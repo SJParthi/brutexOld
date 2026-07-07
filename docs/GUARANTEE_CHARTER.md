@@ -52,7 +52,7 @@ Source: the 3-agent + 2-agent audits run in this session (2026-05-28).
 | **Code coverage** | 🟡 | 90% global floor + **51 modules @100%**; 8 orchestrator modules blocked by `fastbloom_rs` ABI3 (DEC-COV-BACKFILL-LIMIT-001). Closing: vendor swap / per-test subprocess CI |
 | **Mutation testing** | 🟡 | mutmut on `state.py` (98%) + nightly; not all modules. Closing: extend gate |
 | **Bug-fix regression** | 🟡 | `validate_bugfix_regression.py` scan (partial). Closing: full automation |
-| **Stress / soak** | 🟡 | `stress-nightly.yml` (~5-min ubuntu regression gate; refuses `STRESS_EVENTS > 200000`) + `soak-selfhosted.yml` (real multi-hour soak on the self-hosted M4-Pro — weekly cron / `workflow_dispatch(soak_minutes)`, duration-derived timeout; DEC-SOAK-REAL-TIER-001 #1540 — the prior “24h via dispatch” claim was FALSE and is retracted) |
+| **Stress / soak** | 🟡 | `stress-nightly.yml` (~5-min ubuntu regression gate; refuses `STRESS_EVENTS > 200000`) + `soak-selfhosted.yml` (real multi-hour soak on the self-hosted M4-Pro — weekly cron / `workflow_dispatch(soak_minutes)`, duration-derived timeout; DEC-SOAK-REAL-TIER-001 #1541 — the prior “24h via dispatch” claim was FALSE and is retracted) |
 | **O(1) latency** | 🟡 | ratio gates LIVE on 5 hot paths; absolute 1.1× needs M4 Pro runner (DEC-M4PRO-ABSOLUTE-001) |
 | Code-review depth | 👁️ | reviewer + Z+ 6-marker PR guard (blocks) — judgement can't be 100% auto |
 | No-hallucination (every claim cited) | 👁️🟡 | `validate_no_hallucination.py` scan blocks uncited external claims; correctness is reviewer-judged |

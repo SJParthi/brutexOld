@@ -56,7 +56,7 @@ that row's status.
 | Performance / O(1) | ✅ | bench NFR gate (p99 ratio ≤ 1.1; absolute = self-hosted) |
 | Build + dependency | ✅ | editable build + CycloneDX SBOM + audit |
 | Unit / integration / property / golden | ✅ / 🟡 | pytest + hypothesis + fixtures |
-| Load / stress / soak / chaos / race / failover | 📋 | nightly ~5-min stress regression gate + weekly self-hosted soak (#1540); chaos/race/failover roadmap |
+| Load / stress / soak / chaos / race / failover | 📋 | nightly ~5-min stress regression gate + weekly self-hosted soak (#1541); chaos/race/failover roadmap |
 | DB / API / frontend / integration validation | 🟡 | dashboard + integration tests |
 | Runtime / production monitoring | 🚫→📋 | activates when a service is deployed |
 | Docstrings / typos / complexity / dead code | ✅ / 🟡 | interrogate + codespell + radon + vulture |
