@@ -62,6 +62,7 @@ __all__ = [
     "WindowLedgerRecord",
     "expired_window_settle_reason",
     "is_expired_window_settle_reason",
+    "ledger_record_row",
 ]
 
 #: A window the tiler will attempt this pull — upserted at pull start, no outcome
@@ -307,6 +308,40 @@ class WindowLedgerRecord:
     #: no sink result (a lake cold-start seed) — NEVER fabricated to ``0``
     #: (Golden Rule #1: ``0`` would falsely claim "that pull added nothing new").
     bars_net_new: int | None = None
+
+
+def ledger_record_row(
+    r: WindowLedgerRecord,
+) -> tuple[
+    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
+]:
+    """Serialise ONE record to the canonical 14-field ledger row tuple.
+
+    The single source of the row shape (CLAUDE.md §11 COMMON —
+    DEC-SUSPICION-SWEEP-FIXES-001): :meth:`WindowLedger.to_rows` delegates here,
+    and the ``/db`` window-ledger grid's cached projection
+    (:func:`brutex.dashboard.db_view.window_ledger_rows_cached`) reuses it over the
+    mtime-cached records, so the two can never drift. Field order matches the
+    durable store's :data:`~brutex.data.window_ledger_store.LedgerRow` —
+    ``in_pull_fetches`` then ``bars_net_new`` appended LAST for legacy-file
+    back-compat (see :meth:`WindowLedger.to_rows`).
+    """
+    return (
+        r.market,
+        r.security_id,
+        r.interval,
+        r.window_start,
+        r.window_end,
+        r.status,
+        r.bars,
+        r.attempts,
+        r.last_error,
+        r.first_seen_at,
+        r.last_attempt_at,
+        r.empty_streak,
+        r.in_pull_fetches,
+        r.bars_net_new,
+    )
 
 
 @dataclass(slots=True)
@@ -1218,23 +1253,14 @@ class WindowLedger:
     ) -> tuple[
         str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
     ]:
-        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11)."""
-        return (
-            r.market,
-            r.security_id,
-            r.interval,
-            r.window_start,
-            r.window_end,
-            r.status,
-            r.bars,
-            r.attempts,
-            r.last_error,
-            r.first_seen_at,
-            r.last_attempt_at,
-            r.empty_streak,
-            r.in_pull_fetches,
-            r.bars_net_new,
-        )
+        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11).
+
+        Delegates to the module-level :func:`ledger_record_row` — the SINGLE row-shape
+        source shared with the ``/db`` grid's cached projection
+        (DEC-SUSPICION-SWEEP-FIXES-001), so the delta flush
+        (DEC-LEDGER-DELTA-FLUSH-001) and every other serialiser can never drift.
+        """
+        return ledger_record_row(r)
 
     def dirty_rows(
         self,
@@ -1367,8 +1393,12 @@ class WindowLedger:
         ``empty_streak`` exactly as that column was — so a legacy 12/13-tuple
         Parquet (written before either existed) still loads (the store fills the
         missing column per-row; an absent ``bars_net_new`` reads ``None``).
+
+        Delegates per-record to the module-level :func:`ledger_record_row` (ONE
+        source of the row shape — the ``/db`` grid's cached projection reuses it,
+        DEC-SUSPICION-SWEEP-FIXES-001).
         """
-        return [self._record_row(r) for r in self.records()]
+        return [ledger_record_row(r) for r in self.records()]
 
     @classmethod
     def from_rows(

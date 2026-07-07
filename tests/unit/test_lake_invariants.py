@@ -405,11 +405,28 @@ class TestScanFindings:
 
     def test_zero_row_file_is_clean(self, tmp_path: Path) -> None:
         dest = _dest(tmp_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({"timestamp": _series([])}).write_parquet(dest)
+        _plant_raw(dest, [])  # empty CANONICAL 7-column schema (the real writer shape)
         report = scan_lake_invariants(tmp_path)
         assert report.findings == ()
         assert report.files_scanned == 1
+
+    def test_missing_price_columns_file_is_skipped(self, tmp_path: Path) -> None:
+        """A bar file WITHOUT the OHLC columns is honestly SKIPPED (not dup-scanned).
+
+        DEC-STORED-DATA-VALIDATION-001 behavior change, documented in the
+        module docstring: the scan now reads BAR_SCAN_COLUMNS (timestamp +
+        OHLC) in ONE pass; a file violating the canonical 7-column schema
+        cannot satisfy the read and is counted ``files_skipped`` with the
+        ``lake.invariant.scan_skip`` WARNING — never silently ignored.
+        """
+        dest = _dest(tmp_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"timestamp": _series([_ts(1)])}).write_parquet(dest)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 0
+        assert report.files_skipped == 1
+        assert len(_events(logs, "lake.invariant.scan_skip")) == 1
 
     def test_utc_month_rule_no_false_flag_1day(self, tmp_path: Path) -> None:
         # A derived 1day bar is stamped midnight IST = 18:30 UTC of the PREVIOUS
@@ -813,6 +830,7 @@ class TestCensusToDict:
             "foreign_files",
             "overlap_files",
             "drift_dirs",
+            "price_files",
         }
 
     def test_stats_and_sweep_folded(self, tmp_path: Path) -> None:
@@ -845,3 +863,113 @@ class TestCensusToDict:
         assert payload["quarantined_files_total"] == 0  # key absent
         assert payload["last_heal_utc"] is None
         assert payload["last_sweep_utc"] is None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Price-sanity findings (DEC-STORED-DATA-VALIDATION-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _plant_raw_ohlc(
+    dest: Path, rows: Sequence[tuple[datetime, float, float, float, float]]
+) -> None:
+    """Write a RAW bar partition with explicit per-row OHLC (poison-capable)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "timestamp": pa.array([r[0] for r in rows], type=pa.timestamp("us", tz="UTC")),
+            "open": pa.array([r[1] for r in rows], type=pa.float64()),
+            "high": pa.array([r[2] for r in rows], type=pa.float64()),
+            "low": pa.array([r[3] for r in rows], type=pa.float64()),
+            "close": pa.array([r[4] for r in rows], type=pa.float64()),
+            "volume": pa.array([10] * len(rows), type=pa.int64()),
+            "open_interest": pa.array([None] * len(rows), type=pa.int64()),
+        }
+    )
+    pq.write_table(table, dest)
+
+
+class TestPriceSanityFindings:
+    """The scanner is no longer BLIND to price corruption (fails-before: the
+    round-2 audit found the census read NO price column, so its "0 findings"
+    verdict could not see a stored negative / high<low bar)."""
+
+    def test_price_corrupt_file_yields_finding_and_warn(self, tmp_path: Path) -> None:
+        _plant_raw_ohlc(
+            _dest(tmp_path),
+            [
+                (_ts(1), 100.0, 101.0, 99.0, 100.5),  # clean
+                (_ts(2), -5.0, -1.0, -10.0, -2.0),  # negative but ordered (L1-a shape)
+                (_ts(3), 100.0, 1.0, 50.0, 60.0),  # high < low (L1-b shape)
+            ],
+        )
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        price_findings = [f for f in report.findings if isinstance(f, li.PriceSanityRows)]
+        assert len(price_findings) == 1
+        assert price_findings[0].bad_rows == 2
+        assert price_findings[0].coords == _NIFTY_COORDS
+        events = _events(logs, "lake.invariant.price_sanity_rows")
+        assert len(events) == 1
+        assert events[0]["bad_rows"] == 2
+        assert events[0]["partition"] == _NIFTY_COORDS.relpath()
+
+    def test_clean_file_yields_no_price_finding(self, tmp_path: Path) -> None:
+        _plant_raw_ohlc(_dest(tmp_path), [(_ts(1), 100.0, 101.0, 99.0, 100.5)])
+        report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+
+    def test_census_counts_price_files_and_flips_engine_verdict(self, tmp_path: Path) -> None:
+        # NIFTY is an ENGINE_INDEX_COORDS series — a price finding on it must
+        # flip engine_clean (the census verdict is no longer blind).
+        _plant_raw_ohlc(_dest(tmp_path), [(_ts(1), -5.0, -1.0, -10.0, -2.0)])
+        census = build_lake_census(scan_lake_invariants(tmp_path))
+        index_row = next(row for row in census.segments if row.segment == "INDEX")
+        assert index_row.price_files == 1
+        assert index_row.clean == 0  # a price-corrupt file is NOT clean
+        assert census.engine_clean is False
+        assert "price bars/NSE/INDEX/NIFTY/1minute/2024/06.parquet" in census.engine_detail
+        payload = census_to_dict(census, mode="auto")
+        assert payload["segments"][0]["price_files"] == 1
+
+    def test_price_finding_coexists_with_dup_finding_one_poisoned_file(
+        self, tmp_path: Path
+    ) -> None:
+        # A file carrying BOTH a duplicate timestamp AND a bad price is ONE
+        # poisoned file in the census `clean` arithmetic (set union).
+        _plant_raw_ohlc(
+            _dest(tmp_path),
+            [
+                (_ts(1), 100.0, 101.0, 99.0, 100.5),
+                (_ts(1), 100.0, 101.0, 99.0, 100.5),  # dup ts
+                (_ts(2), 0.0, 0.0, 0.0, 0.0),  # zero prices
+            ],
+        )
+        census = build_lake_census(scan_lake_invariants(tmp_path))
+        index_row = next(row for row in census.segments if row.segment == "INDEX")
+        assert index_row.files == 1
+        assert index_row.dup_files == 1
+        assert index_row.price_files == 1
+        assert index_row.clean == 0  # one file, poisoned once — never negative
+
+    def test_engine_offender_token_for_price_finding(self) -> None:
+        finding = li.PriceSanityRows(path=Path("x"), coords=_NIFTY_COORDS, bad_rows=3)
+        assert li._engine_offender(finding) == f"price {_NIFTY_COORDS.relpath()}"
+        assert li._engine_relevant(finding) is True
+
+    def test_non_engine_price_finding_not_engine_relevant(self) -> None:
+        coords = PartitionCoords(
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            interval="1minute",
+            year=2024,
+            month=6,
+        )
+        assert (
+            li._engine_relevant(li.PriceSanityRows(path=Path("x"), coords=coords, bad_rows=1))
+            is False
+        )

@@ -447,3 +447,129 @@ def test_ledger_file_path_pins_window_ledger_store(tmp_path: Path) -> None:
     definition (the ``lake_revision._SWEEPS_DIRNAME`` precedent).
     """
     assert lm.ledger_file_path(tmp_path) == ledger_path(tmp_path)
+
+
+class TestRecordLogVolume:
+    """DEC-MANIFEST-LOG-FLOOD-001 — recording N datasets costs O(1) INFO lines.
+
+    The forensic contract: the prebuild's ~10⁵ ``record_dataset`` calls must
+    never rotate away the completion audit trail again (the 2026-07-05 run
+    emitted 94,190 per-dataset INFO lines at ~190/s). Per-dataset detail
+    survives at DEBUG (same event + fields); the surviving INFO record is the
+    ONE aggregate ``lake_manifest.record_summary`` per flush window.
+    """
+
+    def _base(self, lake: Path) -> None:
+        _seed_ledger(lake)
+        token = lm.ledger_stat_token(lake)
+        assert token is not None
+        assert lm.rebuild_manifest(lake, [], ledger_token=token) is True
+
+    def test_n_records_emit_bounded_info_and_n_debug(self, tmp_path: Path) -> None:
+        """The decree pin: N recordings → ≤ 1 INFO line (the aggregate) + N DEBUG lines."""
+        self._base(tmp_path)
+        n = 40
+        with capture_logs() as logs:
+            for i in range(n):
+                assert (
+                    lm.record_dataset(
+                        tmp_path,
+                        exchange="NSE",
+                        segment="FNO",
+                        symbol=f"SYM{i % 20}",
+                        interval="5minute" if i % 2 == 0 else "15minute",
+                    )
+                    is True
+                )
+            assert lm.flush_record_summary(tmp_path) == n
+        per_dataset = [e for e in logs if e["event"] == "lake_manifest.dataset_recorded"]
+        assert len(per_dataset) == n
+        assert all(e["log_level"] == "debug" for e in per_dataset)
+        info_lines = [e for e in logs if e["log_level"] == "info"]
+        assert len(info_lines) <= 1  # K = 1: ONLY the aggregate, never O(datasets)
+        summaries = [e for e in logs if e["event"] == "lake_manifest.record_summary"]
+        assert len(summaries) == 1
+        summary = summaries[0]
+        assert summary["log_level"] == "info"
+        # Every per-dataset field survives in aggregate form (Golden Rule #1).
+        assert summary["datasets_recorded"] == n
+        assert summary["exchanges"] == {"NSE": n}
+        assert summary["segments"] == {"FNO": n}
+        assert summary["intervals"] == {"15minute": n // 2, "5minute": n // 2}
+        assert summary["distinct_symbols"] == 20
+        assert summary["elapsed_s"] >= 0.0
+        assert summary["lake_root"] == str(tmp_path)
+
+    def test_flush_with_nothing_pending_is_silent(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            assert lm.flush_record_summary(tmp_path) == 0
+        assert logs == []
+
+    def test_interval_elapsed_emits_aggregate_inline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A record stream outlasting the interval self-flushes — no boundary needed."""
+        self._base(tmp_path)
+        monkeypatch.setattr(lm, "RECORD_SUMMARY_INTERVAL_S", 0.0)
+        with capture_logs() as logs:
+            assert (
+                lm.record_dataset(
+                    tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
+                )
+                is True
+            )
+        summaries = [e for e in logs if e["event"] == "lake_manifest.record_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["datasets_recorded"] == 1
+        # The inline emit already closed the window — nothing left to flush.
+        assert lm.flush_record_summary(tmp_path) == 0
+
+    def test_load_boundary_flushes_trailing_window(self, tmp_path: Path) -> None:
+        """The first manifest read after a record burst surfaces the aggregate."""
+        self._base(tmp_path)
+        assert (
+            lm.record_dataset(
+                tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
+            )
+            is True
+        )
+        with capture_logs() as logs:
+            loaded = lm.load_manifest_datasets(tmp_path)
+        assert loaded == [_row("NIFTY")]
+        summaries = [e for e in logs if e["event"] == "lake_manifest.record_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["datasets_recorded"] == 1
+        with capture_logs() as logs_again:
+            assert lm.load_manifest_datasets(tmp_path) == [_row("NIFTY")]
+        assert [e for e in logs_again if e["event"] == "lake_manifest.record_summary"] == []
+
+    def test_rebuild_boundary_flushes_pending_window(self, tmp_path: Path) -> None:
+        self._base(tmp_path)
+        assert (
+            lm.record_dataset(
+                tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
+            )
+            is True
+        )
+        token = lm.ledger_stat_token(tmp_path)
+        assert token is not None
+        with capture_logs() as logs:
+            assert lm.rebuild_manifest(tmp_path, [_row("NIFTY")], ledger_token=token) is True
+        summaries = [e for e in logs if e["event"] == "lake_manifest.record_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["datasets_recorded"] == 1
+
+    def test_invalidate_boundary_flushes_pending_window(self, tmp_path: Path) -> None:
+        self._base(tmp_path)
+        assert (
+            lm.record_dataset(
+                tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute"
+            )
+            is True
+        )
+        with capture_logs() as logs:
+            lm.invalidate_manifest(tmp_path)
+        summaries = [e for e in logs if e["event"] == "lake_manifest.record_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["datasets_recorded"] == 1
+        assert not lm.manifest_meta_path(tmp_path).exists()

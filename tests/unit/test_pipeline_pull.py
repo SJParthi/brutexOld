@@ -94,7 +94,12 @@ def _spot(
     )
 
 
-def _metadata(*, expiry_failures: int = 0, contract_failures: int = 0) -> MetadataPullReport:
+def _metadata(
+    *,
+    expiry_failures: int = 0,
+    contract_failures: int = 0,
+    store_write_deferrals: int = 0,
+) -> MetadataPullReport:
     """Build a :class:`MetadataPullReport` with the given failure tallies."""
     return MetadataPullReport(
         dry_run=False,
@@ -108,6 +113,7 @@ def _metadata(*, expiry_failures: int = 0, contract_failures: int = 0) -> Metada
         contract_failures=contract_failures,
         contracts_persisted=400,
         note="ok",
+        store_write_deferrals=store_write_deferrals,
     )
 
 
@@ -242,6 +248,12 @@ def test_metadata_phase_not_ok_on_expiry_failures() -> None:
 
 def test_metadata_phase_not_ok_on_contract_failures() -> None:
     assert metadata_phase_ok(_metadata(contract_failures=1)) is False
+
+
+def test_metadata_phase_not_ok_on_store_write_deferrals() -> None:
+    """A wedged-store metadata phase (DEC-STORE-WRITE-DEADLINE-001) stops the
+    chain GRACEFULLY after metadata — the deferred units re-attempt next pull."""
+    assert metadata_phase_ok(_metadata(store_write_deferrals=1)) is False
 
 
 # --------------------------------------------------------------------------- #

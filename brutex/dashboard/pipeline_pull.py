@@ -165,10 +165,15 @@ def metadata_phase_ok(report: MetadataPullReport) -> bool:
     """Return ``True`` iff the METADATA phase enumerated the chain cleanly.
 
     The metadata enumeration may proceed to the historical candle phase only when
-    NO Phase-1 expiry cell raised (``expiry_failures``) AND NO Phase-2 contract
-    job raised (``contract_failures``). A dry-run that honestly persists an EMPTY
-    chain (no creds) raises nothing, so it passes the gate (the historical phase
-    then finds no tradable contracts — a reported no-op, never a fabricated pull).
+    NO Phase-1 expiry cell raised (``expiry_failures``), NO Phase-2 contract
+    job raised (``contract_failures``), AND NO registry/coverage write batch was
+    deferred by the store-write wall-clock deadline (``store_write_deferrals`` —
+    DEC-STORE-WRITE-DEADLINE-001: a wedged store volume stops the chain
+    GRACEFULLY after metadata via the existing ``stopped_after`` verdict, never a
+    crash, never a pull-wide halt; the deferred units re-attempt next pull). A
+    dry-run that honestly persists an EMPTY chain (no creds) raises nothing, so
+    it passes the gate (the historical phase then finds no tradable contracts —
+    a reported no-op, never a fabricated pull).
 
     Parameters
     ----------
@@ -181,7 +186,11 @@ def metadata_phase_ok(report: MetadataPullReport) -> bool:
     bool
         ``True`` when the chain enumeration is clean enough to proceed to candles.
     """
-    return report.expiry_failures == 0 and report.contract_failures == 0
+    return (
+        report.expiry_failures == 0
+        and report.contract_failures == 0
+        and report.store_write_deferrals == 0
+    )
 
 
 def historical_phase_ok(report: CompositePullReport) -> bool:

@@ -156,6 +156,7 @@ def assemble_candle(
     close: object,
     volume: object,
     open_interest: object,
+    on_clamp: Callable[[], None] | None = None,
 ) -> CandleBar:
     """Build a validated :class:`CandleBar` from raw field values.
 
@@ -164,6 +165,17 @@ def assemble_candle(
     independent of its timestamp. Spot **indices** carry no traded volume
     (vendor returns ``null``) — an absent volume maps to ``0`` rather than
     quarantining the row.
+
+    Parameters
+    ----------
+    on_clamp
+        OBSERVE-ONLY hook (DEC-STORED-DATA-VALIDATION-001): invoked exactly
+        once per bar whose ``high``/``low`` the vendor-OHLC normalization
+        below actually MOVED (``high != max(prices)`` or ``low !=
+        min(prices)``), so a caller (the Groww parser) can count clamps per
+        window and WARN instead of the clamp firing silently. ``None`` (the
+        default — every other caller) is byte-identical to before; the
+        returned bar is IDENTICAL either way (parse behavior unchanged).
 
     Raises
     ------
@@ -176,7 +188,8 @@ def assemble_candle(
         negative volume / open-interest. Inconsistent OHLC (a vendor
         ``open`` / ``close`` outside the reported ``[low, high]``) is
         **normalized** here — ``high`` / ``low`` are clamped to bound all
-        four prices (DEC-OHLC-VENDOR-NORMALIZE-001) — never raised.
+        four prices (DEC-OHLC-VENDOR-NORMALIZE-001) — never raised (the
+        clamp is COUNTED via *on_clamp*).
     """
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
@@ -226,11 +239,19 @@ def assemble_candle(
     # traded open of 17289 implies the true high >= 17289), never data loss.
     # The ``CandleBar`` invariant stays strict for any non-assembler path.
     prices = (open_price, high_price, low_price, close_price)
+    clamped_high = max(prices)
+    clamped_low = min(prices)
+    # Clamp observability (DEC-STORED-DATA-VALIDATION-001): the normalization
+    # above used to fire SILENTLY with no counter — a vendor systematically
+    # under-reporting highs would never surface. Observe-only: the bar built
+    # below is byte-identical whether or not a hook is present.
+    if on_clamp is not None and (clamped_high != high_price or clamped_low != low_price):
+        on_clamp()
     return CandleBar(
         timestamp=parse_timestamp(ts_raw),
         open=open_price,
-        high=max(prices),
-        low=min(prices),
+        high=clamped_high,
+        low=clamped_low,
         close=close_price,
         volume=0 if is_absent(volume) else max(0, to_int(volume, "volume")),
         open_interest=oi,

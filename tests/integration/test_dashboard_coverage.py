@@ -206,6 +206,13 @@ class TestCoverageApi:
         # "barely retried".
         assert "In-pull retries" in win.text
         assert "EMPTY-retries" not in win.text
+        # DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001: the per-run vs lifetime EMPTY tile —
+        # the JS reads counts_since_pull_start (server-omitted when no journal exists)
+        # and writes "N this run · M lifetime" via textContent (never innerHTML).
+        assert 'id="emptyc"' in win.text
+        assert "empty windows" in win.text
+        assert "counts_since_pull_start" in win.text
+        assert "this run" in win.text
         assert "NOT the total vendor calls" in win.text
         # Context-aware honesty: the legend explains a FAILED row's depth is the
         # transient-retry depth, an EMPTY row's the empty-retry depth.
@@ -710,6 +717,58 @@ class TestWindowStatusApi:
         page = client.get("/api/v1/coverage/windows?limit=1&offset=1").json()
         assert page["returned"] == 1
         assert page["capped"] is True  # matched (4) > limit (1)
+
+        # Per-run honesty (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): with NO pull
+        # journal on this lake, the per-run keys are OMITTED entirely — the payload
+        # stays byte-identical to the pre-change shape (never a fabricated 0).
+        assert "counts_since_pull_start" not in body
+        assert "pull_start_utc" not in body
+
+    def test_windows_per_run_counts_from_pull_journal(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001 end-to-end: with a journal
+        ``started`` record on the lake, the route ships ``counts_since_pull_start``
+        (attempted rows on/after the pull start; PLANNED rows never counted) next
+        to the UNCHANGED lifetime ``counts`` — "24 this run · 88 lifetime"."""
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+        from brutex.observability.pull_journal import record_pull_start
+
+        def _key(symbol: str) -> WindowKey:
+            return WindowKey(
+                market="groww",
+                security_id=symbol,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 4, 1),
+            )
+
+        old = datetime(2026, 6, 8, 10, 0, tzinfo=UTC)
+        new = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+        ledger = WindowLedger()
+        # An OLD pull's EMPTY (before this run) + THIS run's EMPTY + SUCCESS + a
+        # PLANNED row (NULL last_attempt_at — attempted statuses only).
+        ledger.record(_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=old)
+        ledger.record(_key("BANKNIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=new)
+        ledger.record(_key("INFY"), raw_bars=5, error_type=None, bars_appended=5, now=new)
+        ledger.plan(_key("SENSEX"), now=new)
+        save_window_ledger(ledger, tmp_path)
+        record_pull_start(
+            tmp_path,
+            pull_id="run-2",
+            dry_run=False,
+            now_utc=datetime(2026, 6, 8, 11, 0, tzinfo=UTC),
+        )
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/coverage/windows").json()
+        assert body["pull_start_utc"] == "2026-06-08T11:00:00+00:00"
+        # This run: 1 EMPTY + 1 SUCCESS (the 10:00 EMPTY + the PLANNED row are out).
+        assert body["counts_since_pull_start"]["spot"] == {"EMPTY": 1, "SUCCESS": 1}
+        # The lifetime counts stay complete + unchanged alongside.
+        assert body["counts"]["spot"] == {"EMPTY": 2, "SUCCESS": 1, "PLANNED": 1}
 
     def test_windows_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))
@@ -1255,3 +1314,51 @@ class TestWindowLedgerApi:
         # Offset past the end → a clean empty page, total still the real count.
         tail = client.get("/api/v1/db/window-ledger?limit=10&offset=999").json()
         assert tail["rows"] == [] and tail["total"] == 5
+
+    def test_paging_clicks_parse_the_ledger_once_per_generation(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D3 read-count SPY (DEC-SUSPICION-SWEEP-FIXES-001): the route previously
+        re-PARSED the whole ledger Parquet (~841k rows measured on a full-universe
+        options pull) on EVERY paging click. Now every click within one ledger
+        generation rides ONE cached parse (``db_view.window_ledger_rows_cached``);
+        a ledger flush (mtime bump) costs exactly one more."""
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import load_window_ledger, save_window_ledger
+
+        ledger = WindowLedger()
+        for i in range(4):
+            ledger.record(
+                WindowKey(
+                    market="groww",
+                    security_id=f"SYM{i:02d}",
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2021, 1, 31),
+                ),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=5,
+                now=datetime(2026, 7, 1, tzinfo=UTC),
+            )
+        save_window_ledger(ledger, tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        parses = {"n": 0}
+
+        def _counting_load(lake_root: Path, **kwargs: object) -> WindowLedger:
+            parses["n"] += 1
+            return load_window_ledger(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _counting_load)
+        full = client.get("/api/v1/db/window-ledger?limit=500&offset=0").json()
+        page1 = client.get("/api/v1/db/window-ledger?limit=2&offset=0").json()
+        page2 = client.get("/api/v1/db/window-ledger?limit=2&offset=2").json()
+        assert parses["n"] == 1  # three clicks, ONE parse (was one parse PER click)
+        # The cached read serves byte-identical pages (sort + derived cols intact).
+        assert page1["rows"] == full["rows"][0:2]
+        assert page2["rows"] == full["rows"][2:4]
+        assert full["total"] == 4

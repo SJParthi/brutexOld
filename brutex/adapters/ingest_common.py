@@ -71,11 +71,34 @@ from brutex.models import BruteXError, Exchange, Instrument
 
 if TYPE_CHECKING:
     from brutex.data.parquet_writer import BarConflict
+    from brutex.orchestrator.audit import AuditWriter
 
 #: Structured logger — lights each retry round (``ingest.auto_retry.round``) and
 #: the final residual (``ingest.auto_retry.done``) under the pull's correlation
 #: scope, so an operator can grep the recovery end-to-end (DEC-INGEST-AUTO-RETRY-001).
 _LOG = structlog.get_logger("brutex.adapters.ingest_common")
+
+
+def maybe_audit(
+    audit: AuditWriter | None,
+    action: str,
+    subject: str,
+    payload: dict[str, object],
+) -> None:
+    """Append one hash-chained audit line when an *audit* writer is wired.
+
+    The ONE vendor-neutral guard BOTH ingest spines share (CLAUDE.md §11
+    COMMON — DEC-INGEST-AUDIT-WIRING-001; moved here from the spot spine's
+    private ``run_ingest._maybe_audit`` so the F&O spine reuses it instead of
+    copying). A no-op when ``audit is None`` (a dry-run / inspect / synthetic
+    pull carries no writer). Called ONLY from the single controller thread
+    (each spine's fan-out drain loop), so the not-thread-safe
+    :class:`~brutex.orchestrator.audit.AuditWriter` is never touched
+    concurrently and the O(1)-per-entry append never runs on — and can never
+    block — a fetch worker (Golden Rule #8).
+    """
+    if audit is not None:
+        audit.append(action=action, subject=subject, payload=payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -1929,6 +1952,7 @@ __all__ = [
     "gate_pull_credentials",
     "label_synthetic",
     "mark_synthetic",
+    "maybe_audit",
     "now_ist",
     "partition_spot_steps",
     "plan_windows",

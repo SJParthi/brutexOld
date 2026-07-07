@@ -24,12 +24,16 @@ REAL temp :class:`RegistryStore`, a tiny in-memory coverage sink, a recording
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
+import structlog.testing
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import OPTION_SEGMENT
 from brutex.dashboard import composite_pull as cp
@@ -640,6 +644,113 @@ def test_composite_note_without_skips_has_no_breakdown(tmp_path: Path) -> None:
     assert report.historical.contracts_not_yet_in_window == 0
     assert "not yet in window" not in report.note
     assert "3/3 contract(s)" in report.note
+
+
+# ── wedged store: phase (b) is GATED, never a whole-job crash ───────────────────
+# DEC-STORE-WRITE-DEADLINE-001: a store-write deadline breach during phase (a)
+# leaves the SHARED registry WEDGED (the zombie write still holds the DuckDB
+# connection's internal mutex). Before the gate, phase (b)'s registry re-read
+# (``_select_fresh_contracts`` → ``list_contracts`` → ``_ensure_not_wedged``)
+# raised the TERMINAL ``RegistryError`` UNCAUGHT — the whole composite job (and
+# the pipeline's phase 3, which shares ONE registry across the composite) died
+# instead of the graceful per-underlying defer. The composite now consults
+# ``metadata.store_write_deferrals``, skips phase (b), and RETURNS an honest
+# report; the deferred underlyings re-attempt (and complete) on the next pull.
+
+
+class _RegistryGateConn:
+    """Proxy over the registry's DuckDB conn that HANGS on a matching statement.
+
+    The deterministic wedge (the #999 recipe, mirroring ``test_metadata_pull``):
+    ``entered`` proves the hang engaged; ``gate`` is released by the test's
+    ``finally`` (30 s safety so a crashed test never leaves a forever-daemon).
+    """
+
+    def __init__(self, real: object, *, hang_on: str) -> None:
+        self._real = real
+        self._hang_on = hang_on
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+
+    def execute(self, sql: str, params: list[object] | None = None) -> object:
+        if self._hang_on in sql:
+            self.entered.set()
+            self.gate.wait(timeout=30.0)
+        real: Any = self._real
+        if params is None:
+            return real.execute(sql)
+        return real.execute(sql, params)
+
+    def close(self) -> None:
+        real: Any = self._real
+        real.close()
+
+
+def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILS-BEFORE regression: a registry wedged DURING phase (a) — the zombie
+    still in flight when phase (b) starts — must yield an honest report with
+    ``historical=None`` (candle phase skipped, deferral surfaced), NEVER an
+    uncaught terminal ``RegistryError`` that kills the whole composite job."""
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+    sdk = _nifty_sdk()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    proxy = _RegistryGateConn(registry._conn, hang_on="INSERT OR REPLACE INTO expiries")
+    registry._conn = proxy
+    start = time.monotonic()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            report = _run(
+                [_instrument("NIFTY", 13)],
+                sdk=sdk,
+                sink=sink,
+                registry=registry,
+                coverage=coverage,
+            )
+        assert proxy.entered.is_set()  # the wedge genuinely engaged
+        assert time.monotonic() - start < 10.0  # completed within one small deadline
+        # The composite RETURNED (no raise) with the candle phase skipped honestly.
+        assert report.metadata is not None
+        assert report.metadata.store_write_deferrals == 1
+        assert report.historical is None
+        assert report.note == (
+            "metadata deferred 1 registry/coverage write batch(es) on a wedged "
+            "store volume — candle phase skipped; deferred underlyings re-attempt "
+            "next pull"
+        )
+        assert report.to_dict()["historical"] is None
+        # Phase (b) never ran: zero candle vendor calls, zero lake appends.
+        assert "get_historical_candles" not in sdk.calls
+        assert sink.appends == []
+        # The gate is LOUD.
+        deferred = [r for r in logs if r["event"] == "composite_pull.metadata_write_deferred"]
+        assert len(deferred) == 1
+        assert deferred[0]["tradable"] == ["NIFTY"]
+        assert deferred[0]["store_write_deferrals"] == 1
+    finally:
+        proxy.gate.set()
+    # RE-ATTEMPT ON THE NEXT PULL: the volume heals (the zombie's idempotent write
+    # completes, the wedge latch self-clears) and the SAME selection runs WHOLE —
+    # metadata re-pulled, candles pulled.
+    deadline_at = time.monotonic() + 10.0
+    while registry._write_guard.wedged:
+        if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
+            pytest.fail("registry did not self-heal within the watchdog bound")
+        time.sleep(0.005)
+    sdk2 = _nifty_sdk()
+    sink2 = _RecordingSink()
+    report2 = _run(
+        [_instrument("NIFTY", 13)], sdk=sdk2, sink=sink2, registry=registry, coverage=coverage
+    )
+    assert report2.metadata is not None
+    assert report2.metadata.store_write_deferrals == 0
+    assert report2.historical is not None
+    assert report2.historical.contracts_completed == 3
+    assert "get_historical_candles" in sdk2.calls
+    registry.close()
 
 
 # ── the module exposes exactly its public surface ──────────────────────────────

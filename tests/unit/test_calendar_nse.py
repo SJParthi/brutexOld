@@ -1214,3 +1214,52 @@ class TestHolidays2026Complete:
     def test_coverage_span_still_2020_to_2026(self) -> None:
         assert HOLIDAY_COVERAGE_FIRST_YEAR == 2020
         assert HOLIDAY_COVERAGE_LAST_YEAR == 2026
+
+
+class TestMuhuratClampGuard:
+    """DEC-SUSPICION-SWEEP-FIXES-001 (G2) — the clamp_window_end partial-settle guard.
+
+    ``clamp_window_end`` allows an intraday window through ``today`` from the
+    15:30 IST regular close onward (DEC-DAILY-CANDLE-CLAMP-001). A CURRENT/FUTURE
+    Muhurat session that closes AFTER 15:30 (the historical evening sessions)
+    would let a post-15:30 pull settle that day's window SUCCESS BEFORE the
+    evening session traded — the keep-settled skip rule would then never
+    re-fetch the Muhurat bars (a silent partial settle). The 2025 session is
+    afternoon (13:45–14:45, the verified SEBI shift), so today no live entry
+    re-arms the hazard; this enumeration pins that a FUTURE evening entry cannot
+    land SILENTLY — adding one (e.g. the pending 2026-11-08 timings, if notified
+    as an evening session) fails this test and forces a conscious
+    clamp_window_end decision instead of a quiet re-arm.
+    """
+
+    #: The pivot: entries from 2025 onward are the "current/future" regime the
+    #: clamp hazard applies to (pre-2025 evening sessions are historical — any
+    #: pull today fetches them long after the fact, complete).
+    _PIVOT = date(2025, 1, 1)
+    #: The regular NSE close the intraday clamp keys on (15:30 IST).
+    _REGULAR_CLOSE = time(15, 30)
+
+    def test_no_current_or_future_muhurat_session_closes_after_1530(self) -> None:
+        offenders = {
+            d: (open_t, close_t)
+            for d, (open_t, close_t) in MUHURAT_SESSIONS.items()
+            if d >= self._PIVOT and close_t > self._REGULAR_CLOSE
+        }
+        assert offenders == {}, (
+            f"MUHURAT_SESSIONS entries on/after {self._PIVOT} close AFTER 15:30 IST: "
+            f"{offenders} — this re-arms the clamp_window_end partial-settle hazard "
+            "(a post-15:30 pull settles the day SUCCESS before the evening session "
+            "trades and the skip rule never re-fetches it). Before adding such an "
+            "entry, make clamp_window_end Muhurat-aware (defer the day's intraday "
+            "clamp past the special-session close) — see DEC-SUSPICION-SWEEP-FIXES-001."
+        )
+
+    def test_historical_evening_sessions_still_recorded(self) -> None:
+        """The guard must never be 'fixed' by deleting real history: the verified
+        2020–2024 evening sessions stay recorded (Golden Rule #1 — real data)."""
+        evening = [
+            d
+            for d, (_open_t, close_t) in MUHURAT_SESSIONS.items()
+            if d < self._PIVOT and close_t > self._REGULAR_CLOSE
+        ]
+        assert len(evening) == 5  # 2020–2024, all evening sessions
