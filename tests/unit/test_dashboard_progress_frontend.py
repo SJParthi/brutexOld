@@ -59,7 +59,9 @@ def test_universe_open_ended_renders_total_unknown_not_a_pinned_percent() -> Non
     # fabricated 100% through the whole F&O phase. Now the open_ended branch says
     # the honest thing — units done, total unknown — via textContent.
     html = _render_universe_html()
-    assert "units · total unknown · ${esc(s.current || '…')}`" in html
+    # (Round 6 sanctioned repoint: `esc(` dropped from the textContent interpolation —
+    # see test_regression_universe_header_double_escaped_ampersand_labels.)
+    assert "units · total unknown · ${s.current || '…'}`" in html
     assert "s.open_ended" in html
     # The counter mirrors it ("N / ?"), instead of a fake "N / N".
     assert "' / ?'" in html
@@ -185,15 +187,25 @@ def test_rate_widget_success_resets_cadence_and_stamps_client_clock() -> None:
     js = _widget_js()
     assert "pollFailures = 0;" in js
     assert "lastPollOkMs = nowMs();" in js, "the client staleness stamp is missing"
+    # The render(data) call pinned as one ORDERED block with the failure reset
+    # (refuter finding, round 6: the success chain's render call was pinned nowhere
+    # — dropping it froze every widget number FOREVER while the staleness stamps
+    # kept reading fresh, a fresh-LABELLED stale display strictly worse than the
+    # 2026-07-06 incident, with the whole suite green).
+    assert "render(data);\n        pollFailures = 0;" in js, (
+        "the success chain must RENDER the payload before resetting the failure count"
+    )
     assert "schedulePoll(POLL_MS);" in js, "success must resume the normal cadence"
     assert "setInterval(poll, POLL_MS)" not in js, (
         "the fixed interval must be replaced by the self-scheduling chain"
     )
-    # schedulePoll's BODY is the primitive ALL three pinned call sites ride
+    # schedulePoll's BODY is the primitive BOTH pinned call sites ride
     # (refuter finding, round 5: the call sites were pinned but the body was not —
     # a no-op body polls exactly ONCE at start() and never again, the exact
     # frozen-widget class this PR fixes, with the whole suite green; the universe
-    # twin's reschedule was already pinned verbatim, so this closes the asymmetry).
+    # twin's reschedule was already pinned verbatim, so this closes the asymmetry.
+    # Round 6 removed the third call site — the visibility handler's
+    # schedulePoll(0) — in favour of a direct poll(); two call sites remain).
     assert "function schedulePoll(delayMs)" in js, "the schedulePoll definition is missing"
     assert "pollTimer = setTimeout(poll, delayMs);" in js, (
         "schedulePoll's setTimeout body is the self-scheduling chain's teeth"
@@ -222,6 +234,12 @@ def test_rate_widget_age_readout_and_thresholds() -> None:
     assert (
         'else if (age >= STALE_WARN_MS) { text = base + tail; cls = "bxrm-stale-warn"; }' in js
     ), "the amber warn tier branch is missing"
+    # The FRESH tier too (refuter finding, round 6: only the red + amber branches
+    # were pinned — deleting the else left the always-visible below-warn readout a
+    # permanent "—" until 10 s of staleness, with the whole suite green).
+    assert "else { text = base; }" in js, (
+        "the fresh below-warn tier must render the plain age — the always-visible readout"
+    )
     assert '"no data yet (" + ageS + "s)"' in js, "the never-succeeded boot wording is missing"
     assert 'pillRow("updated", "bxrmAge", null)' in js, "the age pill row is missing"
     assert 'ageRow.id = "bxrmAgeRow"' in js
@@ -317,11 +335,32 @@ def test_rate_widget_poll_overlap_guard() -> None:
 def test_rate_widget_backgrounded_tab_repolls_on_visibility() -> None:
     """A background-throttled tab re-polls immediately on becoming visible instead
     of waiting out a backoff (the age is timestamp-derived, so it is already
-    correct the instant it renders)."""
+    correct the instant it renders).
+
+    REGRESSION (refuter-confirmed, round 6): the handler scheduled a 0 ms TIMER
+    (``schedulePoll(0)``) instead of invoking ``poll()`` directly. Because only a
+    RUNNING ``poll()`` bumps ``pollSeq``, an in-flight poll's failure callback
+    landing in the window between the visibilitychange task and the 0 ms timer
+    task passed its ``seq !== pollSeq`` guard and REPLACED the instant re-poll
+    with a backoff wait of up to 30 s — the foregrounded tab waited out one
+    backoff despite the handler's intent. ``poll()`` is now invoked DIRECTLY
+    (bumping ``pollSeq`` synchronously, mirroring the universe twin's direct
+    ``pollProgress()`` call) with the pending timer cleared first."""
     js = _widget_js()
     assert '"visibilitychange"' in js
     assert "!document.hidden" in js
-    assert "schedulePoll(0);" in js
+    # The direct invocation, timer-clear first — one ordered block.
+    assert (
+        "      if (!document.hidden) {\n"
+        "        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }\n"
+        "        poll();\n"
+        "      }" in js
+    ), "the foreground re-poll must invoke poll() DIRECTLY (synchronous pollSeq bump)"
+    # The racy 0 ms timer form is gone (the regression pin).
+    assert "schedulePoll(0);" not in js, (
+        "a 0 ms timer leaves a window where an in-flight failure callback replaces"
+        " the instant re-poll with a backoff wait"
+    )
 
 
 def test_rate_widget_malformed_payload_and_hung_fetch_feed_backoff() -> None:
@@ -832,6 +871,15 @@ def test_universe_stale_clears_on_success_and_settle() -> None:
     html = _render_universe_html()
     poll = _poll_progress_src(html)
     assert "lastProgressOkMs = nowMs();" in poll, "the success path must stamp the client clock"
+    # The success-path failure-count reset, location-aware inside pollProgress
+    # (refuter finding, round 6: the widget twin's `pollFailures = 0;` was pinned
+    # but this reset was not — deleting it permanently exhausted the 600 ms
+    # quick-retry budget after >POLL_MAX_FEED_RETRIES cumulative blips over a long
+    # watch AND left the round-5 `pollFeedRetries === 0` gate reading a stale
+    # count, resurrecting the false "retrying" during a slow successful poll).
+    assert (
+        "pollFeedRetries = 0;            // success resets the quick-retry budget + backoff" in poll
+    ), "success must reset the quick-retry budget + backoff inside pollProgress"
     finish = re.search(r"function finishLive\(\) \{(.*?)\n\}", html, re.DOTALL)
     assert finish is not None, "finishLive is missing"
     assert "stopFeedAgeTicker();" in finish.group(1)
@@ -1013,4 +1061,36 @@ def test_universe_subunit_omitted_for_spot_or_empty_current() -> None:
     # "expiry BAR" in the header, contradicting this test's own docstring).
     assert "return tok && EXPIRY_TOKEN_RE.test(tok) ? tok : null;" in html, (
         "the EXPIRY_TOKEN_RE whitelist must actually be APPLIED to the token"
+    )
+
+
+def test_regression_universe_header_double_escaped_ampersand_labels() -> None:
+    """REGRESSION (refuter-confirmed, round 6 — pre-existing on main, but the diff
+    rewrote these exact lines): both running-header ``textContent`` template
+    literals interpolated ``${esc(s.current || '…')}``. ``esc()`` HTML-entity-
+    escapes ``&`` → ``&amp;`` while ``textContent`` performs NO entity decoding,
+    so during the F&O phase an ampersand underlying's contract label — e.g.
+    ``NSE-M&M-30Sep25-2000-CE 1minute`` — rendered literally as
+    ``NSE-M&amp;M-…`` in the header, for every pull touching M&M / M&MFIN /
+    L&TFH / GVT&D / J&KBANK. ``s.current`` is now interpolated RAW (textContent
+    is not an HTML sink); ``esc()`` survives for the GENUINE innerHTML sinks
+    (``terminalPullHeader``). The new ``expiryFromCurrent`` parse always read the
+    raw ``s.current`` and was never affected. Substring-presence pins (no
+    headless JS runner)."""
+    html = _render_universe_html()
+    poll = _poll_progress_src(html)
+    # Both running-header arms interpolate the label RAW …
+    assert "units · total unknown · ${s.current || '…'}`" in poll, (
+        "the open-ended header arm must interpolate s.current raw"
+    )
+    assert "% · ${s.current || '…'}`" in poll, (
+        "the percent header arm must interpolate s.current raw"
+    )
+    # … the double-escaping form is gone from the whole page (the regression pin) …
+    assert "esc(s.current" not in html, (
+        "esc() inside a textContent sink double-escapes M&M-family labels to &amp; garbage"
+    )
+    # … and esc() SURVIVES for the genuine innerHTML sinks (terminalPullHeader).
+    assert "const L = esc(label);" in html, (
+        "esc() must stay on the innerHTML sinks — this fix is textContent-scoped only"
     )

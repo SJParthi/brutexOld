@@ -666,7 +666,15 @@
     document.addEventListener("visibilitychange", function () {
       // A background-throttled tab re-syncs within one RTT of being foregrounded;
       // the age is timestamp-derived so it is already correct the instant it renders.
-      if (!document.hidden) { schedulePoll(0); }
+      // poll() DIRECTLY, never a 0 ms timer (refuter-confirmed, round 6): poll()
+      // bumps pollSeq SYNCHRONOUSLY, so an in-flight poll's failure callback
+      // landing between this task and a 0 ms timer task can no longer pass its
+      // seq guard and replace the instant re-poll with a backoff wait of up to
+      // 30 s — mirrors the universe twin, which invokes pollProgress() directly.
+      if (!document.hidden) {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        poll();
+      }
     });
   }
 

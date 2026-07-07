@@ -2097,12 +2097,17 @@ async function pollProgress(label) {
       // Per-expiry sub-unit note (DEC-PULL-HEADER-SUBUNIT-001) — '' when the label
       // carries no expiry and the unit is not grinding, so the header degrades to
       // byte-identical-to-today. textContent (never innerHTML) — the CodeQL XSS guard.
+      // s.current is interpolated RAW (refuter-confirmed, round 6): textContent is
+      // NOT an HTML sink and performs no entity decoding, so esc() here rendered an
+      // M&M-family contract label ("NSE-M&M-30Sep25-2000-CE 1minute") as literal
+      // "&amp;" garbage in the header; esc() stays for the genuine innerHTML sinks
+      // (terminalPullHeader below).
       const subNote = subUnitNote(s, trackSubUnit(s));
       const suEl = document.getElementById('subunit');
       if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';
       document.getElementById('pulltitle').textContent = s.open_ended
-        ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${esc(s.current || '…')}` + (subNote ? ' · ' + subNote : '')
-        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s);
+        ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '')
+        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s);
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
