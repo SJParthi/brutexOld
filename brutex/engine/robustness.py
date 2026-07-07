@@ -50,6 +50,8 @@ def combo_returns(
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> list[float]:
     """Run a combo over bars → its PER-TRADE return series.
 
@@ -64,6 +66,11 @@ def combo_returns(
     ----------
     bars, required_mask, direction, tf_minutes, stop_loss_paisa, take_profit_paisa, start_equity_paisa, proximity, prior_n
         As :func:`brutex.engine.sweep_driver.evaluate_combo`.
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs into
+        :func:`~brutex.engine.stage1a.build_bar_bits`
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, review round-2 finding 2).
+        Defaults (``None`` / ``False``) are the byte-identical spot path.
 
     Returns
     -------
@@ -78,7 +85,13 @@ def combo_returns(
     """
     if not bars:
         raise ValueError("combo_returns: bars must be non-empty")
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    bar_bits = build_bar_bits(
+        bars,
+        proximity=proximity,
+        prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    )
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
     trades = simulate_trades(
         bars,

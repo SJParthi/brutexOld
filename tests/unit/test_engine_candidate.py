@@ -138,3 +138,59 @@ class TestValidateCandidate:
             dsr_min=0.95,
             cpcv_min=0.5,
         )
+
+    def test_roll_schedule_threads_into_both_composed_builds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-0012 pass-through (review round-2 finding 2): validate_candidate
+        # previously exposed NO way to pass a schedule — schedule-blind
+        # bar_bits were the only possible result for roll-stitched futures
+        # bars. Spy on BOTH composed Stage-1A builds (validation's OOS build
+        # AND robustness's CPCV build) and prove the schedule reaches each.
+        import brutex.engine.robustness as robustness_mod
+        import brutex.engine.validation as validation_mod
+        from brutex.engine.stage1a import build_bar_bits as real_build
+
+        bars = _multiday(4, bars_per_day=5)
+        covering = (bars[-1].timestamp.astimezone(_IST).date().toordinal(),)
+        seen: dict[str, tuple[object, object]] = {}
+
+        def _spy_for(site: str) -> Any:
+            def spy(*args: Any, **kwargs: Any) -> Any:
+                seen[site] = (kwargs.get("roll_schedule"), kwargs.get("apply_1day_mask"))
+                return real_build(*args, **kwargs)
+
+            return spy
+
+        monkeypatch.setattr(validation_mod, "build_bar_bits", _spy_for("oos"))
+        monkeypatch.setattr(robustness_mod, "build_bar_bits", _spy_for("cpcv"))
+        validate_candidate(
+            bars,
+            0,
+            [(0, _m())],
+            direction=Side.BUY,
+            tf_minutes=1,
+            roll_schedule=covering,
+            apply_1day_mask=True,
+        )
+        assert seen == {"oos": (covering, True), "cpcv": (covering, True)}
+
+    def test_default_call_stays_the_spot_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import brutex.engine.robustness as robustness_mod
+        import brutex.engine.validation as validation_mod
+        from brutex.engine.stage1a import build_bar_bits as real_build
+
+        bars = _multiday(4, bars_per_day=5)
+        seen: dict[str, tuple[object, object]] = {}
+
+        def _spy_for(site: str) -> Any:
+            def spy(*args: Any, **kwargs: Any) -> Any:
+                seen[site] = (kwargs.get("roll_schedule"), kwargs.get("apply_1day_mask"))
+                return real_build(*args, **kwargs)
+
+            return spy
+
+        monkeypatch.setattr(validation_mod, "build_bar_bits", _spy_for("oos"))
+        monkeypatch.setattr(robustness_mod, "build_bar_bits", _spy_for("cpcv"))
+        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
+        assert seen == {"oos": (None, False), "cpcv": (None, False)}

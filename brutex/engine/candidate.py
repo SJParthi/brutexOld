@@ -108,6 +108,8 @@ def validate_candidate(
     cpcv_min: float = _DEFAULT_CPCV_MIN,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> CandidateVerdict:
     """Run a candidate combo through OOS + DSR + CPCV → one composed verdict.
 
@@ -122,6 +124,13 @@ def validate_candidate(
         Train fraction for the out-of-sample holdout (default 0.7).
     dsr_min, cpcv_min
         Acceptance floors for the Deflated Sharpe Ratio and the CPCV pass-rate.
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001,
+        review round-2 finding 2), threaded into BOTH composed ``bar_bits``
+        builds — :func:`validate_out_of_sample` AND
+        :func:`~brutex.engine.robustness.combo_returns` (the CPCV producer) —
+        so roll-stitched futures bars are never validated schedule-blind.
+        Defaults (``None`` / ``False``) are the byte-identical spot path.
 
     Returns
     -------
@@ -145,6 +154,8 @@ def validate_candidate(
         train_frac=train_frac,
         proximity=proximity,
         prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
     )
     deflated = deflate_sweep(sweep_results).get(required_mask)
     cpcv = cpcv_robustness(
@@ -158,6 +169,8 @@ def validate_candidate(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
         )
     )
     return CandidateVerdict(

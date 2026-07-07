@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 import fno_math
 
@@ -165,6 +165,8 @@ def evaluate_combo(
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> ResultMetrics:
     """Backtest ONE strategy combo over real bars → its full result metrics.
 
@@ -194,6 +196,13 @@ def evaluate_combo(
         Proximity tolerances for the ``near_*`` conditions (defaults to 10 bps).
     prior_n
         Prior-bar pattern look-back ∈ {1, 2, 3, 4} (defaults to 3).
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs into
+        :func:`~brutex.engine.stage1a.build_bar_bits`
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, review round-2 finding 2 —
+        every evaluator entry point accepts them, so roll-stitched futures
+        bars are never forced through a schedule-blind build). Defaults
+        (``None`` / ``False``) are the byte-identical spot path.
 
     Returns
     -------
@@ -208,7 +217,13 @@ def evaluate_combo(
     if not bars:
         raise ValueError("evaluate_combo: bars must be non-empty")
 
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    bar_bits = build_bar_bits(
+        bars,
+        proximity=proximity,
+        prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    )
     return metrics_for_mask(
         bars,
         bar_bits,
@@ -875,6 +890,8 @@ def _walk_forward_run_hash(
     start_equity_paisa: int,
     proximity: ProximityParams | None,
     prior_n: int,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> str:
     """Return the 64-char BLAKE3 run-hash for a walk-forward combo evaluation.
 
@@ -883,22 +900,31 @@ def _walk_forward_run_hash(
     against the exact layout it was scored on (Golden Rule #4). Uses the same
     ``fno_math.blake3_hash`` primitive + canonical-JSON rules + ``\\x1f`` field
     join as :func:`brutex.strategies.combo.combo_hash` — one hashing source of
-    truth (CLAUDE.md §11 COMMON).
+    truth (CLAUDE.md §11 COMMON). The ADR-0012 futures ``roll_schedule`` /
+    ``apply_1day_mask`` enter CONDITIONALLY (the ``canonical_trade_params``
+    precedent): ``bar_bits`` are a function of ``(bars, schedule)``, so a
+    schedule-aware evaluation is a DIFFERENT computation and must hash apart —
+    while a spot evaluation (both defaults) stays byte-identical to the
+    pre-launch derivation.
     """
     prox = proximity if proximity is not None else ProximityParams()
+    descriptor: dict[str, Any] = {
+        "mask": required_mask,
+        "direction": direction.name,
+        "tf_minutes": tf_minutes,
+        "stop_loss_paisa": stop_loss_paisa,
+        "take_profit_paisa": take_profit_paisa,
+        "start_equity_paisa": start_equity_paisa,
+        "pivot_proximity_bps": prox.pivot_proximity_bps,
+        "pdh_pdl_proximity_bps": prox.pdh_pdl_proximity_bps,
+        "fib_proximity_bps": prox.fib_proximity_bps,
+        "prior_n": prior_n,
+    }
+    if roll_schedule is not None or apply_1day_mask:
+        descriptor["roll_schedule"] = list(roll_schedule or ())
+        descriptor["apply_1day_mask"] = apply_1day_mask
     canonical = json.dumps(
-        {
-            "mask": required_mask,
-            "direction": direction.name,
-            "tf_minutes": tf_minutes,
-            "stop_loss_paisa": stop_loss_paisa,
-            "take_profit_paisa": take_profit_paisa,
-            "start_equity_paisa": start_equity_paisa,
-            "pivot_proximity_bps": prox.pivot_proximity_bps,
-            "pdh_pdl_proximity_bps": prox.pdh_pdl_proximity_bps,
-            "fib_proximity_bps": prox.fib_proximity_bps,
-            "prior_n": prior_n,
-        },
+        descriptor,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -1009,6 +1035,8 @@ def evaluate_combo_walk_forward(
     train_days: int = DEFAULT_WF_TRAIN_DAYS,
     test_days: int = DEFAULT_WF_TEST_DAYS,
     step_days: int = DEFAULT_WF_STEP_DAYS,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> WalkForwardResult:
     """Backtest ONE combo across a rolling walk-forward schedule → its WF outcome.
 
@@ -1032,6 +1060,10 @@ def evaluate_combo_walk_forward(
     train_days, test_days, step_days
         Rolling-window sizes in trading days (see
         :func:`~brutex.engine.stage1a.build_walk_forward_schedule`).
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs into the single full-stream
+        ``bar_bits`` build (review round-2 finding 2); both enter the
+        run-hash CONDITIONALLY, so spot results stay byte-identical.
 
     Returns
     -------
@@ -1055,7 +1087,13 @@ def evaluate_combo_walk_forward(
     report = verify_walk_forward_no_lookahead(schedule)
     if not report.passed:
         raise LookAheadError(f"walk-forward schedule failed P-06 re-check: {report.violation}")
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    bar_bits = build_bar_bits(
+        bars,
+        proximity=proximity,
+        prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    )
     fold_results = [
         _score_fold(
             bars,
@@ -1080,6 +1118,8 @@ def evaluate_combo_walk_forward(
         start_equity_paisa=start_equity_paisa,
         proximity=proximity,
         prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
     )
     return _aggregate_folds(schedule, fold_results, run_hash)
 
@@ -1098,6 +1138,8 @@ def walk_forward_sweep(
     train_days: int = DEFAULT_WF_TRAIN_DAYS,
     test_days: int = DEFAULT_WF_TEST_DAYS,
     step_days: int = DEFAULT_WF_STEP_DAYS,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> list[tuple[int, WalkForwardResult]]:
     """Walk-forward MANY masks over the same bars → ``(mask, WalkForwardResult)`` pairs.
 
@@ -1117,6 +1159,10 @@ def walk_forward_sweep(
         As :func:`evaluate_combo`.
     train_days, test_days, step_days
         Rolling-window sizes in trading days.
+    roll_schedule, apply_1day_mask
+        The ADR-0012 futures pass-throughs into the ONE shared ``bar_bits``
+        build (review round-2 finding 2); conditional run-hash entry, spot
+        byte-identical.
 
     Returns
     -------
@@ -1138,7 +1184,13 @@ def walk_forward_sweep(
     report = verify_walk_forward_no_lookahead(schedule)
     if not report.passed:
         raise LookAheadError(f"walk-forward schedule failed P-06 re-check: {report.violation}")
-    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    bar_bits = build_bar_bits(
+        bars,
+        proximity=proximity,
+        prior_n=prior_n,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    )
     results: list[tuple[int, WalkForwardResult]] = []
     for mask in masks:
         fold_results = [
@@ -1165,6 +1217,8 @@ def walk_forward_sweep(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            roll_schedule=roll_schedule,
+            apply_1day_mask=apply_1day_mask,
         )
         results.append((mask, _aggregate_folds(schedule, fold_results, run_hash)))
     return results

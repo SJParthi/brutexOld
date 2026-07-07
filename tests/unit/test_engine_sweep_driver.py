@@ -196,6 +196,31 @@ class TestEvaluateCombo:
         )
         assert metrics.total_trades >= 1
 
+    def test_roll_schedule_reaches_the_stage1a_build(self) -> None:
+        # ADR-0012 pass-through (review round-2 finding 2): pre-fix
+        # evaluate_combo accepted NO roll_schedule, so schedule-blind bar_bits
+        # were the ONLY possible result. A schedule whose last expiry precedes
+        # the bars now provably reaches Stage-1A (its desync raise fires).
+        bars = _session_bars()
+        stale = (bars[0].timestamp.astimezone(_IST).date().toordinal() - 1,)
+        with pytest.raises(ValueError, match="beyond the last roll_schedule expiry"):
+            evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=stale)
+
+    def test_covering_schedule_matches_the_schedule_aware_sweep(self) -> None:
+        # The single-contract equivalence oracle: evaluate_combo under a
+        # covering schedule == sweep_masks under the SAME schedule (the
+        # already-threaded sibling), and the defaults stay the spot path.
+        bars = _session_bars()
+        covering = (bars[-1].timestamp.astimezone(_IST).date().toordinal(),)
+        direct = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=covering)
+        [(_, swept)] = sweep_masks(
+            bars, [0], direction=Side.BUY, tf_minutes=1, roll_schedule=covering
+        )
+        assert direct == swept
+        assert evaluate_combo(
+            bars, 0, direction=Side.BUY, tf_minutes=1, roll_schedule=None, apply_1day_mask=False
+        ) == evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+
 
 # ────── sweep_masks + rank_sweep (the leaderboard machine) ──────
 
