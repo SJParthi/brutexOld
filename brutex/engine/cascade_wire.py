@@ -1481,9 +1481,19 @@ def _roll_schedules_from_payload(
     """
     if raw is None:
         return None
+
+    def _strict_ordinal(ordinal: object) -> int:
+        # Strict int-not-bool (review round-4 finding 2, mirroring the audit
+        # reader `_schedules_from_entries`): a bare `int()` silently accepted
+        # `true` (→1) and truncated `739000.9` (→739000) — a malformed
+        # hand-edited manifest must REFUSE, never coerce.
+        if not isinstance(ordinal, int) or isinstance(ordinal, bool):
+            raise ValueError(f"non-int roll_schedule ordinal {ordinal!r}")
+        return ordinal
+
     try:
         parsed = tuple(
-            (str(instrument), tuple(int(ordinal) for ordinal in schedule))
+            (str(instrument), tuple(_strict_ordinal(ordinal) for ordinal in schedule))
             for instrument, schedule in cast("Sequence[Any]", raw)
         )
     except (TypeError, ValueError) as exc:

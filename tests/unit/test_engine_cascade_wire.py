@@ -1263,6 +1263,24 @@ class TestManifestSerialisation:
         with pytest.raises(cw.CascadeWireError, match="invalid roll_schedules"):
             cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
 
+    @pytest.mark.parametrize(
+        "schedule",
+        [[True, 739030], [739000.9, 739030], ["739000", 739030]],
+        ids=["bool", "float", "int-string"],
+    )
+    def test_non_int_ordinal_types_refused_not_coerced(self, schedule: list[object]) -> None:
+        # Round-4 finding 2: the parse boundary documented itself as THE
+        # validator for a hand-edited manifest, yet bare `int()` silently
+        # coerced `true` → 1, truncated 739000.9 → 739000, and parsed an
+        # int-string — now strictly int-not-bool, mirroring the audit reader
+        # `_schedules_from_entries`.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", schedule]]
+        with pytest.raises(cw.CascadeWireError, match="non-int roll_schedule ordinal"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
     def test_spot_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
         # Round-3 finding 2: the manifest has no integrity digest, so a
         # hand-edited/corrupt `roll_schedules` entry for a SPOT instrument
