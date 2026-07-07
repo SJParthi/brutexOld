@@ -862,3 +862,137 @@ class TestComputeFuturesCandidatesBranches:
         assert len(skips) == 1
         assert skips[0]["source"] == "futures"
         assert skips[0]["symbol"] == bad
+
+
+# ── prev-close/OI calendar-contiguity goldens (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) ──
+
+from structlog.testing import capture_logs  # noqa: E402
+
+#: The FROZEN additive-key vocabulary this decision may ever add to a row.
+_CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+    }
+)
+
+#: The pre-fix futures row key set (the byte-identity vocabulary).
+_FUTURES_ROW_KEYS = frozenset(
+    {
+        "name",
+        "symbol",
+        "exchange",
+        "segment",
+        "ltp",
+        "spot",
+        "premium",
+        "pct_change",
+        "oi",
+        "oi_chg_pct",
+        "volume",
+        "value_cr",
+    }
+)
+
+_G_DAY = date(2025, 9, 29)  # Mon — the repro snapshot day
+_G_FUT = "NSE-NIFTY-30Sep25-FUT"  # expiry 2025-09-30 ≥ snapshot → near tier
+
+
+def _seed_contiguity_future(tmp_path: Path, *, prior_day: date) -> None:
+    """One near FUT: session bars on Mon 2025-09-29 + ONE prior 1-day bar on
+    *prior_day* (close 20000, OI 1000) — Fri 2025-09-26 contiguous when passed,
+    Thu 2025-09-25 the lake-hole arm."""
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_G_FUT,
+        interval="1minute",
+        bars=[
+            _min_bar(hour=9, minute=15, close="20050", volume=100, oi=1050, day=_G_DAY),
+            _min_bar(hour=9, minute=16, close="20100", volume=400, oi=1100, day=_G_DAY),
+        ],
+    )
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_G_FUT,
+        interval="1day",
+        bars=[_day_bar(day=prior_day, close="20000", oi=1000)],
+    )
+    # Underlying NIFTY spot under INDEX (LTP 20040) for the premium leg.
+    _write(
+        tmp_path,
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_min_bar(hour=9, minute=16, close="20040", volume=50, oi=None, day=_G_DAY)],
+    )
+
+
+class TestFuturesContiguityGoldens:
+    def test_contiguous_row_is_byte_identical_no_warn(self, tmp_path: Path) -> None:
+        # Prior 1-day on Fri 2025-09-26 = the immediately-preceding session of
+        # Mon 2025-09-29 (weekend spanned) → NO additive key, no WARN.
+        _seed_contiguity_future(tmp_path, prior_day=date(2025, 9, 26))
+        with capture_logs() as logs:
+            payload = run_futures_snapshot(
+                lake_root=tmp_path, interval="1day", date=_G_DAY.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # FULL-row byte identity: the exact pre-fix wire, computed independently.
+        assert row == {
+            "name": "NIFTY 30-Sep-2025 FUT",
+            "symbol": _G_FUT,
+            "exchange": "NSE",
+            "segment": "FNO",
+            "ltp": "₹20,100.00",
+            "spot": "₹20,040.00",
+            "premium": "₹60.00",
+            "pct_change": str(
+                (Decimal("20100.00") - Decimal("20000.00")) / Decimal("20000.00") * 100
+            ),
+            "oi": 1100,
+            "oi_chg_pct": str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100),
+            "volume": 500,
+            # HLC3 turnover: 20050x100 + 20100x400 = 1.0045 Cr -> 2dp half-up.
+            "value_cr": "1.00",
+        }
+        assert set(row) == _FUTURES_ROW_KEYS
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_noncontiguous_close_and_oi_both_stamped_two_warns(self, tmp_path: Path) -> None:
+        # The lake-hole arm: the ONLY prior 1-day bar sits on Thu 2025-09-25
+        # while Fri 2025-09-26 (the true prior session) is a hole — BOTH the
+        # close and the OI baselines ride that bar → both flagged, one WARN
+        # per kind, served values UNCHANGED.
+        _seed_contiguity_future(tmp_path, prior_day=date(2025, 9, 25))
+        with capture_logs() as logs:
+            payload = run_futures_snapshot(
+                lake_root=tmp_path, interval="1day", date=_G_DAY.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: identical served numbers to the contiguous golden —
+        # the fix stamps, it never changes a value.
+        assert row["ltp"] == "₹20,100.00"
+        assert row["pct_change"] == str(
+            (Decimal("20100.00") - Decimal("20000.00")) / Decimal("20000.00") * 100
+        )
+        assert row["oi_chg_pct"] == str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100)
+        # The four additive keys, both baselines independently False.
+        assert row["prev_close_session"] == "2025-09-25"
+        assert row["prev_close_contiguous"] is False
+        assert row["oi_baseline_session"] == "2025-09-25"
+        assert row["oi_baseline_contiguous"] is False
+        assert set(row) - _FUTURES_ROW_KEYS == _CONTIGUITY_KEYS
+        # Exactly TWO warns — one per kind, independently.
+        warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert sorted((e["kind"], e["symbol"]) for e in warns) == [
+            ("oi", _G_FUT),
+            ("prev_close", _G_FUT),
+        ]
+        for e in warns:
+            assert e["found_session"] == "2025-09-25"
+            assert e["expected_session"] == "2025-09-26"
