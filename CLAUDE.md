@@ -18,7 +18,25 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+_Last updated: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+MIGRATION.md #1533 — the /movers prev-close calendar-contiguity honesty guard:
+a previous-day close/OI baseline that provably skipped a nearer NSE session (a
+lake hole — the confirmed repro printed 2.2822% where the true Friday-based
+figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
++ the INDEPENDENT `oi_baseline_*` twins), warned ONCE (capped 20/build, deduped
+per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
+untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
+(strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
+NON-session documented limit), enriched resolvers `resolve_prev_close`/
+`resolve_prev_oi` with byte-identical `.value` seams over the historical
+`_prev_day_close`/`_prev_day_oi`, ONE pure `prev_baseline_provenance`, and
+EMIT-ON-FALSE row projection (contiguous + abstained payloads byte-for-byte
+the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
+HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
+the missing session does; `preopen_report._previous_trading_day` NOT refactored
+(named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
 MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
 `SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
 deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
@@ -623,7 +641,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+- **Active branch:** `claude/trusting-einstein-bobai2` (**DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+  MIGRATION.md #1533** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
+  previous-day close + futures/options previous-day OI baselines (which silently served the NEAREST-prior lake bar
+  with zero calendar check — the confirmed repro: a Fri-hole lake baselined Mon on Thu's close and printed 2.2822%
+  where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
+  (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
+  ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
+  documented NON-session limit; NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
+  `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
+  `PrevOiBaseline(value, found_date)` keep byte-identical `.value` seams (`_prev_day_close`/`_prev_day_oi` wrappers —
+  every historical pin green unmodified; `_prior_session_last_from_minute` appends its found date, [0]/[1] stable);
+  ONE pure `prev_baseline_provenance` yields (session_iso, contiguous|null), stamped as defaulted additive fields on
+  MoverSnapshot/FuturesMover/OptionMover with close + OI judged INDEPENDENTLY (the null-OI-1day divergence pinned);
+  row projectors EMIT-ON-FALSE so contiguous AND abstained payloads are byte-for-byte the pre-fix wire (golden-pinned
+  both arms on all three tabs + a FROZEN additive-key-NAME set); one capped (20/build) per-(symbol,kind)-deduped
+  `movers.prev_baseline_noncontiguous` WARN + a single suppressed summary; `movers.html` appends a strict-`=== false`
+  " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
+  makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
+  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` deliberately NOT refactored — the
+  named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
+  line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
   DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
   ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
   constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
@@ -2182,7 +2222,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/amazing-darwin-hb4caw`
+- **Active feature branch:** `claude/trusting-einstein-bobai2`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
