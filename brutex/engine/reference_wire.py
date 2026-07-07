@@ -10,11 +10,17 @@ missing production pieces:
   :class:`~brutex.engine.reference_series.TradeReferenceStamper` per run from
   the lake's ``NSE / INDEX / INDIAVIX`` series via the ONE COMMON slice-read
   law (:func:`~brutex.engine.lake_slice.load_lake_slice`: catalog-reconcile →
-  L1 heal → window-bounded feed → keep-FIRST dedup). The provider is
-  lazy + cached so the lake is read AT MOST ONCE per run, and it degrades
+  L1 heal → window-bounded feed → keep-FIRST dedup). The build degrades
   HONESTLY to ``None`` (observe-only WARN, the run proceeds unstamped) when
   the lake carries no VIX data — a missing series never fabricates a stamp
-  and never fails a sweep (Golden Rule #1).
+  and never fails a sweep (Golden Rule #1). HONEST (round-2 review, the
+  #935/#1014 dormant-surface class): production's once-per-run property is
+  owned by the launchers' SINGLE EAGER :func:`build_vix_stamper` call
+  (``cmd_sweep_all`` / the sweep-verify recount build once and thread the
+  one object everywhere; cascade + dashboard build once via
+  ``vix_stamper_for_manifest``) — the lazy cached
+  :func:`vix_stamper_provider` is a LIBRARY-level convenience with NO
+  production consumer today (see its docstring).
 * :func:`aggregate_trade_vix` — the ONE pure fold from a combo's stamped
   trades to its ``(vix_mean, vix_min, vix_max)`` summary trio.
 
@@ -329,10 +335,27 @@ def vix_stamper_provider(
     """Return a lazy, once-per-run cached provider of the India-VIX stamper.
 
     The zero-arg closure defers :func:`build_vix_stamper` until the FIRST call
-    (a run that never simulates trades never reads the VIX lake) and caches the
-    outcome — INCLUDING an honest ``None`` — so the lake read happens AT MOST
-    ONCE per run regardless of how many slices/tuples consume the stamper.
-    Per-run closure state only, no global mutable state (CLAUDE.md §4).
+    (a consumer that never simulates trades never reads the VIX lake) and
+    caches the outcome — INCLUDING an honest ``None`` — so the lake read
+    happens AT MOST ONCE per closure regardless of how many slices/tuples
+    consume the stamper. Per-run closure state only, no global mutable state
+    (CLAUDE.md §4).
+
+    HONEST envelope (Golden Rule #10, round-2 review — the #935/#1014
+    dormant-surface class, stated rather than hidden): NO production path
+    routes through this provider today. Every production launcher binds
+    EAGERLY — ``cmd_sweep_all`` and the sweep-verify recount call
+    :func:`build_vix_stamper` once at launch and hand stage-3 a
+    ``stamper_for=lambda: reference_stamper`` over that already-built object;
+    cascade/dashboard build once via
+    :func:`~brutex.engine.cascade_wire.vix_stamper_for_manifest` — so the
+    production once-per-run property is owned by those single builds, NOT by
+    this closure, and the lazy never-read-if-never-simulating benefit is
+    unrealised in production (a library-level convenience for embedders).
+    Also NOT thread-safe (a plain check-then-set closure): a future
+    multi-threaded consumer could double-build — idempotent and harmless
+    (same lake, same window) but not "at most once" under races; production
+    launch paths are single-threaded at build time.
 
     Parameters
     ----------

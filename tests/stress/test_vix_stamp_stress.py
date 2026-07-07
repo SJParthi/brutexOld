@@ -1,13 +1,26 @@
 """Sustained-load stress for the India-VIX trade stamp (DEC-VIX-STAMP-WIRE-001 Stage D).
 
-Two envelopes proven AT SCALE (the one-shot unit tests structurally cannot):
+Three envelopes proven AT SCALE (the one-shot unit tests structurally cannot):
 
-* **memory per series entry** — building a :class:`TradeReferenceStamper` over
-  a ≥100K-instant VIX series costs a bounded number of bytes per entry (the
-  ``{datetime → Decimal}`` probe dict; round-1 measured ~204 B/entry), so a
-  full 2020→today 1-minute VIX series (~450K instants) stays well inside the
-  §8 RAM envelope. The ``tracemalloc`` recipe (untracked warmup → baseline →
-  build → net) mirrors ``tests/stress/test_memory_growth.py``.
+* **dict-container memory per series entry** — building a
+  :class:`TradeReferenceStamper` over a ≥100K-instant VIX series costs a
+  bounded number of bytes of NEW probe-dict storage per entry (bars built
+  UNTRACKED, so the dict's re-referenced key/value objects are excluded;
+  measured ~52 B/entry). The ``tracemalloc`` recipe (untracked warmup →
+  baseline → build → net) mirrors ``tests/stress/test_memory_growth.py``.
+* **RETAINED memory per series entry** (round-2 panel fold) — the recipe the
+  first gate cannot see: production (``build_vix_stamper``) DROPS the bar
+  lists after ``from_vix_bars``, so what the process retains per entry is the
+  dict slot PLUS its datetime key PLUS its Decimal value. Bars are built
+  INSIDE the traced region with a DISTINCT Decimal per entry, then dropped —
+  the net is the true retained footprint (~204 B/entry, the round-1 figure),
+  gated against the SAME 512 B ceiling. Spawn-pool arithmetic (§8, stated
+  because ``sweep_parallel`` only says the stamper "crosses the SPAWN
+  boundary verbatim"): every spawn worker unpickles its OWN full copy, so a
+  full 2020→today ~610K-instant series costs ≈ 204 B × 610K ≈ 125 MB per
+  process ≈ 1.25 GB at the M4-Pro's 8-9 workers + parent — comfortably
+  inside the 48 GB envelope (an arithmetic projection at the measured
+  per-entry cost, not a measured 610K-series run — Golden Rule #10).
 * **WARN-volume cap under an all-miss flood** — a sweep stamping ≥100K miss
   occurrences emits AT MOST :data:`MISS_WARN_DETAIL_CAP` + 1 warnings (the
   per-instant details + the ONE ``vix_miss_capped`` sentinel), the memo set
@@ -71,6 +84,28 @@ def _vix_bars(n: int) -> list[CandleBar]:
     ]
 
 
+def _vix_bars_distinct(n: int) -> list[CandleBar]:
+    """Bars whose Decimal level is a DISTINCT object per entry.
+
+    ``_vix_bars`` shares ONE ``Decimal("14.25")`` across every bar — fine for
+    the dict-container gate, but the RETAINED-footprint gate must count a
+    real per-entry value object (a lake read materialises one Decimal per
+    bar), so each bar here carries its own level object.
+    """
+    return [
+        CandleBar(
+            timestamp=_T0 + timedelta(minutes=i),
+            open=(level := Decimal(f"14.{i % 100:02d}")),
+            high=level,
+            low=level,
+            close=level,
+            volume=0,
+            open_interest=None,
+        )
+        for i in range(n)
+    ]
+
+
 def test_stamper_memory_per_series_entry_is_bounded() -> None:
     """Building a ≥100K-entry stamper costs ≤ the per-entry byte ceiling."""
     entries = _resolve("STRESS_VIX_STAMP_ENTRIES", _DEFAULT_ENTRIES)
@@ -105,6 +140,50 @@ def test_stamper_memory_per_series_entry_is_bounded() -> None:
         f"stamper series memory {per_entry:.0f} B/entry over {entries:,} entries "
         f"exceeds the {_PER_ENTRY_CEILING_BYTES} B ceiling — the probe dict may "
         f"have grown a per-entry object."
+    )
+
+
+def test_stamper_retained_footprint_per_entry_is_bounded() -> None:
+    """The RETAINED per-entry cost — dict slot + key + value — stays ≤ ceiling.
+
+    Round-2 panel fold: the container gate above builds bars UNTRACKED, so
+    the ~52 B/entry it measures excludes the datetime keys + Decimal values
+    the dict re-references — objects production RETAINS after
+    ``build_vix_stamper`` drops the bar lists. Building the bars INSIDE the
+    traced region and dropping them makes the net the TRUE retained
+    footprint; a regression that bloats the per-entry key/value objects
+    (invisible to the container gate) trips this one.
+    """
+    entries = _resolve("STRESS_VIX_STAMP_ENTRIES", _DEFAULT_ENTRIES)
+    warmup = TradeReferenceStamper.from_vix_bars(_vix_bars_distinct(64))
+    assert warmup.vix.level_at(_T0) == Decimal("14.00")
+    del warmup
+
+    gc.collect()
+    tracemalloc.start()
+    try:
+        gc.collect()
+        baseline, _ = tracemalloc.get_traced_memory()
+        bars = _vix_bars_distinct(entries)
+        stamper = TradeReferenceStamper.from_vix_bars(bars)
+        del bars  # production drops the slices — only the stamper retains
+        gc.collect()
+        current, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    net = current - baseline
+    per_entry = net / entries
+    print(
+        f"\nVIX stamper RETAINED-memory stress (DEC-VIX-STAMP-WIRE-001): "
+        f"{entries:,} entries | net {net / 1024:.0f} KiB | "
+        f"{per_entry:.0f} B/entry retained (ceiling {_PER_ENTRY_CEILING_BYTES} B)\n"
+    )
+    assert len(stamper.vix.close_by_ts) == entries  # the whole series is servable
+    assert per_entry <= _PER_ENTRY_CEILING_BYTES, (
+        f"retained stamper memory {per_entry:.0f} B/entry over {entries:,} entries "
+        f"exceeds the {_PER_ENTRY_CEILING_BYTES} B ceiling — a per-entry key/value "
+        f"object may have grown (this is the figure every SPAWN worker pays)."
     )
 
 
