@@ -17,6 +17,7 @@ records it and moves on).
 
 from __future__ import annotations
 
+import contextvars
 import math
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -117,11 +118,25 @@ class PoolRunParallel:
         it fully drains the iterator before the next phase). A fetcher raising
         is captured into ``ItemResult(ok=False, exc=...)``; a clean return is
         ``ItemResult(ok=True, result=...)``.
+
+        Each task runs inside a COPY of the SUBMITTING thread's contextvars
+        context (``contextvars.copy_context().run``, one fresh copy per task —
+        DEC-PULL-BEAT-PERRUN-001 fix round): the driver's ambient ``pull_id``
+        therefore reaches EVERY pool worker automatically, so a paced fetcher's
+        ``emit_progress_beat`` (rate ``pace`` return / reauth wait — the
+        metadata phase's ``get_expiries``/``get_contracts`` fan-out) attributes
+        to the run's keyed channel instead of dropping as an unattributed
+        foreign beat and false-stalling a heavily-throttled run. A driver with
+        NO bound context propagates an empty copy — byte-identical to the
+        pre-change fresh-thread behaviour — and per-task copies mean one task's
+        binds can never leak into a later task on the reused pool thread.
         """
         if not items:
             return
         with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            future_to_item = {pool.submit(fn, item): item for item in items}
+            future_to_item = {
+                pool.submit(contextvars.copy_context().run, fn, item): item for item in items
+            }
             for future in as_completed(future_to_item):
                 item = future_to_item[future]
                 try:

@@ -1860,11 +1860,18 @@ jobs:
           # (_build_revision_probe + _on_wedged) is covered by
           # tests/unit/test_pull_jobs_wedge.py (stem-matched for the discovery
           # gate), which MUST join this gate for the same reason.
+          # DEC-PULL-BEAT-PERRUN-001: the per-run keyed beat-channel wiring
+          # (the _run_beat identity/running guards + the foreign-beat
+          # warn-once drop in _beat) is covered by
+          # tests/unit/test_pull_jobs_beat_channel.py (stem-matched for the
+          # discovery gate), which MUST join this gate so its coverage of
+          # those lines registers (without it the module reads 96.95%).
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
               tests/unit/test_pull_jobs_singleflight.py \
               tests/unit/test_pull_jobs_wedge.py \
+              tests/unit/test_pull_jobs_beat_channel.py \
               tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
