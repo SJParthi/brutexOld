@@ -179,6 +179,10 @@
      below parses — the pinned ROUND_HALF_UP display law
      (preopen_report._round2 / the #1154 half-up cells). -->
 <script src="/static/bx-format.js"></script>
+<!-- The shared as-of TIME default/persist primitives (DEC-MOVERS-ASOF-LATEST-DEFAULT-001).
+     Loaded SYNCHRONOUSLY (like bx-format.js) so BXMoversTime is defined before the inline
+     script below runs fillTimes() — a deferred script would execute AFTER this inline block. -->
+<script src="/static/bx-movers-time.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -281,12 +285,24 @@ const SAMPLE = {
   ],
 };
 
+/* Auto-fill the as-of TIME dropdown for the chosen timeframe
+   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): a "Latest" default ("" ⇒ the backend
+   whole-day cut ⇒ the latest traded minute, IDENTICAL across every timeframe)
+   + the intraday grid, PRESERVING a retained explicit pick across TF switches
+   only when it is still a valid slot. NO first-slot pin (the pre-fix bug that
+   froze a coarse TF at a partial-bucket close). Grid strings come from
+   BXMoversTime.defaultTimeOptions — numeric-generated "HH:MM" + one static
+   literal, so the innerHTML stays XSS-safe (DEC-DASHBOARD-XSS-HARDENING-001). */
 function fillTimes() {
   const m = TF_MIN[$("interval").value] || 375, sel = $("time");
   if (m >= 375) { sel.innerHTML = '<option value="">(daily)</option>'; sel.disabled = true; state.time=""; return; }
-  sel.disabled = false; let opts = "", t = 9*60+15;
-  while (t < 15*60+30) { opts += `<option>${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}</option>`; t += m; }
-  sel.innerHTML = opts; state.time = sel.value;
+  sel.disabled = false;
+  let opts = '<option value="">Latest</option>';
+  for (const hhmm of BXMoversTime.defaultTimeOptions(m)) opts += `<option>${hhmm}</option>`;
+  sel.innerHTML = opts;
+  const resolved = BXMoversTime.resolveTime(state.time, m);   // "" (Latest) or a retained valid pick
+  sel.value = resolved;
+  state.time = resolved;   // NOT the selected first slot — the resolved default/retained pick
 }
 /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 + the hostile-review
    legend-desync fix): recompute the " *" legend from the CURRENT rowsData every time
@@ -508,11 +524,35 @@ async function load() {
     lastPayload = j;  /* cache: sub-filter switches now re-render from this, no refetch. */
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
-    $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
+    /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): an intraday DEFAULT
+       (blank time) reads "latest (HH:MM)" from the additive latest_time echo — NOT
+       the wrong "(daily)" it used to print — while the CUT stays whole-day; an
+       explicit pick shows its minute; a daily TF reads "(daily)". */
+    const isDaily = (TF_MIN[j.interval] || 375) >= 375;
+    const asofTime = j.time ? j.time
+                   : isDaily ? "(daily)"
+                   : (j.latest_time ? `latest (${j.latest_time})` : "latest");
+    $("asof").textContent = `as-of ${(j.date||"")} ${asofTime} · ${j.interval||""}`;
+    /* Adopt an EXPLICIT echoed as-of so subsequent TF switches reuse the identical
+       minute — reflected via .value / .textContent (never innerHTML of server data),
+       injecting an off-grid minute as a selectable option (XSS-safe). */
+    if (j.time && state.time !== j.time) {
+      state.time = j.time;
+      const tsel = $("time");
+      if (tsel && !tsel.disabled) {
+        if (![...tsel.options].some(o => o.value === j.time)) {
+          const opt = document.createElement("option");
+          opt.value = j.time; opt.textContent = j.time;
+          tsel.appendChild(opt);
+        }
+        tsel.value = j.time;
+      }
+    }
     /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001): when any
        rendered row carries a strictly-false contiguity flag (the EMIT-ON-FALSE
        keys), explain the " *" marker in the note — via the SAME helper the cached
-       pill switch uses, recomputed from the CURRENT rowsData. */
+       pill switch uses, recomputed from the CURRENT rowsData (the helper sets
+       #noteText from the note + legend, replacing the plain noteText assignment). */
     baseNote = j.note || "";
     refreshBaselineLegend(baseNote);
   } catch (e) {

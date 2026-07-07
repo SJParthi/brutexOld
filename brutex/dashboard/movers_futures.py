@@ -668,6 +668,7 @@ def build_futures_payload(
     skipped: int,
     expiry_tier: str = _DEFAULT_TIER,
     min_volume: int | None = None,
+    latest_time: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -693,6 +694,11 @@ def build_futures_payload(
         The OPT-IN "Top Volume" floor (DEC-MOVERS-MIN-VOLUME-001) applied at RANK
         time to the ``volume`` ranking only; ``None`` / ``0`` ⇒ the byte-identical
         no-floor default.
+    latest_time
+        The ADDITIVE display-only echo of the resolved latest intraday minute
+        (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
+        ``latest (HH:MM)`` while the default cut stays whole-day; ``None`` for an
+        explicit *time* / daily interval / empty lake. Never affects a number.
     skipped
         Count of underlyings/contracts dropped — no live contract at the tier,
         no session bars, OR an unreadable Parquet file (logged as
@@ -743,6 +749,7 @@ def build_futures_payload(
         "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
+        "latest_time": latest_time,
         "note": note,
         **ranked,
     }

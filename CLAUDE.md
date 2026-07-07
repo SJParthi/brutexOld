@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
-MIGRATION.md #1535 — the /movers prev-close calendar-contiguity honesty guard:
+MIGRATION.md #1536 — the /movers prev-close calendar-contiguity honesty guard:
 a previous-day close/OI baseline that provably skipped a nearer NSE session (a
 lake hole — the confirmed repro printed 2.2822% where the true Friday-based
 figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
@@ -36,6 +36,11 @@ HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
 the missing session does; `preopen_report._previous_trading_day` NOT refactored
 (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 —
+the `/movers` Spot default as-of TIME resolves to the SAME latest available
+minute across EVERY timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the
+identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX).
 Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
 the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
 on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
@@ -718,7 +723,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/trusting-einstein-bobai2` (**DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
-  MIGRATION.md #1535** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
+  MIGRATION.md #1536** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
   previous-day close + futures/options previous-day OI baselines (which silently served the NEAREST-prior lake bar
   with zero calendar check — the confirmed repro: a Fri-hole lake baselined Mon on Thu's close and printed 2.2822%
   where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
@@ -739,6 +744,10 @@ hostile-review pass._
   named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535** —
+  the `/movers` Spot default as-of TIME resolves to the SAME latest available minute across EVERY timeframe, so
+  1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
   Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
   MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
   gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
@@ -2370,6 +2379,22 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/trusting-einstein-bobai2`
+  (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1536 — the `/movers`
+  prev-close/OI baselines gain an honest calendar-contiguity verdict: a
+  baseline anchored on a non-adjacent NSE session is stamped
+  (`prev_close_*`/`oi_baseline_*` EMIT-ON-FALSE keys), warned once (capped),
+  and marked " *" in the UI — the served number itself unchanged; READ-ONLY
+  dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/movers-asof-default-latest-minute`
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
+  default as-of TIME resolves to the SAME latest available minute across EVERY
+  timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
+  MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
+  (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
+  ADR-0017, MIGRATION.md #1531–#1532)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

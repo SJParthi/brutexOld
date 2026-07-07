@@ -678,6 +678,32 @@ class TestFuturesApi:
         assert len(body["volume"]) == 1
         assert "Min volume" not in body["note"]
 
+    def test_default_intraday_echoes_latest_time_from_spot(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-ASOF-LATEST-DEFAULT-001: the additive `latest_time` echo rides the
+        # Futures payload too, resolved from the SPOT 1-minute (INDEX NIFTY → 09:16 here);
+        # `time` stays null (whole-day cut, identical latest close across every TF).
+        _seed_futures_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "futures", "interval": "3minute", "date": "2024-06-13"},
+        ).json()
+        assert body["latest_time"] == "09:16"
+        assert body["time"] is None
+
+    def test_daily_futures_latest_time_is_none(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _seed_futures_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "futures", "interval": "1day", "date": "2024-06-13"},
+        ).json()
+        assert body["latest_time"] is None
+
 
 class TestFuturesExpiryTier:
     """The Near / Next / Far serial-expiry selector (DEC-MOVERS-FUTURES-TIER-001).
