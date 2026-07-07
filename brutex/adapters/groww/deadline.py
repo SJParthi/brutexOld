@@ -9,15 +9,29 @@ DEC-GROWW-PULL-CALL-DEADLINE-001 + DEC-GROWW-TOKEN-REAUTH-001 (MINOR-1). The Gro
   :meth:`~brutex.adapters.groww.reauth.SdkRefresher.reauth`).
 
 Both share the same hazard — a hung call with no timeout. This module is the SINGLE
-freeze guard for both. It is deliberately **stdlib-only** (it imports ``threading``
-and nothing from the :mod:`brutex.adapters.groww` package), so it can never take part
-in an import cycle — the reason it lives here and not in
+freeze guard for both. It is deliberately **stdlib-only** (it imports ``contextvars`` +
+``threading`` and nothing from the :mod:`brutex.adapters.groww` package), so it can
+never take part in an import cycle — the reason it lives here and not in
 :mod:`brutex.adapters.groww.client` (a ``client`` import from ``reauth`` would
 re-create the client↔reauth cycle CodeQL flagged on #868).
+
+Run correlation (DEC-PULL-BEAT-PERRUN-001 fix round): the daemon worker runs inside a
+COPY of the CALLER thread's contextvars context (one fresh copy per call — the
+:class:`~brutex.orchestrator.parallel.PoolRunParallel` precedent), so the wrapped *fn*
+keeps the caller's ambient ``pull_id``. Load-bearing for the deadline-wrapped durable
+write (:func:`~brutex.adapters.groww.write_deadline.append_with_deadline`, BOTH spine
+tails): the partition-flock lock-wait poll inside ``sink.append`` fires
+:func:`~brutex.observability.progress_beat.emit_progress_beat` per retry (the
+DEC-PULL-CONTENTION-ANTISTALL-001 GAP-#15 antistall seam), and a fresh thread's EMPTY
+context would resolve the ambient run id to ``""`` — the run's OWN write-contention
+beats would DROP as foreign instead of feeding its keyed watchdog channel, consuming
+the once-per-epoch ``progress_beat.foreign_beat_dropped`` WARN and silencing a later
+genuine zombie's WARN.
 """
 
 from __future__ import annotations
 
+import contextvars
 import threading
 from collections.abc import Callable
 
@@ -70,6 +84,16 @@ def run_with_deadline[T](fn: Callable[[], T], seconds: float) -> T:
     ``tests/unit/test_groww_deadline.py`` pins this by firing N timed-out calls and
     asserting the thread count returns to its pre-storm baseline once every simulated
     socket fires.
+
+    The worker runs inside a COPY of the CALLER's contextvars context
+    (DEC-PULL-BEAT-PERRUN-001 fix round — a fresh thread starts with an EMPTY context,
+    so without the copy every ``emit_progress_beat`` fired inside *fn* — the
+    partition-flock lock-wait poll under a deadline-wrapped ``sink.append`` in BOTH
+    spine tails — resolved its ambient ``pull_id`` to ``""`` and DROPPED as a foreign
+    beat instead of feeding the run's keyed watchdog channel). One fresh copy per call
+    (the ``PoolRunParallel`` precedent): anything *fn* binds mutates only the discarded
+    copy, so no bind can leak across calls or back into the caller; a scope-less caller
+    (the CLI path) propagates an empty copy — byte-identical to the pre-copy behaviour.
     """
     result: dict[str, T] = {}
     failure: dict[str, Exception] = {}
@@ -83,7 +107,12 @@ def run_with_deadline[T](fn: Callable[[], T], seconds: float) -> T:
         finally:
             done.set()
 
-    threading.Thread(target=_runner, name="groww-deadline-call", daemon=True).start()
+    # Capture on the CALLER thread; run the worker inside the copy so the wrapped fn
+    # keeps the caller's ambient run correlation (pull_id) — see the docstring above.
+    ctx = contextvars.copy_context()
+    threading.Thread(
+        target=ctx.run, args=(_runner,), name="groww-deadline-call", daemon=True
+    ).start()
     if not done.wait(seconds):
         # The guard's OWN timeout — a DeadlineExceeded (TimeoutError subclass). A real
         # TimeoutError raised by ``fn`` itself takes the ``failure`` path below and is re-raised

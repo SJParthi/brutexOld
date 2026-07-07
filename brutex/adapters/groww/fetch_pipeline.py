@@ -520,8 +520,13 @@ class FetchPipeline:
         # re-binds it once for its whole loop (the pipeline object is strictly
         # per-run — constructed and drained within one pull), so the consumers' seam
         # beats (partition lock-wait / write paths) attribute to the run's keyed
-        # channel. A captured "" (the CLI path — no scope) binds "" → routes to the
-        # legacy channel → byte-identical no-op there.
+        # channel. That attribution crosses the deadline-wrapped durable-write tail
+        # (``append_with_deadline`` in both spine tails) ONLY because
+        # ``run_with_deadline`` runs its daemon worker inside a COPY of the consumer's
+        # context (DEC-PULL-BEAT-PERRUN-001 fix round) — the flock/write beats fire on
+        # that worker, not on the consumer thread itself. A captured "" (the CLI path —
+        # no scope) binds "" → routes to the legacy channel → byte-identical no-op
+        # there.
         self._pull_id = current_pull_id()
         # `object` poison-pill sentinel: a unique instance per pipeline so a stray
         # RawFetchResult can never be mistaken for the stop signal.
@@ -962,7 +967,11 @@ class FetchPipeline:
         The whole loop runs inside ``pull_id_scope(self._pull_id)``
         (DEC-PULL-BEAT-PERRUN-001) — bound ONCE per consumer thread, safe because the
         pipeline object is strictly per-run — so the tails' seam beats attribute to the
-        run's keyed progress-beat channel.
+        run's keyed progress-beat channel. The tails' durable write runs on a
+        ``run_with_deadline`` daemon worker (``append_with_deadline``), which carries a
+        COPY of this thread's context (DEC-PULL-BEAT-PERRUN-001 fix round) — the
+        partition-flock lock-wait beats fired there attribute too, they do not drop as
+        foreign.
         """
         q = self._queues[shard]
         with pull_id_scope(self._pull_id):
