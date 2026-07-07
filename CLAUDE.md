@@ -18,15 +18,18 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (the 10-item POLISH PACK, MIGRATION.md #1527–#1536 —
+_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1527–#1537 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
 DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
 DEC-ACCOUNT-LEASE-CROSSHOST-001 + DEC-DERIVE-LOCK-VISIBILITY-001 +
-DEC-RESUME-BANNER-AUTOCLEAR-001 + DEC-QUOTA-VERDICT-MOOT-001: (1) the
+DEC-RESUME-BANNER-AUTOCLEAR-001 + DEC-QUOTA-VERDICT-MOOT-001 +
+DEC-DAILY-OPEN-PREDICATE-ALIGN-001: (1) the
 at-close 15:30:00 boundary divergence (`daily_derive_cutoff` strict `>` vs
 `clamp_window_end` `>=`) is ruled DELIBERATE and drift-PINNED cross-module
-(closed-wontfix, the #1267 pattern; clamp byte-untouched); (2) the prebuild's
+(the boundary tightening refused, the #1267 pattern; clamp byte-untouched;
+NOT the daily-OPEN predicate item — that is item (11), closed by
+IMPLEMENTATION, never wontfix); (2) the prebuild's
 session-close daily cutoff is REPAIRED (the #1401 M1 regression had left
 DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 production-dead — route/parallel
 orchestrator/heal recall all now ride ONE law via NEW `nse.now_ist` threaded
@@ -70,7 +73,23 @@ daily quota + ZERO production `DailyQuotaTracker` constructions,
 AST-pinned) and the doubly-dead informational quota surface is DELETED
 (`GET /api/v1/quota` + panel fields + `/universe` gauge — all only ever
 served the constant sentinel), the vendor-neutral enforcement seam kept
-dormant logic-byte-identical. ALL TEN: ENGINE UNCHANGED —
+dormant logic-byte-identical; (11) the TWO daily-open-substitution surfaces
+now share ONE per-session predicate (MIGRATION.md #1537,
+DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up the #1267/#1232
+drift pin deferred to): NEW pure `spot_daily_resample.classify_daily_open`
+(substituted iff a NON-Muhurat session's first present 1-minute bar is NOT
+exactly 09:15 IST) drives the prebuild detector directly AND the
+/completeness · /universe · /coverage census's DuckDB CTE as its
+mirror-pinned SQL twin (strict `>` → `<>` + a `_muhurat_exclusion_sql`
+NOT-IN baked from `MUHURAT_SESSIONS`) — a Muhurat session no longer counts
+read-side (was a yearly false positive on a healthy lake), a stray
+pre-09:15 first bar now counts on both (the strict-`>` under-count closed);
+same-lake same-verdict equivalence proven + pinned, the old divergence pin
+consciously rewritten to an alignment pin; the ONE remaining deliberate
+divergence is POPULATION not predicate (census = ALL stored sessions,
+detector = the forming-session cutoff), documented + pinned; also corrects
+#1527's earlier misattribution (this item was never closed-wontfix — it is
+closed by IMPLEMENTATION). ALL ELEVEN: ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch behaviour
 byte-identical; touched modules 100% line+branch).
 Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
@@ -572,7 +591,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/blissful-curie-gp94rk` (**the 10-item POLISH PACK, MIGRATION.md #1527–#1536** —
+- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1527–#1537** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
   DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
@@ -585,7 +604,13 @@ hostile-review pass._
   NOT mutual exclusion; `BRUTEX_PULL_LEASE=off`) · DEC-DERIVE-LOCK-VISIBILITY-001 (movers PrebuildGate honors
   the cross-process derive lock, `source="cross_process"`) · DEC-RESUME-BANNER-AUTOCLEAR-001 (the resume red
   banner auto-clears on the next real pull launch) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
-  follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant).
+  follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant) ·
+  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1537 — the two daily-open-substitution surfaces share the ONE
+  per-session predicate `spot_daily_resample.classify_daily_open`: Muhurat abstains on BOTH, `!=` 09:15 on
+  BOTH — the /completeness census's strict-`>` flips to `<>` + a `MUHURAT_SESSIONS` NOT-IN exclusion, its SQL
+  CTE mirror-pinned equivalent to the classifier; the remaining divergence is POPULATION (forming-session
+  cutoff) not predicate, documented + pinned; closes the #1267/#1232 named follow-up BY IMPLEMENTATION and
+  corrects #1527's wontfix misattribution).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch;
   ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
   Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
