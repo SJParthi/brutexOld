@@ -131,7 +131,7 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.models import Instrument
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
-from brutex.observability.correlation import pull_id_scope
+from brutex.observability.correlation import inherited_pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
 from brutex.orchestrator.audit import open_ingest_audit
 from brutex.orchestrator.parallel import PoolRunParallel
@@ -1754,6 +1754,14 @@ def pull_all_spot(
     # the ingest spine's ``ingest.*`` events, AND the already-lit transport
     # (``groww.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
+    # INHERIT-aware (DEC-PULL-BEAT-PERRUN-001, LOAD-BEARING): under the dashboard job's
+    # RUN scope a plain ``pull_id_scope(None)`` would shadow-MINT a fresh id here, so
+    # every spot-phase fan-out worker (run_ingest capture-then-rebind) would carry the
+    # minted id ≠ the job's registered beat-channel key → all pace/flock seam beats
+    # DROP → under heavy 429 throttling (zero completed windows → zero direct
+    # _on_progress beats) the run would FALSE-STALL. ``inherited_pull_id_scope`` binds
+    # the ambient run id when one exists; a standalone call (no ambient) still mints —
+    # byte-identical to before.
     # Golden Rule #8 hash-chained ingest audit (DEC-INGEST-AUDIT-WIRING-001): bind
     # the SAME COMMON trail the CLI ``brutex fetch`` pull writes —
     # ``<lake>/audit/spot-ingest.jsonl`` via the ONE ``open_ingest_audit`` factory
@@ -1761,7 +1769,7 @@ def pull_all_spot(
     # real data, no audit). The spine appends RUN_START → per-pair → RUN_COMPLETE
     # on its controller drain thread, O(1) per event, never on a fetch worker.
     with (
-        pull_id_scope(pull_id) as pid,
+        inherited_pull_id_scope(pull_id) as pid,
         open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
         # DURABLE pull journal (G5, DEC-DOCTOR-LIVE-PROOF-KIT-001): a start record
@@ -2894,7 +2902,10 @@ def pull_candles(
     # bound into the structlog contextvars for the whole pass, so this start/done
     # summary, the ingest spine's ``ingest.*`` events, and the already-lit
     # transport (``groww.call``) + rate (``rate.*``) events all share one
-    # ``pull_id``. Always unbinds on exit (no leak).
+    # ``pull_id``. Always unbinds on exit (no leak). INHERIT-aware
+    # (DEC-PULL-BEAT-PERRUN-001): under the dashboard job's RUN scope the entrypoint
+    # inherits the run id instead of shadow-minting (see :func:`pull_all_spot`); a
+    # standalone call (no ambient) still mints — byte-identical to before.
     # Golden Rule #8 hash-chained ingest audit (DEC-INGEST-AUDIT-WIRING-001): bind
     # the SAME COMMON trail the CLI ``brutex fetch`` pull writes —
     # ``<lake>/audit/spot-ingest.jsonl`` via the ONE ``open_ingest_audit`` factory
@@ -2903,7 +2914,7 @@ def pull_candles(
     # on its controller drain thread, O(1) per event, never on a fetch worker.
     with (
         _pull_meter_scope(session_rate, adapter, dry_run=dry_run),
-        pull_id_scope(pull_id) as pid,
+        inherited_pull_id_scope(pull_id) as pid,
         open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,

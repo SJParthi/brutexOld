@@ -16,16 +16,31 @@ write on a wedged volume) would block its caller FOREVER:
 
 All share the same hazard — a hung call with no timeout — and this module is the SINGLE
 freeze guard for all of them (CLAUDE.md §11 COMMON, one primitive, no copy). It is
-deliberately **stdlib-only** (it imports ``threading`` / ``os`` / ``math`` and nothing
-from any ``brutex`` package), so it can never take part in an import cycle. It lives in
+deliberately **stdlib-only** (it imports ``contextvars`` / ``threading`` / ``os`` /
+``math`` and nothing from any ``brutex`` package), so it can never take part in an import
+cycle. It lives in
 :mod:`brutex.config` — the layer BOTH :mod:`brutex.adapters` and :mod:`brutex.data`
 already import (the ``brutex.config.hardware_envelope`` precedent) — so the store guard
 never needs a data→adapters import; :mod:`brutex.adapters.groww.deadline` re-exports it
 byte-compatibly (the DEC-GROWW-REAUTH-DEADLINE-001 #910 relocation precedent).
+
+Run correlation (DEC-PULL-BEAT-PERRUN-001 fix round): the daemon worker runs inside a
+COPY of the CALLER thread's contextvars context (one fresh copy per call — the
+:class:`~brutex.orchestrator.parallel.PoolRunParallel` precedent), so the wrapped *fn*
+keeps the caller's ambient ``pull_id``. Load-bearing for the deadline-wrapped durable
+write (:func:`~brutex.adapters.groww.write_deadline.append_with_deadline`, BOTH spine
+tails): the partition-flock lock-wait poll inside ``sink.append`` fires
+:func:`~brutex.observability.progress_beat.emit_progress_beat` per retry (the
+DEC-PULL-CONTENTION-ANTISTALL-001 GAP-#15 antistall seam), and a fresh thread's EMPTY
+context would resolve the ambient run id to ``""`` — the run's OWN write-contention
+beats would DROP as foreign instead of feeding its keyed watchdog channel, consuming
+the once-per-epoch ``progress_beat.foreign_beat_dropped`` WARN and silencing a later
+genuine zombie's WARN.
 """
 
 from __future__ import annotations
 
+import contextvars
 import math
 import os
 import threading
@@ -93,6 +108,16 @@ def run_with_deadline[T](
     ``tests/unit/test_config_deadline.py`` pin this by firing N timed-out calls and
     asserting the thread count returns to its pre-storm baseline once every simulated
     hang releases.
+
+    The worker runs inside a COPY of the CALLER's contextvars context
+    (DEC-PULL-BEAT-PERRUN-001 fix round — a fresh thread starts with an EMPTY context,
+    so without the copy every ``emit_progress_beat`` fired inside *fn* — the
+    partition-flock lock-wait poll under a deadline-wrapped ``sink.append`` in BOTH
+    spine tails — resolved its ambient ``pull_id`` to ``""`` and DROPPED as a foreign
+    beat instead of feeding the run's keyed watchdog channel). One fresh copy per call
+    (the ``PoolRunParallel`` precedent): anything *fn* binds mutates only the discarded
+    copy, so no bind can leak across calls or back into the caller; a scope-less caller
+    (the CLI path) propagates an empty copy — byte-identical to the pre-copy behaviour.
     """
     result: dict[str, T] = {}
     failure: dict[str, Exception] = {}
@@ -106,7 +131,10 @@ def run_with_deadline[T](
         finally:
             done.set()
 
-    threading.Thread(target=_runner, name=thread_name, daemon=True).start()
+    # Capture on the CALLER thread; run the worker inside the copy so the wrapped fn
+    # keeps the caller's ambient run correlation (pull_id) — see the docstring above.
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(_runner,), name=thread_name, daemon=True).start()
     if not done.wait(seconds):
         # The guard's OWN timeout — a DeadlineExceeded (TimeoutError subclass). A real
         # TimeoutError raised by ``fn`` itself takes the ``failure`` path below and is re-raised
