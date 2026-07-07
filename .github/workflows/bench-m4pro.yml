@@ -38,6 +38,11 @@ on:
       - "tests/bench/test_throughput_canary.py"
       - "tests/bench/test_summary_cache_o1.py"
       - "tests/bench/test_m4pro_sweep_walltime.py"
+      # DEC-TEST-APPARATUS-DEBTS-001(i): the sweep worker-scaling A/B bench
+      # (ADR-0016 §5 deferred core-scaling measurement) + the module its arms
+      # derive from (AUTO_SWEEP_WORKERS_CAP).
+      - "tests/bench/test_sweep_worker_scaling.py"
+      - "brutex/engine/sweep_parallel.py"
       # DEC-O1-BENCH-GATE-COMPLETE-001 (M2): the strict 1.1x tier now gates
       # every Golden-Rule-#5 hot path via a dedicated isolated bench; a change
       # to any of them must re-run this workflow.
@@ -91,7 +96,13 @@ jobs:
     # set is online the job sits in "queued" indefinitely — the operator
     # can disable the workflow if registration is delayed.
     runs-on: [self-hosted, macos, m4pro]
-    timeout-minutes: 10
+    # 25 min (was 10): the sweep worker-scaling A/B bench step below runs the
+    # REAL run_parallel_grid at 4 worker arms; the runbook
+    # (docs/runbooks/sweep-worker-scaling-bench.md) estimates "single-digit
+    # minutes on the M4 Pro (UNVERIFIED until first run)" on top of the 4
+    # existing pytest steps + 2 maturin builds. Tune down after first
+    # real-run evidence (DEC-TEST-APPARATUS-DEBTS-001(i)).
+    timeout-minutes: 25
 
     env:
       # The literal "1" activates the absolute gate per
@@ -208,6 +219,19 @@ jobs:
           # (set in the job env) and skips elsewhere. HONEST measurement, not a hard
           # perf gate (the gated body asserts only positive/finite sanity).
           pytest tests/bench/test_m4pro_sweep_walltime.py -q -s -rA --tb=short -p no:cacheprovider
+
+      - name: Run sweep worker-scaling A/B bench (ADR-0016 §5 deferred core-scaling)
+        run: |
+          . .venv/bin/activate
+          # DEC-SWEEP-CAP-BENCH-001: A/B wall-clock + RSS of the REAL
+          # run_parallel_grid at workers ∈ {cap−1, cap, 10, 12}. Gated on
+          # BRUTEX_M4PRO_ABS=1 (job env) PLUS the test's own >=14-usable-CPU
+          # core guard — skips honestly elsewhere. -s -rA surface the
+          # machine-readable SWEEP_WORKER_SCALING lines + the VERDICT: line
+          # (DEC-M4PRO-BENCH-SURFACE-001). HONEST measurement, not a perf
+          # gate — asserts only sanity + cross-arm result-digest identity;
+          # the cap moves only per the runbook decision rule.
+          pytest tests/bench/test_sweep_worker_scaling.py -q -s -rA --tb=short -p no:cacheprovider
 
       - name: Run strict 1.1x O(1) ratio tier
         run: |
