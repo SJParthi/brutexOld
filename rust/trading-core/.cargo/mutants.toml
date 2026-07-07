@@ -43,10 +43,19 @@ examine_globs = ["src/evaluator.rs", "src/spec.rs", "src/python.rs"]
 # `--features python,serde` — flag verified present.)
 features = ["python", "serde"]
 
-# GIL-only one-line #[pyfunction]/#[pymethods] delegation shims are excluded
-# per-function below (each with its reason): they cannot be executed by any
-# no-libpython Rust test, and their glue is exercised end-to-end by the Python
-# wheel suites in ci.yml. Populated by the DEC-MUTATION-RUNTIME-003 survivor
-# enumeration; NEVER a blanket python.rs exclude. A renamed wrapper makes its
-# mutants reappear as MISSED — the gate goes red loudly, never silently.
+# GIL-only one-line #[pyfunction]/#[pymethods] delegation shims WOULD be
+# excluded per-function here (one commented entry each, with its reason) IF
+# any ever needed it — the DEC-MUTATION-RUNTIME-003 survivor enumeration found
+# NONE, so ZERO exclusions are configured and the commented `exclude_re` below
+# only documents the reserved format. Load-bearing reason (measured — the
+# src/python.rs test-section header): cargo-mutants 27.1.0 does not resolve
+# the `PyResult` alias and fabricates only non-compiling replacements for the
+# PyErr-constructing wrappers, so every one of those 229 mutants is UNVIABLE
+# (verified 8/8 on `py_greeks` + `_trading_core`); the Rust-callable
+# plain-return wrappers are killed by the in-file delegation-parity tests, and
+# the glue is exercised end-to-end by the Python wheel suites in ci.yml. If a
+# future cargo-mutants version makes wrapper mutants viable they reappear as
+# MISSED and the gate goes red loudly, never silently; the pre-approved
+# fallback is the per-function pattern below — NEVER a blanket python.rs
+# exclude.
 # exclude_re = [ ... one commented entry per excluded wrapper fn ... ]

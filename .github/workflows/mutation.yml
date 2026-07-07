@@ -81,9 +81,11 @@ concurrency:
   # cancelling an older run mid-flight would have made the older run's
   # surviving-mutant failure vanish silently. Since
   # DEC-MUTATION-ALERT-CANCELLED-001 the alert steps ALSO fire on
-  # `cancelled()` (a timeout-killed job reports CANCELLED — run 28748795864),
-  # but queueing pushes is still right: finishing the run beats alerting
-  # that it never finished. With cancel-in-progress=false
+  # `cancelled()` (a timeout-killed job reports CANCELLED — run 28748795864;
+  # scope honesty: that covers JOB-level timeout kills — on a RUN-level
+  # cancel GitHub never starts the not-yet-started fan-in job, see the
+  # mutation-verdict comment below), but queueing pushes is still right:
+  # finishing the run beats alerting that it never finished. With cancel-in-progress=false
   # for push, an in-flight push run always runs to completion (and can alert);
   # a newer push queues instead of killing it. schedule + workflow_dispatch
   # keep cancel-in-progress=true: the group is event-keyed, so the weekly
@@ -142,7 +144,13 @@ jobs:
     # pre-decided dial (the Rust shards' "+1 shard" twin): any observed
     # rehearsal/scheduled run > 100 min => split pass 2 across two parallel
     # jobs (move rate_common + the slowest loop modules out), a mechanical
-    # edit that needs no new machinery.
+    # edit that needs no new machinery. Admitted-regime honesty (R4-3): the
+    # preflight's [1200, 20000] ms band is CLASSIFIER arithmetic, not a
+    # budget guarantee — a rate_common baseline >= ~9.5-10 s (369 x ~10 s
+    # ~= 61 min on top of the ~59 min loop-module nominal) already crosses
+    # the 120-min kill from INSIDE the admitted band; the failure is LOUD
+    # (budget kill -> cancelled -> cause-aware issue) and the same
+    # >100-min split dial is the remedy.
     # (The OLD broad `pytest tests/unit` runner could never finish here —
     # 123/804 mutants at cancellation, DEC-MUTATION-RUNTIME-001.)
     timeout-minutes: 120
@@ -363,7 +371,9 @@ jobs:
           # `pytest -x` dies in milliseconds — the ordering contract is documented
           # at the top of that file's survivor-kill pack), validated by the local
           # 243/243 8m48s run (re-validated 250/250 KILLED after fixer round 2's
-          # pragma un-hiding) but silently defeatable by future test insertion or
+          # pragma un-hiding, then 254/254 KILLED — 0 timeout/suspicious/survived
+          # — post-round-3 on the F1-restructured audit.py, byte-identical to
+          # this tree; MIGRATION.md #1541) but silently defeatable by future test insertion or
           # a new spin loop without a fail-fast twin. Pre-decided dial: if a
           # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
@@ -400,10 +410,13 @@ jobs:
               # warm re-timed baseline never pays) — so the classifier
               # arithmetic above holds for every admitted baseline GIVEN the
               # disclosed ~2x preflight/mutmut agreement assumption; the
-              # pair's 3rd field is now the CAP, not the wrap. Refusal band
-              # (1200, 20000) ms on the MIN: at or below 1.2 s
-              # mutmut's 10x-baseline hard timer leaves < 1 s of slack over the
-              # wrap + the `-k 5` grace (spin kills would flake BAD_TIMEOUT);
+              # pair's 3rd field is now the CAP, not the wrap. Refusal band:
+              # the check admits the CLOSED [1200, 20000] ms band on the MIN
+              # (`-lt 1200 || -gt 20000` refuses strictly outside it) — below
+              # 1.2 s mutmut's 10x-baseline hard timer leaves < 1 s of slack
+              # over the wrap + the `-k 5` grace (spin kills would flake
+              # BAD_TIMEOUT; at exactly 1200 ms — admitted — the slack is
+              # exactly 1.0 s, the monotone floor);
               # above 20 s the capped wrap sits < 1.5x a legit pass (widening
               # the mid-pass false-green window and risking a wrap-killed
               # unmutated baseline). Time two clean runs and REFUSE loudly
@@ -422,7 +435,7 @@ jobs:
               fi
               echo "preflight baselines for $name: ${base1_ms} ms / ${base2_ms} ms -> min ${base_ms} ms -> wrap ${wrap_s} s (5 x min baseline, cap ${tmo} s)"
               if [ "$base_ms" -lt 1200 ] || [ "$base_ms" -gt 20000 ]; then
-                echo "❌ $name preflight min baseline ${base_ms} ms (samples ${base1_ms}/${base2_ms} ms) is outside the (1200, 20000) ms regime the measured-baseline wrap sizing (5 x min baseline capped at ${tmo} s, -k 5 grace) + --test-time-base 45 classifier arithmetic covers — re-derive the sizing for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
+                echo "❌ $name preflight min baseline ${base_ms} ms (samples ${base1_ms}/${base2_ms} ms) is outside the [1200, 20000] ms regime the measured-baseline wrap sizing (5 x min baseline capped at ${tmo} s, -k 5 grace) + --test-time-base 45 classifier arithmetic covers — re-derive the sizing for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
                 exit 1
               fi
               # --test-time-base 45: keep a wrap-killed spin mutant BELOW the
@@ -617,9 +630,10 @@ jobs:
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
           #   wall-clock parallelism = this 5-way shard matrix:
-          #   ceil(556/5)=112 mutants x 35-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 65-75 min + ~5.5 min baseline/setup
-          #   ~= 71-81 min nominal, ~95 at +20% -> >= 25 min margin per shard.
+          #   ceil(556/5)=112 mutants x 29-40 s/mutant serial (CI per-lane measured
+          #   4-9 s build + 25-31 s test) ~= 54-75 min + ~5.5 min baseline/setup
+          #   ~= 60-81 min nominal, ~95 at +20% on the worst end -> >= 25 min
+          #   margin per shard.
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/5 \
@@ -741,11 +755,19 @@ jobs:
   # workflow_dispatch rehearsal can NEVER close the completion-proof
   # issues (the first green SCHEDULED run is the proof — Golden Rule #10).
   #
-  # The DEC-MUTATION-ALERT-CANCELLED-001 semantics survive here: a
-  # timeout-killed shard reports CANCELLED, and the filer conditions match
-  # BOTH failure and cancelled via needs.<job>.result — but the issue BODY
-  # now decodes which it was (a timeout kill is a RUNTIME regression, NOT
-  # evidence of survivors — the #1207/#1211/#1216 mis-titling defect).
+  # The DEC-MUTATION-ALERT-CANCELLED-001 semantics survive here for the case
+  # that matters: a shard killed by its JOB-level timeout-minutes reports
+  # CANCELLED while the RUN continues, so this `if: always()` job still
+  # executes and the filer conditions match BOTH failure and cancelled via
+  # needs.<job>.result — and the issue BODY now decodes which it was (a
+  # timeout kill is a RUNTIME regression, NOT evidence of survivors — the
+  # #1207/#1211/#1216 mis-titling defect). Honest residual (R2-EC-2): on a
+  # RUN-level cancellation (concurrency supersede / manual cancel) GitHub
+  # does not START not-yet-started jobs even with `if: always()`, so this
+  # job never runs and no issue is filed — reachability is near-nil (push
+  # runs keep cancel-in-progress: false; the schedule group is superseded
+  # only by next week's schedule while a run lasts <= ~2.5 h; manual cancels
+  # are attended), accepted rather than papered over.
   # ─────────────────────────────────────────────────────────────────
   mutation-verdict:
     name: "Mutation verdict (fan-in alerts + auto-close on green schedule)"
