@@ -616,10 +616,14 @@ def run_stage3_pass(
         reused verbatim for the train-slice hash derivation.
     stamper_for
         Optional ZERO-ARG provider of the run's India-VIX stamper
-        (DEC-VIX-STAMP-WIRE-001) — e.g. the launcher's cached
-        :func:`~brutex.engine.reference_wire.vix_stamper_provider` closure.
-        Invoked LAZILY, once, AFTER the ``stage3_enable`` fast path (a
-        disabled pass never touches the VIX lake); the resolved stamper (or
+        (DEC-VIX-STAMP-WIRE-001). The production launchers (``cmd_sweep_all``
+        + the sweep-verify recount) pass ``lambda: reference_stamper`` over
+        their ONE eagerly-built launch stamper — never a second lake read;
+        the lazy :func:`~brutex.engine.reference_wire.vix_stamper_provider`
+        closure also fits this seam but has no production consumer today
+        (its docstring states the dormancy honestly). Invoked LAZILY, once,
+        AFTER the ``stage3_enable`` fast path (a disabled pass never resolves
+        the provider); the resolved stamper (or
         an honest ``None``) rides every refinement evaluation AND the
         persisted refined-row projection. ``None`` (default) = unstamped.
 
