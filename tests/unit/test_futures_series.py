@@ -3,8 +3,9 @@
 DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 / DEC-FUTURES-ADDRESSING-PIN-001: pins the
 vendor-truth ownership law (``(E_{k-1}, E_k]``, expiry day owned by the
 EXPIRING contract — the ``resolve_near_month`` ``>=`` law), the loud-refusal
-vs graceful-abstain failure-mode matrix (interior hole refuses NAMING months;
-head/tail clamp + WARN), the observe-only calendar cross-check (drift WARNs
+vs graceful-abstain failure-mode matrix (interior hole refuses NAMING months —
+including a window STARTING inside a hole; head spans stay UNOWNED + WARN;
+ANY tail overhang WARNs), the observe-only calendar cross-check (drift WARNs
 with evidence, coverage abstains — vendor dates govern), the returned evidence
 fields (``unparsed_dirs`` / ``cross_checks`` — exact-equality-testable, never
 log-only), and the ``MAX_MONTHLY_EXPIRY_GAP_DAYS`` bound against the REAL
@@ -146,7 +147,32 @@ class TestScanAndFilter:
             res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 6, 26))
         assert res.unparsed_dirs == ("NSE-NIFTY-26Jun2024-FUT", "NSE-NIFTY-BADTOKEN-FUT")
         warned = _events(logs, "futures_series.unparsed_dir")
-        assert {rec["dir"] for rec in warned} == set(res.unparsed_dirs)
+        # repr()-named (the #907/#919 convention): the on-disk name is hostile-
+        # controlled input — newline/ANSI bytes must not forge log lines.
+        assert {rec["dir"] for rec in warned} == {repr(name) for name in res.unparsed_dirs}
+
+    def test_regular_file_shaped_like_a_contract_is_skipped_and_warned(
+        self, tmp_path: Path
+    ) -> None:
+        # Review round-1 finding 7: a stray regular FILE named like a contract
+        # must never become an owning segment (it would poison the ownership
+        # windows + roll_schedule, then dead-end the loader with a wrong
+        # "re-pull" remediation).
+        root = _mk_lake(tmp_path, _JUN, _JUL)
+        stray = root / "bars" / "NSE" / "FNO" / "NSE-NIFTY-28Oct25-FUT"
+        stray.write_bytes(b"not a directory")
+        # Fails-before: pre-fix the stray FILE parsed into `ordered`, was
+        # SELECTED for this window (own_start 2025-08-01 <= end) and the
+        # Jul→Oct 89-day pairwise gap refused the whole launch with a wrong
+        # remediation. Post-fix it is skipped + WARNed and the resolution
+        # succeeds on the real dirs.
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 8, 10))
+        assert res.contract_symbols == (_JUN, _JUL)
+        assert res.unparsed_dirs == ()  # a non-dir is NOT parse-failure evidence
+        warned = _events(logs, "futures_series.non_dir_entry")
+        assert len(warned) == 1
+        assert warned[0]["entry"] == repr("NSE-NIFTY-28Oct25-FUT")
 
     def test_poison_alias_dir_is_ignored_not_resolved(self, tmp_path: Path) -> None:
         # F7: a hand-created literal bars/NSE/FNO/NSE-NIFTY-FUT/ dir parses to
@@ -252,6 +278,64 @@ class TestInteriorHoleGate:
         assert "Jul 2025" in str(exc.value)
 
 
+class TestInteriorHoleStartSideGate:
+    """Review round-1 findings 1/10 — a window STARTING inside a hole refuses.
+
+    The pairwise gate only sees SELECTED segments; when the pre-hole
+    contract's expiry precedes the window start it is excluded from selection,
+    so pre-fix the hole was silently served by the successor's back-month bars
+    (no refusal, ``head_clamped=False``, single-entry ``roll_schedule``).
+    """
+
+    def test_window_starting_inside_a_hole_refuses_naming_the_month(self, tmp_path: Path) -> None:
+        # Finding 1's repro: May + Jul dirs, June MISSING, window starts Jun 2
+        # (inside the June hole) — pre-fix this resolved WITHOUT refusal to one
+        # July segment owning 2025-06-02 → 2025-07-31.
+        root = _mk_lake(tmp_path, "NSE-NIFTY-29May25-FUT", _JUL)
+        with pytest.raises(FuturesSeriesError, match="INTERIOR hole") as exc:
+            resolve_futures_series(root, start=date(2025, 6, 2), end=date(2025, 7, 31))
+        message = str(exc.value)
+        assert "Jun 2025" in message
+        assert "NSE-NIFTY-29May25-FUT" in message
+        assert _JUL in message
+
+    def test_finding10_repro_mar_hole_refuses(self, tmp_path: Path) -> None:
+        # Finding 10's repro: Jan/Feb/Apr dirs, Mar-2025 MISSING, window starts
+        # 2025-03-05 → the Feb predecessor is dropped by selection and the Apr
+        # contract silently served March pre-fix.
+        root = _mk_lake(
+            tmp_path,
+            "NSE-NIFTY-30Jan25-FUT",
+            "NSE-NIFTY-27Feb25-FUT",
+            "NSE-NIFTY-24Apr25-FUT",
+        )
+        with pytest.raises(FuturesSeriesError, match="INTERIOR hole") as exc:
+            resolve_futures_series(root, start=date(2025, 3, 5), end=date(2025, 4, 20))
+        message = str(exc.value)
+        assert "Mar 2025" in message
+        assert "NSE-NIFTY-27Feb25-FUT" in message
+        assert "NSE-NIFTY-24Apr25-FUT" in message
+
+    def test_control_same_hole_with_predecessor_selected_still_refuses(
+        self, tmp_path: Path
+    ) -> None:
+        # Control: the SAME holed lake with a window start that keeps the
+        # predecessor selected refuses via the ORIGINAL pairwise gate.
+        root = _mk_lake(tmp_path, "NSE-NIFTY-29May25-FUT", _JUL)
+        with pytest.raises(FuturesSeriesError, match="INTERIOR hole"):
+            resolve_futures_series(root, start=date(2025, 5, 1), end=date(2025, 7, 31))
+
+    def test_predecessor_gap_at_the_bound_is_accepted(self, tmp_path: Path) -> None:
+        # Boundary teeth for the START-side gate: a predecessor exactly
+        # MAX_MONTHLY_EXPIRY_GAP_DAYS before the first selected expiry passes
+        # (kills a > → >= mutant on the new gate); a healthy complete lake's
+        # mid-month window start never false-refuses.
+        root = _mk_lake(tmp_path, "NSE-NIFTY-01Jul25-FUT", "NSE-NIFTY-10Aug25-FUT")
+        res = resolve_futures_series(root, start=date(2025, 7, 15), end=date(2025, 8, 10))
+        assert res.contract_symbols == ("NSE-NIFTY-10Aug25-FUT",)
+        assert (date(2025, 8, 10) - date(2025, 7, 1)).days == MAX_MONTHLY_EXPIRY_GAP_DAYS
+
+
 def _raise_holiday_unavailable(on_date: date) -> date:
     """Monkeypatch stand-in: every calendar query hits the coverage horizon."""
     raise HolidayDataUnavailableError(f"no holiday data covering {on_date.isoformat()}")
@@ -340,7 +424,7 @@ class TestOwnershipWindows:
 
 
 class TestHeadLaw:
-    """Head spans are GRACEFUL (clamp + WARN) — never a refusal."""
+    """Head spans are GRACEFUL (stay unowned + WARN) — never a refusal."""
 
     def test_first_lake_dir_gets_the_calendar_fallback_own_start(self, tmp_path: Path) -> None:
         # The very first dir in the whole lake: own_start = the previous
@@ -350,19 +434,37 @@ class TestHeadLaw:
         assert res.segments[0].own_start == date(2025, 5, 30)
         assert res.head_clamped is False  # start == natural own_start exactly
 
-    def test_head_unowned_span_clamps_and_warns(self, tmp_path: Path) -> None:
-        # Window starts BEFORE the first owned date → clamp + one WARN +
-        # head_clamped evidence (the spot-mirroring graceful law, F13).
+    def test_head_unowned_span_stays_unowned_and_warns(self, tmp_path: Path) -> None:
+        # Window starts BEFORE the first owned date → one WARN + head_clamped
+        # evidence, and the segment KEEPS its natural own_start (review
+        # round-1 findings 14/18): extending ownership backwards would serve
+        # the first contract's pre-front-month (far-month basis) bars as
+        # series bars; the unowned span instead loads NOTHING — the true
+        # spot-mirroring graceful law (F13).
         root = _mk_lake(tmp_path, _JUN)
         with capture_logs() as logs:
             res = resolve_futures_series(root, start=date(2025, 5, 1), end=date(2025, 6, 26))
         assert res.head_clamped is True
-        assert res.segments[0].own_start == date(2025, 5, 1)
+        assert res.segments[0].own_start == date(2025, 5, 30)  # natural, NOT the window start
         warned = _events(logs, "futures_series.head_unowned")
         assert len(warned) == 1
         assert warned[0]["window_start"] == "2025-05-01"
         assert warned[0]["first_owned"] == "2025-05-30"
         assert warned[0]["contract"] == _JUN
+        assert warned[0]["unowned_days"] == 29
+
+    def test_head_unowned_cross_check_stays_honest(self, tmp_path: Path) -> None:
+        # Review round-1 finding 19: pre-fix the cross-check ran at the
+        # CLAMPED own_start (the window start), so a routine head-unowned
+        # launch emitted a FALSE `expiry_drift` although the lake and the
+        # calendar AGREE. With the natural own_start kept, the check reads ok.
+        root = _mk_lake(tmp_path, _JUN)
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 5, 1), end=date(2025, 6, 26))
+        assert res.cross_checks == (
+            CalendarCrossCheck(expiry=date(2025, 6, 26), computed=date(2025, 6, 26), status="ok"),
+        )
+        assert _events(logs, "futures_series.expiry_drift") == []
 
     def test_pre_floor_calendar_abstain_clamps_silently(self, tmp_path: Path) -> None:
         # The Jan-2020 pre-floor edge: the previous-month (Dec-2019) calendar
@@ -388,7 +490,7 @@ class TestHeadLaw:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Tail law: overhang recorded, WARNed only past the gap bound
+# Tail law: ANY positive overhang recorded + WARNed (escalation flag past bound)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -401,13 +503,20 @@ class TestTailLaw:
         assert res.segments[-1].own_end == date(2025, 6, 20)
         assert res.tail_unowned_days == 0
 
-    def test_small_overhang_recorded_without_warn(self, tmp_path: Path) -> None:
+    def test_small_overhang_warns_too(self, tmp_path: Path) -> None:
+        # Review round-1 findings 4/12/20: ANY positive overhang means the
+        # successor contract owning those dates is ABSENT from the lake, so a
+        # 10-day truncation now WARNs (pre-fix it was fully silent, drifting
+        # from the #1521 'clamp + WARN' law and this module's own docstring).
         root = _mk_lake(tmp_path, _JUN)
         with capture_logs() as logs:
             res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 7, 6))
         assert res.tail_unowned_days == 10
         assert res.segments[-1].own_end == date(2025, 6, 26)  # never past the expiry
-        assert _events(logs, "futures_series.tail_unowned") == []
+        warned = _events(logs, "futures_series.tail_unowned")
+        assert len(warned) == 1
+        assert warned[0]["unowned_days"] == 10
+        assert warned[0]["exceeds_monthly_gap"] is False
 
     def test_overhang_past_the_gap_bound_warns(self, tmp_path: Path) -> None:
         root = _mk_lake(tmp_path, _JUN)
@@ -419,6 +528,7 @@ class TestTailLaw:
         assert warned[0]["unowned_days"] == 45
         assert warned[0]["last_expiry"] == "2025-06-26"
         assert warned[0]["contract"] == _JUN
+        assert warned[0]["exceeds_monthly_gap"] is True
 
 
 # ────────────────────────────────────────────────────────────────────────

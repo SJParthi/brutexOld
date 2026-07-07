@@ -27,15 +27,21 @@ load-bearing).
 ## Failure-mode law (loud refusal vs graceful abstain)
 
 * **Interior hole** (a missing monthly contract dir between two selected
-  expiries) → LOUD :class:`FuturesSeriesError` naming the missing expiry
-  month(s) — the worst silent-corruption class (a hole would silently span
-  two contracts across a basis gap). NOT maskable by
-  ``--allow-missing-slices`` (that flag governs empty ``(symbol, interval)``
-  pairs, never interior continuity).
-* **Head/tail unowned window spans** → GRACEFUL clamp + one
-  ``futures_series.head_unowned`` / ``futures_series.tail_unowned`` WARN +
-  resolution evidence fields (spot-mirroring: a spot sweep over a
-  partially-backfilled lake silently loads what exists).
+  expiries, OR a window that STARTS inside such a hole — the pre-hole
+  contract's expiry precedes the window start, so it is not selected, yet
+  the start date belongs to the MISSING contract) → LOUD
+  :class:`FuturesSeriesError` naming the missing expiry month(s) — the worst
+  silent-corruption class (a hole would silently span two contracts across a
+  basis gap). NOT maskable by ``--allow-missing-slices`` (that flag governs
+  empty ``(symbol, interval)`` pairs, never interior continuity).
+* **Head/tail unowned window spans** → GRACEFUL + one
+  ``futures_series.head_unowned`` / ``futures_series.tail_unowned`` WARN
+  (ANY positive span WARNs) + resolution evidence fields. The head span
+  stays UNOWNED — ownership is never extended backwards, so the first
+  contract's pre-front-month (far-month basis) bars are never served as
+  series bars; the span simply loads nothing (true spot-mirroring: a spot
+  sweep over a partially-backfilled lake silently loads what exists — and
+  nothing exists for a missing day).
 * **Registry absent** (``registry.duckdb``, a CLI-only lake) → NON-EVENT: the
   resolver never reads it — vendor dir names are the truth (the droppable-
   cache law, MIGRATION.md #1034).
@@ -114,8 +120,9 @@ class FuturesSeriesSegment:
     expiry
         Vendor-parsed from the dir token (the holiday-shifted truth).
     own_start
-        First owned IST date (previous expiry + 1 day; head segment per the
-        head law — see :func:`resolve_futures_series`).
+        First owned IST date (previous expiry + 1 day; the head segment keeps
+        its NATURAL start even when the window begins earlier — see the head
+        law in :func:`resolve_futures_series`).
     own_end
         Last owned IST date, INCLUSIVE (expiry-day ownership — the ``>=`` law:
         the expiry day is owned by the EXPIRING contract).
@@ -154,8 +161,10 @@ class FuturesSeriesResolution:
     Attributes
     ----------
     segments
-        Sorted by expiry; the ownership windows partition the window's date
-        axis (every in-window date owned by exactly one segment).
+        Sorted by expiry; the ownership windows partition the OWNED part of
+        the window's date axis (every owned in-window date owned by exactly
+        one segment; a head-unowned span — ``head_clamped`` — is owned by NO
+        segment and loads nothing).
     roll_schedule
         ``(segment.expiry.toordinal(), ...)`` — the ONE source of truth for
         the engine's roll boundaries (fed to
@@ -171,9 +180,11 @@ class FuturesSeriesResolution:
     cross_checks
         Per-segment calendar-vs-vendor evidence rows (WARNed AND returned).
     head_clamped
-        The window start predates the first owned date (graceful clamp+WARN).
+        The window start predates the first owned date (graceful: WARNed and
+        left UNOWNED — never a backward ownership extension).
     tail_unowned_days
-        Days the window end overhangs the last parsed expiry (0 when none).
+        Days the window end overhangs the last parsed expiry (0 when none;
+        ANY positive overhang WARNs — the successor contract is absent).
     """
 
     segments: tuple[FuturesSeriesSegment, ...]
@@ -242,6 +253,33 @@ def _name_missing_months(prev_expiry: date, next_expiry: date) -> list[str]:
     return months
 
 
+def _interior_hole_error(
+    prev_symbol: str, prev_expiry: date, next_symbol: str, next_expiry: date
+) -> FuturesSeriesError:
+    """Build the loud interior-hole refusal (shared by BOTH continuity gates).
+
+    Names the missing month(s) where the calendar can (naming-only — the gap
+    TRIGGER never depends on calendar coverage), else the raw day-gap count.
+    """
+    gap_days = (next_expiry - prev_expiry).days
+    months = _name_missing_months(prev_expiry, next_expiry)
+    what = (
+        f"the {', '.join(months)} monthly expiry(ies)"
+        if months
+        else f"a {gap_days}-day expiry gap (calendar naming unavailable)"
+    )
+    return FuturesSeriesError(
+        f"INTERIOR hole in the NIFTY futures series: contract dir for "
+        f"{what} is absent between {prev_symbol!r} "
+        f"(expiry {prev_expiry.isoformat()}) and "
+        f"{next_symbol!r} (expiry {next_expiry.isoformat()}) "
+        "— pull it via the dashboard ▶ Pull · full pipeline (a CLI "
+        "'brutex fetch' pull leaves derived TFs absent until the next "
+        "pipeline run). NOT maskable by --allow-missing-slices (an interior "
+        "hole would silently span two contracts)"
+    )
+
+
 def _head_own_start(first_expiry: date) -> date | None:
     """Calendar-fallback natural ``own_start`` for the very FIRST lake dir.
 
@@ -279,10 +317,20 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
             name = entry.name
             if not name.endswith(f"-{FUTURE_TYPE}"):
                 continue
+            if not entry.is_dir():
+                # A stray regular FILE named like a contract must never become
+                # an owning segment (it would poison the ownership windows +
+                # roll_schedule, then dead-end the loader with a wrong
+                # "re-pull" remediation). Skipped + WARNed, never guessed.
+                _LOG.warning("futures_series.non_dir_entry", entry=repr(name))
+                continue
             parts = parse_fno_symbol(name)
             if parts is None:
                 unparsed.append(name)
-                _LOG.warning("futures_series.unparsed_dir", dir=name)
+                # repr()-named: the dir name is hostile-controlled on-disk
+                # input — newline/ANSI bytes must not forge log lines (the
+                # #907/#919 repr-naming convention).
+                _LOG.warning("futures_series.unparsed_dir", dir=repr(name))
                 continue
             if (
                 parts.exchange == _SERIES_EXCHANGE
@@ -322,7 +370,9 @@ def resolve_futures_series(
         On an inverted window, a lake with zero NIFTY ``-FUT`` dirs, a window
         no contract's ownership intersects, two dirs sharing one parsed
         expiry (ambiguous lake), or an INTERIOR continuity hole (missing
-        monthly contract — named by month where the calendar can name it).
+        monthly contract — named by month where the calendar can name it),
+        including a window that STARTS inside such a hole (the first selected
+        segment's predecessor dir gaps past the monthly bound).
     """
     if end < start:
         raise FuturesSeriesError(
@@ -396,40 +446,46 @@ def resolve_futures_series(
     for prev_seg, next_seg in itertools.pairwise(selected):
         gap_days = (next_seg.expiry - prev_seg.expiry).days
         if gap_days > MAX_MONTHLY_EXPIRY_GAP_DAYS:
-            months = _name_missing_months(prev_seg.expiry, next_seg.expiry)
-            what = (
-                f"the {', '.join(months)} monthly expiry(ies)"
-                if months
-                else f"a {gap_days}-day expiry gap (calendar naming unavailable)"
-            )
-            raise FuturesSeriesError(
-                f"INTERIOR hole in the NIFTY futures series: contract dir for "
-                f"{what} is absent between {prev_seg.contract_symbol!r} "
-                f"(expiry {prev_seg.expiry.isoformat()}) and "
-                f"{next_seg.contract_symbol!r} (expiry {next_seg.expiry.isoformat()}) "
-                "— pull it via the dashboard ▶ Pull · full pipeline (a CLI "
-                "'brutex fetch' pull leaves derived TFs absent until the next "
-                "pipeline run). NOT maskable by --allow-missing-slices (an interior "
-                "hole would silently span two contracts)"
+            raise _interior_hole_error(
+                prev_seg.contract_symbol,
+                prev_seg.expiry,
+                next_seg.contract_symbol,
+                next_seg.expiry,
             )
 
-    # Head law: an unowned span before the first owned date is GRACEFULLY
-    # clamped + WARNed (spot-mirroring), never a refusal.
+    # Continuity gate, START side (review round-1 findings 1/10): the pairwise
+    # gate above only sees SELECTED segments, so a window that STARTS inside a
+    # hole — the pre-hole contract's expiry precedes the window start, which
+    # excluded it from selection — would otherwise be served silently by the
+    # successor's back-month bars. Check the FIRST selected segment against
+    # its predecessor in the FULL ordered dir set: a predecessor was excluded
+    # only because its expiry precedes the window start (a later dir WAS
+    # selected), so an over-bound gap there means the window start sits on
+    # dates owned by a MISSING contract → the SAME loud refusal.
     first = selected[0]
+    first_pos = next(pos for pos, (expiry, _name) in enumerate(ordered) if expiry == first.expiry)
+    if first_pos > 0:
+        pred_expiry, pred_name = ordered[first_pos - 1]
+        if (first.expiry - pred_expiry).days > MAX_MONTHLY_EXPIRY_GAP_DAYS:
+            raise _interior_hole_error(pred_name, pred_expiry, first.contract_symbol, first.expiry)
+
+    # Head law (review round-1 findings 14/18/19): an unowned span before the
+    # first owned date stays UNOWNED — WARNed + recorded, never a refusal AND
+    # never a backward ownership extension. Extending segment[0] to the window
+    # start would serve the first contract's pre-front-month (far-month basis)
+    # bars as series bars; leaving the span unowned makes it load NOTHING —
+    # true spot-mirroring (a missing spot day loads nothing either). Keeping
+    # own_start natural also keeps the observe-only calendar cross-check below
+    # honest (it evaluates at the segment's REAL first owned date).
     if start < first.own_start:
         _LOG.warning(
             "futures_series.head_unowned",
             window_start=start.isoformat(),
             first_owned=first.own_start.isoformat(),
             contract=first.contract_symbol,
+            unowned_days=(first.own_start - start).days,
         )
         head_clamped = True
-        selected[0] = FuturesSeriesSegment(
-            contract_symbol=first.contract_symbol,
-            expiry=first.expiry,
-            own_start=start,
-            own_end=first.own_end,
-        )
     elif first.own_start < start:
         # Normal intersection clamp INTO the window.
         selected[0] = FuturesSeriesSegment(
@@ -439,18 +495,22 @@ def resolve_futures_series(
             own_end=first.own_end,
         )
 
-    # Tail law: an overhang past the last parsed expiry is recorded + WARNed
-    # when it exceeds the gap bound (a missing NEWEST contract is visible,
-    # never silent); no bars can exist beyond the last dir's pull tail.
+    # Tail law (review round-1 findings 4/12/20): ANY positive overhang past
+    # the last parsed expiry means the successor contract owning those dates
+    # is ABSENT from the lake (a current lake's live front month expires
+    # on/after today), so the truncation is WARNed at ANY size — a missing
+    # NEWEST contract is visible, never silent; no bars can exist beyond the
+    # last dir's pull tail.
     last = selected[-1]
     tail_unowned_days = max(0, (end - last.expiry).days)
-    if tail_unowned_days > MAX_MONTHLY_EXPIRY_GAP_DAYS:
+    if tail_unowned_days > 0:
         _LOG.warning(
             "futures_series.tail_unowned",
             window_end=end.isoformat(),
             last_expiry=last.expiry.isoformat(),
             unowned_days=tail_unowned_days,
             contract=last.contract_symbol,
+            exceeds_monthly_gap=tail_unowned_days > MAX_MONTHLY_EXPIRY_GAP_DAYS,
         )
     if last.own_end > end:
         selected[-1] = FuturesSeriesSegment(
