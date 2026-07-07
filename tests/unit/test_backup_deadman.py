@@ -24,6 +24,7 @@ import pytest
 import structlog.testing
 from brutex.backup.deadman import (
     ALARM_VERDICTS,
+    DEEP_CHECK_TIMEOUT_S,
     DeadmanVerdict,
     _deep_divergence,
     _default_ping,
@@ -285,6 +286,12 @@ def _diverging_snapshots_json() -> str:
 
 
 class TestCheckerShell:
+    def test_check_survives_tilde_typo_env(self, tmp_path: Path) -> None:
+        """Round-1 BLOCKER repro: a ``~<nonexistent-user>`` typo in the backup env
+        must yield a VERDICT from the hourly tick, never a resolver traceback."""
+        cfg = _shell_cfg(tmp_path, BRUTEX_BACKUP_PASSWORD_FILE="~no-such-user-x9/pw")
+        assert run_deadman_check(cfg, dry_run=True) == EXIT_DEADMAN_BREACH  # NEVER_SUCCEEDED
+
     def test_alert_kind_severity_dedupe_key_recorded(self, tmp_path: Path) -> None:
         """OVERDUE → PHASE_BLOCKED / CRITICAL / backup-overdue:<reason> (§7.3/7.4)."""
         cfg = _shell_cfg(tmp_path)
@@ -463,6 +470,49 @@ class TestDeepTier:
         assert load_deadman(deadman_path(cfg)).last_deep_check_at == NOW
         assert any(entry["event"] == "backup.deadman.deep_ok" for entry in logs)
 
+    def test_deep_runner_gets_bounded_timeout_not_backup_deadline(self, tmp_path: Path) -> None:
+        """Round-1 review pin: the deep tier's ONE metadata call runs under
+        DEEP_CHECK_TIMEOUT_S (120 s), never the multi-day backup deadline —
+        a wedged `restic snapshots` must not silence the hourly checker for 48 h."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        assert cfg.timeout_s == 48.0 * 3600.0  # the inherited default IS the hazard
+        save_state(state_path(cfg), _state())
+        runner = FakeDeepRunner(_agreeing_snapshots_json())
+        seen: list[float] = []
+
+        def _recording(c: BackupEnvConfig) -> ResticRunner:
+            seen.append(c.timeout_s)
+            return cast("ResticRunner", runner)
+
+        code = run_deadman_check(
+            cfg,
+            deep=True,
+            alerter=SweepAlerter(resolver=lambda: None),
+            clock=_clock,
+            runner_factory=_recording,
+        )
+        assert code == EXIT_OK
+        assert seen == [DEEP_CHECK_TIMEOUT_S]
+
+    def test_deep_timeout_never_raised_above_operator_value(self, tmp_path: Path) -> None:
+        """min() law: an operator timeout SMALLER than 120 s wins."""
+        cfg = _shell_cfg(tmp_path, BRUTEX_BACKUP_TIMEOUT_S="60", **_repo_env(tmp_path))
+        save_state(state_path(cfg), _state())
+        seen: list[float] = []
+
+        def _recording(c: BackupEnvConfig) -> ResticRunner:
+            seen.append(c.timeout_s)
+            return cast("ResticRunner", FakeDeepRunner(_agreeing_snapshots_json()))
+
+        run_deadman_check(
+            cfg,
+            deep=True,
+            alerter=SweepAlerter(resolver=lambda: None),
+            clock=_clock,
+            runner_factory=_recording,
+        )
+        assert seen == [60.0]
+
     def test_deep_skipped_without_repo_config(self, tmp_path: Path) -> None:
         """Graft A pin: the shallow check needs NO repo config — deep logs + stands."""
         cfg = _shell_cfg(tmp_path)  # no repo env at all
@@ -613,6 +663,37 @@ class TestDefaultPing:
         with structlog.testing.capture_logs() as logs:
             assert _default_ping("file:///etc/passwd") is False
         assert [entry["event"] for entry in logs] == ["backup.deadman.ping_failed"]
+
+    def test_ping_failure_logs_host_never_full_url(self) -> None:
+        """Round-1 review pin: the ping URL is a WRITE-capability token — a
+        failed ping logs ONLY the host, never the full URL (SET/UNSET stance)."""
+        secret = "secret-capability-token-uuid"
+        with structlog.testing.capture_logs() as logs:
+            assert _default_ping(f"http://127.0.0.1:9/{secret}") is False
+        events = [entry for entry in logs if entry["event"] == "backup.deadman.ping_failed"]
+        assert len(events) == 1
+        assert events[0]["url_host"] == "127.0.0.1"
+        assert all(secret not in str(value) for entry in logs for value in entry.values())
+
+    def test_ping_refusal_logs_host_never_full_url(self) -> None:
+        """The non-http refusal branch is redacted too."""
+        with structlog.testing.capture_logs() as logs:
+            assert _default_ping("gopher://hc.example/secret-token-xyz") is False
+        events = [entry for entry in logs if entry["event"] == "backup.deadman.ping_failed"]
+        assert len(events) == 1
+        assert events[0]["url_host"] == "hc.example"
+        assert all(
+            "secret-token-xyz" not in str(value) for entry in logs for value in entry.values()
+        )
+
+    def test_ping_unparseable_url_host_none(self) -> None:
+        """urlsplit ValueError (invalid IPv6 netloc) → url_host=None, still no raise."""
+        with structlog.testing.capture_logs() as logs:
+            assert _default_ping("http://[::1-bad/secret-abc") is False
+        events = [entry for entry in logs if entry["event"] == "backup.deadman.ping_failed"]
+        assert len(events) == 1
+        assert events[0]["url_host"] is None
+        assert all("secret-abc" not in str(value) for entry in logs for value in entry.values())
 
 
 class TestDefaultClock:

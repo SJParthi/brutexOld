@@ -4,8 +4,13 @@ DEC-BACKUP-OFFBOX-001: the hourly ``brutex backup check`` reads ONE tiny JSON
 (+ the checker-owned throttle sidecar), evaluates the pure
 :func:`evaluate_deadman`, publishes at most ONE alert, and fires ONE HTTP ping
 — NEVER a lake walk, never a restic call except the DAILY deep cross-check
-(F21: one metadata call at most once per 24 h, gated on the durable
-``deadman.json:last_deep_check_at`` stamp). SCALABLE by construction.
+(F21: one metadata call at most once per 24 h **on a COMPLETED comparison** —
+gated on the durable ``deadman.json:last_deep_check_at`` stamp, which a FAILED
+metadata call deliberately does NOT advance, so during a remote outage the
+deep tier retries next tick: bounded to one call per hourly tick,
+fail-toward-alarm, alerts realert-bounded; the call itself is bounded by
+:data:`DEEP_CHECK_TIMEOUT_S`, never the multi-day backup deadline). SCALABLE
+by construction.
 
 Fail-toward-alarm invariants:
 
@@ -32,6 +37,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -72,6 +78,14 @@ _SECONDS_PER_HOUR: Final[float] = 3600.0
 
 #: Bounded wall-clock for the best-effort healthcheck ping (F18).
 _PING_TIMEOUT_S: Final[float] = 10.0
+
+#: Bounded wall-clock for the deep tier's ONE ``restic snapshots`` metadata
+#: call. The default runner inherits ``cfg.timeout_s`` (max_runtime_hours ×
+#: 3600 = a multi-day BACKUP deadline); a wedged metadata call under that
+#: bound would block the one-shot hourly checker — no ticks, no alerts, no
+#: healthcheck pings — for up to 48 h (launchd never overlaps a still-running
+#: one-shot). A metadata call needs seconds, not days.
+DEEP_CHECK_TIMEOUT_S: Final[float] = 120.0
 
 
 def _default_utc_clock() -> datetime:
@@ -268,10 +282,27 @@ def evaluate_deadman(
     )
 
 
+def _ping_url_host(url: str) -> str | None:
+    """The *url*'s host for logs — NEVER the full URL.
+
+    A healthchecks ping URL is a WRITE-capability token (anyone holding it
+    can keep the external dead-man green), so logs carry only the host —
+    mirroring ``backup status``'s own SET/UNSET redaction stance.
+    """
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
 def _default_ping(url: str) -> bool:
     """Best-effort GET of the healthcheck *url* — True on success, never raises (F18)."""
     if not url.startswith(("http://", "https://")):
-        _LOG.warning("backup.deadman.ping_failed", url=url, error="non-http(s) URL refused")
+        _LOG.warning(
+            "backup.deadman.ping_failed",
+            url_host=_ping_url_host(url),
+            error="non-http(s) URL refused",
+        )
         return False
     try:
         # S310: scheme validated http(s) above; the URL is the operator's own
@@ -280,7 +311,7 @@ def _default_ping(url: str) -> bool:
         with urllib.request.urlopen(url, timeout=_PING_TIMEOUT_S):  # noqa: S310  # nosec B310
             return True
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        _LOG.warning("backup.deadman.ping_failed", url=url, error=str(exc))
+        _LOG.warning("backup.deadman.ping_failed", url_host=_ping_url_host(url), error=str(exc))
         return False
 
 
@@ -395,7 +426,10 @@ def run_deadman_check(
 
     # DEEP tier (F21) — only when shallow reads FRESH (an already-alarming
     # state needs no divergence proof), never on dry-run, at most once per
-    # DEEP_CHECK_INTERVAL_HOURS unless forced.
+    # DEEP_CHECK_INTERVAL_HOURS on a COMPLETED comparison unless forced. A
+    # FAILED metadata call does NOT stamp last_deep_check_at, so it retries
+    # on the NEXT hourly tick — bounded to one call/hour during a remote
+    # outage (fail-toward-alarm; alerts stay realert-bounded).
     deep_due = (
         deep
         or sidecar.last_deep_check_at is None
@@ -407,7 +441,11 @@ def run_deadman_check(
             _LOG.info("backup.deadman.deep_skipped", reason="no_repo_config")
         else:
             factory = runner_factory if runner_factory is not None else default_runner_factory
-            diverged, completed, detail = _deep_divergence(cfg, state, factory(cfg))
+            # The deep runner gets its OWN short deadline: the hourly one-shot
+            # checker must never inherit the multi-day backup timeout for one
+            # metadata call (a wedged mount would silence ticks AND pings).
+            deep_cfg = replace(cfg, timeout_s=min(cfg.timeout_s, DEEP_CHECK_TIMEOUT_S))
+            diverged, completed, detail = _deep_divergence(cfg, state, factory(deep_cfg))
             if completed:
                 sidecar = replace(sidecar, last_deep_check_at=now)
             if diverged:
@@ -468,6 +506,7 @@ def run_deadman_check(
 
 __all__ = [
     "ALARM_VERDICTS",
+    "DEEP_CHECK_TIMEOUT_S",
     "Clock",
     "DeadmanReport",
     "DeadmanVerdict",

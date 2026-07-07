@@ -70,14 +70,21 @@ heals via the ledger-reconcile design of
    `docs/runbooks/backup-templates/` (`com.brutex.backup.plist`,
    `com.brutex.backup-deadman.plist`, `com.brutex.backup-drill.plist` —
    GENERATED from `brutex/backup/schedule_render.py`, golden-pinned
-   byte-equal; edit the renderer, never the copies); `cp` them to
+   byte-equal; edit the renderer, never the copies). **Keychain
+   (`_COMMAND`) route from step 4:** set the
+   `{{BRUTEX_BACKUP_PASSWORD_FILE}}` placeholder in the backup + drill
+   plists to an EMPTY string (blank reads as unset) or delete that key —
+   any non-blank value (including the literal placeholder) combines with
+   the `.env` `_COMMAND` into the ambiguous-source `EXIT_CONFIG` refusal
+   every night. Then `cp` them to
    `~/Library/LaunchAgents/`; then
    `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.brutex.backup*.plist`;
    verify with `launchctl print gui/$(id -u)/com.brutex.backup`.
 8. **[MANUAL M5]** Enable Telegram: `BRUTEX_TELEGRAM_ENABLED=true` in
    `~/.brutex/.env`, then `brutex notify test`. Until enabled (the repo
    default is OFF), backup alerts degrade to exit codes + structlog + the
-   healthchecks lane, and `brutex backup status` says so in red.
+   healthchecks lane, and `brutex backup status` says so ("Telegram
+   alerts: DISABLED" — plain text).
 9. **[MANUAL — mandatory live NEGATIVE dead-man drill]** Prove the alarm
    path end-to-end before trusting it:
 

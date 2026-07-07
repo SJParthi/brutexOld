@@ -31,6 +31,17 @@ _GENERATED_NOTE: Final[str] = (
     "     ride ~/.brutex/.env, loaded by bootstrap_env() at dispatch."
 )
 
+#: Inline note above the password-FILE env key (backup + drill plists): the
+#: runbook's RECOMMENDED keychain route sets ``BRUTEX_BACKUP_PASSWORD_COMMAND``
+#: in ``~/.brutex/.env`` — a non-blank FILE value here would combine with it
+#: into the ambiguous-source EXIT_CONFIG refusal every night (F6).
+_KEYCHAIN_ROUTE_NOTE: Final[str] = (
+    "    <!-- keychain _COMMAND route (runbook step 4): set the value below to an EMPTY\n"
+    "         string (blank reads as unset) or delete this key — never leave the literal\n"
+    "         placeholder: any non-blank value alongside the .env _COMMAND is the\n"
+    "         ambiguous-source EXIT_CONFIG refusal (F6). -->"
+)
+
 
 def render_backup_plist() -> str:
     """Render the nightly backup LaunchAgent template (03:35 IST, one-shot)."""
@@ -50,6 +61,7 @@ def render_backup_plist() -> str:
   <key>EnvironmentVariables</key><dict>
     <key>BRUTEX_LAKE_ROOT</key><string>{{{{BRUTEX_LAKE_ROOT}}}}</string>
     <key>BRUTEX_BACKUP_REPO</key><string>{{{{BRUTEX_BACKUP_REPO}}}}</string>
+{_KEYCHAIN_ROUTE_NOTE}
     <key>BRUTEX_BACKUP_PASSWORD_FILE</key><string>{{{{BRUTEX_BACKUP_PASSWORD_FILE}}}}</string>
     <key>PATH</key><string>{{{{BRUTEX_VENV_BIN}}}}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
@@ -103,6 +115,7 @@ def render_drill_plist() -> str:
   <key>EnvironmentVariables</key><dict>
     <key>BRUTEX_LAKE_ROOT</key><string>{{{{BRUTEX_LAKE_ROOT}}}}</string>
     <key>BRUTEX_BACKUP_REPO</key><string>{{{{BRUTEX_BACKUP_REPO}}}}</string>
+{_KEYCHAIN_ROUTE_NOTE}
     <key>BRUTEX_BACKUP_PASSWORD_FILE</key><string>{{{{BRUTEX_BACKUP_PASSWORD_FILE}}}}</string>
     <key>PATH</key><string>{{{{BRUTEX_VENV_BIN}}}}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

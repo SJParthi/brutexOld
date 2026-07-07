@@ -203,6 +203,25 @@ class TestPullLockProbe:
         """No lock file = no pull ever ran → not held."""
         assert pull_lock_held(tmp_path / "fresh-lake") is False
 
+    def test_pull_lock_exists_probe_error_reads_not_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An EACCES-class error from the exists() PROBE itself (pathlib re-raises
+        it — only ENOENT/ENOTDIR/EBADF/ELOOP read False) logs + reads not-held —
+        round-1 review pin: the probe error guard covers its OWN exists() call."""
+
+        class _ExistsRaises(Path):
+            def exists(self, *, follow_symlinks: bool = True) -> bool:
+                raise PermissionError(13, "probe denied")
+
+        monkeypatch.setattr(
+            "brutex.backup.plan.pull_singleflight_lock_path",
+            lambda root: _ExistsRaises(root, "pull.lock"),
+        )
+        with structlog.testing.capture_logs() as logs:
+            assert pull_lock_held(tmp_path / "lake") is False
+        assert [entry["event"] for entry in logs] == ["backup.plan.pull_probe_failed"]
+
     def test_pull_lock_probe_error_reads_not_held(self, tmp_path: Path) -> None:
         """A probe OSError (directory at the lock path) logs + reads not-held."""
         lake = tmp_path / "lake"

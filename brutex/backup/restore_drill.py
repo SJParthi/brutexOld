@@ -193,25 +193,34 @@ def _verify_sampled_file(
     if not live.exists():
         tally.bump(tally.skipped_changed, category)
         return
-    if category == "audit":
-        # Hash-chained JSONL is append-only — the restored copy must be a
-        # byte-PREFIX of the live file REGARDLESS of mtime (Golden Rule #8).
-        if _is_prefix_of(restored, live):
+    try:
+        if category == "audit":
+            # Hash-chained JSONL is append-only — the restored copy must be a
+            # byte-PREFIX of the live file REGARDLESS of mtime (Golden Rule #8).
+            if _is_prefix_of(restored, live):
+                tally.bump(tally.verified, category)
+            else:
+                _LOG.error("backup.drill.mismatch", path=path, detail="audit non-prefix")
+                tally.bump(tally.corrupt, category)
+                tally.corrupt_paths.append(path)
+            return
+        if _file_sha256(restored) == _file_sha256(live):
             tally.bump(tally.verified, category)
-        else:
-            _LOG.error("backup.drill.mismatch", path=path, detail="audit non-prefix")
-            tally.bump(tally.corrupt, category)
-            tally.corrupt_paths.append(path)
-        return
-    if _file_sha256(restored) == _file_sha256(live):
-        tally.bump(tally.verified, category)
-        return
-    snapshot_epoch_ns = (
-        int(snapshot_time.timestamp() * 1_000_000_000)
-        if snapshot_time is not None
-        else restored.stat().st_mtime_ns
-    )
-    if live.stat().st_mtime_ns > snapshot_epoch_ns:
+            return
+        snapshot_epoch_ns = (
+            int(snapshot_time.timestamp() * 1_000_000_000)
+            if snapshot_time is not None
+            else restored.stat().st_mtime_ns
+        )
+        if live.stat().st_mtime_ns > snapshot_epoch_ns:
+            tally.bump(tally.skipped_changed, category)
+            return
+    except FileNotFoundError:
+        # The live file vanished BETWEEN exists() and the read — a lake-heal
+        # DELETE-and-rebuild / prebuild rewrite racing the drill on a LIVE
+        # lake (DEC-LAKE-HEAL-001). The honest skipped_changed verdict,
+        # never a false alarm and never a raw traceback (§8 law).
+        _LOG.info("backup.drill.live_vanished", path=path)
         tally.bump(tally.skipped_changed, category)
         return
     _LOG.error("backup.drill.mismatch", path=path, detail="bytes differ, live not newer")
@@ -338,6 +347,44 @@ def run_restore_drill(
             _LOG.error("backup.drill.no_snapshot", detail="run a backup first")
             return EXIT_CONFIG
 
+    try:
+        return _drill_flow(
+            cfg,
+            snapshot_id=snapshot_id,
+            lake_root=lake_root,
+            sample=sample,
+            target_dir=target_dir,
+            keep=keep,
+            alerter=active_alerter,
+            runner_factory=runner_factory,
+        )
+    except OSError as exc:
+        # The drill's own F10 direction: canary/tmp setup or verification I/O
+        # failed (ENOSPC / permissions on the home volume) — a deterministic
+        # exit + alert triple, never a raw traceback out of the monthly
+        # launchd job ("returns an exit code, raises nothing").
+        _LOG.error("backup.drill.io_failed", error=str(exc))
+        active_alerter.backup_failed(reason="drill_io", detail=str(exc))
+        return EXIT_RESTIC
+
+
+def _drill_flow(
+    cfg: BackupEnvConfig,
+    *,
+    snapshot_id: str,
+    lake_root: Path | None,
+    sample: int | None,
+    target_dir: Path | None,
+    keep: bool,
+    alerter: SweepAlerter,
+    runner_factory: Callable[[BackupEnvConfig], ResticRunner],
+) -> int:
+    """The §8 drill body (canary → ls → sample restore → verify).
+
+    Every ``OSError`` raised here is mapped by :func:`run_restore_drill` to
+    ``EXIT_RESTIC`` + ``backup_failed(reason="drill_io")``.
+    """
+    active_alerter = alerter
     lake = lake_root if lake_root is not None else resolve_lake_root()
     home_audit = brutex_home() / "audit"
     sample_count = sample if sample is not None else cfg.drill_sample

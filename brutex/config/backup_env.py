@@ -233,6 +233,25 @@ def _split_excludes(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(":") if part.strip())
 
 
+def _expand_user_path(raw: str, env_var: str) -> Path:
+    """``Path(raw).expanduser()`` made TOTAL (the resolver's never-raises law).
+
+    ``Path.expanduser()`` raises ``RuntimeError`` (Python ≥ 3.12; older
+    pathlib raised ``KeyError``) for a ``~user`` naming a nonexistent user —
+    a plausible operator typo that must NOT crash the hourly dead-man
+    ``check``/``status`` (graft A). The unexpandable value keeps the RAW,
+    unexpanded path with ONE ``backup.config.malformed_path`` WARN — the
+    malformed-numeric loud-fallback idiom; run/drill then surface the bogus
+    path through restic itself (F4), never a traceback here.
+    """
+    path = Path(raw)
+    try:
+        return path.expanduser()
+    except (RuntimeError, KeyError):
+        _LOG.warning("backup.config.malformed_path", env_var=env_var, value=raw)
+        return path
+
+
 def resolve_backup_env(
     env: Mapping[str, str] | None = None, *, home: Path | None = None
 ) -> BackupEnvConfig:
@@ -265,7 +284,11 @@ brutex_home`.
     repo = _optional(env, BACKUP_REPO_ENV)
     password_file_raw = _optional(env, BACKUP_PASSWORD_FILE_ENV)
     password_command = _optional(env, BACKUP_PASSWORD_COMMAND_ENV)
-    password_file = Path(password_file_raw).expanduser() if password_file_raw else None
+    password_file = (
+        _expand_user_path(password_file_raw, BACKUP_PASSWORD_FILE_ENV)
+        if password_file_raw
+        else None
+    )
     if password_file is not None and password_command is not None:
         _LOG.warning(
             "backup.config.ambiguous_password_source",
@@ -279,7 +302,9 @@ brutex_home`.
 
     state_dir_raw = _optional(env, BACKUP_STATE_DIR_ENV)
     state_dir = (
-        Path(state_dir_raw).expanduser() if state_dir_raw else brutex_home(home=home) / "backup"
+        _expand_user_path(state_dir_raw, BACKUP_STATE_DIR_ENV)
+        if state_dir_raw
+        else brutex_home(home=home) / "backup"
     )
 
     max_runtime_hours = _float_env(env, BACKUP_MAX_RUNTIME_HOURS_ENV, _DEFAULT_MAX_RUNTIME_HOURS)

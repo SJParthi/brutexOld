@@ -205,6 +205,34 @@ class TestVerifySubset:
         assert cfg.verify_subset == value
 
 
+class TestPathExpansionTotality:
+    """Round-1 hostile-review BLOCKER pin: ``~<nonexistent-user>`` values must
+    NOT crash the resolver (Path.expanduser raises RuntimeError for them) —
+    the hourly dead-man check/status must always resolve (graft A)."""
+
+    def test_unknown_tilde_user_password_file_keeps_raw_plus_warn(self, tmp_path: Path) -> None:
+        raw = "~brutex-no-such-user-x9/pw.txt"
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_PASSWORD_FILE_ENV: raw}, home=tmp_path)
+        assert cfg.password_file == Path(raw)
+        events = [entry for entry in logs if entry["event"] == "backup.config.malformed_path"]
+        assert len(events) == 1
+        assert events[0]["env_var"] == BACKUP_PASSWORD_FILE_ENV
+        assert events[0]["value"] == raw
+
+    def test_unknown_tilde_user_state_dir_keeps_raw_plus_warn(self, tmp_path: Path) -> None:
+        raw = "~brutex-no-such-user-x9/state"
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_STATE_DIR_ENV: raw}, home=tmp_path)
+        assert cfg.state_dir == Path(raw)
+        assert [entry["event"] for entry in logs] == ["backup.config.malformed_path"]
+
+    def test_expandable_tilde_still_expands(self, tmp_path: Path) -> None:
+        """The happy ``~/`` expansion is unchanged by the totality guard."""
+        cfg = resolve_backup_env({BACKUP_STATE_DIR_ENV: "~/bstate"}, home=tmp_path)
+        assert "~" not in str(cfg.state_dir)
+
+
 class TestResolverTotality:
     @given(
         env=st.dictionaries(

@@ -23,6 +23,7 @@ orchestrators map every outcome to a deterministic exit code.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess  # nosec B404 — fixed argv, no shell; restic/fake-restic only (power_keepawake.py idiom)
 from collections.abc import Callable
@@ -37,7 +38,7 @@ import structlog
 from brutex.backup.errors import BackupError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from brutex.config.backup_env import BackupEnvConfig
 
@@ -96,10 +97,16 @@ class ResticInvocation:
     stdout_full
         The COMPLETE stdout — the parse input for ``--json`` verbs (``ls`` of
         a real lake emits far more than any log tail; never truncated here).
+        HONEST envelope: this holds the whole child stdout in memory
+        (O(child stdout) — hundreds of MB for ``ls`` of a full-universe
+        lake); the parse helpers iterate it LAZILY (no per-node dict list),
+        but true subprocess streaming would be a runner-seam redesign.
     timed_out
         The subprocess deadline expired (F17a).
     binary_missing
-        The restic binary was not found (F3).
+        The restic binary was not found OR could not be executed (a
+        not-executable install / ENOEXEC / fork failure — F3): every
+        exec-time failure routes to the same restic_missing/M1 triple.
     """
 
     op: str
@@ -264,6 +271,25 @@ class ResticRunner:
                 timed_out=True,
                 binary_missing=False,
             )
+        except OSError as exc:
+            # Exec-time failure OTHER than not-found (PermissionError on a
+            # non-executable binary, ENOEXEC, ETXTBSY, fork ENOMEM) — mapped
+            # INSIDE the seam like FileNotFoundError, never raised past it:
+            # an escaped exec OSError left running_since STAMPED (dead-man
+            # read RUNNING, healthcheck pinged success) and was mis-labelled
+            # a state_write failure by run_backup's lock-scope handler.
+            _LOG.error("backup.restic.exec_failed", op=op, binary=self._binary, error=str(exc))
+            return ResticInvocation(
+                op=op,
+                argv=argv,
+                ok=False,
+                returncode=None,
+                stdout_tail="",
+                stderr_tail=str(exc)[-_STDERR_TAIL_CHARS:],
+                stdout_full="",
+                timed_out=False,
+                binary_missing=True,
+            )
         return ResticInvocation(
             op=op,
             argv=argv,
@@ -377,10 +403,17 @@ def default_runner_factory(cfg: BackupEnvConfig) -> ResticRunner:
     )
 
 
-def _json_lines(stdout: str) -> list[dict[str, object]]:
-    """Parse restic ``--json`` line output, skipping non-JSON / non-object lines."""
-    out: list[dict[str, object]] = []
-    for line in stdout.splitlines():
+def _json_lines(stdout: str) -> Iterator[dict[str, object]]:
+    """Lazily parse restic ``--json`` line output, skipping non-JSON / non-object lines.
+
+    A GENERATOR by design (never a materialised list): ``restic ls --json``
+    of the full-universe lake emits one node object per lake file (10^5-10^6
+    lines), and buffering every node as a Python dict multiplied the already
+    O(child stdout) ``stdout_full`` RSS several-fold in the monthly drill.
+    Callers keep only what they need (file-path strings / the first summary
+    line); ``io.StringIO`` iterates lines without a ``splitlines()`` copy.
+    """
+    for line in io.StringIO(stdout):
         stripped = line.strip()
         if not stripped:
             continue
@@ -389,8 +422,7 @@ def _json_lines(stdout: str) -> list[dict[str, object]]:
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
+            yield parsed
 
 
 def parse_backup_summary_snapshot_id(stdout: str) -> str:

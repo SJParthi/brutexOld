@@ -263,6 +263,22 @@ class TestInvocationMapping:
         assert inv.returncode is None
         assert inv.timed_out is False
 
+    def test_exec_oserror_maps_inside_seam_not_raised(self, tmp_path: Path) -> None:
+        """A PRESENT but non-executable binary (mode 0644) through the REAL
+        _default_run: the exec-time PermissionError maps to binary_missing INSIDE
+        the seam — round-1 review pin (an escaped exec OSError left running_since
+        stamped and mis-labelled the failure state_write)."""
+        stub = tmp_path / "restic-noexec"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o644)
+        with structlog.testing.capture_logs() as logs:
+            inv = _runner(binary=str(stub), base_env=None).cat_config()
+        assert inv.binary_missing is True
+        assert inv.ok is False
+        assert inv.returncode is None
+        assert inv.timed_out is False
+        assert any(entry["event"] == "backup.restic.exec_failed" for entry in logs)
+
     def test_default_run_executes_real_binary(self, tmp_path: Path) -> None:
         """The default seam runs a REAL executable stub — no pragma needed."""
         fake = write_fake_restic(tmp_path, {"unlock": {"exit": 0, "stdout": "unlocked"}})
@@ -475,3 +491,17 @@ class TestParseLs:
 
     def test_parse_ls_snapshot_time_absent_none(self) -> None:
         assert parse_ls_snapshot_time('{"type": "file", "path": "/x"}\n') is None
+
+
+class TestJsonLinesLazy:
+    def test_json_lines_is_lazy_iterator(self) -> None:
+        """Round-1 review pin: the --json line parser is a GENERATOR — the drill
+        must never materialize every ls node dict of a full-universe lake."""
+        from collections.abc import Iterator as ABCIterator
+
+        from brutex.backup.restic_runner import _json_lines  # pyright: ignore[reportPrivateUsage]
+
+        produced = _json_lines('{"a": 1}\n[1]\nnot-json\n\n{"b": 2}\n')
+        assert isinstance(produced, ABCIterator)
+        assert not isinstance(produced, list)
+        assert list(produced) == [{"a": 1}, {"b": 2}]

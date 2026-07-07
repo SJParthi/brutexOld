@@ -449,6 +449,103 @@ class TestBusyAndLockErrors:
         assert harness.dedupe_keys() == ["backup-failed:state_write"]
 
 
+class TestEscapedInRunOSError:
+    """Round-1 review pins: an OSError escaping ``_run_locked`` AFTER step 4
+    stamped ``running_since`` must clear the stale RUNNING marker (F17b —
+    "cleared at EVERY exit"), and an exec-time OSError from a present but
+    non-executable restic must map inside the runner seam."""
+
+    def test_plan_oserror_clears_running_marker(self, tmp_path: Path) -> None:
+        """A permissions hiccup in the step-6 plan build → exit 4 AND running_since=None."""
+        harness = Harness(tmp_path)
+
+        def _raising_plan(cfg: BackupEnvConfig, lake: Path, **kwargs: Any) -> BackupPlan:
+            raise PermissionError(13, "audit probe denied")
+
+        assert harness.run(plan_fn=_raising_plan) == EXIT_RESTIC
+        state = harness.state()
+        assert state is not None
+        assert state.running_since is None  # the stale-RUNNING mute window is closed
+        assert state.last_attempt_at == NOW
+        assert harness.dedupe_keys() == ["backup-failed:state_write"]
+
+    def test_nonexecutable_restic_reason_restic_missing_marker_cleared(
+        self, tmp_path: Path
+    ) -> None:
+        """The F10 empirical chain: a mode-0644 restic through the REAL runner seam
+        → exit 4, reason restic_missing (NOT state_write), running_since cleared."""
+        stub = tmp_path / "restic-noexec"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o644)
+        harness = Harness(tmp_path)
+
+        def _factory(_cfg: BackupEnvConfig) -> ResticRunner:
+            return ResticRunner(
+                binary=str(stub),
+                repo="s3:host/bucket",
+                password_command="echo pw",
+                password_file=None,
+                timeout_s=5.0,
+                base_env={"HOME": "/h", "PATH": "/usr/bin"},
+            )
+
+        assert harness.run(runner_factory=_factory) == EXIT_RESTIC
+        state = harness.state()
+        assert state is not None
+        assert state.running_since is None
+        assert harness.dedupe_keys() == ["backup-failed:restic_missing"]
+
+
+class TestClearRunningMarkerHelper:
+    def _cfg(self, tmp_path: Path) -> BackupEnvConfig:
+        return resolve_backup_env(
+            {"BRUTEX_BACKUP_STATE_DIR": str(tmp_path / "bstate")}, home=tmp_path
+        )
+
+    def test_missing_state_noop(self, tmp_path: Path) -> None:
+        from brutex.backup.run import _clear_running_marker_best_effort
+
+        cfg = self._cfg(tmp_path)
+        _clear_running_marker_best_effort(cfg)  # no state file — no raise, no write
+        assert load_state(state_path(cfg)) is None
+
+    def test_corrupt_state_noop_forensics_preserved(self, tmp_path: Path) -> None:
+        from brutex.backup.run import _clear_running_marker_best_effort
+
+        cfg = self._cfg(tmp_path)
+        state_path(cfg).parent.mkdir(parents=True, exist_ok=True)
+        state_path(cfg).write_text("not-json", encoding="utf-8")
+        _clear_running_marker_best_effort(cfg)
+        assert state_path(cfg).read_text(encoding="utf-8") == "not-json"
+
+    def test_no_running_marker_noop(self, tmp_path: Path) -> None:
+        from brutex.backup.run import _clear_running_marker_best_effort
+
+        cfg = self._cfg(tmp_path)
+        stamped = replace(empty_backup_state(), last_success_at=NOW)
+        save_state(state_path(cfg), stamped)
+        _clear_running_marker_best_effort(cfg)
+        assert load_state(state_path(cfg)) == stamped
+
+    def test_save_failure_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failing clear-write is logged, never raised (the caller is already failing)."""
+        import brutex.backup.run as run_mod
+        from brutex.backup.run import _clear_running_marker_best_effort
+
+        cfg = self._cfg(tmp_path)
+        save_state(state_path(cfg), replace(empty_backup_state(), running_since=NOW))
+
+        def _boom(path: Path, state: BackupState) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(run_mod, "save_state", _boom)
+        with structlog.testing.capture_logs() as logs:
+            _clear_running_marker_best_effort(cfg)
+        events = [entry for entry in logs if entry["event"] == "backup.state.write_failed"]
+        assert len(events) == 1
+        assert events[0]["context"] == "clear_running"
+
+
 class TestRepoProbe:
     def test_init_needed_then_proceeds(self, tmp_path: Path) -> None:
         """cat-config rc≠0 → init once → proceed (F5 idempotent first run)."""

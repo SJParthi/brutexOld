@@ -466,3 +466,66 @@ class TestTargetTree:
         restores = [argv for argv in world.fake.calls() if argv[0] == "restore"]
         sample_includes = [a for a in restores[1] if a == "--include"]
         assert len(sample_includes) == 2
+
+
+class TestDrillIOResilience:
+    """Round-1 review pins: the drill "returns an exit code, raises nothing" —
+    an OSError in canary/tmp setup maps to EXIT_RESTIC + drill_io, and a live
+    file vanishing MID-verify (lake-heal DELETE-and-rebuild racing the drill)
+    reads skipped_changed, never a traceback."""
+
+    def test_tmp_setup_oserror_exit_4_drill_io_alert(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """state_dir occupied by a FILE → mkdir OSError → deterministic triple."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        blocker = tmp_path / "state-as-file"
+        blocker.write_text("not-a-dir", encoding="utf-8")
+        password = tmp_path / "pw"
+        password.write_text("p", encoding="utf-8")
+        cfg = resolve_backup_env(
+            {
+                "BRUTEX_BACKUP_REPO": "s3:host/bucket",
+                "BRUTEX_BACKUP_PASSWORD_FILE": str(password),
+                "BRUTEX_BACKUP_STATE_DIR": str(blocker),
+            },
+            home=tmp_path,
+        )
+        notifier = FakeNotifier()
+        with structlog.testing.capture_logs() as logs:
+            code = run_restore_drill(
+                cfg,
+                snapshot_id="cafe12",
+                lake_root=tmp_path / "lake",
+                alerter=SweepAlerter(notifier=notifier),
+            )
+        assert code == EXIT_RESTIC
+        assert [event.dedupe_key for event in notifier.published] == ["backup-failed:drill_io"]
+        assert any(entry["event"] == "backup.drill.io_failed" for entry in logs)
+
+    def test_live_file_vanished_mid_verify_skipped_changed(
+        self, world: DrillWorld, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FileNotFoundError from the live-side read AFTER exists() → skipped_changed."""
+        import brutex.backup.restore_drill as drill_mod
+
+        world.set_script({"ls": {"stdout": world.ls_stdout()}})
+        real_sha = drill_mod._file_sha256  # pyright: ignore[reportPrivateUsage]
+        racy_live = str(world.lake / "bars" / "2025" / "09.parquet")
+
+        def _racy(path: Path) -> str:
+            if str(path) == racy_live:
+                raise FileNotFoundError(racy_live)
+            return real_sha(path)
+
+        monkeypatch.setattr(drill_mod, "_file_sha256", _racy)
+        with structlog.testing.capture_logs() as logs:
+            code = world.drill()
+        assert code == EXIT_OK
+        vanished = [entry for entry in logs if entry["event"] == "backup.drill.live_vanished"]
+        assert len(vanished) == 1
+        assert vanished[0]["path"] == racy_live
+        ok_events = [entry for entry in logs if entry["event"] == "backup.drill.ok"]
+        assert len(ok_events) == 1
+        assert ok_events[0]["skipped_changed"].get("bars") == 1
+        assert not ok_events[0]["corrupt"]

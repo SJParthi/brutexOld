@@ -169,9 +169,12 @@ def pull_lock_held(lake_root: Path) -> bool:
     only, never control flow.
     """
     path = pull_singleflight_lock_path(lake_root)
-    if not path.exists():
-        return False
     try:
+        # The exists() probe sits INSIDE the guard: pathlib re-raises
+        # EACCES-class OSErrors (only ENOENT/ENOTDIR/EBADF/ELOOP read False),
+        # and the docstring's "probe error reads not held" must hold for it.
+        if not path.exists():
+            return False
         fd = os.open(path, os.O_RDWR)
     except OSError as exc:
         _LOG.warning("backup.plan.pull_probe_failed", path=str(path), error=str(exc))
@@ -217,7 +220,9 @@ def build_backup_plan(
     if audit_dir.exists():
         paths.append(audit_dir)
     excludes: list[str] = [*EXCLUDE_DIR_NAMES, *EXCLUDE_GLOBS, *cfg.extra_excludes]
-    state_dir = cfg.state_dir.expanduser()
+    # ~-expansion is OWNED by resolve_backup_env (total — an unexpandable
+    # ~user value arrives raw by design); re-expanding here could raise.
+    state_dir = cfg.state_dir
     if state_dir.is_relative_to(lake_root):
         excludes.append(str(state_dir))
     pull_active = pull_probe(lake_root)

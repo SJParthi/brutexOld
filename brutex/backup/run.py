@@ -169,6 +169,29 @@ class _RunShell:
         return exit_code
 
 
+def _clear_running_marker_best_effort(cfg: BackupEnvConfig) -> None:
+    """Best-effort ``running_since=None`` clear after an escaped in-run ``OSError``.
+
+    ``running_since`` is "cleared at EVERY exit" (F17b): an ``OSError`` that
+    escapes ``_run_locked`` AFTER step 4 stamped it would otherwise leave a
+    stale RUNNING marker muting the dead-man's OVERDUE verdict until the
+    48 h HUNG bound. Every failure here is swallowed (the caller is already
+    on its own failure path — nothing may mask its exit code).
+    """
+    try:
+        state = load_state(state_path(cfg))
+    except BackupStateError:
+        return
+    if state is None or state.running_since is None:
+        return
+    try:
+        save_state(state_path(cfg), replace(state, running_since=None))
+    except OSError as exc:
+        _LOG.error(
+            "backup.state.write_failed", context="clear_running", error_type=type(exc).__name__
+        )
+
+
 def _password_source_ok(cfg: BackupEnvConfig) -> bool:
     """True iff exactly one password source is configured (F6)."""
     return (cfg.password_file is None) != (cfg.password_command is None)
@@ -343,8 +366,12 @@ def run_backup(
         return EXIT_BUSY
     except OSError as exc:
         # Lock/state-dir creation failed (e.g. ENOSPC) — the F10 direction:
-        # alarm-over-silence, nothing was snapshotted or stamped.
+        # alarm-over-silence, nothing was snapshotted or stamped. An OSError
+        # can ALSO escape _run_locked AFTER step 4 stamped running_since
+        # (e.g. a permissions hiccup in the step-6 plan build), so the stale
+        # RUNNING marker is cleared best-effort — F17b: cleared at EVERY exit.
         _LOG.error("backup.state.write_failed", context="singleflight", error=str(exc))
+        _clear_running_marker_best_effort(cfg)
         active_alerter.backup_failed(reason="state_write", detail=str(exc))
         return EXIT_RESTIC
 
