@@ -248,7 +248,11 @@ class NewPageFactory(Protocol):
         expect_console_clean: bool = True,
     ) -> PageSession:
         """Serve ``fixture`` on a fresh server+context; return its session."""
-        ...
+        # Deliberately NOT the house docstring+`...` stub: CodeQL
+        # py/ineffectual-statement flags a bare ellipsis ExprStmt (alert #688)
+        # and pyright rejects a docstring-only body (reportReturnType), so this
+        # uses the typing-spec protocol placeholder BOTH checkers accept.
+        raise NotImplementedError
 
 
 def _arm_route_policy(context: Any, *, stub_widgets: bool) -> None:
