@@ -7272,10 +7272,13 @@ def _run_results_depth_adapter(
     runner = run_results_depth_pass if pass_runner is None else pass_runner
 
     def _margin_roi(candidate: Any) -> dict[str, object]:
-        # lots=1 is the honest signal-only unit (the CapturedTrade law);
-        # the regime date is the sweep window START — the v1 all-refusal
-        # tables answer "unverified" for EVERY in-window date, so no
-        # per-trade date threading is needed until a sourced row lands.
+        # lots=1 here is a margin-SIZING hypothetical for the refusal-only
+        # (all-UNVERIFIED) ROI mechanism — NOT a trade-row value: captured
+        # trades carry lots=None by design until P5's translation sidecar
+        # lands (gap-register Ruling 18). The regime date is the sweep
+        # window START — the v1 all-refusal tables answer "unverified" for
+        # EVERY in-window date, so no per-trade date threading is needed
+        # until a sourced row lands.
         return margin_roi_payload(
             candidate.row.net_pnl_paisa,
             instrument=candidate.row.instrument,

@@ -736,11 +736,13 @@ hostile-review pass._
   stamps via the FIRST production `TradeReferenceStamper.from_vix_bars` construction (R31; NULL + counted when the
   UNVERIFIED VIX series is absent), folds per-combo aggregates + regime/VIX-band/entry-hour/event lenses (R46/R51 —
   event flags are ONLY the four calendar-verifiable classes; weekday Budget/election days honestly untagged), writes
-  the deterministic per-tuple sidecar trio + stamp under the glob-collision-proof `results-depth/` subtree
-  (idempotent stamp-skip resume, R42), buy-&-hold baselines from the sweep's own bars (R27), groups behavioral twin
+  the deterministic per-tuple sidecar trio + stamp under the per-run `sweep_runs/<run_id>/results-depth/` subtree
+  (gap-register Ruling 4 — a SIBLING root beside the `**/*.parquet`-globbed sweeps tree, built EXCLUSIVELY through
+  the ONE `trade_store.sweep_run_dir` seam; idempotent stamp-skip resume, R42), buy-&-hold baselines from the
+  sweep's own bars (R27), groups behavioral twin
   families (R34), and builds the global cross-bucket top-100 artifact at the binding contract path
-  `runs/<grid_identity>/top100.json` + stage stamp (R21/R26 — `load_top100` O(1) by construction, ≤100 entries; any
-  damage → None → deterministic rebuild to identical bytes). The R30 preset law lives in ONE home
+  `sweep_runs/<grid_identity>/top100.json` + stage stamp (R21/R26 — `load_top100` O(1) by construction, ≤100
+  entries; any damage → None → deterministic rebuild to identical bytes). The R30 preset law lives in ONE home
   `brutex/ranking/presets.py` (`min_dd_first` default = smallest max-drawdown → composite tiebreak, None-after-scored
   → fewest consecutive losses → run_id ASC; alternates composite/PF/win%/Calmar DESC on the RAW value;
   `top100_artifact` DELEGATES via `sort_by_preset`, byte-identical order — its golden passes unmodified); R33 ships
@@ -750,7 +752,8 @@ hostile-review pass._
   exist anywhere, so every winner honestly reads `margin_roi: unverified`; override paths are DATA only). WP6
   wiring: ONE comment-fenced CLI adapter in `cmd_sweep_all` — the fail-loud `BRUTEX_RESULTS_DEPTH` kill switch
   resolves EAGERLY pre-sweep (junk → clean `EXIT_USER_ERROR` before any compute), the pass runs post-cascade wired
-  to the WP3 providers (phrases reasons + margin ROI at the honest lots=1), reference bars (per-instrument 1m/1day +
+  to the WP3 providers (phrases reasons + margin ROI at a 1-lot SIZING hypothetical — the refusal-only mechanism is
+  all-UNVERIFIED regardless, never a trade-row value), reference bars (per-instrument 1m/1day +
   `NSE-INDIAVIX` 1m) load best-effort through the SAME Catalog/ReplayFeed path, and a pass failure prints LOUD +
   logs `cli.results_depth.pass_failed` but NEVER fails the sweep — integration-proven over a REAL lake through
   `cmd_sweep_all` (post-cascade order pinned, artifacts + `reasons_wired`/`margin_roi_wired` flags, kill switch,
@@ -759,9 +762,28 @@ hostile-review pass._
   UNMODIFIED); trade pages are O(page) with a disclosed O(row-groups-up-to-offset) deep-offset scan (the db_view
   envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1538); the
   contracts memory-file additive-key update (`trade_seq`/`path_1m_status`/`mae_granularity` + the top100 object
-  root) is a coordinator obligation. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; every
-  new/touched module 100% line+branch; ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change
-  baseline).
+  root) is a coordinator obligation. RULINGS-CONFORMANCE AMENDMENT (2026-07-08, same branch — the gap-register
+  coordinator rulings folded in pre-merge, ledgered in #1538): Ruling 4 — every run-end artifact relocated to the
+  `sweep_runs/` SIBLING root via the ONE `sweep_run_dir` seam (the `<sweeps>/results-depth/` + `<sweeps>/runs/`
+  layouts SUPERSEDED; branch-introduced goldens regenerated, origin/main goldens untouched); Ruling 18 —
+  `lots`/`costs_paisa` NULL-BY-DESIGN `None` until P5's futures translation sidecar (the fabricated `1`/`0`
+  constants REMOVED); Ruling 5 — `ResultsStore.load` wraps EVERY decode failure into the NEW typed
+  `ResultsStoreSchemaError` naming the store path (G14) + presence-tolerant optional-column reads defaulting `None`
+  (the WindowLedgerRecord precedent), guarded by the NEW frozen pre-extension golden fixture; Ruling 1 — top-1000
+  storage-side pins (no silent cap, tie law intact, flush/load round trip); Ruling 12 — NEW
+  `brutex.ranking.gate_reasons`, the reason-returning twin of `passes_gates` over the STABLE `GATE_REASON_ORDER`
+  wire vocabulary (fail-closed `non_finite_input`; property-pinned `passes_gates(m) == (gate_reasons(m) == ())`;
+  P2 folds the per-door counters); Ruling 10 — `/api/v1/sweep/leaderboard` gains the OPTIONAL `?preset=` token
+  (absent/blank = legacy ordering byte-identical; known token orders via the ONE presets law with non-persisted
+  axes surfaced as `preset_inert_axes`, never faked; unknown = clean 400) + the C3 `store_error_payload` degrade
+  (typed store fault → honest 200 error markers, never a 500/blank illusion); Ruling 7 — capped
+  `results_depth.vix_miss` WARNs (cap 20, misses stay counted) + the integration proof the CLI's NSE-INDIAVIX lake
+  coordinate is REAL (production-writer bars found + every captured trade stamped); the lake-read bypass allowlist
+  admits `trade_store`/`results_depth_pass` with explicit not-lake-bars reasons; `minute_path` max-dd pct now the
+  honest INDEPENDENT max ratio (review NIT (a)); baseline JSON `allow_nan=False`. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; every
+  new/touched module 100% line+branch; ruff/ruff-format clean, `mypy --strict` clean + pyright 0 new errors vs the
+  origin/main baseline).
   Earlier: `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
   `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
   `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
