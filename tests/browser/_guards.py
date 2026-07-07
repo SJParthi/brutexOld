@@ -254,7 +254,7 @@ def iter_violations() -> Iterator[str]:
                     hits.append((lineno, order, lines[lineno - 1].strip()))
                 continue
             for lineno, line in enumerate(lines, start=1):
-                for _match in re.finditer(pattern, line):
+                for _ in re.finditer(pattern, line):
                     hits.append((lineno, order, line.strip()))
         for lineno, order, snippet in sorted(hits):
             name, _pattern, reason = FORBIDDEN_PATTERNS[order]
