@@ -33,7 +33,6 @@ from pathlib import Path
 import pytest
 from brutex.orchestrator import audit as audit_mod
 from brutex.orchestrator.audit import (
-    GENESIS_PREV_HASH,
     AuditChainCorruption,
     AuditEntry,
     AuditError,
@@ -42,39 +41,13 @@ from brutex.orchestrator.audit import (
     verify_chain,
 )
 
+from tests.fakes.audit_chain import write_clean_chain as _clean_chain
+
 # ────────────────────────────────────────────────────────────────────────
 # Helpers — fast hand-built chains (no per-append fsync, so 100k is cheap)
+# now live in the COMMON tests/fakes/audit_chain.py (shared with the append
+# O(1) bench, DEC-O1-CLAIMS-HONESTY-001); the alias keeps call sites intact.
 # ────────────────────────────────────────────────────────────────────────
-
-
-def _entry(seq: int, prev_hash: str, *, payload: dict[str, object] | None = None) -> AuditEntry:
-    """Build one hash-valid entry chained onto *prev_hash*."""
-    bare = AuditEntry(
-        seq=seq,
-        prev_hash=prev_hash,
-        ts_utc=float(seq),
-        actor="brutex",
-        action="STEP",
-        subject=f"s:{seq}",
-        payload={"i": seq} if payload is None else payload,
-    )
-    return replace(bare, entry_hash=bare.compute_hash())
-
-
-def _clean_chain(path: Path, n: int, *, pad: str = "") -> list[AuditEntry]:
-    """Write a valid *n*-entry chain to *path* (writer-equivalent bytes)."""
-    prev = GENESIS_PREV_HASH
-    entries: list[AuditEntry] = []
-    with open(path, "w", encoding="utf-8") as f:
-        for i in range(n):
-            payload: dict[str, object] = {"i": i}
-            if pad:
-                payload["pad"] = pad
-            entry = _entry(i, prev, payload=payload)
-            f.write(entry.to_json_line() + "\n")
-            prev = entry.entry_hash
-            entries.append(entry)
-    return entries
 
 
 def _write_lines(path: Path, entries: list[AuditEntry]) -> None:
