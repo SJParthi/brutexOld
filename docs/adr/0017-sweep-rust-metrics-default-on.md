@@ -35,7 +35,8 @@ envelope (dual-arm golden byte-equality on the frozen
 bit-equality under hypothesis, 18 Rust-native tests). Measured (sandbox
 ratios, NOT the §8 M4 Pro): ~7.3× on the traded-mask tail, ~1683× on the
 zero-trade shortcut. The flip to ON was explicitly deferred to a separate
-ADR. `DEC-SWEEP-EXIT-INDEX-FASTPATH-001` (#1527, this PR's earlier commits)
+ADR. `DEC-SWEEP-EXIT-INDEX-FASTPATH-001` (#1527, landing in the same
+reconstructed commit as this flip — see Status above)
 then removed the ON arm's last honest-envelope residual — the per-mask
 O(N_bars) `exit_ts`→index dict build — and added the burn-in self-check +
 autorevert latch, the runtime safety net a default-ON kernel needs.

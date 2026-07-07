@@ -23,8 +23,10 @@ MIGRATION.md #1527–#1528 — the sweep-metrics Rust tail is now ON BY DEFAULT:
 `SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
 deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
 per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
-`sweep_lookahead`, imported not copied), licensed by TWO safety layers
-shipped first, fully green under the prior default-OFF: (a) the
+`sweep_lookahead`, imported not copied), licensed by TWO safety layers —
+ORIGINALLY authored + proven fully green under the prior default-OFF before
+the flip, though the pushed branch is ONE reconstructed post-wipe commit so
+no shipped-first commit boundary exists (see ADR-0017 Status / #1528): (a) the
 exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
 simulators return each mask's certified exit-bar indices
 (`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
@@ -550,8 +552,10 @@ hostile-review pass._
 - **Active branch:** `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
   DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1527–#1528** — the sweep-metrics Rust tail is now
   ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
-  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers shipped
-  first, fully green under the prior default-OFF: the exit_idx-native FAST PATH — both trade simulators return each
+  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
+  authored + proven fully green under the prior default-OFF before the flip, though the pushed branch is ONE
+  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1528): the
+  exit_idx-native FAST PATH — both trade simulators return each
   mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
   consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
   `exit_indices_consistent` consumer belt) so the kernel arm consumes them O(trades) with NO per-mask O(N_bars)
