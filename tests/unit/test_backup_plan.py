@@ -28,6 +28,19 @@ from brutex.config.backup_env import BackupEnvConfig, resolve_backup_env
 from brutex.config.paths import LakeRootIdentity
 
 
+def _raise(exc: BaseException) -> None:
+    """Raise *exc* via a CALL, not a literal ``raise`` statement.
+
+    Keeps the statements AFTER a ``with pytest.raises(...), backup_singleflight_lock():``
+    block reachable to the static analyzer: a literal ``raise`` as the last
+    with-body statement makes CodeQL mark the following code "unreachable" (a
+    false positive — ``pytest.raises`` suppresses the exception). A function call
+    is not treated as unconditionally terminating, so the re-acquire stays
+    reachable (the same idiom as :mod:`tests.unit.test_atomic_io`).
+    """
+    raise exc
+
+
 def _identity(
     lake_root: Path,
     *,
@@ -254,6 +267,6 @@ class TestSingleflight:
         """An exception inside the block still releases (finally-close)."""
         state_dir = tmp_path / "state"
         with pytest.raises(RuntimeError, match="boom"), backup_singleflight_lock(state_dir):
-            raise RuntimeError("boom")
+            _raise(RuntimeError("boom"))
         with backup_singleflight_lock(state_dir):
             pass

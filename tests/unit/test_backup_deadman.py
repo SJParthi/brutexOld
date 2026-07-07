@@ -358,7 +358,7 @@ class TestCheckerShell:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A sidecar-write OSError can only cost an EXTRA alert — never a crash."""
-        import brutex.backup.deadman as deadman_mod
+        from brutex.backup import deadman as deadman_mod
 
         cfg = _shell_cfg(tmp_path)
         save_state(state_path(cfg), _state())

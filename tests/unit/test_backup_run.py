@@ -438,7 +438,7 @@ class TestBusyAndLockErrors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An ENOSPC creating the lock/state dir → F10 direction (exit 4, CRITICAL)."""
-        import brutex.backup.run as run_mod
+        from brutex.backup import run as run_mod
 
         def _boom(state_dir: Path) -> Iterator[None]:
             raise OSError(28, "No space left on device")
@@ -529,7 +529,7 @@ class TestClearRunningMarkerHelper:
 
     def test_save_failure_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failing clear-write is logged, never raised (the caller is already failing)."""
-        import brutex.backup.run as run_mod
+        from brutex.backup import run as run_mod
         from brutex.backup.run import _clear_running_marker_best_effort
 
         cfg = self._cfg(tmp_path)
@@ -816,7 +816,7 @@ class TestStateWriteFailures:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """F10 at mark-running: nothing snapshotted, fail loud (exit 4, CRITICAL)."""
-        import brutex.backup.run as run_mod
+        from brutex.backup import run as run_mod
 
         harness = Harness(tmp_path)
 
@@ -832,7 +832,7 @@ class TestStateWriteFailures:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """F10 at stamp-success: alarm-over-silence — unstamped success alarms later."""
-        import brutex.backup.run as run_mod
+        from brutex.backup import run as run_mod
 
         harness = Harness(tmp_path)
         calls: list[int] = []
@@ -851,7 +851,7 @@ class TestStateWriteFailures:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A best-effort failure stamp that ALSO fails keeps the original exit code."""
-        import brutex.backup.run as run_mod
+        from brutex.backup import run as run_mod
 
         harness = Harness(tmp_path)
         harness.runner.script["backup"] = _inv("backup", rc=1)
@@ -873,7 +873,7 @@ class TestStateWriteFailures:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The maintenance_ok=False rewrite is best-effort — exit stays 7."""
-        import brutex.backup.run as run_mod
+        from brutex.backup import run as run_mod
 
         harness = Harness(tmp_path)
         harness.runner.script["forget"] = _inv("forget", rc=1)

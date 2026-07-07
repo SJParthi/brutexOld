@@ -507,7 +507,7 @@ class TestDrillIOResilience:
         self, world: DrillWorld, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """FileNotFoundError from the live-side read AFTER exists() → skipped_changed."""
-        import brutex.backup.restore_drill as drill_mod
+        from brutex.backup import restore_drill as drill_mod
 
         world.set_script({"ls": {"stdout": world.ls_stdout()}})
         real_sha = drill_mod._file_sha256  # pyright: ignore[reportPrivateUsage]
