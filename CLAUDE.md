@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1482 —
+_Last updated: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 —
 the CLI `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment
 pass the dashboard runs — post-drain Seam A (fetch lane drained + window
 ledger persisted FIRST, single-flight lock still HELD), default-ON with the
@@ -337,7 +337,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1482** — the CLI
+- **Active branch:** `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
   `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
   `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
   DEC-GREEKS-CORRECTNESS-AUDIT-001 named follow-ups ("a CLI-pulled lake never enriches" + "bulk re-enrich"). ONE
@@ -442,7 +442,7 @@ hostile-review pass._
   (enrich golden regenerated — the diff is EXACTLY the formula bit, zero value drift). HONEST envelope:
   the v2 re-enrich reaches ONLY contracts inside a live pull window (expired contracts keep v1 stamps —
   bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up) [CLI-ENRICH RECONCILE —
-  DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1482: BOTH follow-ups are now CLOSED — the CLI fetch path runs the
+  DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536: BOTH follow-ups are now CLOSED — the CLI fetch path runs the
   same fenced pass post-drain (default-ON, `BRUTEX_CLI_GREEKS_ENRICH` kill switch) and `brutex enrich-greeks`
   is the bulk v1→v2 re-enrich lever; the CLI L2 heal seam remains the open DEC-LAKE-HEAL-001 follow-up];
   rust/** kernel out of scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
