@@ -1002,3 +1002,20 @@ def test_cold_reentrant_outer_exception_after_inner_success() -> None:
     follow_up = _CountingRecompute()
     assert cache.get_or_refresh(SPOT, recompute=follow_up) == [{"call": 1}]
     assert follow_up.calls == 0
+
+
+def test_effective_adaptive_floor_boundaries() -> None:
+    """DEC-LEDGER-DELTA-O-PAGE-001: the EXTRACTED #920 formula — ONE source of
+    truth ``min(max(base_s, compute_duration), cap_s)`` that ``_plan``,
+    ``movers_cache``, and the db_view ledger read cache all delegate to."""
+    from brutex.dashboard.summary_cache import MAX_ADAPTIVE_FLOOR_S, effective_adaptive_floor
+
+    assert effective_adaptive_floor(0.0, base_s=2.0, cap_s=120.0) == 2.0  # cheap → base
+    assert effective_adaptive_floor(30.0, base_s=2.0, cap_s=120.0) == 30.0  # ≤50% duty
+    assert effective_adaptive_floor(500.0, base_s=2.0, cap_s=120.0) == 120.0  # bounded
+    assert effective_adaptive_floor(-5.0, base_s=2.0, cap_s=120.0) == 2.0  # clock skew
+    # The delegated _plan call site's exact arguments, hand-computed.
+    assert (
+        effective_adaptive_floor(27.0, base_s=DEFAULT_TTL_FLOOR_S, cap_s=MAX_ADAPTIVE_FLOOR_S)
+        == 27.0
+    )

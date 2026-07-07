@@ -64,7 +64,19 @@ class TestWindowLedgerRowsCached:
     ) -> None:
         """THE D3 read-count pin: repeated paging reads within one ledger
         generation cost EXACTLY ONE Parquet parse; a ledger flush (mtime bump)
-        costs exactly one more — never one per click."""
+        costs exactly one more — never one per click.
+
+        DEC-LEDGER-DELTA-O-PAGE-001: the shared ledger read cache now carries
+        the #920 adaptive floor, so a post-flush read WITHIN the floor serves
+        the prior rows stale (bounded + logged); the injected clock steps past
+        the floor so this pin keeps asserting the fresh-parse-per-stamp law.
+        """
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view,
+            "_LEDGER_READ_CACHE",
+            db_view._make_ledger_read_cache(clock=lambda: clock["t"]),  # pyright: ignore[reportPrivateUsage]
+        )
         _seed(tmp_path, ["NIFTY"])
         parses = {"n": 0}
 
@@ -78,10 +90,12 @@ class TestWindowLedgerRowsCached:
         third = window_ledger_rows_cached(tmp_path)
         assert parses["n"] == 1  # three "clicks", one parse
         assert first == second == third
-        # A new ledger generation (flush → new mtime) → exactly one fresh parse.
-        # (The SAVE itself may parse for its merge-on-save — that is the writer's
-        # cost, not the grid's — so pin the DELTA of the grid reads only.)
+        # A new ledger generation (flush → new mtime) → exactly one fresh parse
+        # once past the adaptive floor. (The SAVE itself may parse for its
+        # merge-on-save — that is the writer's cost, not the grid's — so pin
+        # the DELTA of the grid reads only.)
         _seed(tmp_path, ["NIFTY", "SENSEX"])
+        clock["t"] += 121.0  # step past the floor cap — never a stale serve here
         base = parses["n"]
         refreshed = window_ledger_rows_cached(tmp_path)
         assert parses["n"] == base + 1
@@ -90,9 +104,30 @@ class TestWindowLedgerRowsCached:
         assert parses["n"] == base + 1
 
     def test_no_ledger_file_returns_empty(self, tmp_path: Path) -> None:
-        """A lake with no ledger Parquet reads ``()`` — the same empty grid the
-        uncached read produced (never a raise, never a 500)."""
+        """A lake with no ledger Parquet AND no deltas reads ``()`` — the same
+        empty grid the uncached read produced (never a raise, never a 500)."""
         assert window_ledger_rows_cached(tmp_path) == ()
+
+    def test_base_less_delta_only_lake_renders_rows(self, tmp_path: Path) -> None:
+        """DEC-LEDGER-DELTA-O-PAGE-001 (the fixed base-less inconsistency): a
+        first pull's DELTA-ONLY checkpoint (no ``ledger.parquet`` yet) now
+        renders its live rows on the /db grid — ``_ledger_records_cached``
+        always read it while this projection returned ``()``."""
+        from brutex.data.window_ledger_store import append_ledger_delta
+
+        live = WindowLedger()
+        live.record(
+            _key("NIFTY"),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            bars_net_new=3,
+            now=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+        assert append_ledger_delta(live, tmp_path) == 1
+        rows = window_ledger_rows_cached(tmp_path)
+        assert [row[1] for row in rows] == ["NIFTY"]
+        assert list(rows) == load_window_ledger(tmp_path).to_rows()
 
     def test_rows_cache_shares_the_records_parse(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
