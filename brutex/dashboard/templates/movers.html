@@ -484,7 +484,33 @@ async function load() {
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
-    if (!r.ok) throw new Error("HTTP "+r.status);
+    if (!r.ok) {
+      /* A 5xx on a RUNNING dashboard is a genuine SERVER fault (today's one
+         realistically-reachable producer: the PCR fold's lake-corruption 500,
+         DEC-MOVERS-OPTIONS-PCR-001 — its detail carries the group-key-enriched
+         "lake corruption: … (underlying X, expiry …)" remediation) — surface
+         the server's own parsed detail over an EMPTY grid instead of falling
+         into the offline SAMPLE preview, whose "run the dashboard" note would
+         misdirect the operator away from the real fix (round-8 hostile-review
+         fold). textContent only — never innerHTML for a server string
+         (DEC-DASHBOARD-XSS-HARDENING-001). The PCR panel is already hidden by
+         the unconditional invalidation at the top of load(). Client errors
+         (4xx — unreachable from the UI controls) + network failures keep the
+         sample-preview catch below. */
+      if (r.status >= 500) {
+        let detail = "";
+        try { detail = String(JSON.parse(await r.text()).detail || ""); } catch { detail = ""; }
+        lastPayload = null;   /* a pill switch must re-fetch, never re-render the error shell. */
+        lastRenderSig = null; /* a recovered fetch must always repaint over the error shell. */
+        wasGated = false; lastGatedKey = null;
+        rowsData = [];
+        renderHead(); renderRows();
+        $("asof").textContent = `server error · HTTP ${r.status}`;
+        $("noteText").textContent = detail || `the server answered HTTP ${r.status} — check the dashboard log (movers.pcr_corruption / the stack trace) for the fault.`;
+        return;
+      }
+      throw new Error("HTTP "+r.status);
+    }
     /* Read the body as TEXT first so an identical repeat payload is detectable
        client-side (DEC-DASHBOARD-JS-PERF-001 — the backend echoes no generation
        field; that echo is a reported follow-up, NOT added here). */

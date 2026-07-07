@@ -104,10 +104,16 @@ def _day_bar(*, day: date, close: str, oi: int | None) -> CandleBar:
 
 
 def _write(
-    tmp_path: Path, *, segment: str, symbol: str, interval: str, bars: list[CandleBar]
+    tmp_path: Path,
+    *,
+    segment: str,
+    symbol: str,
+    interval: str,
+    bars: list[CandleBar],
+    exchange: str = _EXCHANGE,
 ) -> None:
     ParquetWriter(lake_root=tmp_path).write(
-        exchange=_EXCHANGE, segment=segment, symbol=symbol, interval=interval, bars=bars
+        exchange=exchange, segment=segment, symbol=symbol, interval=interval, bars=bars
     )
 
 
@@ -1573,6 +1579,7 @@ class TestOptionsPcr:
         # `max(0, …)` and CandleBar rejects negatives), so the corruption is
         # seeded by rewriting the raw Parquet cell directly.
         import polars as pl
+        from structlog.testing import capture_logs
 
         _seed_pcr_lake(tmp_path)
         files = list((tmp_path / "bars" / _EXCHANGE / "FNO" / _PE / "1minute").rglob("*.parquet"))
@@ -1581,10 +1588,11 @@ class TestOptionsPcr:
             frame = pl.read_parquet(path)
             frame.with_columns(pl.col("open_interest") * -1).write_parquet(path)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        response = client.get(
-            "/api/v1/movers",
-            params={"asset": "options", "interval": "1day", "date": "2024-06-13"},
-        )
+        with capture_logs() as logs:
+            response = client.get(
+                "/api/v1/movers",
+                params={"asset": "options", "interval": "1day", "date": "2024-06-13"},
+            )
         assert response.status_code == 500
         detail = response.json()["detail"]
         assert detail.startswith("lake corruption:")
@@ -1594,6 +1602,18 @@ class TestOptionsPcr:
         # never blind-bisects a ~212-underlying lake for one bit-rotted cell.
         assert "underlying 'NIFTY'" in detail
         assert "expiry 2024-06-27" in detail
+        # Round-8 hostile-review fold: the route's operator-facing structlog
+        # WARN now has regression TEETH (a mutant deleting/renaming the log
+        # line survived every prior PCR test): exactly ONE
+        # `movers.pcr_corruption` WARN, its error field carrying the SAME
+        # group-key-enriched detail — so the corruption reaches the log even
+        # when nobody watches the wire (the #919 log-event-pin discipline).
+        events = [entry for entry in logs if entry.get("event") == "movers.pcr_corruption"]
+        assert len(events) == 1, f"expected exactly one movers.pcr_corruption WARN, got {events!r}"
+        assert events[0]["log_level"] == "warning"
+        assert "negative metric" in str(events[0]["error"])
+        assert "underlying 'NIFTY'" in str(events[0]["error"])
+        assert "expiry 2024-06-27" in str(events[0]["error"])
 
     def test_all_put_chain_reads_real_put_sums(
         self, store: InstrumentStore, tmp_path: Path
@@ -1829,3 +1849,106 @@ class TestOptionsPcr:
             "_underlying_spot_ltp": 2,
         }
         assert len(candidates.pcr) == 1
+
+    def test_mixed_exchange_fold_sums_both_listings_and_keys_per_exchange(
+        self,
+        store: InstrumentStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Design edge 20 BEHAVIORALLY pinned (round-8 hostile-review fold —
+        # previously only the help-text WORDING was pinned): (a) with
+        # exchange=None an underlying listed on BOTH NSE and BSE folds BOTH
+        # listings' legs into ONE PCR row (the same population the table
+        # ranks), hand-summed; (b) the exchange=NSE coordinate sums NSE legs
+        # only; (c) the two coordinates occupy DISTINCT MoversSnapshotCache
+        # keys — computed independently, repeat-served from their own entries,
+        # never cross-contaminated.
+        import brutex.dashboard.app as app_module
+
+        # NSE (whole-day: CE oi 1200 / vol 175 · PE oi 1080 / vol 290)…
+        _seed_pcr_lake(tmp_path)
+        # …plus a BSE listing of the SAME underlying on the SAME expiry.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="BSE-NIFTY-27Jun24-24000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="101", volume=40, oi=400)],
+            exchange="BSE",
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="BSE-NIFTY-27Jun24-24000-PE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="81", volume=30, oi=300)],
+            exchange="BSE",
+        )
+        calls = {"n": 0}
+        real_compute = app_module.compute_options_candidates
+
+        def _counting(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            return real_compute(*args, **kwargs)
+
+        monkeypatch.setattr(app_module, "compute_options_candidates", _counting)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        base = {"asset": "options", "interval": "1day", "date": "2024-06-13"}
+        both = client.get("/api/v1/movers", params=base).json()
+        nse = client.get("/api/v1/movers", params={**base, "exchange": "NSE"}).json()
+        # (a) the all-exchanges view folds BOTH listings into ONE row.
+        assert len(both["pcr"]) == 1
+        row = both["pcr"][0]
+        assert row["underlying"] == "NIFTY"
+        assert (row["put_oi"], row["call_oi"]) == (1080 + 300, 1200 + 400)
+        assert (row["put_volume"], row["call_volume"]) == (290 + 30, 175 + 40)
+        assert (row["legs_read"], row["legs_total"]) == (4, 4)
+        # (b) the NSE-scoped coordinate carries the NSE-only sums.
+        assert len(nse["pcr"]) == 1
+        nse_row = nse["pcr"][0]
+        assert (nse_row["put_oi"], nse_row["call_oi"]) == (1080, 1200)
+        assert (nse_row["put_volume"], nse_row["call_volume"]) == (290, 175)
+        assert (nse_row["legs_read"], nse_row["legs_total"]) == (2, 2)
+        # (c) distinct cache keys: two coordinates → two computes; a repeat of
+        # EACH is a pure hit (count unchanged) serving ITS OWN rows.
+        assert calls["n"] == 2
+        assert client.get("/api/v1/movers", params=base).json()["pcr"] == both["pcr"]
+        nse_again = client.get("/api/v1/movers", params={**base, "exchange": "NSE"}).json()
+        assert nse_again["pcr"] == nse["pcr"]
+        assert calls["n"] == 2
+
+    def test_mixed_exchange_differing_tier_expiries_keep_only_the_tier_legs(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Edge 20 sub-permutation (round-8 fold): when the two exchanges list
+        # DIFFERENT near expiries for one underlying, the tier filter keeps
+        # ONLY the tier-expiry legs — the off-expiry exchange's legs are
+        # absent from BOTH legs_total and the sums (consistent with the
+        # table, which ranks the identical tier-filtered set).
+        _seed_pcr_lake(tmp_path)  # NSE on 27Jun24
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="BSE-NIFTY-20Jun24-24000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="101", volume=40, oi=400)],
+            exchange="BSE",
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="BSE-NIFTY-20Jun24-24000-PE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="81", volume=30, oi=300)],
+            exchange="BSE",
+        )
+        body = self._get(store, {"interval": "1day", "date": "2024-06-13"})
+        assert len(body["pcr"]) == 1
+        row = body["pcr"][0]
+        # Near tier as-of 2024-06-13 = the earliest live expiry (20Jun24, the
+        # BSE listing) — the NSE 27Jun24 legs are tier-dropped everywhere.
+        assert row["expiry"] == "2024-06-20"
+        assert (row["put_oi"], row["call_oi"]) == (300, 400)
+        assert (row["put_volume"], row["call_volume"]) == (30, 40)
+        assert (row["legs_read"], row["legs_total"]) == (2, 2)
