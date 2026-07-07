@@ -1127,13 +1127,21 @@ class TestOptionsPcrPayload:
 
     @staticmethod
     def _pcr_rows() -> tuple[UnderlyingPcr, ...]:
+        # TWO underlyings, deliberately: a single-row fixture made the
+        # byte-invariance pin below toothless against a ``[:top_n]`` slice
+        # mutant of the payload's pcr emission (slicing one row at the
+        # top_n=1 arm is invariant — mutation-proven). With two rows the
+        # smallest top_n arm drops a row under any slice mutant and the
+        # byte-identity assert trips.
         return compute_pcr_rows(
             [
                 PcrLeg(underlying="NIFTY", opt_type="PE", oi=300, volume=30),
                 PcrLeg(underlying="NIFTY", opt_type="CE", oi=200, volume=20),
+                PcrLeg(underlying="BANKNIFTY", opt_type="PE", oi=400, volume=40),
+                PcrLeg(underlying="BANKNIFTY", opt_type="CE", oi=200, volume=20),
             ],
-            legs_total={"NIFTY": 2},
-            target_expiry={"NIFTY": date(2025, 6, 26)},
+            legs_total={"NIFTY": 2, "BANKNIFTY": 2},
+            target_expiry={"NIFTY": date(2025, 6, 26), "BANKNIFTY": date(2025, 6, 26)},
         )
 
     def test_candidates_backcompat_defaults_pcr_empty(self) -> None:
@@ -1160,7 +1168,11 @@ class TestOptionsPcrPayload:
             pcr=self._pcr_rows(),
         )
         assert payload["pcr"] == [pcr_row_json(row) for row in self._pcr_rows()]
-        assert payload["pcr"][0]["oi_pcr"] == "1.5"
+        # Sorted by PARSED underlying: BANKNIFTY (400/200) then NIFTY (300/200).
+        assert [(r["underlying"], r["oi_pcr"]) for r in payload["pcr"]] == [
+            ("BANKNIFTY", "2"),
+            ("NIFTY", "1.5"),
+        ]
 
     def test_pcr_is_byte_identical_across_top_n_and_min_volume(self) -> None:
         # PCR is a scan-time per-underlying aggregate over the FULL tier chain —
