@@ -19,14 +19,15 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
-MIGRATION.md #1529–#1530 — the sweep-metrics Rust tail is now ON BY DEFAULT:
+MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
 `SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
 deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
 per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
-`sweep_lookahead`, imported not copied), licensed by TWO safety layers —
+`sweep_lookahead`, consumed via its public `env_flag_tristate`, never
+copied), licensed by TWO safety layers —
 ORIGINALLY authored + proven fully green under the prior default-OFF before
 the flip, though the pushed branch is ONE reconstructed post-wipe commit so
-no shipped-first commit boundary exists (see ADR-0017 Status / #1530): (a) the
+no shipped-first commit boundary exists (see ADR-0017 Status / #1532): (a) the
 exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
 simulators return each mask's certified exit-bar indices
 (`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
@@ -50,6 +51,28 @@ autorevert event). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
 tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the
 pre-change baseline).
+Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
+source change; tests + docs excepted): both poll surfaces (the site-wide
+`bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
+CLIENT-clock "updated Xs ago" readout on a ~1 s ticker (amber → LOUD RED explicit
+"STALE" past justified thresholds — widget warn 10 s / red 30 s = 10× cadence =
+backoff cap; universe warn 5 s past the retained 600 ms quick-retry envelope /
+red 15 s) + a SELF-RECOVERING poll (fetch rejection AND non-ok AND malformed body
+all counted failures; quick retries then 3 s→30 s capped exponential backoff,
+NEVER gives up — the 2026-07-06 38-minute frozen-tab incident fix; the bounded
+give-up that painted "live progress feed dropped" via innerHTML and stopped
+polling forever is REMOVED, its pinned tokens kept with genuine semantics; a
+non-ok poll can no longer settle the header as "— nothing to pull"; the stale
+state clears automatically on the next successful poll), and the `/universe`
+header + a new `#subunit` counter show per-expiry sub-unit progress ("expiry
+30Sep25 · sub-unit N this unit") derived ENTIRELY client-side from
+`s.current`/`s.completed` transitions (distinct-label count per completed/total
+anchor, Set-capped 4096; the `data/fno_symbol.py` grammar mirrored right-anchored
+so hyphenated underlyings never confuse the parse; spot/empty labels degrade to
+omission, never garbage). textContent-only DOM; substring tests pin PRESENCE of
+the JS, not execution (honest envelope — no headless JS runner); ZERO backend
+change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX).
 Earlier: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
 preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
 cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
@@ -601,11 +624,11 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
-  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1529–#1530** — the sweep-metrics Rust tail is now
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
   ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
   constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
   authored + proven fully green under the prior default-OFF before the flip, though the pushed branch is ONE
-  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1530): the
+  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1532): the
   exit_idx-native FAST PATH — both trade simulators return each
   mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
   consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
@@ -618,6 +641,15 @@ hostile-review pass._
   default (no-env) arm reproduces them byte-for-byte with exactly ONE engaged event (golden-pinned). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
   tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+  MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
+  widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
+  LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
+  exponential backoff, never gives up — the 38-minute frozen-tab incident fix; a non-ok poll can no longer settle
+  the header), and the `/universe` header + `#subunit` counter show per-expiry sub-unit progress derived entirely
+  client-side from `s.current` transitions (fno_symbol grammar mirrored right-anchored; spot/empty → omission).
+  textContent-only; substring tests pin presence not execution (honest envelope); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
   Earlier: `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528** —
   the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
   COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by
