@@ -217,9 +217,10 @@ class TestAmpersandEvidence:
             expiries={"M&M": "data", "M%26M": "data"},
             contracts={"M&M": "data", "M%26M": "data"},
         )
-        _report, _t = _probe(sdk, ["M&M"])
+        report, _t = _probe(sdk, ["M&M"])
         assert sdk.expiry_forms == ["M&M", "M%26M"]
         assert sdk.contract_forms == ["M&M", "M%26M"]
+        assert len(report.results) == 4  # one recorded result per physical call
 
     def test_one_transcript_event_per_call_before_the_verdict(self) -> None:
         """Ordering pin: every amp.call precedes the underlying's amp.verdict."""
@@ -241,13 +242,14 @@ class TestAmpersandEvidence:
     def test_budget_spent_before_every_call(self) -> None:
         budget = _Budget()
         sdk = _AmpSDK(expiries={"M%26M": "data"})
-        _report, _t = _probe(sdk, ["M&M"], budget=budget)
+        report, _t = _probe(sdk, ["M&M"], budget=budget)
         assert budget.spent == [
             "amp.expiries.M&M",
             "amp.expiries.M&M",
             "amp.contracts.M&M",
             "amp.contracts.M&M",
         ]
+        assert len(report.results) == len(budget.spent)  # one spend per recorded call
 
     def test_budget_exhaustion_aborts_bounded(self) -> None:
         """A raising budget stops the probe MID-family — never the account."""

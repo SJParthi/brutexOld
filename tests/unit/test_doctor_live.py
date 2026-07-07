@@ -1956,9 +1956,9 @@ class TestStageAmpersand:
 
     def test_stamp_key_has_exactly_one_writer_in_the_package(self) -> None:
         """Repo pin: ONLY the doctor stage writes ``FORM_PROBE_VERDICT_KEY``."""
-        import brutex
-
-        package_root = Path(brutex.__file__).resolve().parent
+        # dl is brutex.doctor_live, so its parent dir IS the brutex package root
+        # (avoids mixing `import brutex` with the top-level `from brutex import`).
+        package_root = Path(dl.__file__).resolve().parent
         writers = [
             str(path.relative_to(package_root))
             for path in sorted(package_root.rglob("*.py"))

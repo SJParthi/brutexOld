@@ -47,17 +47,14 @@ def test_instrument_store_satisfies_meta_kv(tmp_path: Path) -> None:
     """The production store structurally satisfies the Protocol end-to-end."""
     from brutex.data.instrument_store import InstrumentStore
 
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
         assert isinstance(store, MetaKV)
         store.set_meta("groww.form_winner.M&M", "M%26M")
         assert store.get_meta("groww.form_winner.M&M") == "M%26M"
         assert store.get_meta("absent.key") is None
-    finally:
-        store.close()
 
 
 def test_public_surface() -> None:
-    import brutex.data.meta_kv as module
+    from brutex.data import meta_kv as meta_kv_module
 
-    assert module.__all__ == ["MetaKV"]
+    assert meta_kv_module.__all__ == ["MetaKV"]
