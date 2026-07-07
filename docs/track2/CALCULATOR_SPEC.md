@@ -60,7 +60,7 @@ constants module.
 | `TICK_PAISA` | `5` (= ₹0.05) | COSTS_VERIFIED §11 |
 | `GROWW_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order) | COSTS_VERIFIED §8.1 |
 | `ZERODHA_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order, also flat for F&O) | COSTS_VERIFIED §8.2 |
-| `STT_RATE_PRE_OCT2024` | `0.000625` (= 0.0625% of sell premium, pre 2024-10-01) | `brutex/costs/constants.py` `STT_OPTIONS_PRE_OCT_2024_BPS_X100`; DEC-COST-003 (MIGRATION.md #128). Row added 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) — the code has carried this third regime since the rate lock; the table previously showed only two. |
+| `STT_RATE_PRE_OCT2024` | `0.000625` (= 0.0625% of sell premium, pre 2024-10-01) | COSTS_VERIFIED §13 (the three-regime history) + §14 rate constants; DEC-COST-002 (MIGRATION.md #127) locks the date-keyed regime lookup; code mirror `brutex/costs/constants.py` `STT_OPTIONS_PRE_OCT_2024_BPS_X100`. Row added 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) — the code has carried this third regime since the rate lock; the table previously showed only two. Citation corrected 2026-07-07 (reconstruction round-4 review): the row originally cited DEC-COST-003 (#128), which locks ONLY the Finance-Act-2026 0.10%→0.15% arm and never states 0.0625%. |
 | `STT_RATE_PRE_APR2026` | `0.0010` (= 0.10% of sell premium, 2024-10-01 → 2026-03-31) | COSTS_VERIFIED §3 |
 | `STT_RATE_POST_APR2026` | `0.0015` (= 0.15% of sell premium, from 2026-04-01) | COSTS_VERIFIED §3 (UNVERIFIED gazette text) |
 | `STT_HIKE_EFFECTIVE_DATE` | `date(2026, 4, 1)` | Budget 2026 |
@@ -357,9 +357,10 @@ match trade_outcome:
     # but NO separate STT (was paid at sell-open as 0.15% × premium)
     # NOTE (§16 item 19, NOT decided): the sell-open premium-STT rate in the
     # parenthetical above is ERA-DEPENDENT, not a flat 0.15% — 0.0625% pre
-    # 2024-10-01 / 0.10% to 2026-03-31 / 0.15% from 2026-04-01
-    # (brutex/costs/constants.py STT_OPTIONS_*; DEC-COST-003, MIGRATION.md
-    # #128). The DEC that implements this branch must apply the era rate.
+    # 2024-10-01 (COSTS_VERIFIED §13/§14) / 0.10% to 2026-03-31 / 0.15% from
+    # 2026-04-01 (the 0.10%→0.15% arm is DEC-COST-003, MIGRATION.md #128);
+    # code mirror brutex/costs/constants.py STT_OPTIONS_*. The DEC that
+    # implements this branch must apply the era rate.
     stt = 0
     brokerage = GROWW_BROKERAGE_PAISA  # ₹20 per order (NOT per contract)
     exch = sebi = ipft = stamp = 0  # no trade event
@@ -923,7 +924,7 @@ still UNVERIFIED (3 original + 5 new):
 | 16 | **Groww ₹20 brokerage on EXPIRED WORTHLESS options** | Groww-specific gotcha vs Zerodha which dropped to ₹0 in June 2024 | Track 2 never holds to expiry (15:20 forced exit), but expiry branches must use ₹20 not ₹0 | LOW |
 | 17 | **STT-on-exercise rate 0.125% pre-Apr-2026 vs 0.15% post** | Both rates cited but Finance Act 2026 gazette text not pulled | Only fires for `EXPIRY_EXERCISE` outcome (Track 2 never sets this) | LOW for Track 2; MEDIUM for future tracks |
 | 18 | **`EXPIRY_*` STT-era key: `exit_dt` vs entry date** — §4.2's illustrative pseudo-code keys the exercise STT era on `exit_dt`, while DEC-COST-002 (MIGRATION.md #127) locked the NORMAL_CLOSE key to `entry_dt_ist.date()` (§4 Step 5, §7) | Exercise settles AT expiry so exit-keying may be intended — an undecided design question, not a typo. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Only fires if the `EXPIRY_*` branches are ever implemented (Track 2 never sets them, DEC-RISK-011) | LOW for Track 2; owned by the DEC that implements the expiry branches |
-| 19 | **`EXPIRY_ASSIGN` premium-STT parenthetical is era-dependent** — §4.2's "(already paid at sell-open as 0.15% × premium)" hardcodes one era's rate; the actual sell-open rate is 0.0625% / 0.10% / 0.15% by era (`brutex/costs/constants.py` `STT_OPTIONS_*`, DEC-COST-003) | Spec note written against the post-Apr-2026 era only. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Documentation/impl of `EXPIRY_ASSIGN` only (unreachable in Track 2) | LOW for Track 2; the implementing DEC must apply the era rate |
+| 19 | **`EXPIRY_ASSIGN` premium-STT parenthetical is era-dependent** — §4.2's "(already paid at sell-open as 0.15% × premium)" hardcodes one era's rate; the actual sell-open rate is 0.0625% / 0.10% / 0.15% by era (`brutex/costs/constants.py` `STT_OPTIONS_*`; the 0.0625% regime is COSTS_VERIFIED §13/§14, the 0.10%→0.15% arm DEC-COST-003 #128) | Spec note written against the post-Apr-2026 era only. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Documentation/impl of `EXPIRY_ASSIGN` only (unreachable in Track 2) | LOW for Track 2; the implementing DEC must apply the era rate |
 
 **Items 1-3:** original 3 from `TRACK2_OPTIONS_SPEC §8b`.
 **Items 4-8:** added 2026-05-16 from deep research on long/short
@@ -993,6 +994,7 @@ work but calculator can ship without them.
 | 2026-05-16 | §16 expanded to 17 unverified items (added 15, 16, 17) | Futures STT 0.05% (informational), Groww ₹20-on-worthless, STT-on-exercise rate split. |
 | 2026-05-16 | TradeOutcome enum added to §11 API | Replaces `held_to_expiry_exercise: bool`. Backward-compat via DEPRECATED label on the bool. New fixtures use enum. |
 | 2026-07-06 | §4 Step-1 short-side slippage resolved to the §8 ADVERSE rule (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) | §4's pseudocode disagreed with §8 on BOTH short legs (short sell = `exit_open + tick` — wrong bar; short cover buy = `exit_open − tick` — favorable) and carried a literal "# CHECK SIGN" inside a LOCKED spec (the #963 MINOR-4 contradiction). §8 (adverse — buy higher, sell lower; consistent with `TRACK2_OPTIONS_SPEC §9.2`'s per-action rule) is authoritative; "# CHECK SIGN" deleted; `brutex/costs/calculator.py`'s short SELL leg + the byte-exact test re-pinned to the resolved rule (branch stays production-unreachable — BUY-only DEC-EXEC-008 unchanged). §4.2 gained the implementation-status block (Step-0 guard ≠ state machine, MIGRATION.md #963); the `exit_dt` era-key + assign premium-STT drifts registered as §16 items 18-19 WITHOUT deciding them; §2 gained the pre-2024-10-01 0.0625% STT regime row. |
+| 2026-07-07 | Citation hygiene on the pre-2024-10-01 0.0625% STT regime (§2 row, §4.2 EXPIRY_ASSIGN note, §16 item 19) — reconstruction round-4 review | The three sites added on 2026-07-06 attributed the 0.0625% rate to DEC-COST-003 (MIGRATION.md #128), which locks ONLY the Finance-Act-2026 0.10%→0.15% arm and never states 0.0625% (Golden Rule #1: a citation must resolve to a source stating the claim). Re-cited to COSTS_VERIFIED §13 (three-regime history) / §14 (rate constants) + DEC-COST-002 (#127, the date-keyed regime lookup), keeping DEC-COST-003 only for the 0.10%→0.15% arm. Rate VALUES unchanged. |
 
 ---
 

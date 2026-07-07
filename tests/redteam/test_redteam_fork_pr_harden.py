@@ -402,11 +402,23 @@ def test_no_workflow_run_job_checks_out_pr_head() -> None:
 # the repo-DEFAULT GITHUB_TOKEN it inherits is read/WRITE on an
 # un-hardened repo, so `_job_write_scopes`' declared-only inspection
 # read [] while the effective token could `gh pr merge` — zero
-# violations, fail-OPEN).
+# violations, fail-OPEN). Secret references are matched in BOTH GitHub
+# Actions expression spellings — dot (`secrets.NAME`) AND index/bracket
+# (`secrets['NAME']` / `secrets["NAME"]`) — via `_SECRET_REF_RE`
+# (round-4 reconstruction-review fix: the dot-only regex failed OPEN for
+# a read-permissions comment job exfiltrating a foreign secret via the
+# bracket respelling — the secret-access twin of the `on:`-spelling /
+# `.yaml`-extension / `write-all` bypasses).
 
 _COMMENT_TRIGGERS = ("issue_comment", "pull_request_review_comment", "discussion_comment")
 _PRIVILEGED_WRITE_SCOPES = ("contents", "pull-requests", "issues", "id-token")
-_SECRET_REF_RE = re.compile(r"\bsecrets\.([A-Za-z_][A-Za-z0-9_]*)")
+# BOTH GitHub Actions expression spellings of secret access: dot
+# (`secrets.NAME`) and index/bracket (`secrets['NAME']` / `secrets["NAME"]`,
+# whitespace-tolerant) — round-4 reconstruction-review fix. The quote class
+# is `+` because `yaml.safe_dump` DOUBLES a single quote inside a
+# single-quoted scalar (`secrets[''NAME'']`), which a single-quote match
+# would miss on a re-serialized node.
+_SECRET_REF_RE = re.compile(r"\bsecrets(?:\.|\[\s*['\"]+)([A-Za-z_][A-Za-z0-9_]*)")
 
 # The retired docs/runbooks/claude_automation.md §3 snippet, VERBATIM (the
 # in-memory negative fixture proving the sweep has teeth — kept here so the
@@ -432,11 +444,15 @@ jobs:
 
 
 def _job_foreign_secrets(node: Any) -> list[str]:
-    """Secret names referenced anywhere in a job/step mapping, EXCLUDING the
-    implicit ``secrets.GITHUB_TOKEN`` — the carve-out: every workflow run
-    receives that token implicitly and benign comment-triggered jobs (label
-    bots, slash-command acks) legitimately pass it at read-level, so
-    forbidding it would false-positive every future benign job."""
+    """Secret names referenced anywhere in a job/step mapping — in EITHER
+    GitHub Actions expression spelling, dot (``secrets.NAME``) or
+    index/bracket (``secrets['NAME']`` / ``secrets["NAME"]``; round-4
+    reconstruction-review fix — the dot-only regex was fail-OPEN for the
+    bracket respelling) — EXCLUDING the implicit ``secrets.GITHUB_TOKEN``
+    in both spellings — the carve-out: every workflow run receives that
+    token implicitly and benign comment-triggered jobs (label bots,
+    slash-command acks) legitimately pass it at read-level, so forbidding
+    it would false-positive every future benign job."""
     names = _SECRET_REF_RE.findall(yaml.safe_dump(node))
     return sorted({name for name in names if name != "GITHUB_TOKEN"})
 
@@ -1035,4 +1051,62 @@ jobs:
     assert _comment_trigger_violations("empty-on.yml", empty_on) == [], (
         "a workflow with an EMPTY `on:` was flagged — the trigger "
         "normalization fallback over-reaches"
+    )
+
+
+def test_issue_comment_sweep_flags_bracket_notation_secret_reference() -> None:
+    """Round-4 reconstruction-review regression pin: ``_SECRET_REF_RE``
+    matched ONLY dot-notation secret access (``secrets.NAME``), while
+    GitHub Actions expression syntax equally accepts index/bracket
+    notation (``secrets['NAME']`` / ``secrets["NAME"]``) — a
+    comment-triggered job declaring read-only ``permissions:`` (so checks
+    (a) write-scopes and (d) undeclared-permissions both stand down) but
+    exfiltrating a foreign secret via the bracket spelling produced ZERO
+    violations (fail-OPEN: the secret-access twin of the ``on:``-spelling
+    / ``.yaml``-extension / ``write-all`` bypasses this file already
+    closed). Both quote styles must be flagged; the implicit-token
+    carve-out must equally cover the bracket spelling of
+    ``secrets['GITHUB_TOKEN']`` (a benign read-only comment job passing
+    the implicit token by bracket stays clean)."""
+    for spelling in ("secrets['ANTHROPIC_API_KEY']", 'secrets["ANTHROPIC_API_KEY"]'):
+        workflow = yaml.safe_load(
+            f"""
+name: bracket exfil
+on:
+  issue_comment: {{ types: [created] }}
+permissions: {{ contents: read }}
+jobs:
+  exfil:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe
+        env:
+          KEY: ${{{{ {spelling} }}}}
+"""
+        )
+        violations = _comment_trigger_violations("bracket.yml", workflow)
+        joined = "\n".join(violations)
+        assert violations and "secrets.ANTHROPIC_API_KEY" in joined, (
+            f"a read-permissions comment-triggered job referencing {spelling} "
+            "produced no foreign-secret violation — the bracket-notation "
+            f"secret-access bypass is open again; violations were:\n{joined}"
+        )
+    benign = yaml.safe_load(
+        """
+name: bracket token ack
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  ack:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/$REPO/issues/$NUM/comments --silent
+        env: { GH_TOKEN: "${{ secrets['GITHUB_TOKEN'] }}" }
+"""
+    )
+    assert _comment_trigger_violations("bracket-token.yml", benign) == [], (
+        "the implicit secrets.GITHUB_TOKEN carve-out does not cover the "
+        "bracket spelling — a benign read-only comment-triggered job is "
+        "being flagged"
     )
