@@ -119,6 +119,12 @@ class TestExpiredV1Restamp:
         assert plan.scan.stale_v1 == 1 and len(plan.targets) == 1
         report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
         assert report.enriched == 1 and report.errored == 0
+        # The WET report carries the scan census verbatim (fix round 2: four
+        # census-zeroing mutants survived every suite — the done-log would
+        # have reported an all-zero census on a real stale lake).
+        assert report.stale_v1 == 1
+        assert report.stale_null == 0 and report.stale_inputs_drift == 0
+        assert report.probe_failed == 0
         for pid in pl.read_parquet(_option_partition(lake))["greeks_provenance_id"].to_list():
             stored = unpack_greeks_provenance(int(pid))
             assert stored.formula_version == GREEKS_FORMULA_VERSION == 2

@@ -60,6 +60,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.calendars.nse import IST
 from brutex.config.credentials import groww_credentials_error
+from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
     build_completeness_scoreboard,
@@ -2295,19 +2296,33 @@ def build_app(
     # summary (the next eligible poll refreshes), and owns the incremental
     # CoverageCounters that back the O(1) coverage headline
     # (DEC-DASHBOARD-FASTREAD-001).
-    _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
+    # Both jobs key their cross-process single-flight flock on the STORE-derived
+    # WRITE root (`_job_lake_root_resolver` — the same root `_resolve_pull_lake_root`
+    # gives their `_work` bodies), so a `brutex dashboard --lake-root X` launch with
+    # a divergent/unset $BRUTEX_LAKE_ROOT still contends with a CLI pull/backfill
+    # flocking X (DEC-GREEKS-BULK-REENRICH-001 fix round 2 — the lock root and the
+    # write root can no longer diverge).
+    _pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        lake_root_resolver=_job_lake_root_resolver(instrument_store),
+    )
 
     # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
     # SEPARATE BackgroundPullJob so its progress feed never collides with a
     # pull's. The ACCOUNT-keyed lock is skipped via the existing graceful-skip
     # path (`account_key_resolver` returning None — the backfill makes ZERO
-    # vendor calls, so there is no account rate to protect); the DEFAULT
-    # lake-root single-flight is KEPT, so a backfill and a pull against the
-    # SAME lake serialise (one lake-writer job at a time — the honest posture;
-    # the per-partition flocks of DEC-LAKE-PARTITION-FLOCK-001 protect
-    # regardless). Owned by this app instance (no module global — CLAUDE.md §4).
+    # vendor calls, so there is no account rate to protect); the WRITE-root
+    # lake single-flight is KEPT for the WET run, so a backfill and a pull
+    # against the SAME lake serialise (one lake-writer job at a time — the
+    # honest posture; the per-partition flocks of DEC-LAKE-PARTITION-FLOCK-001
+    # protect regardless). A DRY-RUN start skips the cross-process lock
+    # entirely (`cross_process_lock=False` at the route — zero writes, the CLI
+    # `--dry-run` lock-free posture). Owned by this app instance (no module
+    # global — CLAUDE.md §4).
     _greeks_backfill_job = BackgroundPullJob(
-        summary_cache=_summary_cache, account_key_resolver=lambda: None
+        summary_cache=_summary_cache,
+        account_key_resolver=lambda: None,
+        lake_root_resolver=_job_lake_root_resolver(instrument_store),
     )
 
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
@@ -4076,13 +4091,19 @@ def build_app(
         makes ZERO vendor calls, and a credential-less CLI-lake box MUST be able
         to run it — that IS gap (b) of #1188. ``dry_run`` is an explicit query
         param (default false) and stops at the PLAN boundary: zero writes, zero
-        checkpoint, zero Telegram. Single-flight: a second click — or a pull on
-        the same lake — refuses with ``started: false``. A disk-full / broken
-        pool halts through the job's existing ``is_pull_halt`` handling (one
-        CRITICAL Telegram alert; the durable checkpoint survives for resume).
-        ``force`` + ``limit`` together is a 400: force-mode selection is
-        stamp-independent, so a limited force run re-selects the SAME first N
-        contracts every run — chipping works only in the default mode.
+        checkpoint, zero Telegram — and it takes NO cross-process lake lock
+        (``cross_process_lock=False``): a zero-write scan must never exclude a
+        real pull for its whole O(files) duration (the CLI ``--dry-run``
+        lock-free posture; DEC-GREEKS-BULK-REENRICH-001 fix round 2). WET
+        single-flight: a second click — or a pull on the same lake — refuses
+        with ``started: false`` (the flock is keyed on the store-derived WRITE
+        root, so it contends with a CLI pull/backfill regardless of
+        ``$BRUTEX_LAKE_ROOT``). A disk-full / broken pool halts through the
+        job's existing ``is_pull_halt`` handling (one CRITICAL Telegram alert;
+        the durable checkpoint survives for resume). ``force`` + ``limit``
+        together is a 400: force-mode selection is stamp-independent, so a
+        limited force run re-selects the SAME first N contracts every run —
+        chipping works only in the default mode.
         """
         if batch is not None and batch < 1:
             raise HTTPException(status_code=400, detail=f"batch must be >= 1, got {batch}")
@@ -4163,11 +4184,14 @@ def build_app(
         # total=0 + ledger_synced=True: the scan (O(files), on the job thread)
         # discovers the real total; the first _sync sets it. The "note" of the
         # returned report dict becomes the completion headline (_finish_detail).
+        # A DRY-RUN skips the cross-process lake lock (zero writes to protect —
+        # a read-only scan must never refuse a real pull; the wet run keeps it).
         started = _greeks_backfill_job.start(
             _work,
             total=0,
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
+            cross_process_lock=not dry_run,
         )
         return JSONResponse(
             {
@@ -4179,8 +4203,13 @@ def build_app(
                 "limit": limit,
                 "note": (
                     "scan is O(files) — the total appears once the scan completes; "
-                    "a pull on the same lake is refused while the backfill runs "
-                    "(one lake-writer job at a time)"
+                    + (
+                        "dry-run takes no lake lock (zero writes — a concurrent "
+                        "pull on this lake is unaffected)"
+                        if dry_run
+                        else "a pull on the same lake is refused while the backfill "
+                        "runs (one lake-writer job at a time)"
+                    )
                 ),
             }
         )
@@ -6694,8 +6723,10 @@ def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | No
     :func:`brutex.dashboard.lake_revision.lake_revision` — one O(1) ``os.stat``
     of the window-ledger Parquet plus the bounded O(dirs) sweeps-tree digest
     (DEC-RESULTS-SURFACE-HONESTY-001; instruments × timeframes directory stats,
-    never O(files)) per call, never raising (every ``OSError`` maps to ``None``
-    = "no signal" inside ``lake_revision``).
+    never O(files)) plus one O(1) ``os.stat`` of the Greeks-backfill freshness
+    marker (DEC-GREEKS-BULK-REENRICH-001 fix round 2 — a CLI backfill's
+    overlay writes reach the caches without a restart) per call, never raising
+    (every ``OSError`` maps to ``None`` = "no signal" inside ``lake_revision``).
     """
     store_path = getattr(instrument_store, "path", None)
     if not isinstance(store_path, Path):
@@ -6707,6 +6738,40 @@ def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | No
         return lake_revision(lake_root)
 
     return _probe
+
+
+def _job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
+    """Build the background jobs' single-flight lake-root resolver — the WRITE root.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2 (refuter-confirmed MAJOR): the
+    jobs' cross-process ``flock`` used to key off the DEFAULT
+    :func:`brutex.dashboard.pull_jobs._default_lake_root_resolver`
+    (``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``), while their ``_work`` bodies
+    scan and WRITE :func:`_resolve_pull_lake_root` — the wired
+    :class:`~brutex.data.instrument_store.InstrumentStore`'s on-disk parent.
+    ``brutex dashboard --lake-root /data/lake`` with ``$BRUTEX_LAKE_ROOT``
+    unset (the exact launch mode :func:`_resolve_pull_lake_root`'s own error
+    message prescribes) therefore flocked ``~/.brutex/lake`` while writing
+    ``/data/lake`` — a CLI ``brutex greeks-backfill --lake-root /data/lake``
+    (which flocks the REAL root) never contended, silently re-opening the
+    stale-read → latest-wins NO_SPOT-NULL clobber the lock exists to prevent
+    (the backfill deliberately has NO account-lock second belt). The lock root
+    and the write root are now derived from the SAME source: the store's
+    parent when a path-carrying store is wired (mirrors
+    :func:`_lake_revision_probe_or_none`), else the COMMON
+    :func:`~brutex.config.paths.resolve_lake_root` env default — byte-identical
+    to the prior behaviour for a store-less app (where every live pull is
+    refused by :func:`_resolve_pull_lake_root` anyway). O(1), pure path
+    computation per call.
+    """
+
+    def _resolve() -> Path | None:
+        store_path = getattr(instrument_store, "path", None)
+        if isinstance(store_path, Path):
+            return store_path.parent
+        return resolve_lake_root()
+
+    return _resolve
 
 
 def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:

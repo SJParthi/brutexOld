@@ -1900,6 +1900,15 @@ def cmd_greeks_backfill(
     force-mode selection is stamp-independent, so a limited force run would
     re-select the SAME first N contracts every run — the incremental-chipping
     promise holds only for the default stamp-driven mode.
+
+    **Dashboard freshness (fix round 2):** the backfill never touches the
+    window ledger, so a CONCURRENTLY-RUNNING dashboard's cross-process
+    revision probe (DEC-HARDENING-LEFTOVERS-001) would not see its writes;
+    every bar-writing batch therefore touches the durable
+    ``<lake>/.greeks_backfill/revision.json`` freshness marker, which
+    :func:`brutex.dashboard.lake_revision.lake_revision` folds into its
+    composite token — a running dashboard serves the NEW Greeks on its next
+    poll, no restart required.
     """
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,

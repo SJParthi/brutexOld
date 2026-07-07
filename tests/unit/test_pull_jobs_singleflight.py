@@ -381,6 +381,68 @@ def test_none_account_key_skips_account_lock_gracefully(tmp_path: Path) -> None:
     assert order == ["enter:lake", "exit:lake"]
 
 
+def test_cross_process_lock_false_skips_both_locks_for_a_zero_write_run(tmp_path: Path) -> None:
+    """``start(cross_process_lock=False)`` takes NEITHER cross-process lock.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2 (refuter-confirmed): the dashboard
+    DRY-RUN Greeks backfill is a zero-write scan, yet it held the lake-root
+    flock for its whole O(files) duration and REFUSED a real production pull —
+    while the CLI ``--dry-run`` twin is deliberately lock-free. The zero-write
+    run must not exclude a writer: neither lock factory (nor the account-key
+    resolver) is consulted, a REAL peer flock on the same root acquires freely
+    DURING the run, and the in-process single-flight still applies.
+    """
+    lake_calls: list[Path] = []
+    account_calls: list[str] = []
+    resolver_calls: list[bool] = []
+    peer_acquired: dict[str, bool] = {}
+
+    def lake_factory(root: Path) -> AbstractContextManager[None]:  # pragma: no cover
+        lake_calls.append(root)
+        return _SpyGuard()
+
+    def account_factory(key: str) -> AbstractContextManager[None]:  # pragma: no cover
+        account_calls.append(key)
+        return _SpyGuard()
+
+    def key_resolver() -> str | None:  # pragma: no cover — never called
+        resolver_calls.append(True)
+        return "key-A"
+
+    def work(on_progress: ProgressHook) -> None:
+        # DURING the lock-free run a peer writer (the REAL flock) acquires
+        # freely — the zero-write scan excludes nobody.
+        with pull_singleflight_lock(tmp_path):
+            peer_acquired["ok"] = True
+        on_progress("X", 1, False, False)
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lake_factory,
+        account_singleflight_factory=account_factory,
+        account_key_resolver=key_resolver,
+    )
+    assert job.start(work, total=1, cross_process_lock=False) is True
+    assert job.snapshot().state == STATE_DONE
+    assert peer_acquired == {"ok": True}
+    assert lake_calls == [] and account_calls == [] and resolver_calls == []
+    # A later DEFAULT start on the same job still takes the lock (per-run flag).
+    spy_ok = _SpyGuard()
+    job2 = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: spy_ok,
+        account_key_resolver=lambda: None,
+    )
+    assert job2.start(lambda _h: None, total=1, cross_process_lock=False) is True
+    assert spy_ok.entered == 0  # lock-free run: never consulted
+    assert job2.start(lambda _h: None, total=1) is True  # default → locked
+    assert spy_ok.entered == 1 and spy_ok.exited == 1
+
+
 def test_none_lake_root_disables_both_locks(tmp_path: Path) -> None:
     """A None lake root (dry-run/test) skips BOTH locks AND the key resolver."""
     resolver_calls: list[bool] = []

@@ -51,6 +51,16 @@ from brutex.models import BruteXError
 #: detectable on load rather than silently mis-parsed.
 CHECKPOINT_VERSION: Final[int] = 1
 
+#: Sanity cap on the checkpoint file size :meth:`SweepCheckpointStore.load`
+#: will read. A legitimate checkpoint is a ~150-byte JSON object; anything
+#: beyond this bound is corruption/tampering and is REFUSED with
+#: :class:`SweepCheckpointError` BEFORE the read — never an unbounded
+#: ``read_text`` (a multi-GiB planted file → ``MemoryError``) and never a
+#: parse of attacker-shaped bytes (a deeply-nested JSON array →
+#: ``RecursionError`` escaping every consumer's narrow domain-error catch,
+#: refuter-confirmed). 1 MiB leaves ~4 orders of magnitude of headroom.
+MAX_CHECKPOINT_BYTES: Final[int] = 1 << 20
+
 
 class SweepCheckpointError(BruteXError):
     """Raised on a malformed checkpoint payload or a checkpoint I/O failure."""
@@ -236,25 +246,60 @@ class SweepCheckpointStore:
         matching checkpoint, the in-memory high-water mark is adopted so
         subsequent :meth:`record` calls continue monotonically.
 
+        Every corruption class maps to :class:`SweepCheckpointError` — never a
+        raw parser/OS error that escapes a consumer's narrow domain-error
+        catch: an oversized file (> :data:`MAX_CHECKPOINT_BYTES`) is refused
+        BEFORE the read, a deeply-nested valid-JSON payload's
+        ``RecursionError`` is mapped alongside ``json.JSONDecodeError``, and a
+        SAME-``sweep_id`` checkpoint whose ``total_combos`` disagrees with
+        this store's is refused (a tampered/inflated total would otherwise
+        adopt a ``next_index`` past this store's real total — a silent
+        zero-work "complete"; the id derives from the same inputs as the
+        total, so a mismatch is corruption by construction).
+
         Raises
         ------
         SweepCheckpointError
-            If the file exists but is unreadable or malformed.
+            If the file exists but is unreadable, oversized, malformed, or
+            carries this ``sweep_id`` with a mismatched ``total_combos``.
         """
         if not self._path.exists():
             return None
+        try:
+            size = self._path.stat().st_size
+        except OSError as exc:
+            raise SweepCheckpointError(f"Failed to stat checkpoint {self._path}: {exc}") from exc
+        if size > MAX_CHECKPOINT_BYTES:
+            raise SweepCheckpointError(
+                f"Checkpoint {self._path} is {size} bytes — beyond the "
+                f"{MAX_CHECKPOINT_BYTES}-byte sanity cap for a small-JSON checkpoint; "
+                "refusing to read it (corruption/tampering)"
+            )
         try:
             raw = self._path.read_text(encoding="utf-8")
         except OSError as exc:
             raise SweepCheckpointError(f"Failed to read checkpoint {self._path}: {exc}") from exc
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
+            # RecursionError: a pathologically nested valid-JSON payload (e.g.
+            # 200k nested arrays fits well under the size cap) — parser-level
+            # corruption, same contract as malformed JSON (refuter-confirmed).
             raise SweepCheckpointError(f"Malformed checkpoint JSON at {self._path}: {exc}") from exc
         checkpoint = SweepCheckpoint.from_dict(data)
         if checkpoint.sweep_id != self._sweep_id:
             # A checkpoint from a different sweep — never resume from it.
             return None
+        if checkpoint.total_combos != self._total_combos:
+            # Same sweep_id but a DIFFERENT total: the id is derived from the
+            # same inputs as the total (grid identity / backfill plan), so this
+            # is corruption or tampering — refuse LOUDLY rather than adopting
+            # an index that could no-op the whole run as instantly "complete".
+            raise SweepCheckpointError(
+                f"Checkpoint {self._path} carries sweep_id {self._sweep_id!r} with "
+                f"total_combos={checkpoint.total_combos} but this store enumerates "
+                f"{self._total_combos} — corrupt/tampered; refusing to adopt it"
+            )
         self._last_index = checkpoint.last_completed_index
         return checkpoint
 
@@ -293,15 +338,21 @@ class SweepCheckpointStore:
 
         Tempfile in the destination directory → ``flush`` → ``fsync`` →
         ``os.replace``, so a crash mid-write never corrupts the resume point.
+        The parent-directory ``mkdir`` runs INSIDE the ``OSError`` →
+        :class:`SweepCheckpointError` mapping (refuter-confirmed: a stray
+        non-directory file at the checkpoint dir raised a raw
+        ``FileExistsError`` past every consumer's documented advisory
+        ``except SweepCheckpointError`` and aborted the whole run — every
+        checkpoint I/O failure must honour the domain-error contract).
 
         Raises
         ------
         SweepCheckpointError
-            If the write fails.
+            If creating the parent directory or writing the file fails.
         """
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps(checkpoint.to_dict(), sort_keys=True).encode("utf-8")
         try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(self._path, content)
         except OSError as exc:
             raise SweepCheckpointError(f"Failed to write checkpoint {self._path}: {exc}") from exc
@@ -330,6 +381,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 
 __all__ = [
     "CHECKPOINT_VERSION",
+    "MAX_CHECKPOINT_BYTES",
     "SweepCheckpoint",
     "SweepCheckpointError",
     "SweepCheckpointStore",

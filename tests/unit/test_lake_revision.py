@@ -14,9 +14,14 @@ the sweeps-tree component of DEC-RESULTS-SURFACE-HONESTY-001).
 * the NEW sweeps component (:func:`sweeps_revision`) changes when a results
   store lands in an EXISTING ``<sweeps>/<instrument>/<tf>/`` directory — the
   out-of-band CLI ``sweep-all`` write the #1069 ledger-only probe was blind to;
+* the Greeks-backfill marker component (DEC-GREEKS-BULK-REENRICH-001 fix
+  round 2) changes when a wet backfill touches
+  ``.greeks_backfill/revision.json`` — the out-of-band CLI ``greeks-backfill``
+  write the two-component probe was blind to (its literals are drift-pinned
+  against ``brutex.data.greeks_backfill``'s constants);
 * any non-missing-file :class:`OSError` (permissions, mid-scan fault) maps to
   ``None`` — "unknown, no signal" — never a raise, never a spurious
-  invalidation, for EITHER component.
+  invalidation, for ANY component.
 """
 
 # The drift-pin tests read module-private constants deliberately.
@@ -70,18 +75,19 @@ class TestLedgerComponent:
     """The window-ledger half of the composite (the #1069 behaviour, preserved)."""
 
     def test_absent_everything_returns_stable_composite_sentinel(self, tmp_path: Path) -> None:
-        """No ledger + no deltas + no sweeps tree → the stable all-absent composite."""
-        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        """No ledger + no deltas + no sweeps tree + no marker → the stable all-absent composite."""
+        all_absent = f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert lake_revision(tmp_path) == all_absent
         # Stable: a second probe of the same absent lake returns the SAME token
         # (the sentinel never oscillates a generation).
-        assert lake_revision(tmp_path) == f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert lake_revision(tmp_path) == all_absent
 
     def test_present_ledger_component_matches_stat(self, tmp_path: Path) -> None:
         """A present ledger contributes the exact ``"<mtime_ns>:<size>"`` component."""
         target = _write_ledger_bytes(tmp_path, b"v1")
         st = os.stat(target)
         assert lake_revision(tmp_path) == (
-            f"{st.st_mtime_ns}:{st.st_size}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+            f"{st.st_mtime_ns}:{st.st_size}+{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
         )
 
     def test_token_changes_after_a_ledger_write(self, tmp_path: Path) -> None:
@@ -94,7 +100,7 @@ class TestLedgerComponent:
         assert first is not None and second is not None
         assert second != first
         # And the absent→present transition also moved the token.
-        assert first != f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert first != f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
 
     def test_unreadable_ledger_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -358,3 +364,70 @@ class TestRateBridgeRevision:
         assert token is not None
         ledger_component = token.split("+", 1)[0]
         assert ledger_component == f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _write_greeks_marker(lake_root: Path, payload: bytes) -> Path:
+    """Write raw *payload* at the backfill freshness-marker path (stat-only stand-in)."""
+    target = lake_root / ".greeks_backfill" / "revision.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    return target
+
+
+class TestGreeksBackfillComponent:
+    """The Greeks-backfill marker component (DEC-GREEKS-BULK-REENRICH-001 fix round 2).
+
+    Refuter-confirmed: the bulk backfill rewrites option partitions WITHOUT
+    touching the window ledger, so a CLI ``brutex greeks-backfill`` never moved
+    the two-component token — a running dashboard's ``/movers`` kept serving
+    the pre-backfill iv/delta the backfill was run to fix.
+    """
+
+    def test_marker_write_moves_the_composite_without_a_ledger_touch(self, tmp_path: Path) -> None:
+        """The defect under test: a CLI backfill's marker touch MUST bump the token."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        first = lake_revision(tmp_path)
+        # A CLI greeks-backfill batch writes bars and touches the marker; the
+        # ledger and the sweeps tree are NOT touched.
+        _write_greeks_marker(tmp_path, b'{"backfill_id": "x", "bars_written": 3}')
+        second = lake_revision(tmp_path)
+        assert first is not None and second is not None
+        assert second != first
+        # Only the marker component moved — ledger + sweeps halves unchanged.
+        assert first.rsplit("|", 1)[0] == second.rsplit("|", 1)[0]
+        # A second batch's rewrite (different size) moves it again.
+        _write_greeks_marker(tmp_path, b'{"backfill_id": "x", "bars_written": 3000}')
+        third = lake_revision(tmp_path)
+        assert third is not None and third != second
+
+    def test_unreadable_marker_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError on the marker stat → ``None`` ("no signal")."""
+        _write_ledger_bytes(tmp_path, b"v1")
+        target = _write_greeks_marker(tmp_path, b"{}")
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(target):
+                raise PermissionError(13, "denied", str(target))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert lake_revision(tmp_path) is None
+
+    def test_marker_literals_pinned_to_the_backfill_constants(self) -> None:
+        """The not-imported dir/file literals cannot drift from the ONE definition.
+
+        ``lake_revision`` deliberately does NOT import ``greeks_backfill``
+        (that module pulls the greeks-enrich polars/trading_core-wheel import
+        graph; the probe must stay stdlib-lean) — this pin is the drift guard,
+        the ``_SWEEPS_DIRNAME`` precedent.
+        """
+        pytest.importorskip("trading_core", reason="greeks_backfill needs the wheel")
+        pytest.importorskip("polars", reason="greeks_backfill imports the enrich driver")
+        from brutex.dashboard import lake_revision as probe_mod
+        from brutex.data.greeks_backfill import CHECKPOINT_DIR_NAME, REVISION_MARKER_FILE_NAME
+
+        assert probe_mod._GREEKS_BACKFILL_DIRNAME == CHECKPOINT_DIR_NAME
+        assert probe_mod._GREEKS_REVISION_FILENAME == REVISION_MARKER_FILE_NAME

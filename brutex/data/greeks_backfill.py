@@ -60,6 +60,7 @@ REFERENCE_ONLY; spot INDEX partitions are never written.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -70,6 +71,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
@@ -97,6 +99,7 @@ __all__ = [
     "CHECKPOINT_DIR_NAME",
     "CHECKPOINT_FILE_NAME",
     "DEFAULT_BACKFILL_BATCH_SIZE",
+    "REVISION_MARKER_FILE_NAME",
     "BackfillPlan",
     "BackfillProgress",
     "BackfillScan",
@@ -106,6 +109,7 @@ __all__ = [
     "plan_greeks_backfill",
     "resolve_backfill_batch_size",
     "resolve_backfill_pause_s",
+    "revision_marker_path",
     "run_greeks_backfill",
     "scan_stale_greeks_targets",
 ]
@@ -130,6 +134,21 @@ CHECKPOINT_DIR_NAME: Final[str] = ".greeks_backfill"
 
 #: The checkpoint JSON file name inside :data:`CHECKPOINT_DIR_NAME`.
 CHECKPOINT_FILE_NAME: Final[str] = "checkpoint.json"
+
+#: The durable cross-process FRESHNESS marker inside :data:`CHECKPOINT_DIR_NAME`
+#: (DEC-GREEKS-BULK-REENRICH-001 fix round 2). The backfill rewrites option
+#: 1-minute partitions but never touches the window ledger, so the
+#: :func:`brutex.dashboard.lake_revision.lake_revision` token — which a running
+#: dashboard's SummaryCache probes for cross-process invalidation
+#: (DEC-HARDENING-LEFTOVERS-001) — never moved on a CLI ``brutex
+#: greeks-backfill``: ``/movers`` kept serving the PRE-backfill iv/delta the
+#: backfill was run to fix, until an unrelated pull or a restart. Every WET
+#: batch that wrote bars now touches this marker (atomic tmp→``os.replace``),
+#: and ``lake_revision`` folds one ``os.stat`` of it into the composite token —
+#: the dashboard sees the new Greeks on its next poll. The literals are
+#: duplicated in ``lake_revision`` (that module is deliberately lean
+#: stdlib-only — the ``_SWEEPS_DIRNAME`` precedent) and pinned equal by test.
+REVISION_MARKER_FILE_NAME: Final[str] = "revision.json"
 
 #: The one Greeks-bearing interval (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — derived
 #: TFs never carry the overlay and are deliberately never scanned.
@@ -300,6 +319,49 @@ class GreeksBackfillReport:
 def checkpoint_path(lake_root: Path) -> Path:
     """The durable checkpoint sidecar path under *lake_root* — pure, O(1)."""
     return lake_root / CHECKPOINT_DIR_NAME / CHECKPOINT_FILE_NAME
+
+
+def revision_marker_path(lake_root: Path) -> Path:
+    """The cross-process freshness marker path under *lake_root* — pure, O(1).
+
+    See :data:`REVISION_MARKER_FILE_NAME` for why the marker exists (the
+    lake-revision component a running dashboard probes so a CLI backfill's
+    freshly-written Greeks overlay is served without a restart).
+    """
+    return lake_root / CHECKPOINT_DIR_NAME / REVISION_MARKER_FILE_NAME
+
+
+def _touch_revision_marker(lake_root: Path, *, backfill_id: str, bars_written: int) -> None:
+    """Move the cross-process lake-revision token after a bar-writing batch.
+
+    Writes a tiny JSON marker (atomic tmp→``fsync``→``os.replace`` via the
+    COMMON :func:`~brutex.data.atomic_io.atomic_write_simple`) whose
+    ``mtime``/size :func:`brutex.dashboard.lake_revision.lake_revision` stats
+    into its composite token, so a running dashboard's generation-keyed caches
+    (``/movers`` iv/delta overlays, ``/db`` totals, …) recompute on the next
+    poll instead of serving the pre-backfill Greeks until an unrelated pull or
+    a restart (Golden Rule #1). BEST-EFFORT — an :class:`OSError` (including a
+    stray non-directory file at the sidecar dir) logs ONE
+    ``greeks_backfill.revision_marker_failed`` warning and never affects the
+    run: the marker is a freshness signal, never data (the dashboard-run
+    backfill also bumps in-process via ``mark_dirty``; a lost marker there
+    costs nothing, and on the CLI it degrades to the pre-fix staleness window,
+    never a wrong value). O(1) per batch.
+    """
+    dest = revision_marker_path(lake_root)
+    payload = json.dumps(
+        {"backfill_id": backfill_id, "bars_written": bars_written, "updated_at": time.time()},
+        sort_keys=True,
+    ).encode("utf-8")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(dest, lambda tmp: tmp.write_bytes(payload))
+    except OSError as exc:
+        _LOG.warning(
+            "greeks_backfill.revision_marker_failed",
+            path=str(dest),
+            error=str(exc),
+        )
 
 
 def resolve_backfill_batch_size(env: Mapping[str, str] | None = None) -> int:
@@ -523,11 +585,15 @@ def scan_stale_greeks_targets(
 
     LIVENESS (DEC-PIPELINE-STALL-HEARTBEAT-001): one
     :func:`~brutex.observability.progress_beat.emit_progress_beat` fires per
-    considered contract AND per probed month file, so a long scan on the
-    dashboard job thread keeps the 600 s pull stall watchdog fed instead of
-    false-tripping a CRITICAL "pull halted" alert on a healthy backfill (the
-    beat is a documented no-op outside a dashboard job — the CLI path is
-    unaffected).
+    considered contract AND per probed month file, AND — fix round 2 — per
+    walked symbol directory inside the ENUMERATION phase's manifest-miss
+    O(files) tree walk (``db_view._walk_candle_datasets``, which fully
+    materialises BEFORE the first per-contract beat and measured 29.7 minutes
+    on the production 2.36M-file lake — ~3× the watchdog timeout), so a long
+    scan on the dashboard job thread keeps the 600 s pull stall watchdog fed
+    through EVERY phase instead of false-tripping a CRITICAL "pull halted"
+    alert on a healthy backfill (the beat is a documented no-op outside a
+    dashboard job — the CLI path is unaffected).
 
     READ-only in lake-DATA terms — the scan never touches ``bars/`` /
     ``options/`` / the checkpoint. HONEST side-effect note: the manifest-first
@@ -827,7 +893,13 @@ def run_greeks_backfill(
     documented deviation from the lake writers' ``atomic_write_via`` rule: the
     sidecar is advisory, while a REAL lake ENOSPC still halts through the
     driver's ``LakeWriteHalt``). On completion the checkpoint file is DELETED —
-    the stamps are the durable done-record.
+    the stamps are the durable done-record. Every batch that WROTE bars also
+    touches the durable :func:`revision_marker_path` freshness marker
+    (best-effort) so a running dashboard's cross-process
+    ``lake_revision`` probe invalidates its generation-keyed caches — a CLI
+    backfill's new Greeks reach ``/movers`` on the next poll, no restart
+    (fix round 2; the backfill never touches the window ledger, so the marker
+    is its ONLY revision signal).
 
     Parameters
     ----------
@@ -922,6 +994,13 @@ def run_greeks_backfill(
                 path=str(store.path),
                 error=str(exc),
                 completed=completed,
+            )
+        if report.bars_written > 0:
+            # This batch WROTE overlay bars: move the cross-process freshness
+            # marker so a concurrently-running dashboard's revision probe sees
+            # the write on its next poll (best-effort — see the helper).
+            _touch_revision_marker(
+                lake_root, backfill_id=plan.backfill_id, bars_written=tallies.bars_written
             )
         _LOG.info(
             "greeks_backfill.batch_done",

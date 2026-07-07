@@ -19,6 +19,7 @@ round-trips in ``tests/integration/test_greeks_bulk_reenrich.py``.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -34,6 +35,7 @@ from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_backfill import (
     BACKFILL_BATCH_ENV,
     BACKFILL_PAUSE_ENV,
+    CHECKPOINT_DIR_NAME,
     DEFAULT_BACKFILL_BATCH_SIZE,
     BackfillPlan,
     BackfillScan,
@@ -44,6 +46,7 @@ from brutex.data.greeks_backfill import (
     plan_greeks_backfill,
     resolve_backfill_batch_size,
     resolve_backfill_pause_s,
+    revision_marker_path,
     run_greeks_backfill,
     scan_stale_greeks_targets,
 )
@@ -340,8 +343,12 @@ class TestScanner:
         finally:
             unregister_progress_beat()
         assert scan.files_probed == 3
-        # ≥ one beat per considered contract (2) + one per probed month file (3).
-        assert len(beats) >= 2 + scan.files_probed
+        # ≥ one beat per ENUMERATED symbol dir (2 — the manifest-absent walk
+        # fallback, fix round 2: enumeration fully materialises BEFORE the
+        # first per-contract beat and was the beat-less 29.7-minute segment on
+        # the production lake) + one per considered contract (2) + one per
+        # probed month file (3).
+        assert len(beats) >= 2 + 2 + scan.files_probed
 
     def test_force_scan_still_beats_per_contract(self, lake: Path) -> None:
         """force skips the probe (no per-file beats) — the per-contract beat covers it."""
@@ -683,6 +690,153 @@ class TestRunner:
         assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
         # Clean completion deletes the sidecar — the poison never wedges twice.
         assert not checkpoint_path(lake).exists()
+
+    def test_recursion_bomb_checkpoint_is_ignored_loudly_never_a_crash(self, lake: Path) -> None:
+        """A deeply-nested valid-JSON checkpoint takes the LOUD fresh-start path.
+
+        Refuter repro (fix round 2): ``json.loads`` raised ``RecursionError``
+        — neither ``JSONDecodeError`` nor ``SweepCheckpointError`` — escaping
+        the runner's advisory catch and crashing EVERY wet run until the
+        operator deleted the file.
+        """
+        depth = 200_000
+        path = checkpoint_path(lake)
+        path.parent.mkdir(parents=True)
+        path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=_plan(1), rate_source=_RATE, batch_size=1, enrich=_SpyEnrich()
+            )
+        assert report.resumed_from == 0 and report.batches == 1
+        assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+        assert not checkpoint_path(lake).exists()  # clean completion deletes the poison
+
+    def test_tampered_inflated_checkpoint_never_zero_batches(self, lake: Path) -> None:
+        """A same-``backfill_id`` checkpoint with an inflated total is REFUSED.
+
+        Refuter repro (fix round 2): the store validated the index only against
+        the FILE's own total, so a tampered ``total_combos=10000 /
+        last_completed_index=9999`` adopted ``next_index=10000`` — the run
+        silently zero-batched "complete" and DELETED the checkpoint.
+        """
+        plan = _plan(3)
+        path = checkpoint_path(lake)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "sweep_id": plan.backfill_id,
+                    "total_combos": 10_000,
+                    "last_completed_index": 9_999,
+                    "updated_at": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        spy = _SpyEnrich()
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=spy
+            )
+        assert report.resumed_from == 0 and report.batches == 2  # every target enriched
+        assert [len(c) for c in spy.calls] == [2, 1]
+        assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+
+    def test_stray_file_at_the_checkpoint_dir_logs_and_continues(self, lake: Path) -> None:
+        """A stray FILE at ``.greeks_backfill`` never aborts the wet run.
+
+        Refuter repro (fix round 2): ``save()``'s parent ``mkdir`` ran outside
+        the OSError → SweepCheckpointError mapping, so the ``FileExistsError``
+        escaped the runner's documented "advisory — log + continue" catch and
+        aborted the whole backfill after batch 1's real work — persistently,
+        on every re-run.
+        """
+        (lake / CHECKPOINT_DIR_NAME).write_text("not a directory", encoding="utf-8")
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=_plan(2), rate_source=_RATE, batch_size=1, enrich=_SpyEnrich()
+            )
+        assert report.batches == 2  # checkpoint loss ≠ halt (the documented contract)
+        assert sum(1 for r in logs if r["event"] == "greeks_backfill.checkpoint_failed") == 2
+        # The best-effort freshness marker shares the sidecar dir: same posture.
+        assert sum(1 for r in logs if r["event"] == "greeks_backfill.revision_marker_failed") == 2
+
+    def test_wet_report_carries_the_scan_census(self, lake: Path) -> None:
+        """The wet report's ``stale_*``/``probe_failed`` carry the PLAN's census.
+
+        Refuter-confirmed test-blindness (fix round 2): four mutants zeroing
+        the census carry survived all 123 backfill tests — the operator-facing
+        ``greeks_backfill.done`` log would have reported ``probe_failed=0`` on
+        a lake with unreadable files (Golden Rule #1).
+        """
+        scan = BackfillScan(
+            targets=_targets(2),
+            stale_null=3,
+            stale_v1=5,
+            stale_inputs_drift=7,
+            current=1,
+            probe_failed=11,
+            files_probed=9,
+        )
+        plan = plan_greeks_backfill(scan, rate_source=_RATE, force=False, expired_only=False)
+        report = run_greeks_backfill(
+            lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=_SpyEnrich()
+        )
+        assert report.stale_null == 3
+        assert report.stale_v1 == 5
+        assert report.stale_inputs_drift == 7
+        assert report.probe_failed == 11
+        payload = report.to_dict()
+        assert payload["stale_null"] == 3 and payload["stale_v1"] == 5
+        assert payload["stale_inputs_drift"] == 7 and payload["probe_failed"] == 11
+
+    def test_bar_writing_run_touches_the_marker_and_moves_the_lake_revision_token(
+        self, lake: Path
+    ) -> None:
+        """A wet bar-writing batch moves the cross-process freshness token.
+
+        Refuter-confirmed (fix round 2): the backfill never touches the window
+        ledger, so a CLI run was INVISIBLE to a running dashboard's
+        generation-keyed caches — ``/movers`` kept serving the pre-backfill
+        iv/delta until an unrelated pull or a restart.
+        """
+        from brutex.dashboard.lake_revision import lake_revision
+
+        before = lake_revision(lake)
+        report = run_greeks_backfill(
+            lake, plan=_plan(2), rate_source=_RATE, batch_size=1, enrich=_SpyEnrich()
+        )
+        assert report.bars_written > 0
+        marker = revision_marker_path(lake)
+        assert marker.exists()
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        assert payload["backfill_id"] == report.backfill_id
+        assert payload["bars_written"] == report.bars_written
+        after = lake_revision(lake)
+        assert before is not None and after is not None
+        assert after != before  # the dashboard probe sees the write on its next poll
+
+    def test_zero_write_run_leaves_the_revision_marker_untouched(self, lake: Path) -> None:
+        """An all-reused (zero bars written) batch fabricates NO freshness signal."""
+        spy = _SpyEnrich(
+            reports=[
+                _enrich_report(
+                    enriched=0, already_current=1, bars_written=0, bars_solved=0, bars_reused=3
+                )
+            ]
+        )
+        report = run_greeks_backfill(
+            lake, plan=_plan(1), rate_source=_RATE, batch_size=1, enrich=spy
+        )
+        assert report.bars_written == 0
+        assert not revision_marker_path(lake).exists()
 
     def test_record_failure_logs_and_continues(self, lake: Path) -> None:
         class _BoomStore(SweepCheckpointStore):

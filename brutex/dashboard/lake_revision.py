@@ -13,7 +13,7 @@ mapping, the ``/results`` sweep leaderboard) served pre-CLI-write data until a
 dashboard restart.
 
 This module supplies the missing cross-process signal as ONE composite content
-token with two components:
+token with three components:
 
 * the **window-ledger** component — ``os.stat`` of the durable window-ledger
   Parquet (``<lake_root>/window_ledger/ledger.parquet``). Every production pull
@@ -29,6 +29,17 @@ token with two components:
   results-store flush is a tempfile + ``os.replace`` into its
   ``<instrument>/<tf>/`` directory, which moves that directory's mtime — the
   digest sees it on the next poll.
+* the **Greeks-backfill marker** component — ``os.stat`` of
+  ``<lake_root>/.greeks_backfill/revision.json``
+  (DEC-GREEKS-BULK-REENRICH-001 fix round 2). The bulk Greeks backfill is a
+  sanctioned production lake WRITER (it rewrites option 1-minute partitions'
+  iv/delta overlay latest-wins) that never touches the window ledger, so —
+  exactly the CLI-``fetch``/CLI-``sweep-all`` staleness class the first two
+  components closed — a CLI ``brutex greeks-backfill`` never moved the token
+  and a running dashboard's ``/movers`` kept serving the PRE-backfill
+  iv/delta the backfill was run to fix, until an unrelated pull or a restart.
+  Every wet backfill batch that writes bars touches the marker (atomic
+  ``os.replace``), moving this component on the next poll.
 
 :class:`~brutex.dashboard.summary_cache.SummaryCache` polls the composite token
 via its ``revision_probe`` seam and bumps its generation when the token changes,
@@ -38,8 +49,11 @@ Honest envelope (Golden Rule #10 — stated, not hidden)
 ------------------------------------------------------
 * The ledger component moves ONLY when a writer touches the window ledger. **All
   production pulls do** (the per-window checkpoint of
-  DEC-CLI-LEDGER-CHECKPOINT-001 plus the end-of-pull save). An out-of-band raw
-  bar-Parquet write that BYPASSES the ledger (e.g. hand-copying a partition file
+  DEC-CLI-LEDGER-CHECKPOINT-001 plus the end-of-pull save); the ONE sanctioned
+  production writer that does NOT — the bulk Greeks backfill — carries its own
+  marker component above. An out-of-band raw
+  bar-Parquet write that BYPASSES both the ledger and the marker (e.g.
+  hand-copying a partition file
   into ``bars/``) is **NOT detected** — explicitly out of scope; detecting it
   would need an O(files) tree walk per probe (not fabricated as O(1)) or the
   write-time lake manifest already named as future work (#867/#1025).
@@ -84,6 +98,14 @@ ABSENT_TOKEN: Final[str] = "absent"  # noqa: S105  # nosec B105 — a freshness 
 #: can call on every generation read (the ``trial_stats._TUPLE_DIGEST_LEN``
 #: precedent).
 _SWEEPS_DIRNAME: Final[str] = "sweeps"
+
+#: The Greeks-backfill sidecar dir + freshness-marker filename. MUST equal
+#: ``brutex.data.greeks_backfill.CHECKPOINT_DIR_NAME`` /
+#: ``…REVISION_MARKER_FILE_NAME`` — pinned by test, not imported: that module
+#: pulls the greeks-enrich (polars/trading_core-wheel) import graph, and this
+#: probe must stay lean stdlib-only (the ``_SWEEPS_DIRNAME`` precedent).
+_GREEKS_BACKFILL_DIRNAME: Final[str] = ".greeks_backfill"
+_GREEKS_REVISION_FILENAME: Final[str] = "revision.json"
 
 
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
@@ -251,28 +273,48 @@ def rate_bridge_revision(lake_root: Path) -> str | None:
     )
 
 
+def _greeks_backfill_revision(lake_root: Path) -> str | None:
+    """The Greeks-backfill marker component: one ``os.stat`` of the marker file.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2 — the marker
+    (``<lake_root>/.greeks_backfill/revision.json``) is touched by every wet
+    backfill batch that writes overlay bars, so a CLI ``brutex
+    greeks-backfill`` moves the composite token and a running dashboard's
+    generation-keyed caches recompute (the backfill never checkpoints the
+    window ledger, making this its ONLY cross-process revision signal).
+    Returns :data:`ABSENT_TOKEN` when no backfill has ever written (the
+    common case), ``None`` (logged) on any other :class:`OSError`.
+    """
+    return _stat_token(
+        lake_root / _GREEKS_BACKFILL_DIRNAME / _GREEKS_REVISION_FILENAME,
+        event="lake_revision.greeks_marker_stat_failed",
+    )
+
+
 def lake_revision(lake_root: Path) -> str | None:
     """Return the composite O(1)/O(dirs) content token for *lake_root*, or ``None``.
 
-    The token is ``"<ledger component>|<sweeps component>"`` — the window-ledger
-    stat token (every production PULL moves it,
-    DEC-CLI-LEDGER-CHECKPOINT-001) joined with the sweeps-tree directory digest
-    (every results-store flush moves it, DEC-RESULTS-SURFACE-HONESTY-001) — so a
-    bar pull OR a sweep write from ANY process changes the composite. A
-    component that does not exist yet contributes the stable
-    :data:`ABSENT_TOKEN` sentinel (its creation moves the composite exactly
-    once).
+    The token is ``"<ledger component>|<sweeps component>|<greeks-backfill
+    component>"`` — the window-ledger stat token (every production PULL moves
+    it, DEC-CLI-LEDGER-CHECKPOINT-001) joined with the sweeps-tree directory
+    digest (every results-store flush moves it,
+    DEC-RESULTS-SURFACE-HONESTY-001) and the Greeks-backfill freshness-marker
+    stat token (every bar-writing backfill batch moves it,
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2) — so a bar pull, a sweep write,
+    OR a Greeks backfill from ANY process changes the composite. A component
+    that does not exist yet contributes the stable :data:`ABSENT_TOKEN`
+    sentinel (its creation moves the composite exactly once).
 
     Parameters
     ----------
     lake_root
         Top-level lake directory (the parent of ``bars/`` / ``window_ledger/``
-        / ``sweeps/``).
+        / ``sweeps/`` / ``.greeks_backfill/``).
 
     Returns
     -------
     str | None
-        The composite token, or ``None`` — "unknown, no signal" — when EITHER
+        The composite token, or ``None`` — "unknown, no signal" — when ANY
         component probe failed with a non-missing-file :class:`OSError`
         (logged inside the component). ``None`` tells the caller to make NO
         freshness decision (never a spurious invalidation, never a masked
@@ -284,7 +326,10 @@ def lake_revision(lake_root: Path) -> str | None:
     sweeps = sweeps_revision(lake_root)
     if sweeps is None:
         return None
-    return f"{ledger}|{sweeps}"
+    greeks = _greeks_backfill_revision(lake_root)
+    if greeks is None:
+        return None
+    return f"{ledger}|{sweeps}|{greeks}"
 
 
 __all__ = ["ABSENT_TOKEN", "lake_revision", "rate_bridge_revision", "sweeps_revision"]

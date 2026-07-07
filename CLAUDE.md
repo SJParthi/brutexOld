@@ -35,8 +35,10 @@ batches with a DURABLE advisory checkpoint (`SweepCheckpointStore` reused
 verbatim at `<lake>/.greeks_backfill/checkpoint.json`; crash → resume; deleted
 on completion — the stamps are the durable done-record). Surfaces: `POST
 /api/v1/universe/greeks-backfill` (+ O(1) progress route, a dedicated
-`BackgroundPullJob` — account lock skipped, lake-root single-flight KEPT so a
-backfill and a pull on the same lake serialise) + a `universe.html` panel
+`BackgroundPullJob` — account lock skipped, lake-root single-flight KEPT for
+the WET run so a backfill and a pull on the same lake serialise — since fix
+round 2 keyed on the STORE-derived WRITE root, and a dry-run start is
+lock-free) + a `universe.html` panel
 (textContent-only), and `brutex greeks-backfill` with a FULLY INERT
 `--dry-run` (zero writes / checkpoint / Telegram — whole-tree sha-pinned; the
 one documented read side effect is the shared `.manifest/` cache self-heal);
@@ -57,10 +59,29 @@ alert on a deep-lake backfill); `force`+`limit` REFUSED at scanner/CLI/route
 valid-JSON non-object payload as `SweepCheckpointError` (never a wedging
 `AttributeError`); a schema-poisoned stamp column + an out-of-range month
 filename fold into `probe_failed`/skip instead of crashing the scan; the
-`expired_only` expiry==today boundary regression-pinned. ENGINE
+`expired_only` expiry==today boundary regression-pinned.
+FIX ROUND 2 folded (refuter-majority-confirmed, MIGRATION.md #1482): BOTH
+dashboard jobs' cross-process flock re-keyed onto the STORE-derived WRITE
+root (`app._job_lake_root_resolver` — a `--lake-root X`/env-divergent launch
+no longer yields disjoint lock files that let a CLI backfill race a dashboard
+writer on the SAME lake); the dashboard DRY-RUN backfill skips the lake lock
+(`BackgroundPullJob.start(cross_process_lock=False)` — the CLI posture, a
+zero-write scan never refuses a real pull); the manifest-miss enumeration
+WALK (`db_view._walk_candle_datasets`) beats the stall watchdog per symbol
+dir (round 1's beats covered the probe only — honesty-corrected in the
+ledger); `SweepCheckpointStore` maps EVERY corruption class to
+`SweepCheckpointError` (1 MiB size cap pre-read, `RecursionError` nesting
+bomb, same-id `total_combos` mismatch refused, parent-mkdir inside the
+mapping — a stray file at `.greeks_backfill` logs + continues per the
+advisory contract); every bar-writing wet batch touches
+`<lake>/.greeks_backfill/revision.json` and `lake_revision` stats it as a
+THIRD component, so a CLI backfill's Greeks reach a running dashboard's
+caches on the next poll; the wet report's scan-census carry gains killing
+tests. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
-ALL 100% line+branch; every touched `cli.py`/`app.py` line+branch covered).
++ `pull_jobs.py`/`lake_revision.py` ALL 100% line+branch; every touched
+`cli.py`/`app.py`/`db_view.py` line+branch covered).
 Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide

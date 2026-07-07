@@ -266,6 +266,121 @@ class TestPostTrigger:
         assert emitted == []  # no completion summary on a halted run
 
 
+@pytest.fixture
+def divergent_env_client(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[tuple[TestClient, Path, Path]]:
+    """A client launched with ``$BRUTEX_LAKE_ROOT`` pointing AWAY from the write root.
+
+    The documented ``brutex dashboard --lake-root X`` shape: the wired store
+    lives at ``tmp_path/instruments.duckdb`` (write root = ``tmp_path``) while
+    the env resolves a DIFFERENT directory — the deployment in which the old
+    default flock silently guarded the wrong lake (fix round 2).
+    """
+    env_root = tmp_path / "elsewhere-env-root"
+    env_root.mkdir()
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(env_root))
+    with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+        yield c, tmp_path, env_root
+
+
+class TestFlockRootAlignment:
+    """The jobs' cross-process flock is keyed on the store-derived WRITE root.
+
+    Refuter-confirmed MAJOR (DEC-GREEKS-BULK-REENRICH-001 fix round 2): the
+    jobs flocked ``resolve_lake_root()`` ($BRUTEX_LAKE_ROOT → ~/.brutex/lake)
+    while their ``_work`` bodies wrote the store's parent, so a ``brutex
+    dashboard --lake-root /data/lake`` launch (env unset/divergent) yielded
+    DISJOINT lock files: a CLI ``greeks-backfill``/``fetch`` on the same lake
+    never contended — re-opening the stale-read → latest-wins NO_SPOT-NULL
+    clobber the lock exists to prevent (the backfill has no account-lock
+    second belt). The dry-run posture is the CLI twin's: lock-free.
+    """
+
+    def test_wet_refused_while_the_write_root_lock_is_held(
+        self, divergent_env_client: tuple[TestClient, Path, Path]
+    ) -> None:
+        """A peer flock on the WRITE root (the CLI's key) refuses the wet backfill."""
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        client, write_root, _env_root = divergent_env_client
+        with pull_singleflight_lock(write_root):  # a CLI pull/backfill on the SAME lake
+            resp = client.post("/api/v1/universe/greeks-backfill")
+            assert resp.status_code == 200
+            assert resp.json()["started"] is False  # mutual exclusion HOLDS
+
+    def test_wet_not_refused_by_a_stale_env_root_lock(
+        self,
+        divergent_env_client: tuple[TestClient, Path, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The env-root lock (the OLD, wrong key) no longer gates the backfill."""
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        client, _write_root, env_root = divergent_env_client
+        _patch_pipeline(monkeypatch, {}, run_result=_report())
+        with pull_singleflight_lock(env_root):  # a lock on the UNRELATED env root
+            resp = client.post("/api/v1/universe/greeks-backfill")
+            body = resp.json()
+            assert body["started"] is True
+            assert "one lake-writer job at a time" in body["note"]
+            assert _wait_for_backfill(client)["state"] == "done"
+
+    def test_dry_run_takes_no_lake_lock_while_a_writer_holds_the_write_root(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A zero-write dry-run starts DESPITE a held write-root lock (CLI posture).
+
+        Refuter-confirmed MINOR: the dashboard dry-run used to hold the
+        lake-root flock for its whole O(files) scan, refusing real pulls —
+        while the CLI ``--dry-run`` twin is deliberately lock-free.
+        """
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        _patch_pipeline(monkeypatch, {}, run_result=_report())
+        with pull_singleflight_lock(tmp_path):  # a REAL pull holds the write root
+            resp = client.post("/api/v1/universe/greeks-backfill", params={"dry_run": "true"})
+            body = resp.json()
+            assert body["started"] is True  # zero writes — never excluded, never excluding
+            assert "dry-run takes no lake lock" in body["note"]
+            assert _wait_for_backfill(client)["state"] == "done"
+
+    def test_both_jobs_flock_the_store_derived_write_root(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """BOTH background jobs (pull + backfill) key their flock on the write root."""
+        from brutex.dashboard.pull_jobs import BackgroundPullJob
+
+        env_root = tmp_path / "elsewhere-env-root"
+        monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(env_root))
+        created: list[dict[str, Any]] = []
+
+        class _Recording(BackgroundPullJob):
+            def __init__(self, **kwargs: Any) -> None:
+                created.append(dict(kwargs))
+                super().__init__(**kwargs)
+
+        monkeypatch.setattr(app_module, "BackgroundPullJob", _Recording)
+        build_app(DashboardState(), instrument_store=store)
+        assert len(created) == 2  # the pull job + the backfill job
+        for kwargs in created:
+            resolver = kwargs["lake_root_resolver"]
+            assert resolver() == tmp_path  # the store's parent — the WRITE root
+
+    def test_job_lake_root_resolver_falls_back_to_env_without_a_store(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No path-carrying store → the COMMON env resolver (byte-identical legacy)."""
+        env_root = tmp_path / "env-root"
+        monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(env_root))
+        assert app_module._job_lake_root_resolver(None)() == env_root
+
+        class _PathlessStore:
+            path = "not-a-Path"
+
+        assert app_module._job_lake_root_resolver(_PathlessStore())() == env_root
+
+
 class TestProgressRoute:
     def test_idle_snapshot_shape(self, client: TestClient) -> None:
         snap = client.get("/api/v1/universe/greeks-backfill-progress").json()
