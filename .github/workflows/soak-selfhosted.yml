@@ -307,6 +307,19 @@ jobs:
           required_kib=$((DURATION_S * 410))
           required_kib=$((required_kib + required_kib / 4 + 2097152))
           free_kib=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          # Digits fence (SOAK-R10-1 — the SEC7-1 class, same COMMON pattern
+          # as the plan job's soak_minutes fence): without pipefail a failing
+          # `df` (or an awk row shape yielding empty/non-numeric $4) leaves
+          # free_kib empty, and `[ "" -lt N ]` errors with status 2 — which an
+          # `if` swallows as FALSE, silently PASSING the preflight and
+          # reverting to the burn-hours-then-ENOSPC shape SOAK-R9-3 closed.
+          # Refuse LOUDLY instead of comparing garbage.
+          case "$free_kib" in
+            ''|*[!0-9]*)
+              echo "::error::Disk preflight could not read free space under \$RUNNER_TEMP (df/awk yielded '$free_kib') — refusing to launch a multi-hour soak blind (SOAK-R9-3/SOAK-R10-1)." >&2
+              exit 1
+              ;;
+          esac
           echo "Disk preflight: need ~${required_kib} KiB under \$RUNNER_TEMP, free ${free_kib} KiB"
           if [ "$free_kib" -lt "$required_kib" ]; then
             echo "::error::Insufficient disk for this soak: ~${required_kib} KiB required under \$RUNNER_TEMP (the fsync'd audit JSONL grows ~1.5 GiB per soak-hour) but only ${free_kib} KiB free. Free up space or dispatch a shorter soak_minutes (SOAK-R9-3)." >&2
