@@ -4316,6 +4316,17 @@ def cmd_sweep(
         )
         return EXIT_USER_ERROR
     try:
+        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): `brutex
+        # sweep` renders a TEXT leaderboard and persists nothing — the report
+        # bytes are regression-pinned IDENTICAL stamped-vs-unstamped
+        # (test_engine_vix_stamper_wiring: the report surface carries no VIX
+        # column), so a stamp here is provably unobservable and a stamper
+        # build would be pure wasted lake I/O. The stream is EXPLICITLY
+        # unstamped via this literal (an enumerated sanctioned literal-None
+        # site, AST-pinned by tests/unit/test_vix_stamper_binding_pin.py —
+        # this call previously OMITTED the kwarg, the silent-omission class
+        # the pin now polices). REVERT LEVER: bind a build_vix_stamper(...)
+        # here if the report ever grows a VIX surface.
         report = sweep_report(
             bars,
             instrument=symbol,
@@ -4331,6 +4342,7 @@ def cmd_sweep(
             sort_by=sort_by,
             validate_oos=validate_oos,
             oos_only=oos_only,
+            reference_stamper=None,
         )
     except ValueError as exc:
         # Honest user errors (over-cap sweep, bad k, --oos-only on a < 2-day window)
@@ -6489,7 +6501,6 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     start: str,
     end: str,
     expiry_kind: Any,
-    reference_stamper: Any = None,
 ) -> list[Any]:
     """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
 
@@ -6546,15 +6557,27 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         return []
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
-    # The CLI-replay bind (DEC-VIX-STAMP-WIRE-001): the replayed round-trips
-    # feed the OBSERVABLE options-sim leaderboard, so the caller's stamper
-    # rides here (None-degrade on a VIX-less lake).
+    # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
+    # replayed trades exist ONLY to become SpotSignals — the very next call,
+    # signals_from_spot_trades, reads entry_ts/exit_ts/direction and NOTHING
+    # else (SpotSignal carries no VIX field; _render_options_leaderboard
+    # renders no VIX column), so a stamp here is DISCARDED at conversion and
+    # can never reach any output. The Stage-B bind at this site was
+    # provably-dead work costing a full window-bounded VIX lake read per
+    # invocation (misdescribed as feeding an "OBSERVABLE leaderboard") — the
+    # stream is therefore EXPLICITLY unstamped via this literal (one of the
+    # enumerated sanctioned literal-None seam bindings, AST-pinned with
+    # exact counts by tests/unit/test_vix_stamper_binding_pin.py). REVERT
+    # LEVER: to surface VIX on the options-sim output, re-thread a stamper
+    # kwarg here + bind builds at cmd_options_sim /
+    # _maybe_run_options_sim_on_winners — a conscious follow-up that ALSO
+    # needs a VIX field on SpotSignal + a leaderboard column.
     trades = simulate_trades(
         bars,
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
-        reference_stamper=reference_stamper,
+        reference_stamper=None,
     )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
     # is LAST-wins on a duplicated timestamp — the COMMON gate keeps the first
@@ -6629,7 +6652,6 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
     expiry: str,
     broker: str,
     audit_path: Path,
-    reference_stamper: Any = None,
 ) -> tuple[Any, ...]:
     """Replay a winning spot run into priced per-rule options results + audit."""
     from brutex.options.executor import ExpiryKind, execute_options_sim
@@ -6645,7 +6667,6 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
         start=start,
         end=end,
         expiry_kind=expiry_kind,
-        reference_stamper=reference_stamper,
     )
     source = _LakeOptionBarSource(lake_root=lake_root)
     with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
@@ -6696,16 +6717,10 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
-    # The manual replay binds the window-bounded India-VIX stamper
-    # (DEC-VIX-STAMP-WIRE-001; None-degrade on a VIX-less lake).
-    from brutex.engine.reference_wire import build_vix_stamper
-
-    reference_stamper = build_vix_stamper(
-        lake_root=resolved_lake,
-        start=_parse_dt(start),
-        end=_parse_dt(end),
-        catalog_path=catalog,
-    )
+    # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
+    # replay's stamps were provably discarded at the SpotSignal conversion —
+    # see the sanctioned literal-None site in _replay_spot_signals_for_row —
+    # so the Stage-B build here paid a full VIX lake read for zero output.
     results = _options_sim_for_row(
         row,
         lake_root=resolved_lake,
@@ -6717,7 +6732,6 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         expiry=expiry,
         broker=broker,
         audit_path=audit_path,
-        reference_stamper=reference_stamper,
     )
     total_signals = results[0].n_signals if results else 0
     if total_signals == 0:
@@ -6764,16 +6778,11 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
         return
     winners = store.top_k(top, by="net_pnl_paisa")
     print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
-    # ONE stamper for every winner's replay (DEC-VIX-STAMP-WIRE-001; the VIX
-    # lake is read at most once per auto-hook, None-degrade when absent).
-    from brutex.engine.reference_wire import build_vix_stamper
-
-    reference_stamper = build_vix_stamper(
-        lake_root=lake_root,
-        start=_parse_dt(start),
-        end=_parse_dt(end),
-        catalog_path=catalog_path,
-    )
+    # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
+    # Stage-B build at this hook was a SECOND full VIX lake read per
+    # sweep-all --options-sim launch (the launch stamper was already built,
+    # and it even ran for ZERO winners) whose stamps were then discarded at
+    # the SpotSignal conversion — see _replay_spot_signals_for_row.
     for row in winners:
         audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
         try:
@@ -6788,7 +6797,6 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
                 expiry=expiry,
                 broker=broker,
                 audit_path=audit_path,
-                reference_stamper=reference_stamper,
             )
         except (ValueError, KeyError, OSError) as exc:
             print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
