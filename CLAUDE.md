@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
-MIGRATION.md #1535 — the `/movers` SPOT "Top Value" (turnover) is now
+MIGRATION.md #1536 — the `/movers` SPOT "Top Value" (turnover) is now
 TIMEFRAME-INVARIANT: it is re-sourced from the RAW 1-minute session frame
 (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, exactly
 mirroring the already-TF-invariant futures/options `_read_future_session`,
@@ -53,6 +53,11 @@ shows ONLY `movers_snapshot.py` in source; the F&O suites re-run UNMODIFIED
 green). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; READ-ONLY dashboard ranking;
 no lake/schema/scope/vocab/rate change; touched module 100% line+branch;
 ruff/ruff-format/`mypy --strict`/pyright clean.)
+Earlier: 2026-07-07 (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 —
+the `/movers` Spot default as-of TIME resolves to the SAME latest available
+minute across EVERY timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the
+identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX).
 Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
 the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
 on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
@@ -734,7 +739,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/eloquent-shannon-bdjnuv` (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1535**
+- **Active branch:** `claude/eloquent-shannon-bdjnuv` (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1536**
   — the `/movers` SPOT "Top Value" (turnover) is now TIMEFRAME-INVARIANT: re-sourced from the RAW 1-minute session
   frame (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, mirroring the already-TF-invariant
   futures/options `_read_future_session`, instead of the resampled display-timeframe bars — so the SAME (symbol, day,
@@ -747,6 +752,10 @@ hostile-review pass._
   320000/318660 goldens pass UNMODIFIED). HONEST: a SANCTIONED display-value correction on coarse timeframes;
   value(1minute) byte-unchanged; futures/options value BYTE-UNCHANGED; READ-ONLY dashboard ranking; ENGINE UNCHANGED
   — NIFTY/BANKNIFTY/SENSEX; touched module 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535** —
+  the `/movers` Spot default as-of TIME resolves to the SAME latest available minute across EVERY timeframe, so
+  1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
   Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
   MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
   gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
@@ -2378,6 +2387,22 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/eloquent-shannon-bdjnuv`
+  (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1536 — the `/movers`
+  SPOT "Top Value" (turnover) is TIMEFRAME-INVARIANT: re-sourced from the RAW
+  1-minute session frame (post as-of cut, PRE-resample) via the NEW
+  `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options session value; READ-ONLY dashboard ranking, ENGINE UNCHANGED
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/movers-asof-default-latest-minute`
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
+  default as-of TIME resolves to the SAME latest available minute across EVERY
+  timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
+  MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
+  (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
+  ADR-0017, MIGRATION.md #1531–#1532)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

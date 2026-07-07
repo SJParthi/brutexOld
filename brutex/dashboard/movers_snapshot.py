@@ -70,6 +70,8 @@ __all__ = [
     "compute_spot_candidates",
     "filter_to_ist_minute",
     "interval_minutes",
+    "is_intraday_interval",
+    "minute_to_hhmm",
     "normalize_min_volume",
     "parse_snapshot_date",
     "pending_asset_payload",
@@ -117,6 +119,37 @@ def interval_minutes(interval: str) -> int | None:
     ``None`` for any label outside the 21-timeframe set.
     """
     return _INTERVAL_MINUTES.get(interval)
+
+
+def minute_to_hhmm(minute_of_day: int) -> str:
+    """Return the IST ``"HH:MM"`` string for a minute-of-day (the inverse of :func:`_cutoff_minute`).
+
+    ``minute_to_hhmm(929) == "15:29"`` · ``minute_to_hhmm(555) == "09:15"``. The
+    output matches the :func:`session_bar_times` grid string EXACTLY (zero-padded
+    ``HH:MM``), so a resolved latest minute is always a selectable ``#time`` option
+    on the frontend and round-trips through :func:`_cutoff_minute`
+    (``_cutoff_minute(minute_to_hhmm(m)) == m``). Pure + O(1)
+    (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 — the displayed-minute formatter that lets
+    the default as-of dropdown SHOW the real latest minute while the cut stays
+    whole-day; CLAUDE.md §11 COMMON: the single minute↔label formatter).
+    """
+    return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d}"
+
+
+def is_intraday_interval(interval: str) -> bool:
+    """Return ``True`` iff *interval* has an intraday as-of time-of-day choice.
+
+    ``True`` for the intraday timeframes whose bar length is shorter than the
+    whole session (``1minute`` … ``30minute`` / ``1hour`` / ``4hour`` — anything
+    ``< _DAILY_MIN_FLOOR``); ``False`` for ``1day`` (the bar IS the day) and any
+    unknown label. The public predicate the ``/movers`` route uses to decide
+    whether to resolve the display-only ``latest_time``
+    (DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — so the daily-vs-intraday rule has ONE
+    source of truth (CLAUDE.md §11 COMMON; the twin of the empty
+    :func:`session_bar_times` daily check). O(1).
+    """
+    minutes = interval_minutes(interval)
+    return minutes is not None and minutes < _DAILY_MIN_FLOOR
 
 
 def session_bar_times(interval: str) -> list[str]:
@@ -429,6 +462,7 @@ def build_snapshot_payload(
     min_volume: int | None = None,
     stored_reads: int = 0,
     resampled_reads: int = 0,
+    latest_time: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -451,6 +485,15 @@ def build_snapshot_payload(
     chunk 2): how many contributing instruments were served from the pipeline
     prebuild's STORED interval partitions vs the on-the-fly 1-minute resample
     fallback — honesty visible in the payload, nothing noisy in the UI.
+
+    *latest_time* is the ADDITIVE display-only echo of the resolved latest
+    intraday minute (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — the
+    minute the DEFAULT whole-day as-of read's last kept bar carries, so the
+    dropdown/label can SHOW the real latest minute (e.g. ``latest (15:29)``)
+    while the cut stays whole-day (``time`` echoes ``None``). ``None`` for an
+    explicit *time*, a daily interval, or an empty lake — the frontend then
+    renders a plain "latest" label. It NEVER affects the ranked numbers (the cut
+    is unchanged); ``echo == cut`` in value by construction.
     """
     floor = normalize_min_volume(min_volume)
     ranked: dict[str, list[dict[str, Any]]] = {
@@ -491,6 +534,7 @@ def build_snapshot_payload(
         "skipped_count": skipped,
         "stored_reads": stored_reads,
         "resampled_reads": resampled_reads,
+        "latest_time": latest_time,
         "note": note,
         **ranked,
     }
