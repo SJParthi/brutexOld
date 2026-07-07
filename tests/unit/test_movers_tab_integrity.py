@@ -24,6 +24,9 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+from brutex.calendars.nse import previous_trading_session
+from brutex.dashboard import movers_snapshot
 from brutex.dashboard.movers_futures import _prev_day_oi
 from brutex.dashboard.movers_snapshot import (
     _NONCONTIGUOUS_WARN_CAP,
@@ -34,6 +37,7 @@ from brutex.dashboard.movers_snapshot import (
     _prev_day_close,
     _prior_session_last_from_minute,
     compute_spot_candidates,
+    make_expected_session_resolver,
     prev_baseline_provenance,
     resolve_prev_close,
     warn_prev_baseline_noncontiguous,
@@ -436,6 +440,60 @@ class TestPrevBaselineProvenance:
         # the value keeps being served, no False, no marker.
         got = prev_baseline_provenance(date(2019, 5, 31), date(2019, 6, 3), exchange=None)
         assert got == ("2019-05-31", None)
+
+    def test_hoisted_expected_session_matches_internal_compute(self) -> None:
+        # The per-build perf seam (kw-only expected_session): passing the
+        # hoisted expected session yields the SAME verdicts as the ``...``
+        # internal-compute default — both the True and the False arm.
+        day = date(2025, 9, 29)
+        hoisted = date(2025, 9, 26)
+        assert prev_baseline_provenance(
+            date(2025, 9, 26), day, exchange="NSE", expected_session=hoisted
+        ) == ("2025-09-26", True)
+        assert prev_baseline_provenance(
+            date(2025, 9, 25), day, exchange="NSE", expected_session=hoisted
+        ) == ("2025-09-25", False)
+
+    def test_hoisted_none_expected_session_abstains_never_recomputes(self) -> None:
+        # ``None`` is a VALID hoisted value (the calendar's abstain) — NOT the
+        # sentinel: the verdict is the honest unknown. An internal recompute
+        # with exchange="NSE" would have returned True here, so this proves the
+        # seam never falls back to the calendar when a value was passed.
+        got = prev_baseline_provenance(
+            date(2025, 9, 26), date(2025, 9, 29), exchange="NSE", expected_session=None
+        )
+        assert got == ("2025-09-26", None)
+
+
+class TestMakeExpectedSessionResolver:
+    def test_memoises_one_calendar_walk_per_exchange(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ONE previous_trading_session walk per (build, calendar exchange) —
+        # the repeat resolve is a dict hit, and a DIFFERENT exchange key (the
+        # None union) walks once more.
+        calls: list[str | None] = []
+        real = previous_trading_session
+
+        def counting(day: date, *, exchange: str | None = None) -> date | None:
+            calls.append(exchange)
+            return real(day, exchange=exchange)
+
+        monkeypatch.setattr(movers_snapshot, "previous_trading_session", counting)
+        resolve = make_expected_session_resolver(date(2025, 9, 29))
+        first = resolve("NSE")
+        assert first == date(2025, 9, 26)
+        assert resolve("NSE") == first  # memo hit — no second walk
+        assert calls == ["NSE"]
+        assert resolve(None) == date(2025, 9, 26)  # union calendar → new key
+        assert calls == ["NSE", None]
+
+    def test_matches_the_uncached_walk_per_exchange(self) -> None:
+        # Byte-parity with the direct calendar walk for every calendar key the
+        # loops can produce (NSE / BSE / the abstain-union None).
+        resolve = make_expected_session_resolver(date(2025, 9, 29))
+        for exchange in ("NSE", "BSE", None):
+            assert resolve(exchange) == previous_trading_session(
+                date(2025, 9, 29), exchange=exchange
+            )
 
 
 class TestCalendarExchange:

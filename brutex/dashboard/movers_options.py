@@ -109,7 +109,6 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.calendars.nse import previous_trading_session
 from brutex.dashboard.movers_futures import (
     _read_future_session,
     _underlying_spot_ltp,
@@ -123,6 +122,7 @@ from brutex.dashboard.movers_snapshot import (
     _cutoff_minute,
     _NoncontiguousWarnState,
     interval_minutes,
+    make_expected_session_resolver,
     normalize_min_volume,
     parse_snapshot_date,
     prev_baseline_provenance,
@@ -1172,6 +1172,7 @@ def compute_options_candidates(
     skipped = 0
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
+    expected_session_for = make_expected_session_resolver(day)
     for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
         try:
             read = _read_future_session(
@@ -1238,11 +1239,12 @@ def compute_options_candidates(
         # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — mirrors the Futures loop). Served
         # values are untouched; each strictly-False verdict gets ONE capped WARN.
         cal_exchange = _calendar_exchange(contract_exchange)
+        expected_session = expected_session_for(cal_exchange)
         close_iso, close_contig = prev_baseline_provenance(
-            close_baseline.found_date, day, exchange=cal_exchange
+            close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         oi_iso, oi_contig = prev_baseline_provenance(
-            oi_baseline.found_date, day, exchange=cal_exchange
+            oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         mover = replace(
             mover,
@@ -1260,7 +1262,7 @@ def compute_options_candidates(
                 symbol=symbol,
                 snapshot_day=day,
                 found_session=close_iso,
-                expected_session=previous_trading_session(day, exchange=cal_exchange),
+                expected_session=expected_session,
             )
         if oi_iso is not None and oi_contig is False:
             warn_prev_baseline_noncontiguous(
@@ -1271,7 +1273,7 @@ def compute_options_candidates(
                 symbol=symbol,
                 snapshot_day=day,
                 found_session=oi_iso,
-                expected_session=previous_trading_session(day, exchange=cal_exchange),
+                expected_session=expected_session,
             )
         movers.append(mover)
 

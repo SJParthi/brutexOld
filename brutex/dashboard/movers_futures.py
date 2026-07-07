@@ -64,7 +64,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
-from brutex.calendars.nse import previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
@@ -75,6 +74,7 @@ from brutex.dashboard.movers_snapshot import (
     _prior_session_last_from_minute,
     filter_to_ist_minute,
     interval_minutes,
+    make_expected_session_resolver,
     normalize_min_volume,
     parse_snapshot_date,
     prev_baseline_provenance,
@@ -1130,6 +1130,7 @@ def compute_futures_candidates(
     skipped = 0
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
+    expected_session_for = make_expected_session_resolver(day)
     for underlying, contracts in by_underlying.items():
         chosen = select_expiry_tier(
             [(sym, exp) for sym, _exch, exp in contracts], on_date=day, tier=tier
@@ -1187,11 +1188,12 @@ def compute_futures_candidates(
         # baseline to the minute fallback on a possibly DIFFERENT day. Served
         # values are untouched; each strictly-False verdict gets ONE capped WARN.
         cal_exchange = _calendar_exchange(exchange)
+        expected_session = expected_session_for(cal_exchange)
         close_iso, close_contig = prev_baseline_provenance(
-            close_baseline.found_date, day, exchange=cal_exchange
+            close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         oi_iso, oi_contig = prev_baseline_provenance(
-            oi_baseline.found_date, day, exchange=cal_exchange
+            oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         mover = replace(
             mover,
@@ -1209,7 +1211,7 @@ def compute_futures_candidates(
                 symbol=chosen,
                 snapshot_day=day,
                 found_session=close_iso,
-                expected_session=previous_trading_session(day, exchange=cal_exchange),
+                expected_session=expected_session,
             )
         if oi_iso is not None and oi_contig is False:
             warn_prev_baseline_noncontiguous(
@@ -1220,7 +1222,7 @@ def compute_futures_candidates(
                 symbol=chosen,
                 snapshot_day=day,
                 found_session=oi_iso,
-                expected_session=previous_trading_session(day, exchange=cal_exchange),
+                expected_session=expected_session,
             )
         movers.append(mover)
 

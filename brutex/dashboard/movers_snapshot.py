@@ -39,12 +39,13 @@ pulled**, NOT a live feed (Track-1 has no live feed — CLAUDE.md §1). Prices a
 from __future__ import annotations
 
 import html
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -74,6 +75,7 @@ __all__ = [
     "compute_spot_candidates",
     "filter_to_ist_minute",
     "interval_minutes",
+    "make_expected_session_resolver",
     "normalize_min_volume",
     "parse_snapshot_date",
     "pending_asset_payload",
@@ -1022,7 +1024,11 @@ def _calendar_exchange(exchange: str) -> str | None:
 
 
 def prev_baseline_provenance(
-    found_date: date_cls | None, snapshot_day: date_cls, *, exchange: str | None
+    found_date: date_cls | None,
+    snapshot_day: date_cls,
+    *,
+    exchange: str | None,
+    expected_session: date_cls | None | EllipsisType = ...,
 ) -> tuple[str | None, bool | None]:
     """Judge a resolved baseline's calendar contiguity (pure, side-effect-free).
 
@@ -1035,13 +1041,48 @@ def prev_baseline_provenance(
       ``(found_iso, None)`` — the value is still served, contiguity unknown;
     * otherwise → ``(found_iso, found_date == expected)`` — ``False`` means the
       served baseline provably skipped a nearer NSE session (a lake hole).
+
+    *expected_session* is a pure perf seam: the expected previous session is
+    invariant per ``(snapshot_day, exchange)``, so the candidate builds hoist
+    it ONCE per build (:func:`make_expected_session_resolver`) and pass it in;
+    the ``...`` default (the Ellipsis sentinel — ``None`` is a VALID calendar
+    abstain, so it cannot be the sentinel) computes it internally, keeping
+    every existing call site/test byte-valid. Same verdict either way.
     """
     if found_date is None:
         return None, None
-    expected = previous_trading_session(snapshot_day, exchange=exchange)
+    expected = (
+        previous_trading_session(snapshot_day, exchange=exchange)
+        if isinstance(expected_session, EllipsisType)
+        else expected_session
+    )
     if expected is None:
         return found_date.isoformat(), None
     return found_date.isoformat(), found_date == expected
+
+
+def make_expected_session_resolver(
+    snapshot_day: date_cls,
+) -> Callable[[str | None], date_cls | None]:
+    """Build a per-candidate-build memo over :func:`previous_trading_session`.
+
+    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 perf tidy: the expected previous
+    session is invariant per ``(snapshot_day, calendar exchange)`` yet was
+    recomputed per ROW — once inside :func:`prev_baseline_provenance` and
+    once more per warn block's ``expected_session`` argument. The three
+    candidate builds (spot / futures / options) hoist the calendar walk
+    through this ONE memoised resolver (a tiny per-build dict — the calendar
+    exchange can vary per row) and thread the result into both consumers.
+    Function-local state per build, never module-global (CLAUDE.md §4).
+    """
+    cache: dict[str | None, date_cls | None] = {}
+
+    def resolve(exchange: str | None) -> date_cls | None:
+        if exchange not in cache:
+            cache[exchange] = previous_trading_session(snapshot_day, exchange=exchange)
+        return cache[exchange]
+
+    return resolve
 
 
 #: Hard cap on ``movers.prev_baseline_noncontiguous`` warnings per candidate
@@ -1289,6 +1330,7 @@ def compute_spot_candidates(
     resampled_reads = 0
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
+    expected_session_for = make_expected_session_resolver(day)
     for dataset in spot_datasets:
         try:
             if is_daily:
@@ -1348,8 +1390,9 @@ def compute_spot_candidates(
         # the immediately-preceding NSE session; a strictly-False verdict also gets
         # ONE capped WARN. The VALUE served above is untouched in every branch.
         cal_exchange = _calendar_exchange(dataset["exchange"])
+        expected_session = expected_session_for(cal_exchange)
         session_iso, contiguous = prev_baseline_provenance(
-            baseline.found_date, day, exchange=cal_exchange
+            baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         snap = replace(snap, prev_close_session=session_iso, prev_close_contiguous=contiguous)
         if session_iso is not None and contiguous is False:
@@ -1361,7 +1404,7 @@ def compute_spot_candidates(
                 symbol=dataset["symbol"],
                 snapshot_day=day,
                 found_session=session_iso,
-                expected_session=previous_trading_session(day, exchange=cal_exchange),
+                expected_session=expected_session,
             )
         # Read-path provenance (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): count
         # ONLY the instruments that contributed a snapshot, by which path
