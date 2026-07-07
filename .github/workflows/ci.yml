@@ -389,13 +389,20 @@ jobs:
           # can identify which exact gate aborted the step when the
           # raw log is auth-gated.
           trap 'echo "❌ Last gate failed at: $BASH_COMMAND (exit $?)" >> "$GITHUB_STEP_SUMMARY"' ERR
+          # DEC-FUTURES-EXEC-TRANSLATION-001 (MIGRATION.md #1541): the
+          # whole-package --cov=brutex.costs gate must also run the
+          # futures cost-stack suite — brutex/costs/futures_costs.py is
+          # stem-matched by tests/unit/test_futures_costs.py, which the
+          # test_costs_*.py glob does NOT collect (the same static-list
+          # addition precedent as the pull_jobs gate, PR #1248).
           if compgen -G "tests/unit/test_costs_*.py" > /dev/null; then
             pytest \
               --cov=brutex.costs \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_costs_*.py
+              tests/unit/test_costs_*.py \
+              tests/unit/test_futures_costs.py
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
