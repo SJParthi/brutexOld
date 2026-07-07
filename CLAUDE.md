@@ -786,7 +786,7 @@ hostile-review pass._
   Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001,
   MIGRATION.md #1535** — the `/movers` Spot screen's DEFAULT as-of TIME resolves to the SAME latest
   available minute across EVERY timeframe (1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day on a finalized day always
-  show the IDENTICAL latest close, the Groww/Dhan-consistent behaviour): the frontend `fillTimes()`
+  show the IDENTICAL latest close, the Groww-consistent behaviour): the frontend `fillTimes()`
   per-TF grid-slot pin is dropped in favour of a `Latest` (`value=""`) default riding the
   already-tested `cutoff_min=None` whole-day stored-fast path (readers UNCHANGED); NEW
   `movers_snapshot.minute_to_hhmm` + `movers_warm.latest_movers_minute` (bounded DuckDB
