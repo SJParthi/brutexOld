@@ -90,11 +90,32 @@ removes only its own — the two now-concurrent `BackgroundPullJob`s can no
 longer clobber/clear each other's liveness beat and resurrect the false
 CRITICAL stall-alert class this branch closed); a stray FILE at
 `.greeks_backfill` (ENOTDIR) reads the stable `absent` token instead of
-muting the ENTIRE composite `lake_revision` probe. ENGINE
+muting the ENTIRE composite `lake_revision` probe.
+FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1482): the
+`backfill_id` binds a rate-source VALUE fingerprint (exact fixed rate / sha256
+of the loaded CSV curve), so a crashed FORCE run's surviving checkpoint
+self-ignores across a rate-value change instead of exempting the recorded
+prefix from the driver's value-checked gate (false-clean green run; a
+SPOT-heal inside the crash window stays a DOCUMENTED residue — delete the
+checkpoint after a heal); progress beats are JOB-SCOPED on the emitting
+thread (`bind_progress_beat_scope` — a concurrent dry-run backfill's O(files)
+scan can no longer mask a genuinely-WEDGED pull's HUNG→CRITICAL→WEDGED chain;
+unscoped fan-out threads keep the fail-open broadcast, and the round-3 "the
+WEDGED dual signal backstops the masking" claim is RETRACTED as vacuous —
+WEDGED is gated on the HUNG edge); a null-stamped row with non-finite OHLC
+(driver-skippable by IVX-2 design) classifies the NEW `stale_unfixable`
+census bucket — never re-targeted (the census converges instead of a forever
+re-feed reported `already_current`), surfaced with ⚠️ Telegram head + note +
+CLI stderr; `--pause-s`/`BRUTEX_GREEKS_BACKFILL_PAUSE_S` refuse non-finite
+values (`inf` crashed the wet run mid-batch, `nan` silently disabled the
+pause); the #1175-style bench pins land
+(`tests/bench/test_greeks_backfill_scan_cost.py` — flat per-file probe cost,
+stamp-column projection spy, O(1) checkpoint bytes) and the ledger's "TESTS
+(7 types touched)" header is honesty-corrected. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
-+ `pull_jobs.py`/`lake_revision.py` ALL 100% line+branch; every touched
-`cli.py`/`app.py`/`db_view.py` line+branch covered).
++ `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
+every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
 Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
@@ -696,7 +717,15 @@ hostile-review pass._
   (refuter-majority-confirmed, #1482): the checkpoint freezes at the last fully-clean prefix boundary (an errored
   contract is always re-fed on resume — never a false-clean `errored=0` skip); `progress_beat` is a multi-registrant
   handle-keyed registry (two concurrent jobs keep independent watchdog liveness); a stray file at `.greeks_backfill`
-  reads `absent` instead of muting the whole `lake_revision` composite. ENGINE UNCHANGED —
+  reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
+  (refuter-majority-confirmed, #1482): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
+  checkpoint self-ignores across a rate-value change, so the recorded prefix is always re-routed through the driver's
+  value-checked gate (spot-heal-in-crash-window = documented residue); progress beats are JOB-SCOPED on the emitting
+  thread (a concurrent backfill scan no longer masks a wedged pull's HUNG→WEDGED chain; the round-3 broadcast's
+  "WEDGED dual-signal backstop" honesty claim retracted as vacuous); NEW `stale_unfixable` census bucket for
+  null-stamped non-finite-OHLC rows (driver-skippable IVX-2 class — excluded from targeting so the census CONVERGES,
+  ⚠️ Telegram/note/stderr); non-finite `--pause-s`/`_PAUSE_S` refused eagerly; #1175-style bench pins added
+  (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/
   `sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
   Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,

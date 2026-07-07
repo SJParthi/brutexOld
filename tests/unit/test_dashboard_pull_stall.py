@@ -430,21 +430,27 @@ class TestBackgroundPullJobWatchdog:
         assert spy.beats == 3
 
     def test_concurrent_jobs_never_clobber_or_clear_each_others_beat(self) -> None:
-        """Two concurrent jobs keep INDEPENDENT liveness beats (fix round 3).
+        """Two concurrent jobs keep INDEPENDENT, JOB-SCOPED liveness beats.
 
         DEC-GREEKS-BULK-REENRICH-001 broke the seam's old single-flight
         invariant: ``build_app`` owns TWO :class:`BackgroundPullJob` instances
         (the pull + the Greeks backfill), and a DRY-RUN backfill is sanctioned
         to run concurrently with a real pull (``cross_process_lock=False`` —
         the route note says "a concurrent pull on this lake is unaffected").
-        Refuter-confirmed against the old single-slot registry: (a) the
-        backfill's register CLOBBERED the running pull's beat, so every seam
-        beat fed the WRONG watchdog (a healthy pull phase > 600 s silent
+        Refuter-confirmed against the old single-slot registry (fix round 3):
+        (a) the backfill's register CLOBBERED the running pull's beat, so every
+        seam beat fed the WRONG watchdog (a healthy pull phase > 600 s silent
         false-tripped ``_on_hung`` → CRITICAL "pull halted" Telegram alert +
         STALLED-SUSPECT); (b) whichever job finished FIRST unconditionally
         CLEARED the slot, stripping the still-running sibling's only
-        defence-in-depth liveness source. Fails on the single-slot design;
-        passes with the multi-registrant registry.
+        defence-in-depth liveness source. Refuter-confirmed against the
+        round-3 BROADCAST (fix round 4): a beat emitted on one job's OWN
+        worker thread reached the SIBLING's watchdog too, so a concurrent
+        dry-run backfill's ~30 min O(files) scan kept a genuinely-WEDGED
+        pull's watchdog HEALTHY — suppressing the HUNG edge, the CRITICAL
+        alert AND the terminal WEDGED verdict (gated on HUNG). Each run now
+        binds its handle as its worker thread's beat SCOPE: own-thread beats
+        route ONLY to the owner's watchdog.
         """
         from brutex.observability.progress_beat import (
             emit_progress_beat,
@@ -458,32 +464,35 @@ class TestBackgroundPullJobWatchdog:
         backfill_job = _job(backfill_factory)
 
         def backfill_work(_on_progress: ProgressHook) -> None:
-            # While BOTH jobs are live a seam beat must reach BOTH watchdogs
-            # (a beat is pure liveness — the broadcast can only keep
-            # heartbeats alive, never corrupt anything).
+            # The backfill's own-thread scan beat: it must feed the BACKFILL's
+            # watchdog and — fix round 4 — must NOT feed the (potentially
+            # wedged) pull's watchdog. The old broadcast masked the pull here.
             emit_progress_beat()
 
         def pull_work(_on_progress: ProgressHook) -> None:
             emit_progress_beat()  # baseline: the pull's own seam beat
             # A dry-run Greeks-backfill scan starts AND finishes MID-PULL (the
             # sanctioned lock-free concurrency of the dashboard route; the
-            # sync spawner runs it inline here).
+            # sync spawner runs it inline here — the Token-based scope restore
+            # hands the thread back to the pull's scope after the nested run).
             assert backfill_job.start(backfill_work, total=0, cross_process_lock=False) is True
-            # The finished backfill removed ONLY its own handle — the pull's
-            # beat must still be registered (the clobber/clear regression).
+            # The finished backfill removed ONLY its own handle + restored the
+            # pull's scope — the pull's beat must still be registered AND
+            # routable (the clobber/clear regression).
             emit_progress_beat()
 
         assert pull_job.start(pull_work, total=1) is True
         pull_spy, backfill_spy = pull_built[0], backfill_built[0]
-        # The pull's watchdog received EVERY seam beat fired while it ran: its
-        # baseline, the one during the concurrent backfill, and the one AFTER
-        # the backfill finished (the old single slot lost the last two).
-        assert pull_spy.beats == 3
+        # The pull's watchdog received exactly ITS OWN seam beats: the baseline
+        # + the one after the nested backfill finished. NOT the backfill's
+        # scan beat — under the round-3 broadcast this read 3 and a wedged
+        # pull's silence was masked for the backfill's whole lifetime.
+        assert pull_spy.beats == 2
         # The backfill's watchdog received the seam beat fired while IT ran.
         assert backfill_spy.beats == 1
         # Both runs finished: every handle is gone — a stray emit reaches nobody.
         emit_progress_beat()
-        assert pull_spy.beats == 3
+        assert pull_spy.beats == 2
         assert backfill_spy.beats == 1
 
     def test_hung_edge_alerts_and_marks_stalled_suspect_without_release(

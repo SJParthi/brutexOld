@@ -41,6 +41,8 @@ from brutex.data.greeks_backfill import (
     BackfillScan,
     _contract_window,
     _month_files,
+    _null_stamped_rows_fixable,
+    _rate_source_value_fingerprint,
     checkpoint_path,
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -123,6 +125,43 @@ def _write_month(
         frame = pl.DataFrame({"greeks_provenance_id": pl.Series(pids, dtype=pl.Int32)})
     else:
         frame = pl.DataFrame({"close": [1.0] * max(1, len(pids))})
+    frame.write_parquet(dest)
+    return dest
+
+
+def _write_month_prices(
+    lake: Path,
+    symbol: str,
+    year: int,
+    month: int,
+    pids: list[int | None],
+    closes: list[float | None],
+    *,
+    interval: str = "1minute",
+    exchange: str = "NSE",
+) -> Path:
+    """Write a month partition with REAL OHLC columns (fix-round-4 fixability probes)."""
+    dest = (
+        lake
+        / "bars"
+        / exchange
+        / "FNO"
+        / symbol
+        / interval
+        / f"{year:04d}"
+        / f"{month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = len(pids)
+    frame = pl.DataFrame(
+        {
+            "open": pl.Series([100.0] * n, dtype=pl.Float64),
+            "high": pl.Series([101.0] * n, dtype=pl.Float64),
+            "low": pl.Series([99.0] * n, dtype=pl.Float64),
+            "close": pl.Series(closes, dtype=pl.Float64),
+            "greeks_provenance_id": pl.Series(pids, dtype=pl.Int32),
+        }
+    )
     frame.write_parquet(dest)
     return dest
 
@@ -321,6 +360,78 @@ class TestScanner:
         scan = _scan(lake)
         assert scan.probe_failed == 1 and scan.targets == () and scan.current == 1
 
+    @pytest.mark.parametrize("poison", [float("nan"), float("inf"), float("-inf")])
+    def test_nonfinite_ohlc_null_stamp_is_stale_unfixable_never_targeted(
+        self, lake: Path, poison: float
+    ) -> None:
+        """The fix-round-4 non-convergence regression (refuter-confirmed).
+
+        A null-stamped row whose OHLC carries a non-finite value is one the
+        driver's per-bar IVX-2 guard SKIPS without a write — the old probe
+        classified it ``stale_null``, so the contract was re-targeted on EVERY
+        scan while the driver honestly reported it ``already_current``: the
+        census never converged and the run read a dishonest green. The probe
+        now mirrors the driver's skip predicate: such a contract classifies
+        ``stale_unfixable``, is NEVER targeted, and is logged loudly.
+        """
+        from structlog.testing import capture_logs
+
+        _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID, None], [100.0, poison])
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1
+        assert scan.stale_null == 0 and scan.current == 0
+        assert any(r["event"] == "greeks_backfill.contract_unfixable" for r in logs)
+        # Convergence: a re-scan reproduces the SAME stable census — never a
+        # re-queued target (the finding's forever-loop).
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.stale_unfixable == 1
+
+    def test_mixed_fixable_and_unfixable_null_rows_still_target_stale_null(
+        self, lake: Path
+    ) -> None:
+        """One driver-stampable null row is enough to target the contract."""
+        _write_month_prices(lake, _CE, 2024, 1, [None, None], [float("nan"), 100.0])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_null == 1 and scan.stale_unfixable == 0
+
+    def test_unfixable_file_with_v1_sibling_stamp_still_targets_v1(self, lake: Path) -> None:
+        """An unfixable null never masks a genuinely-stale NON-null stamp."""
+        _write_month_prices(lake, _CE, 2024, 1, [_V1_PID, None], [100.0, float("nan")])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
+
+    def test_null_price_null_stamp_stays_stale_null(self, lake: Path) -> None:
+        """A NULL price errors the target LOUDLY in the driver — so re-feed it."""
+        _write_month_prices(lake, _CE, 2024, 1, [None], [None])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_null == 1 and scan.stale_unfixable == 0
+
+    def test_junk_typed_price_column_stays_stale_null(self, lake: Path) -> None:
+        """A junk-typed price column errors the target LOUDLY in the driver — re-feed."""
+        dest = _write_month_prices(lake, _CE, 2024, 1, [None], [1.0])
+        pl.DataFrame(
+            {
+                "open": pl.Series(["poison"], dtype=pl.Utf8),
+                "high": pl.Series(["poison"], dtype=pl.Utf8),
+                "low": pl.Series(["poison"], dtype=pl.Utf8),
+                "close": pl.Series(["poison"], dtype=pl.Utf8),
+                "greeks_provenance_id": pl.Series([None], dtype=pl.Int32),
+            }
+        ).write_parquet(dest)
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_null == 1 and scan.stale_unfixable == 0
+
+    def test_fixability_probe_fails_open_without_visible_null_rows(self, lake: Path) -> None:
+        """The defensive no-null-rows arm fails OPEN (re-feed the driver)."""
+        dest = _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID], [100.0])
+        assert _null_stamped_rows_fixable(dest) is True
+
     def test_scan_beats_the_stall_watchdog_per_contract_and_per_file(self, lake: Path) -> None:
         """The O(files) scan feeds the pull stall watchdog (refuter-confirmed):
 
@@ -487,6 +598,52 @@ class TestPlan:
         csv_source = load_risk_free_csv(csv)
         assert _plan_of((_T1,)).backfill_id != _plan_of((_T1,), rate_source=csv_source).backfill_id
 
+    def test_sensitive_to_the_fixed_rate_value(self) -> None:
+        """Fix round 4 (refuter-confirmed): a rate VALUE change under an
+        unchanged source KIND must re-key the plan — kind-only hashing let a
+        force plan (stamp-independent targets) reproduce the IDENTICAL id
+        across the change, so a crashed force run's checkpoint was ADOPTED
+        and the recorded prefix silently exempted from the driver's
+        value-checked gate.
+        """
+        a = _plan_of((_T1,), rate_source=FixedRateSource(rate=0.065), force=True)
+        b = _plan_of((_T1,), rate_source=FixedRateSource(rate=0.10), force=True)
+        assert a.backfill_id != b.backfill_id
+
+    def test_sensitive_to_the_csv_curve_values(self, tmp_path: Path) -> None:
+        """Two same-kind CSVs with different VALUES yield different ids."""
+        from brutex.options.risk_free import load_risk_free_csv
+
+        a_csv = tmp_path / "rates.csv"
+        a_csv.write_text("date,yield,tenor_days\n2024-01-01,0.065,91\n", encoding="utf-8")
+        b_csv = tmp_path / "rates_b.csv"
+        b_csv.write_text("date,yield,tenor_days\n2024-01-01,0.080,91\n", encoding="utf-8")
+        # Same source LABEL (file name) so ONLY the curve values differ.
+        a = load_risk_free_csv(a_csv)
+        b = load_risk_free_csv(b_csv)
+        b = type(b)(dates=b.dates, rates=b.rates, source=a.source)
+        assert (
+            _plan_of((_T1,), rate_source=a).backfill_id
+            != _plan_of((_T1,), rate_source=b).backfill_id
+        )
+
+    def test_fingerprint_values(self, tmp_path: Path) -> None:
+        """The fingerprint components are deterministic + honestly labelled."""
+        from brutex.options.risk_free import load_risk_free_csv
+
+        assert _rate_source_value_fingerprint(FixedRateSource()) == "fixed=0.065"
+        csv = tmp_path / "rates.csv"
+        csv.write_text("date,yield,tenor_days\n2024-01-01,0.065,91\n", encoding="utf-8")
+        source = load_risk_free_csv(csv)
+        fp = _rate_source_value_fingerprint(source)
+        assert fp.startswith("csv=") and fp == _rate_source_value_fingerprint(source)
+
+        class _Odd:
+            def rate_on(self, on_date: date) -> None:
+                return None
+
+        assert _rate_source_value_fingerprint(_Odd()) == "unlabelled"
+
     def test_plan_carries_scan_and_modes(self) -> None:
         plan = _plan_of((_T1,), force=True, expired_only=True)
         assert plan.force is True and plan.expired_only is True
@@ -538,6 +695,18 @@ class TestEnvResolvers:
     def test_pause_negative_fails_loud(self) -> None:
         with pytest.raises(ValueError, match="must be >= 0"):
             resolve_backfill_pause_s(env={BACKFILL_PAUSE_ENV: "-1"})
+
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "nan"])
+    def test_pause_nonfinite_fails_loud(self, raw: str) -> None:
+        """Fix round 4 (refuter-confirmed): ``float()`` parses inf/nan and a
+        bare ``< 0`` check passes both (NaN compares False to everything) —
+        ``inf`` then crashed the wet run mid-batch with a raw ``OverflowError``
+        from ``time.sleep`` AFTER the full O(files) scan, and ``nan`` SILENTLY
+        disabled the configured pause, the exact silent fallback the FAIL-LOUD
+        env contract forbids.
+        """
+        with pytest.raises(ValueError, match="must be finite"):
+            resolve_backfill_pause_s(env={BACKFILL_PAUSE_ENV: raw})
 
     def test_pause_reads_os_environ_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(BACKFILL_PAUSE_ENV, "0.5")
@@ -719,6 +888,47 @@ class TestRunner:
         ]
         assert report.resumed_from == 1 and "resumed from target 1" in report.note
 
+    def test_force_resume_across_a_rate_value_change_feeds_index_zero(self, lake: Path) -> None:
+        """Fix round 4 (refuter-confirmed MAJOR): force crash → rate VALUE change
+        → force re-run must feed index 0, never ``next_index``.
+
+        Kind-only id hashing made the two force plans IDENTICAL across the
+        value change, so the surviving checkpoint was ADOPTED and the recorded
+        prefix — enriched under rate A — was never routed through the driver's
+        rate-B value-checked gate: a false-clean ``errored=0`` green run whose
+        prefix kept the wrong-rate Greeks stamped CURRENT forever (the stamp
+        cannot represent a rate VALUE). The value fingerprint in the id makes
+        the old checkpoint foreign, so the re-run starts fresh.
+        """
+        targets = _targets(4)
+        plan_a = _plan_of(targets, rate_source=FixedRateSource(rate=0.065), force=True)
+        crashing = _SpyEnrich(raise_on_call=2, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(
+                lake,
+                plan=plan_a,
+                rate_source=FixedRateSource(rate=0.065),
+                batch_size=2,
+                enrich=crashing,
+            )
+        assert checkpoint_path(lake).exists()  # batch 1's clean record survived
+        # The operator revises the rate VALUE (unchanged KIND) — the documented
+        # --force remedy for exactly this stamp-invisible drift class.
+        plan_b = _plan_of(targets, rate_source=FixedRateSource(rate=0.10), force=True)
+        assert plan_b.backfill_id != plan_a.backfill_id
+        resumed = _SpyEnrich()
+        report = run_greeks_backfill(
+            lake,
+            plan=plan_b,
+            rate_source=FixedRateSource(rate=0.10),
+            batch_size=2,
+            enrich=resumed,
+        )
+        # EVERY contract — including the recorded prefix — goes through the
+        # driver's value-checked gate under the NEW rate.
+        assert resumed.calls[0] == list(targets[0:2])
+        assert report.resumed_from == 0
+
     def test_foreign_backfill_id_checkpoint_is_ignored(self, lake: Path) -> None:
         other = SweepCheckpointStore(
             path=checkpoint_path(lake), sweep_id="someone-else", total_combos=4
@@ -857,6 +1067,7 @@ class TestRunner:
             stale_null=3,
             stale_v1=5,
             stale_inputs_drift=7,
+            stale_unfixable=2,
             current=1,
             probe_failed=11,
             files_probed=9,
@@ -868,10 +1079,16 @@ class TestRunner:
         assert report.stale_null == 3
         assert report.stale_v1 == 5
         assert report.stale_inputs_drift == 7
+        assert report.stale_unfixable == 2
         assert report.probe_failed == 11
+        # The completion note surfaces the unfixable census LOUDLY (fix round
+        # 4): a green note while null stamps persist on driver-skippable rows
+        # would be a false clean.
+        assert "2 contract(s) UNFIXABLE" in report.note
         payload = report.to_dict()
         assert payload["stale_null"] == 3 and payload["stale_v1"] == 5
         assert payload["stale_inputs_drift"] == 7 and payload["probe_failed"] == 11
+        assert payload["stale_unfixable"] == 2
 
     def test_bar_writing_run_touches_the_marker_and_moves_the_lake_revision_token(
         self, lake: Path
@@ -984,6 +1201,15 @@ class TestRunner:
         with pytest.raises(ValueError, match="pause_s must be >= 0"):
             run_greeks_backfill(lake, plan=_plan(1), rate_source=_RATE, pause_s=-0.1)
 
+    @pytest.mark.parametrize("pause", [float("inf"), float("-inf"), float("nan")])
+    def test_explicit_nonfinite_pause_fails_loud(self, lake: Path, pause: float) -> None:
+        """Fix round 4: an explicit inf/nan pause is refused EAGERLY — never an
+        ``OverflowError`` from ``time.sleep(inf)`` after batch 1, never a
+        silently-disabled nan pause.
+        """
+        with pytest.raises(ValueError, match="pause_s must be finite"):
+            run_greeks_backfill(lake, plan=_plan(1), rate_source=_RATE, pause_s=pause)
+
     def test_env_defaults_are_used_when_params_are_none(
         self, lake: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1056,6 +1282,7 @@ class TestRunner:
             "stale_null",
             "stale_v1",
             "stale_inputs_drift",
+            "stale_unfixable",
             "probe_failed",
             "resumed_from",
             "dry_run",
@@ -1078,3 +1305,11 @@ class TestDryRunReport:
     def test_dry_run_force_note_names_the_skipped_probe(self) -> None:
         plan = _plan_of((_T1,), force=True)
         assert "force — stamp probe skipped" in dry_run_backfill_report(plan).note
+
+    def test_dry_run_note_names_the_unfixable_census(self) -> None:
+        """Fix round 4: the dry-run note surfaces driver-unfixable contracts."""
+        scan = BackfillScan(targets=(_T1,), stale_null=1, stale_unfixable=3)
+        plan = plan_greeks_backfill(scan, rate_source=_RATE, force=False, expired_only=False)
+        report = dry_run_backfill_report(plan)
+        assert "3 contract(s) UNFIXABLE" in report.note
+        assert report.stale_unfixable == 3

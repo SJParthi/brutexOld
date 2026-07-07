@@ -318,6 +318,11 @@ class GreeksBackfillReportLike(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
+    def stale_unfixable(self) -> int:
+        """Contracts whose only staleness the driver cannot act on (fix round 4)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
     def bars_written(self) -> int:
         """Bars carried in the latest-wins writes."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
@@ -863,15 +868,25 @@ class SweepAlerter:
         pattern: the ✅ head downgrades to ⚠️ with an ``N errored (re-runnable)``
         clause when any contract was quarantined (an errored contract keeps its
         stale stamp, so the next run retries it automatically — Golden Rule
-        #10). A zero-target run still reads honestly ("0/0 contracts
-        re-stamped") — an operator-initiated one-shot deserves an answer.
-        Best-effort; silent no-op when Telegram is disabled.
+        #10) AND when the scan found driver-UNFIXABLE contracts (fix round 4:
+        a null-stamped non-finite-OHLC row the enrich driver skips by design —
+        a ✅ while a stale null stamp persists would be a false green; those
+        need a lake repair, not a re-run). A zero-target run still reads
+        honestly ("0/0 contracts re-stamped") — an operator-initiated one-shot
+        deserves an answer. Best-effort; silent no-op when Telegram is
+        disabled.
         """
+        clauses: list[str] = []
         if report.errored > 0:
+            clauses.append(f"{report.errored} errored (re-runnable)")
+        if report.stale_unfixable > 0:
+            clauses.append(
+                f"{report.stale_unfixable} unfixable (non-finite OHLC — lake repair needed)"
+            )
+        if clauses:
             head = (
                 f"⚠️ Greeks backfill complete with failures — "
-                f"{report.enriched}/{report.planned} contracts re-stamped v2; "
-                f"{report.errored} errored (re-runnable)"
+                f"{report.enriched}/{report.planned} contracts re-stamped v2; " + "; ".join(clauses)
             )
         else:
             head = (

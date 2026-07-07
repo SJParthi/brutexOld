@@ -298,6 +298,51 @@ class TestFailureIsolation:
                 assert unpack_greeks_provenance(int(pid)).formula_version == 2
 
 
+class TestUnfixableConvergence:
+    def test_nonfinite_ohlc_null_stamp_converges_to_stale_unfixable(self, lake: Path) -> None:
+        """Fix round 4 (refuter-confirmed): the census CONVERGES on a poisoned row.
+
+        A previously-enriched contract with ONE out-of-band-poisoned row
+        (``close=NaN`` + a NULL stamp — the IVX-2 class the driver skips
+        per-bar by design; ``lake_heal`` is strictly row-removing and cannot
+        value-edit it) used to classify ``stale_null`` on EVERY scan while the
+        driver reported it ``already_current`` with zero writes: the plan
+        never shrank, the run read a dishonest green (✅/EXIT_OK), forever.
+        The probe now mirrors the driver's skip predicate: the contract lands
+        in ``stale_unfixable``, is never targeted, and the note says so.
+        """
+        _seed_spot(lake)
+        _seed_option(lake)
+        enrich_greeks_for_targets(targets=_targets(_CE), lake_root=lake, rate_source=_RATE)
+        partition = _option_partition(lake)
+        frame = pl.read_parquet(partition)
+        n = frame.height
+        poisoned = frame.with_columns(
+            pl.when(pl.arange(0, n) == 0)
+            .then(pl.lit(float("nan"), dtype=pl.Float64))
+            .otherwise(pl.col("close"))
+            .alias("close"),
+            pl.when(pl.arange(0, n) == 0)
+            .then(pl.lit(None, dtype=pl.Int32))
+            .otherwise(pl.col("greeks_provenance_id"))
+            .alias("greeks_provenance_id"),
+        )
+        poisoned.write_parquet(partition)
+        for _ in range(3):  # every rescan reproduces the SAME stable verdict
+            plan = _scan_plan(lake)
+            assert plan.targets == ()  # never re-targeted — the forever-loop is dead
+            assert plan.scan.stale_unfixable == 1
+            assert plan.scan.stale_null == 0 and plan.scan.current == 0
+            report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
+            assert report.stale_unfixable == 1 and report.errored == 0
+            assert "1 contract(s) UNFIXABLE" in report.note
+        # The healthy rows keep their v2 OK stamps — nothing was rewritten.
+        stamps = pl.read_parquet(partition)["greeks_provenance_id"].to_list()
+        assert stamps[0] is None  # the poisoned row honestly stays unstamped
+        for pid in stamps[1:]:
+            assert unpack_greeks_provenance(int(pid)).status == STATUS_OK
+
+
 class TestDryRunInertness:
     def test_dry_run_writes_nothing_anywhere(
         self,

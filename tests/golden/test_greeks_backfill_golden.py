@@ -40,8 +40,15 @@ _GOLDEN_INPUTS_PACK = 332034
 #: The frozen full STATUS_OK European v2 stamp (inputs | style=1<<20).
 _GOLDEN_OK_STAMP = 1380610
 
-#: The frozen backfill_id of the fixed two-target plan below.
-_GOLDEN_BACKFILL_ID = "5d3638eacbee2094c377d549e0544968546a36e8c86ea19de0945cf1ae867e43"
+#: The frozen backfill_id of the fixed two-target plan below. RE-KEYED
+#: DELIBERATELY in DEC-GREEKS-BULK-REENRICH-001 fix round 4 (ledger #1482,
+#: refuter-confirmed MAJOR): the id head now binds the rate-source VALUE
+#: fingerprint (here ``fixed=0.065``), so a rate VALUE change under an
+#: unchanged source kind re-keys the plan and a crashed force run's surviving
+#: checkpoint can never exempt its recorded prefix from the driver's
+#: value-checked gate. (Previous frozen id, superseded by that decision:
+#: ``5d3638eacbee2094c377d549e0544968546a36e8c86ea19de0945cf1ae867e43``.)
+_GOLDEN_BACKFILL_ID = "dae921b2e8c5dcc57eee3984cdb374669a5c8900b33e854298cab5a10d3886bf"
 
 
 def test_formula_version_unbumped() -> None:

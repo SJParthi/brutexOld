@@ -51,6 +51,7 @@ class FakeBackfillReport:
     enriched: int = 5
     already_current: int = 2
     errored: int = 0
+    stale_unfixable: int = 0
     bars_written: int = 123
 
 
@@ -74,6 +75,33 @@ class TestGreeksBackfillComplete:
         (event,) = fake.published
         assert "⚠️ Greeks backfill complete with failures" in event.message
         assert escape_markdown_v2("2 errored (re-runnable)") in event.message
+
+    def test_unfixable_contracts_downgrade_to_warning_head(self) -> None:
+        """Fix round 4 (refuter-confirmed): a driver-UNFIXABLE contract (a
+        null-stamped non-finite-OHLC row the enrich driver skips by design)
+        must never ride a green ✅ — the stale null stamp persists and no
+        re-run can clear it (a lake repair can).
+        """
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        report = FakeBackfillReport(errored=0, stale_unfixable=1)
+        assert alerter.greeks_backfill_complete(report) is True
+        (event,) = fake.published
+        assert "⚠️ Greeks backfill complete with failures" in event.message
+        assert (
+            escape_markdown_v2("1 unfixable (non-finite OHLC — lake repair needed)")
+            in event.message
+        )
+
+    def test_errored_and_unfixable_clauses_combine(self) -> None:
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        report = FakeBackfillReport(enriched=3, errored=2, stale_unfixable=1)
+        assert alerter.greeks_backfill_complete(report) is True
+        (event,) = fake.published
+        assert "⚠️" in event.message
+        assert escape_markdown_v2("2 errored (re-runnable)") in event.message
+        assert escape_markdown_v2("1 unfixable") in event.message
 
     def test_zero_target_run_still_answers_honestly(self) -> None:
         fake = FakeNotifier()

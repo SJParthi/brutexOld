@@ -107,6 +107,21 @@ class TestValidation:
         assert main(["greeks-backfill", "--pause-s", "-0.5"]) == EXIT_USER_ERROR
         assert "--pause-s must be >= 0" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "nan"])
+    def test_nonfinite_pause_refused(
+        self, lake: Path, raw: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Fix round 4 (refuter-confirmed): argparse's ``type=float`` parses
+        "inf"/"nan" and the bare ``< 0`` check passed both — ``inf`` then
+        crashed the wet run mid-batch with a raw ``OverflowError`` from
+        ``time.sleep`` AFTER the operator already paid the full O(files) scan;
+        ``nan`` silently disabled the pause. Both are refused EAGERLY now.
+        """
+        # The "=" form: argparse's negative-number matcher would read a bare
+        # "-inf" as an option flag, not a value.
+        assert main(["greeks-backfill", f"--pause-s={raw}"]) == EXIT_USER_ERROR
+        assert "--pause-s must be finite" in capsys.readouterr().err
+
     def test_force_with_limit_refused(
         self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -158,6 +173,38 @@ class TestDryRun:
         assert ran == [] and emitted == []  # INERT: no runner, no telegram
         assert captured["scan_kwargs"]["limit"] == 2
         assert captured["scan_lake_root"] == lake
+
+    def test_unfixable_census_is_printed_loudly(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Fix round 4: driver-unfixable contracts surface on stdout AND stderr.
+
+        A null-stamped non-finite-OHLC row is one the enrich driver skips by
+        design — silently omitting it from the CLI census would leave the run
+        reading green while a stale null stamp persisted (the refuter-confirmed
+        false-clean class).
+        """
+        unfixable_scan = BackfillScan(targets=(), stale_unfixable=2, files_probed=1)
+        unfixable_plan = BackfillPlan(
+            backfill_id="e" * 64,
+            targets=(),
+            scan=unfixable_scan,
+            force=False,
+            expired_only=False,
+        )
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.scan_stale_greeks_targets",
+            lambda *a, **k: unfixable_scan,
+        )
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.plan_greeks_backfill",
+            lambda *a, **k: unfixable_plan,
+        )
+        assert main(["greeks-backfill", "--dry-run"]) == EXIT_OK
+        out, err = capsys.readouterr()
+        assert "2 unfixable" in out  # the plan-line census
+        assert "2 contract(s) UNFIXABLE" in err  # the loud stderr repair note
+        assert "2 contract(s) UNFIXABLE" in out  # the dry-run note clause
 
 
 class TestWetRun:

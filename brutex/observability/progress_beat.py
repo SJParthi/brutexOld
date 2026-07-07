@@ -1,7 +1,8 @@
 """Process-global liveness-beat seam — defence-in-depth for the job watchdogs.
 
 DEC-PULL-CONTENTION-ANTISTALL-001 (single-slot origin) + the MULTI-REGISTRANT
-registry of DEC-GREEKS-BULK-REENRICH-001 fix round 3. The
+registry of DEC-GREEKS-BULK-REENRICH-001 fix round 3 + the JOB-SCOPED beat
+routing of fix round 4. The
 :class:`~brutex.dashboard.pull_stall.PullWatchdog` declares a job worker HUNG
 when no heartbeat lands for the audited timeout. Its real heartbeat
 (:meth:`brutex.dashboard.pull_jobs.BackgroundPullJob._on_progress`) fires only
@@ -16,11 +17,9 @@ hot liveness paths (the bounded partition lock-wait poll
 :func:`brutex.data.partition_lock.partition_write_lock`, the rate controller's
 :meth:`brutex.adapters.rate_common.RateController.pace` return, the
 greeks-enrich / prebuild / movers-warm / backfill-scan per-unit seams) call
-:func:`emit_progress_beat` after each poll / pace / unit. Every watchdog that
-has :func:`register_progress_beat`-ed its beat callback receives it — so a
-slow-but-progressing job keeps its heartbeat alive and is NEVER falsely
-killed. When nothing is registered (a CLI dry-run, a unit test, any
-non-dashboard caller) :func:`emit_progress_beat` is a cheap no-op.
+:func:`emit_progress_beat` after each poll / pace / unit. When nothing is
+registered (a CLI dry-run, a unit test, any non-dashboard caller)
+:func:`emit_progress_beat` is a cheap no-op.
 
 Design (COMMON · decoupled · best-effort · O(registrants)):
 
@@ -41,17 +40,36 @@ Design (COMMON · decoupled · best-effort · O(registrants)):
   liveness fed the WRONG watchdog → a false CRITICAL "pull halted" alert on
   a healthy run) and whichever job finished first CLEARED the slot outright,
   stripping the survivor's only defence-in-depth liveness source
-  (refuter-confirmed, fix round 3). The registry now holds EVERY registered
-  beat and :func:`emit_progress_beat` fires them ALL: a beat is pure liveness
-  (it carries no job data and gates nothing), so a beat reaching a sibling
-  job's watchdog can only KEEP A HEARTBEAT ALIVE, never corrupt anything.
-  Honest envelope (Golden Rule #10): the broadcast means one job's beats can
-  mask a genuinely-wedged SIBLING's silence at the HUNG stage — accepted
-  because the terminal WEDGED verdict additionally requires the lake-revision
-  DUAL signal (DEC-PULL-WEDGE-ESCALATE-001), and a stray liveness beat was
-  the module's sanctioned failure direction from day one. A pull still fans
-  out across worker threads and the registry reaches them all (guarded by
-  one lock; the underlying :meth:`PullWatchdog.beat` is itself thread-safe).
+  (refuter-confirmed, fix round 3). The registry holds EVERY registered beat.
+* **JOB-SCOPED routing (fix round 4, refuter-confirmed).** The naive round-3
+  broadcast ("fire EVERY registered beat") introduced a FALSE-NEGATIVE: a
+  concurrent dry-run backfill's O(files) scan beats — emitted per contract /
+  per month file on ITS OWN job thread — kept a genuinely-WEDGED live pull's
+  watchdog HEALTHY for the whole ~30 min scan, suppressing the HUNG edge and
+  with it the STALLED-SUSPECT marker, the CRITICAL alert, AND the terminal
+  WEDGED verdict (the DEC-PULL-WEDGE-ESCALATE-001 dual signal is gated ON the
+  HUNG edge, so it was never even consulted — the round-3 docstring's "the
+  WEDGED verdict still requires the lake-revision DUAL signal" mitigation
+  claim was VACUOUS and is hereby retracted). Each job worker therefore binds
+  its own registration as the THREAD-scoped beat target
+  (:func:`bind_progress_beat_scope`, a :mod:`contextvars` var): a beat emitted
+  on a job's OWN thread (the backfill scan, the prebuild driver loop, the
+  movers warm) is delivered ONLY to that job's watchdog — one job's
+  synchronous phases can no longer mask a wedged sibling in EITHER direction.
+* **Unscoped emitters still broadcast — fail-open, honestly bounded.** Beats
+  emitted on threads that carry NO scope (the fetch pipeline's fan-out worker
+  threads firing the lock-wait / pace / reauth seams, the prebuild pool
+  workers — threads the spine creates far below the dashboard, where no job
+  token can be plumbed without the #1022-rejected multi-layer threading) are
+  delivered to EVERY registrant: a beat must never be LOST to its own
+  watchdog (losing it would resurrect the round-3 false-CRITICAL class, the
+  worse failure direction). Honest envelope (Golden Rule #10): in that
+  unscoped direction a running job's fan-out beats CAN still delay a wedged
+  sibling's HUNG edge — and therefore its CRITICAL alert AND the WEDGED
+  verdict, since HUNG is their precondition — for the emitter's lifetime; the
+  wedge dual signal does NOT mitigate this (it is only evaluated after the
+  HUNG edge). Detection resumes when the emitting job unregisters in its
+  ``finally``.
 * **Best-effort.** A raising beat callback is swallowed + logged — and never
   prevents the OTHER registered beats from firing — so a buggy beat can NEVER
   crash the fetch worker, the lock-wait, or the pacer (Golden Rule #10). The
@@ -66,6 +84,8 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from contextvars import ContextVar, Token
+from typing import Final
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +114,13 @@ _BEATS: dict[ProgressBeatHandle, ProgressBeat] = {}
 #: the job control threads, while emit runs on the fetch worker threads.
 _BEAT_LOCK = threading.Lock()
 
+#: The emitting context's OWN registration (fix round 4): bound by a job worker
+#: on ITS thread for the run's lifetime, so a beat emitted there routes ONLY to
+#: that job's watchdog. ``None`` (every fan-out / non-job thread) = broadcast.
+_BEAT_SCOPE: Final[ContextVar[ProgressBeatHandle | None]] = ContextVar(
+    "progress_beat_scope", default=None
+)
+
 
 def register_progress_beat(beat: ProgressBeat) -> ProgressBeatHandle:
     """Register *beat* as A process-global liveness beat; return its handle. O(1).
@@ -104,7 +131,10 @@ def register_progress_beat(beat: ProgressBeat) -> ProgressBeatHandle:
     Registrations are INDEPENDENT — a second concurrent job (the pull + the
     Greeks backfill run side by side by design) adds its own entry and can
     never displace this one. The caller MUST keep the returned handle and pass
-    it to :func:`unregister_progress_beat` in its ``finally``.
+    it to :func:`unregister_progress_beat` in its ``finally`` — and SHOULD
+    additionally bind it on its worker thread via
+    :func:`bind_progress_beat_scope` so the thread's own beats never feed a
+    sibling's watchdog (fix round 4).
     """
     handle = ProgressBeatHandle()
     with _BEAT_LOCK:
@@ -126,20 +156,64 @@ def unregister_progress_beat(handle: ProgressBeatHandle) -> None:
         _BEATS.pop(handle, None)
 
 
+def bind_progress_beat_scope(handle: ProgressBeatHandle) -> Token[ProgressBeatHandle | None]:
+    """Make *handle* the CURRENT thread/context's beat target; return the token.
+
+    Fix round 4 (refuter-confirmed): a job worker binds its own registration
+    on its worker thread right after :func:`register_progress_beat`, so every
+    beat the run emits SYNCHRONOUSLY on that thread (the backfill's O(files)
+    scan, the prebuild driver loop, …) is delivered ONLY to its own watchdog —
+    never to a concurrently-running sibling's, whose genuine wedge it would
+    otherwise mask through the whole phase. Threads the run fans out to do NOT
+    inherit the scope (:mod:`contextvars` do not propagate into pool worker
+    threads) and keep the fail-open broadcast — see the module docstring's
+    honest envelope. The caller MUST reset via
+    :func:`unbind_progress_beat_scope` in the same ``finally`` that
+    unregisters (Token-based restore — nesting-safe for an inline/sync
+    spawner running one job inside another's thread). O(1).
+    """
+    return _BEAT_SCOPE.set(handle)
+
+
+def unbind_progress_beat_scope(token: Token[ProgressBeatHandle | None]) -> None:
+    """Restore the scope bound before the matching :func:`bind_progress_beat_scope`.
+
+    Token-based (LIFO) restore, so an inline-spawned nested job hands the
+    thread back to its outer job's scope exactly. O(1).
+    """
+    _BEAT_SCOPE.reset(token)
+
+
 def emit_progress_beat() -> None:
-    """Fire EVERY registered liveness beat — best-effort. O(registrants).
+    """Fire the emitting context's OWN beat — or broadcast when unscoped. O(registrants).
 
     The hot liveness paths (the bounded partition lock-wait poll, the
     rate-controller ``pace`` return, the per-unit scan/enrich/prebuild seams)
-    call this after each poll / pace / unit. A no-op when nothing is
-    registered (every non-dashboard caller). A beat is pure liveness, so
-    broadcasting to every registered watchdog is safe by construction (see the
-    module docstring); a raising beat is swallowed + logged — and the
-    remaining beats still fire — so it can never crash the worker that is
-    merely signalling liveness (Golden Rule #10).
+    call this after each poll / pace / unit. Routing (fix round 4):
+
+    * a SCOPED context (a job's own worker thread, bound via
+      :func:`bind_progress_beat_scope`) delivers ONLY to that job's
+      registration — a sibling job's watchdog never sees it, so a long
+      synchronous phase (the backfill scan) can no longer mask a genuinely
+      wedged sibling; a scoped beat whose registration is already gone (the
+      run finished) is delivered to NOBODY — its dying breaths must not feed
+      siblings either;
+    * an UNSCOPED context (fan-out worker threads, any non-job caller) keeps
+      the fail-open broadcast to every registrant — a beat must never be lost
+      to its own watchdog (the round-3 false-CRITICAL class).
+
+    A no-op when nothing is registered (every non-dashboard caller). A raising
+    beat is swallowed + logged — and the remaining beats still fire — so it
+    can never crash the worker that is merely signalling liveness (Golden
+    Rule #10).
     """
+    scope = _BEAT_SCOPE.get()
     with _BEAT_LOCK:
-        beats = list(_BEATS.values())
+        if scope is not None:
+            own = _BEATS.get(scope)
+            beats = [own] if own is not None else []
+        else:
+            beats = list(_BEATS.values())
     for beat in beats:
         try:
             beat()
@@ -153,7 +227,8 @@ def reset_progress_beats_for_tests() -> None:
     Production code never calls this (each job removes only its own handle);
     test fixtures use it to guarantee a clean registry across tests regardless
     of what a prior test leaked (the :func:`reset_notifier_for_tests`
-    precedent).
+    precedent). The thread-local scope var is NOT touched (it dies with the
+    binding thread; tests bind/reset it via the token API).
     """
     with _BEAT_LOCK:
         _BEATS.clear()
@@ -162,8 +237,10 @@ def reset_progress_beats_for_tests() -> None:
 __all__ = [
     "ProgressBeat",
     "ProgressBeatHandle",
+    "bind_progress_beat_scope",
     "emit_progress_beat",
     "register_progress_beat",
     "reset_progress_beats_for_tests",
+    "unbind_progress_beat_scope",
     "unregister_progress_beat",
 ]

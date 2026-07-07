@@ -34,7 +34,7 @@ from brutex.data.greeks_enrich import (
 )
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.options.risk_free import RISK_FREE_SOURCE_VERSION, FixedRateSource
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 _RATE = FixedRateSource()
@@ -137,6 +137,10 @@ def test_contract_window_covers_every_month_file(months: list[tuple[int, int]]) 
     assert (end - next_month).days == 1
 
 
+@settings(deadline=None)  # I/O-bound: up to 30 REAL fsync'd records per example —
+# hypothesis's 200 ms wall-clock deadline is pure noise on a loaded shared
+# container (observed flaky-failing pre-round-4); the ORACLE is the monotonic
+# high-water logic below, which stays fully asserted.
 @given(indices=st.lists(st.integers(min_value=0, max_value=49), min_size=1, max_size=30))
 def test_checkpoint_high_water_is_monotonic(indices: list[int]) -> None:
     import tempfile

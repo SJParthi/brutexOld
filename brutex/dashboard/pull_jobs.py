@@ -44,7 +44,9 @@ from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S, PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.progress_beat import (
+    bind_progress_beat_scope,
     register_progress_beat,
+    unbind_progress_beat_scope,
     unregister_progress_beat,
 )
 from brutex.observability.watchdog import WorkerEvent
@@ -830,7 +832,15 @@ class BackgroundPullJob:
         # backfill is sanctioned to run CONCURRENTLY with a real pull, so each run holds
         # its OWN handle — registering can never clobber a sibling job's beat, and the
         # ``finally`` removes exactly this run's registration, never the sibling's.
+        # The handle is additionally BOUND as this worker thread's beat SCOPE (fix
+        # round 4, refuter-confirmed): a beat this run emits synchronously on its own
+        # thread (the backfill's O(files) scan per-contract/per-file beats, the prebuild
+        # driver loop) is delivered ONLY to THIS run's watchdog — a concurrent sibling's
+        # genuinely-wedged silence is no longer masked by it. Fan-out worker threads do
+        # not inherit the scope and keep the fail-open broadcast (a beat is never lost
+        # to its own watchdog — the round-3 false-CRITICAL class stays closed).
         beat_handle = register_progress_beat(self._beat)
+        scope_token = bind_progress_beat_scope(beat_handle)
         try:
             result = work(self._on_progress)
         except Exception as exc:  # report ANY failure to the live feed, never crash the thread
@@ -860,10 +870,14 @@ class BackgroundPullJob:
                 except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
                     _LOG.exception("pull_job.on_success failed; the completed pull is unaffected")
         finally:
-            # Remove THIS run's liveness beat (its own handle ONLY) so a later poll can
-            # never fire into a dead watchdog — while a concurrently-running sibling
-            # job's beat stays registered (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001
+            # Restore the thread's prior beat scope FIRST (Token LIFO — an
+            # inline/sync-spawned nested job hands the thread back to the outer
+            # job's scope exactly; fix round 4), then remove THIS run's liveness
+            # beat (its own handle ONLY) so a later poll can never fire into a
+            # dead watchdog — while a concurrently-running sibling job's beat
+            # stays registered (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001
             # GAP #15 + the fix-round-3 multi-registrant registry).
+            unbind_progress_beat_scope(scope_token)
             unregister_progress_beat(beat_handle)
             # Stop this run's stall timer first (so it can never fire after the worker has
             # already returned / raised). Outside the lock: stop() only sets an Event,

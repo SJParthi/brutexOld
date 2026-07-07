@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import os
 import shutil
 import sys
@@ -1940,8 +1941,16 @@ def cmd_greeks_backfill(
             "incremental chipping (--limit) works only in the default "
             "stamp-driven mode. Drop --force or drop --limit."
         )
-    if pause_s is not None and pause_s < 0:
-        raise CliUserError(f"--pause-s must be >= 0, got {pause_s}")
+    if pause_s is not None:
+        # Non-finite refused eagerly (fix round 4): argparse's ``type=float``
+        # happily parses "inf"/"nan" — ``inf`` would crash the wet run
+        # mid-batch with a raw ``OverflowError`` from ``time.sleep`` AFTER the
+        # operator already paid the full O(files) scan, and ``nan`` compares
+        # False to everything so the pause would be SILENTLY disabled.
+        if not math.isfinite(pause_s):
+            raise CliUserError(f"--pause-s must be finite, got {pause_s}")
+        if pause_s < 0:
+            raise CliUserError(f"--pause-s must be >= 0, got {pause_s}")
     try:
         rate_source = resolve_risk_free_source()
     except RiskFreeError as exc:
@@ -1964,10 +1973,23 @@ def cmd_greeks_backfill(
         f"[brutex] greeks-backfill plan {plan.backfill_id[:12]} — "
         f"{len(plan.targets)} contract(s) targeted "
         f"({scan.stale_null} unstamped, {scan.stale_v1} v1, "
-        f"{scan.stale_inputs_drift} inputs-drift, {scan.current} current, "
+        f"{scan.stale_inputs_drift} inputs-drift, {scan.stale_unfixable} unfixable, "
+        f"{scan.current} current, "
         f"{scan.futures_skipped} futures, {scan.probe_failed} unreadable file(s) skipped; "
         f"scan cost: O(files) — {scan.files_probed} file(s) probed)"
     )
+    if scan.stale_unfixable > 0:
+        # Honest loud census (fix round 4): these contracts carry null-stamped
+        # rows the enrich driver SKIPS by design (non-finite OHLC — IVX-2), so
+        # re-targeting them would loop forever while the run read green. They
+        # need a lake repair, not a re-run — say so on stderr, every mode.
+        print(
+            f"[brutex] greeks-backfill — {scan.stale_unfixable} contract(s) UNFIXABLE "
+            "(null-stamped row(s) with non-finite OHLC; the enrich driver skips such "
+            "rows by design, so they are excluded from targeting — repair the "
+            "poisoned partition(s), lake_heal cannot value-edit them).",
+            file=sys.stderr,
+        )
     if dry_run:
         report = dry_run_backfill_report(plan)
         print(f"[brutex] {report.note}")

@@ -54,11 +54,32 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   crash-resume always re-feeds every errored contract, cheaply restating any
   clean ones redone alongside. In ``force`` mode the plan is stamp-INdependent
   and stable, so the checkpoint genuinely resumes at ``next_index`` — under
-  the same clean-prefix-only guarantee.
+  the same clean-prefix-only guarantee AND only for the SAME rate VALUES: the
+  ``backfill_id`` binds a rate-source VALUE fingerprint (fix round 4,
+  refuter-confirmed — a force run that crashed under rate A, resumed after the
+  operator revised the fixed rate / the ``BRUTEX_RISK_FREE_CSV`` values, would
+  otherwise ADOPT the old checkpoint and exempt the recorded prefix from the
+  driver's value-checked gate — the exact drift class ``force`` exists to
+  catch — ending in a false-clean green run), so ANY rate-value change re-keys
+  the plan and the stale checkpoint self-ignores.
 * BLIND SPOT, stated everywhere: the stamp prefilter cannot see a rate/spot
   VALUE drift under an unchanged ``(rate_source_id, RISK_FREE_SOURCE_VERSION)``
   — ``force=True`` routes every contract through the driver's VALUE-checked
-  gate, which catches exactly that class.
+  gate, which catches exactly that class. Honest residue (Golden Rule #10): a
+  SPOT-lake mutation (e.g. a DEC-LAKE-HEAL-001 heal) landing in the narrow
+  window between a force run's crash and its resume is NOT representable in
+  the ``backfill_id`` (no cheap spot-content token exists), so the resumed
+  prefix would not be re-gated against the healed spot — delete
+  ``<lake>/.greeks_backfill/checkpoint.json`` (or let the force run complete
+  afresh) after a heal in that window to guarantee full coverage.
+* A null-stamped bar the driver CANNOT act on — a stored row with a non-finite
+  OHLC value, which the driver's per-bar IVX-2 guard SKIPS without a write —
+  is classified ``stale_unfixable`` (fix round 4, refuter-confirmed): counted
+  + logged + surfaced on the report/Telegram honesty heads, NEVER targeted, so
+  the census converges instead of re-feeding the contract forever while the
+  driver honestly reports it ``already_current``. Repairing the poisoned row
+  is a lake-repair task (``lake_heal`` is strictly row-removing, never
+  value-editing — a manual partition fix is required), stated, not hidden.
 * No wall-clock SLA is claimed — the first wet pass is O(stale bars) kernel
   compute + O(changed partitions) latest-wins rewrites.
 
@@ -71,6 +92,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -95,7 +117,11 @@ from brutex.data.greeks_enrich import (
 )
 from brutex.engine.sweep_checkpoint import SweepCheckpointError, SweepCheckpointStore
 from brutex.observability.progress_beat import emit_progress_beat
-from brutex.options.risk_free import RISK_FREE_SOURCE_VERSION
+from brutex.options.risk_free import (
+    RISK_FREE_SOURCE_VERSION,
+    CsvRateSource,
+    FixedRateSource,
+)
 
 if TYPE_CHECKING:
     from brutex.data.fno_symbol import FnoSymbolParts
@@ -176,6 +202,10 @@ _STALE_NULL: Final[str] = "null"
 _STALE_V1: Final[str] = "v1"
 _STALE_DRIFT: Final[str] = "drift"
 
+#: The four physical price columns the driver's per-bar IVX-2 guard inspects —
+#: the probe's fixability check mirrors EXACTLY that predicate (fix round 4).
+_PRICE_COLUMNS: Final[tuple[str, str, str, str]] = ("open", "high", "low", "close")
+
 #: The runner's per-batch progress hook — ABSOLUTE counts, O(1) per batch:
 #: ``(completed_targets, total_targets, bars_written_cum, errored_cum, label)``.
 BackfillProgress = Callable[[int, int, int, int, str], None]
@@ -201,6 +231,14 @@ class BackfillScan:
     stale_inputs_drift
         Contracts stale on a NON-formula input bit (rate source / rate version
         / q bias / TTE convention drift).
+    stale_unfixable
+        Contracts whose ONLY staleness is null-stamped rows the driver CANNOT
+        act on (a non-finite OHLC value — the per-bar IVX-2 skip class): NEVER
+        targeted (the driver would honestly report them ``already_current``
+        forever while the null stamp persisted — the fix-round-4 refuter-
+        confirmed non-convergence), counted + logged + surfaced on the
+        report/Telegram honesty heads instead. Repair is a lake-repair task
+        (``lake_heal`` is strictly row-removing, never value-editing).
     current
         Contracts whose every probed stamp already matches the current inputs
         — skipped, no target built.
@@ -227,6 +265,7 @@ class BackfillScan:
     stale_null: int = 0
     stale_v1: int = 0
     stale_inputs_drift: int = 0
+    stale_unfixable: int = 0
     current: int = 0
     futures_skipped: int = 0
     undecodable: int = 0
@@ -243,10 +282,13 @@ class BackfillPlan:
     Attributes
     ----------
     backfill_id
-        ``sha256`` over the formula version ‖ rate-source id ‖
-        ``RISK_FREE_SOURCE_VERSION`` ‖ ``force`` ‖ ``expired_only`` ‖ the sorted
-        target keys — ANY input or plan-set change yields a different id, so a
-        stale checkpoint self-ignores (the ``sweep_id`` guard of
+        ``sha256`` over the formula version ‖ rate-source KIND id ‖ the
+        rate-source VALUE fingerprint (:func:`_rate_source_value_fingerprint`,
+        fix round 4) ‖ ``RISK_FREE_SOURCE_VERSION`` ‖ ``force`` ‖
+        ``expired_only`` ‖ the sorted target keys — ANY input or plan-set
+        change (including a rate VALUE revision under an unchanged source
+        kind) yields a different id, so a stale checkpoint self-ignores (the
+        ``sweep_id`` guard of
         :class:`~brutex.engine.sweep_checkpoint.SweepCheckpointStore`).
     targets
         The scan's sorted stale targets, frozen.
@@ -294,6 +336,7 @@ class GreeksBackfillReport:
     stale_null: int
     stale_v1: int
     stale_inputs_drift: int
+    stale_unfixable: int
     probe_failed: int
     resumed_from: int
     dry_run: bool
@@ -319,6 +362,7 @@ class GreeksBackfillReport:
             "stale_null": self.stale_null,
             "stale_v1": self.stale_v1,
             "stale_inputs_drift": self.stale_inputs_drift,
+            "stale_unfixable": self.stale_unfixable,
             "probe_failed": self.probe_failed,
             "resumed_from": self.resumed_from,
             "dry_run": self.dry_run,
@@ -426,7 +470,14 @@ def resolve_backfill_pause_s(env: Mapping[str, str] | None = None) -> float:
     Raises
     ------
     ValueError
-        On a non-float or negative override — fail-loud (the #1360 contract).
+        On a non-float, non-FINITE, or negative override — fail-loud (the
+        #1360 contract). Non-finite is rejected explicitly (fix round 4,
+        refuter-confirmed): ``float("inf")``/``float("nan")`` parse fine and
+        pass a bare ``< 0`` check (NaN compares ``False`` to everything), yet
+        ``inf`` crashes the wet run mid-batch with a raw ``OverflowError``
+        from ``time.sleep`` AFTER the full O(files) scan, and ``nan``
+        SILENTLY disables the configured gentleness pause — the exact silent
+        fallback this contract forbids.
     """
     source = os.environ if env is None else env
     raw = source.get(BACKFILL_PAUSE_ENV, "").strip()
@@ -437,6 +488,9 @@ def resolve_backfill_pause_s(env: Mapping[str, str] | None = None) -> float:
     except ValueError as exc:
         msg = f"{BACKFILL_PAUSE_ENV}={raw!r} is not a number"
         raise ValueError(msg) from exc
+    if not math.isfinite(parsed):
+        msg = f"{BACKFILL_PAUSE_ENV}={raw!r} must be finite"
+        raise ValueError(msg)
     if parsed < 0:
         msg = f"{BACKFILL_PAUSE_ENV}={parsed} must be >= 0"
         raise ValueError(msg)
@@ -493,6 +547,47 @@ def _contract_window(files: list[tuple[int, int, Path]]) -> tuple[date, date]:
     return start, after + timedelta(days=1)
 
 
+def _null_stamped_rows_fixable(path: Path) -> bool:
+    """Whether ANY null-stamped row in *path* is one the enrich driver can stamp.
+
+    The value-level twin of the driver's per-bar IVX-2 guard (fix round 4,
+    refuter-confirmed): the driver SKIPS a row whose OHLC carries a non-finite
+    value — no bar, no write, the null stamp persists — so a probe that
+    classified EVERY null stamp :data:`_STALE_NULL` re-targeted such a contract
+    forever while the driver honestly reported it ``already_current``. Mirrors
+    the driver's predicate EXACTLY: a row with all four prices present + finite
+    is FIXABLE (the driver stamps it); a row with a NULL or junk-typed price is
+    ALSO treated fixable because the driver ERRORS the target LOUDLY on it
+    (``errored`` → ⚠️ head + non-zero CLI exit — never a silent green); ONLY
+    the all-prices-present-but-non-finite row is driver-SKIPPABLE. FAIL-OPEN on
+    any read trouble (missing OHLC columns / corrupt bytes → ``True``): feeding
+    the driver is the safe over-approximation this module documents. One extra
+    bounded 5-column read, paid ONLY on the null-stamp branch — the clean fast
+    path stays a single stamp-column read per file.
+    """
+    import polars as pl
+
+    try:
+        frame = pl.read_parquet(path, columns=[*_PRICE_COLUMNS, "greeks_provenance_id"])
+    except (pl.exceptions.PolarsError, OSError):
+        return True  # fail-open: re-feed the driver (its own guards are total)
+    null_rows = frame.filter(pl.col("greeks_provenance_id").is_null()).select(_PRICE_COLUMNS)
+    saw_row = False
+    for row in null_rows.iter_rows():
+        saw_row = True
+        if any(value is None for value in row):
+            return True  # a NULL price ERRORS the target loudly in the driver
+        try:
+            prices = [float(value) for value in row]
+        except (TypeError, ValueError):
+            return True  # a junk-typed price ERRORS the target loudly too
+        if all(math.isfinite(price) for price in prices):
+            return True  # the driver CAN stamp this row — genuine stale_null
+    # Every visible null-stamped row is driver-skippable (or none were visible
+    # at all — a probe/read skew, fail-open): unfixable only when rows were seen.
+    return not saw_row
+
+
 def _probe_contract_staleness(
     files: list[tuple[int, int, Path]],
     *,
@@ -500,12 +595,16 @@ def _probe_contract_staleness(
     symbol: str,
     per_file_pause: float,
     sleep: Callable[[float], None],
-) -> tuple[str | None, int, int]:
+) -> tuple[str | None, int, int, bool]:
     """Probe one contract's month files for a stale stamp — bounded column reads.
 
-    Returns ``(stale_reason, files_probed, probe_failed)`` where
-    ``stale_reason`` is one of :data:`_STALE_NULL` / :data:`_STALE_V1` /
-    :data:`_STALE_DRIFT` or ``None`` (every probed stamp current).
+    Returns ``(stale_reason, files_probed, probe_failed, unfixable_seen)``
+    where ``stale_reason`` is one of :data:`_STALE_NULL` / :data:`_STALE_V1` /
+    :data:`_STALE_DRIFT` or ``None`` (every probed stamp current or
+    driver-unfixable) and ``unfixable_seen`` flags a file whose null stamps sit
+    ONLY on driver-skippable rows (non-finite OHLC — see
+    :func:`_null_stamped_rows_fixable`; such a file's remaining NON-null stamps
+    are still checked, so a v1/drift sibling stamp still targets the contract).
     Short-circuits on the FIRST stale file. A legacy 7-column partition (no
     ``greeks_provenance_id`` column at all) classifies :data:`_STALE_NULL`. A
     corrupt/unreadable file is counted + logged and the probe continues — and
@@ -525,6 +624,7 @@ def _probe_contract_staleness(
 
     files_probed = 0
     probe_failed = 0
+    unfixable_seen = False
     for _year, _month, path in files:
         if per_file_pause > 0:
             sleep(per_file_pause)
@@ -537,7 +637,7 @@ def _probe_contract_staleness(
             series = pl.read_parquet(path, columns=["greeks_provenance_id"])["greeks_provenance_id"]
         except pl.exceptions.ColumnNotFoundError:
             # A legacy 7-column partition — every bar is unstamped.
-            return _STALE_NULL, files_probed, probe_failed
+            return _STALE_NULL, files_probed, probe_failed, unfixable_seen
         except (pl.exceptions.PolarsError, OSError) as exc:
             probe_failed += 1
             _LOG.warning(
@@ -547,16 +647,23 @@ def _probe_contract_staleness(
                 error=f"{type(exc).__name__}: {exc}",
             )
             continue
+        stamp_values = series
+        if series.null_count() > 0:
+            if _null_stamped_rows_fixable(path):
+                return _STALE_NULL, files_probed, probe_failed, unfixable_seen
+            # Every null stamp in this file sits on a driver-skippable row
+            # (non-finite OHLC): targeting on their account would loop forever
+            # (fix round 4). Flag it, then still check the NON-null stamps.
+            unfixable_seen = True
+            stamp_values = series.drop_nulls()
         try:
-            if series.null_count() > 0:
-                return _STALE_NULL, files_probed, probe_failed
-            for value in series.unique().to_list():
+            for value in stamp_values.unique().to_list():
                 pid = int(value)
                 if not stamp_is_current_inputs(pid, rate_source=rate_source):
                     stored = unpack_greeks_provenance(pid)
                     if stored.formula_version != GREEKS_FORMULA_VERSION:
-                        return _STALE_V1, files_probed, probe_failed
-                    return _STALE_DRIFT, files_probed, probe_failed
+                        return _STALE_V1, files_probed, probe_failed, unfixable_seen
+                    return _STALE_DRIFT, files_probed, probe_failed, unfixable_seen
         except (ValueError, TypeError) as exc:
             # A schema-poisoned stamp column (utf8 "poison", a NaN float, …):
             # data corruption, not a code bug — count + log + continue, exactly
@@ -570,7 +677,7 @@ def _probe_contract_staleness(
                 error=f"{type(exc).__name__}: {exc}",
             )
             continue
-    return None, files_probed, probe_failed
+    return None, files_probed, probe_failed, unfixable_seen
 
 
 def scan_stale_greeks_targets(
@@ -698,7 +805,7 @@ def scan_stale_greeks_targets(
     decoded.sort(key=lambda item: (item[0].underlying, item[1], item[2]))
 
     targets: list[GreeksEnrichTarget] = []
-    stale_null = stale_v1 = stale_drift = current = no_files = 0
+    stale_null = stale_v1 = stale_drift = stale_unfixable = current = no_files = 0
     probe_failed = files_probed = 0
     for _parts, exchange, symbol in decoded:
         if limit is not None and len(targets) >= limit:
@@ -718,7 +825,7 @@ def scan_stale_greeks_targets(
                 GreeksEnrichTarget(exchange=exchange, symbol=symbol, start=start, end=end)
             )
             continue
-        reason, probed, failed = _probe_contract_staleness(
+        reason, probed, failed, unfixable = _probe_contract_staleness(
             files,
             rate_source=rate_source,
             symbol=symbol,
@@ -728,7 +835,24 @@ def scan_stale_greeks_targets(
         files_probed += probed
         probe_failed += failed
         if reason is None:
-            current += 1
+            if unfixable:
+                # The contract's ONLY staleness is driver-skippable rows
+                # (non-finite OHLC): targeting it would re-feed forever while
+                # the driver honestly reported it already_current (fix round 4,
+                # refuter-confirmed non-convergence). Count + log LOUDLY —
+                # repair is a lake-repair task, never silently re-queued.
+                stale_unfixable += 1
+                _LOG.warning(
+                    "greeks_backfill.contract_unfixable",
+                    symbol=symbol,
+                    exchange=exchange,
+                    reason=(
+                        "null-stamped row(s) with non-finite OHLC — the enrich "
+                        "driver skips them by design (IVX-2); lake repair needed"
+                    ),
+                )
+            else:
+                current += 1
             continue
         if reason == _STALE_NULL:
             stale_null += 1
@@ -742,6 +866,7 @@ def scan_stale_greeks_targets(
         stale_null=stale_null,
         stale_v1=stale_v1,
         stale_inputs_drift=stale_drift,
+        stale_unfixable=stale_unfixable,
         current=current,
         futures_skipped=futures_skipped,
         undecodable=undecodable,
@@ -756,6 +881,7 @@ def scan_stale_greeks_targets(
         stale_null=scan.stale_null,
         stale_v1=scan.stale_v1,
         stale_inputs_drift=scan.stale_inputs_drift,
+        stale_unfixable=scan.stale_unfixable,
         current=scan.current,
         futures_skipped=scan.futures_skipped,
         undecodable=scan.undecodable,
@@ -769,6 +895,43 @@ def scan_stale_greeks_targets(
     return scan
 
 
+def _rate_source_value_fingerprint(rate_source: RiskFreeSource) -> str:
+    """The rate source's VALUE fingerprint — a ``backfill_id`` head component.
+
+    Fix round 4 (refuter-confirmed MAJOR): ``rate_source_id_for`` labels only
+    the source KIND (fixed=1 / csv=2), so a force-mode plan — whose target set
+    is stamp-independent — produced the IDENTICAL ``backfill_id`` across a
+    rate VALUE change, and a surviving checkpoint from a crashed force run was
+    ADOPTED after the operator revised the fixed rate / the
+    ``BRUTEX_RISK_FREE_CSV`` values: the recorded prefix was never routed
+    through the driver's value-checked gate — the exact stamp-invisible drift
+    class ``--force`` is documented to catch — ending in a false-clean green
+    run with the wrong-rate Greeks stamped CURRENT forever. Fingerprinting the
+    VALUES the source actually serves re-keys the plan on any change, so the
+    stale checkpoint self-ignores (the ``sweep_id`` guard).
+
+    * :class:`~brutex.options.risk_free.FixedRateSource` → the exact
+      configured rate (``repr`` — full float precision, deterministic).
+    * :class:`~brutex.options.risk_free.CsvRateSource` → a sha256 over the
+      LOADED curve (source label + every ``date=rate`` pair) — the values the
+      driver consumes, so two byte-different CSVs parsing to the same curve
+      are honestly value-identical. O(rows), once per plan.
+    * Any other (unrecognised) source kind → the stable ``"unlabelled"``
+      sentinel — an honest kind-only fallback mirroring
+      ``RATE_SOURCE_ID_NONE`` (the stamp cannot represent such a source
+      either; production resolves only the two shapes above).
+    """
+    if isinstance(rate_source, FixedRateSource):
+        return f"fixed={rate_source.rate!r}"
+    if isinstance(rate_source, CsvRateSource):
+        digest = hashlib.sha256()
+        digest.update(rate_source.source.encode("utf-8"))
+        for on_date, rate in zip(rate_source.dates, rate_source.rates, strict=True):
+            digest.update(f"\x1f{on_date.isoformat()}={rate!r}".encode())
+        return f"csv={digest.hexdigest()}"
+    return "unlabelled"
+
+
 def plan_greeks_backfill(
     scan: BackfillScan,
     *,
@@ -779,15 +942,20 @@ def plan_greeks_backfill(
     """Freeze *scan* into a content-addressed :class:`BackfillPlan`.
 
     The ``backfill_id`` hashes every input that shapes the run (formula
-    version, rate-source id, rate-source version, the two scan modes, the
-    sorted target keys), so ANY change — a formula bump, a different rate CSV
-    kind, a shrunk/grown plan — yields a NEW id and a prior checkpoint
-    self-ignores. Deterministic: the same scan + inputs always produce the
-    same id (pinned by test). O(targets).
+    version, rate-source KIND id, the rate-source VALUE fingerprint
+    (:func:`_rate_source_value_fingerprint` — fix round 4: a rate VALUE change
+    under an unchanged kind must re-key the plan so a crashed force run's
+    checkpoint can never exempt its recorded prefix from the driver's
+    value-checked gate), rate-source version, the two scan modes, the sorted
+    target keys), so ANY change — a formula bump, a different rate CSV kind,
+    a revised rate value/curve, a shrunk/grown plan — yields a NEW id and a
+    prior checkpoint self-ignores. Deterministic: the same scan + inputs
+    always produce the same id (pinned by test). O(targets).
     """
     hasher = hashlib.sha256()
     head = (
         f"{GREEKS_FORMULA_VERSION}|{rate_source_id_for(rate_source)}|"
+        f"{_rate_source_value_fingerprint(rate_source)}|"
         f"{RISK_FREE_SOURCE_VERSION}|{int(force)}|{int(expired_only)}"
     )
     hasher.update(head.encode("utf-8"))
@@ -803,6 +971,23 @@ def plan_greeks_backfill(
     )
 
 
+def _unfixable_note_clause(stale_unfixable: int) -> str:
+    """The honest completion-note clause for driver-unfixable contracts — O(1).
+
+    Empty when none were found (note stability); otherwise a LOUD clause the
+    dashboard headline + CLI print surface verbatim (fix round 4 — the census
+    must never read green while a null stamp persists on a row the driver
+    cannot act on).
+    """
+    if stale_unfixable <= 0:
+        return ""
+    return (
+        f"; {stale_unfixable} contract(s) UNFIXABLE (null-stamped non-finite-OHLC "
+        "row(s) the enrich driver skips by design — lake repair needed, excluded "
+        "from targeting)"
+    )
+
+
 def dry_run_backfill_report(plan: BackfillPlan) -> GreeksBackfillReport:
     """The INERT dry-run report — scan census only, zero writes/checkpoint/alerts."""
     scan = plan.scan
@@ -811,7 +996,7 @@ def dry_run_backfill_report(plan: BackfillPlan) -> GreeksBackfillReport:
         f"({scan.stale_null} unstamped, {scan.stale_v1} v1, "
         f"{scan.stale_inputs_drift} inputs-drift"
         f"{'; force — stamp probe skipped' if plan.force else ''}); "
-        "zero writes, zero checkpoint, zero alerts"
+        "zero writes, zero checkpoint, zero alerts" + _unfixable_note_clause(scan.stale_unfixable)
     )
     return GreeksBackfillReport(
         backfill_id=plan.backfill_id,
@@ -831,6 +1016,7 @@ def dry_run_backfill_report(plan: BackfillPlan) -> GreeksBackfillReport:
         stale_null=scan.stale_null,
         stale_v1=scan.stale_v1,
         stale_inputs_drift=scan.stale_inputs_drift,
+        stale_unfixable=scan.stale_unfixable,
         probe_failed=scan.probe_failed,
         resumed_from=0,
         dry_run=True,
@@ -928,7 +1114,9 @@ def run_greeks_backfill(
         The frozen :func:`plan_greeks_backfill` output.
     rate_source
         The resolved risk-free source (MUST be the one the plan was built
-        with — the ``backfill_id`` binds it).
+        with — the ``backfill_id`` binds its KIND and its VALUES via
+        :func:`_rate_source_value_fingerprint`, fix round 4, so a surviving
+        checkpoint from a different rate configuration self-ignores).
     batch_size
         Contracts per batch (default :func:`resolve_backfill_batch_size`).
     pause_s
@@ -956,7 +1144,10 @@ def run_greeks_backfill(
     Raises
     ------
     ValueError
-        On an explicit *batch_size* ``< 1`` or *pause_s* ``< 0``.
+        On an explicit *batch_size* ``< 1`` or a *pause_s* that is negative or
+        non-finite (fix round 4: ``inf`` would crash mid-batch with a raw
+        ``OverflowError`` from ``time.sleep`` and ``nan`` would silently
+        disable the pause — both refused eagerly, the resolver contract).
     """
     if batch_size is None:
         batch_size = resolve_backfill_batch_size()
@@ -965,6 +1156,9 @@ def run_greeks_backfill(
         raise ValueError(msg)
     if pause_s is None:
         pause_s = resolve_backfill_pause_s()
+    elif not math.isfinite(pause_s):
+        msg = f"pause_s must be finite, got {pause_s}"
+        raise ValueError(msg)
     elif pause_s < 0:
         msg = f"pause_s must be >= 0, got {pause_s}"
         raise ValueError(msg)
@@ -1074,6 +1268,7 @@ def run_greeks_backfill(
         f"re-stamped v2, {tallies.already_current} already current, "
         f"{tallies.errored} errored (re-runnable); {tallies.bars_written} bars written"
         + (f"; resumed from target {resumed_from}" if resumed_from > 0 else "")
+        + _unfixable_note_clause(plan.scan.stale_unfixable)
     )
     result = GreeksBackfillReport(
         backfill_id=plan.backfill_id,
@@ -1093,6 +1288,7 @@ def run_greeks_backfill(
         stale_null=plan.scan.stale_null,
         stale_v1=plan.scan.stale_v1,
         stale_inputs_drift=plan.scan.stale_inputs_drift,
+        stale_unfixable=plan.scan.stale_unfixable,
         probe_failed=plan.scan.probe_failed,
         resumed_from=resumed_from,
         dry_run=False,
