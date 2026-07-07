@@ -45,11 +45,14 @@ the §8 wall-time envelope (~33B trials in 2-4 days on an M4 Pro, 12-24 h on a
 
 from __future__ import annotations
 
+import contextlib
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
+
+import structlog
 
 from brutex.models import BruteXError
 
@@ -57,7 +60,11 @@ if TYPE_CHECKING:
     # Annotation-only: the resume-view adapter reads a SweepCheckpoint's public
     # attributes but never needs the symbol at runtime (PEP-563 string annots),
     # so the import stays out of this pure module's runtime graph.
+    from collections.abc import Generator
+
     from brutex.engine.sweep_checkpoint import SweepCheckpoint
+
+_LOG = structlog.get_logger(__name__)
 
 #: India Standard Time offset (UTC+5:30) in seconds — the natural anchor for a
 #: "nightly, after the incremental vendor pull" daily schedule on an IST market.
@@ -513,16 +520,154 @@ def cycle_audit_payload(
     }
 
 
+# ── G13 escalation kernel (DEC-SWEEP-UNKILLABLE-CORE-001, design D-5) ─────────
+#
+# The daemon's "phone-silent failure" gap: a cycle that fails repeatedly (or an
+# init that dies BEFORE the alerter exists) must escalate to the operator. The
+# DECISION logic lives here — the 100%-tested daemon core — and the coverage-
+# omitted ``cmd_sweep_daemon`` shim in ``brutex.cli`` stays a thin adapter
+# (constructs the ``SweepAlerter`` FIRST, wraps its init in
+# :func:`daemon_init_guard`, feeds each cycle outcome to a
+# :class:`CycleFailureTracker`).
+
+#: Consecutive failed daemon cycles at which the escalation edge fires —
+#: mirrors :data:`brutex.notifications.sweep_alerts.CRASH_LOOP_RELAUNCH_THRESHOLD`
+#: (the same operator-actionable crash-loop bar; the value is REPEATED here, not
+#: imported, so this pure module keeps zero notifications-package edges — the
+#: cross-module equality is pinned by a test instead).
+ESCALATION_THRESHOLD: Final[int] = 3
+
+
+def escalate_after(consecutive_failures: int, *, threshold: int = ESCALATION_THRESHOLD) -> bool:
+    """Pure LEVEL decision: has the failure streak reached the escalation bar? — O(1).
+
+    ``True`` iff *consecutive_failures* ``>= threshold``. This is the stateless
+    half of the G13 kernel; :meth:`CycleFailureTracker.record_failure` is the
+    stateful EDGE (fires exactly once, at the cycle where the streak first
+    reaches the bar) so a night of failed cycles yields ONE CRITICAL, not one
+    per cycle.
+
+    Parameters
+    ----------
+    consecutive_failures
+        The current uninterrupted failed-cycle count (``0`` after any success).
+    threshold
+        The escalation bar (``>= 1``).
+
+    Raises
+    ------
+    SchedulerError
+        If *threshold* is ``< 1`` (a bar of 0 would escalate on a clean start —
+        fail loud, never a silent mis-config).
+    """
+    if threshold < 1:
+        raise SchedulerError(f"escalation threshold must be >= 1, got {threshold}")
+    return consecutive_failures >= threshold
+
+
+@dataclass(slots=True)
+class CycleFailureTracker:
+    """Consecutive-failure counter with an edge-triggered escalation verdict (G13).
+
+    The daemon feeds every cycle outcome in; the tracker answers "is THIS the
+    cycle to fire the CRITICAL escalation?" exactly once per streak:
+    :meth:`record_failure` returns ``True`` only at the cycle where the streak
+    FIRST reaches :attr:`threshold` (``escalate_after(n) and not
+    escalate_after(n - 1)``); later failures in the same streak return
+    ``False`` (the alert already fired); any success resets the streak.
+
+    Attributes
+    ----------
+    threshold
+        The escalation bar (``>= 1``; default :data:`ESCALATION_THRESHOLD`).
+    consecutive_failures
+        The current uninterrupted failed-cycle count (read-only observability;
+        mutate only via the two ``record_*`` methods).
+
+    Raises
+    ------
+    SchedulerError
+        If constructed with ``threshold < 1``.
+    """
+
+    threshold: int = ESCALATION_THRESHOLD
+    consecutive_failures: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        if self.threshold < 1:
+            raise SchedulerError(f"escalation threshold must be >= 1, got {self.threshold}")
+
+    def record_failure(self) -> bool:
+        """Record one failed cycle; ``True`` iff the streak JUST reached the bar — O(1)."""
+        self.consecutive_failures += 1
+        return self.consecutive_failures == self.threshold
+
+    def record_success(self) -> None:
+        """Record one successful cycle — resets the streak to zero — O(1)."""
+        self.consecutive_failures = 0
+
+
+class HaltAlerterLike(Protocol):
+    """Structural type for the halt-alert surface :func:`daemon_init_guard` uses.
+
+    Matched by :class:`brutex.notifications.sweep_alerts.SweepAlerter` (and any
+    test fake) — structural so this pure module never imports the
+    notifications package.
+    """
+
+    def sweep_halted(self, *, run_id: str, reason: str) -> bool:
+        """Fire the CRITICAL sweep-halted alert (best-effort)."""
+        ...
+
+
+@contextlib.contextmanager
+def daemon_init_guard(alerter: HaltAlerterLike, *, run_id: str = "") -> Generator[None, None, None]:
+    """Alerter-FIRST init guard (D-5): any init failure phones, then re-raises.
+
+    The G13 root cause was a daemon dying BEFORE its alerter existed — a
+    phone-silent failure. The fix is ordering: ``cmd_sweep_daemon`` constructs
+    the :class:`~brutex.notifications.sweep_alerts.SweepAlerter` FIRST, then
+    runs the REST of its initialisation inside this guard, so an init crash
+    fires ``sweep_halted(reason="daemon_init")`` before propagating. The alert
+    call itself is best-effort (a raising fake/notifier is swallowed + logged —
+    the alert can never REPLACE the real init failure); the guarded body's
+    exception ALWAYS re-raises unchanged. ``KeyboardInterrupt``/``SystemExit``
+    propagate WITHOUT an alert (an operator-driven stop is not a failure).
+
+    Parameters
+    ----------
+    alerter
+        The already-constructed alerter (alerter-first — it must exist before
+        anything that can fail).
+    run_id
+        The run identity when known; ``""`` at daemon init (the grid identity
+        is minted later in the cycle) — the dedupe key still scopes per reason.
+    """
+    try:
+        yield
+    except Exception:
+        try:
+            alerter.sweep_halted(run_id=run_id, reason="daemon_init")
+        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks init failure
+            _LOG.exception("sweep_scheduler.daemon_init_alert_failed")
+        raise
+
+
 __all__ = [
+    "ESCALATION_THRESHOLD",
     "IST_OFFSET_SECONDS",
     "CheckpointView",
+    "CycleFailureTracker",
     "CyclePlan",
+    "HaltAlerterLike",
     "ResumeDecision",
     "ResumeKind",
     "Schedule",
     "ScheduleKind",
     "SchedulerError",
     "cycle_audit_payload",
+    "daemon_init_guard",
     "decide_resume",
+    "escalate_after",
     "plan_cycle",
 ]

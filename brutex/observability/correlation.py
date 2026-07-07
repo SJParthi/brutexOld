@@ -184,14 +184,64 @@ def request_id_scope(request_id: str | None = None) -> Generator[str, None, None
         yield resolved
 
 
+#: The contextvar / event key every brute-force SWEEP RUN is correlated by
+#: (DEC-SWEEP-UNKILLABLE-CORE-001 R43). Distinct from :data:`PULL_ID_KEY` /
+#: :data:`REQUEST_ID_KEY`: a run id tags one sweep run — all three ride the
+#: same ``merge_contextvars`` processor, so a dashboard request that launches a
+#: sweep can carry ``request_id`` AND ``run_id`` at once.
+RUN_ID_KEY: str = "run_id"
+
+
+def current_run_id() -> str:
+    """Return the ``run_id`` bound to the current context, or ``""`` if none.
+
+    The run twin of :func:`current_pull_id` — same contextvar read, same
+    outside-any-scope empty-string contract, same O(bound contextvars) cost
+    envelope (Golden Rule #10 — never claimed a literal O(1)).
+    """
+    return str(structlog.contextvars.get_contextvars().get(RUN_ID_KEY, ""))
+
+
+@contextlib.contextmanager
+def run_id_scope(run_id: str) -> Generator[str, None, None]:
+    """Bind a ``run_id`` for the duration of one sweep run; yield it; unbind on exit.
+
+    The sweep twin of :func:`pull_id_scope` with ONE deliberate divergence:
+    there is **no mint-on-``None`` path**. A sweep's ``run_id`` IS the
+    deterministic grid identity (``grid_identity(grid)`` — BLAKE3 over the
+    axes + repro hashes, design D-1 / R43); minting a random id here would
+    fabricate an identity that matches no artifact on disk (Golden Rule #1),
+    so the caller must always pass the real one. Observability-only: it binds
+    a log field via ``structlog.contextvars.bound_contextvars`` (bind on
+    entry, RESTORE the prior value on exit — nesting-safe, never leaks past
+    the run), changing no sweep behaviour.
+
+    Parameters
+    ----------
+    run_id
+        The run's grid-identity digest (the caller's ``grid_identity(grid)``).
+
+    Yields
+    ------
+    str
+        The bound ``run_id`` (verbatim) — so the caller can stamp it on its
+        own start / done summary events, mirroring :func:`pull_id_scope`.
+    """
+    with structlog.contextvars.bound_contextvars(**{RUN_ID_KEY: run_id}):
+        yield run_id
+
+
 __all__ = [
     "PULL_ID_KEY",
     "REQUEST_ID_KEY",
+    "RUN_ID_KEY",
     "current_pull_id",
     "current_request_id",
+    "current_run_id",
     "inherited_pull_id_scope",
     "new_pull_id",
     "new_request_id",
     "pull_id_scope",
     "request_id_scope",
+    "run_id_scope",
 ]

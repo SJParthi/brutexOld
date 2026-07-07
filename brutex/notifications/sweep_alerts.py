@@ -816,6 +816,102 @@ class SweepAlerter:
             dedupe_key=summary.sweep_id,
         )
 
+    # ── Unkillable-run-core alerts (DEC-SWEEP-UNKILLABLE-CORE-001) ──
+
+    def sweep_milestone(self, *, run_id: str, pct: int, tuples_done: int, total: int) -> bool:
+        """Alert a sweep progress milestone — 25/50/75% edges (INFO, R41).
+
+        Fired by the run core's progress tick at each percentage EDGE (the
+        caller edge-gates — this method is fire-and-forget per call). The
+        ``dedupe_key`` carries BOTH the run id and the pct so each milestone of
+        one run cuts through the ``PHASE_PROGRESS`` coalescing window while a
+        re-emit of the SAME milestone coalesces.
+
+        Parameters
+        ----------
+        run_id
+            The run identity (D-1 — the grid-identity digest).
+        pct
+            The milestone percentage reached (e.g. ``25`` / ``50`` / ``75``).
+        tuples_done
+            Tuples applied so far.
+        total
+            The full enumerated tuple count.
+        """
+        message = escape_markdown_v2(
+            f"⏳ Sweep {run_id[:12]} reached {pct}% — {tuples_done}/{total} tuples done. "
+            "The run continues unattended."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_PROGRESS,
+            severity=TelegramSeverity.INFO,
+            message=message,
+            dedupe_key=f"sweep-milestone:{run_id}:{pct}",
+        )
+
+    def run_suspect(self, *, run_id: str, tripwire: str, detail: str) -> bool:
+        """Alert that a tripwire marked the run SUSPECT (CRITICAL, R39/D-12).
+
+        Fired ONCE per run by the SUSPECT latch's first-set fan-out: a tripwire
+        (count reconciliation / NaN screen / diffcheck mismatch / …) found
+        evidence the run's numbers may be wrong. The run CONTINUES — tripwires
+        mark, they never kill (never silent, never lost compute) — but the
+        results are quarantined-of-trust until the operator triages, hence the
+        ``QUARANTINE_NEW`` kind + CRITICAL severity. The ``dedupe_key`` scopes
+        per (run, tripwire) so a distinct second tripwire still cuts through.
+
+        Parameters
+        ----------
+        run_id
+            The run identity.
+        tripwire
+            The tripping rule's name (e.g. ``"count_reconcile"``).
+        detail
+            Short evidence string (values, never secrets).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Sweep {run_id[:12]} marked SUSPECT by tripwire {tripwire}: {detail}. "
+            "The run continues but its results need triage before use — see "
+            "runs/<run_id>/manifest.json + flight-recorder.jsonl."
+        )
+        return self._publish(
+            kind=TelegramEventKind.QUARANTINE_NEW,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"run-suspect:{run_id}:{tripwire}",
+        )
+
+    def sweep_halted(self, *, run_id: str, reason: str) -> bool:
+        """Alert that the sweep HALTED on an unrecoverable condition (CRITICAL).
+
+        The sweep twin of :meth:`pull_halted`: a run-wide stop (disk-full
+        graceful halt, a refused launch, a daemon-init failure via
+        :func:`brutex.engine.sweep_scheduler.daemon_init_guard`) must reach the
+        operator's phone — the checkpoint + sentinel laws mean a relaunch
+        RESUMES, so the message says so. The ``dedupe_key`` scopes per
+        (run, reason) so a repeated halt of the same cause coalesces.
+
+        Parameters
+        ----------
+        run_id
+            The run identity when known; ``""`` for a pre-run failure (e.g.
+            daemon init — no grid identity exists yet).
+        reason
+            A short, non-secret cause token (e.g. ``"disk_full"``,
+            ``"daemon_init"``).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Sweep {run_id[:12]} HALTED: {reason}. Compute already done is safe "
+            "(checkpoint + per-tuple sentinels) — fix the cause and relaunch; the "
+            "run resumes where it stopped."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"sweep-halt:{run_id}:{reason}",
+        )
+
     # ── Callback adapters for the existing seams ────────────────────
 
     def watchdog_hung_callback(self) -> Callable[[WorkerEventLike], None]:
@@ -914,6 +1010,39 @@ def emit_pull_halt_alert(exc: Exception) -> None:
         structlog.get_logger("brutex.notifications.sweep_alerts").exception(
             "pull_halt_alert_failed"
         )
+
+
+def emit_run_suspect_alert(*, run_id: str, tripwire: str, detail: str) -> bool:
+    """Fire a best-effort CRITICAL run-SUSPECT alert (DEC-SWEEP-UNKILLABLE-CORE-001).
+
+    The COMMON module helper mirroring :func:`emit_pull_halt_alert` — the ONE
+    place the SUSPECT latch's fan-out (D-12) maps onto
+    :meth:`SweepAlerter.run_suspect` without every seam constructing its own
+    alerter. The whole body is wrapped in a blanket ``try/except`` so the
+    fire-and-forget contract is STRUCTURAL: an alert failure is swallowed +
+    logged and can NEVER change results or kill the run (the I-3 fail-soft
+    law). Silent no-op returning ``False`` when Telegram is disabled (the
+    default). Returns ``True`` iff the publish was attempted on a live
+    notifier.
+
+    Parameters
+    ----------
+    run_id
+        The run identity (D-1).
+    tripwire
+        The tripping rule's name.
+    detail
+        Short, non-secret evidence string.
+    """
+    import structlog
+
+    try:
+        return SweepAlerter().run_suspect(run_id=run_id, tripwire=tripwire, detail=detail)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never kills the run
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "run_suspect_alert_failed"
+        )
+        return False
 
 
 #: Env var naming the pull-level max-close-delta (rupees) at/above which ONE
@@ -1048,6 +1177,7 @@ __all__ = [
     "conflict_alert_threshold",
     "emit_lake_heal_alert",
     "emit_pull_halt_alert",
+    "emit_run_suspect_alert",
     "emit_vendor_conflict_alert",
     "escape_markdown_v2",
 ]
