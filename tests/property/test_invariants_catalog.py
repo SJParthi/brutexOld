@@ -61,6 +61,17 @@ is now REAL in ``tests/integration/test_replay_audit_log.py`` — a fixture pull
 through the real spine + writers, replayed FROM the verified audit log into a
 fresh lake and asserted byte-identical (DEC-INGEST-AUDIT-WIRING-001).
 
+DEC-TEST-APPARATUS-DEBTS-001(h) (``docs/MIGRATION.md``) then promoted the two
+cost-model stubs to live Hypothesis properties over the REAL Track 2
+calculator :func:`brutex.costs.calculator.compute_trade_cost` in
+``test_cost_calculator_properties.py``: **P-10** (STT sell-leg-only, three
+ways — buy-leg-price invariance + independent sell-notional recomputation
+with a test-side half-up rounder + the stamp-duty buy-leg mirror) and
+**P-12** (brokerage = the VERIFIED flat ₹20/order, ₹40 round-trip law +
+the pairwise monotone-in-notional shape check; the old ``min(₹20, 0.03%
+notional)`` docstring here was the stale equity-delivery formula —
+CALCULATOR_SPEC §4.4 corrects it, and the calculator was left untouched).
+
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
 
@@ -151,7 +162,8 @@ def test_p_06_no_lookahead_in_evaluate() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Phase 2 reserved — Track 2 + costs (P-07, P-10, P-12, P-15)
+# Phase 2 reserved — Track 2 + costs (P-07, P-15 pending; P-10, P-12
+# promoted live by DEC-TEST-APPARATUS-DEBTS-001(h))
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -161,13 +173,17 @@ def test_p_07_pessimistic_fill_envelope() -> None:
 
 
 def test_p_10_stt_sell_leg_only() -> None:
-    """P-10: STT applied only on SELL leg."""
-    pytest.skip("Phase 2 implementation pending (STT cost-model)")
+    """P-10: STT applied only on SELL leg (invariant in the buy-leg price +
+    independent sell-notional recomputation + the stamp-duty buy-leg mirror)."""
+    pytest.skip("implemented in tests/property/test_cost_calculator_properties.py")
 
 
 def test_p_12_brokerage_monotone() -> None:
-    """P-12: ``min(₹20, 0.03% notional)`` is monotone non-decreasing in notional until floor, then flat."""
-    pytest.skip("Phase 2 implementation pending (brokerage cost-model)")
+    """P-12: brokerage is flat ₹20 per executed order (₹40 round-trip),
+    invariant in notional/lots — the degenerate flat case of the spec's
+    monotone-until-floor claim; the ``min(₹20, 0.03% notional)`` wording was
+    the stale equity formula (CALCULATOR_SPEC §4.4 corrects it)."""
+    pytest.skip("implemented in tests/property/test_cost_calculator_properties.py")
 
 
 def test_p_15_back_adjustment_multiplicative_invertible() -> None:
