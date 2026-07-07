@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1527 —
+_Last updated: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1533 —
 the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
 fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
 the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
@@ -543,7 +543,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1527** — the
+- **Active branch:** `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1533** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
   23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
