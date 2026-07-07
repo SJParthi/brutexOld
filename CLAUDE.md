@@ -21,7 +21,7 @@
 _Last updated: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
 DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
 DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
-MIGRATION.md #1536–#1540 — the 5-item engine cleanup pack (reapplied onto
+MIGRATION.md #1541–#1545 (renumbered from #1536–#1540 after sibling PR #1236 took #1536) — the 5-item engine cleanup pack (reapplied onto
 current main after the original 2026-07-06 lineage was wiped), ONE change set:
 (1) the combo `\x1f` reject-only guard is MIRRORED into both previously-
 unguarded run-identity joins (`refinement_run_id` + `_walk_forward_run_hash`)
@@ -37,7 +37,7 @@ consumer of the verified ordering is the engine sweep's
 `ComboDedup(OptionDedupIndex)` dedup tier (`sweep_launch.py`/`cli.py`); the
 original sink-path pin covered the since-deleted `OptionBarSink` orchestration
 (removed on main by DEC-INGEST-AUDIT-WIRING-001 #1500 — dropped in the rebase),
-with the mark-after-durable-write LAW recorded as history in #1537. (3) the
+with the mark-after-durable-write LAW recorded as history in #1542. (3) the
 hand-synced Python `VwapState` +
 `MarketStructureState`/`Trend` twins DELETED — the `rust/trading-core`
 pyclasses are the SINGLE SOURCE (additive `last_swing_high/low` getters
@@ -60,7 +60,7 @@ trio DELETED with its 8 test surfaces + golden fixture + dead ci.yml gates
 (grep-proven zero production consumers; `types.py` kept whole —
 `InstrumentMeta` live — and `errors.py` semantics untouched, its five
 subclasses honestly ledgered as orphaned; landed as ONE atomic commit — the
-wiped first lineage's two-commit accident is recorded as history in #1540) —
+wiped first lineage's two-commit accident is recorded as history in #1545) —
 the pack's ONLY behaviour-visible item (import surface). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; run identity bit-identical for all currently-legal
 inputs (golden-proven); no scope/vocab/rate change; touched modules 100%
@@ -68,6 +68,34 @@ line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
 pre-change baseline; cargo suites green (fno-math 565, trading-core 162);
 cargo-mutants evidence partial under the ledgered #1511 Rust timeout —
 stated, not papered over).
+Earlier: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 —
+the CLI `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment
+pass the dashboard runs — post-drain Seam A (fetch lane drained + window
+ledger persisted FIRST, single-flight lock still HELD), default-ON with the
+fail-loud `BRUTEX_CLI_GREEKS_ENRICH` kill switch, inert under
+`--dry-run`/`--inspect` via `_no_persist`, halts (`LakeWriteHalt`/
+`GreeksEnrichPoolBroken`) alert-then-re-raise, a fenced failure NEVER fails
+the pull — and a NEW `brutex enrich-greeks` subcommand delivers the #1188
+bulk v1→v2 re-enrich (exit 0 iff fully clean — cron-visible). ONE COMMON
+wheel-free `brutex/data/greeks_enrich_pass.py` owns the fence (MOVED from
+`historical_pull`, whose `_enrich_greeks_from_minute` is now a thin
+delegator — dashboard behavior byte-identical, outcome types aliased to the
+SAME objects) + the chain-union lake-walk target discovery (CE/PE only,
+zero Parquet opens). HONEST: NOT O(1) — discovery is an O(option partition
+dirs) walk and the pass re-READS the scoped stored bars every run (the
+stamp-driven `already_current` gate makes re-runs cheap by skipping writes
++ solves, never reads); the CLI L2 heal seam landed INDEPENDENTLY on
+main as DEC-CLI-LAKE-HEAL-L2-001 (#1493) and the merged fetch path runs it
+BEFORE this enrich seam — the dashboard heal-L2-before-Greeks-enrich
+ordering law holds on the CLI too; the six-step strict gate
+(DEC-PULL-SIX-STEP-ORDER-001 #1527, merged in flight) sits BETWEEN the
+dashboard's own F&O L2 heal (`_heal_lake_after_pull`) and the enrich
+delegator inside `pull_contract_candles` — `_GREEKS_STRICT_WITHHELD` is a
+distinct instance of the COMMON `GreeksEnrichOutcome`; the CLI never calls
+that seam — its Seam A enrich invokes the COMMON fence directly, so the
+strict gate cannot touch it. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100%
+line+branch).
 Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
 the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
 on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
@@ -751,7 +779,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
   DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
-  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1536–#1540** — the
+  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1541–#1545 (renumbered from #1536–#1540 after sibling PR #1236 took #1536)** — the
   5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
   (1) the combo `\x1f` reject-only guard mirrored into BOTH
   previously-unguarded run-identity joins via ONE COMMON `strategies.combo.reject_unit_separator`
@@ -761,7 +789,7 @@ hostile-review pass._
   docs only, ZERO executable change (AST-proven); the PRODUCTION consumer is the engine sweep's
   `ComboDedup(OptionDedupIndex)` dedup tier (the `OptionBarSink` pin was dropped in the rebase —
   main's #1500 deleted that dead orchestration; the mark-after-durable-write LAW recorded as
-  history in #1537);
+  history in #1542);
   (3) the hand-synced Python `VwapState` + `MarketStructureState`/`Trend` twins DELETED — the
   `rust/trading-core` pyclasses are the single source (additive `last_swing_high/low` getters,
   core untouched — TickVault-safe; crate 0.3.0→0.3.1 moves the live `_indicator_version()`
@@ -774,11 +802,66 @@ hostile-review pass._
   `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver` trio DELETED in full (8 test surfaces +
   golden fixture + dead ci.yml gates; `types.py` whole + `errors.py` semantics untouched, five
   subclasses honestly orphaned; ONE atomic commit — the wiped lineage's two-commit shape recorded
-  as history in #1540) — the
+  as history in #1545) — the
   pack's ONLY behaviour-visible item. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
   bit-identical for all currently-legal inputs (golden-proven); no scope/vocab/rate change;
   touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
   pre-change baseline; cargo-mutants partial under the ledgered #1511 timeout).
+  Earlier: `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
+  `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
+  `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
+  DEC-GREEKS-CORRECTNESS-AUDIT-001 named follow-ups ("a CLI-pulled lake never enriches" + "bulk re-enrich"). ONE
+  COMMON wheel-free module `brutex/data/greeks_enrich_pass.py` (the MOVED dashboard fence `run_greeks_enrich_pass` +
+  `GreeksEnrichOutcome`/`GREEKS_NOT_RUN` + the wheel-free chain-union lake discovery
+  `discover_option_windows`/`lake_target_builder` + the `has_option_candles` pre-gate + the fail-loud
+  `resolve_cli_greeks_enrich` env gate); `historical_pull._enrich_greeks_from_minute` is now a thin delegator —
+  dashboard behavior BYTE-IDENTICAL (event names, the 13 `done` fields in order, logger name via `log=_LOG`, the halt
+  re-raise, outcome types aliased to the SAME objects; the existing dashboard suite passes unmodified). The fetch
+  seam is Seam A — post-drain, ledger persisted, single-flight lock still HELD, default-ON
+  (`BRUTEX_CLI_GREEKS_ENRICH=0` kill switch; a junk value fails loud pre-pull `EXIT_USER_ERROR`; inert under
+  `--dry-run`/`--inspect` via `_no_persist`), scoped pulled-underlyings × pulled-window, deliberately NOT gated on
+  `bars_appended > 0` (async-pipeline counts reconcile AFTER the seam); halts alert-then-re-raise via the COMMON
+  `emit_pull_halt_alert` (`_one_fetch_pass` pattern), any other failure is fenced and NEVER fails the pull; a
+  pure-spot lake skips in O(exchange dirs) with one DEBUG event. `brutex enrich-greeks` (whole lake or
+  `--underlying`/`--start`/`--end` slice, dates CLI-inclusive → half-open internally; `--dry-run` = wheel-free
+  discovery counts, no lock) takes the pull single-flight lock + `keep_awake` and exits `EXIT_OK` iff `ok is True
+  and errored_targets == 0` (the `lake audit-unique` cron-visible precedent — a deliberate, documented divergence
+  from the never-fail pull path). Discovery bounds year dirs via the canonical `brutex.data.partition` constants
+  (§11 COMMON — imported, never re-minted). Review round-1 fixes folded: discovery's year/month names are
+  ASCII-digit-gated (`_is_canonical_digits` — bare `isdigit()` admitted non-decimal Unicode digits like `²024` whose
+  `int()` raise killed the whole pass, and silently accepted Arabic-Indic decimals; both now skip per the
+  junk-tolerance contract); the fetch seam's `+1 day` widening SATURATES at `date.max` (`_next_day_saturating` — a
+  degenerate `--end 9999-12-31` pull previously died on an uncaught post-drain `OverflowError`); `enrich-greeks`
+  refuses `--end 9999-12-31` cleanly (`EXIT_USER_ERROR`, never a traceback) and refuses a nonexistent `--lake-root`
+  loudly via the COMMON `_require_lake_dir` (previously a green `errored_targets=0` illusion + a materialised
+  phantom `.locks/`). Review round-4 fix folded: the `enrich-greeks` clean-done summary echoes `contracts=N` (the
+  fenced build's actual target count, captured by wrapping the builder — never a second discovery walk; the `?` leg is
+  a DEFENSIVE belt only — with the real pass `ok=True` implies the build already ran and a pre-build failure takes the
+  FAILED branch, so it is production-unreachable and guards a future pass-contract change, never a fabricated 0) and
+  an explicit `--underlying` matching ZERO stored option contracts
+  prints one loud stderr WARNING naming the sorted tokens (matching is exact + case-sensitive — `nifty` never
+  matches stored `NIFTY`; exit 0 unchanged, the pass genuinely completed; a whole-lake zero stays quiet) — closing
+  the silent-green typo class one level below the `_require_lake_dir` guard. HONEST: NOT O(1) — discovery is
+  O(option partition dirs + month entries)
+  and the pass re-READS the scoped stored bars every run (`already_current` skips writes/solves, not reads; a
+  full-floor fetch over a dashboard-populated lake re-reads the whole stored index-options history inside the lock —
+  levers: window scoping, `BRUTEX_CLI_GREEKS_ENRICH=0`, `BRUTEX_GREEKS_WORKERS=1`); the CLI L2 heal seam landed INDEPENDENTLY on main as
+  DEC-CLI-LAKE-HEAL-L2-001 (#1493) while this change was in flight — the merge orders this enrich seam strictly
+  AFTER that heal (heal in `cmd_fetch`'s drain `finally` before `end_pull_ledger`, enrich after it; a heal-halt
+  `LakeWriteHalt` re-raises so the enrich never runs over an un-healed slice — the dashboard's
+  heal-L2-BEFORE-Greeks-enrich ordering law holds on the CLI path too); SIX-STEP RECONCILE (DEC-PULL-SIX-STEP-ORDER-001
+  #1527, merged in flight): the dashboard call-site law is preserved with main's strict gate BETWEEN heal and enrich —
+  `_mark_complete` → `_heal_lake_after_pull` (integrity, ALWAYS runs) → the opt-in `BRUTEX_PIPELINE_STRICT_GATE=1`
+  barrier (an unclean prior step / F&O phase WITHHOLDS the pass, `_GREEKS_STRICT_WITHHELD` — now a distinct instance of
+  the COMMON `GreeksEnrichOutcome`, identity-keyed so it never collides with `GREEKS_NOT_RUN`) →
+  `_enrich_greeks_from_minute` (still the thin delegator into the COMMON fence); the CLI never calls that seam
+  (`pull_contract_candles` — `prior_steps=None` covers the OTHER non-pipeline callers: the /db selection route,
+  tests) — its Seam A enrich invokes the COMMON fence directly, so the strict gate cannot touch it (the CLI spot
+  six-step path is
+  main's NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, not this change's); `futures_skipped` reads 0 on CLI passes (FUT filtered at discovery —
+  documented asymmetry); the bulk lever is manual (no cron). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+  REFERENCE_ONLY, no scope/vocab/rate change, zero vendor calls added; touched modules 100% line+branch;
+  ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
   Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
   MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
   gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
@@ -1091,8 +1174,12 @@ hostile-review pass._
   SPOTJOIN-3 2dp `round_money` spot snap (spot only, never a Greek), and `GREEKS_FORMULA_VERSION` 1→2
   (enrich golden regenerated — the diff is EXACTLY the formula bit, zero value drift). HONEST envelope:
   the v2 re-enrich reaches ONLY contracts inside a live pull window (expired contracts keep v1 stamps —
-  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up); rust/** kernel out of
-  scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
+  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up) [CLI-ENRICH RECONCILE —
+  DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536: BOTH follow-ups are now CLOSED — the CLI fetch path runs the
+  same fenced pass post-drain (default-ON, `BRUTEX_CLI_GREEKS_ENRICH` kill switch) and `brutex enrich-greeks`
+  is the bulk v1→v2 re-enrich lever; the CLI L2 heal seam is ALSO closed — DEC-CLI-LAKE-HEAL-L2-001 (#1493),
+  ordered BEFORE the CLI enrich seam];
+  rust/** kernel out of scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
   clean; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
   Prior merged: **DEC-CI-FORK-PR-HARDEN-001,
   MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
@@ -2412,8 +2499,12 @@ hostile-review pass._
 - **Active feature branch:** `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
-  DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1536–#1540)
-  Earlier: `claude/movers-asof-default-latest-minute`
+  DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1541–#1545)
+  Earlier: `claude/intelligent-euler-dwf2ab`
+  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch` pull
+  path runs the SAME fenced Greeks-enrichment pass the dashboard runs + the NEW
+  `brutex enrich-greeks` bulk re-enrich subcommand; ENGINE UNCHANGED),
+  `claude/movers-asof-default-latest-minute`
   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
   default as-of TIME resolves to the SAME latest available minute across EVERY
   timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
@@ -2461,7 +2552,7 @@ hostile-review pass._
   `LookAheadError`; wired into the strategy runner — the deprecated
   execution driver, the historical second wiring site, was DELETED with
   the simulator/driver trio per DEC-EXECUTION-TRIO-DELETE-001
-  (MIGRATION.md #1540) — integration-tested) — a *timestamp*-based check
+  (MIGRATION.md #1545) — integration-tested) — a *timestamp*-based check
   on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
