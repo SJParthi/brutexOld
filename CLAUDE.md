@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1540 —
+_Last updated: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1541 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
 executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
@@ -810,7 +810,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1540** —
+- **Active branch:** `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1541** —
   the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
   twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
   futures contract (nearest UNEXPIRED monthly as of each trade's ENTRY date, resolved from the REAL `registry.duckdb`
