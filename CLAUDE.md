@@ -18,7 +18,37 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
+_Last updated: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+MIGRATION.md #1527–#1528 — the sweep-metrics Rust tail is now ON BY DEFAULT:
+`SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
+deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
+per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
+`sweep_lookahead`, imported not copied), licensed by TWO safety layers
+shipped first, fully green under the prior default-OFF: (a) the
+exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
+simulators return each mask's certified exit-bar indices
+(`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
+over the NEW stdlib-only COMMON `brutex/engine/exit_index.py`:
+`build_ts_index` consolidating the three inline dict copies +
+`bars_strictly_increasing` producer certificate + `exit_indices_consistent`
+consumer belt) so the kernel arm consumes them O(trades) with NO per-mask
+O(N_bars) `exit_ts`→index dict build (an inconsistent stream DEMOTES to the
+dict, never to the Python oracle — results byte-identical; measured 6.1×
+sandbox tail ratio, bench-gated ≥1.15×; the sweep spine threads the pairs
+through the ONE `_iter_mask_metrics`; `_reattribute_chunk_failure` stays on
+the oracle); and (b) a per-process BURN-IN SELF-CHECK — the first 16
+kernel-served masks are bit-compared (`struct.pack` floats, signed zeros
+included) against the Python `_drawdown_stats` oracle; a mismatch SHIPS THE
+ORACLE VALUE and AUTOREVERTS the kernel for the process
+(`kernel_autoreverted` ERROR + latch; `kernel_disabled` short-circuit). The
+frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the default
+(no-env) arm reproduces them byte-for-byte with exactly ONE engaged event
+(golden-pinned; a burn-in-poisoned kernel lands on the pinned bytes with one
+autorevert event). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline).
+Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
 rate>)` UNVERIFIED placeholder rows are DELETED and replaced by explicit
@@ -517,7 +547,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+- **Active branch:** `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1527–#1528** — the sweep-metrics Rust tail is now
+  ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
+  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers shipped
+  first, fully green under the prior default-OFF: the exit_idx-native FAST PATH — both trade simulators return each
+  mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
+  consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
+  `exit_indices_consistent` consumer belt) so the kernel arm consumes them O(trades) with NO per-mask O(N_bars)
+  `exit_ts`→index dict build (inconsistent stream DEMOTES to the dict, never to the Python oracle — results
+  byte-identical; measured 6.1× sandbox tail ratio, bench-gated ≥1.15×) — and a per-process BURN-IN SELF-CHECK: the
+  first 16 kernel-served masks are bit-compared (`struct.pack` floats, signed zeros) against the Python
+  `_drawdown_stats` oracle; a mismatch SHIPS THE ORACLE VALUE and AUTOREVERTS the kernel for the process (ERROR +
+  latch + `kernel_disabled` short-circuit). The frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the
+  default (no-env) arm reproduces them byte-for-byte with exactly ONE engaged event (golden-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+  tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
   carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`
@@ -1975,7 +2021,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zealous-maxwell-w257yf`
+- **Active feature branch:** `claude/amazing-darwin-hb4caw`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

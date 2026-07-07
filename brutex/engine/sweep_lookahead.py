@@ -92,6 +92,15 @@ SWEEP_LOOKAHEAD_GUARD_ENV: Final[str] = "BRUTEX_SWEEP_LOOKAHEAD_GUARD"
 #: The accepted truthy literals (case-insensitive, whitespace-stripped).
 _TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
+#: The accepted falsy literals (case-insensitive, whitespace-stripped) — the
+#: explicit kill-switch vocabulary, the mirror of :data:`_TRUTHY`. Defined
+#: HERE (the sweep env-flag vocabulary home, CLAUDE.md §11 COMMON) so a
+#: default-ON sibling flag (``brutex.engine.rust_metrics``,
+#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001) can recognise an explicit OFF;
+#: this module's own default-OFF flag needs no falsy set — anything
+#: non-truthy is already OFF.
+_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",
     "GuardedBarWindow",
