@@ -3239,7 +3239,9 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
-def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: Any = None) -> bool:
+def _enter_pull_singleflight(
+    stack: Any, lake_root: Path, account_key_resolver: Any = None, lease_factory: Any = None
+) -> bool:
     """Take the cross-process account single-flight lock for the CLI pull; report contention.
 
     DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
@@ -3275,14 +3277,29 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
     against ``pull_jobs.start()``'s identical order. *account_key_resolver* is the
     injectable ``() -> str | None`` key seam (tests); ``None`` (production) resolves via
     the AWS-only source.
+
+    **Cross-host lease, taken LAST (DEC-ACCOUNT-LEASE-CROSSHOST-001):** after both
+    flocks this enters the advisory
+    :func:`~brutex.adapters.groww.pull_singleflight.pull_lease_guard` — a heartbeat
+    lease on the SHARED lake storage, so a pull apparently running on ANOTHER host
+    against the same lake is refused too. Honest envelope: best-effort DETECTION over
+    shared storage + wall clocks, NOT cross-host mutual exclusion (see the guard's
+    module docstring). Entered strictly AFTER the flocks (holding them is what makes
+    ignoring a same-host lease sound); the ExitStack releases LIFO, matching
+    ``pull_jobs``' order. *lease_factory* is the injectable ``(Path) -> CM`` seam
+    (tests); ``None`` (production) uses the live guard.
     """
     import structlog
 
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
         account_pull_singleflight_lock,
+        pull_lease_guard,
         pull_singleflight_lock,
     )
+
+    if lease_factory is None:
+        lease_factory = pull_lease_guard
 
     if account_key_resolver is not None:
         account_key: str | None = account_key_resolver()
@@ -3318,6 +3335,16 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
             f"[brutex] {exc} — refusing to start a second concurrent pull on this lake. "
             "Wait for the running pull to finish (or stop it) before re-running "
             "`brutex fetch`.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        stack.enter_context(lease_factory(lake_root))
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] {exc} — refusing to start a concurrent pull: another HOST appears "
+            "to be pulling into this shared lake. Wait for it to finish (the lease goes "
+            "stale by itself if that pull is dead) before re-running `brutex fetch`.",
             file=sys.stderr,
         )
         return False
