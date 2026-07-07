@@ -4314,8 +4314,11 @@ def cmd_enrich_greeks(
     peer pull), runs the COMMON fenced pass under ``keep_awake``, and alerts +
     re-raises halts (the ``_one_fetch_pass`` pattern). The clean-done summary
     echoes ``contracts=N`` (the fenced build's ACTUAL target count — captured
-    by wrapping the builder, never a second discovery walk; ``?`` when the
-    pass whole-failed before the build ran), and an explicit ``--underlying``
+    by wrapping the builder, never a second discovery walk; the ``?`` leg is
+    a DEFENSIVE belt only — with the real pass, ``ok=True`` implies the build
+    already ran, and a pre-build failure reads ``ok=False`` → the FAILED
+    branch, so ``?`` is production-unreachable and guards a future
+    pass-contract change, never fabricating a 0), and an explicit ``--underlying``
     that matched ZERO stored option contracts prints a loud stderr WARNING
     naming the tokens — matching is exact + case-sensitive, so ``nifty``
     never matches stored ``NIFTY`` (review round-4 fix, the one-level-down
@@ -4418,9 +4421,12 @@ def cmd_enrich_greeks(
     # contracts = how many targets the fenced build ACTUALLY put in scope,
     # captured by wrapping the builder — NEVER a second discovery walk
     # (discovery is O(option partition dirs); doubling it would be a hidden
-    # cost, Golden Rule #10). -1 = the build never ran (the pass whole-failed
-    # before it) — rendered "?" on the summary and never treated as a
-    # zero-match (a count the pass did not produce is never fabricated).
+    # cost, Golden Rule #10). -1 = the build never ran. With the REAL pass
+    # this sentinel cannot survive to the clean-done render: ok=True is
+    # returned only AFTER list(build_targets()) completed, and a pre-build
+    # failure reads ok=False → the FAILED branch below. The "?" render is
+    # therefore a DEFENSIVE belt against a future pass-contract change —
+    # a count the pass did not produce is never fabricated as 0.
     contracts = -1
 
     def _counting_build() -> Sequence[GreeksEnrichTarget]:

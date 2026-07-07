@@ -365,8 +365,10 @@ hostile-review pass._
   refuses `--end 9999-12-31` cleanly (`EXIT_USER_ERROR`, never a traceback) and refuses a nonexistent `--lake-root`
   loudly via the COMMON `_require_lake_dir` (previously a green `errored_targets=0` illusion + a materialised
   phantom `.locks/`). Review round-4 fix folded: the `enrich-greeks` clean-done summary echoes `contracts=N` (the
-  fenced build's actual target count, captured by wrapping the builder — never a second discovery walk; `?` when the
-  pass whole-failed before the build ran) and an explicit `--underlying` matching ZERO stored option contracts
+  fenced build's actual target count, captured by wrapping the builder — never a second discovery walk; the `?` leg is
+  a DEFENSIVE belt only — with the real pass `ok=True` implies the build already ran and a pre-build failure takes the
+  FAILED branch, so it is production-unreachable and guards a future pass-contract change, never a fabricated 0) and
+  an explicit `--underlying` matching ZERO stored option contracts
   prints one loud stderr WARNING naming the sorted tokens (matching is exact + case-sensitive — `nifty` never
   matches stored `NIFTY`; exit 0 unchanged, the pass genuinely completed; a whole-lake zero stays quiet) — closing
   the silent-green typo class one level below the `_require_lake_dir` guard. HONEST: NOT O(1) — discovery is

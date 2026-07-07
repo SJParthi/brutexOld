@@ -591,9 +591,11 @@ class TestEnrichGreeksLive:
     ) -> None:
         """Repeatable ``--underlying`` tokens become ONE frozenset and the
         INCLUSIVE ``--end`` reaches the builder widened ``+1 day``; a stubbed
-        pass that never invokes the builder leaves the count honestly UNKNOWN
-        (``contracts=?`` — never a fabricated 0, and never a spurious
-        zero-match WARNING; review round-4)."""
+        pass that never invokes the builder exercises the DEFENSIVE ``?`` leg
+        (production-unreachable with the real pass, whose ``ok=True`` implies
+        the build ran — a pre-build failure takes the FAILED branch instead):
+        the count stays honestly UNKNOWN (``contracts=?`` — never a fabricated
+        0, and never a spurious zero-match WARNING; review round-4/round-5)."""
         _skip_account_lock(monkeypatch)
         builder_calls: list[dict[str, Any]] = []
 
@@ -624,7 +626,10 @@ class TestEnrichGreeksLive:
         assert "window=[2024-01-01 → 2024-02-01)" in captured.err
         # The stub pass never invoked the builder, so the count is honestly
         # UNKNOWN — rendered "?" (never a fabricated 0, Golden Rule #10) and
-        # never treated as an explicit-filter zero-match (no WARNING).
+        # never treated as an explicit-filter zero-match (no WARNING). This
+        # ok=True-without-build shape is impossible with the REAL pass (it
+        # returns ok=True only after list(build_targets())) — the stub pins
+        # the DEFENSIVE belt against a future pass-contract change.
         assert "[brutex] enrich-greeks done — contracts=? errored_targets=0" in captured.out
         assert "WARNING" not in captured.err
 
