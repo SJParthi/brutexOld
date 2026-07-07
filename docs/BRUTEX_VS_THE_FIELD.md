@@ -21,7 +21,7 @@
 | **Money rounding** | Float drift creeps in | Manual | **Money always 2 decimals; stats (Sharpe/p-values) kept full precision** so ranking never lies |
 | **"Is it correct?"** | You hope so | Some tests | **3,126 automated tests pass, 97.84% line+branch coverage**, hash-chained audit log |
 | **Shipping a change** | Push and pray | CI if you wrote it | **24-gate CI must be green** — tests + types + security + O(1) bench + dedup + docs, then it can merge |
-| **Daily operation** | Babysit it | Babysit it | **Designed for zero-click**: Release Please + auto-merge + nightly stress gate + weekly self-hosted soak (#1535) + a red-team "planted-bug" harness |
+| **Daily operation** | Babysit it | Babysit it | **Designed for zero-click**: Release Please + auto-merge + nightly stress gate + weekly self-hosted soak (#1536) + a red-team "planted-bug" harness |
 
 ---
 
@@ -37,7 +37,7 @@ Every row is enforced automatically on **every pull request**. Nothing ships on 
 | **100% correctness gates** | 3,126 tests, 97.84% coverage (≥90% floor + per-module 100% gates), mypy --strict, bandit, hash-chained audit | ✅ enforced |
 | **All worst-cases / failure modes** | property tests (Hypothesis) + golden fixtures + a 32-test red-team harness that plants bugs and asserts the gates catch them | ✅ enforced |
 | **Reproducible, bit-for-bit** | every run keyed by `blake3(strategy ‖ instrument ‖ params ‖ data-snapshot ‖ code-commit)`; replay oracle | ✅ enforced |
-| **Fully automated merge** | 24-job aggregate gate must be green; auto-merge only on green; nightly ~5-min stress regression gate + weekly self-hosted soak (#1535) + weekly mutation | ✅ enforced |
+| **Fully automated merge** | 24-job aggregate gate must be green; auto-merge only on green; nightly ~5-min stress regression gate + weekly self-hosted soak (#1536) + weekly mutation | ✅ enforced |
 
 ---
 
@@ -50,7 +50,7 @@ Every row is enforced automatically on **every pull request**. Nothing ships on 
 | **Property (Hypothesis)** | edge cases you didn't think of | ✅ 106 |
 | **Golden** | byte-level output drift | ✅ 3 corpora |
 | **Benchmark** | O(1) regressions | ✅ 40 |
-| **Stress / soak** | sustained leaks / drift over hours | ✅ nightly ~5-min regression gate + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, DEC-SOAK-REAL-TIER-001 #1535 — the prior “24h nightly” claim was false and is retracted) |
+| **Stress / soak** | sustained leaks / drift over hours | ✅ nightly ~5-min regression gate + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, DEC-SOAK-REAL-TIER-001 #1536 — the prior “24h nightly” claim was false and is retracted) |
 | **Smoke + Red-team** | fast pre-push + gate-integrity (planted bugs) | ✅ 12 + 32 |
 
 ---

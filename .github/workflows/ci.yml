@@ -2141,7 +2141,7 @@ jobs:
         # DEC-GROWW-CATALOG-DRIVER-001: wire tests/stress into CI (bounded N;
         # the real multi-hour soak runs on soak-selfhosted.yml — soak-scale
         # STRESS_EVENTS dispatches are REFUSED by stress-nightly.yml's fence
-        # (> 200000), DEC-SOAK-REAL-TIER-001 #1535; BRUTEX_STRESS_YEARS stays
+        # (> 200000), DEC-SOAK-REAL-TIER-001 #1536; BRUTEX_STRESS_YEARS stays
         # the fetch-sustained scale knob).
         run: |
           if [ -d tests/stress ]; then

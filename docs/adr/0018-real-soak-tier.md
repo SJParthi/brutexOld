@@ -1,6 +1,6 @@
 # ADR-0018 — A real self-hosted multi-hour soak tier + a pure drift detector
 
-**Decision ID:** `DEC-SOAK-REAL-TIER-001` (MIGRATION.md entry #1535)
+**Decision ID:** `DEC-SOAK-REAL-TIER-001` (MIGRATION.md entry #1536)
 **Date:** 2026-07-06
 **Status:** **ACCEPTED** — ships in the owning PR (CI + observability + tests +
 docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no Groww vendor/rate/scope/vocab change).

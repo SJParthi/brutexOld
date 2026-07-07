@@ -1,6 +1,6 @@
 """Pure, deterministic soak-drift detector — RSS ceiling / fd growth / p99 latency drift.
 
-DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1535). A real multi-hour soak must
+DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1536). A real multi-hour soak must
 answer three questions AUTOMATICALLY — never by eyeballing a chart (CLAUDE.md §11
 AUTOMATED, "ZERO clicks"):
 
@@ -57,7 +57,7 @@ soak tier uses is a process-lifetime PEAK, so it answers "did we ever cross a
 hard wall" not "did we grow N bytes/window". Thresholds are operator-tunable
 heuristics, not proven limits.
 
-## Decision: DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1535).
+## Decision: DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1536).
 """
 
 from __future__ import annotations
