@@ -1724,8 +1724,16 @@ hostile-review pass._
 3. **Scope lock.** Track 1 = Groww + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
-   every trade, but is NEVER part of brute-force pattern combinations
-   or the 52-condition vocabulary. 21 timeframes — **`1m` is the ONLY
+   every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
+   #1527 — persisted finalist rows additionally carry the derived
+   nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
+   trade streams are the two named DISCARDED inner streams — the
+   cascade Monte-Carlo permutation filter and `run_persisted_sweep`'s
+   K-of-N inner stream — each an explicit literal
+   `reference_stamper=None` enumerated by an AST pin, never a silent
+   omission; a missing VIX bar stamps `None`, never fabricated), but is
+   NEVER part of brute-force pattern combinations or the 52-condition
+   vocabulary (nor `_RANKABLE_FIELDS`, nor the BLAKE3 run identity). 21 timeframes — **`1m` is the ONLY
    granularity fetched** and the 19 derived intraday TFs + `1d` are all
    DERIVED from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853; the
    `1d` daily anchor is resampled to midnight-IST from the stored 1-minute and

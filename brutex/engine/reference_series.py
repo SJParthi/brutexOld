@@ -25,10 +25,25 @@ hard-wired one-off:
 ## No hallucination (CLAUDE.md Golden Rule #1)
 
 A missing VIX bar at a trade's entry / exit timestamp yields ``None`` — never a
-fabricated, interpolated, or carried-forward number. Each miss emits one
-``reference_series.vix_miss`` structlog warning so the gap is visible, never
-silent. The VIX series shares the spot index's trading calendar + timeframes,
-so a well-formed aligned feed hits on every bar; the ``None`` path guards a
+fabricated, interpolated, or carried-forward number. Each miss is visible,
+never silent, through a MEMOISED + CAPPED warning scheme
+(DEC-VIX-STAMP-WIRE-001 Stage D — a sweep re-stamps the same instants across
+thousands of masks, so an uncapped per-miss WARNING would flood production
+logs while telling the operator nothing new):
+
+* the first :data:`MISS_WARN_DETAIL_CAP` DISTINCT missing instants each emit
+  ONE detailed ``reference_series.vix_miss`` warning (a re-miss of an
+  already-warned instant is memoised — counted, never re-warned);
+* the next NEW distinct miss emits ONE ``reference_series.vix_miss_capped``
+  sentinel (``distinct_misses=MISS_WARN_DETAIL_CAP``) and every further miss
+  is silent in the log;
+* the TRUE tally of every miss occurrence stays observable via
+  :attr:`TradeReferenceStamper.miss_count` — the cap bounds the LOG VOLUME
+  (≤ cap + 1 warnings per stamper) and the memo's memory (≤ cap instants),
+  never the honesty of the count.
+
+The VIX series shares the spot index's trading calendar + timeframes, so a
+well-formed aligned feed hits on every bar; the ``None`` path guards a
 crafted / partial feed.
 
 ## Full precision (CLAUDE.md §4 — money-only rounding)
@@ -47,7 +62,7 @@ lookups. There is no scan over the series per trade.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
@@ -65,6 +80,35 @@ _LOG = structlog.get_logger(__name__)
 #: the structlog ``series`` field so a future second series (gap / ATR) is
 #: distinguishable in the logs without changing the call site.
 VIX_SERIES_NAME: Final[str] = "india_vix"
+
+#: Cap on the DETAILED per-instant miss warnings one stamper may emit
+#: (DEC-VIX-STAMP-WIRE-001 Stage D). The first ``MISS_WARN_DETAIL_CAP``
+#: DISTINCT missing instants each get one ``reference_series.vix_miss``
+#: warning; the next NEW distinct miss emits the single
+#: ``reference_series.vix_miss_capped`` sentinel; everything after is silent
+#: in the log (still counted in :attr:`TradeReferenceStamper.miss_count`), so
+#: the total warning volume per stamper is bounded at ``cap + 1``.
+MISS_WARN_DETAIL_CAP: Final[int] = 20
+
+
+@dataclass(slots=True)
+class _MissWarnMemo:
+    """Mutable miss-warning bookkeeping for ONE stamper (bounded + picklable).
+
+    Deliberately NOT frozen — the tallies mutate per miss — and excluded from
+    the owning stamper's equality / repr (``compare=False, repr=False`` at the
+    field). Memory is BOUNDED: ``warned_instants`` never grows past
+    :data:`MISS_WARN_DETAIL_CAP` entries regardless of how many distinct
+    instants miss, so an all-miss multi-year sweep cannot balloon the memo.
+    Plain stdlib state (``set`` / ``int`` / ``bool``), so the stamper stays
+    picklable across the spawn-pool worker boundary
+    (:class:`~brutex.engine.sweep_parallel._WorkerContext`); each worker
+    process carries its OWN memo copy — the cap is per process, honestly.
+    """
+
+    warned_instants: set[datetime] = field(default_factory=set)
+    miss_count: int = 0
+    cap_warned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,17 +186,35 @@ class TradeReferenceStamper:
     """
 
     vix: ReferenceSeries
+    #: Per-stamper mutable miss bookkeeping (see :class:`_MissWarnMemo`) —
+    #: excluded from equality/repr so two stampers over the same series stay
+    #: equal regardless of how many misses each has observed.
+    _miss_memo: _MissWarnMemo = field(default_factory=_MissWarnMemo, repr=False, compare=False)
 
     @classmethod
     def from_vix_bars(cls, bars: Sequence[CandleBar]) -> TradeReferenceStamper:
         """Build a stamper from the India VIX bar feed (the common construction)."""
         return cls(vix=ReferenceSeries.from_bars(VIX_SERIES_NAME, bars))
 
+    @property
+    def miss_count(self) -> int:
+        """The TRUE total number of miss OCCURRENCES this stamper observed.
+
+        Every ``None`` stamp counts — entry and exit each, repeats of the same
+        instant included — regardless of the warning memo/cap state, so the
+        log-volume cap never hides the honest tally (Golden Rule #1 / #10).
+        """
+        return self._miss_memo.miss_count
+
     def stamp(self, entry_ts: datetime, exit_ts: datetime) -> tuple[Decimal | None, Decimal | None]:
         """Return ``(vix_at_entry, vix_at_exit)`` for a trade, ``None`` on a miss.
 
-        Each ``None`` is logged once as ``reference_series.vix_miss`` so a gap is
-        visible (Golden Rule #1) — never invented. O(1): two dict lookups.
+        A ``None`` is never invented into a value (Golden Rule #1) and never
+        silent: each miss is tallied in :attr:`miss_count` and surfaced through
+        the memoised + capped ``reference_series.vix_miss`` /
+        ``vix_miss_capped`` warning scheme (module docstring;
+        :data:`MISS_WARN_DETAIL_CAP`). O(1) per trade: two dict lookups, plus
+        O(1) memo bookkeeping on the miss path only.
 
         Parameters
         ----------
@@ -167,14 +229,42 @@ class TradeReferenceStamper:
         """
         vix_entry = self.vix.level_at(entry_ts)
         if vix_entry is None:
-            _LOG.warning("reference_series.vix_miss", series=self.vix.name, at="entry", ts=entry_ts)
+            self._record_miss("entry", entry_ts)
         vix_exit = self.vix.level_at(exit_ts)
         if vix_exit is None:
-            _LOG.warning("reference_series.vix_miss", series=self.vix.name, at="exit", ts=exit_ts)
+            self._record_miss("exit", exit_ts)
         return vix_entry, vix_exit
+
+    def _record_miss(self, at: str, ts: datetime) -> None:
+        """Tally one miss + emit the memoised/capped warning (module docstring).
+
+        O(1): one set probe + at most one set insert. The memo set is bounded
+        at :data:`MISS_WARN_DETAIL_CAP` entries — after the cap, a NEW distinct
+        instant is deliberately NOT memoised (the sentinel already said the
+        details stopped; unbounded memoisation would trade a log flood for a
+        memory flood).
+        """
+        memo = self._miss_memo
+        memo.miss_count += 1
+        if ts in memo.warned_instants:
+            return  # already detailed once — memoised, never re-warned
+        if len(memo.warned_instants) < MISS_WARN_DETAIL_CAP:
+            memo.warned_instants.add(ts)
+            _LOG.warning("reference_series.vix_miss", series=self.vix.name, at=at, ts=ts)
+            return
+        if not memo.cap_warned:
+            memo.cap_warned = True
+            _LOG.warning(
+                "reference_series.vix_miss_capped",
+                series=self.vix.name,
+                distinct_misses=MISS_WARN_DETAIL_CAP,
+                detail="per-instant detail cap reached — further misses are "
+                "counted silently (see TradeReferenceStamper.miss_count)",
+            )
 
 
 __all__ = [
+    "MISS_WARN_DETAIL_CAP",
     "VIX_SERIES_NAME",
     "ReferenceSeries",
     "TradeReferenceStamper",
