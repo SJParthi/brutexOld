@@ -6,7 +6,9 @@ disabled-notifier silent ``False``) and the module helper
 :func:`emit_greeks_backfill_complete_alert` (delegation + the structural
 swallow-all fire-and-forget contract). Injected fakes only — the lazy
 singleton resolver is never touched (the sibling ``test_notifications_sweep_alerts``
-convention).
+convention). Stem-named into the ``test_notifications_sweep_alerts*`` family
+(like ``test_notifications_sweep_alerts_conflict.py``) so the per-module
+coverage-discovery gate maps it to :mod:`brutex.notifications.sweep_alerts`.
 """
 
 from __future__ import annotations

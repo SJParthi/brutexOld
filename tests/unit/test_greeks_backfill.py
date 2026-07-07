@@ -1,16 +1,18 @@
 # pyright: reportPrivateUsage=none
 """Unit tests for :mod:`brutex.data.greeks_backfill` (DEC-GREEKS-BULK-REENRICH-001).
 
-100% line + branch on the bulk v1→v2 re-enrich backfill: the exported
-staleness predicate truth table, the scanner classification matrix (unstamped /
-v1 / inputs-drift / current / futures / undecodable / expired-only / limit /
-force / corrupt-file / no-files / pause), the content-addressed plan id
-(determinism + sensitivity), the env resolvers' fail-loud contract, and the
-runner's batch loop (slicing, checkpoint record/ignore/continue/delete,
-resume, halt escape, progress hook, pause, empty plan, dry-run report).
+100% line + branch on the bulk v1→v2 re-enrich backfill: the scanner
+classification matrix (unstamped / v1 / inputs-drift / current / futures /
+undecodable / expired-only / limit / force / corrupt-file / no-files / pause),
+the content-addressed plan id (determinism + sensitivity), the env resolvers'
+fail-loud contract, and the runner's batch loop (slicing, checkpoint
+record/ignore/continue/delete, resume, halt escape, progress hook, pause,
+empty plan, dry-run report).
 
-Test types: unit (every branch) + golden-style frozen expectations for the
-packed stamp; the hypothesis properties live in
+Test types: unit (every branch); the exported staleness-predicate truth table
+(``stamp_is_current_inputs`` / ``current_inputs_pack``) lives with its OWN
+module's suite in ``tests/unit/test_greeks_enrich.py`` (the per-module
+coverage-gate stem convention); the hypothesis properties live in
 ``tests/property/test_greeks_backfill_properties.py`` and the end-to-end lake
 round-trips in ``tests/integration/test_greeks_bulk_reenrich.py``.
 """
@@ -46,16 +48,12 @@ from brutex.data.greeks_backfill import (
     scan_stale_greeks_targets,
 )
 from brutex.data.greeks_enrich import (
-    RATE_SOURCE_ID_CSV,
     RATE_SOURCE_ID_FIXED,
-    STATUS_NO_SPOT,
     STATUS_OK,
     STYLE_EUROPEAN_EXACT,
     GreeksEnrichReport,
     GreeksEnrichTarget,
-    current_inputs_pack,
     pack_greeks_provenance,
-    stamp_is_current_inputs,
 )
 from brutex.engine.sweep_checkpoint import (
     SweepCheckpointError,
@@ -137,50 +135,6 @@ def _scan(lake: Path, **kwargs: Any) -> BackfillScan:
     kwargs.setdefault("rate_source", _RATE)
     kwargs.setdefault("today", _TODAY)
     return scan_stale_greeks_targets(lake, **kwargs)
-
-
-# ────────────────────────────────────────────────────────────────────────
-# stamp_is_current_inputs / current_inputs_pack — the exported predicate
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestStampPredicate:
-    def test_none_is_never_current(self) -> None:
-        assert stamp_is_current_inputs(None, rate_source=_RATE) is False
-
-    def test_current_v2_stamp_is_current(self) -> None:
-        assert stamp_is_current_inputs(_CURRENT_PID, rate_source=_RATE) is True
-
-    def test_v1_stamp_is_stale(self) -> None:
-        assert stamp_is_current_inputs(_V1_PID, rate_source=_RATE) is False
-
-    def test_rate_version_drift_is_stale(self) -> None:
-        assert stamp_is_current_inputs(_DRIFT_PID, rate_source=_RATE) is False
-
-    def test_rate_source_kind_drift_is_stale(self) -> None:
-        csv_stamped = pack_greeks_provenance(
-            rate_source_id=RATE_SOURCE_ID_CSV, style_flag=0, status=0
-        )
-        assert stamp_is_current_inputs(csv_stamped, rate_source=_RATE) is False
-
-    def test_style_and_status_bits_do_not_affect_the_inputs_verdict(self) -> None:
-        """Style + status are per-bar DESCRIPTIONS, not inputs (bits 20-26)."""
-        demoted = pack_greeks_provenance(
-            rate_source_id=RATE_SOURCE_ID_FIXED, style_flag=0, status=STATUS_NO_SPOT
-        )
-        assert stamp_is_current_inputs(demoted, rate_source=_RATE) is True
-
-    def test_pack_matches_the_driver_gate_bytes(self) -> None:
-        """The predicate's pack IS the gate's pack — ONE source of truth."""
-        expected = pack_greeks_provenance(
-            rate_source_id=RATE_SOURCE_ID_FIXED, style_flag=0, status=0
-        ) & ((1 << 20) - 1)
-        assert current_inputs_pack(_RATE) == expected
-
-    def test_frozen_current_pack_golden(self) -> None:
-        """Golden pin: the v2/fixed-rate input bits are exactly this integer."""
-        # formula=2 | rate_source=1<<8 | rate_version=1<<12 | q_bias=1<<16 | tte=1<<18
-        assert current_inputs_pack(_RATE) == 2 + (1 << 8) + (1 << 12) + (1 << 16) + (1 << 18)
 
 
 # ────────────────────────────────────────────────────────────────────────
