@@ -54,7 +54,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from time import sleep as _time_sleep
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeAlias
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -1767,7 +1767,10 @@ _PULL_STEP_LABELS: Final[dict[PullStep, str]] = {
 }
 
 #: One ordered spot step group — the step plus its instruments, input order kept.
-type SpotStepGroup = tuple[PullStep, tuple[Instrument, ...]]
+#: Classic ``TypeAlias`` (not a PEP 695 ``type`` statement) because this alias is
+#: exported via ``__all__`` and CodeQL's Python extractor does not recognize a
+#: ``type`` statement as a definition (explicit-export alert on the export list).
+SpotStepGroup: TypeAlias = tuple[PullStep, tuple[Instrument, ...]]  # noqa: UP040
 
 
 def partition_spot_steps(instruments: Sequence[Instrument]) -> tuple[SpotStepGroup, ...]:
