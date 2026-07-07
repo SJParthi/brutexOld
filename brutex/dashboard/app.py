@@ -201,6 +201,7 @@ from brutex.dashboard.pull_intent import (
     PullIntent,
     PullIntentStore,
     persist_intent_for_launch,
+    probe_pull_singleflight,
     run_auto_resume,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
@@ -3941,6 +3942,10 @@ def build_app(
                     raise ValueError(str(exc.detail)) from exc
                 raise RuntimeError(str(exc.detail)) from exc
 
+        _probe_job_singleflight = _resume_singleflight_probe(
+            _job_lake_root_resolver(instrument_store)
+        )
+
         def _resume_pipeline_from_intent() -> None:
             """Boot-time seam: run the intent auto-resume decision + dispatch.
 
@@ -3950,9 +3955,15 @@ def build_app(
             single-flight probe, restart-cap refusal + CRITICAL alert + red
             banner, bump-before-launch, stale-intent clear — lives in the
             100 %-tested :func:`~brutex.dashboard.pull_intent.run_auto_resume`;
-            this binding only supplies the real launcher. Never raises.
+            this binding supplies the real launcher + the JOB-root-keyed
+            single-flight probe (never the env default — the two must probe
+            one lock). Never raises.
             """
-            run_auto_resume(_intent_store, launch=_resume_launch)
+            run_auto_resume(
+                _intent_store,
+                launch=_resume_launch,
+                probe_singleflight=_probe_job_singleflight,
+            )
 
         app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
 
@@ -6796,6 +6807,34 @@ def _job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
         return resolve_lake_root()
 
     return _resolve
+
+
+def _resume_singleflight_probe(
+    lake_root_resolver: Callable[[], Path | None],
+) -> Callable[[], bool]:
+    """Build the intent-resume peer probe keyed on the JOBS' single-flight root.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2 re-keyed the background jobs'
+    cross-process ``flock`` onto the STORE-derived WRITE root
+    (:func:`_job_lake_root_resolver`); the boot-time intent resume's peer
+    probe must probe the IDENTICAL lock file, or a live peer holding the job
+    lock at the store parent reads "acquirable" on the intent store's
+    env-derived lake root — burning a restart token (and re-persisting the
+    intent with ``restarts+1``) on a HEALTHY concurrent system, the exact
+    false-positive :attr:`~brutex.dashboard.pull_intent.ResumeAction.PEER_ACTIVE`
+    exists to prevent. A ``None`` root mirrors
+    :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._acquire_singleflight`
+    exactly: with no root the jobs take NO lock, so there is nothing to
+    probe and the resume may fire (``True``).
+    """
+
+    def _probe() -> bool:
+        root = lake_root_resolver()
+        if root is None:
+            return True
+        return probe_pull_singleflight(root)
+
+    return _probe
 
 
 def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:
