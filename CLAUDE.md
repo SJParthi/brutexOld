@@ -20,7 +20,7 @@
 
 _Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
 DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
-MIGRATION.md #1540–#1544 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+MIGRATION.md #1541–#1545 — the doc/spec/ops debt reconciliation pack, DOCS-first:
 (1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
 ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
 production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
@@ -817,7 +817,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
-  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1540–#1544** — the doc/spec/ops debt reconciliation
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1541–#1545** — the doc/spec/ops debt reconciliation
   pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
   (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
   "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
@@ -1270,7 +1270,7 @@ hostile-review pass._
   collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
   own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
   DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
-  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1543), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1544), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
