@@ -1593,6 +1593,19 @@ jobs:
           else
             echo "(brutex.data.session test file not present yet — gate inactive)"
           fi
+          # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
+          # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
+          # adapter. Both ship at 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_data_pcr.py" > /dev/null; then
+            pytest --cov=brutex.data.pcr --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_pcr.py
+          else
+            echo "(brutex.data.pcr test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_movers_pcr.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.movers_pcr --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_pcr.py
+          else
+            echo "(brutex.dashboard.movers_pcr test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_spot_features.py" > /dev/null; then
             pytest --cov=brutex.data.spot_features --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_spot_features.py
           else
