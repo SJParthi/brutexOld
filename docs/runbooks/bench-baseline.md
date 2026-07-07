@@ -53,13 +53,15 @@ job opens a bot PR committing the candidate VERBATIM. The operator:
    with ONLY the baseline change: every blessed cell NOT in
    `replace_entries` is CARRIED byte-identical (its fresh measurement is
    ignored — never a refusal, never a quiet re-mint), so a single-entry
-   re-bless and an additive bless both just work. For a CONTEXT re-bless
-   (e.g. the runner's python minor moved — the `context.python` STRUCTURAL
-   red), list EVERY blessed entry in `replace_entries`: a FULL replace
-   refreshes the candidate's top-level context/fingerprint from the fresh
-   measurement, so the very next compare is green; a partial replace keeps
-   the old context (the carried cells were measured under it) and the
-   honest structural red stands until the full re-bless.
+   re-bless and an additive bless both just work. For a PROACTIVE context
+   re-bless while the compare is still GREEN (e.g. ahead of a planned
+   runner interpreter upgrade), list EVERY blessed entry in
+   `replace_entries`: a FULL replace refreshes the candidate's top-level
+   context/fingerprint from the fresh measurement; a partial replace keeps
+   the old context (the carried cells were measured under it). NOTE: this
+   dispatch flow requires the run's own compare step to pass — a STANDING
+   STRUCTURAL red (e.g. `context.python` drift already in effect) dies at
+   compare before capture can run; use the removal-first recovery below.
 3. **Write the MIGRATION.md entry yourself** (ledger entries are always
    human-written) and push it onto the bless branch: the entry's added
    lines MUST contain the new decision id, the literal entry key
@@ -72,6 +74,27 @@ job opens a bot PR committing the candidate VERBATIM. The operator:
    bench-m4pro.yml; completed with conclusion `success`; head_sha == the
    embedded commit) — a fabricated provenance is machine-refuted. The gate
    fails CLOSED (exit 2) when `$GITHUB_REPOSITORY` is unset.
+
+## Recovering a STANDING `context.python` STRUCTURAL red (removal-first)
+
+Once the runner's python minor has ALREADY moved, every run — scheduled OR
+dispatched — fails at the compare step (STRUCTURAL, exit 2) BEFORE capture:
+the capture step's `if:` carries GitHub's implicit `success()` (deliberate —
+a red run never mints a candidate; wiring-test-pinned), so a
+`capture_candidate=true` dispatch can NOT reach capture and can NOT heal
+this red. The working recovery is REMOVAL-FIRST — the same recipe as
+retiring a machine:
+
+1. Delete `tests/bench/baselines/<key>.json` in a PR whose MIGRATION.md
+   entry names the filename (the governance gate enforces it).
+2. Merge. The next scheduled run ABSTAINS (green-but-loud), capture arms on
+   the abstain, and the FIRST-capture path refreshes the candidate's
+   top-level context/fingerprint from the fresh measurement under the
+   bootstrap decision id.
+3. Nudge CI on the bless PR, review the measured table, merge.
+
+The gate is honestly dormant between steps 1 and 3 (the abstain window) —
+one scheduled cycle on a healthy runner.
 
 ## Workload-parameter change (S11 recipe)
 

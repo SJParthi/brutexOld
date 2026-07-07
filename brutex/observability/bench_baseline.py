@@ -1073,9 +1073,11 @@ def fold_capture(
     from *existing* while any blessed cell is carried (their values were
     measured under that context), and refreshed from the FRESH measurement's
     *fingerprint*/*context* on a first capture OR a FULL re-bless
-    (*replace_entries* covering every blessed cell) — so the documented
-    python-drift re-bless yields a baseline whose next compare is OK instead
-    of a permanent STRUCTURAL red.
+    (*replace_entries* covering every blessed cell) — so the removal-first
+    python-drift recovery (a ledgered baseline delete, then the
+    abstain-armed FIRST capture; ``docs/runbooks/bench-baseline.md``) and
+    the proactive still-green FULL re-bless both yield a baseline whose
+    next compare is OK instead of a permanent STRUCTURAL red.
     """
     if len(runs) < MIN_CAPTURE_RUNS:
         raise BenchBaselineError(
@@ -1170,7 +1172,8 @@ def fold_capture(
     else:
         # First capture OR a FULL re-bless (every blessed cell replaced):
         # the candidate's context/fingerprint come from the FRESH
-        # measurement, so a python-drift re-bless self-heals the gate.
+        # measurement, so the removal-first python-drift recovery (a first
+        # capture after the ledgered baseline delete) refreshes the gate.
         key = format_hardware_key(
             model_slug=str(fingerprint["model_slug"]),
             physical_cores=int(fingerprint["physical_cores"]),

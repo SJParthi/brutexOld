@@ -21,6 +21,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 BENCH_YML = REPO_ROOT / ".github" / "workflows" / "bench-m4pro.yml"
+RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "bench-baseline.md"
 
 
 def _load(path: Path) -> dict[Any, Any]:
@@ -138,6 +139,40 @@ class TestBenchM4ProWiring:
         # NEVER armed by a regression outcome (a red compare fails the job).
         assert "REGRESSION" not in condition
         assert "failure()" not in condition
+
+    def test_runbook_context_drift_recovery_is_removal_first(self) -> None:
+        """The documented ``context.python``-drift recovery must match the wiring.
+
+        A STANDING python-drift STRUCTURAL red fails the compare step
+        (exit 2) BEFORE capture, and the capture step's ``if:`` carries
+        GitHub's implicit ``success()`` (no status-check function — pinned
+        here), so a ``capture_candidate=true`` dispatch can never reach
+        capture while that red stands. The runbook must therefore document
+        the REMOVAL-FIRST recovery (ledgered baseline delete -> abstain ->
+        first-capture context refresh), never a dispatch that "self-heals"
+        a standing structural red (round-3 review, MIGRATION.md #1527).
+        """
+        job = _load(BENCH_YML)["jobs"]["m4pro-absolute-throughput"]
+        condition = _step_named(job, "Capture baseline candidate")["if"]
+        # No status-check function => implicit success(): capture is dead on
+        # a red compare. If a failure-tolerant arm is ever added, this pin
+        # forces a conscious re-reconcile of the runbook + ledger claims.
+        for status_fn in ("success()", "failure()", "always()", "cancelled()"):
+            assert status_fn not in condition, status_fn
+        runbook = RUNBOOK.read_text(encoding="utf-8")
+        heading = "## Recovering a STANDING `context.python` STRUCTURAL red (removal-first)"
+        assert heading in runbook
+        section = runbook.split(heading, 1)[1].split("\n## ", 1)[0]
+        assert "Delete `tests/bench/baselines/<key>.json`" in section
+        assert "names the filename" in section  # the governance-enforced ledger note
+        assert "ABSTAINS" in section
+        assert "FIRST-capture path refreshes" in section
+        assert "bootstrap decision id" in section
+        # The dispatch context re-bless is documented as PROACTIVE-only
+        # (still-green compare) and points a standing red at removal-first.
+        flat = " ".join(runbook.split())
+        assert "while the compare is still GREEN" in flat
+        assert "dies at compare before capture can run" in flat
 
     def test_compare_step_retries_numeric_only(self) -> None:
         job = _load(BENCH_YML)["jobs"]["m4pro-absolute-throughput"]
