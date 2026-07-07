@@ -75,6 +75,10 @@
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
   #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
   .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
+  /* Per-underlying PCR panel (DEC-MOVERS-OPTIONS-PCR-001) — Options tab only. */
+  #pcrPanel { margin-bottom:12px; }
+  #pcrRows .name { color:var(--text-bright); font-weight:600; }
+  #pcrRows .muted { color:var(--muted); }
   .preview-badge { font-size:10px; font-weight:700; color:var(--yellow); border:1px solid var(--yellow);
     border-radius:999px; padding:2px 8px; background:rgba(255,183,77,.10); }
   .empty { color:var(--muted); text-align:center; padding:24px 0; }
@@ -164,6 +168,21 @@
         <label class="ctl">Min vol<input type="number" id="minvol" min="0" step="1" value="0" title="Minimum cumulative session volume (Top Volume ranking)" /></label>
         <button class="go" id="refresh">↻ Refresh</button>
         <span id="asof"></span>
+      </div>
+
+      <!-- Per-underlying Put-Call Ratio panel (DEC-MOVERS-OPTIONS-PCR-001):
+           Options tab only, hidden by default; rendered by renderPcr() with
+           DOM APIs + textContent ONLY (never innerHTML for payload values —
+           DEC-DASHBOARD-XSS-HARDENING-001). OI PCR is a point-in-time ratio of
+           each leg's LAST open_interest at the as-of instant; Vol PCR is the
+           session-to-cutoff flow ratio — the SAME reads the table rows use, so
+           panel and table can never disagree. "~" marks non-full coverage.
+           Honest limit (design edge 20): the all-exchanges view folds an
+           underlying listed on both NSE and BSE into ONE row — the same
+           population the table ranks; pick an exchange for a per-listing PCR. -->
+      <div class="note" id="pcrPanel" hidden>
+        <b>PCR (put/call) — tier expiry · OI at the as-of instant · volume session-to-cutoff · all-exchanges view folds both listings of an underlying into one row (the population the table ranks)</b>
+        <div id="pcrRows"></div>
       </div>
 
       <table>
@@ -372,6 +391,64 @@ function fmtElapsed(s){
   if (m > 0) return `${m}m ${String(sec).padStart(2,"0")}s`;
   return `${sec}s`;
 }
+/* PCR panel (DEC-MOVERS-OPTIONS-PCR-001): per-underlying put/call ratios over
+   the SAME candidate set the rankings use. Ratios arrive as full-precision
+   strings or null (zero call-side denominator — never Infinity, never
+   fabricated); display trims to 2dp, full precision rides the title attr;
+   null renders "—" with the typed status string as tooltip; a null put/call
+   SUM (unreachable today — pcr_row_json always emits raw ints) also renders
+   an honest "—", never a fabricated 0 (Golden Rule #1). coverage_note is
+   server-composed — never re-derived here. "~" marks non-full coverage (the
+   strike_step_confidence marker precedent). XSS-safe BY CONSTRUCTION: every
+   payload-derived value is assigned via textContent / the title DOM property
+   ONLY — renderPcr never concatenates payload values into innerHTML
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
+function renderPcr(rows) {
+  /* 2dp via the SHARED half-up bxFixed2 — never IEEE Number#toFixed
+     (DEC-STORED-DATA-VALIDATION-001 display law; pinned by
+     test_dashboard_halfup_format's zero-IEEE-rounder sweep). */
+  const two = (s) => { if (s == null) return "—";
+    const n = parseFloat(s); return isNaN(n) ? String(s) : bxFixed2(n); };
+  const grp = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
+  const box = $("pcrRows");
+  box.textContent = "";
+  rows.forEach((r) => {
+    const div = document.createElement("div");
+    div.className = "pcr-row";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = r.display_underlying == null ? String(r.underlying) : String(r.display_underlying);
+    if (r.display_underlying !== r.underlying) name.title = "parsed: " + String(r.underlying == null ? "" : r.underlying);
+    div.appendChild(name);
+    div.appendChild(document.createTextNode(" " + String(r.expiry == null ? "" : r.expiry) + " · OI PCR "));
+    const oiB = document.createElement("b");
+    oiB.textContent = two(r.oi_pcr);
+    oiB.title = r.oi_pcr == null ? String(r.oi_status == null ? "" : r.oi_status) : String(r.oi_pcr);
+    div.appendChild(oiB);
+    div.appendChild(document.createTextNode(" (P " + grp(r.put_oi) + " / C " + grp(r.call_oi) + ") · Vol PCR "));
+    const volB = document.createElement("b");
+    volB.textContent = two(r.vol_pcr);
+    volB.title = r.vol_pcr == null ? String(r.vol_status == null ? "" : r.vol_status) : String(r.vol_pcr);
+    div.appendChild(volB);
+    div.appendChild(document.createTextNode(" (P " + grp(r.put_volume) + " / C " + grp(r.call_volume) + ")"));
+    const cov = document.createElement("span");
+    cov.className = "muted";
+    cov.textContent = (r.coverage !== "full" ? " ~" : "")
+      + (r.coverage_note ? " " + String(r.coverage_note) : "");
+    div.appendChild(cov);
+    box.appendChild(div);
+  });
+}
+/* showPcr(): the ONE guard + render + unhide for the panel — called on BOTH the
+   full-render path and the skip-render-when-unchanged fast path (load() hides
+   the panel unconditionally at its top, so the fast path must re-render it or a
+   repeat identical fetch would blank the panel). Non-options assets, gated
+   payloads (no `pcr` key), and empty arrays leave the panel hidden. */
+function showPcr(j) {
+  if (state.asset === "options" && !j.gated && Array.isArray(j.pcr) && j.pcr.length) {
+    renderPcr(j.pcr); $("pcrPanel").hidden = false;
+  }
+}
 function renderRows() {
   const cols = ASSETS[state.asset].cols;
   let data = rowsData.slice();
@@ -442,6 +519,11 @@ async function load() {
      label stays in the DOM — never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
      A reflected `?asset=<img …>` renders as inert text, not a live tag. */
   $("noteText").textContent = "Loading…";
+  /* Unconditional PCR-panel invalidation (DEC-MOVERS-OPTIONS-PCR-001): the ONE
+     move covering asset switches, gated payloads, preview/catch fallbacks, and
+     absent-key payloads — the panel only reappears via showPcr() on a
+     successful options payload carrying rows. */
+  $("pcrPanel").hidden = true; $("pcrRows").textContent = "";
   syncControls();
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"100" });
   if ($("date").value) p.set("date", $("date").value);
@@ -454,7 +536,33 @@ async function load() {
   if (state.asset==="options") p.set("track", $("track").value||"All");
   try {
     const r = await fetch("/api/v1/movers?"+p.toString());
-    if (!r.ok) throw new Error("HTTP "+r.status);
+    if (!r.ok) {
+      /* A 5xx on a RUNNING dashboard is a genuine SERVER fault (today's one
+         realistically-reachable producer: the PCR fold's lake-corruption 500,
+         DEC-MOVERS-OPTIONS-PCR-001 — its detail carries the group-key-enriched
+         "lake corruption: … (underlying X, expiry …)" remediation) — surface
+         the server's own parsed detail over an EMPTY grid instead of falling
+         into the offline SAMPLE preview, whose "run the dashboard" note would
+         misdirect the operator away from the real fix (round-8 hostile-review
+         fold). textContent only — never innerHTML for a server string
+         (DEC-DASHBOARD-XSS-HARDENING-001). The PCR panel is already hidden by
+         the unconditional invalidation at the top of load(). Client errors
+         (4xx — unreachable from the UI controls) + network failures keep the
+         sample-preview catch below. */
+      if (r.status >= 500) {
+        let detail = "";
+        try { detail = String(JSON.parse(await r.text()).detail || ""); } catch { detail = ""; }
+        lastPayload = null;   /* a pill switch must re-fetch, never re-render the error shell. */
+        lastRenderSig = null; /* a recovered fetch must always repaint over the error shell. */
+        wasGated = false; lastGatedKey = null;
+        rowsData = [];
+        renderHead(); renderRows();
+        $("asof").textContent = `server error · HTTP ${r.status}`;
+        $("noteText").textContent = detail || `the server answered HTTP ${r.status} — check the dashboard log (movers.pcr_corruption / the stack trace) for the fault.`;
+        return;
+      }
+      throw new Error("HTTP "+r.status);
+    }
     /* Read the body as TEXT first so an identical repeat payload is detectable
        client-side (DEC-DASHBOARD-JS-PERF-001 — the backend echoes no generation
        field; that echo is a reported follow-up, NOT added here). */
@@ -518,12 +626,14 @@ async function load() {
          overwrite too (the same desync class as the pill switch). */
       baseNote = j.note || "";
       refreshBaselineLegend(baseNote);
+      showPcr(j);  /* load() hid the panel above — an identical repeat must restore it. */
       return;
     }
     lastRenderSig = sig;
     lastPayload = j;  /* cache: sub-filter switches now re-render from this, no refetch. */
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
+    showPcr(j);
     /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): an intraday DEFAULT
        (blank time) reads "latest (HH:MM)" from the additive latest_time echo — NOT
        the wrong "(daily)" it used to print — while the CUT stays whole-day; an
