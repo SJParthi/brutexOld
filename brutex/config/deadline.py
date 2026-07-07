@@ -32,6 +32,28 @@ import threading
 from collections.abc import Callable
 
 
+class DeadlineSpawnError(RuntimeError):
+    """The guard FAILED TO SPAWN its worker daemon — ``fn`` never ran.
+
+    Raised ONLY by :func:`run_with_deadline` when ``threading.Thread(...).start()``
+    itself fails (a :class:`RuntimeError` under thread/memory exhaustion). A
+    DISTINCT type so a caller that must degrade on "the GUARD's own failure
+    modes" — expiry (:class:`DeadlineExceeded`) or this spawn failure — can
+    match the pair EXACTLY without also swallowing a :class:`RuntimeError`
+    raised by *fn* ITSELF (e.g. a :class:`RecursionError` out of a wrapped
+    parse — a genuine ``fn`` error, re-raised UNCHANGED on the caller thread,
+    never re-typed). The hostile-review round-4 MINOR on
+    ``pull_singleflight._bounded_lease_io``: its ``except (DeadlineExceeded,
+    RuntimeError)`` silently reclassified any fn-raised ``RuntimeError`` as a
+    wedged-volume event, contradicting its own "a genuine code bug still
+    propagates" contract — this type is the narrow spawn signal that catch
+    needed. A ``RuntimeError`` SUBCLASS, so every pre-existing broad
+    ``except RuntimeError`` / ``except Exception`` spawn-failure owner (the
+    ``rate_bridge_cache`` #1522 precedent) still catches it byte-compatibly.
+    The original ``Thread.start`` error rides ``__cause__``.
+    """
+
+
 class DeadlineExceeded(TimeoutError):
     """The deadline guard's OWN timeout — raised ONLY by :func:`run_with_deadline` on expiry.
 
@@ -74,7 +96,11 @@ def run_with_deadline[T](
 
     A caller that must distinguish THIS guard's timeout from a :class:`TimeoutError` raised
     by *fn* ITSELF matches the :class:`DeadlineExceeded` subclass (a real ``fn``-raised
-    ``TimeoutError`` is re-raised UNCHANGED on the caller thread, never re-typed).
+    ``TimeoutError`` is re-raised UNCHANGED on the caller thread, never re-typed). The
+    guard's OTHER own failure mode — ``Thread.start()`` raising under thread/memory
+    exhaustion, so *fn* never ran — surfaces as the typed :class:`DeadlineSpawnError`
+    (a ``RuntimeError`` subclass; the original error on ``__cause__``), so a caller can
+    likewise tell it apart from a ``RuntimeError`` raised by *fn* itself.
 
     Generic over the return type so it bounds the historical candle call, the token
     re-mint, the durable lake write AND the registry/coverage DuckDB writes — one
@@ -106,7 +132,15 @@ def run_with_deadline[T](
         finally:
             done.set()
 
-    threading.Thread(target=_runner, name=thread_name, daemon=True).start()
+    worker = threading.Thread(target=_runner, name=thread_name, daemon=True)
+    try:
+        worker.start()
+    except RuntimeError as exc:
+        # Thread/memory exhaustion — ``fn`` NEVER ran. A typed spawn signal
+        # (see :class:`DeadlineSpawnError`): callers that degrade on the
+        # guard's OWN failure modes match (DeadlineExceeded, DeadlineSpawnError)
+        # exactly, while an fn-raised RuntimeError below stays a genuine error.
+        raise DeadlineSpawnError(f"{what} guard thread spawn failed: {exc}") from exc
     if not done.wait(seconds):
         # The guard's OWN timeout — a DeadlineExceeded (TimeoutError subclass). A real
         # TimeoutError raised by ``fn`` itself takes the ``failure`` path below and is re-raised
@@ -154,4 +188,4 @@ def resolve_env_seconds(env_name: str, default: float, raw: str | None = None) -
     return parsed
 
 
-__all__ = ["DeadlineExceeded", "resolve_env_seconds", "run_with_deadline"]
+__all__ = ["DeadlineExceeded", "DeadlineSpawnError", "resolve_env_seconds", "run_with_deadline"]

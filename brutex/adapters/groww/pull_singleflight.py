@@ -143,7 +143,12 @@ from typing import Final
 
 import structlog
 
-from brutex.config.deadline import DeadlineExceeded, resolve_env_seconds, run_with_deadline
+from brutex.config.deadline import (
+    DeadlineExceeded,
+    DeadlineSpawnError,
+    resolve_env_seconds,
+    run_with_deadline,
+)
 from brutex.data.atomic_io import atomic_write_simple, lake_write_guard
 from brutex.models import BruteXError
 
@@ -537,8 +542,13 @@ def _read_lease_file(path: Path) -> PullLease | None:
         return None
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        # A partial / torn / non-UTF-8 write. Honest unknown.
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        # A partial / torn / non-UTF-8 write — or a degenerately deep-nested
+        # payload blowing the parser's recursion limit (RecursionError is a
+        # RuntimeError subclass json.loads CAN raise on hostile/corrupt input;
+        # the hostile-review round-4 MINOR: it previously escaped this decode
+        # and was mislabelled a wedged-volume event upstream). Honest unknown —
+        # a damaged lease can never break (or falsely block) a pull start.
         return None
     if not isinstance(data, dict):
         return None
@@ -682,17 +692,22 @@ def _bounded_lease_io[T](
     only after this I/O. Bounds *fn* by *deadline_s* via
     :func:`~brutex.config.deadline.run_with_deadline`; on expiry
     (:class:`~brutex.config.deadline.DeadlineExceeded`) OR a guard-thread spawn
-    failure under thread exhaustion (:class:`RuntimeError` from
-    ``Thread.start`` — the ``pull_lease.heartbeat_spawn_failed`` rationale)
-    logs ONE ``pull_lease.io_wedged`` WARN and returns *fallback* — the lease
-    machinery degrades (detection lost / a leftover lease that self-heals by
-    going stale within the TTL), the pull and the lock releases are UNAFFECTED.
-    HONEST (#999 stance): the abandoned worker is a daemon that cannot be
-    killed — at most one zombie per wedged op, dying with the process. The
-    wrapped ops never raise themselves (``foreign_pull_lease`` /
-    ``keeper.refresh`` / ``keeper.clear`` are all fail-soft), so only the
-    guard's own failure modes are caught here — a genuine code bug still
-    propagates through ``run_with_deadline``'s re-raise.
+    failure under thread exhaustion
+    (:class:`~brutex.config.deadline.DeadlineSpawnError` — the typed
+    ``Thread.start`` signal, the ``pull_lease.heartbeat_spawn_failed``
+    rationale) logs ONE ``pull_lease.io_wedged`` WARN and returns *fallback* —
+    the lease machinery degrades (detection lost / a leftover lease that
+    self-heals by going stale within the TTL), the pull and the lock releases
+    are UNAFFECTED. HONEST (#999 stance): the abandoned worker is a daemon that
+    cannot be killed — at most one zombie per wedged op, dying with the
+    process. EXACTLY the guard's own two failure modes are caught — the
+    hostile-review round-4 MINOR fix: the prior ``except (DeadlineExceeded,
+    RuntimeError)`` also swallowed a ``RuntimeError`` raised by *fn* ITSELF
+    (``run_with_deadline`` re-raises fn's errors on the caller thread),
+    mislabelling a genuine code bug ``pull_lease.io_wedged``. The wrapped ops
+    never raise themselves (``foreign_pull_lease`` / ``keeper.refresh`` /
+    ``keeper.clear`` are all fail-soft), so any fn-raised error — including a
+    ``RuntimeError`` — now propagates as the genuine code bug it is.
     """
     try:
         return run_with_deadline(
@@ -701,7 +716,7 @@ def _bounded_lease_io[T](
             what=f"pull-lease {action}",
             thread_name=f"brutex-pull-lease-{action}",
         )
-    except (DeadlineExceeded, RuntimeError) as exc:
+    except (DeadlineExceeded, DeadlineSpawnError) as exc:
         _LOG.warning(
             "pull_lease.io_wedged",
             action=action,
@@ -710,9 +725,10 @@ def _bounded_lease_io[T](
             error=str(exc),
             error_type=type(exc).__name__,
             detail=(
-                "lease I/O abandoned on a wedged volume; cross-host detection "
-                "degraded — a leftover lease self-heals by going stale within "
-                "the TTL, and the single-flight locks release normally"
+                "lease I/O abandoned (wedged volume) or never spawned (thread "
+                "exhaustion); cross-host detection degraded — a leftover lease "
+                "self-heals by going stale within the TTL, and the "
+                "single-flight locks release normally"
             ),
         )
         return fallback

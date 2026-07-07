@@ -771,3 +771,117 @@ class TestLeaseIoDeadline:
             )
             == pull_singleflight.PULL_LEASE_IO_DEADLINE_S
         )
+
+    def test_fn_raised_runtime_error_propagates_never_mislabelled_io_wedged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``RuntimeError`` raised by the WRAPPED op is a genuine code bug.
+
+        Hostile-review round-4 MINOR regression pin — FAILS BEFORE the fix:
+        ``_bounded_lease_io``'s ``except (DeadlineExceeded, RuntimeError)``
+        swallowed it, returned the fallback, and emitted a MISLEADING
+        ``pull_lease.io_wedged`` "wedged volume" WARN masking the real cause
+        (contradicting its own "a genuine code bug still propagates"
+        docstring). Now only the guard's OWN failure modes (expiry + the typed
+        spawn failure) degrade — fn's errors propagate verbatim.
+        """
+        warned: list[str] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append(event),
+        )
+
+        def _bug() -> None:
+            raise RuntimeError("genuine code bug in the wrapped op")
+
+        with pytest.raises(RuntimeError, match="genuine code bug"):
+            pull_singleflight._bounded_lease_io(  # pyright: ignore[reportPrivateUsage]
+                _bug,
+                fallback=None,
+                deadline_s=5.0,
+                action="read",
+                lease_path=pull_lease_path(tmp_path),
+            )
+        assert "pull_lease.io_wedged" not in warned  # never a wedged-volume claim
+
+    def test_guard_spawn_failure_degrades_with_io_wedged_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DEADLINE guard's own ``Thread.start`` exhaustion still degrades.
+
+        The narrowed catch keeps the sanctioned arm: a spawn failure is the
+        guard's OWN failure mode (the typed
+        :class:`~brutex.config.deadline.DeadlineSpawnError`), so the op is
+        abandoned with ONE ``pull_lease.io_wedged`` WARN and the fallback is
+        served — the pull and the lock releases stay unaffected.
+        """
+        real_start = threading.Thread.start
+
+        def _no_spawn(self: threading.Thread) -> None:
+            # Surgical: fail ONLY the bounded-I/O guard's worker threads
+            # ("brutex-pull-lease-<action>"), never pytest's own machinery.
+            if self.name.startswith("brutex-pull-lease-"):
+                raise RuntimeError("can't start new thread")
+            real_start(self)
+
+        monkeypatch.setattr(threading.Thread, "start", _no_spawn)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        out = pull_singleflight._bounded_lease_io(  # pyright: ignore[reportPrivateUsage]
+            lambda: "never-runs",
+            fallback="fallback-served",
+            deadline_s=5.0,
+            action="read",
+            lease_path=pull_lease_path(tmp_path),
+        )
+        assert out == "fallback-served"
+        events = [(e, kw) for e, kw in warned if e == "pull_lease.io_wedged"]
+        assert len(events) == 1
+        assert events[0][1]["error_type"] == "DeadlineSpawnError"
+        assert events[0][1]["action"] == "read"
+
+
+class TestHostileLeaseFileFailSoft:
+    """A damaged/hostile lease file can never break (or falsely block) a pull."""
+
+    def test_deep_nested_lease_json_reads_as_honest_unknown(self, tmp_path: Path) -> None:
+        """``json.loads`` RecursionError on a degenerately nested lease → None.
+
+        Hostile-review round-4 MINOR regression pin — FAILS BEFORE the fix:
+        ``_read_lease_file`` caught only ``(JSONDecodeError, ValueError)``, so
+        the ``RecursionError`` (a ``RuntimeError`` subclass) escaped the
+        decode; in production it then hit ``_bounded_lease_io``'s broad
+        ``RuntimeError`` catch and was mislabelled a wedged-volume event. It is
+        corrupt-file territory: the honest unknown, per the module's
+        "a damaged lease can never break a pull start" pledge.
+        """
+        path = pull_lease_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        depth = 100_000  # far beyond any recursion limit the parser tolerates
+        path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        assert read_pull_lease(tmp_path) is None
+
+    def test_guard_enters_cleanly_over_a_hostile_lease_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: the hostile file neither refuses the pull nor WARNs io_wedged."""
+        path = pull_lease_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        depth = 100_000
+        path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        warned: list[str] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append(event),
+        )
+        with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+            lease = read_pull_lease(tmp_path)
+            assert lease is not None and lease.host == "me"  # ours overwrote the junk
+        assert read_pull_lease(tmp_path) is None  # cleared at exit
+        assert "pull_lease.io_wedged" not in warned  # never a wedged-volume claim
