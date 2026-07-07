@@ -177,7 +177,7 @@ one **test** (`brutex/dashboard/templates/groww_credentials.html`,
 |---|---|---|
 | Whole workspace works | Toolchain rebuilt; 7,435/0 tests; ruff/mypy/pyright/bandit/doctor green | "269 errors" on a bare clone are provisioning noise — `make setup` first |
 | O(1) uniqueness/dedup/lookup | Bloom (fixed-k) + LMDB (B+tree) + u64-AND + dict-by-symbol; CI blocks O(n) regressions | Strict tier + 50 M/s floor run + PASS on the **registered** M4-Pro runner (MIGRATION #655; run #109) — daily/push/dispatch, not a per-PR blocker by design |
-| 100% tested & hardened | 100% coverage gate + 7 test types on every PR | Full mutation / 24h soak / sanitizers run nightly, not per-PR |
+| 100% tested & hardened | 100% coverage gate + 7 test types on every PR | Full mutation / ~~24h soak~~ / sanitizers run nightly, not per-PR **(CORRECTED — DEC-SOAK-REAL-TIER-001 #1552: the nightly never ran a 24h soak; it was and is a ~5-min stress regression gate. The real multi-hour soak now runs weekly on `soak-selfhosted.yml`)** |
 | Fully automated merge | auto-merge squashes trusted `claude/*` PRs on green `ci-ok` | No auto-conflict-resolution (refuses `dirty`/`behind` — git cannot auto-merge true conflicts); server-side branch protection not yet applied |
 | No illusion / hallucination | Env fixed *before* any green claim; every figure traces to a command/file | — |
 
