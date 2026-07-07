@@ -1,0 +1,227 @@
+# Runbook — Automated Off-Box Backup (restic) · Install / Operate / Restore
+
+> **Decision:** DEC-BACKUP-OFFBOX-001 (MIGRATION.md #1527; ADR
+> `docs/adr/0017-offbox-backup-restic.md`). **Blueprint authority:**
+> `docs/REMOTE_CONTROL_AND_ZERO_TOUCH_COMPARISON.md:304` ("restic/rclone to
+> S3 Object-Lock (or B2 immutable) + local snapshots"), matrix rows 28
+> (bit-rot, `:156`) + 30 (ransomware, `:158`), dead-man keystone
+> (`:27-31`, `:287`).
+> **Supersedes** the manual tar recipe in
+> `docs/runbooks/lake-backup-restore.md` §2 (which stays as the manual
+> fallback); that runbook's restore-ORDER law + consistency argument
+> ("the ledger reconciles against the lake — but expect re-pull work
+> proportional to the mismatch") stand verbatim and are cross-linked from
+> §"Restore" below.
+> **Target audience:** the operator (sjparthi) arming the nightly off-box
+> backup on the §8 Mac, and any Claude session asked "is the lake backed
+> up / how do I restore?".
+
+The system is three one-shot scheduled jobs plus a CLI:
+
+| Job | Schedule | Command | What it does |
+|---|---|---|---|
+| `com.brutex.backup` | nightly 03:35 IST | `brutex backup run` | preflight → restic backup → verify (structure + rotating read-data subset) → stamp success → retention (`forget`, Sunday `--prune`) |
+| `com.brutex.backup-deadman` | hourly | `brutex backup check` | O(1) dead-man freshness check; CRITICAL Telegram on breach; healthchecks ping every tick; daily deep remote cross-check self-gated inside the hourly tick |
+| `com.brutex.backup-drill` | monthly (Day 1, 04:30) | `brutex backup restore-drill` | 1 MiB known-bytes canary roundtrip + stratified per-category sample restore + byte verification (audit files: byte-PREFIX law) |
+
+Fire time 03:35 IST: after the 02:30 sweep-daemon default, before the
+~06:05 IST token-minter window. Quiescence is NOT guaranteed and is not
+required — a backup during a live pull is tagged `pull-active` and tolerated
+by design (every lake writer is atomic tmp→fsync→`os.replace`; set-level skew
+heals via the ledger-reconcile design of
+`docs/runbooks/lake-backup-restore.md` §4).
+
+---
+
+## 1. Install procedure (12 steps — each tagged [AUTO] or [MANUAL-ADR-0017 M#])
+
+1. **[MANUAL M1]** Install restic: `brew install restic` (pin ≥ 0.16).
+2. **[MANUAL M1]** **Probe the INSTALLED binary** (closes the external-tool
+   fact gate): run `restic version`; confirm against the ADR-0017
+   "External-tool facts" citations that the installed version has
+   exit-code-3 partial-backup semantics, supports
+   `check --read-data-subset=n/t`, and that `unlock` removes only stale
+   locks (restic docs, https://restic.readthedocs.io/ — verified
+   2026-07-06; re-run this probe step on every restic upgrade).
+3. **[MANUAL M2]** Provision the bucket: S3 Object-Lock (compliance mode) or
+   Backblaze B2 with object lock enabled; create a scoped key WITHOUT
+   delete / bypass-governance permission. Put the S3/B2 credentials into
+   `~/.brutex/.env` (0600) — `bootstrap_env()` loads it at CLI dispatch, so
+   the launchd jobs inherit them without any secret in a plist.
+4. **[MANUAL M3]** Create the repo password:
+   `security add-generic-password -s brutex-restic -w` (macOS keychain, then
+   set `BRUTEX_BACKUP_PASSWORD_COMMAND="security find-generic-password -s brutex-restic -w"`)
+   or a 0600 password file (`BRUTEX_BACKUP_PASSWORD_FILE=...`). EXACTLY ONE
+   of the two may be set. Copy the password to an OFF-BOX password manager
+   AND a printed/offline copy — **password loss = total loss; restic has no
+   recovery** (ADR-0017 M3).
+5. **[AUTO]** Add `BRUTEX_BACKUP_REPO=s3:s3.ap-south-1.amazonaws.com/<bucket>/brutex`
+   (or the B2 equivalent) to `~/.brutex/.env`; run
+   `brutex backup run --dry-run` and review the printed include/exclude
+   plan + WOULD-run argv (zero restic calls, zero state writes).
+6. **[MANUAL M4]** **First seed:** run `brutex backup run` manually under
+   `screen`/`tmux` — an 8 TB lake over WAN takes days (~1 TB/day at
+   ~100 Mbit/s sustained — honest envelope). Optionally raise
+   `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` (default 48) for the seed window; the
+   dead-man reads **RUNNING** while the run is alive (no false page) and
+   HUNG only past that bound. The single-flight lock means overlapping
+   launchd fire times exit busy (code 5, no alert) while the seed runs.
+7. **[MANUAL M4]** Fill the `{{PLACEHOLDER}}`s in the three templates under
+   `docs/runbooks/backup-templates/` (`com.brutex.backup.plist`,
+   `com.brutex.backup-deadman.plist`, `com.brutex.backup-drill.plist` —
+   GENERATED from `brutex/backup/schedule_render.py`, golden-pinned
+   byte-equal; edit the renderer, never the copies); `cp` them to
+   `~/Library/LaunchAgents/`; then
+   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.brutex.backup*.plist`;
+   verify with `launchctl print gui/$(id -u)/com.brutex.backup`.
+8. **[MANUAL M5]** Enable Telegram: `BRUTEX_TELEGRAM_ENABLED=true` in
+   `~/.brutex/.env`, then `brutex notify test`. Until enabled (the repo
+   default is OFF), backup alerts degrade to exit codes + structlog + the
+   healthchecks lane, and `brutex backup status` says so in red.
+9. **[MANUAL — mandatory live NEGATIVE dead-man drill]** Prove the alarm
+   path end-to-end before trusting it:
+
+   ```bash
+   BRUTEX_BACKUP_DEADMAN_HOURS=0.0001 brutex backup check
+   ```
+
+   EXPECT: exit code 1, a `backup.deadman.*` breach event in the log, and
+   the CRITICAL "BACKUP DEAD-MAN" Telegram push on your phone. An untested
+   recovery path is unverified (blueprint §C.7 step 10,
+   `docs/REMOTE_CONTROL_AND_ZERO_TOUCH_COMPARISON.md`). The re-alert
+   throttle stamps `deadman.json` only after a SUCCESSFUL send, so the
+   drill costs at most one page; the next normal hourly tick reads FRESH
+   again with the real threshold.
+10. **[MANUAL M6]** Create the healthchecks.io check (period 1 h, grace
+    ≥ 2 h) and set `BRUTEX_BACKUP_HEALTHCHECK_URL=<ping url>`; watch one
+    hourly ping arrive. The checker pings EVERY tick — plain URL when
+    FRESH/RUNNING, `<url>/fail` on any breach — so the EXTERNAL service
+    alarms when pings STOP: the one lane that catches checker-dead,
+    launchd-dead, box-dead and Telegram-dead (the blueprint's missing
+    keystone, `:27-31`). **Without M6 a dead box is silent.**
+11. **[AUTO]** `brutex backup restore-drill` → expect exit 0 (canary
+    verified, zero corrupt); then `brutex backup status --json` → green
+    (FRESH, `maintenance_ok: true`, Telegram ENABLED, healthcheck SET).
+12. **Reference — restore procedures:** see §4 below (single file /
+    directory / full lake), the restore-ORDER law + post-restore mop-up
+    (ledger-driven idempotent re-pull + catalog reconcile) kept from
+    `docs/runbooks/lake-backup-restore.md` §3-§4; the verify-egress cost
+    table (§5); seed-window threshold guidance (step 6); and the
+    Object-Lock-vs-prune interplay (`maintenance_ok=false` is EXPECTED
+    under Object-Lock retention — repo growth is a cost issue, not a data
+    risk; review quarterly, ADR-0017 M8).
+
+## 2. cron fallback (non-macOS boxes / launchd-averse installs)
+
+Emitted by `schedule_render.render_cron_lines()` — same three jobs,
+`crontab -e`:
+
+```cron
+35 3 * * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup run           >> ~/.brutex/logs/backup.log 2>&1
+0  * * * *  /path/venv/bin/brutex backup check                                     >> ~/.brutex/logs/backup.log 2>&1
+30 4 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill >> ~/.brutex/logs/backup.log 2>&1
+```
+
+Note cron does not load `~/.brutex/.env` itself — `bootstrap_env()` does at
+CLI dispatch, so the lines need only the lake root. Tighter RPO = edit the
+first line's schedule (the RPO IS the schedule interval — honest envelope
+§6).
+
+## 3. Operating: exit codes, alerts, status
+
+- `brutex backup status [--json]` — O(1), zero restic calls: prints
+  `state.json` + `deadman.json` + resolved config (repo URL redacted to
+  scheme+host; the password VALUE is never read), plus "Telegram alerts:
+  ENABLED/DISABLED" and "healthcheck ping: SET/UNSET". Exit mirrors the
+  shallow dead-man verdict (0/1) with NO alert/ping/sidecar side effects.
+- `brutex backup check [--deep] [--dry-run]` — the dead-man tick. `--deep`
+  forces the remote cross-check (`restic snapshots --json --latest 1 --tag
+  brutex` compared against the local stamp) this tick.
+- Exit codes (from `brutex/backup/errors.py`): 0 OK · 1 dead-man breach ·
+  2 config · 3 preflight (unmounted/phantom/empty lake) · 4 restic/state
+  failure · 5 busy (benign overlap, no alert) · 6 corruption
+  (verify/drill) · 7 maintenance failed (data-success stamp stands).
+- Every failure maps to a deterministic triple (exit code + `backup.*`
+  structlog event + alert-or-explicit-no-alert) — the full 23-row
+  failure-mode matrix lives in the DEC-BACKUP-OFFBOX-001 PR body and
+  MIGRATION.md #1527.
+- The nightly run REFUSES an unmounted `/Volumes/<name>` phantom dir and an
+  empty backup set BEFORE any restic verb — critically before
+  `forget --prune`, the one path by which a backup system could age real
+  snapshots out against a skeleton lake. A genuinely brand-new box seeds
+  once with `brutex backup run --allow-empty` (loud, logged).
+- Partial backups (restic exit 3 — some source files unreadable, normal on
+  a LIVE lake) still stamp success; a streak ≥ 3 escalates CRITICAL.
+
+## 4. Restore
+
+Single file / directory:
+
+```bash
+restic -r "$BRUTEX_BACKUP_REPO" snapshots --tag brutex          # pick <id>
+restic -r "$BRUTEX_BACKUP_REPO" restore <id> --target /tmp/r --include '/path/inside/lake'
+```
+
+Full lake: `restic restore <id> --target <new_lake_root_parent>` then
+follow the restore-ORDER law of `docs/runbooks/lake-backup-restore.md` §3
+VERBATIM: stop the dashboard + every pull first; restore `bars/`, the three
+`*.duckdb` masters, `sweeps/`, `audit/`; restore
+`window_ledger/ledger.parquet` LAST; restart the dashboard. Post-restore
+mop-up: the DuckDB masters may have been snapshotted torn during a live
+pull — they are REBUILDABLE (instrument re-load / registry metadata re-pull
+/ catalog reconcile); the ledger reconciles against the lake — expect
+re-pull work proportional to the mismatch (idempotent keep-first sink), per
+`docs/runbooks/lake-backup-restore.md` §4.
+
+Repo-corruption remediation (`backup_repo_corrupt` alert): human-only —
+restore from an OLDER snapshot or re-seed; NEVER run automated "repair" (an
+automated repair of a corrupt repo can destroy the last good copy) —
+ADR-0017.
+
+## 5. Verify-egress cost table (the `BRUTEX_BACKUP_VERIFY_SUBSET` trade)
+
+The nightly `restic check` verifies repo STRUCTURE (metadata) every run;
+the read-data tier is the knob:
+
+| `BRUTEX_BACKUP_VERIFY_SUBSET` | Nightly read | Full-repo cycle | Egress on ~8 TB |
+|---|---|---|---|
+| `auto` (default) | rotating `k/56` pack bucket (state cursor; advances only on a PASSING check — no bucket ever skipped) | every 56 successful nights ≈ 8 weeks | S3: ~8 TB/56 ≈ **143 GB/night** (billed egress); B2's free-egress tier changes the math (pricing: https://www.backblaze.com/cloud-storage/pricing — verified 2026-07-06) |
+| `none` | structure only | never (bit-rot detection OFF) | ~0 |
+| passthrough (e.g. `2%`, `1/10`) | verbatim to restic | your arithmetic | proportional |
+
+## 6. Honest envelope (Golden Rule #10 — what this does NOT guarantee)
+
+1. **A dead box is silent on-box** — every alert pushes FROM the Mac; true
+   box-death detection REQUIRES the M6 external healthchecks watcher.
+2. **RPO = the schedule interval** (nightly ⇒ up to ~24 h lost). Bars are
+   re-pullable from Groww within vendor retention (CLAUDE.md §6 historical
+   depth row); **`sweeps/` + the hash-chained audit logs are NOT
+   re-pullable — their loss window IS the RPO.**
+3. **No cross-file transactional snapshot** — file-level consistency only
+   (atomic writers); DuckDB masters may snapshot torn mid-pull
+   (rebuildable); set-level skew heals via ledger reconcile.
+4. **Subset verification is sampling** — bit-rot at the remote can live up
+   to ~8 weeks before the rotating read-data cycle touches its pack; the
+   drill samples N files (default 16) + a canary, not 8 TB; the quarterly
+   FULL restore rehearsal is manual (ADR-0017 M7).
+5. **Immutability is provisioned remote-side** (M2) — a stolen key with
+   delete rights on a NON-locked bucket can still destroy history.
+6. **Password loss = total loss** (M3).
+7. Secrets never leave the box: the password exists only as a FILE path or
+   COMMAND in the child env; any inherited `RESTIC_PASSWORD` is stripped;
+   argv is secret-free; `~/.brutex/cache/`, `~/.brutex/.env`, `quota/`,
+   `runtime.json` and every credential path are NOT in the backup set
+   (creds are AWS-SSM-only, DEC-AWS-ONLY-CREDS-001).
+
+## Decision trail
+
+- DEC-BACKUP-OFFBOX-001 (MIGRATION.md #1527) — this system.
+- ADR-0017 (`docs/adr/0017-offbox-backup-restic.md`) — the
+  manual-acceptance register M1-M8 + external-tool facts.
+- `docs/runbooks/lake-backup-restore.md` — the manual tar fallback + the
+  restore-ORDER law + consistency argument this runbook inherits.
+- DEC-LAKE-HEAL-001 (#1175) — why `.quarantine/` is INCLUDED in the backup
+  set (post-heal it is the ONLY record of removed poison rows).
+- DEC-ATOMIC-WRITE-CONSOLIDATE-001 (#890) — why the state files ride
+  `atomic_write_simple` (a state ENOSPC must never mis-escalate to
+  `LakeWriteHalt`).
