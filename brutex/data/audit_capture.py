@@ -395,14 +395,30 @@ class DedupJournal:
         """The wrapped dedup index (Bloom L1 + injected exact tier)."""
         return self._index
 
-    def admit(self, keys: Iterable[bytes]) -> list[bytes]:
+    def admit(self, keys: Iterable[bytes], *, out: list[bytes] | None = None) -> list[bytes]:
         """Admit *keys*; return ONLY the newly-admitted ones, in input order.
 
         Delegates to the index's atomic
         :meth:`~brutex.data.option_dedup.OptionDedupIndex.add_if_new`, so a
         key is admitted exactly once even under concurrent shard workers.
+
+        Parameters
+        ----------
+        keys
+            Candidate dedup keys, in input order.
+        out
+            Optional accumulator appended to AS EACH key is admitted — the
+            exception-safety seam (round-5 review fix): on a mid-iteration
+            raise from the exact tier / Bloom (LMDB write error, FAIL_CLOSED
+            trip), *out* already holds every key durably admitted BEFORE the
+            fault, so the caller can still audit them — the chain must never
+            under-report a durable admission. ``None`` → a fresh list.
         """
-        return [key for key in keys if self._index.add_if_new(key)]
+        admitted: list[bytes] = [] if out is None else out
+        for key in keys:
+            if self._index.add_if_new(key):
+                admitted.append(key)
+        return admitted
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -419,8 +435,15 @@ class AuditCaptureSink:
     the durable inner append AND the ``capture_seq`` stamp + buffer, so the
     stamp order IS the lake-apply order (the parallel-window same-partition
     keep-first hazard is closed structurally). An inner-append exception
-    buffers nothing (capture-after-durable); an empty append short-circuits
-    to the inner's own no-op with no lock and no event.
+    buffers nothing (capture-after-durable); a JOURNAL fault after the
+    durable inner append still buffers the event + the ``add`` rows for the
+    keys durably admitted before the fault, then re-raises (the chain never
+    under-reports a durable write — round-5 review fix); an empty append
+    short-circuits to the inner's own no-op with no lock and no event.
+    Everything capture cannot faithfully record — a ``"|"`` subject, a
+    Greeks-overlay batch, a sub-second timestamp, a dedup key the attached
+    journal cannot derive (a ``"\\x1f"``-bearing coordinate) — refuses the
+    write BEFORE it becomes durable.
 
     Records are pair-tagged ``(symbol, interval)`` so the controller-thread
     drain seams (:meth:`drain_pair` / :meth:`drain_remaining`) can flush a
@@ -519,12 +542,26 @@ class AuditCaptureSink:
                 merge_mode=merge_mode,
             )
         # Fail-loud input validation BEFORE the durable write: a batch the
-        # capture cannot faithfully record (Greeks overlay / '|' subject) must
-        # never become an un-audited durable append — that would be structural
-        # replay incompleteness, worse than a refused write.
+        # capture cannot faithfully record (Greeks overlay / '|' subject /
+        # a dedup key the L3 journal cannot derive) must never become an
+        # un-audited durable append — that would be structural replay
+        # incompleteness, worse than a refused write.
         subject = _capture_subject(exchange, segment, symbol, interval)
         encoded = encode_bars(bars)
         batch_digest = input_blake3(encoded)
+        # The L3 key derivation is PURE — hoisted pre-durable (round-5 review
+        # fix): a '\x1f'-bearing vendor coordinate raises CandleParseError
+        # inside candle_dedup_key, and post-write that raise stranded exactly
+        # the un-audited durable append the block above exists to prevent.
+        keys: list[bytes] = []
+        if self._journal is not None:
+            keys = self._dedup_keys(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                bars=bars,
+            )
         with self._lock:
             result = self._inner.append(
                 exchange=exchange,
@@ -560,35 +597,39 @@ class AuditCaptureSink:
                     for wr in result.write_results
                 ],
             }
-            add_records: list[BufferedAuditRecord] = []
-            if self._journal is not None:
-                admitted = self._journal.admit(
-                    self._dedup_keys(
-                        exchange=exchange,
-                        segment=segment,
-                        symbol=symbol,
-                        interval=interval,
-                        bars=bars,
+            # Exception-safe L3 admission (round-5 review fix): the journal
+            # admits key-by-key into `admitted`, and the `finally` buffers the
+            # LAKE_APPEND_WRITTEN event + one 'add' row per key DURABLY
+            # admitted even when a mid-loop fault (LMDB write error, Bloom
+            # FAIL_CLOSED trip) re-raises — the durable inner append above has
+            # already happened, so swallowing the records here would strand an
+            # un-audited write and a permanent false L3 extra_in_live.
+            admitted: list[bytes] = []
+            try:
+                if self._journal is not None:
+                    self._journal.admit(keys, out=admitted)
+            finally:
+                if self._journal is not None:
+                    payload["added_keys_digest"] = _added_keys_digest(admitted)
+                    payload["added_count"] = len(admitted)
+                if self._mode is CaptureMode.CAPTURE:
+                    payload["bars"] = encoded
+                tag = (symbol, interval)
+                self._buffer.append(
+                    (
+                        tag,
+                        BufferedAuditRecord(
+                            action=LAKE_APPEND_ACTION, subject=subject, payload=payload
+                        ),
                     )
                 )
-                payload["added_keys_digest"] = _added_keys_digest(admitted)
-                payload["added_count"] = len(admitted)
-                add_records = [
-                    BufferedAuditRecord(action=DEDUP_ADD_ACTION, subject=key.hex(), payload={})
+                self._buffer.extend(
+                    (
+                        tag,
+                        BufferedAuditRecord(action=DEDUP_ADD_ACTION, subject=key.hex(), payload={}),
+                    )
                     for key in admitted
-                ]
-            if self._mode is CaptureMode.CAPTURE:
-                payload["bars"] = encoded
-            tag = (symbol, interval)
-            self._buffer.append(
-                (
-                    tag,
-                    BufferedAuditRecord(
-                        action=LAKE_APPEND_ACTION, subject=subject, payload=payload
-                    ),
                 )
-            )
-            self._buffer.extend((tag, record) for record in add_records)
         return result
 
     @staticmethod

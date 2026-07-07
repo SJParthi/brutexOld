@@ -12,10 +12,14 @@ DEC-AUDIT-LAKE-REPLAY-ORACLE-001. 100% line + branch of ``audit_capture.py``:
   inner's), the lock-spans-delegate white-box pin (stamp order IS lake-apply
   order), monotonic ``capture_seq``, empty-append short-circuit,
   inner-exception → nothing buffered, pair-scoped vs remaining drains,
-  anchor vs capture payload shape, the ``"|"``-subject refusal BEFORE the
-  durable write;
-* :class:`DedupJournal` — admitted-once semantics + the ``added_keys_digest``
-  determinism, zero ``add`` rows on a re-pull;
+  anchor vs capture payload shape, the ``"|"``-subject AND the
+  ``"\\x1f"``-coordinate (dedup-key) refusals BEFORE the durable write, the
+  journal-fault-after-durable-write event/add-row buffering (round-5 review
+  fixes);
+* :class:`DedupJournal` — admitted-once semantics + the ``out`` accumulator
+  exception seam, the ``added_keys_digest`` determinism AND
+  order-insensitivity (sorted-set digest — mutant-killing fixtures), zero
+  ``add`` rows on a re-pull;
 * :func:`resolve_audit_capture` — the OFF identity pin (the IDENTICAL
   un-wrapped sink object), anchor/capture wiring, the LMDB-backed exact
   tier, the once-per-process ``audit_capture.enabled`` WARN.
@@ -40,6 +44,7 @@ from brutex.data.audit_capture import (
     AuditCaptureSink,
     CaptureMode,
     DedupJournal,
+    _added_keys_digest,  # pyright: ignore[reportPrivateUsage]
     decode_bars,
     encode_bars,
     input_blake3,
@@ -47,6 +52,7 @@ from brutex.data.audit_capture import (
     resolve_audit_capture,
     resolve_capture_mode,
 )
+from brutex.data.candle_fields import CandleParseError
 from brutex.data.models import CandleBar, FnoGreeksBar
 from brutex.data.option_dedup import OptionDedupIndex, candle_dedup_key
 from brutex.data.parquet_writer import ParquetWriter, WriteResult
@@ -161,6 +167,25 @@ class RaisingSink:
 
     def append(self, **_kwargs: Any) -> SinkAppendResult:
         raise RuntimeError("inner sink exploded")
+
+
+class FaultyExact:
+    """An exact-membership tier raising on its Nth ``add`` — the L3
+    fault-injection seam (LMDB write error / Bloom FAIL_CLOSED stand-in)."""
+
+    def __init__(self, fail_on_add: int) -> None:
+        self._seen: set[bytes] = set()
+        self._adds = 0
+        self._fail_on_add = fail_on_add
+
+    def __contains__(self, key: bytes, /) -> bool:
+        return key in self._seen
+
+    def add(self, key: bytes, /) -> None:
+        self._adds += 1
+        if self._adds == self._fail_on_add:
+            raise OSError("exact tier write failed")
+        self._seen.add(key)
 
 
 class LockProbeSink:
@@ -420,6 +445,51 @@ def test_dedup_journal_admits_once_in_input_order() -> None:
     assert journal.admit([key_b, key_a]) == []
 
 
+def test_dedup_journal_admit_out_accumulator_is_returned_and_filled() -> None:
+    """``out`` is filled in input order and IS the returned list (identity)."""
+    journal = DedupJournal(OptionDedupIndex())
+    key_a = candle_dedup_key(
+        exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", epoch=1
+    )
+    key_b = candle_dedup_key(
+        exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", epoch=2
+    )
+    acc: list[bytes] = []
+    returned = journal.admit([key_a, key_b], out=acc)
+    assert returned is acc
+    assert acc == [key_a, key_b]
+
+
+def test_dedup_journal_admit_out_holds_prefix_on_mid_iteration_fault() -> None:
+    """Round-5 review fix: a mid-loop exact-tier fault re-raises, but ``out``
+    already holds every key DURABLY admitted before the fault — the caller's
+    audit seam can never under-report a durable admission."""
+    journal = DedupJournal(OptionDedupIndex(exact=FaultyExact(2)))
+    key_a = candle_dedup_key(
+        exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", epoch=1
+    )
+    key_b = candle_dedup_key(
+        exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", epoch=2
+    )
+    acc: list[bytes] = []
+    with pytest.raises(OSError, match="exact tier write failed"):
+        journal.admit([key_a, key_b], out=acc)
+    assert acc == [key_a]
+
+
+def test_added_keys_digest_is_an_order_insensitive_set_digest() -> None:
+    """The digest is over the SORTED hex keys — admission order must not
+    matter (round-5 review fix: the sorted() deletion mutant previously
+    survived because the only non-trivial fixture was coincidentally already
+    in sorted order)."""
+    # hex(b"\x02") = "02" > hex(b"\x01") = "01": input order is OUT of
+    # sorted order, so an unsorted join ("02\n01") diverges from the
+    # sorted recompute ("01\n02") — the mutant-killing shape.
+    digest = _added_keys_digest([b"\x02", b"\x01"])
+    assert digest == _added_keys_digest([b"\x01", b"\x02"])
+    assert digest == fno_math.blake3_hash(b"01\n02").hex()
+
+
 # ────────────────────────────────────────────────────────────────────────
 # AuditCaptureSink — construction + delegation
 # ────────────────────────────────────────────────────────────────────────
@@ -536,6 +606,62 @@ def test_pipe_bearing_symbol_refused_before_durable_write(tmp_path: Path) -> Non
         )
     assert inner.calls == []
     assert sink.drain_remaining() == ()
+
+
+def test_unit_separator_symbol_refused_before_durable_write(tmp_path: Path) -> None:
+    """Round-5 review fix: a ``"\\x1f"``-bearing vendor symbol (the dedup-key
+    field separator) is refused BEFORE the inner append runs.
+
+    Pre-fix the L3 key derivation ran AFTER the durable write, so the raise
+    stranded exactly the un-audited durable append the pre-write validation
+    block exists to prevent (and strict replay would later misattribute the
+    partition divergence to post-write tampering).
+    """
+    journal = DedupJournal(OptionDedupIndex())
+    sink, inner = _capture_sink(tmp_path, mode=CaptureMode.CAPTURE, journal=journal)
+    with pytest.raises(CandleParseError, match="unit separator"):
+        sink.append(
+            exchange="NSE", segment="CASH", symbol="NIF\x1fTY", interval="1minute", bars=[_bar(0)]
+        )
+    assert inner.calls == []  # the write never became durable
+    assert sink.drain_remaining() == ()
+
+
+def test_journal_fault_after_durable_write_still_buffers_event_and_add_rows(
+    tmp_path: Path,
+) -> None:
+    """Round-5 review fix: a mid-admit journal fault AFTER the durable inner
+    append still buffers the ``LAKE_APPEND_WRITTEN`` event + one ``add`` row
+    per key durably admitted before the fault, then re-raises.
+
+    Pre-fix nothing was buffered: the durable write went un-audited and the
+    one durably-admitted key became a permanent false L3 ``extra_in_live``
+    against the persistent LMDB (the re-pull admits nothing new).
+    """
+    journal = DedupJournal(OptionDedupIndex(exact=FaultyExact(2)))
+    sink, inner = _capture_sink(tmp_path, mode=CaptureMode.CAPTURE, journal=journal)
+    bars = [_bar(0), _bar(1)]
+    with pytest.raises(OSError, match="exact tier write failed"):
+        sink.append(
+            exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", bars=bars
+        )
+    # The inner append DID run (capture-after-durable for the write itself).
+    assert len(inner.calls) == 1
+    anchor, add = sink.drain_remaining()
+    key0 = candle_dedup_key(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        epoch=int(bars[0].timestamp.timestamp()),
+    )
+    assert anchor.action == LAKE_APPEND_ACTION
+    assert anchor.payload["capture_seq"] == 0
+    assert anchor.payload["added_count"] == 1  # ONLY the durably-admitted key
+    assert anchor.payload["added_keys_digest"] == fno_math.blake3_hash(key0.hex().encode()).hex()
+    assert anchor.payload["bars"] == encode_bars(bars)
+    assert add.action == DEDUP_ADD_ACTION
+    assert add.subject == key0.hex()
 
 
 def test_greeks_batch_refused_before_durable_write(tmp_path: Path) -> None:
@@ -682,6 +808,46 @@ def test_repull_admits_nothing_and_emits_zero_add_rows(tmp_path: Path) -> None:
     assert anchors[1].payload["added_count"] == 0
     # The empty admission set still stamps a deterministic digest.
     assert anchors[1].payload["added_keys_digest"] == fno_math.blake3_hash(b"").hex()
+
+
+def test_added_keys_digest_equal_across_admission_orders_through_the_sink(
+    tmp_path: Path,
+) -> None:
+    """Two sinks admitting the SAME key set in opposite orders stamp the SAME
+    ``added_keys_digest`` (the order-insensitivity pin, at event level).
+
+    Minutes 0 and 3 are chosen so admission order is OUT of sorted-hex order
+    (pinned by direct computation: key(minute 0) = ``603e83d2…`` >
+    key(minute 3) = ``5952a172…``), so an unsorted-join mutant diverges here
+    — unlike the coincidentally-ordered 2-key fixture the round-5 review
+    caught (round-4 TEETH VERIFIED discipline).
+    """
+    bars_fwd = [_bar(0), _bar(3)]
+    digests: list[str] = []
+    for batch in (bars_fwd, list(reversed(bars_fwd))):
+        sink, _inner = _capture_sink(
+            tmp_path, mode=CaptureMode.CAPTURE, journal=DedupJournal(OptionDedupIndex())
+        )
+        sink.append(
+            exchange="NSE", segment="INDEX", symbol="NSE-NIFTY", interval="1minute", bars=batch
+        )
+        anchor = sink.drain_remaining()[0]
+        digests.append(str(anchor.payload["added_keys_digest"]))
+    assert digests[0] == digests[1]
+    # ...and both equal the independently-recomputed sorted-join digest.
+    hexes = sorted(
+        candle_dedup_key(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            epoch=int(bar.timestamp.timestamp()),
+        ).hex()
+        for bar in bars_fwd
+    )
+    assert hexes[0] < hexes[1]  # the fixture genuinely exercises the sort
+    expected = fno_math.blake3_hash("\n".join(hexes).encode()).hex()
+    assert digests[0] == expected
 
 
 def test_capture_mode_without_journal_has_no_journal_fields(tmp_path: Path) -> None:
