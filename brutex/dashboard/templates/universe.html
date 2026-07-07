@@ -198,6 +198,13 @@
      hidden by default + revealed via the established .on toggle (.badge.on). */
   .chip.stall { color:var(--yellow); background:rgba(255,183,77,.14); display:none; }
   .chip.stall.on { display:inline-block; }
+  /* CLIENT-side staleness chip (DEC-PULL-UI-STALENESS-001) — "updated Xs ago" on the
+     client clock since the last SUCCESSFUL progress poll. Hidden while fresh; amber
+     past FEED_STALE_WARN_MS; LOUD RED + explicit STALE wording past FEED_STALE_RED_MS
+     (the 2026-07-06 38-minute frozen-tab incident fix). .on toggle like .chip.stall. */
+  .chip.stale { color:var(--yellow); background:rgba(255,183,77,.14); display:none; }
+  .chip.stale.on { display:inline-block; }
+  .chip.stale.red { color:var(--red); background:rgba(255,92,92,.16); font-weight:700; }
   .inst.refonly { opacity:.82; }   /* subtle dim so F&O rows pop */
   /* Inline legend explaining the row chips. */
   .legend { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
@@ -605,7 +612,7 @@
 
   <div id="pullpanel">
     <div class="beam"></div>
-    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span></div>
+    <div class="title"><b id="pulltitle">Pulling…</b><span class="chip stall" id="stallchip"></span><span class="counter" id="counter">0</span><span class="sub">units</span><span class="sub" id="subunit"></span><span class="chip stale" id="feedage"></span></div>
     <div class="tfgrid" id="tfgrid"></div>
     <!-- DEC-PROGRESS-WINDOW-UNITS-001: the card counts COARSE units (spot:
          symbol×interval chunks; options: all-or-nothing SERIES of ~dozens of
@@ -1631,6 +1638,43 @@ function setBulkDisabled(on) {
 const PROGRESS_MS = 600;
 let pollTimer = null;
 
+/* Self-recovering poll + client staleness (DEC-PULL-UI-STALENESS-001). A rejected
+   fetch OR a non-ok response OR a malformed body OR a HUNG fetch (10 s abort,
+   armed through the BODY read — browsers have no body-read timeout, so a
+   headers-then-stalled-body response would otherwise hang `await r.json()`
+   forever with nothing scheduled) is a FAILED poll: the first
+   POLL_MAX_FEED_RETRIES failures retry at the quick PROGRESS_MS cadence (a
+   sub-second blip recovers in ~600 ms, unchanged), then the poll backs off
+   exponentially (3 s doubling to a 30 s cap) and NEVER gives up — the page
+   recovers without a manual refresh. (Supersedes the bounded give-up that painted
+   "live progress feed dropped" and STOPPED polling forever — the 38-min incident;
+   that wording now lives inside the never-give-up stale chip.) Thresholds: warn 5 s
+   (past the ~3 s quick-retry envelope, ~8 missed 600 ms polls — never flashes on an
+   absorbed blip), red 15 s (the cadence miss + the first two failed backoff waits
+   3+6 s — an unambiguous outage, not jitter). */
+const FEED_STALE_WARN_MS = 5000;
+const FEED_STALE_RED_MS = 15000;
+const FEED_BACKOFF_BASE_MS = 3000;
+const FEED_BACKOFF_MAX_MS = 30000;
+const FEED_FETCH_TIMEOUT_MS = 10000;  // hung-fetch abort bound (headers AND body) — mirrors the widget's
+/* Monotonic client clock (immune to NTP/wall-clock jumps). Suspend caveat
+   (Golden Rule #10, refuter-confirmed): on some browser/OS combinations
+   performance.now() may NOT advance while the machine is suspended
+   (implementation variance, unverified against current builds), so a Date.now()
+   wall twin is stamped alongside every success and renderFeedAge reports
+   max(monotonicAge, wallAge) — a wall jump can only OVER-report staleness, the
+   safe direction for this chip. */
+const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let pollGen = 0;              // re-entrancy generation: a superseded response never repaints
+let lastProgressOkMs = null;  // client clock of the last SUCCESSFUL progress poll
+let lastProgressOkWallMs = null;  // Date.now() twin (suspend guard — see renderFeedAge)
+let hadProgressSuccess = false;  // true once THIS watch received a validated snapshot — the
+                                 // "updated Xs ago" wording is claimed ONLY then, never off
+                                 // the watch-start baseline (refuter-confirmed fix, round 3)
+let feedAgeTimer = null;      // the ~1 s ticker — runs ONLY while a live watch is active
+let lastPollLabel = null;
+let watchActive = false;      // true from watch start (startAndPoll) until settle (finishLive)
+
 /* DEC-PROGRESS-WINDOW-UNITS-001 + DEC-EMPTY-RESOLVED-REPORTING-001 +
    DEC-UNIVERSE-WINDOW-SEGMENTS-001: window-scale companion to the coarse unit
    counter — reads the SAME /api/v1/coverage/windows counts the fetch-windows page
@@ -1693,6 +1737,21 @@ async function startAndPoll(path, label) {
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   pullStarted = true;   // DEC-UNIVERSE-WINDOW-SEGMENTS-001: gate the all-segments line on a started pull
+  pollFeedRetries = 0; lastProgressOkMs = null; lastProgressOkWallMs = null; hadProgressSuccess = false; lastPollLabel = null; resetSubUnit();   // a new watch starts clean
+  watchActive = true;   // opens the visibility re-poll gate for the whole watch (cleared in finishLive)
+  // Refuter-confirmed fix: start the staleness ticker BEFORE the start POST, so a
+  // hung/wedged POST escalates the #feedage chip amber → red STALE from the
+  // watch-start baseline instead of freezing "Starting …" with zero indication.
+  // (The POST itself is deliberately NOT aborted — a slow-but-successful start
+  // would be mislabelled failed. Indication, not auto-retry — and the chip's
+  // tail says so honestly in this mode: while the poll chain has not started
+  // (lastPollLabel still null) renderFeedAge names the pending start request +
+  // the RELOAD-then-re-click remedy, never a false "retrying". Reload, NOT a
+  // bare re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
+  // above disables the ONE pipeline button until finishLive — which never runs
+  // while the POST is wedged — so an in-page re-click is impossible; a fresh
+  // page's enabled button re-attaches safely through the single-flight route.)
+  startFeedAgeTicker();
   refreshWindowsLine();
   try {
     const r = await fetch(path, {method: 'POST'});
@@ -1834,10 +1893,11 @@ function renderPhases(phases, currentPhase) {
   });
 }
 
-/* Poll the O(1) progress snapshot and tick the panel until the job ends. A
-   transient poll-fetch failure (a momentary network blip, NOT a terminal state)
-   is RETRIED a bounded number of times instead of clobbering the header with the
-   scary network-error string the removed live-feed poll used to show. */
+/* Poll the O(1) progress snapshot and tick the panel until the job ends.
+   POLL_MAX_FEED_RETRIES is now the QUICK-retry budget in FRONT of the exponential
+   backoff (DEC-PULL-UI-STALENESS-001), no longer a give-up bound: the first
+   failures retry at the quick PROGRESS_MS cadence, then feedRetryDelayMs() takes
+   over — the poll never stops until a VALIDATED settled snapshot arrives. */
 const POLL_MAX_FEED_RETRIES = 5;
 let pollFeedRetries = 0;
 
@@ -1871,12 +1931,159 @@ function updateStallChip(s) {
   chip.classList.toggle('on', on);
   chip.textContent = on ? ('⚠ ' + (s.stall_detail || 'stalled — no heartbeat')) : '';
 }
+
+/* ── Client staleness + self-recovering backoff (DEC-PULL-UI-STALENESS-001) ── */
+function feedRetryDelayMs() {
+  if (pollFeedRetries <= POLL_MAX_FEED_RETRIES) return PROGRESS_MS;      // quick-blip absorber, unchanged
+  const exp = Math.min(pollFeedRetries - POLL_MAX_FEED_RETRIES - 1, 4);  // overflow-proof clamp
+  return Math.min(FEED_BACKOFF_MAX_MS, FEED_BACKOFF_BASE_MS * Math.pow(2, exp));  // 3s,6s,12s,24s,30s cap
+}
+/* The #feedage chip: hidden while fresh, amber past FEED_STALE_WARN_MS, LOUD RED
+   explicit-STALE past FEED_STALE_RED_MS. Client-clock only (the snapshot's
+   updated_at is a server-side time.monotonic float — useless as wall-clock);
+   textContent ONLY, never innerHTML (CodeQL XSS guard). HONEST wording
+   (refuter-confirmed fixes, round 3): the "updated Xs ago" claim is made ONLY
+   after a validated snapshot actually arrived THIS watch (hadProgressSuccess) —
+   before that the watch-start baseline reads the honest no-payload-yet form,
+   mirroring the widget's "no data yet" split; and the action tail claims
+   "retrying" ONLY while the poll chain is actually live (lastPollLabel non-null)
+   AND a poll failure was actually COUNTED (pollFeedRetries > 0 — round-5
+   refuter-confirmed fix: a merely SLOW in-flight successful response in the
+   5-10 s latency band crosses the 5 s warn with zero failures and nothing
+   retrying, so that band reads the in-flight truth "awaiting response")
+   — during a hung/wedged start POST nothing retries, so the tail names the
+   real state + the real remedy instead: RELOAD, then re-click. NOT a bare
+   re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
+   disables the ONE pipeline button for the whole watch and finishLive — its
+   only re-enabler — never runs while the POST is wedged, so an in-page
+   re-click is impossible; a fresh page's enabled button re-attaches safely
+   through the single-flight route (see the startAndPoll comment). */
+function renderFeedAge() {
+  const chip = document.getElementById('feedage');
+  if (!chip) return;
+  if (lastProgressOkMs === null) { chip.classList.remove('on', 'red'); chip.textContent = ''; return; }
+  let age = nowMs() - lastProgressOkMs;
+  // Suspend guard: performance.now() may pause across a system suspend, so fold
+  // in the wall-clock age too — max() can only OVER-report (the safe direction).
+  if (lastProgressOkWallMs !== null) age = Math.max(age, Date.now() - lastProgressOkWallMs);
+  const ageS = Math.max(0, Math.round(age / 1000));
+  const red = age >= FEED_STALE_RED_MS;
+  const warn = age >= FEED_STALE_WARN_MS;
+  chip.classList.toggle('on', warn || red);
+  chip.classList.toggle('red', red);
+  const tail = (lastPollLabel === null)
+    ? 'start request pending — reload the page, then re-click to re-attach'
+    : (pollFeedRetries === 0
+        ? 'awaiting response'
+        : (pollFeedRetries > POLL_MAX_FEED_RETRIES ? 'live progress feed dropped — retrying' : 'retrying'));
+  if (red) {
+    chip.textContent = '⚠ STALE — no live update for ' + ageS + 's · ' + tail;
+  } else if (warn) {
+    chip.textContent = (hadProgressSuccess ? 'updated ' + ageS + 's ago' : 'no update yet (' + ageS + 's)') + ' — ' + tail;
+  } else {
+    chip.textContent = '';
+  }
+}
+function startFeedAgeTicker() {
+  // Watch-start baseline: a watch whose FIRST poll fails still escalates to STALE.
+  if (lastProgressOkMs === null) { lastProgressOkMs = nowMs(); lastProgressOkWallMs = Date.now(); }
+  if (!feedAgeTimer) feedAgeTimer = setInterval(renderFeedAge, 1000);
+}
+function stopFeedAgeTicker() {
+  if (feedAgeTimer) { clearInterval(feedAgeTimer); feedAgeTimer = null; }
+  lastProgressOkMs = null;
+  lastProgressOkWallMs = null;
+  hadProgressSuccess = false;   // the wording flag never leaks across watches
+  pollFeedRetries = 0;
+  renderFeedAge();   // clears the chip — a settled page never reads STALE
+}
+document.addEventListener('visibilitychange', () => {
+  // Background-tab throttling stretched the old 5x600 ms budget into minutes of
+  // silence; on tab return, re-poll NOW instead of waiting out a backoff. Gate on
+  // the watchActive FLAG, never pollTimer (refuter-confirmed fix: pollTimer is
+  // null exactly while a poll is IN FLIGHT, so the old gate blocked tab-return
+  // recovery for a poll wedged mid-flight); the pollGen token makes a re-poll
+  // during an in-flight fetch safe — the hung straggler drops on its gen check.
+  if (!document.hidden && watchActive && lastPollLabel !== null) pollProgress(lastPollLabel);
+});
+
+/* Per-expiry sub-unit progress (DEC-PULL-HEADER-SUBUNIT-001): one giant unit (a whole
+   option chain) holds completed/total still while s.current ticks per processed pair —
+   so count DISTINCT s.current labels observed since completed/total last moved (a
+   poll-sampled FLOOR while the Set is below SUBUNIT_SET_CAP: 600 ms sampling can miss
+   fast transitions; PAST the cap the unseen-label transition fallback can OVERCOUNT on
+   an alternating unseen-label sequence — an honest degraded approximation, not a floor)
+   and parse the DDMmmYY expiry token out of the contract label, mirroring
+   data/fno_symbol.py's right-anchored grammar. Derived ENTIRELY client-side — ZERO
+   backend change. Spot ("NIFTY 1minute") / empty / junk labels => chunk omitted. */
+const EXPIRY_TOKEN_RE = /^\d{1,2}(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\d{2}$/;
+function expiryFromCurrent(cur) {
+  const sym = String(cur || '').split(' ')[0];
+  const parts = sym.split('-');
+  const t = parts[parts.length - 1];
+  let tok = null;
+  if ((t === 'CE' || t === 'PE') && parts.length >= 5) tok = parts[parts.length - 3];
+  else if (t === 'FUT' && parts.length >= 4) tok = parts[parts.length - 2];
+  return tok && EXPIRY_TOKEN_RE.test(tok) ? tok : null;   // spot / junk => null => omitted, never garbage
+}
+const SUBUNIT_SET_CAP = 4096;   // bounds memory over a multi-hour watch
+let subUnitSeen = new Set();
+let subUnitCount = 0;
+let subUnitAnchor = null;
+let subUnitLastCur = '';
+function resetSubUnit() {
+  subUnitSeen = new Set(); subUnitCount = 0; subUnitAnchor = null; subUnitLastCur = '';
+}
+function trackSubUnit(s) {
+  // Unit boundary = ANY movement of completed/total (covers frozen-total AND
+  // grow-total phases; a restart's decrease resets just like an increase).
+  const anchor = String(s.completed || 0) + '/' + String(s.total || 0);
+  if (subUnitAnchor !== anchor) {
+    subUnitSeen = new Set(); subUnitCount = 0; subUnitAnchor = anchor; subUnitLastCur = '';
+  }
+  const cur = (typeof s.current === 'string') ? s.current : '';
+  if (cur && !subUnitSeen.has(cur)) {
+    if (subUnitSeen.size < SUBUNIT_SET_CAP) { subUnitSeen.add(cur); subUnitCount += 1; }
+    else if (cur !== subUnitLastCur) { subUnitCount += 1; }   // capped => transition counting (honest approx)
+  }
+  subUnitLastCur = cur;
+  return subUnitCount;
+}
+function subUnitNote(s, count) {
+  const bits = [];
+  const exp = expiryFromCurrent(s.current);
+  if (exp) bits.push('expiry ' + exp);
+  if (count >= 2) bits.push('sub-unit ' + count.toLocaleString('en-IN') + ' this unit');  // <2 = not grinding — hide, no noise
+  return bits.join(' · ');
+}
 async function pollProgress(label) {
-  if (pollTimer) clearTimeout(pollTimer);
+  const gen = ++pollGen;            // every invocation claims the chain (re-entrancy guard)
+  lastPollLabel = label;
+  startFeedAgeTicker();
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  // Hung-fetch abort bound (refuter-confirmed fix — the same 10 s bound the widget
+  // carries): browsers have NO body-read timeout, so a headers-then-stalled-body
+  // response (or a half-open connection dying silently mid-response) could wedge
+  // BOTH awaits below forever with nothing scheduled. The killer stays ARMED
+  // through the BODY read — cleared in the finally, i.e. only after r.json()
+  // settles — so a wedged poll becomes a counted failure on the backoff path
+  // within FEED_FETCH_TIMEOUT_MS instead of wedging the chain permanently.
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;
+  const opts = {};
+  if (ctrl) opts.signal = ctrl.signal;
   try {
-    const r = await fetch('/api/v1/universe/pull-progress');
+    const r = await fetch('/api/v1/universe/pull-progress', opts);
+    if (gen !== pollGen) return;                              // superseded — drop stale response
+    if (!r.ok) throw new Error('HTTP ' + r.status);           // non-ok is a POLL failure, NEVER a settled snapshot
     const s = await r.json();
-    pollFeedRetries = 0;  // a successful poll clears the transient-retry budget
+    if (gen !== pollGen) return;
+    if (!s || typeof s !== 'object' || typeof s.state !== 'string') throw new Error('malformed snapshot');
+    pollFeedRetries = 0;            // success resets the quick-retry budget + backoff
+    lastProgressOkMs = nowMs();     // the CLIENT staleness stamp
+    lastProgressOkWallMs = Date.now();  // wall twin (suspend guard — see renderFeedAge)
+    hadProgressSuccess = true;      // a validated snapshot landed — "updated Xs ago" is now honest
+    renderFeedAge();                // stale chip clears immediately on success
     /* open_ended (DEC-PULL-PROGRESS-HONESTY-001): the phase's total is NOT final
        (the F&O denominator grows as contracts are planned), so show the honest
        units count instead of a fabricated-complete "N / N". */
@@ -1887,10 +2094,20 @@ async function pollProgress(label) {
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
     if (s.state === 'running') {
       updateStallChip(s);  // stalled-suspect ⇒ amber chip; a recovery clears it (DEC-PULL-STALL-CHIP-001)
-      // textContent (never innerHTML) — the CodeQL XSS guard; ETA hidden when null.
+      // Per-expiry sub-unit note (DEC-PULL-HEADER-SUBUNIT-001) — '' when the label
+      // carries no expiry and the unit is not grinding, so the header degrades to
+      // byte-identical-to-today. textContent (never innerHTML) — the CodeQL XSS guard.
+      // s.current is interpolated RAW (refuter-confirmed, round 6): textContent is
+      // NOT an HTML sink and performs no entity decoding, so esc() here rendered an
+      // M&M-family contract label ("NSE-M&M-30Sep25-2000-CE 1minute") as literal
+      // "&amp;" garbage in the header; esc() stays for the genuine innerHTML sinks
+      // (terminalPullHeader below).
+      const subNote = subUnitNote(s, trackSubUnit(s));
+      const suEl = document.getElementById('subunit');
+      if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';
       document.getElementById('pulltitle').textContent = s.open_ended
-        ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${esc(s.current || '…')}`
-        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}` + etaSuffix(s);
+        ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '')
+        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s);
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
@@ -1898,24 +2115,28 @@ async function pollProgress(label) {
     document.getElementById('pulltitle').innerHTML = terminalPullHeader(label, s);
     finishLive();
   } catch (e) {
-    // A transient poll blip is NOT a pull failure — retry a few times before
-    // surfacing an honest "feed dropped" note (never a hardcoded network-error
-    // string, and never overriding the real terminal state we already know).
+    if (gen !== pollGen) return;
+    // DEC-PULL-UI-STALENESS-001 (regression: the 38-min frozen tab): a poll failure is
+    // NEVER a pull verdict and NEVER abandons the watch. Quick 600 ms retries absorb a
+    // blip; past the budget the poll self-recovers on capped exponential backoff while
+    // the 1 s ticker escalates the #feedage chip amber -> red STALE. The next
+    // successful poll clears everything — no manual refresh.
     pollFeedRetries += 1;
-    if (pollFeedRetries <= POLL_MAX_FEED_RETRIES) {
-      pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
-      return;
-    }
-    pollFeedRetries = 0;
-    document.getElementById('pulltitle').innerHTML =
-      `<span style="color:var(--yellow)">…</span> ${esc(label)} — live progress feed dropped `
-      + `(the pull may still be running); ⟳ Refresh the verdict below to re-check`;
-    finishLive();
+    renderFeedAge();
+    pollTimer = setTimeout(() => pollProgress(label), feedRetryDelayMs());
+  } finally {
+    if (killer) clearTimeout(killer);   // cleared only AFTER r.json() settled — a stalled body aborts too
   }
 }
 
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  watchActive = false;   // the visibility re-poll gate closes with the watch (DEC-PULL-UI-STALENESS-001)
+  pollGen += 1;          // invalidate any in-flight poll straggler (a settled page never repaints stale)
+  stopFeedAgeTicker();   // a settled page never reads STALE (DEC-PULL-UI-STALENESS-001)
+  resetSubUnit();        // DEC-PULL-HEADER-SUBUNIT-001: clear the per-watch tracker + note
+  const suEl = document.getElementById('subunit');
+  if (suEl) suEl.textContent = '';
   updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
