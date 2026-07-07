@@ -37,6 +37,7 @@ from brutex.engine.sweep_verify import (
     VerifyFinding,
     compare_recount,
     plan_expected_stores,
+    recorded_audit_facts,
     recorded_context_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
@@ -329,6 +330,76 @@ class TestRecordedRollSchedules:
             recorded_roll_schedules_from_audit(path)
 
 
+# ── recorded_audit_facts (review round-4 finding 5) ──────────────────────────
+
+
+class TestRecordedAuditFacts:
+    """`recorded_audit_facts` — cmd_sweep_verify's ONE shared audit parse.
+
+    Round-4 finding 5: a production futures audit holds one SWEEP_START line
+    per grid tuple (thousands), and cmd_sweep_verify parsed the whole JSONL
+    once for the context and AGAIN for the F16 schedules — the exact double
+    parse the round-3 gate fix eliminated at the launch mouth.
+    """
+
+    _SCHEDULE: tuple[int, ...] = (739428, 739463)
+
+    def _write(self, path: Path) -> None:
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={
+                    "data_snapshot_hash": "snap0001",
+                    "indicator_version": "ind-v1",
+                    "code_commit_sha": "deadbeef",
+                    "instrument": "NSE-NIFTY-FUT",
+                    "params": {"roll_schedule": list(self._SCHEDULE)},
+                },
+            )
+
+    def test_absent_audit_returns_none_and_empty(self, tmp_path: Path) -> None:
+        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {})
+
+    def test_derives_both_facts_matching_the_single_fact_readers(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        self._write(path)
+        context, schedules = recorded_audit_facts(path)
+        assert context == recorded_context_from_audit(path)
+        assert schedules == recorded_roll_schedules_from_audit(path)
+        assert context is not None
+        assert context.data_snapshot_hash == "snap0001"
+        assert schedules == {"NSE-NIFTY-FUT": self._SCHEDULE}
+
+    def test_reads_the_audit_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The regression teeth: pre-fix cmd_sweep_verify's two single-fact
+        # readers each ran their own full O(entries) read+parse.
+        import brutex.orchestrator.audit as audit_mod
+
+        path = tmp_path / "a.jsonl"
+        self._write(path)
+        real_read = audit_mod.read_entries
+        calls: list[Path] = []
+
+        def counting_read(p: Path) -> object:
+            calls.append(p)
+            return real_read(p)
+
+        monkeypatch.setattr(audit_mod, "read_entries", counting_read)
+        context, schedules = recorded_audit_facts(path)
+        assert context is not None
+        assert schedules
+        assert calls == [path]  # ONE parse for BOTH derivations
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_audit_facts(path)
+
+
 # ── The resume-honesty gate (ADR-0012, review round-2 finding 11) ────────────
 
 
@@ -354,6 +425,13 @@ class TestStaleRollScheduleRefusal:
         snapshot: str = "snap0001",
         schedule: tuple[int, ...] | None = None,
     ) -> None:
+        """Record one launch's SWEEP_START — APPENDS to an existing audit.
+
+        `resume=path.exists()` mirrors `cmd_sweep_all`'s `AuditWriter.open(...,
+        resume=audit_path.exists())` exactly, so calling this twice reproduces
+        the sanctioned multi-launch same-root audit shape (the monthly
+        grown-lake cadence — review round-4 findings 1/8/11).
+        """
         payload: dict[str, object] = {
             "data_snapshot_hash": snapshot,
             "indicator_version": "ind-v1",
@@ -362,7 +440,7 @@ class TestStaleRollScheduleRefusal:
         }
         if schedule is not None:
             payload["params"] = {"roll_schedule": list(schedule)}
-        with AuditWriter.open(path) as audit:
+        with AuditWriter.open(path, resume=path.exists()) as audit:
             audit.append(action="SWEEP_START", subject="s", payload=payload)
 
     def test_absent_audit_abstains(self, tmp_path: Path) -> None:
@@ -530,6 +608,151 @@ class TestStaleRollScheduleRefusal:
             )
             is None
         )
+
+    # ── round-4 findings 1/8/11: launch-generation scoping of multi-launch audits ──
+
+    _S3: tuple[int, ...] = (739428, 739463, 739491)
+
+    def _two_launch_audit(self, root: Path) -> Path:
+        """The sanctioned same-root shape: launch 1 (snap0001/S1), then the
+        moved-snapshot monthly re-launch (snap0002/S2) APPENDED to the SAME
+        `resume=True` audit — exactly what cmd_sweep_all produces."""
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True, exist_ok=True)
+        self._write_audit(audit, snapshot="snap0001", schedule=self._S1)
+        self._write_audit(audit, snapshot="snap0002", schedule=self._S2)
+        return audit
+
+    def test_multi_launch_moved_snapshot_next_launch_abstains(self, tmp_path: Path) -> None:
+        # Findings 1/8: cycle 3 of the monthly cadence (a THIRD snapshot over a
+        # two-generation audit) must ABSTAIN — every recorded sentinel's tuple
+        # digest folded a foreign snapshot, so none can pair with this launch.
+        # Pre-fix the whole-file context derivation raised 'inconsistent
+        # recorded context' and misattributed 'UNREADABLE/inconsistent'.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = self._two_launch_audit(root)
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0003",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S3},
+                results_root=root,
+            )
+            is None
+        )
+
+    def test_multi_launch_crash_resume_of_matching_launch_passes(self, tmp_path: Path) -> None:
+        # Finding 11: a crash-resume of launch 2 — IDENTICAL snapshot and
+        # IDENTICAL schedule as its own recorded generation — is never
+        # refused; the sentinel/checkpoint crash-safe-resume guarantee stands.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = self._two_launch_audit(root)
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0002",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+            )
+            is None
+        )
+
+    def test_multi_launch_schedule_drift_within_matching_launch_refuses(
+        self, tmp_path: Path
+    ) -> None:
+        # The gate's core law survives the scoping: schedule-only drift against
+        # the MATCHING generation still refuses with BOTH schedules named —
+        # the foreign launch-1 generation is ignored, never condemned.
+        path = tmp_path / "a.jsonl"
+        self._write_audit(path, snapshot="snap0001", schedule=self._S1)
+        self._write_audit(path, snapshot="snap0002", schedule=self._S1)
+        message = stale_roll_schedule_refusal(
+            path,
+            fresh_snapshot="snap0002",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+        )
+        assert message is not None
+        assert str(list(self._S1)) in message  # the RECORDED (matching-launch) schedule
+        assert str(list(self._S2)) in message  # the FRESH schedule
+
+    # ── round-4 finding 10: readable but SWEEP_START-less audits ──
+
+    def test_empty_audit_with_futures_sentinels_refuses(self, tmp_path: Path) -> None:
+        # A truncated-to-empty (copytruncate-rotated) audit leaves the schedule
+        # the sentinels' rows were minted under exactly as unverifiable as an
+        # ABSENT audit — refuse, never abstain into the sentinel short-circuit.
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        audit.write_text("", encoding="utf-8")
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+        )
+        assert message is not None
+        assert "no SWEEP_START context" in message
+        assert str(sentinel) in message  # the evidence named
+
+    def test_sweep_start_less_audit_with_sentinels_refuses(self, tmp_path: Path) -> None:
+        # The chain-valid variant: real committed entries, zero SWEEP_START.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        with AuditWriter.open(audit) as writer:
+            writer.append(action="OTHER", subject="s", payload={})
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+        )
+        assert message is not None
+        assert "no SWEEP_START context" in message
+
+    def test_empty_audit_without_sentinels_abstains(self, tmp_path: Path) -> None:
+        # No sentinels → nothing a stale schedule could pair with — abstain.
+        root = tmp_path / "results"
+        (root / "NSE-NIFTY-FUT" / "1minute").mkdir(parents=True)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        audit.write_text("", encoding="utf-8")
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+            )
+            is None
+        )
+
+    def test_sweep_start_missing_context_key_with_sentinels_refuses(self, tmp_path: Path) -> None:
+        # A malformed SWEEP_START (context key missing) makes the recorded
+        # snapshot underivable — with sentinels present, fail closed.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        with AuditWriter.open(audit) as writer:
+            writer.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={"data_snapshot_hash": "snap0001"},  # indicator/sha MISSING
+            )
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+        )
+        assert message is not None
+        assert "UNREADABLE/inconsistent" in message
 
     # ── round-3 finding 4: ONE shared audit parse for both derivations ──
 
