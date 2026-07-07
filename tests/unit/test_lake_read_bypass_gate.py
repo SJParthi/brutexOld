@@ -51,6 +51,13 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/data/lake_day_glob.py": "wired: both day readers route through dedup_bars_frame",
     "brutex/data/spot_join.py": "wired: spot_close_by_ts_window dedups before the map build",
     "brutex/data/greeks_enrich.py": "wired: read_option_rows dedups the merged frame",
+    "brutex/data/greeks_backfill.py": (
+        "stamp-staleness probe — a bounded greeks_provenance_id COLUMN read per "
+        "month file (no OHLCV bar rows served); RAW is the conservative choice: a "
+        "stale stamp on ANY physical row (even a would-be-deduped dup) must flag "
+        "the contract, and a flagged contract is only ever re-enriched through the "
+        "dedup-gated driver (DEC-GREEKS-BULK-REENRICH-001)"
+    ),
     "brutex/data/spot_daily_resample.py": (
         "1m->1d derive read — its own frame-level dedup self-heal (DEC-PULL-FORENSIC-WAVE3-001)"
     ),
