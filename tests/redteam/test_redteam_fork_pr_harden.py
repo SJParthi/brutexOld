@@ -107,6 +107,25 @@ def _repo_workflow_files() -> list[Path]:
     return files
 
 
+#: Checkout ``ref:`` spellings that place PR-CONTROLLED code in the tree:
+#: the event-payload expressions (``head_sha`` / ``head.sha`` / ``head.ref``)
+#: AND the canonical server-side PR ref namespace ``refs/pull/<n>/head`` —
+#: the spelling a comment-triggered job actually uses (an ``issue_comment``
+#: payload carries NO ``pull_request`` context, only the issue number, so a
+#: real auto-fix job checks the PR out via
+#: ``refs/pull/${{ github.event.issue.number }}/head``). The
+#: event-expression-only set missed it (round-2 reconstruction-review fix:
+#: the canonical spelling returned ZERO violations).
+_PR_CONTROLLED_REF_MARKERS = ("head_sha", "head.sha", "head.ref", "refs/pull/")
+
+
+def _is_pr_controlled_ref(ref: str) -> bool:
+    """True iff a checkout ``ref:`` value names PR-controlled code. ONE
+    common predicate shared by the ``workflow_run``/``pull_request_target``
+    sweep and the comment-trigger sweep (§11 COMMON)."""
+    return any(marker in ref for marker in _PR_CONTROLLED_REF_MARKERS)
+
+
 def _trust_check_script() -> str:
     """Extract the real trust-check ``run:`` script from auto-merge.yml."""
     jobs = _load_jobs(AUTO_MERGE_YML)
@@ -355,7 +374,7 @@ def test_no_workflow_run_job_checks_out_pr_head() -> None:
                 if "actions/checkout" not in str(step.get("uses", "")):
                     continue
                 ref = str((step.get("with") or {}).get("ref", ""))
-                assert "head_sha" not in ref and "head.sha" not in ref and "head.ref" not in ref, (
+                assert not _is_pr_controlled_ref(ref), (
                     f"{path.name} job {job_name!r} checks out a PR-controlled "
                     f"ref ({ref!r}) in a privileged trigger context — the "
                     "fork-PR code-execution hole is open again "
@@ -376,6 +395,9 @@ def test_no_workflow_run_job_checks_out_pr_head() -> None:
 # and under BOTH accepted workflow filename extensions (`.yml`/`.yaml`)
 # via the shared `_glob_workflow_files` glob (round-2 hostile-review fix:
 # a `.yml`-only glob failed OPEN for a `claude-autofix.yaml` landing).
+# "Un-landable" is bounded by the DISCLOSED static-shape residual in
+# `_job_has_leading_trust_gate` — the gate exemption matches the gate's
+# SHAPE, it never executes the gate script.
 
 _COMMENT_TRIGGERS = ("issue_comment", "pull_request_review_comment", "discussion_comment")
 _PRIVILEGED_WRITE_SCOPES = ("contents", "pull-requests", "issues", "id-token")
@@ -425,7 +447,7 @@ def _job_write_scopes(workflow: dict[Any, Any], job: dict[str, Any]) -> list[str
     return [s for s in _PRIVILEGED_WRITE_SCOPES if str(perms.get(s, "")) == "write"]
 
 
-def _job_has_leading_trust_gate(job: dict[str, Any]) -> bool:
+def _job_has_leading_trust_gate(job: dict[str, Any], *, gate_every_step: bool = False) -> bool:
     """True iff a DEC-CI-FORK-PR-HARDEN-001-pattern trust-check step (a
     live ``author_association`` lookup restricted to
     OWNER|MEMBER|COLLABORATOR) appears BEFORE any privileged step (a
@@ -438,12 +460,23 @@ def _job_has_leading_trust_gate(job: dict[str, Any]) -> bool:
     OWNER|MEMBER|COLLABORATOR"`` first step exempted the WHOLE job from
     all three checks fail-open, so the gate must now carry an ``id:``
     (an id-less verdict is unreferencable) and every subsequent
-    privileged step must reference it. DISCLOSED residual (the sibling
-    GPU-pin convention): the gate script's CONTENT is still matched by
-    substring, never executed — a gate-SHAPED script whose privileged
-    steps ARE ``if:``-conditioned on its output is accepted on shape;
-    the teeth for the real script's verdict live in the
-    ``_run_trust_check`` functional tests above."""
+    privileged step must reference it. With ``gate_every_step=True``
+    (the caller passes it for a job holding a privileged WRITE scope)
+    EVERY post-gate step — not merely the checkout/foreign-secret ones —
+    must carry the ``if:`` condition, because a write-scope job can act
+    through the implicit ``GITHUB_TOKEN`` alone (``gh pr merge``),
+    invisible to the privileged-step classifier (round-2
+    reconstruction-review fix: an id-carrying gate-SHAPED ``echo``
+    exempted a ``contents: write`` job whose UNCONDITIONED step merged
+    via the implicit token — zero violations). DISCLOSED residual (the
+    sibling GPU-pin convention): the gate script's CONTENT is still
+    matched by substring, never executed — a gate-SHAPED script whose
+    every gated step IS ``if:``-conditioned on its output is accepted on
+    shape (at runtime a verdict-less shaped gate leaves the condition
+    falsy so the gated steps cannot run; a shaped script that ALSO
+    writes a ``trusted=true`` output is the residual static
+    shape-matching cannot close); the teeth for the real script's
+    verdict live in the ``_run_trust_check`` functional tests above."""
     gate_ref: str | None = None
     for step in job.get("steps", []) or []:
         if not isinstance(step, dict):
@@ -455,8 +488,10 @@ def _job_has_leading_trust_gate(job: dict[str, Any]) -> bool:
                 return False
             gate_ref = f"steps.{step_id}.outputs."
             continue
-        privileged = "actions/checkout" in str(step.get("uses", "")) or bool(
-            _job_foreign_secrets(step)
+        privileged = (
+            gate_every_step
+            or "actions/checkout" in str(step.get("uses", ""))
+            or bool(_job_foreign_secrets(step))
         )
         if not privileged:
             continue
@@ -469,15 +504,22 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     """Privilege violations for ONE parsed workflow, or ``[]`` when it has
     no comment-family trigger. A comment-triggered job may not (a) hold
     write permissions, (b) reference a secret other than the implicit
-    ``secrets.GITHUB_TOKEN``, or (c) check out a PR-controlled ref —
+    ``secrets.GITHUB_TOKEN``, or (c) check out a PR-controlled ref (the
+    ``_is_pr_controlled_ref`` markers — the event-payload expressions AND
+    the canonical ``refs/pull/<n>/head`` namespace an ``issue_comment``
+    job actually uses; round-2 reconstruction-review fix, teeth-pinned by
+    ``test_issue_comment_sweep_flags_pr_controlled_checkout`` — check (c)
+    was previously an untested dead branch blind to that spelling) —
     unless an id-carrying #1180-pattern trust-check step precedes the
     privileged steps AND every one of them is ``if:``-conditioned on the
-    gate's ``steps.<id>.outputs.`` verdict (the ledgered
+    gate's ``steps.<id>.outputs.`` verdict; for a job holding a WRITE
+    scope that means EVERY post-gate step (the ledgered
     revival-precondition shape; ``_job_has_leading_trust_gate`` — the
     bare substring exemption was spoofable, round-1 reconstruction-review
-    fix). The ``on:`` value is
-    normalized via ``_workflow_triggers`` so the scalar/list trigger
-    spellings can never bypass the pin (round-1 hostile-review fix)."""
+    fix; the write-scope every-step rule is the round-2 fix). The ``on:``
+    value is normalized via ``_workflow_triggers`` so the scalar/list
+    trigger spellings can never bypass the pin (round-1 hostile-review
+    fix)."""
     triggers = _workflow_triggers(workflow)
     if not any(trigger in triggers for trigger in _COMMENT_TRIGGERS):
         return []
@@ -485,9 +527,10 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     for job_name, job in (workflow.get("jobs") or {}).items():
         if not isinstance(job, dict):
             continue
-        if _job_has_leading_trust_gate(job):
+        write_scopes = _job_write_scopes(workflow, job)
+        if _job_has_leading_trust_gate(job, gate_every_step=bool(write_scopes)):
             continue
-        for scope in _job_write_scopes(workflow, job):
+        for scope in write_scopes:
             violations.append(
                 f"{name} job {job_name!r} holds '{scope}: write' on a comment trigger"
             )
@@ -501,7 +544,7 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
             if "actions/checkout" not in str(step.get("uses", "")):
                 continue
             ref = str((step.get("with") or {}).get("ref", ""))
-            if "head_sha" in ref or "head.sha" in ref or "head.ref" in ref:
+            if _is_pr_controlled_ref(ref):
                 violations.append(
                     f"{name} job {job_name!r} checks out PR-controlled ref "
                     f"{ref!r} on a comment trigger"
@@ -517,7 +560,8 @@ def test_no_issue_comment_privileged_workflows() -> None:
     permissions, a non-``GITHUB_TOKEN`` secret, or a PR-controlled
     checkout, unless an id-carrying DEC-CI-FORK-PR-HARDEN-001-pattern
     trust check precedes the privileged steps and every one of them is
-    ``if:``-conditioned on its verdict. The retired cloud auto-fix design
+    ``if:``-conditioned on its verdict (EVERY post-gate step, for a job
+    holding a write scope). The retired cloud auto-fix design
     would have slipped past the workflow_run/pull_request_target-only
     sweep above; this pin closes that blind spot directory-wide."""
     violations: list[str] = []
@@ -693,6 +737,101 @@ def test_issue_comment_sweep_flags_spoofed_trust_gate() -> None:
         "a job with ONE unconditioned privileged step after the gate was "
         "exempted — the per-step conditioning requirement regressed"
     )
+
+
+def test_issue_comment_sweep_flags_pr_controlled_checkout() -> None:
+    """Round-2 reconstruction-review regression pin: check (c) — the
+    PR-controlled-checkout arm of the comment-trigger sweep — was a DEAD
+    branch (no test drove it) AND blind to the CANONICAL ``issue_comment``
+    PR-checkout spelling ``refs/pull/<n>/head`` (a comment payload carries
+    no ``pull_request`` event context, only the issue number, so a real
+    comment-triggered job checks the PR out via the server-side ref
+    namespace — the probe returned ZERO violations). Both the refs/pull/
+    namespace and the event-expression spellings must be flagged; a
+    base-pinned ``ref: main`` checkout stays clean (read-level
+    permissions, no foreign secrets — isolating check (c))."""
+    for ref in (
+        "refs/pull/${{ github.event.issue.number }}/head",
+        "${{ github.event.pull_request.head.sha }}",
+    ):
+        workflow = yaml.safe_load(
+            f"""
+name: comment checkout
+on:
+  issue_comment: {{ types: [created] }}
+permissions: {{ contents: read }}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: {{ ref: "{ref}" }}
+"""
+        )
+        violations = _comment_trigger_violations("prref.yml", workflow)
+        joined = "\n".join(violations)
+        assert violations and "checks out PR-controlled ref" in joined, (
+            f"a comment-triggered checkout of {ref!r} produced no "
+            f"PR-controlled-ref violation — check (c) is fail-open again; "
+            f"violations were:\n{joined}"
+        )
+    pinned = yaml.safe_load(
+        """
+name: comment checkout pinned
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: main }
+"""
+    )
+    assert _comment_trigger_violations("pinned.yml", pinned) == [], (
+        "a base-pinned `ref: main` comment-triggered checkout was flagged — check (c) over-reaches"
+    )
+
+
+def test_issue_comment_sweep_flags_shaped_gate_implicit_token_merge() -> None:
+    """Round-2 reconstruction-review regression pin: an id-carrying
+    gate-SHAPED no-op ``echo`` (the two substrings, never a real verdict)
+    exempted a ``contents: write``/``pull-requests: write`` job whose
+    UNCONDITIONED step merges via the IMPLICIT ``GITHUB_TOKEN`` — no
+    checkout, no foreign secret, so the privileged-step classifier never
+    saw it and the probe produced ZERO violations. A write-scope job is
+    now exempt ONLY when EVERY post-gate step is ``if:``-conditioned on
+    the gate verdict; the unconditioned implicit-token merge must be
+    flagged via the job's write scopes."""
+    shaped = yaml.safe_load(
+        """
+name: shaped gate merge
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: write, pull-requests: write }
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - id: gate
+        run: echo "author_association OWNER|MEMBER|COLLABORATOR"
+      - run: gh pr merge "$PR" --squash
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+"""
+    )
+    violations = _comment_trigger_violations("shaped.yml", shaped)
+    joined = "\n".join(violations)
+    assert violations, (
+        "an id-carrying gate-shaped echo exempted a write-scope job whose "
+        "unconditioned step merges via the implicit GITHUB_TOKEN — the "
+        "write-scope exemption is fail-open again"
+    )
+    for expected in ("'contents: write'", "'pull-requests: write'"):
+        assert expected in joined, (
+            f"shaped-gate implicit-token merge: {expected} was not flagged; "
+            f"violations were:\n{joined}"
+        )
 
 
 def test_workflow_sweep_covers_yaml_extension(tmp_path: Path) -> None:

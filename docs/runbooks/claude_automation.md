@@ -43,7 +43,11 @@ ignores them; the parallel-review pattern is ALSO invoked explicitly each PR reg
 > no repo variable, no test ever existed (grep re-verified 2026-07-07 against the committed
 > tree — the 18 files in `.github/workflows/` carry zero references to
 > `claude-autofix` / `CLAUDE_AUTOFIX` / `claude-code-action` / `ANTHROPIC_API_KEY`; the only
-> repo-wide hits were this section and ledger entry #831). Do not resurrect the snippet from
+> repo-wide hits are the historical ledger entry #831 plus this retirement's OWN artifacts —
+> this banner, ledger entry #1530, and the deliberate `_RETIRED_AUTOFIX_SNIPPET` negative
+> teeth fixture in `tests/redteam/test_redteam_fork_pr_harden.py`; before this retirement
+> the hits were confined to the original §3 snippet + ledger entry #831 — no secret, no
+> variable, no wiring). Do not resurrect the snippet from
 > git history without meeting the revival preconditions below.
 >
 > **Why retired — the four disqualifiers:**

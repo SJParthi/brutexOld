@@ -15,16 +15,28 @@ The pin, over SOURCE trees only (``docs/`` and ``tests/`` are never scanned;
 Rust ``target/`` build trees are excluded so vendored third-party sources can
 never false-positive):
 
-* NO ``brutex/**/*.py`` module imports ``mlx`` or ``cupy`` (AST-level, so a
-  docstring or comment mention never false-positives — and a word like
-  ``occupy`` never matches at all), none reads ``BRUTEX_GPU_OFFLOAD``
-  (any NON-docstring string constant carrying the flag counts as a read;
-  docstring removal-notes stay sanctioned, mirroring the repo's removed-flag
+* NO ``brutex/**/*.py`` module imports ``mlx``, ``cupy``, or ``cupyx`` (the
+  extension namespace shipped INSIDE the CuPy wheel, importable standalone
+  as ``from cupyx import scipy`` — round-2 reconstruction-review fix: the
+  {mlx, cupy} roots and the module-path regex both missed it), nor the
+  ``numba.cuda`` subtree — ADR-0004 §5 item 3's own sanctioned Numba-CUDA
+  FALLBACK kernel host; ``numba`` ITSELF stays an allowed CPU dependency
+  (CLAUDE.md §4 "numpy + numba"), so only its ``.cuda`` subpath is
+  forbidden, caught in every reachable spelling: ``import numba.cuda``,
+  ``from numba import cuda``, ``from numba.cuda import …``, the LITERAL
+  dynamic-import string, and the ``numba.cuda`` ATTRIBUTE shape reachable
+  from a plain ``import numba`` (round-2 reconstruction-review fix: every
+  one of those previously evaded the Python arm because the benign
+  ``numba`` root passed the import scan). All AST-level, so a docstring or
+  comment mention never false-positives — and a word like ``occupy`` never
+  matches at all. None reads ``BRUTEX_GPU_OFFLOAD`` (any NON-docstring
+  string constant carrying the flag counts as a read; docstring
+  removal-notes stay sanctioned, mirroring the repo's removed-flag
   docstring convention), and no NON-docstring string constant is a LITERAL
-  ``mlx``/``cupy``-rooted module path (``"cupy"``, ``"mlx.core"``, …) — so
-  the dynamic-import shapes ``importlib.import_module("cupy")`` /
-  ``__import__("mlx.core")`` are caught via their string argument (round-2
-  hostile-review fix).
+  GPU-rooted module path (``"cupy"``, ``"cupyx.scipy"``, ``"mlx.core"``,
+  ``"numba.cuda"``, …) — so the dynamic-import shapes
+  ``importlib.import_module("cupy")`` / ``__import__("mlx.core")`` are
+  caught via their string argument (round-2 hostile-review fix).
 * NO ``rust/**/*.rs`` source references an ``mlx``-/``cupy``-PREFIXED
   identifier token (``mlx``, ``mlx_rs``, ``mlx_sys``, ``cupy_backend``, …
   — the real-world MLX crates import as ``mlx_rs``/``mlx_sys``, and ``_``
@@ -37,8 +49,11 @@ never false-positive):
 Honest envelope (Python arm): static imports are AST-detected in every
 form and LITERAL module-path/env-flag strings are caught, but a COMPUTED
 module path or flag string (``"BRUTEX_GPU_" + "OFFLOAD"``, f-strings,
-joins) is NOT detected — a DISCLOSED residual (catching computation needs
-symbolic evaluation; the literal import/flag shapes are the ones a real
+joins) is NOT detected, and the ``numba.cuda`` ATTRIBUTE check fires only
+on the literal ``numba`` name — an offload through a REBOUND root
+(``import numba as nb; nb.cuda…``) is the same computed-shape class. Both
+are DISCLOSED residuals (catching computation/aliasing needs symbolic
+evaluation; the literal import/flag shapes are the ones a real
 GPU-offload PR writes, and CI review covers the rest).
 
 A failure means GPU-offload wiring appeared without the sanctioned path:
@@ -54,10 +69,23 @@ from pathlib import Path
 
 import brutex
 
-#: Forbidden GPU package roots (ADR-0004 §5 items 3-4 name CuPy + MLX as the
-#: only sanctioned future kernel hosts — so these are exactly the imports a
-#: GPU-offload PR would introduce).
-_GPU_MODULES = frozenset({"mlx", "cupy"})
+#: Forbidden GPU package ROOTS. ADR-0004 §5 item 3 names CuPy (with a
+#: Numba-CUDA fallback) and item 4 names MLX as the sanctioned future kernel
+#: hosts — so the root imports a GPU-offload PR would introduce are ``mlx``,
+#: ``cupy``, and ``cupyx`` (the extension namespace shipped INSIDE the CuPy
+#: wheel; round-2 reconstruction-review fix — previously missed by both the
+#: import roots and the module-path regex, while the Rust arm's PREFIX match
+#: would have caught the analogous token).
+_GPU_MODULES = frozenset({"mlx", "cupy", "cupyx"})
+
+#: Forbidden DOTTED module paths whose ROOT package stays sanctioned:
+#: ``numba`` is an explicitly ALLOWED CPU dependency (CLAUDE.md §4 — "use
+#: `polars` or `numpy` + `numba`"), but ADR-0004 §5 item 3 names Numba-CUDA
+#: as the sanctioned CuPy FALLBACK kernel host, so only the ``numba.cuda``
+#: subtree is forbidden (round-2 reconstruction-review fix: a Numba-CUDA
+#: offload previously evaded the Python arm entirely because the
+#: benign-looking ``numba`` root passed the import scan).
+_GPU_MODULE_PATHS = frozenset({"numba.cuda"})
 
 #: The GPU-offload env flag ADR-0004 §5 item 3 reserves; it exists in docs
 #: only and must stay out of ``brutex/`` + ``rust/`` source until the §6
@@ -87,11 +115,21 @@ _FAILURE_HINT = (
 #: LEADING ``\b`` keeps ``occupy``/``preoccupy_mlx`` excluded.
 _RS_GPU_TOKEN = re.compile(rf"\b(?:mlx|cupy)\w*|{_GPU_ENV_FLAG}")
 
-#: A LITERAL ``mlx``/``cupy``-rooted module path ("cupy", "mlx.core", …) —
-#: the string argument of the dynamic-import shapes
+#: A LITERAL GPU-rooted module path ("cupy", "cupyx.scipy", "mlx.core",
+#: "numba.cuda", …) — the string argument of the dynamic-import shapes
 #: ``importlib.import_module(...)`` / ``__import__(...)``. Fullmatch-anchored:
-#: ``occupy`` / ``mlx_backend`` / ``x.cupy`` never match.
-_GPU_MODULE_PATH_RE = re.compile(r"(?:mlx|cupy)(?:\.\w+)*")
+#: ``occupy`` / ``mlx_backend`` / ``x.cupy`` / ``numba`` / ``numba.cudax``
+#: never match.
+_GPU_MODULE_PATH_RE = re.compile(r"(?:mlx|cupyx?|numba\.cuda)(?:\.\w+)*")
+
+
+def _is_gpu_module_path(name: str) -> bool:
+    """True iff ``name`` is a forbidden module path: rooted at a forbidden
+    package (``mlx``/``cupy``/``cupyx``), or equal to / nested under a
+    forbidden dotted path (``numba.cuda``)."""
+    if name.partition(".")[0] in _GPU_MODULES:
+        return True
+    return any(name == path or name.startswith(path + ".") for path in _GPU_MODULE_PATHS)
 
 
 def _docstring_constant_ids(tree: ast.Module) -> set[int]:
@@ -116,12 +154,31 @@ def _py_gpu_references(tree: ast.Module) -> list[str]:
             reasons.extend(
                 f"import {alias.name} (line {node.lineno})"
                 for alias in node.names
-                if alias.name.split(".")[0] in _GPU_MODULES
+                if _is_gpu_module_path(alias.name)
             )
         elif isinstance(node, ast.ImportFrom):
-            root = (node.module or "").split(".")[0]
-            if node.level == 0 and root in _GPU_MODULES:
-                reasons.append(f"from {node.module} import ... (line {node.lineno})")
+            module = node.module or ""
+            if node.level != 0:
+                continue
+            if _is_gpu_module_path(module):
+                reasons.append(f"from {module} import ... (line {node.lineno})")
+            else:
+                # `from numba import cuda` — the forbidden path is assembled
+                # from the sanctioned parent module + the imported name.
+                reasons.extend(
+                    f"from {module} import {alias.name} (line {node.lineno})"
+                    for alias in node.names
+                    if _is_gpu_module_path(f"{module}.{alias.name}")
+                )
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and f"{node.value.id}.{node.attr}" in _GPU_MODULE_PATHS
+        ):
+            # `import numba; numba.cuda.jit(...)` — the forbidden subtree is
+            # reachable as an ATTRIBUTE of the sanctioned root with no
+            # `.cuda` import statement anywhere.
+            reasons.append(f"attribute {node.value.id}.{node.attr} (line {node.lineno})")
         elif (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
@@ -300,8 +357,54 @@ class TestDetectorTeeth:
 
     def test_python_module_path_lookalikes_sanctioned(self) -> None:
         """Fullmatch anchoring: near-miss string constants never false-positive."""
-        for probe in ('X = "occupy"\n', 'X = "mlx_backend"\n', 'X = "a.cupy"\n', 'X = "MLX"\n'):
+        for probe in (
+            'X = "occupy"\n',
+            'X = "mlx_backend"\n',
+            'X = "a.cupy"\n',
+            'X = "MLX"\n',
+            'X = "numba"\n',
+            'X = "numba.cudax"\n',
+            'X = "cupyxx"\n',
+        ):
             assert _py_gpu_references(ast.parse(probe)) == [], probe
+
+    def test_numba_cuda_offload_shapes_detected(self) -> None:
+        """Round-2 reconstruction-review regression pin: ADR-0004 §5 item 3
+        itself names Numba-CUDA as the sanctioned CuPy FALLBACK kernel host,
+        and ``numba`` is an allowed CPU dependency (CLAUDE.md §4) — so every
+        ``numba.cuda`` offload spelling looked benign to the {mlx, cupy}
+        import scan and evaded the Python arm entirely (fail-open)."""
+        assert _py_gpu_references(ast.parse("import numba.cuda\n"))
+        assert _py_gpu_references(ast.parse("from numba import cuda\n"))
+        assert _py_gpu_references(ast.parse("from numba import njit, cuda\n"))
+        assert _py_gpu_references(ast.parse("from numba.cuda import jit\n"))
+        assert _py_gpu_references(
+            ast.parse('import importlib\nmod = importlib.import_module("numba.cuda")\n')
+        )
+        assert _py_gpu_references(
+            ast.parse(
+                "import numba\n\ndef f(k):  # attribute shape, no .cuda import\n"
+                "    return numba.cuda.jit(k)\n"
+            )
+        )
+
+    def test_numba_cpu_usage_stays_sanctioned(self) -> None:
+        """CLAUDE.md §4 sanctions numba on CPU hot paths: the plain root
+        import, CPU-only from-imports, a bare ``"numba"`` string, and a
+        non-numba ``.cuda`` attribute must never false-positive."""
+        assert _py_gpu_references(ast.parse("import numba\n")) == []
+        assert _py_gpu_references(ast.parse("from numba import njit, prange\n")) == []
+        assert _py_gpu_references(ast.parse("dev = torchlike.cuda\n")) == []
+
+    def test_cupyx_import_and_string_detected(self) -> None:
+        """Round-2 reconstruction-review regression pin: ``cupyx`` ships
+        INSIDE the CuPy wheel and is importable standalone (``from cupyx
+        import scipy``) — the {mlx, cupy} import roots and the fullmatch
+        module-path regex both missed it (fail-open), while the Rust arm's
+        PREFIX match would have caught the analogous token."""
+        assert _py_gpu_references(ast.parse("import cupyx\n"))
+        assert _py_gpu_references(ast.parse("from cupyx import scipy\n"))
+        assert _py_gpu_references(ast.parse('mod = importlib.import_module("cupyx.scipy")\n'))
 
     def test_rust_real_world_mlx_crate_idents_detected(self) -> None:
         """Round-2 hostile-review regression pin: the real-world MLX Rust
