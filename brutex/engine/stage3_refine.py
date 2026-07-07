@@ -151,8 +151,37 @@ def refinement_run_id(
     versions)`` — the resumable/dedup unit is the WHOLE per-mask run, so a
     bumped optimizer version, budget, or seed yields a NEW identity (cached
     per-eval values from another identity are never reused).
+
+    The three injectable string tokens (``mask_run_id``, ``pycma_version``,
+    ``numpy_version``) are screened for the ``\\x1f`` join delimiter through
+    the COMMON :func:`~brutex.strategies.combo.reject_unit_separator` guard
+    (DEC-RUN-IDENTITY-GUARD-PARITY-001) — REJECT-ONLY, so every
+    currently-legal input's digest is byte-unchanged (golden-pinned). The
+    other two joined tokens are clean by construction (``budget.canonical()``
+    emits only ``key=value;`` scalars; ``f"seed={seed}"`` formats an int) and
+    are deliberately NOT guarded — a dead branch would fake coverage. The
+    combo canonicaliser's recursion depth cap is structurally N/A here: the
+    payload is flat scalars, no recursion exists to cap.
+
+    Raises
+    ------
+    Stage3RefineError
+        If ``mask_run_id``, ``pycma_version``, or ``numpy_version`` contains
+        the ``\\x1f`` unit-separator byte.
     """
     import fno_math
+
+    from brutex.strategies.combo import reject_unit_separator
+
+    reject_unit_separator(
+        "refinement_run_id",
+        (
+            ("mask_run_id", mask_run_id),
+            ("pycma_version", pycma_version),
+            ("numpy_version", numpy_version),
+        ),
+        error=Stage3RefineError,
+    )
 
     payload = "\x1f".join(
         (

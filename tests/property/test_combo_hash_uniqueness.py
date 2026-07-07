@@ -123,6 +123,21 @@ def _hash(tup: Mapping[str, Any]) -> str:
     return combo_hash(**tup)
 
 
+def _canonical_identity(tup: Mapping[str, Any]) -> str:
+    """Project a 9-tuple onto the exact quotient ``combo_hash`` is injective over.
+
+    ``canonicalise_params`` DELIBERATELY collapses param values the hasher
+    treats as ONE run identity — signed zero (``-0.0`` → ``+0.0``,
+    DEC-SWEEP-DEDUP-LMDB-001 / Golden Rule #4) and dict insertion order
+    (``sort_keys=True``) — so a raw ``str(dict)`` projection would present
+    e.g. ``{"a": 0.0}`` vs ``{"a": -0.0}`` as "distinct" tuples that
+    correctly hash equal, falsifying the injectivity property below
+    (hostile-review de-flake, 2026-07-07: distinctness must be judged in
+    the canonical-params quotient, never the raw string form).
+    """
+    return str({**tup, "params": canonicalise_params(tup["params"])})
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Invariant 1 — determinism
 # ────────────────────────────────────────────────────────────────────────
@@ -215,7 +230,7 @@ class TestParamsCanonicalisation:
 
 
 class TestNoDuplicateComboEmitted:
-    @given(tuples=st.lists(_nine_tuple(), min_size=2, max_size=20, unique_by=str))
+    @given(tuples=st.lists(_nine_tuple(), min_size=2, max_size=20, unique_by=_canonical_identity))
     @settings(max_examples=50, deadline=None)
     def test_distinct_tuples_produce_distinct_hashes(self, tuples: list[dict[str, Any]]) -> None:
         """Drawing N pairwise-distinct 9-tuples must produce N distinct digests.
@@ -228,15 +243,45 @@ class TestNoDuplicateComboEmitted:
         layers would silently coalesce them and the dedup invariant
         would break.
 
-        We use ``unique_by=str`` to ensure the input list is pairwise
-        distinct in the dict's string projection (which canonicalises
-        param-order). Hypothesis shrinks toward minimal collisions.
+        Pairwise distinctness is judged through ``_canonical_identity``
+        (the canonical-params quotient), NEVER raw ``str``: the
+        canonicaliser deliberately collapses signed zero and param
+        insertion order, so raw-string-distinct dicts like
+        ``{"a": 0.0}`` / ``{"a": -0.0}`` are ONE combo by design and
+        must not be presented to the injectivity assertion as a
+        "collision". Hypothesis shrinks toward minimal collisions.
         """
         hashes = [_hash(t) for t in tuples]
         assert len(hashes) == len(set(hashes)), (
             f"Collision: {len(hashes) - len(set(hashes))} duplicate hashes "
             f"emitted from {len(tuples)} distinct 9-tuples"
         )
+
+    def test_signed_zero_params_are_one_combo(self) -> None:
+        """Regression (hostile-review de-flake, 2026-07-07): the exact
+        hypothesis falsifying example that flaked under the old
+        ``unique_by=str`` projection. Params ``{"a": 0.0}`` and
+        ``{"a": -0.0}`` are ONE run identity — ``canonicalise_params``
+        normalises signed zero BEFORE repr (Golden Rule #4
+        reproducibility) — so the digests MUST be equal AND the
+        ``_canonical_identity`` projection MUST collapse the pair, so the
+        injectivity property above can never draw them as two "distinct"
+        tuples again.
+        """
+        base: dict[str, Any] = {
+            "strategy_id": "s1",
+            "direction": "bull",
+            "instrument": "NIFTY",
+            "tf": "5m",
+            "mode": "A",
+            "data_snapshot_hash": "snap",
+            "indicator_version": "v1",
+            "code_commit_sha": "c0ffee",
+        }
+        pos = {**base, "params": {"a": 0.0}}
+        neg = {**base, "params": {"a": -0.0}}
+        assert _hash(pos) == _hash(neg)
+        assert _canonical_identity(pos) == _canonical_identity(neg)
 
 
 # ────────────────────────────────────────────────────────────────────────
