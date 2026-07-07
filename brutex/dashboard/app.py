@@ -113,6 +113,7 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    latest_movers_minute_key,
     preopen_datasets_key,
     warm_discovery_memos,
 )
@@ -151,6 +152,7 @@ from brutex.dashboard.movers_snapshot import (
     DEFAULT_TOP_N,
     build_snapshot_payload,
     compute_spot_candidates,
+    is_intraday_interval,
     parse_snapshot_date,
     pending_asset_payload,
 )
@@ -158,6 +160,7 @@ from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
+    latest_movers_minute,
     options_warm_grid,
     spot_warm_grid,
     warm_coordinate_label,
@@ -1510,6 +1513,16 @@ def build_app(
     # Pull-time staleness note: the derived 1day partitions are rewritten ONLY by the
     # pipeline's final prebuild, so the latest date genuinely cannot move mid-fetch.
     _latest_movers_date_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
+    # The DEFAULT-poll latest-MINUTE display resolver cache (DEC-MOVERS-ASOF-LATEST-DEFAULT-001):
+    # when no explicit `time` is sent AND the interval is intraday, the movers route resolves
+    # the latest available spot 1-minute (`latest_movers_minute`) for the ADDITIVE `latest_time`
+    # display echo — so the dropdown/label SHOW the real latest minute (e.g. `latest (15:29)`)
+    # while the cut stays whole-day (`cutoff_min=None`, identical latest close across every TF).
+    # An O(spot-1m-files) DuckDB MAX, so it is memoised per (write generation, latest date) —
+    # a repeat DEFAULT intraday poll on the same day is an O(1) handoff; a pull re-resolves.
+    _latest_movers_minute_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True
     )
     # The Options-tab AUTHORITATIVE expiry-calendar cache (DEC-MOVERS-CALENDAR-TIERS-001):
@@ -5071,6 +5084,23 @@ def build_app(
                     )
                 else:
                     date_str = parse_snapshot_date(date).isoformat()
+                # DEFAULT-poll latest-MINUTE display echo (DEC-MOVERS-ASOF-LATEST-DEFAULT-001):
+                # ONLY when no explicit `time` was sent AND the interval is intraday, resolve the
+                # latest available spot 1-minute of `date_str` for the ADDITIVE `latest_time`
+                # display field — so the dropdown/label SHOW the real latest minute while the CUT
+                # stays whole-day (`time` still threads `None` → identical latest close across
+                # every TF). Memoised per (generation, date); `None` (empty/unreadable lake) → the
+                # frontend shows a plain "latest" label and still cuts whole-day. Display-only —
+                # the ranked numbers are byte-unchanged (the cut is not touched).
+                latest_time: str | None = None
+                if time is None and is_intraday_interval(interval):
+                    latest_time = _latest_movers_minute_cache.get_or_compute(
+                        latest_movers_minute_key(date_str),
+                        generation=generation,
+                        compute=lambda: latest_movers_minute(
+                            lake_root, parse_snapshot_date(date_str)
+                        ),
+                    )
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -5152,6 +5182,7 @@ def build_app(
                         expiry_track=opt_cands.expiry_track,
                         min_volume=min_volume,
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
+                        latest_time=latest_time,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5190,6 +5221,7 @@ def build_app(
                         skipped=fut_cands.skipped,
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
+                        latest_time=latest_time,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5229,6 +5261,7 @@ def build_app(
                     min_volume=min_volume,
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
+                    latest_time=latest_time,
                 )
 
             payload = await run_in_threadpool(_resolve)
