@@ -275,11 +275,15 @@ def latest_movers_minute(lake_root: Path, day: date_cls) -> str | None:
     empty/absent spot lake, OR a corrupt Parquet) → the caller shows a plain
     "latest" label and still cuts whole-day.
 
-    Honest envelope (Golden Rule #10): the read is bounded — not a full-lake
-    scan. It globs only the spot ``1minute`` partitions (skipping F&O), the
-    caller memoises it per write generation (a repeat DEFAULT poll is an O(1)
-    handoff), and DuckDB reads only the Parquet footers/columns needed for the
-    aggregate. Still O(spot-1m-files), so it is called on the threadpool worker,
+    Honest envelope (Golden Rule #10): the read is MONTH-PRUNED — because *day*
+    fully determines its ``<yyyy>/<mm>`` partition (lake layout
+    ``…/1minute/<yyyy>/<mm>.parquet``), the glob targets ONLY that one month's
+    spot ``1minute`` files (skipping F&O AND every other month), so DuckDB reads
+    the timestamp column of ~one-month-of-spot-1m rather than the whole
+    multi-year 1-minute lake — the amplification the sibling
+    :func:`latest_movers_date` avoids by construction. The caller also memoises
+    it per write generation (a repeat DEFAULT poll is an O(1) handoff). Still
+    O(spot-1m-files-in-day's-month), so it is called on the threadpool worker,
     never the event loop.
 
     Parameters
@@ -296,11 +300,17 @@ def latest_movers_minute(lake_root: Path, day: date_cls) -> str | None:
     """
     import duckdb
 
+    # MONTH-PRUNE: *day* fully determines its `<yyyy>/<mm>` partition (lake
+    # layout `…/<interval>/<yyyy>/<mm>.parquet`), so glob ONLY that month's spot
+    # 1-minute files instead of `1minute/**/*.parquet` — one month (~750 files)
+    # rather than the whole multi-year lake. The WHERE date filter still selects
+    # `day`'s bars out of the month partition.
+    month_glob = f"{_MINUTE_INTERVAL}/{day.year:04d}/{day.month:02d}.parquet"
     present = [
-        (lake_root / "bars" / "*" / seg / "*" / _MINUTE_INTERVAL).as_posix() + "/**/*.parquet"
+        (lake_root / "bars" / "*" / seg / "*" / month_glob).as_posix()
         for seg in _SPOT_SEGMENTS
         if (lake_root / "bars").is_dir()
-        and any((lake_root / "bars").glob(f"*/{seg}/*/{_MINUTE_INTERVAL}/**/*.parquet"))
+        and any((lake_root / "bars").glob(f"*/{seg}/*/{month_glob}"))
     ]
     if not present:
         return None
