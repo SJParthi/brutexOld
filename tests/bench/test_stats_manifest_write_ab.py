@@ -26,13 +26,18 @@ no shard ever created; review round 2). Two layers:
   gate ever fails (spec §7): move the shard upsert to just AFTER the
   partition-lock release (stat still captured UNDER the lock) → kill switch.
 
-  HONEST envelope (Golden Rule #10, review round 4): the gating env var is
-  set ONLY by ``.github/workflows/bench-m4pro.yml``, which previously neither
-  listed this file in its ``paths`` triggers nor invoked it — so the 12 ms
-  assertion executed in NO workflow while the ledger presented it as a pin.
-  It is now wired into that workflow (:class:`TestBenchWorkflowWiring` pins
-  the wiring), but the m4pro runner itself is DORMANT until the operator
-  registers it, so NO measured overhead figure is claimed anywhere.
+  HONEST envelope (Golden Rule #10, review round 4 + ENDGAME round 1): the
+  gating env var is set ONLY by ``.github/workflows/bench-m4pro.yml``, which
+  previously neither listed this file in its ``paths`` triggers nor invoked
+  it — so the 12 ms assertion executed in NO workflow while the ledger
+  presented it as a pin. It is now wired into that workflow
+  (:class:`TestBenchWorkflowWiring` pins the wiring) AND has executed at
+  least once on the registered self-hosted M4-Pro tier: actions run
+  28888100079 (2026-07-07, the first real M4-Pro run) ran this gate GREEN —
+  the measured median overhead is printed in that run's log (see the
+  CALIBRATION bracket in MIGRATION.md #1543). An earlier revision of this
+  docstring claimed the runner was "DORMANT ... no measured overhead figure
+  is claimed anywhere" — stale-false after that run, reconciled here.
 """
 
 from __future__ import annotations
@@ -216,9 +221,13 @@ class TestBenchWorkflowWiring:
     set ONLY by ``.github/workflows/bench-m4pro.yml``, which previously
     neither listed these files in its ``paths`` triggers nor ran them: the
     gates executed in NO workflow. This deterministic pin (runs on shared CI)
-    fails if that wiring regresses. HONEST: it pins the WIRING only — the
-    m4pro runner is dormant until the operator registers it, so this cannot
-    prove an execution happened (and no measured figure is claimed).
+    fails if that wiring regresses. HONEST: it pins the WIRING only — proof
+    of execution lives outside the repo: actions run 28888100079 (2026-07-07,
+    the first real M4-Pro run) executed both wired benches — this file's A/B
+    merge-budget gate GREEN, the paging gate's strict ceiling recalibrated
+    1.1x -> 3.0x off its measured 1.53x (MIGRATION.md #1543 CALIBRATION
+    bracket). ENDGAME round 1 dropped this docstring's stale "runner is
+    dormant / cannot prove an execution happened" wording.
     """
 
     _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "bench-m4pro.yml"

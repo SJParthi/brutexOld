@@ -68,8 +68,12 @@ def cache_tier_ceiling(shared_ci_default: float) -> float:
 #: 1-file-touch probe stayed green (exactly 1 parquet file touched at both
 #: depths). Metadata cost is bounded by a CONSTANT per-file syscall factor,
 #: never O(files) Parquet work; a genuine O(files) regression on the
-#: 12x-depth fixture measures ~12x and still fails 3.0 loudly, and the
-#: deterministic file-touch / fs-op-count probes remain the primary teeth.
+#: 12x-depth fixture measures well above 3.0 and fails loudly — ~5-6x at the
+#: repo's own measured footer cost (~0.26 ms/file from #1025's 19.02 ms/click
+#: at 72 months, over this fixture's 2.27 ms constant base; ~12x only in the
+#: asymptote where O(files) work dominates both depths) — which also means it
+#: can sit UNDER the 8.0 shared-CI ceiling, where the deterministic
+#: file-touch / fs-op-count probes are (and remain) the primary teeth.
 METADATA_SWEEP_STRICT_CEILING: Final[float] = 3.0
 
 

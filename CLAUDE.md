@@ -951,9 +951,17 @@ hostile-review pass._
   click, and the degrade-law LEGACY recount memoises under its own `legacytotal|` generation key so a
   persistently-unprunable page (heterogeneous star union) recounts ONCE per generation, never per click [round 2];
   a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (the wall-clock A/B gate
-  asserting the median overhead under the 12 ms merge-budget floor is AUTHORED + wired into the DORMANT
-  self-hosted bench-m4pro workflow — NOT yet executed on any tier, so NO measured overhead figure is claimed
-  [round 4: it previously executed in NO workflow while this line presented it as an operative pin]; the
+  asserting the median overhead under the 12 ms merge-budget floor is wired into the self-hosted bench-m4pro
+  workflow AND FIRST EXECUTED on the real M4-Pro tier 2026-07-07, actions run 28888100079: the A/B
+  merge-budget gate GREEN — the measured median overhead lives in that run's log; the SAME run measured the
+  O(page) paging click's strict wall-clock ratio at 1.53× (t_small=2.272 ms, t_large=3.485 ms — this entry's
+  OWN documented O(D) statx sweep, 66 extra month files), so the paging gate's strict-tier ceiling was
+  recalibrated 1.1× → 3.0× (`METADATA_SWEEP_STRICT_CEILING` in `tests/bench/_o1_tiers.py`, the
+  DEC-O1-CACHE-TIER-001 precedent; the shared-CI 8.0× default unchanged) while the deterministic
+  file-touch/fs-op-count probes — all green on the same run — remain the PRIMARY O(page) teeth
+  [round 4 history: the gate previously executed in NO workflow while this line presented it as an operative
+  pin — since wired AND executed, the ENDGAME round-1 reconcile of the stale "DORMANT / NOT yet executed"
+  wording that outlived the run]; the
   deterministic byte-parity/anti-storm teeth run in shared CI; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
   in-place overwrite is the documented stat-token residual; the new module's mutation gate is WIRED into the
   weekly Mutation workflow's per-module ZERO-survivor mutmut loop AND was EXECUTED in-session [round 8 — the
@@ -985,6 +993,19 @@ hostile-review pass._
   O(page) benches wired into bench-m4pro.yml (workflow-wiring pin test) + this blurb's stale "pins" wording
   fixed; the route-level integration now proves manifest-served TOTALS on the wire via a fresh app (the
   control run's shared count cache had cushioned the equality).
+  ROUND 6: a NON-REGULAR inode planted at the shard path (FIFO/device/socket) no longer HANGS the reader or
+  the partition-locked write/heal hooks forever — the loader opens `O_RDONLY | O_NONBLOCK` + `S_ISREG`-checks
+  the OPEN descriptor, the NEW fail-closed `not_regular` clause (read side legacy-falls-back + the seed's
+  `os.replace` heals the inode, wire-pinned; write side corrupt-unlinks; SIGALRM-watchdog regressions pin the
+  pre-fix >5 s hang on BOTH sites); the OPTIONS pager's `db.stats_manifest.read` provenance is now
+  content-asserted (a swapped `page_source` label mutant passed the whole suite before; the spot pin gains its
+  `kind` assertion). ROUND 7: the #1025 route-level count-cache pin regains its wire-level anti-STALENESS
+  teeth (two genuinely NEW `(side,timestamp)` option bars written through the PRODUCTION writer before the
+  generation bump — a stale serve answers the old total and fails — with the no-recount law still pinned); a
+  DIRECTORY planted at the shard path is healed via `shutil.rmtree` (`dir_shard_removed`, warn-only contract
+  kept) instead of re-emitting the `corrupt_unlinked`+`unlink_failed` warn pair on every later write; the
+  EMPTY-planned page (offset past the in-bound end) now runs the SAME post-query TOCTOU re-stat via the ONE
+  extracted `_stats_tokens_intact` helper (both call sites — no copy).
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
   Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
@@ -2765,7 +2786,10 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zen-meitner-8780fo`
+- **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1543 — the write-time
+  PER-FILE lake STATS manifest; matches §1's Active branch line)
+  Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
   DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
