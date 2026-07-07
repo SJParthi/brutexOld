@@ -288,11 +288,11 @@ class _FlakyCounts:
         self.failures = failures
         self.calls = 0
 
-    def __call__(self, conn: Any, glob: str) -> tuple[dict[str, dict[str, int]], int]:
+    def __call__(self, conn: Any, source: Any) -> tuple[dict[str, dict[str, int]], int]:
         self.calls += 1
         if self.failures:
             raise self.failures.pop(0)
-        return _window_counts_total(conn, glob)
+        return _window_counts_total(conn, source)
 
 
 class TestPhaseProgressTornReadGuard:

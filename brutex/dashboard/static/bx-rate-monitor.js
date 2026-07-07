@@ -611,6 +611,17 @@
   }
 
   function poll() {
+    // Hidden-tab pause (DEC-LEDGER-DELTA-O-PAGE-001, the v29.html pattern): a
+    // background tab fires ZERO fetches — the guard re-arms the self-scheduling
+    // chain at normal cadence (a hidden tick is free, no fetch) and the
+    // visibilitychange listener below fires an immediate catch-up poll on
+    // return, so the pill is never stale to a returning operator (Golden Rule
+    // #1) beyond one RTT. Interaction with the staleness indicator
+    // (DEC-PULL-UI-STALENESS-001): the guard returns BEFORE pollSeq is bumped
+    // (an in-flight response still renders) and BEFORE any fetch, so a hidden
+    // period counts ZERO pollFailures — no spurious backoff/recovery while
+    // hidden; the catch-up poll's success clears any accrued age readout.
+    if (document.hidden) { schedulePoll(POLL_MS); return; }
     var seq = ++pollSeq;   // a superseded response never renders or schedules
     fetchJson(ENDPOINT)
       .then(function (data) {
