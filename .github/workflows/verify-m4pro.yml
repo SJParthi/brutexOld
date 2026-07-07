@@ -62,6 +62,13 @@ jobs:
     env:
       PYTHONHASHSEED: "0"
       PYTHONDONTWRITEBYTECODE: "1"
+      # DEC-TEST-APPARATUS-DEBTS-001(b): deterministic hypothesis — loads the
+      # `ci` profile registered in tests/conftest.py (derandomize=True), so a
+      # property failure here reproduces on every re-run. The scheduled
+      # stress-nightly arm deliberately does NOT set this — the conftest then
+      # loads the random default, overriding hypothesis's built-in auto-CI
+      # derandomization (deliberate exploration off the PR path).
+      HYPOTHESIS_PROFILE: "ci"
 
     steps:
       - name: Checkout
