@@ -44,15 +44,15 @@ list order IS the rank order (validated on load).
   the same ``run_id``-ASC stable tie law. An unknown preset degrades to the
   default, logged (the /results idiom).
 
-WP3-ABSENCE NOTE (honest seam): the design homes the preset table in
-``brutex.ranking.presets`` and the dual-language reasons / margin-ROI in
-``brutex.ranking.phrases`` / ``brutex.engine.margin_history`` (WP3). Those
-modules do not exist yet, so THIS module owns the minimal R30 ordering law
-and exposes ``reason_provider`` / ``margin_roi_provider`` injection seams;
+WP3 WIRING NOTE: the preset table + the two-pass ordering law live in
+``brutex.ranking.presets`` (the ONE home — this module DELEGATES via
+``sort_by_preset``, byte-identical order to the pre-WP3 inline law); the
+dual-language reasons / margin-ROI live in ``brutex.ranking.phrases`` /
+``brutex.engine.margin_history`` and plug into the ``reason_provider`` /
+``margin_roi_provider`` injection seams (wired by the WP6 CLI adapter);
 absent providers yield an honest ``None`` per entry plus
 ``reasons_wired=False`` / ``margin_roi_wired=False`` in the ``source``
-header — never invented text (R27/R33/R47). When WP3 lands, its modules plug
-into these seams (merge-time wiring per the parallel-integration contract).
+header — never invented text (R27/R33/R47).
 
 ## O() + damage envelope (R26 / R42)
 
@@ -81,6 +81,16 @@ import structlog
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 from brutex.ranking import MIN_TRADES
+from brutex.ranking.presets import (
+    DEFAULT_PRESET,
+    PRESET_NAMES,
+    PRESETS,
+    RankRecord,
+    sort_by_preset,
+)
+from brutex.ranking.presets import (
+    PRESET_MIN_DD_FIRST as _PRESET_MIN_DD_FIRST,
+)
 from brutex.vocabulary.describe import matched_condition_names
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -141,16 +151,12 @@ TOP100_STAMP_FILENAME: Final[str] = "top100.stamp.json"
 #: ships its honest count, NEVER padding.
 TOP100_LIMIT: Final[int] = 100
 
-#: The R30 default preset + the one-click alternates, in display order.
-PRESET_MIN_DD_FIRST: Final[str] = "min_dd_first"
-DEFAULT_TOP100_PRESET: Final[str] = PRESET_MIN_DD_FIRST
-TOP100_PRESETS: Final[tuple[str, ...]] = (
-    PRESET_MIN_DD_FIRST,
-    "composite",
-    "profit_factor",
-    "win_rate",
-    "calmar",
-)
+#: The R30 default preset + the one-click alternates, in display order —
+#: re-exported VERBATIM from the ONE preset home (``brutex.ranking.presets``,
+#: WP3) so the artifact vocabulary can never fork from the ranking law's.
+PRESET_MIN_DD_FIRST: Final[str] = _PRESET_MIN_DD_FIRST
+DEFAULT_TOP100_PRESET: Final[str] = DEFAULT_PRESET
+TOP100_PRESETS: Final[tuple[str, ...]] = PRESET_NAMES
 
 # ── The 5 hard gates, recomputed from (row, agg) ────────────────────────────
 #
@@ -367,42 +373,17 @@ def resolve_preset(name: str) -> str:
     return DEFAULT_TOP100_PRESET
 
 
-def _min_dd_key(candidate: Top100Candidate) -> tuple[float, int, float, int]:
-    """The R30 ``min_dd_first`` sort key (ascending sort).
-
-    Smallest stored max drawdown % first; then composite score DESC (a
-    ``None`` composite ranks AFTER every real one — an unscored combo never
-    outranks a scored one); then fewest consecutive losses. Ties fall through
-    to the stable ``run_id``-ASC pre-sort.
-    """
-    composite = candidate.agg.composite_score
-    return (
-        candidate.row.max_drawdown_pct,
-        0 if composite is not None else 1,
-        -(composite if composite is not None else 0.0),
-        candidate.agg.max_consecutive_losses,
+def _rank_record(candidate: Top100Candidate) -> RankRecord:
+    """Project one pooled candidate onto the COMMON flat rank-record shape."""
+    return RankRecord(
+        run_id=candidate.row.run_id,
+        max_drawdown_pct=candidate.row.max_drawdown_pct,
+        composite_score=candidate.agg.composite_score,
+        max_consecutive_losses=candidate.agg.max_consecutive_losses,
+        profit_factor=candidate.row.profit_factor,
+        win_rate=candidate.row.win_rate,
+        calmar_ratio=candidate.row.calmar_ratio,
     )
-
-
-def _desc_value(candidate: Top100Candidate, preset: str) -> tuple[int, float]:
-    """The descending-preset key: ``(value_present, raw_value)``.
-
-    The row metrics are never ``None`` (persisted floats); only ``composite``
-    can be — a missing composite sorts last under ``reverse=True`` via the
-    presence flag, never coerced to a fake number.
-    """
-    if preset == "composite":
-        composite = candidate.agg.composite_score
-        if composite is None:
-            return (0, 0.0)
-        return (1, composite)
-    if preset == "profit_factor":
-        return (1, candidate.row.profit_factor)
-    if preset == "win_rate":
-        return (1, candidate.row.win_rate)
-    # ``resolve_preset`` admits exactly the TOP100_PRESETS tokens; min_dd_first
-    # never reaches here (rank_candidates branches first), so this is calmar.
-    return (1, candidate.row.calmar_ratio)
 
 
 def rank_candidates(
@@ -410,17 +391,13 @@ def rank_candidates(
 ) -> tuple[Top100Candidate, ...]:
     """Order *candidates* under *preset* — a strict, discovery-order-free total order.
 
-    The ``ResultsStore.top_k`` two-pass law: a stable ``run_id``-ASC pre-sort,
-    then ONE stable sort on the preset key — identical output for any input
-    permutation (property-pinned).
+    Delegates to the ONE two-pass ordering law
+    (:func:`brutex.ranking.presets.sort_by_preset` — the ``ResultsStore.top_k``
+    law: stable ``run_id``-ASC pre-sort, then ONE stable sort on the preset
+    key) — identical output for any input permutation (property-pinned).
     """
     resolved = resolve_preset(preset)
-    ordered = sorted(candidates, key=lambda c: c.row.run_id)
-    if resolved == PRESET_MIN_DD_FIRST:
-        ordered.sort(key=_min_dd_key)
-    else:
-        ordered.sort(key=lambda c: _desc_value(c, resolved), reverse=True)
-    return tuple(ordered)
+    return sort_by_preset(candidates, preset=PRESETS[resolved], record_of=_rank_record)
 
 
 # ── Entry payload projection ─────────────────────────────────────────────────

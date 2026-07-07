@@ -727,7 +727,42 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
+- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1538** — Phase-3
+  "results depth" for the one-click institutional sweep, delivered as ONE fenced RUN-END post-hoc pass
+  (`brutex/engine/results_depth_pass.py`) that re-simulates ONLY the persisted finalists on the pure-Python oracle
+  (per-combo PARITY TOOTH vs the stored row — a mismatch is counted + excluded, never a silently wrong trade list),
+  captures every trade with exit reason + real fill prices (additive `TradeSimWalker(detail_sink=)`, default `None`
+  byte-identical), 1-minute-path MAE/MFE + intraday-path equity (R22; honest `no_1m_data` when 1m is absent), VIX
+  stamps via the FIRST production `TradeReferenceStamper.from_vix_bars` construction (R31; NULL + counted when the
+  UNVERIFIED VIX series is absent), folds per-combo aggregates + regime/VIX-band/entry-hour/event lenses (R46/R51 —
+  event flags are ONLY the four calendar-verifiable classes; weekday Budget/election days honestly untagged), writes
+  the deterministic per-tuple sidecar trio + stamp under the glob-collision-proof `results-depth/` subtree
+  (idempotent stamp-skip resume, R42), buy-&-hold baselines from the sweep's own bars (R27), groups behavioral twin
+  families (R34), and builds the global cross-bucket top-100 artifact at the binding contract path
+  `runs/<grid_identity>/top100.json` + stage stamp (R21/R26 — `load_top100` O(1) by construction, ≤100 entries; any
+  damage → None → deterministic rebuild to identical bytes). The R30 preset law lives in ONE home
+  `brutex/ranking/presets.py` (`min_dd_first` default = smallest max-drawdown → composite tiebreak, None-after-scored
+  → fewest consecutive losses → run_id ASC; alternates composite/PF/win%/Calmar DESC on the RAW value;
+  `top100_artifact` DELEGATES via `sort_by_preset`, byte-identical order — its golden passes unmodified); R33 ships
+  as the FIXED hand-written 60-entry `brutex/ranking/phrases.py` table (import-time cross-pin vs `NAME_TO_BIT`,
+  golden-digest-locked wording, O(k) mechanical assembly — never generated text); R47 ships as the refusal-only
+  `brutex/engine/margin_history.py` regime table (the DEC-ETC-REGIME-HISTORY-001 template — ZERO verified SPAN rows
+  exist anywhere, so every winner honestly reads `margin_roi: unverified`; override paths are DATA only). WP6
+  wiring: ONE comment-fenced CLI adapter in `cmd_sweep_all` — the fail-loud `BRUTEX_RESULTS_DEPTH` kill switch
+  resolves EAGERLY pre-sweep (junk → clean `EXIT_USER_ERROR` before any compute), the pass runs post-cascade wired
+  to the WP3 providers (phrases reasons + margin ROI at the honest lots=1), reference bars (per-instrument 1m/1day +
+  `NSE-INDIAVIX` 1m) load best-effort through the SAME Catalog/ReplayFeed path, and a pass failure prints LOUD +
+  logs `cli.results_depth.pass_failed` but NEVER fails the sweep — integration-proven over a REAL lake through
+  `cmd_sweep_all` (post-cascade order pinned, artifacts + `reasons_wired`/`margin_roi_wired` flags, kill switch,
+  junk env, fence). HONEST: the pass is O(persisted finalists) oracle re-sims at run-end, NOT free and NOT on the
+  ~33B-trial hot path (which receives ZERO diffs — the frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` pins pass
+  UNMODIFIED); trade pages are O(page) with a disclosed O(row-groups-up-to-offset) deep-offset scan (the db_view
+  envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1538); the
+  contracts memory-file additive-key update (`trade_seq`/`path_1m_status`/`mae_granularity` + the top100 object
+  root) is a coordinator obligation. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; every
+  new/touched module 100% line+branch; ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change
+  baseline).
+  Earlier: `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
   `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
   `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
   DEC-GREEKS-CORRECTNESS-AUDIT-001 named follow-ups ("a CLI-pulled lake never enriches" + "bulk re-enrich"). ONE
@@ -2416,7 +2451,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/intelligent-euler-dwf2ab`
+- **Active feature branch:** `claude/elegant-johnson-cgufi7`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
