@@ -320,11 +320,14 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
             name = entry.name
             if not name.endswith(f"-{FUTURE_TYPE}"):
                 continue
-            if not entry.is_dir():
-                # A stray regular FILE named like a contract must never become
-                # an owning segment (it would poison the ownership windows +
-                # roll_schedule, then dead-end the loader with a wrong
-                # "re-pull" remediation). Skipped + WARNed, never guessed.
+            if not entry.is_dir(follow_symlinks=False):
+                # A stray regular FILE — or a SYMLINK, even one pointing at a
+                # real directory — named like a contract must never become an
+                # owning segment (a link at a foreign contract's dir would
+                # serve that target's bars as NIFTY series bars under this
+                # expiry's ownership window — the exact poisoning the FILE
+                # guard exists to prevent; review round-3 finding 3). Skipped
+                # + WARNed, never guessed or followed.
                 _LOG.warning("futures_series.non_dir_entry", entry=repr(name))
                 continue
             parts = parse_fno_symbol(name)

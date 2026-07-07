@@ -174,6 +174,29 @@ class TestScanAndFilter:
         assert len(warned) == 1
         assert warned[0]["entry"] == repr("NSE-NIFTY-28Oct25-FUT")
 
+    def test_symlink_shaped_like_a_contract_is_skipped_and_warned(self, tmp_path: Path) -> None:
+        # Review round-3 finding 3: `entry.is_dir()` follows symlinks, so a
+        # contract-named SYMLINK at a foreign dir (a manual lake reorg /
+        # quarantine-restore leftover) was accepted as an owning segment and
+        # its TARGET's bars served as NIFTY series bars under that expiry's
+        # ownership window — the exact poisoning the stray-FILE guard exists
+        # to prevent. Post-fix (`follow_symlinks=False`) it rides the same
+        # skip + `non_dir_entry` WARN.
+        root = _mk_lake(tmp_path, _JUN, _JUL, "NSE-BANKNIFTY-30Oct25-FUT")
+        fno = root / "bars" / "NSE" / "FNO"
+        link = fno / "NSE-NIFTY-28Oct25-FUT"
+        link.symlink_to(fno / "NSE-BANKNIFTY-30Oct25-FUT", target_is_directory=True)
+        # Fails-before: the link parsed + was SELECTED for this window and the
+        # Jul→Oct 89-day pairwise gap refused the whole launch; post-fix the
+        # resolution succeeds on the real dirs with the link skipped + WARNed.
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 8, 10))
+        assert res.contract_symbols == (_JUN, _JUL)
+        assert res.unparsed_dirs == ()  # a symlink is NOT parse-failure evidence
+        warned = _events(logs, "futures_series.non_dir_entry")
+        assert len(warned) == 1
+        assert warned[0]["entry"] == repr("NSE-NIFTY-28Oct25-FUT")
+
     def test_poison_alias_dir_is_ignored_not_resolved(self, tmp_path: Path) -> None:
         # F7: a hand-created literal bars/NSE/FNO/NSE-NIFTY-FUT/ dir parses to
         # None → counted as evidence, NEVER a segment (the alias never reaches
