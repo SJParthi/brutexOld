@@ -31,6 +31,8 @@ pytest.importorskip("trading_core", reason="the backfill module needs the tradin
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.greeks_backfill import (
+    BACKFILL_BATCH_ENV,
+    BACKFILL_PAUSE_ENV,
     BackfillPlan,
     BackfillScan,
     GreeksBackfillReport,
@@ -235,6 +237,72 @@ class TestPostTrigger:
         )
         assert resp.status_code == 400
         assert "force with limit never progresses" in resp.json()["detail"]
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("abc", "not an integer"), ("0", "must be >= 1")],
+    )
+    def test_env_batch_misconfig_is_400_before_the_scan(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        raw: str,
+        message: str,
+    ) -> None:
+        """Fix round 5 (refuter-confirmed): with no ``batch`` query param, a bad
+        ``$BRUTEX_GREEKS_BACKFILL_BATCH`` used to be parsed only INSIDE
+        ``run_greeks_backfill`` on the job thread — an error state AFTER the
+        whole paid O(files) scan. It is a 400 at POST time now, before the job
+        starts — the eager posture the sibling ``batch < 1`` check already has."""
+        captured: dict[str, Any] = {}
+        _patch_pipeline(monkeypatch, captured, run_result=_report())
+        monkeypatch.setenv(BACKFILL_BATCH_ENV, raw)
+        resp = client.post("/api/v1/universe/greeks-backfill")
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert BACKFILL_BATCH_ENV in detail and message in detail
+        assert "scan_kwargs" not in captured  # refused BEFORE the scan even started
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("inf", "must be finite"), ("junk", "not a number")],
+    )
+    def test_env_pause_misconfig_is_400_before_the_scan(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        raw: str,
+        message: str,
+    ) -> None:
+        """The ``$BRUTEX_GREEKS_BACKFILL_PAUSE_S`` env twin — same eager 400."""
+        captured: dict[str, Any] = {}
+        _patch_pipeline(monkeypatch, captured, run_result=_report())
+        monkeypatch.setenv(BACKFILL_PAUSE_ENV, raw)
+        resp = client.post("/api/v1/universe/greeks-backfill")
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert BACKFILL_PAUSE_ENV in detail and message in detail
+        assert "scan_kwargs" not in captured
+
+    def test_valid_env_overrides_resolved_eagerly_and_threaded_to_the_runner(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix round 5: the RESOLVED env values are what the job passes to
+        ``run_greeks_backfill`` (never ``None``), and the response echoes the
+        effective batch — the runner's internal env resolution never fires on
+        this surface (second belt for programmatic callers only)."""
+        monkeypatch.setenv(BACKFILL_BATCH_ENV, "7")
+        monkeypatch.setenv(BACKFILL_PAUSE_ENV, "0.25")
+        captured: dict[str, Any] = {}
+        _patch_pipeline(monkeypatch, captured, run_result=_report())
+        resp = client.post("/api/v1/universe/greeks-backfill")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["started"] is True
+        assert body["batch"] == 7  # the EFFECTIVE (env-resolved) batch, honestly echoed
+        assert _wait_for_backfill(client)["state"] == "done"
+        assert captured["run_kwargs"]["batch_size"] == 7
+        assert captured["run_kwargs"]["pause_s"] == 0.25
 
     def test_second_trigger_is_refused_single_flight(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

@@ -243,6 +243,8 @@ from brutex.data.economics_integrity import report_from_dict as economics_report
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
     plan_greeks_backfill,
+    resolve_backfill_batch_size,
+    resolve_backfill_pause_s,
     run_greeks_backfill,
     scan_stale_greeks_targets,
 )
@@ -4103,7 +4105,11 @@ def build_app(
         the durable checkpoint survives for resume). ``force`` + ``limit``
         together is a 400: force-mode selection is stamp-independent, so a
         limited force run re-selects the SAME first N contracts every run —
-        chipping works only in the default mode.
+        chipping works only in the default mode. The batch/pause ENV twins
+        (``$BRUTEX_GREEKS_BACKFILL_BATCH`` / ``$BRUTEX_GREEKS_BACKFILL_PAUSE_S``)
+        are resolved EAGERLY here (fix round 5): a misconfigured env is a 400
+        at POST time, never a job-thread error AFTER the paid O(files) scan;
+        the echoed ``batch`` is the resolved EFFECTIVE value.
         """
         if batch is not None and batch < 1:
             raise HTTPException(status_code=400, detail=f"batch must be >= 1, got {batch}")
@@ -4122,6 +4128,23 @@ def build_app(
                     "N contracts) — drop force or drop limit"
                 ),
             )
+        if batch is None:
+            # ENV twin resolved EAGERLY at POST time (fix round 5, refuter-
+            # confirmed): a misconfigured $BRUTEX_GREEKS_BACKFILL_BATCH used to
+            # detonate on the job thread only AFTER the whole O(files) scan —
+            # a wasted multi-hour scan ending in an error state, the exact
+            # lateness class the sibling `batch < 1` query check refuses
+            # eagerly. 400 now, before the job even starts.
+            try:
+                batch = resolve_backfill_batch_size()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            # The pause env twin ($BRUTEX_GREEKS_BACKFILL_PAUSE_S) — same eager
+            # posture ("inf" would otherwise crash the wet job mid-batch).
+            pause_s = resolve_backfill_pause_s()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info(
             "universe.greeks_backfill.requested",
@@ -4174,6 +4197,7 @@ def build_app(
                 plan=plan,
                 rate_source=rate_source,
                 batch_size=batch,
+                pause_s=pause_s,
                 on_progress=_sync,
             )
             # EXACTLY-ONCE completion summary — the one dashboard chokepoint

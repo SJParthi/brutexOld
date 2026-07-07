@@ -80,12 +80,28 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   driver honestly reports it ``already_current``. Repairing the poisoned row
   is a lake-repair task (``lake_heal`` is strictly row-removing, never
   value-editing — a manual partition fix is required), stated, not hidden.
+* The scanner probes ONLY month files the driver's reader can also open —
+  canonical zero-padded ``<yyyy>/<mm>.parquet`` names (fix round 5,
+  refuter-confirmed): an in-range NON-canonical name (``2024/1.parquet``)
+  passed the round-3 range guard yet is invisible to
+  ``ist_span_partition_files``'s zero-padded path construction, so the
+  contract was re-targeted on EVERY run while the wet run wrote nothing and
+  read green. Such a file now folds into ``probe_failed`` + ONE loud WARN
+  (repair = rename to the canonical form), never an eternal re-queue.
 * No wall-clock SLA is claimed — the first wet pass is O(stale bars) kernel
   compute + O(changed partitions) latest-wins rewrites.
 
-ZERO engine impact: nothing under :mod:`brutex.engine` changes semantics (only
-the cycle-free checkpoint store is imported); the F&O lake stays
-REFERENCE_ONLY; spot INDEX partitions are never written.
+Engine scope impact: the brute-force ENGINE scope (NIFTY/BANKNIFTY/SENSEX) is
+untouched and this module only IMPORTS the cycle-free checkpoint store — but
+honesty (Golden Rule #10) requires naming the one engine-visible change of
+this change set: :mod:`brutex.engine.sweep_checkpoint` gained fail-loud
+corruption refusals (1 MiB size cap, ``RecursionError`` nesting-bomb mapping,
+same-id ``total_combos`` mismatch refused, parent-mkdir inside the error
+mapping — ledger #1482 fix round 2) that ALSO harden the sweep's own resume
+path (``sweep_supervisor``/``sweep_parallel`` call ``load()`` uncaught, so a
+corrupt/tampered checkpoint now aborts loudly where it previously resumed
+silently). The F&O lake stays REFERENCE_ONLY; spot INDEX partitions are never
+written.
 """
 
 from __future__ import annotations
@@ -254,8 +270,12 @@ class BackfillScan:
         Decoded option contracts whose ``1minute`` tree held no month files —
         nothing to probe or enrich.
     probe_failed
-        Month files the probe could not read (corrupt Parquet / I/O error) —
-        skipped + logged; repair is :mod:`brutex.data.lake_heal`'s job.
+        Month files the backfill could not act on: corrupt Parquet / I/O
+        error, PLUS (fix round 5) in-range NON-canonical month filenames the
+        driver's zero-padded reader can never open (``2024/1.parquet``) —
+        each skipped + logged, never targeted; repair is
+        :mod:`brutex.data.lake_heal`'s job (or a rename to the canonical
+        zero-padded form for the non-canonical class).
     files_probed
         Month files whose stamp column was actually read (the O(files) cost,
         stated honestly).
@@ -502,19 +522,34 @@ def _today_ist() -> date:
     return datetime.now(UTC).astimezone(_IST).date()
 
 
-def _month_files(minute_dir: Path) -> list[tuple[int, int, Path]]:
-    """The contract's ``<yyyy>/<mm>.parquet`` month files, ascending.
+def _month_files(minute_dir: Path) -> tuple[list[tuple[int, int, Path]], list[Path]]:
+    """The contract's canonical ``<yyyy>/<mm>.parquet`` month files, ascending.
 
-    Non-numeric AND numeric-but-out-of-calendar-range directory / file names
-    are skipped (a foreign tree never raises): a ``13.parquet`` / ``0.parquet``
+    Returns ``(files, driver_unreachable)``. Non-numeric AND
+    numeric-but-out-of-calendar-range directory / file names are skipped
+    silently (a foreign tree never raises): a ``13.parquet`` / ``0.parquet``
     or a year outside ``[1, 9998]`` would make :func:`_contract_window`'s
     :class:`datetime.date` construction raise ``ValueError`` and kill the WHOLE
     scan (the December wrap computes ``year + 1``, hence the ``9998`` cap —
-    ``date.max.year - 1``). No lake writer produces such names; the guard is
-    the same foreign-file tolerance the probe already grants corrupt bytes.
+    ``date.max.year - 1``); such a name can also never hold in-window data.
+
+    An IN-range name that does NOT round-trip to the canonical zero-padded
+    form (``2024/1.parquet``, a ``023`` year dir) is returned in
+    ``driver_unreachable`` instead of ``files`` (fix round 5,
+    refuter-confirmed): the enrich driver reads a target through
+    ``ist_span_partition_files``, which constructs ONLY canonical
+    ``f"{year:04d}/{month:02d}.parquet"`` candidates — probing/targeting such
+    a file would re-select the contract on EVERY run while the driver read
+    ZERO bars, wrote nothing, and the run exited a false green with the stale
+    stamp persisting forever. The caller surfaces the rejects loudly
+    (``probe_failed`` + WARN); repair is a rename-to-canonical lake task.
+
+    No lake writer produces non-canonical names; the guard is the same
+    foreign-file tolerance the probe already grants corrupt bytes.
     O(contract's month files).
     """
     out: list[tuple[int, int, Path]] = []
+    driver_unreachable: list[Path] = []
     max_window_year = date.max.year - 1  # _contract_window's December wrap needs year + 1
     for candidate in minute_dir.glob("*/*.parquet"):
         try:
@@ -524,9 +559,13 @@ def _month_files(minute_dir: Path) -> list[tuple[int, int, Path]]:
             continue
         if not (1 <= month <= _DECEMBER) or not (date.min.year <= year <= max_window_year):
             continue
+        if candidate.parent.name != f"{year:04d}" or candidate.stem != f"{month:02d}":
+            driver_unreachable.append(candidate)
+            continue
         out.append((year, month, candidate))
     out.sort()
-    return out
+    driver_unreachable.sort()
+    return out, driver_unreachable
 
 
 def _contract_window(files: list[tuple[int, int, Path]]) -> tuple[date, date]:
@@ -815,7 +854,29 @@ def scan_stale_greeks_targets(
         # No-op outside a dashboard job; best-effort; O(1).
         emit_progress_beat()
         minute_dir = lake_root / "bars" / exchange / FNO_CANDLE_LAKE_SEGMENT / symbol
-        files = _month_files(minute_dir / _MINUTE_INTERVAL)
+        files, driver_unreachable = _month_files(minute_dir / _MINUTE_INTERVAL)
+        if driver_unreachable:
+            # Fix round 5 (refuter-confirmed): an in-range NON-canonical month
+            # name ("2024/1.parquet") is a file the driver's zero-padded reader
+            # (ist_span_partition_files) can NEVER open — probing/targeting it
+            # would re-select the contract on EVERY run while the wet run wrote
+            # zero bars and exited a false green (the stale stamp persisting
+            # forever, the census never converging). Fold into probe_failed +
+            # WARN loudly: repair is a rename-to-canonical lake task, never a
+            # re-queue.
+            probe_failed += len(driver_unreachable)
+            _LOG.warning(
+                "greeks_backfill.month_file_driver_unreachable",
+                symbol=symbol,
+                exchange=exchange,
+                count=len(driver_unreachable),
+                files=[str(path) for path in driver_unreachable[:5]],
+                reason=(
+                    "non-canonical month filename (not zero-padded "
+                    "<yyyy>/<mm>.parquet) — the enrich driver reads ONLY "
+                    "canonical names; rename the file to its canonical form"
+                ),
+            )
         if not files:
             no_files += 1
             continue

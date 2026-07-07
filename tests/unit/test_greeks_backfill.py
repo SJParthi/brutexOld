@@ -519,7 +519,9 @@ class TestScanner:
         (base / "2024").mkdir(parents=True)
         (base / "2024" / "01.parquet").write_bytes(b"x")
         (base / "2024" / "junk.parquet").write_bytes(b"x")
-        assert [(y, m) for y, m, _ in _month_files(base)] == [(2024, 1)]
+        files, unreachable = _month_files(base)
+        assert [(y, m) for y, m, _ in files] == [(2024, 1)]
+        assert unreachable == []  # non-numeric = foreign, silently skipped
 
     def test_month_files_skips_out_of_range_numeric_names(self, lake: Path) -> None:
         """Numeric-but-invalid names (13.parquet / 0.parquet / year 0 / year 9999)
@@ -536,7 +538,34 @@ class TestScanner:
         # 9999 must be skipped too (date(10000, …) raises).
         (base / "9999").mkdir()
         (base / "9999" / "12.parquet").write_bytes(b"x")
-        assert [(y, m) for y, m, _ in _month_files(base)] == [(2024, 1)]
+        files, unreachable = _month_files(base)
+        assert [(y, m) for y, m, _ in files] == [(2024, 1)]
+        assert unreachable == []  # out-of-range = can never hold month data
+
+    def test_month_files_rejects_non_canonical_in_range_names(self, lake: Path) -> None:
+        """Fix round 5 (refuter-confirmed): an in-range NON-zero-padded name
+        (``2024/1.parquet`` / a ``023`` year dir / ``2024/001.parquet``) is one
+        the driver's reader (``ist_span_partition_files``, which constructs
+        ONLY ``f"{year:04d}/{month:02d}.parquet"`` candidates) can NEVER open —
+        accepting it made the scanner target the contract on EVERY run while
+        the wet run read zero bars (an eternal false-green re-queue). Such
+        names are now returned as driver-unreachable rejects, never probed."""
+        base = lake / "1minute"
+        (base / "2024").mkdir(parents=True)
+        (base / "2024" / "01.parquet").write_bytes(b"x")
+        (base / "2024" / "1.parquet").write_bytes(b"x")  # non-padded month
+        (base / "2024" / "001.parquet").write_bytes(b"x")  # over-padded month
+        (base / "023").mkdir()
+        (base / "023" / "01.parquet").write_bytes(b"x")  # non-padded year dir
+        (base / "0023").mkdir()
+        (base / "0023" / "01.parquet").write_bytes(b"x")  # canonical year 23 — readable
+        files, unreachable = _month_files(base)
+        assert [(y, m) for y, m, _ in files] == [(23, 1), (2024, 1)]
+        assert sorted(p.parent.name + "/" + p.name for p in unreachable) == [
+            "023/01.parquet",
+            "2024/001.parquet",
+            "2024/1.parquet",
+        ]
 
     def test_scan_survives_a_numeric_out_of_range_month_file(self, lake: Path) -> None:
         """One foreign ``13.parquet`` must never kill the WHOLE scan (refuter repro:
@@ -554,6 +583,48 @@ class TestScanner:
         (target,) = scan.targets
         assert target.end == date(2024, 2, 2)  # window derived from VALID months only
         assert scan.no_files == 1
+
+    def test_non_padded_month_file_folds_into_probe_failed_never_targeted_forever(
+        self, lake: Path
+    ) -> None:
+        """Fix round 5 (refuter-confirmed): a stale (v1) stamp inside a
+        non-canonical ``2024/1.parquet`` was targeted on EVERY scan while the
+        driver — whose ``ist_span_partition_files`` reader builds ONLY
+        zero-padded names — read ZERO files, wrote nothing, and the wet run
+        exited 0 with a ✅ head: the stamp persisted forever and the census
+        never converged. The scanner now surfaces the file LOUDLY
+        (``probe_failed`` + one WARN) instead of targeting it."""
+        from structlog.testing import capture_logs
+
+        path = _write_month(lake, _CE, 2024, 1, [_V1_PID])
+        path.rename(path.parent / "1.parquet")  # the refuter repro's rename
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()  # never targeted — the driver could not read it
+        assert scan.probe_failed == 1  # surfaced in the census, not hidden
+        assert scan.no_files == 1  # nothing probe-able remains for the contract
+        assert scan.stale_v1 == 0 and scan.files_probed == 0
+        (warn,) = [r for r in logs if r["event"] == "greeks_backfill.month_file_driver_unreachable"]
+        assert warn["symbol"] == _CE and warn["count"] == 1
+        assert warn["files"] == [str(path.parent / "1.parquet")]
+        assert "rename" in warn["reason"]
+        # Convergence: a re-scan reproduces the SAME stable census — never a
+        # re-queued target (the refuter-reproduced forever-loop).
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.probe_failed == 1
+
+    def test_non_canonical_sibling_never_masks_a_canonical_stale_month(self, lake: Path) -> None:
+        """A driver-unreachable reject rides ALONGSIDE the canonical months: the
+        contract is still targeted off its readable stale file, with the window
+        derived from canonical months only (exactly what the driver can read)."""
+        _write_month(lake, _CE, 2024, 1, [_V1_PID])
+        junk = lake / "bars" / "NSE" / "FNO" / _CE / "1minute" / "2024" / "2.parquet"
+        junk.write_bytes(b"x")  # non-padded Feb — invisible to the driver
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE] and scan.stale_v1 == 1
+        (target,) = scan.targets
+        assert target.end == date(2024, 2, 2)  # window from CANONICAL months only
+        assert scan.probe_failed == 1  # the reject still surfaces in the census
 
     def test_contract_window_non_december(self) -> None:
         files = [(2024, 3, Path("a")), (2024, 5, Path("b"))]
@@ -1313,3 +1384,31 @@ class TestDryRunReport:
         report = dry_run_backfill_report(plan)
         assert "3 contract(s) UNFIXABLE" in report.note
         assert report.stale_unfixable == 3
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Module-docstring honesty (Golden Rule #10)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestModuleDocstringHonesty:
+    def test_engine_impact_claim_names_the_sweep_checkpoint_hardening(self) -> None:
+        """Fix round 5 (refuter-confirmed): the docstring claimed "ZERO engine
+        impact: nothing under brutex.engine changes semantics" — falsified by
+        this change set's OWN fix round 2, which hardened
+        ``brutex/engine/sweep_checkpoint.py`` with fail-loud corruption
+        refusals (size cap / RecursionError mapping / same-id ``total_combos``
+        mismatch / mkdir-in-mapping) that the sweep engine consumes UNCAUGHT
+        (``sweep_supervisor``/``sweep_parallel`` call ``load()``), so a sweep
+        now aborts loudly where it previously resumed. The claim must stay
+        honest, not absolute (Golden Rule #10)."""
+        import brutex.data.greeks_backfill as module
+
+        doc = module.__doc__
+        assert doc is not None
+        flat = " ".join(doc.split())  # wrap-tolerant: claims span source lines
+        assert "ZERO engine impact" not in flat
+        assert "nothing under :mod:`brutex.engine` changes semantics" not in flat
+        # The reworded sentence NAMES the real engine-visible change.
+        assert "sweep_checkpoint" in flat and "fail-loud corruption refusals" in flat
+        assert "NIFTY/BANKNIFTY/SENSEX" in flat  # the scope claim that IS true stays

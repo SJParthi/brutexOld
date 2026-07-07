@@ -343,6 +343,42 @@ class TestUnfixableConvergence:
             assert unpack_greeks_provenance(int(pid)).status == STATUS_OK
 
 
+class TestDriverUnreachableConvergence:
+    def test_non_padded_month_file_converges_to_probe_failed(self, lake: Path) -> None:
+        """Fix round 5 (refuter-confirmed): the census CONVERGES on a
+        non-canonical month filename.
+
+        The refuter repro: a v1-stamped ``2024/01.parquet`` renamed to
+        ``2024/1.parquet`` used to be TARGETED on every scan (targets=1
+        stale_v1=1), while the wet run — whose reader constructs ONLY
+        zero-padded candidates — read zero files (``no_bars=1``), wrote
+        nothing, and exited 0 with a ✅-eligible head; the on-disk formula
+        stayed v1 FOREVER. The scanner now rejects the driver-invisible file
+        into ``probe_failed`` (one loud WARN, repair = rename to canonical),
+        never a target — the run is honest instead of a silent green loop.
+        """
+        _seed_spot(lake)
+        _seed_option(lake)
+        enrich_greeks_for_targets(targets=_targets(_CE), lake_root=lake, rate_source=_RATE)
+        partition = _option_partition(lake)
+        _restamp_v1(partition)
+        non_canonical = partition.parent / "1.parquet"
+        partition.rename(non_canonical)  # the refuter repro's rename
+        for _ in range(2):  # run 1 AND run 2: the same stable, honest verdict
+            plan = _scan_plan(lake)
+            assert plan.targets == ()  # never targeted — the driver could not read it
+            assert plan.scan.probe_failed == 1  # surfaced in the census, not hidden
+            assert plan.scan.stale_v1 == 0 and plan.scan.no_files == 1
+            report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
+            assert report.no_bars == 0 and report.errored == 0  # no phantom wet work
+            assert report.probe_failed == 1  # the wet report carries the census
+        # The file itself is untouched (repair = an operator rename, stated in
+        # the WARN) — the v1 stamps persist HONESTLY, no longer under a loop
+        # that claimed to be fixing them.
+        for pid in pl.read_parquet(non_canonical)["greeks_provenance_id"].to_list():
+            assert unpack_greeks_provenance(int(pid)).formula_version == 1
+
+
 class TestDryRunInertness:
     def test_dry_run_writes_nothing_anywhere(
         self,

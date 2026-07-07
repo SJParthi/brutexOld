@@ -1903,6 +1903,16 @@ def cmd_greeks_backfill(
     re-select the SAME first N contracts every run — the incremental-chipping
     promise holds only for the default stamp-driven mode.
 
+    **Eager config validation (fix round 5):** when ``--batch`` / ``--pause-s``
+    are omitted, their env twins (``$BRUTEX_GREEKS_BACKFILL_BATCH`` /
+    ``$BRUTEX_GREEKS_BACKFILL_PAUSE_S``) are resolved HERE — before the
+    O(files) scan and the single-flight lock — so a misconfigured env refuses
+    as the standard one-line :class:`CliUserError` instead of wasting the whole
+    scan and escaping as a raw ``ValueError`` traceback; the resolved values
+    are passed to :func:`~brutex.data.greeks_backfill.run_greeks_backfill`
+    (whose internal resolution stays as the second belt for programmatic
+    callers).
+
     **Dashboard freshness (fix round 2):** the backfill never touches the
     window ledger, so a CONCURRENTLY-RUNNING dashboard's cross-process
     revision probe (DEC-HARDENING-LEFTOVERS-001) would not see its writes;
@@ -1920,6 +1930,8 @@ def cmd_greeks_backfill(
     from brutex.data.greeks_backfill import (
         dry_run_backfill_report,
         plan_greeks_backfill,
+        resolve_backfill_batch_size,
+        resolve_backfill_pause_s,
         run_greeks_backfill,
         scan_stale_greeks_targets,
     )
@@ -1951,6 +1963,27 @@ def cmd_greeks_backfill(
             raise CliUserError(f"--pause-s must be finite, got {pause_s}")
         if pause_s < 0:
             raise CliUserError(f"--pause-s must be >= 0, got {pause_s}")
+    if batch is None:
+        # ENV twin resolved EAGERLY (fix round 5, refuter-confirmed): with the
+        # flag omitted, $BRUTEX_GREEKS_BACKFILL_BATCH used to be parsed only
+        # inside run_greeks_backfill — AFTER the operator paid the full
+        # O(files) scan and the single-flight lock — and its ValueError escaped
+        # main() as a raw traceback (DEC-CLI-USER-ERROR-HYGIENE-001 reserves
+        # those for genuine code bugs, not operator config). A misconfigured
+        # env now refuses in <1 ms with the standard one-liner, zero partial
+        # work — the same eager posture the flag twins above already get.
+        try:
+            batch = resolve_backfill_batch_size()
+        except ValueError as exc:
+            raise CliUserError(str(exc)) from exc
+    if pause_s is None:
+        # The --pause-s env twin ($BRUTEX_GREEKS_BACKFILL_PAUSE_S) — same
+        # rationale: "inf"/"nan"/junk must refuse BEFORE the scan, not detonate
+        # mid-batch after it (the fix-round-4 flag fix's own stated harm).
+        try:
+            pause_s = resolve_backfill_pause_s()
+        except ValueError as exc:
+            raise CliUserError(str(exc)) from exc
     try:
         rate_source = resolve_risk_free_source()
     except RiskFreeError as exc:

@@ -24,6 +24,8 @@ pytest.importorskip("trading_core", reason="the backfill module needs the tradin
 from brutex.cli import EXIT_OK, EXIT_USER_ERROR, main
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_backfill import (
+    BACKFILL_BATCH_ENV,
+    BACKFILL_PAUSE_ENV,
     BackfillPlan,
     BackfillScan,
     GreeksBackfillReport,
@@ -153,6 +155,62 @@ class TestValidation:
         assert "risk-free source misconfigured" in err and "BRUTEX_RISK_FREE_CSV" in err
         assert scanned == []  # fail-fast: zero partial work
 
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("abc", "not an integer"), ("0", "must be >= 1")],
+    )
+    def test_env_batch_misconfig_refused_eagerly_as_a_one_liner(
+        self,
+        lake: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        raw: str,
+        message: str,
+    ) -> None:
+        """Fix round 5 (refuter-confirmed): with ``--batch`` omitted, a bad
+        ``$BRUTEX_GREEKS_BACKFILL_BATCH`` used to be parsed only INSIDE
+        ``run_greeks_backfill`` — AFTER the operator paid the full O(files)
+        scan and the single-flight lock — and escaped ``main()`` as a raw
+        ``ValueError`` traceback (the DEC-CLI-USER-ERROR-HYGIENE-001 contract
+        reserves raw tracebacks for genuine code bugs, not operator config).
+        It now refuses BEFORE any scan with the standard ``[brutex]`` one-liner,
+        exactly like the identical value passed as ``--batch``."""
+        monkeypatch.setenv(BACKFILL_BATCH_ENV, raw)
+        scanned: list[Any] = []
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.scan_stale_greeks_targets",
+            lambda *a, **k: scanned.append(a),
+        )
+        assert main(["greeks-backfill"]) == EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert BACKFILL_BATCH_ENV in err and message in err
+        assert scanned == []  # refused BEFORE the O(files) scan, zero partial work
+
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [("inf", "must be finite"), ("nan", "must be finite"), ("junk", "not a number")],
+    )
+    def test_env_pause_misconfig_refused_eagerly_as_a_one_liner(
+        self,
+        lake: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        raw: str,
+        message: str,
+    ) -> None:
+        """The ``$BRUTEX_GREEKS_BACKFILL_PAUSE_S`` env twin of the fix-round-4
+        eager ``--pause-s`` refusal — same lateness class, same eager fix."""
+        monkeypatch.setenv(BACKFILL_PAUSE_ENV, raw)
+        scanned: list[Any] = []
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.scan_stale_greeks_targets",
+            lambda *a, **k: scanned.append(a),
+        )
+        assert main(["greeks-backfill"]) == EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert BACKFILL_PAUSE_ENV in err and message in err
+        assert scanned == []  # refused BEFORE the O(files) scan
+
 
 class TestDryRun:
     def test_dry_run_prints_plan_and_never_runs(
@@ -229,6 +287,29 @@ class TestWetRun:
         assert emitted == [report]  # EXACTLY once, at the clean-finish chokepoint
         assert captured["run_kwargs"]["batch_size"] == 5
         assert captured["run_kwargs"]["pause_s"] == 0.5
+
+    def test_valid_env_overrides_resolved_eagerly_and_threaded_to_the_runner(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix round 5: with the flags omitted, the env twins are resolved at
+        the CLI boundary and the RESOLVED values are passed through — the
+        runner's internal env resolution never fires on this surface (it stays
+        as the second belt for programmatic callers)."""
+        monkeypatch.setenv(BACKFILL_BATCH_ENV, "7")
+        monkeypatch.setenv(BACKFILL_PAUSE_ENV, "0.25")
+        captured: dict[str, Any] = {}
+        _patch_scan_plan(monkeypatch, captured)
+        _patch_alert(monkeypatch)
+        report = _report()
+
+        def _fake_run(lake_root: Path, **kwargs: Any) -> GreeksBackfillReport:
+            captured["run_kwargs"] = kwargs
+            return report
+
+        monkeypatch.setattr("brutex.data.greeks_backfill.run_greeks_backfill", _fake_run)
+        assert main(["greeks-backfill"]) == EXIT_OK
+        assert captured["run_kwargs"]["batch_size"] == 7  # resolved, never None
+        assert captured["run_kwargs"]["pause_s"] == 0.25
 
     def test_errored_contracts_exit_nonzero_naming_the_count(
         self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
