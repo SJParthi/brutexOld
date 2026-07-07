@@ -18,7 +18,33 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
+_Last updated: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1527 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
+Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
 rate>)` UNVERIFIED placeholder rows are DELETED and replaced by explicit
@@ -517,7 +543,28 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+- **Active branch:** `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1527** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin. Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
   carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`
@@ -1975,7 +2022,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zealous-maxwell-w257yf`
+- **Active feature branch:** `claude/peaceful-wright-r7l8l9`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
