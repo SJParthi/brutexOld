@@ -460,6 +460,105 @@ class TestStaleRollScheduleRefusal:
             is None
         )
 
+    # ── round-3 finding 8: sentinels-without-a-readable-schedule refusal ──
+
+    def _plant_sentinel(self, root: Path) -> Path:
+        """A futures tuple completion sentinel at the orchestrator's layout."""
+        tf_dir = root / "NSE-NIFTY-FUT" / "1minute"
+        tf_dir.mkdir(parents=True)
+        sentinel = tf_dir / "bull_k3_0123456789abcdef.parquet.complete.json"
+        sentinel.write_text("{}", encoding="utf-8")
+        return sentinel
+
+    def test_absent_audit_with_futures_sentinels_refuses(self, tmp_path: Path) -> None:
+        # The gate's own drift class recurs with the audit rotated/lost: the
+        # sentinels short-circuit rows minted under an UNVERIFIABLE schedule,
+        # then Stage-3 recovery crashes blaming the grid. Refuse UP FRONT.
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        message = stale_roll_schedule_refusal(
+            root / "audit" / "sweep-all.jsonl",
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+        )
+        assert message is not None
+        assert str(sentinel) in message  # the evidence named
+        assert "ABSENT" in message
+        assert "--results-root" in message  # the remediation
+
+    def test_unreadable_audit_with_futures_sentinels_refuses(self, tmp_path: Path) -> None:
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        audit.write_text("{not jsonl\n", encoding="utf-8")
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+        )
+        assert message is not None
+        assert "UNREADABLE" in message
+
+    def test_absent_audit_with_root_but_no_sentinels_abstains(self, tmp_path: Path) -> None:
+        # A fresh tree (instrument dir exists, nothing completed) — the
+        # normal first futures launch into a pre-created root is never blocked.
+        root = tmp_path / "results"
+        (root / "NSE-NIFTY-FUT" / "1minute").mkdir(parents=True)
+        assert (
+            stale_roll_schedule_refusal(
+                root / "audit" / "sweep-all.jsonl",
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+            )
+            is None
+        )
+
+    def test_absent_audit_without_instrument_dir_abstains(self, tmp_path: Path) -> None:
+        # No futures subtree at all (a brand-new root): nothing to protect.
+        root = tmp_path / "results"
+        root.mkdir()
+        assert (
+            stale_roll_schedule_refusal(
+                root / "audit" / "sweep-all.jsonl",
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+            )
+            is None
+        )
+
+    # ── round-3 finding 4: ONE shared audit parse for both derivations ──
+
+    def test_gate_reads_the_audit_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pre-fix the gate invoked recorded_context_from_audit AND
+        # recorded_roll_schedules_from_audit, each re-reading + re-chain-
+        # verifying the WHOLE audit log — a doubled O(entries) launch cost.
+        import brutex.orchestrator.audit as audit_mod
+
+        path = tmp_path / "a.jsonl"
+        self._write_audit(path, schedule=self._S1)
+        real_read = audit_mod.read_entries
+        calls: list[Path] = []
+
+        def counting_read(p: Path) -> object:
+            calls.append(p)
+            return real_read(p)
+
+        monkeypatch.setattr(audit_mod, "read_entries", counting_read)
+        message = stale_roll_schedule_refusal(
+            path,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+        )
+        assert message is not None  # the drift verdict is unchanged
+        assert calls == [path]  # ONE parse, not two
+
 
 # ── Tier 1 — verify_structural ───────────────────────────────────────────────
 

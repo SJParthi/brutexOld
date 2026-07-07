@@ -4860,6 +4860,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             audit_path,
             fresh_snapshot=snapshot,
             roll_schedule_by_instrument=roll_schedule_by_instrument,
+            # Round-3 finding 8: an absent/rotated audit over a tree that DOES
+            # hold futures completion sentinels refuses too (the recorded
+            # schedule those rows were minted under cannot be verified).
+            results_root=out_root,
         )
         if schedule_refusal is not None:
             print(f"[brutex] sweep-all REFUSED: {schedule_refusal}", file=sys.stderr)

@@ -73,6 +73,7 @@ from brutex.engine.trial_stats import (
     trial_stats_sidecar_path,
 )
 from brutex.engine.tuple_complete import (
+    COMPLETION_SUFFIX,
     TupleCompletionError,
     completion_sentinel_path,
     read_completion_sentinel,
@@ -219,6 +220,30 @@ class RecordedContext:
     code_commit_sha: str
 
 
+def _entries_from_audit(audit_path: Path) -> list[AuditEntry]:
+    """Read + chain-verify the audit log ONCE (the shared parse every reader derives from).
+
+    Extracted so :func:`stale_roll_schedule_refusal` can derive BOTH the
+    recorded context and the recorded schedules from ONE pass instead of
+    re-reading + re-chain-verifying the whole file twice per launch (review
+    round-3 finding 4 — the dashboard-side #1492 D3 precedent).
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable/corrupt.
+    """
+    # Function-local import: the audit module pulls the orchestrator/bloom
+    # graph nowhere, but keeping the verifier's module surface minimal mirrors
+    # the trial_stats discipline.
+    from brutex.orchestrator.audit import AuditError, read_entries
+
+    try:
+        return list(read_entries(audit_path))
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+
+
 def recorded_context_from_audit(audit_path: Path) -> RecordedContext | None:
     """Read the tree's recorded context from its audit log, or ``None`` if absent.
 
@@ -235,15 +260,11 @@ def recorded_context_from_audit(audit_path: Path) -> RecordedContext | None:
     """
     if not audit_path.exists():
         return None
-    # Function-local import: the audit module pulls the orchestrator/bloom
-    # graph nowhere, but keeping the verifier's module surface minimal mirrors
-    # the trial_stats discipline.
-    from brutex.orchestrator.audit import AuditError, read_entries
+    return _context_from_entries(_entries_from_audit(audit_path), audit_path)
 
-    try:
-        entries: list[AuditEntry] = list(read_entries(audit_path))
-    except AuditError as exc:
-        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+
+def _context_from_entries(entries: list[AuditEntry], audit_path: Path) -> RecordedContext | None:
+    """Derive the recorded context from already-read *entries* (one shared parse)."""
     context: RecordedContext | None = None
     for entry in entries:
         if entry.action != "SWEEP_START":
@@ -290,12 +311,13 @@ def recorded_roll_schedules_from_audit(audit_path: Path) -> dict[str, tuple[int,
     """
     if not audit_path.exists():
         return {}
-    from brutex.orchestrator.audit import AuditError, read_entries
+    return _schedules_from_entries(_entries_from_audit(audit_path), audit_path)
 
-    try:
-        entries: list[AuditEntry] = list(read_entries(audit_path))
-    except AuditError as exc:
-        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+
+def _schedules_from_entries(
+    entries: list[AuditEntry], audit_path: Path
+) -> dict[str, tuple[int, ...]]:
+    """Derive the recorded schedules from already-read *entries* (one shared parse)."""
     schedules: dict[str, tuple[int, ...]] = {}
     for entry in entries:
         if entry.action != "SWEEP_START":
@@ -327,11 +349,49 @@ def recorded_roll_schedules_from_audit(audit_path: Path) -> dict[str, tuple[int,
     return schedules
 
 
+def _futures_sentinel_refusal(
+    audit_path: Path,
+    *,
+    results_root: Path | None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]],
+    reason: str,
+) -> str | None:
+    """Refuse a futures resume whose tree holds sentinels but no readable schedule.
+
+    Review round-3 finding 8: with the audit absent/rotated/corrupt, a
+    schedule-only lake drift is UNVERIFIABLE — yet completion sentinels would
+    still short-circuit every completed tuple (rows minted under an UNKNOWN
+    schedule) and Stage-3 recovery would later crash with a misattributed
+    grid-mismatch raise. One cheap glob bounded to the futures instruments'
+    own subtrees (``<root>/<instrument>/<tf>/*.complete.json``) decides: any
+    sentinel → refuse with the remediation; none (a fresh/spot tree, or no
+    *results_root* provided) → abstain as before.
+    """
+    if results_root is None:
+        return None
+    for instrument in sorted(roll_schedule_by_instrument):
+        instrument_dir = results_root / instrument
+        if not instrument_dir.is_dir():
+            continue
+        sentinel = next(iter(instrument_dir.glob(f"*/*{COMPLETION_SUFFIX}")), None)
+        if sentinel is not None:
+            return (
+                f"results tree {results_root} holds completed futures tuples for "
+                f"{instrument!r} (completion sentinel: {sentinel}) but {reason} "
+                f"({audit_path}) — the RECORDED roll_schedule cannot be verified, so a "
+                "resume could pair sentinel rows minted under an UNKNOWN schedule with "
+                "this launch's freshly resolved one — re-sweep into a fresh "
+                "--results-root (or restore the tree's audit log)"
+            )
+    return None
+
+
 def stale_roll_schedule_refusal(
     audit_path: Path,
     *,
     fresh_snapshot: str,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]],
+    results_root: Path | None = None,
 ) -> str | None:
     """Detect a SCHEDULE-ONLY lake drift against a resumed results tree.
 
@@ -352,12 +412,20 @@ def stale_roll_schedule_refusal(
     Parameters
     ----------
     audit_path
-        The tree's ``audit/sweep-all.jsonl`` (absent → ``None``: a fresh
-        tree has nothing to drift from).
+        The tree's ``audit/sweep-all.jsonl`` (absent → ``None`` for a tree
+        with no futures completion sentinels: a fresh tree has nothing to
+        drift from).
     fresh_snapshot
         The launch's freshly computed ``data_snapshot_hash``.
     roll_schedule_by_instrument
         The launch's freshly resolved per-instrument schedules.
+    results_root
+        The results tree root (optional). When given, an ABSENT/UNREADABLE
+        audit no longer blindly abstains: if the tree holds futures
+        completion sentinels under any scheduled instrument, the resume is
+        refused — the recorded schedule those sentinels' rows were minted
+        under cannot be verified (review round-3 finding 8). ``None``
+        preserves the prior always-abstain behaviour.
 
     Returns
     -------
@@ -367,16 +435,31 @@ def stale_roll_schedule_refusal(
         fresh one; ``None`` otherwise. A snapshot that MOVED re-keys every
         tuple digest (the stores/sentinels re-address), so no sentinel can
         pair stale rows with the fresh schedule — abstain. An unreadable /
-        inconsistent audit also abstains (``sweep-verify`` owns that
-        diagnosis; a best-effort gate must never block a launch on it).
+        inconsistent / absent audit abstains ONLY when the tree holds no
+        futures completion sentinels (or no *results_root* was given) —
+        otherwise it refuses via :func:`_futures_sentinel_refusal`
+        (``sweep-verify`` still owns the full corruption diagnosis).
     """
     if not audit_path.exists():
-        return None
+        return _futures_sentinel_refusal(
+            audit_path,
+            results_root=results_root,
+            roll_schedule_by_instrument=roll_schedule_by_instrument,
+            reason="the audit log is ABSENT",
+        )
     try:
-        recorded_ctx = recorded_context_from_audit(audit_path)
-        recorded = recorded_roll_schedules_from_audit(audit_path)
+        # ONE shared read + chain verification for BOTH derivations (review
+        # round-3 finding 4 — previously the whole audit was parsed twice).
+        entries = _entries_from_audit(audit_path)
+        recorded_ctx = _context_from_entries(entries, audit_path)
+        recorded = _schedules_from_entries(entries, audit_path)
     except SweepVerifyError:
-        return None
+        return _futures_sentinel_refusal(
+            audit_path,
+            results_root=results_root,
+            roll_schedule_by_instrument=roll_schedule_by_instrument,
+            reason="the audit log is UNREADABLE/inconsistent",
+        )
     if recorded_ctx is None or recorded_ctx.data_snapshot_hash != fresh_snapshot:
         return None
     for instrument, fresh_schedule in sorted(roll_schedule_by_instrument.items()):
