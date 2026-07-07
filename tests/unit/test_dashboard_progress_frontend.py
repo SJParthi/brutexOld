@@ -164,6 +164,17 @@ def test_rate_widget_backoff_constants_and_overflow_clamp() -> None:
     assert "function backoffDelayMs(failures)" in js
     assert "Math.min(failures > 0 ? failures - 1 : 0, 4)" in js, "exponent clamp missing"
     assert "Math.min(BACKOFF_BASE_MS * Math.pow(2, exp), BACKOFF_MAX_MS)" in js, "cap missing"
+    # The cap comment states the SETTLE-relative bound the code delivers (refuter
+    # finding, round 4: "recovery noticed <=30 s after the server returns"
+    # overclaimed — a max-backoff attempt already in flight when the server
+    # recovers still stalls to the 10 s abort THEN waits the full 30 s cap, so the
+    # worst-case recovery notice is ~= FETCH_TIMEOUT_MS + cap ~= 40 s).
+    assert "next attempt <=30 s after the previous poll SETTLES" in js, (
+        "the honest settle-relative cap comment is missing"
+    )
+    assert "recovery noticed <=30 s after the server returns" not in js, (
+        "the overclaiming recovery-latency comment must be gone"
+    )
 
 
 def test_rate_widget_success_resets_cadence_and_stamps_client_clock() -> None:
@@ -248,6 +259,13 @@ def test_rate_widget_age_clock_is_monotonic_client_side() -> None:
     # null declaration was pinned, so removing the stamp — killing the honest
     # never-succeeded ageing this docstring claims — kept the suite green).
     assert "bootMs = nowMs();" in js, "the boot-baseline stamp in start() is missing"
+    # … and the fallback USE (refuter finding, round 4: the declaration + stamp
+    # were pinned but not the ternary — mutating it to `var ref = lastPollOkMs;`
+    # kept the suite green while a page whose polls fail from boot showed '—'
+    # forever with zero escalation, exactly the incident behavior on a fresh tab).
+    assert "var ref = lastPollOkMs !== null ? lastPollOkMs : bootMs;" in js, (
+        "the boot-baseline fallback USE is the never-succeeded ageing's teeth"
+    )
 
 
 def test_rate_widget_poll_overlap_guard() -> None:
@@ -491,8 +509,10 @@ def test_regression_universe_hung_start_post_shows_stale() -> None:
     stale indication. The ticker now starts BEFORE the POST, so the watch-start
     baseline escalates the #feedage chip amber → red STALE if the POST hangs.
     HONEST envelope: indication only — the POST itself is deliberately NOT aborted
-    (a slow-but-successful start would be mislabelled failed; the single-flight
-    route lets a re-click attach to the running pull)."""
+    (a slow-but-successful start would be mislabelled failed). The in-page remedy
+    in this mode is a RELOAD, then re-click — the one pipeline button stays
+    disabled while the POST is wedged (round 4), and a fresh page's enabled
+    button re-attaches safely through the single-flight route."""
     html = _render_universe_html()
     start = _start_and_poll_src(html)
     assert "startFeedAgeTicker();" in start, "the ticker must start inside startAndPoll"
@@ -589,6 +609,68 @@ def test_universe_feed_age_chip_dom_css_and_thresholds() -> None:
     ), "the null-clear branch (settled page never reads STALE) is missing"
 
 
+def test_regression_universe_feedage_escalation_comparisons_pinned() -> None:
+    """REGRESSION (refuter-confirmed, round 4 — MAJOR): ``renderFeedAge``'s
+    ``const red = age >= FEED_STALE_RED_MS;`` / ``const warn = age >=
+    FEED_STALE_WARN_MS;`` are the wires that gate the ENTIRE #feedage feature —
+    ``.chip.stale`` is display:none and only ``classList.toggle('on', warn ||
+    red)`` reveals it — yet no test asserted either comparison: only the constant
+    DECLARATIONS were pinned, so mutating both to ``false`` (or ``>=`` to ``<``)
+    kept the whole suite green while the chip never appeared — resurrecting the
+    exact 2026-07-06 zero-indication incident on the /universe surface. The
+    widget's twin comparisons were already pinned verbatim; these mirror them
+    inside the extracted ``renderFeedAge`` body. Substring-presence pins (no
+    headless JS runner)."""
+    html = _render_universe_html()
+    feed_age = _render_feed_age_src(html)
+    assert "const red = age >= FEED_STALE_RED_MS;" in feed_age, (
+        "the red escalation comparison is the chip's load-bearing wire"
+    )
+    assert "const warn = age >= FEED_STALE_WARN_MS;" in feed_age, (
+        "the warn escalation comparison is the chip's load-bearing wire"
+    )
+
+
+def test_regression_age_clocks_suspend_guard_dual_clock() -> None:
+    """REGRESSION (refuter-confirmed, round 4): both surfaces measured age off
+    ``performance.now()`` alone, which on some browser/OS combinations may NOT
+    advance while the machine is suspended (implementation variance — stated as
+    such, unverified against current builds, per Golden Rule #1). Scenario: the
+    laptop sleeps mid-pull for an hour; on wake the age resumes from the
+    pre-sleep delta, so an unreachable server reads "updated 3s ago" against
+    hour-old numbers for up to a full warn threshold — a bounded recurrence of
+    the stale-illusion class this feature exists to kill. Both surfaces now ALSO
+    stamp a ``Date.now()`` wall twin on every success and report
+    ``max(monotonicAge, wallAge)`` — a wall-clock jump can only OVER-report
+    staleness, the safe direction for a staleness indicator (monotonic stays
+    primary, so NTP-jump immunity is preserved on the common path).
+    Substring-presence pins (no headless JS runner)."""
+    js = _widget_js()
+    # Widget: wall-twin state + stamps + the max() fold in renderAge.
+    assert "var lastPollOkWallMs = null;" in js, "the widget wall-twin state is missing"
+    assert "var bootWallMs = null;" in js, "the widget boot wall twin is missing"
+    assert "lastPollOkWallMs = Date.now();" in js, "success must stamp the wall twin"
+    assert "bootWallMs = Date.now();" in js, "start() must stamp the boot wall twin"
+    assert "var wallRef = lastPollOkWallMs !== null ? lastPollOkWallMs : bootWallMs;" in js, (
+        "the wall reference must fall back to the boot wall baseline"
+    )
+    assert "if (wallRef !== null) { age = Math.max(age, Date.now() - wallRef); }" in js, (
+        "renderAge must fold in the wall age — max() is the suspend guard's teeth"
+    )
+    # Universe: the same dual-clock on the #feedage chip.
+    html = _render_universe_html()
+    assert "let lastProgressOkWallMs = null;" in html, "the universe wall-twin state is missing"
+    poll = _poll_progress_src(html)
+    assert "lastProgressOkWallMs = Date.now();" in poll, (
+        "the universe success path must stamp the wall twin"
+    )
+    feed_age = _render_feed_age_src(html)
+    assert (
+        "if (lastProgressOkWallMs !== null) age = Math.max(age, Date.now() - lastProgressOkWallMs);"
+        in feed_age
+    ), "renderFeedAge must fold in the wall age — max() is the suspend guard's teeth"
+
+
 def test_regression_universe_amber_chip_claimed_update_that_never_arrived() -> None:
     """REGRESSION (refuter-confirmed, round 3): the amber branch rendered
     "updated Xs ago — retrying" off ``lastProgressOkMs``, but ``startFeedAgeTicker``
@@ -628,23 +710,26 @@ def test_regression_universe_amber_chip_claimed_update_that_never_arrived() -> N
 
 
 def test_regression_universe_stale_chip_claimed_retrying_during_hung_start_post() -> None:
-    """REGRESSION (refuter-confirmed, round 3): during a hung/wedged start POST the
-    poll chain has never started — ``pollProgress`` was never invoked,
+    """REGRESSION (refuter-confirmed, rounds 3 + 4): during a hung/wedged start POST
+    the poll chain has never started — ``pollProgress`` was never invoked,
     ``lastPollLabel`` is null (the visibility gate is closed), the POST is
     deliberately un-aborted — yet the red branch unconditionally appended
-    "· retrying", telling the operator to wait for a retry that would NEVER come.
-    The chip's action tail is now state-honest: while ``lastPollLabel === null``
-    (poll chain not started) it renders "start request pending — re-click to
-    re-attach" — the actually-correct remedy, since the route is single-flight and
-    a re-click safely attaches to the already-running pull; only a LIVE poll chain
-    claims "retrying". This retires the MIGRATION.md #1493 disclosed residual.
-    Substring-presence pins (no headless JS runner)."""
+    "· retrying", telling the operator to wait for a retry that would NEVER come
+    (round 3). Round 4 then confirmed the round-3 replacement tail ("re-click to
+    re-attach") named a remedy the page itself BLOCKS: ``startAndPoll`` calls
+    ``setBulkDisabled(true)`` at entry and the ONLY re-enable site is
+    ``finishLive()`` — which never runs while the POST is wedged — so the one
+    pipeline button is greyed out and an in-page re-click is impossible. The tail
+    now names the actionable remedy: RELOAD the page, then re-click (a fresh
+    page's enabled button re-attaches safely through the single-flight route);
+    only a LIVE poll chain claims "retrying". Substring-presence pins (no
+    headless JS runner)."""
     html = _render_universe_html()
     feed_age = _render_feed_age_src(html)
     assert "const tail = (lastPollLabel === null)" in feed_age, (
         "the tail must branch on whether the poll chain is live"
     )
-    assert "? 'start request pending — re-click to re-attach'" in feed_age
+    assert "? 'start request pending — reload the page, then re-click to re-attach'" in feed_age
     assert (
         ": (pollFeedRetries > POLL_MAX_FEED_RETRIES"
         " ? 'live progress feed dropped — retrying' : 'retrying');" in feed_age
@@ -657,7 +742,13 @@ def test_regression_universe_stale_chip_claimed_retrying_during_hung_start_post(
     assert "+ ' — ' + tail;" in feed_age, "the amber branch must render the state-honest tail"
     # The start-pending wording has exactly ONE executable site (renderFeedAge) —
     # a comment double can never satisfy the pins above.
-    assert html.count("'start request pending — re-click to re-attach'") == 1
+    assert html.count("'start request pending — reload the page, then re-click to re-attach'") == 1
+    # The round-3 bare-re-click literal is GONE (round-4 regression pin: the button
+    # is disabled in exactly this mode, so "re-click" was unactionable advice).
+    assert "'start request pending — re-click to re-attach'" not in html, (
+        "the unactionable bare-re-click remedy must be gone — the pipeline button is"
+        " disabled while the start POST is wedged"
+    )
 
 
 def test_universe_stale_clears_on_success_and_settle() -> None:
@@ -672,14 +763,28 @@ def test_universe_stale_clears_on_success_and_settle() -> None:
     assert "stopFeedAgeTicker();" in finish.group(1)
     assert "pollGen += 1;" in finish.group(1)
     assert "function startFeedAgeTicker()" in html
-    assert "if (lastProgressOkMs === null) lastProgressOkMs = nowMs();" in html, (
-        "the watch-start baseline is missing — a first-poll failure must still escalate"
-    )
+    assert (
+        "if (lastProgressOkMs === null) { lastProgressOkMs = nowMs();"
+        " lastProgressOkWallMs = Date.now(); }" in html
+    ), "the watch-start baseline is missing — a first-poll failure must still escalate"
     # The ticker must actually be STARTED from the poll loop (refuter finding: the
     # invocation was unpinned — deleting it meant the 1 s clock never ran and the
     # chip never escalated, with the suite green).
     assert "startFeedAgeTicker();" in poll, (
         "pollProgress must start the 1 s age ticker on every watch"
+    )
+    # stopFeedAgeTicker's chip-CLEAR wires (refuter finding, round 4: only the
+    # stopFeedAgeTicker() CALL and renderFeedAge's null-clear BRANCH were pinned —
+    # deleting the nulling or the trailing renderFeedAge() left a watch that
+    # settled while red painted "⚠ STALE …" PERMANENTLY on the settled page,
+    # ticker stopped, DOM never rewritten, suite green).
+    stop = _stop_feed_age_ticker_src(html)
+    assert "lastProgressOkMs = null;" in stop, (
+        "settle must null the staleness stamp so renderFeedAge takes the clear branch"
+    )
+    assert "lastProgressOkWallMs = null;" in stop, "settle must null the wall twin too"
+    assert "renderFeedAge();   // clears the chip" in stop, (
+        "settle must call renderFeedAge once more — the write that actually clears the DOM"
     )
 
 
@@ -827,3 +932,11 @@ def test_universe_subunit_omitted_for_spot_or_empty_current() -> None:
     assert "count >= 2" in html
     assert "bits.push('expiry ' + exp)" in html
     assert "? tok : null" in html
+    # The whitelist ENFORCEMENT call (refuter finding, round 4: the regex TEXT and
+    # the `? tok : null` shape were pinned but not the `.test(` invocation —
+    # mutating the line to `return tok ? tok : null;` kept both pins green while a
+    # malformed 5-token label like `NSE-FOO-BAR-BAZ-CE 1minute` painted
+    # "expiry BAR" in the header, contradicting this test's own docstring).
+    assert "return tok && EXPIRY_TOKEN_RE.test(tok) ? tok : null;" in html, (
+        "the EXPIRY_TOKEN_RE whitelist must actually be APPLIED to the token"
+    )

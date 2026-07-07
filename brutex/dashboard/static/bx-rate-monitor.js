@@ -86,7 +86,9 @@
   var STALE_WARN_MS = 10000;   // amber: ~3 missed 3 s polls + 1 s margin
   var STALE_RED_MS = 30000;    // red STALE: 10x POLL_MS; == BACKOFF_MAX_MS so "retrying" reads true
   var BACKOFF_BASE_MS = 3000;  // failure backoff base (the ask's 3 s), doubling per consecutive failure
-  var BACKOFF_MAX_MS = 30000;  // backoff cap: recovery noticed <=30 s after the server returns
+  var BACKOFF_MAX_MS = 30000;  // backoff cap: next attempt <=30 s after the previous poll SETTLES
+                               // (worst-case recovery notice ~= FETCH_TIMEOUT_MS + cap ~= 40 s when
+                               // a max-backoff attempt stalls to the abort just as the server returns)
   var FETCH_TIMEOUT_MS = 10000; // abort bound (headers AND body): a wedged fetch becomes a counted failure, the chain never hangs
   var AGE_TICK_MS = 1000;      // the ~1 s client staleness ticker
   var WIDGET_ID = "bxRateMonitor";
@@ -327,10 +329,14 @@
     var w = document.getElementById(WIDGET_ID);
     if (!pill && !big) { return; }
     var ref = lastPollOkMs !== null ? lastPollOkMs : bootMs;
+    var wallRef = lastPollOkWallMs !== null ? lastPollOkWallMs : bootWallMs;
     var text = "—";
     var cls = "";
     if (ref !== null) {
       var age = nowMs() - ref;
+      // Suspend guard: performance.now() may pause across a system suspend, so fold
+      // in the wall-clock age too — max() can only OVER-report (the safe direction).
+      if (wallRef !== null) { age = Math.max(age, Date.now() - wallRef); }
       var ageS = Math.max(0, Math.round(age / 1000));
       var base = lastPollOkMs !== null ? ageS + "s ago" : "no data yet (" + ageS + "s)";
       if (age >= STALE_RED_MS) { text = "STALE — " + base + " — retrying"; cls = "bxrm-stale"; }
@@ -472,7 +478,9 @@
   // ── Self-recovering poll state (DEC-PULL-UI-STALENESS-001) ──
   var pollFailures = 0;
   var lastPollOkMs = null;  // CLIENT clock of the last SUCCESSFUL poll
+  var lastPollOkWallMs = null;  // Date.now() twin of lastPollOkMs (suspend guard — see renderAge)
   var bootMs = null;        // widget-boot baseline: a never-succeeding page still ages honestly
+  var bootWallMs = null;    // Date.now() twin of bootMs (suspend guard — see renderAge)
   var pollTimer = null;
   var pollSeq = 0;          // re-entrancy token: a superseded response never renders or schedules
   // The secondary ETA chain carries its OWN token pair (refuter-confirmed fix,
@@ -487,6 +495,12 @@
   var etaSettledSeq = 0;    // newest ETA request whose response has settled (rendered)
 
   // Monotonic client clock: performance.now() is immune to NTP/wall-clock jumps.
+  // Suspend caveat (Golden Rule #10, refuter-confirmed): on some browser/OS
+  // combinations performance.now() may NOT advance while the machine is suspended
+  // (implementation variance, unverified against current builds), so renderAge()
+  // ALSO stamps a Date.now() wall-clock twin on every success and reports
+  // max(monotonicAge, wallAge) — a wall-clock jump can only OVER-report staleness,
+  // the safe direction for a staleness indicator.
   function nowMs() {
     return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
   }
@@ -598,6 +612,7 @@
         render(data);
         pollFailures = 0;
         lastPollOkMs = nowMs();   // the CLIENT staleness stamp
+        lastPollOkWallMs = Date.now();  // wall twin (suspend guard — see renderAge)
         renderAge();              // stale marking clears on the very next success
         schedulePoll(POLL_MS);
       })
@@ -638,6 +653,7 @@
     buildWidget();
     buildOverlay();
     bootMs = nowMs();
+    bootWallMs = Date.now();  // wall twin (suspend guard — see renderAge)
     poll();   // self-schedules from here on (success -> POLL_MS, failure -> backoff)
     setInterval(renderAge, AGE_TICK_MS);
     document.addEventListener("visibilitychange", function () {

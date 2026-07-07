@@ -240,11 +240,18 @@ class TestPullRateRoute:
         # watch-active visibility gate (refuter-confirmed fixes), and the chip's
         # wording is state-honest (round 3): "updated Xs ago" only after a real
         # success this watch, and a not-yet-started poll chain never claims
-        # "retrying".
+        # "retrying". Round 4: the hung-start-POST tail names the ACTIONABLE
+        # reload-then-re-click remedy (the one pipeline button is disabled while
+        # the POST is wedged, so the round-3 bare "re-click" advice was blocked
+        # by the page's own disable), and both surfaces carry the suspend-guard
+        # wall-clock twin (performance.now may pause across a system suspend).
         assert "FEED_FETCH_TIMEOUT_MS" in uni.text
         assert "watchActive" in uni.text
         assert "hadProgressSuccess" in uni.text
-        assert "'start request pending — re-click to re-attach'" in uni.text
+        assert "'start request pending — reload the page, then re-click to re-attach'" in uni.text
+        assert "'start request pending — re-click to re-attach'" not in uni.text
+        assert "lastProgressOkWallMs" in uni.text
+        assert "lastPollOkWallMs" in js.text
 
 
 def test_widget_referenced_on_operator_and_universe_templates() -> None:
