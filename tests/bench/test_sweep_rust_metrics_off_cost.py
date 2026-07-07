@@ -2,8 +2,11 @@
 
 DEC-SWEEP-RUST-METRICS-001's hard constraint (mirrors
 ``test_sweep_lookahead_off_cost.py``): with ``BRUTEX_SWEEP_RUST_METRICS``
-OFF (the default), ``metrics_from_trades`` must be byte-identical AND
-cost-unchanged — the ONLY addition on the OFF path is one env-dict probe.
+OFF (the explicit ``"0"`` kill switch — since ADR-0017 /
+DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 the DEFAULT is the kernel arm, so the
+Python arm is pinned by ``"0"``), ``metrics_from_trades`` must be
+byte-identical AND cost-unchanged — the ONLY addition on the OFF path is
+one env-dict probe.
 Two complementary proofs (the structural third — OFF never touches the
 kernel machinery — is a unit test with a bombed seam in
 ``test_engine_sweep_driver.py``):
@@ -60,7 +63,7 @@ class TestOffModeIsFree:
     def test_flag_probe_cost_is_below_one_bare_walk(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The whole OFF-mode seam addition (one env probe) is nil next to
         even ONE no-op per-bar walk — so it cannot hide a per-bar cost."""
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         bars = _bars(_LARGE)
 
         probe_samples: list[float] = []
@@ -88,7 +91,7 @@ class TestOffModeIsFree:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """OFF-arm seam cost ≈ the direct equity+metrics tail it wraps."""
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         bars = _bars(_TAIL_BARS)
 
         def _direct() -> None:

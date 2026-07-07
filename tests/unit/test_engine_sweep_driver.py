@@ -22,8 +22,11 @@ from brutex.engine.combo_mask import (
 )
 from brutex.engine.rust_metrics import (
     MAX_EXACT_EQUITY_PAISA,
+    SELF_CHECK_SAMPLES,
     SWEEP_RUST_METRICS_ENV,
     reset_observability_memo_for_tests,
+    reset_self_check_for_tests,
+    self_check_pending,
 )
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import (
@@ -405,6 +408,7 @@ class TestRustMetricsTail:
     @pytest.fixture(autouse=True)
     def _fresh_memo(self) -> None:
         reset_observability_memo_for_tests()
+        reset_self_check_for_tests()
 
     def _both_arms(
         self,
@@ -415,7 +419,9 @@ class TestRustMetricsTail:
         start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
         tf_minutes: int = 1,
     ) -> tuple[ResultMetrics, ResultMetrics]:
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so the OFF arm stays the
+        # Python tail under the ADR-0017 default-ON constant.
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
             bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
         )
@@ -451,14 +457,15 @@ class TestRustMetricsTail:
     def test_off_arm_never_touches_the_kernel_machinery(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OFF is the verbatim pre-#1186 path — no envelope check, no kernel."""
+        """Explicit OFF ("0", the kill switch) is the verbatim pre-#1186 path
+        — no envelope check, no kernel."""
 
         def _bomb(*args: object, **kwargs: object) -> None:
             raise AssertionError("flag OFF must not reach the Rust metrics seam")
 
         monkeypatch.setattr("brutex.engine.sweep_driver.drawdown_stats_via_kernel", _bomb)
         monkeypatch.setattr("brutex.engine.sweep_driver.exceeds_exact_equity_envelope", _bomb)
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         bars = _session_bars()
         metrics = metrics_from_trades(
             bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
@@ -468,7 +475,10 @@ class TestRustMetricsTail:
     def test_empty_bars_raises_identically_on_both_arms(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         with pytest.raises(ValueError, match="build_equity_curve: bars must be non-empty"):
             metrics_from_trades([], [], start_equity_paisa=1_000, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
@@ -481,11 +491,10 @@ class TestRustMetricsTail:
         """The EquityCurve invariant error text is IDENTICAL on both arms."""
         bars = _session_bars()
         errors: list[str] = []
-        for env in (None, "1"):
-            if env is None:
-                monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
-            else:
-                monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+        # Explicit "0" (not delenv) — under the ADR-0017 default-ON constant an
+        # unset env resolves ON, so only the kill switch spans both arms.
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
                 metrics_from_trades(bars, [], start_equity_paisa=0, tf_minutes=1)
             errors.append(str(exc_info.value))
@@ -508,11 +517,10 @@ class TestRustMetricsTail:
             direction=Side.BUY,
         )
         errors: list[str] = []
-        for env in (None, "1"):
-            if env is None:
-                monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
-            else:
-                monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+        # Explicit "0" (not delenv) — under the ADR-0017 default-ON constant an
+        # unset env resolves ON, so only the kill switch spans both arms.
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
                 metrics_from_trades(bars, [stray], start_equity_paisa=1_000, tf_minutes=1)
             errors.append(str(exc_info.value))
@@ -526,11 +534,10 @@ class TestRustMetricsTail:
         EquityCurve span error on both arms (the ON arm falls through)."""
         bars = _session_bars()[:1]
         errors: list[str] = []
-        for env in (None, "1"):
-            if env is None:
-                monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
-            else:
-                monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+        # Explicit "0" (not delenv) — under the ADR-0017 default-ON constant an
+        # unset env resolves ON, so only the kill switch spans both arms.
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
                 metrics_from_trades(bars, [], start_equity_paisa=1_000, tf_minutes=0)
             errors.append(str(exc_info.value))
@@ -578,7 +585,10 @@ class TestRustMetricsTail:
     ) -> None:
         """Any kernel-side fallback (None) serves the mask from Python."""
         bars = _session_bars()
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
             bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
         )
@@ -598,7 +608,9 @@ class TestRustMetricsTail:
         """A domain-valid poisoned kernel result reaches the ResultMetrics —
         proof the ON arm consumes the kernel (the vacuous-gate trap): were
         the seam silently recomputing in Python, the poison would vanish and
-        this test would fail."""
+        this test would fail. The burn-in self-check is explicitly EXHAUSTED
+        first (steady state) — with samples pending the same poison would be
+        caught + autoreverted (pinned by TestKernelSelfCheck)."""
         bars = _session_bars()
         monkeypatch.setattr(
             fno_math,
@@ -606,6 +618,7 @@ class TestRustMetricsTail:
             lambda n_bars, start, exits: (12_345, 6.25, 2, 3.5),
         )
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        reset_self_check_for_tests(remaining=0)
         on = metrics_from_trades(
             bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
         )
@@ -620,7 +633,10 @@ class TestRustMetricsTail:
         """A domain-INVALID kernel result is refused LOUDLY, never adopted:
         the mask is served by the Python oracle bit-identically."""
         bars = _session_bars()
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
             bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
         )
@@ -645,8 +661,267 @@ class TestRustMetricsTail:
         (the sweep re-attribution oracle + evaluate_combo core) is
         bit-identical across arms."""
         bars = _session_bars()
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         on = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
         _assert_metrics_bit_identical(off, on)
+
+
+# ────── DEC-SWEEP-EXIT-INDEX-FASTPATH-001: exit-index fast path ──────
+
+
+class TestExitIndexFastPath:
+    """metrics_from_trades(exit_indices=…): fast path, demotion, OFF-arm inertness."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_memo(self) -> None:
+        reset_observability_memo_for_tests()
+        reset_self_check_for_tests()
+
+    def test_consistent_indices_skip_the_dict_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The certified fast path never builds the ts→index dict — the whole
+        point (O(trades) instead of O(N_bars) per mask)."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        baseline = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+
+        def _bomb(window: object) -> None:
+            raise AssertionError("fast path must not build the ts_to_index dict")
+
+        monkeypatch.setattr("brutex.engine.sweep_driver.build_ts_index", _bomb)
+        fast = metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=1_000_000,
+            tf_minutes=1,
+            exit_indices=[1, 2, 4],
+        )
+        _assert_metrics_bit_identical(baseline, fast)
+
+    def test_fast_path_equals_off_arm_bitwise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
+        off = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        fast = metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=1_000_000,
+            tf_minutes=1,
+            exit_indices=[1, 2, 4],
+        )
+        _assert_metrics_bit_identical(off, fast)
+
+    @pytest.mark.parametrize(
+        "bad_indices",
+        [
+            [1, 2],  # wrong length (short)
+            [1, 2, 4, 4],  # wrong length (long)
+            [1, 2, 5],  # out of range
+            [1, 2, -1],  # negative (a Python-wraparound hazard if trusted)
+            [1, 3, 4],  # in range but the WRONG bar for trade 2's exit_ts
+        ],
+    )
+    def test_inconsistent_indices_demote_to_the_dict_not_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, bad_indices: list[int]
+    ) -> None:
+        """A bad stream demotes to the dict path (same kernel result) with one
+        warn-once — NEVER adopted, never a Python-oracle downgrade. The oracle
+        tail's entry (``build_equity_curve``) is BOMBED for the demoted call:
+        the demotion must land on the kernel-dict path, so the bomb proves the
+        "NEVER to the Python oracle" half of the demotion law (bit-identity
+        alone cannot — the oracle reproduces the kernel bytes by design)."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        baseline = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+
+        def _bomb(*args: object, **kwargs: object) -> None:
+            raise AssertionError("demotion must land on the kernel dict path, not the oracle")
+
+        monkeypatch.setattr("brutex.engine.sweep_driver.build_equity_curve", _bomb)
+        with capture_logs() as logs:
+            demoted = metrics_from_trades(
+                bars,
+                trades,
+                start_equity_paisa=1_000_000,
+                tf_minutes=1,
+                exit_indices=bad_indices,
+            )
+        _assert_metrics_bit_identical(baseline, demoted)
+        events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+        assert [e["reason"] for e in events] == ["exit_indices_demoted"]
+
+    def test_demoted_mask_is_still_served_by_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Steady state + a domain-valid poisoned kernel: the poison flows
+        through on the DEMOTED path — value-level proof the demotion is served
+        by the kernel via the dict, not the Python oracle (which would erase
+        the poison and compute the real drawdown). The self-check is exhausted
+        first, exactly like test_domain_valid_poison_flows_into_the_metrics_row
+        (with samples pending the poison would autorevert instead)."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        monkeypatch.setattr(
+            fno_math,
+            "sweep_drawdown_stats",
+            lambda n_bars, start, exits: (12_345, 6.25, 2, 3.5),
+        )
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        reset_self_check_for_tests(remaining=0)
+        with capture_logs() as logs:
+            demoted = metrics_from_trades(
+                bars,
+                trades,
+                start_equity_paisa=1_000_000,
+                tf_minutes=1,
+                exit_indices=[1, 2, 5],  # out of range → inconsistent → demote
+            )
+        assert demoted.max_drawdown_paisa == 12_345
+        assert demoted.max_drawdown_pct == 6.25
+        assert demoted.max_drawdown_duration_bars == 2
+        assert demoted.ulcer_index == 3.5
+        events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+        assert [e["reason"] for e in events] == ["exit_indices_demoted"]
+
+    def test_off_arm_ignores_exit_indices_entirely(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OFF never reads the hint — even a poisoned stream is inert."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
+        off_plain = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        off_poison = metrics_from_trades(
+            bars,
+            trades,
+            start_equity_paisa=1_000_000,
+            tf_minutes=1,
+            exit_indices=[0, 0, 0],  # wrong on purpose — must be ignored
+        )
+        _assert_metrics_bit_identical(off_plain, off_poison)
+
+    def test_metrics_for_mask_threads_indices_without_dict_build(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The evaluate_combo→metrics_for_mask chain hands the walker's
+        certified indices to the kernel arm — no per-mask dict build."""
+        bars = _session_bars()
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        baseline = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+
+        def _bomb(window: object) -> None:
+            raise AssertionError("metrics_for_mask fast path must not build the dict")
+
+        monkeypatch.setattr("brutex.engine.sweep_driver.build_ts_index", _bomb)
+        fast = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
+        _assert_metrics_bit_identical(baseline, fast)
+
+
+# ────── DEC-SWEEP-EXIT-INDEX-FASTPATH-001: burn-in self-check + autorevert ──────
+
+
+class TestKernelSelfCheck:
+    """The burn-in bit-compare: pass consumes budget; mismatch ships the oracle
+    value and latches the kernel OFF for the process."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_memo(self) -> None:
+        reset_observability_memo_for_tests()
+        reset_self_check_for_tests()
+
+    def test_passing_compares_consume_the_burn_in_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        reset_self_check_for_tests(remaining=2)
+        assert self_check_pending() is True
+        metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        assert self_check_pending() is True  # one sample left
+        metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        assert self_check_pending() is False  # budget exhausted — steady state
+
+    def test_mismatch_ships_the_oracle_value_and_autoreverts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A domain-VALID wrong kernel answer during burn-in: the ORACLE value
+        ships (bit-identical to the OFF arm — the poison never persists), one
+        kernel_autoreverted ERROR fires, and the NEXT call short-circuits to
+        the Python tail with a warn-once kernel_disabled fallback."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
+        off = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        monkeypatch.setattr(
+            fno_math,
+            "sweep_drawdown_stats",
+            lambda n_bars, start, exits: (12_345, 6.25, 2, 3.5),
+        )
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        with capture_logs() as logs:
+            first = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+            second = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+        _assert_metrics_bit_identical(off, first)  # the oracle value shipped
+        _assert_metrics_bit_identical(off, second)  # latched → Python tail
+        reverted = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
+        assert len(reverted) == 1
+        assert reverted[0]["reason"] == "self_check_mismatch"
+        fallbacks = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+        assert [e["reason"] for e in fallbacks] == ["kernel_disabled"]
+        # The burn-in budget was NOT consumed by the failed compare.
+        assert self_check_pending() is True
+
+    def test_signed_zero_divergence_is_caught_by_the_bit_compare(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """-0.0 == +0.0 under float equality — the struct.pack bit-compare
+        must still catch it (the reason the compare is bit-level at all)."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        real_kernel = fno_math.sweep_drawdown_stats
+
+        def _negzero(n_bars: int, start: int, exits: list[tuple[int, int]]) -> object:
+            stats = real_kernel(n_bars, start, exits)
+            return (stats[0], stats[1], stats[2], -0.0) if stats[3] == 0.0 else stats
+
+        # A profitable-only trade set → true ulcer is +0.0; poison flips its sign.
+        winners = [t for t in trades if t.pnl_paisa > 0]
+        monkeypatch.setattr(fno_math, "sweep_drawdown_stats", _negzero)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        with capture_logs() as logs:
+            metrics_from_trades(bars, winners, start_equity_paisa=1_000_000, tf_minutes=1)
+        reverted = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
+        assert len(reverted) == 1
+
+    def test_steady_state_runs_no_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Past the burn-in, the oracle scan never runs (the steady-state cost
+        contract the speedup bench measures)."""
+        bars = _session_bars()
+        trades = _hand_trades(bars)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
+        reset_self_check_for_tests(remaining=0)
+
+        def _bomb(*args: object, **kwargs: object) -> None:
+            raise AssertionError("steady state must not run the oracle drawdown")
+
+        monkeypatch.setattr("brutex.engine.sweep_driver._oracle_drawdown", _bomb)
+        metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
+
+    def test_default_burn_in_budget_is_pinned(self) -> None:
+        assert SELF_CHECK_SAMPLES == 16
