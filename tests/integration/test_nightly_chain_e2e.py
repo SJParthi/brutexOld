@@ -30,6 +30,7 @@ from brutex.adapters.groww import pull_singleflight as ps
 from brutex.config.credentials_types import CredentialsError
 from brutex.data.errors import LakeWriteHalt
 from brutex.engine.sweep_audit import SweepAuditWriter, verify_chain
+from brutex.engine.sweep_supervisor import SUPERVISOR_ACTION_COMPLETE
 from brutex.nightly.chain import LinkStatus
 from brutex.nightly.report import nightly_audit_path, nightly_dir
 from brutex.nightly.run import NightlyPlan, NightlySeams, run_nightly
@@ -140,9 +141,12 @@ def _seams(
     }
 
     def run_sweep(**_kwargs: Any) -> int:
-        path = results / "audit" / "sweep-all.jsonl"
+        # Production shape: the SUPERVISOR audit chain (SweepGuards.audit →
+        # audit/sweep-all-supervisor.jsonl) with the REAL engine action
+        # constant — never the ingest sweep-all.jsonl (review round 1).
+        path = results / "audit" / "sweep-all-supervisor.jsonl"
         with SweepAuditWriter.open(path, actor="sweep", resume=path.exists()) as audit:
-            audit.append(action="SUPERVISOR_ACTION_COMPLETE", subject="sweep:e2e", payload=payload)
+            audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:e2e", payload=payload)
         return 0
 
     def no_creds() -> Any:
@@ -165,6 +169,10 @@ def test_e2e_green_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     )
     assert report.exit_code == 0
     assert report.ok is True
+    # The counts were read from the SUPERVISOR audit (review round 1: the
+    # reader pointed at the ingest sweep-all.jsonl and rendered "?" forever).
+    assert report.counts["sweep_run"] == 2
+    assert report.counts["sweep_skipped_cache"] == 2
     # Durable artifacts: report + bundle + a VERIFIED audit chain.
     run_dir = nightly_dir(results, report.nightly_id)
     on_disk = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))

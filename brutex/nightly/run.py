@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from brutex.nightly.backup import (
+    MANIFEST_NAME,
     BackupManifest,
     backup_inventory,
     create_snapshot,
@@ -86,6 +87,7 @@ from brutex.nightly.sweep_binding import (
     probe_contract_artifacts,
     read_sweep_tail_counts,
     sweep_link_result,
+    sweep_supervisor_audit_path,
 )
 from brutex.observability.power_keepawake import keep_awake
 
@@ -415,15 +417,18 @@ def _run_locked(
             payload={"snapshot": str(result.snapshot_path), "files": result.file_count},
         )
         # T4 snapshot_unreadable: re-read + parse the sealed manifest, re-stat
-        # the item count (the FULL hash verify already ran pre-seal).
+        # the item count (the FULL hash verify already ran pre-seal). Exclude
+        # ONLY the snapshot's OWN top-level manifest — NESTED manifest.json
+        # files (results/cascade/, results/runs/<id>/) are REAL backup entries
+        # counted in item_count; excluding them by basename undercounted the
+        # disk and fired a FALSE tripwire every healthy night (review round 2).
         try:
+            own_manifest = result.snapshot_path / MANIFEST_NAME
             manifest = BackupManifest.from_dict(
-                json.loads((result.snapshot_path / "manifest.json").read_text(encoding="utf-8"))
+                json.loads(own_manifest.read_text(encoding="utf-8"))
             )
             on_disk = sum(
-                1
-                for p in result.snapshot_path.rglob("*")
-                if p.is_file() and p.name != "manifest.json"
+                1 for p in result.snapshot_path.rglob("*") if p.is_file() and p != own_manifest
             )
             if manifest.item_count != on_disk:
                 extra_tripwires.append(
@@ -488,7 +493,10 @@ def _run_locked(
         nonlocal absent_artifacts
         run_sweep = _resolve_run_sweep(seams)
         since = seams.now()
-        audit_path = plan.results_root / "audit" / "sweep-all.jsonl"
+        # The counts live in the SUPERVISOR audit chain (SweepGuards.audit →
+        # sweep-all-supervisor.jsonl) — NEVER the ingest sweep-all.jsonl,
+        # which carries no completion payload (review round 2, finding 1).
+        audit_path = sweep_supervisor_audit_path(plan.results_root)
         had_prior_audit = audit_path.exists()
         code = int(run_sweep(**dict(plan.sweep_kwargs)))
         counts = read_sweep_tail_counts(audit_path)
@@ -586,7 +594,10 @@ def _run_locked(
             write_bundle(
                 plan.results_root,
                 report,
-                sweep_audit_path=plan.results_root / "audit" / "sweep-all.jsonl",
+                # The forensic tail the report's own details reference — the
+                # SUPERVISOR chain (TUPLE_FAILED lines + completion tally),
+                # not the ingest sweep-all.jsonl (review round 2).
+                sweep_audit_path=sweep_supervisor_audit_path(plan.results_root),
                 nightly_audit_path=nightly_audit_path(plan.results_root),
                 progress_path=plan.results_root / "progress" / "sweep-progress.json",
                 env=_bundle_env(),

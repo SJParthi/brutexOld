@@ -17,10 +17,17 @@ Consequence (runbook): an SLA-overrun-sized grid makes the SWEEP link REFUSED
 a supervised manual ``sweep-all --acknowledge-sla-overrun`` — never a silent
 overrun.
 
-Counts are best-effort from the audit tail's ``SUPERVISOR_ACTION_COMPLETE``
-payload (the one VERIFIED field source, sweep_supervisor.py:822-836); an
-absent/unreadable payload is an HONEST ``None`` — rendered ``"?"``, NEVER a
-fabricated 0 or a ``-1`` sentinel (the ``bars_net_new`` precedent).
+Counts are best-effort from the SUPERVISOR audit tail's completion payload
+(the one VERIFIED field source, sweep_supervisor.py:822-836). Production
+writes that tally via ``SweepGuards.audit`` (``sup_audit``) to
+``<results_root>/audit/sweep-all-supervisor.jsonl`` (cli.py) with the REAL
+engine action VALUE ``SUPERVISOR_ACTION_COMPLETE == "SUPERVISOR_COMPLETE"`` —
+:func:`sweep_supervisor_audit_path` is the ONE path law and the reader keys on
+the imported constant, never a re-minted literal (review round 2: the round-1
+reader scanned the ingest ``sweep-all.jsonl`` for the alias NAME, so counts
+were ALWAYS ``None`` and the T5 tripwire was dead). An absent/unreadable
+payload is an HONEST ``None`` — rendered ``"?"``, NEVER a fabricated 0 or a
+``-1`` sentinel (the ``bars_net_new`` precedent).
 """
 
 from __future__ import annotations
@@ -47,12 +54,14 @@ logger = structlog.get_logger(__name__)
 
 __all__ = [
     "SWEEP_FORWARDED_KEYS",
+    "SWEEP_SUPERVISOR_AUDIT_RELPATH",
     "UNATTENDED_ESCAPE_FLAGS",
     "ContractProbe",
     "nightly_sweep_kwargs",
     "probe_contract_artifacts",
     "read_sweep_tail_counts",
     "sweep_link_result",
+    "sweep_supervisor_audit_path",
 ]
 
 #: The safety escape hatches a nightly may NEVER carry — structurally absent
@@ -99,8 +108,40 @@ SWEEP_FORWARDED_KEYS: Final[tuple[str, ...]] = (
     "stage3_restarts",
 )
 
-#: The audit action whose payload carries the verified sweep counters.
-_SUPERVISOR_COMPLETE_ACTION: Final[str] = "SUPERVISOR_ACTION_COMPLETE"
+#: Where PRODUCTION writes the supervisor completion tally, relative to the
+#: sweep results root: ``cmd_sweep_all`` opens ``SweepGuards.audit``
+#: (``sup_audit``) on ``out_root / "audit" / "sweep-all-supervisor.jsonl"``
+#: (cli.py) — NOT the ingest ``sweep-all.jsonl``, which never carries the
+#: completion payload. Pinned against cli.py's literal wiring in the stem test.
+SWEEP_SUPERVISOR_AUDIT_RELPATH: Final[tuple[str, str]] = (
+    "audit",
+    "sweep-all-supervisor.jsonl",
+)
+
+
+def sweep_supervisor_audit_path(results_root: Path) -> Path:
+    """The SUPERVISOR audit chain path under *results_root* — the ONE path law.
+
+    This is the file :func:`read_sweep_tail_counts` must read; the ingest
+    ``sweep-all.jsonl`` sibling never carries the ``SUPERVISOR_COMPLETE``
+    tally (review round 2, finding 1: reading the ingest file kept counts
+    ``None`` forever and left the T5 tripwire dead in production).
+    """
+    return results_root.joinpath(*SWEEP_SUPERVISOR_AUDIT_RELPATH)
+
+
+def _supervisor_complete_action() -> str:
+    """The REAL completion action VALUE (``"SUPERVISOR_COMPLETE"``).
+
+    Imported from the engine constant, never a re-minted literal (Golden Rule
+    #11 COMMON — the round-1 reader hardcoded the alias NAME
+    ``"SUPERVISOR_ACTION_COMPLETE"``, which never matches a real audit line).
+    Call-time import keeps this module's import wheel-free (the engine package
+    pulls the Rust wheels; the reader only ever runs after a real sweep).
+    """
+    from brutex.engine.sweep_supervisor import SUPERVISOR_ACTION_COMPLETE
+
+    return SUPERVISOR_ACTION_COMPLETE
 
 
 def nightly_sweep_kwargs(
@@ -134,17 +175,20 @@ def nightly_sweep_kwargs(
 
 
 def read_sweep_tail_counts(audit_path: Path) -> Mapping[str, int] | None:
-    """The last ``SUPERVISOR_ACTION_COMPLETE`` payload's integer counters, or ``None``.
+    """The last supervisor-completion payload's integer counters, or ``None``.
 
-    Best-effort by contract: ANY read/parse problem (absent file, torn line,
-    no completion entry yet) returns ``None`` — the honest absence the report
-    renders as ``"?"``. Only genuinely-integer payload values are kept (a
-    bool is not a counter).
+    *audit_path* must be the SUPERVISOR chain
+    (:func:`sweep_supervisor_audit_path`); the match is the imported engine
+    action VALUE (``"SUPERVISOR_COMPLETE"``). Best-effort by contract: ANY
+    read/parse problem (absent file, torn line, no completion entry yet)
+    returns ``None`` — the honest absence the report renders as ``"?"``. Only
+    genuinely-integer payload values are kept (a bool is not a counter).
     """
     try:
         lines = audit_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
+    complete_action = _supervisor_complete_action()
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -152,7 +196,7 @@ def read_sweep_tail_counts(audit_path: Path) -> Mapping[str, int] | None:
             entry = json.loads(line)
         except ValueError:
             continue  # a torn tail line — keep scanning upward
-        if not isinstance(entry, dict) or entry.get("action") != _SUPERVISOR_COMPLETE_ACTION:
+        if not isinstance(entry, dict) or entry.get("action") != complete_action:
             continue
         payload = entry.get("payload")
         if not isinstance(payload, dict):

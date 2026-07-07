@@ -18,14 +18,17 @@ from pathlib import Path
 from typing import Any
 
 from brutex.engine.sweep_audit import SweepAuditWriter
+from brutex.engine.sweep_supervisor import SUPERVISOR_ACTION_COMPLETE
 from brutex.nightly.chain import EXIT_SWEEP_TUPLE_FAILED, LinkStatus
 from brutex.nightly.sweep_binding import (
     SWEEP_FORWARDED_KEYS,
+    SWEEP_SUPERVISOR_AUDIT_RELPATH,
     UNATTENDED_ESCAPE_FLAGS,
     nightly_sweep_kwargs,
     probe_contract_artifacts,
     read_sweep_tail_counts,
     sweep_link_result,
+    sweep_supervisor_audit_path,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -160,13 +163,41 @@ def test_explicit_dates_survive_defaults() -> None:
 
 
 def _write_audit(path: Path, *, payload: dict[str, Any]) -> None:
+    """Write the completion the way PRODUCTION does — the REAL engine action
+    constant (value ``"SUPERVISOR_COMPLETE"``), never the alias NAME literal
+    the review-round-1 reader drifted to."""
     with SweepAuditWriter.open(path, actor="sweep") as audit:
         audit.append(action="SWEEP_START", subject="sweep:x", payload={"total": 2})
-        audit.append(action="SUPERVISOR_ACTION_COMPLETE", subject="sweep:x", payload=payload)
+        audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=payload)
+
+
+def test_supervisor_audit_path_matches_cli_wiring() -> None:
+    """The counts live in the SUPERVISOR chain (``SweepGuards.audit``), NOT the
+    ingest ``sweep-all.jsonl`` — pin the helper against cli.py's literal wiring
+    so the path can never silently drift again (review round 1, finding 2)."""
+    root = Path("/some/results")
+    assert sweep_supervisor_audit_path(root) == root / "audit" / "sweep-all-supervisor.jsonl"
+    assert SWEEP_SUPERVISOR_AUDIT_RELPATH == ("audit", "sweep-all-supervisor.jsonl")
+    from brutex import cli
+
+    assert 'out_root / "audit" / "sweep-all-supervisor.jsonl"' in inspect.getsource(cli)
+
+
+def test_reader_keys_on_the_real_supervisor_action_value(tmp_path: Path) -> None:
+    """The completion action VALUE is ``"SUPERVISOR_COMPLETE"``; an entry whose
+    action is the alias NAME ``"SUPERVISOR_ACTION_COMPLETE"`` (the exact
+    review-round-1 drift) is NOT a completion — honest None."""
+    assert SUPERVISOR_ACTION_COMPLETE == "SUPERVISOR_COMPLETE"
+    path = tmp_path / "sweep-all-supervisor.jsonl"
+    path.write_text(
+        json.dumps({"action": "SUPERVISOR_ACTION_COMPLETE", "payload": {"tuples_total": 5}}) + "\n",
+        encoding="utf-8",
+    )
+    assert read_sweep_tail_counts(path) is None
 
 
 def test_tail_counts_happy_path(tmp_path: Path) -> None:
-    audit_path = tmp_path / "audit" / "sweep-all.jsonl"
+    audit_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
     payload = {
         "tuples_total": 6,
         "tuples_run": 4,
@@ -188,18 +219,18 @@ def test_tail_counts_happy_path(tmp_path: Path) -> None:
 
 
 def test_tail_counts_last_completion_wins(tmp_path: Path) -> None:
-    audit_path = tmp_path / "sweep-all.jsonl"
+    audit_path = tmp_path / "sweep-all-supervisor.jsonl"
     with SweepAuditWriter.open(audit_path, actor="sweep") as audit:
-        audit.append(action="SUPERVISOR_ACTION_COMPLETE", subject="s", payload={"tuples_total": 1})
-        audit.append(action="SUPERVISOR_ACTION_COMPLETE", subject="s", payload={"tuples_total": 9})
+        audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="s", payload={"tuples_total": 1})
+        audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="s", payload={"tuples_total": 9})
     assert read_sweep_tail_counts(audit_path) == {"tuples_total": 9}
 
 
 def test_tail_counts_torn_tail_scans_upward(tmp_path: Path) -> None:
-    audit_path = tmp_path / "sweep-all.jsonl"
+    audit_path = tmp_path / "sweep-all-supervisor.jsonl"
     _write_audit(audit_path, payload={"tuples_total": 3})
     with open(audit_path, "a", encoding="utf-8") as fp:
-        fp.write('{"action": "SUPERVISOR_ACTION_COMPL')  # torn mid-write
+        fp.write('{"action": "SUPERVISOR_COMPL')  # torn mid-write
     assert read_sweep_tail_counts(audit_path) == {"tuples_total": 3}
 
 
@@ -218,7 +249,7 @@ def test_tail_counts_honest_none_arms(tmp_path: Path) -> None:
     # A completion entry whose payload is not a mapping → honest None.
     bad_payload = tmp_path / "bad-payload.jsonl"
     bad_payload.write_text(
-        json.dumps({"action": "SUPERVISOR_ACTION_COMPLETE", "payload": [1]}) + "\n",
+        json.dumps({"action": SUPERVISOR_ACTION_COMPLETE, "payload": [1]}) + "\n",
         encoding="utf-8",
     )
     assert read_sweep_tail_counts(bad_payload) is None

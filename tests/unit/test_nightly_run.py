@@ -26,6 +26,7 @@ from brutex.adapters.groww import pull_singleflight as ps
 from brutex.config.credentials_types import CredentialsError
 from brutex.data.errors import LakeWriteHalt
 from brutex.engine.sweep_audit import SweepAuditWriter, verify_chain
+from brutex.engine.sweep_supervisor import SUPERVISOR_ACTION_COMPLETE
 from brutex.nightly.chain import LinkStatus, NightlyLink
 from brutex.nightly.report import nightly_audit_path, nightly_dir
 from brutex.nightly.run import (
@@ -104,10 +105,15 @@ def _lake(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _write_sweep_completion(results: Path, payload: dict[str, Any]) -> None:
-    path = results / "audit" / "sweep-all.jsonl"
+    """Write the tally the way PRODUCTION does: the SUPERVISOR audit chain
+    (``SweepGuards.audit`` → ``audit/sweep-all-supervisor.jsonl``) with the
+    REAL engine action constant (value ``"SUPERVISOR_COMPLETE"``) — never the
+    ingest ``sweep-all.jsonl`` (review round 1: a fixture shaped after the
+    buggy reader masked both the wrong file AND the wrong action string)."""
+    path = results / "audit" / "sweep-all-supervisor.jsonl"
     resume = path.exists()
     with SweepAuditWriter.open(path, actor="sweep", resume=resume) as audit:
-        audit.append(action="SUPERVISOR_ACTION_COMPLETE", subject="sweep:x", payload=payload)
+        audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=payload)
 
 
 _COHERENT = {
@@ -222,6 +228,12 @@ def test_green_path_report_bundle_audit_summary(
     run_dir = nightly_dir(results, report.nightly_id)
     assert json.loads((run_dir / "report.json").read_text(encoding="utf-8"))["ok"] is True
     assert (run_dir / "bundle" / "report.json").exists()
+    # The bundle's sweep tail is the SUPERVISOR chain — the file carrying the
+    # completion tally the report's counts came from, incl. any TUPLE_FAILED
+    # forensics (review round 2: the bundle copied the ingest sweep-all.jsonl,
+    # which never holds the completion).
+    sweep_tail = (run_dir / "bundle" / "sweep-audit-tail.jsonl").read_text(encoding="utf-8")
+    assert SUPERVISOR_ACTION_COMPLETE in sweep_tail
     audit_file = nightly_audit_path(results)
     assert verify_chain(audit_file) > 0
     text = audit_file.read_text(encoding="utf-8")
@@ -437,6 +449,61 @@ def test_backup_enospc_fails_and_blocks_rest(
         tmp_path / "backups" / f"{report.nightly_id}.partial"
     ]
     assert [s["verdict"] for s in alerter.summaries] == ["FAILED"]
+
+
+def test_backup_t4_nested_manifest_json_is_not_a_false_tripwire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A steady-state results tree carries NESTED ``manifest.json`` files
+    (``cascade/manifest.json``, ``runs/<id>/manifest.json``) — REAL backup
+    entries counted in ``manifest.item_count``. Review round 1: the T4 re-stat
+    excluded ``manifest.json`` by BASENAME at any depth, undercounted the disk
+    and fired a FALSE ``snapshot_unreadable`` on every healthy night."""
+    lake, results = _lake(tmp_path)
+    (results / "cascade").mkdir()
+    (results / "cascade" / "manifest.json").write_text("{}", encoding="utf-8")
+    prior_run = results / "runs" / "run-prior"
+    prior_run.mkdir(parents=True)
+    (prior_run / "manifest.json").write_text("{}", encoding="utf-8")
+    seams, _alerter, _pipeline, _calls = _seams(monkeypatch, results)
+    report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
+    assert not any(w.name == "snapshot_unreadable" for w in report.tripwires)
+    assert report.suspect is False
+    assert report.exit_code == 0
+    # Both nested manifests genuinely rode into the sealed snapshot.
+    snapshot = tmp_path / "backups" / report.nightly_id
+    assert (snapshot / "results" / "cascade" / "manifest.json").exists()
+    assert (snapshot / "results" / "runs" / "run-prior" / "manifest.json").exists()
+
+
+def test_sweep_counts_never_read_from_ingest_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A tally in the ingest ``audit/sweep-all.jsonl`` is NOT the supervisor
+    completion — production writes the counts ONLY to
+    ``audit/sweep-all-supervisor.jsonl`` (``SweepGuards.audit``, cli.py), so a
+    reader keyed on the ingest file reports honest-unknown, never counts
+    (review round 1, finding 2 — the reader pointed at the wrong file)."""
+    lake, results = _lake(tmp_path)
+
+    def sweep_writes_only_ingest_audit(**_kwargs: Any) -> int:
+        path = results / "audit" / "sweep-all.jsonl"
+        with SweepAuditWriter.open(path, actor="sweep", resume=path.exists()) as audit:
+            audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=_COHERENT)
+        return 0
+
+    seams, _alerter, _pipeline, _calls = _seams(monkeypatch, results)
+    seams = NightlySeams(
+        build_pipeline=seams.build_pipeline,
+        run_sweep=sweep_writes_only_ingest_audit,
+        alerter=seams.alerter,
+        keep_awake_cm=_noop_keep_awake,
+        credentials=seams.credentials,
+        now=seams.now,
+    )
+    report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
+    assert report.counts["sweep_run"] is None
+    assert any("sweep counts unknown" in note for note in report.honesty_notes)
 
 
 def test_backup_t4_extra_file_in_snapshot_marks_suspect(
