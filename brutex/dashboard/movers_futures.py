@@ -14,7 +14,7 @@ module IMPORTS :func:`~brutex.dashboard.movers_snapshot.interval_minutes`,
 :func:`~brutex.dashboard.movers_snapshot.session_bar_times`,
 :func:`~brutex.dashboard.movers_snapshot.parse_snapshot_date`,
 :func:`~brutex.dashboard.movers_snapshot._cutoff_minute`, and the prior-day
-1-day-close reader :func:`~brutex.dashboard.movers_snapshot._prev_day_close`. It
+1-day-close reader :func:`~brutex.dashboard.movers_snapshot.resolve_prev_close`. It
 adds only what futures need: the contract-symbol parser, the serial-expiry tier
 picker (Near / Next / Far), the raw-1-minute reader that PRESERVES
 ``open_interest`` (the shared ``make_lake_read_1m`` path drops OI), the prior-day
@@ -58,27 +58,32 @@ mover.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.calendars.nse import previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
     _IST,
+    _calendar_exchange,
     _cutoff_minute,
-    _prev_day_close,
+    _NoncontiguousWarnState,
     _prior_session_last_from_minute,
     filter_to_ist_minute,
     interval_minutes,
     normalize_min_volume,
     parse_snapshot_date,
+    prev_baseline_provenance,
     resolve_candle_datasets,
+    resolve_prev_close,
     session_traded_value_paisa,
     value_crore_str,
     value_meets_volume_floor,
+    warn_prev_baseline_noncontiguous,
 )
 from brutex.data.fno_symbol import expiry_year_in_window
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -90,12 +95,14 @@ __all__ = [
     "DEFAULT_FUTURES_TOP_N",
     "FuturesCandidates",
     "FuturesMover",
+    "PrevOiBaseline",
     "build_futures_payload",
     "compute_futures_candidates",
     "compute_futures_mover",
     "format_contract_date",
     "normalize_futures_tier",
     "parse_future_symbol",
+    "resolve_prev_oi",
     "run_futures_snapshot",
     "select_expiry_tier",
     "select_near_month",
@@ -392,6 +399,16 @@ class FuturesMover:
         ``Σ round_money((high+low+close)/3) × volume`` (the per-bar HLC3 typical
         price × volume VWAP-proxy turnover, DEC-MOVERS-VWAP-VALUE-001), shared with
         the spot + options screens via ``session_traded_value_paisa``.
+    prev_close_session, prev_close_contiguous
+        Calendar-contiguity provenance of the ``pct_change`` baseline
+        (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — the ISO session date the prior
+        close actually came from + whether it IS the immediately-preceding NSE
+        session (``None`` = no baseline / calendar abstained). Additive +
+        defaulted; the row projector emits the pair ONLY on ``False``.
+    oi_baseline_session, oi_baseline_contiguous
+        The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
+        fall to the minute fallback on a possibly DIFFERENT day than the close
+        baseline, so the two flags never share a verdict.
     """
 
     underlying: str
@@ -407,6 +424,10 @@ class FuturesMover:
     oi_chg_pct: Decimal | None
     volume: int
     value_paisa: int
+    prev_close_session: str | None = None
+    prev_close_contiguous: bool | None = None
+    oi_baseline_session: str | None = None
+    oi_baseline_contiguous: bool | None = None
 
     @property
     def name(self) -> str:
@@ -608,7 +629,7 @@ def compute_futures_mover(
 
 def _futures_row(mover: FuturesMover) -> dict[str, Any]:
     """Project one mover to a markets-screen Futures row (money 2dp, metrics full-precision)."""
-    return {
+    row: dict[str, Any] = {
         # The FULL dated contract label ("NIFTY 30-Sep-2025 FUT") so the Futures tab
         # disambiguates Near/Next/Far contracts of the same underlying; falls back to
         # the raw symbol / underlying on an unparseable symbol (DEC-MOVERS-FULL-CONTRACT-NAME-001).
@@ -625,6 +646,16 @@ def _futures_row(mover: FuturesMover) -> dict[str, Any]:
         "volume": mover.volume,
         "value_cr": mover.value_crore,
     }
+    # EMIT-ON-FALSE, each baseline INDEPENDENT (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001):
+    # the additive provenance keys appear ONLY when the calendar PROVED that
+    # baseline non-contiguous — contiguous and abstained rows stay byte-identical.
+    if mover.prev_close_contiguous is False:
+        row["prev_close_session"] = mover.prev_close_session
+        row["prev_close_contiguous"] = mover.prev_close_contiguous
+    if mover.oi_baseline_contiguous is False:
+        row["oi_baseline_session"] = mover.oi_baseline_session
+        row["oi_baseline_contiguous"] = mover.oi_baseline_contiguous
+    return row
 
 
 def build_futures_payload(
@@ -848,16 +879,39 @@ def _last_bar_overlay(last: Any, column: str) -> float | None:
     return None if raw is None else float(raw)
 
 
-def _prev_day_oi(
-    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
-) -> int | None:
-    """Return the previous trading day's 1-day open interest before *day*, or ``None``.
+@dataclass(frozen=True, slots=True)
+class PrevOiBaseline:
+    """A resolved previous-day OI baseline + the session it actually came from.
 
-    The OI twin of :func:`~brutex.dashboard.movers_snapshot._prev_day_close`:
+    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the OI twin of
+    :class:`~brutex.dashboard.movers_snapshot.PrevDayBaseline`: ``value`` is the
+    served baseline (byte-identical to the historical ``_prev_day_oi`` answer)
+    and ``found_date`` is the IST session date the OI bar belongs to, judged by
+    :func:`~brutex.dashboard.movers_snapshot.prev_baseline_provenance`
+    INDEPENDENTLY of the close baseline (a null-OI 1-day bar makes the OI fall
+    to the minute fallback on a possibly DIFFERENT day). ``(None, None)`` when
+    no prior-session OI resolved.
+    """
+
+    value: int | None
+    found_date: date_cls | None
+
+
+def resolve_prev_oi(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> PrevOiBaseline:
+    """Return the previous trading day's open interest before *day* + its session date.
+
+    The OI twin of :func:`~brutex.dashboard.movers_snapshot.resolve_prev_close`:
     reads the symbol's stored ``1day`` partitions and returns the
     ``open_interest`` of the last bar whose IST trading date is strictly before
-    *day*. ``None`` when there is no 1-day data, no prior day, or the prior bar's
-    OI column is null — the OI % change is then an honest ``None``, never faked.
+    *day*. ``PrevOiBaseline(None, None)`` when there is no 1-day data, no prior
+    day, or neither source yields an OI — the OI % change is then an honest
+    ``None``, never faked. The served VALUE is byte-identical to the historical
+    ``_prev_day_oi`` in every branch (the value-seam law) — this resolver ADDS
+    only the found session date. The 1-day OI scan physically stays HERE
+    (movers_futures) so the DEC-LAKE-READ-UNIQUE-001 bypass-gate allowlist keeps
+    its wired dedup entry for this module.
 
     Parameters
     ----------
@@ -870,8 +924,8 @@ def _prev_day_oi(
 
     Returns
     -------
-    int | None
-        The prior trading day's open interest, or ``None``.
+    PrevOiBaseline
+        The prior trading day's open interest + its IST session date.
     """
     import polars as pl
 
@@ -890,17 +944,36 @@ def _prev_day_oi(
             "timestamp"
         )
         if not prior.is_empty():
-            raw_oi = prior.tail(1).get_column("open_interest")[0]
+            last = prior.tail(1)
+            raw_oi = last.get_column("open_interest")[0]
             if raw_oi is not None:
-                return int(raw_oi)
+                found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
+                return PrevOiBaseline(value=int(raw_oi), found_date=found)
     # Fallback: derived ``1day`` partition absent (or no prior 1-day OI) — recover the
     # prior trading day's OI from the stored 1-MINUTE bars (the OI twin of the
-    # ``_prev_day_close`` fallback, the ONE shared bounded helper) so the OI %-change
+    # ``resolve_prev_close`` fallback, the ONE shared bounded helper) so the OI %-change
     # works on an F&O lake whose 1-day derive never ran — the OI Gainers/Losers fix.
     recovered = _prior_session_last_from_minute(
         lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
     )
-    return None if recovered is None else recovered[1]
+    if recovered is None:
+        return PrevOiBaseline(value=None, found_date=None)
+    return PrevOiBaseline(value=recovered[1], found_date=recovered[2])
+
+
+def _prev_day_oi(
+    lake_root: Path, *, exchange: str, segment: str, symbol: str, day: date_cls
+) -> int | None:
+    """Return the previous trading day's 1-day open interest before *day*, or ``None``.
+
+    The byte-identical value seam over :func:`resolve_prev_oi`
+    (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001): every historical caller/pin of the
+    plain-``int`` contract keeps its exact answer; the enriched resolver
+    additionally carries the found session date for the contiguity stamping.
+    """
+    return resolve_prev_oi(
+        lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
+    ).value
 
 
 def _underlying_spot_ltp(
@@ -1056,6 +1129,7 @@ def compute_futures_candidates(
     movers: list[FuturesMover] = []
     skipped = 0
     skip_errors = movers_read_skip_errors()
+    warn_state = _NoncontiguousWarnState()
     for underlying, contracts in by_underlying.items():
         chosen = select_expiry_tier(
             [(sym, exp) for sym, _exch, exp in contracts], on_date=day, tier=tier
@@ -1081,10 +1155,10 @@ def compute_futures_candidates(
             # iv/delta of the shared read are always None here (options consume
             # them — DEC-GREEKS-ENGINE-PR3B-001).
             ltp, volume, value_paisa, oi = read[:4]
-            prev_close = _prev_day_close(
+            close_baseline = resolve_prev_close(
                 lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
             )
-            prev_oi = _prev_day_oi(
+            oi_baseline = resolve_prev_oi(
                 lake_root, exchange=exchange, segment=_FNO_SEGMENT, symbol=chosen, day=day
             )
             spot_ltp = _underlying_spot_ltp(
@@ -1096,20 +1170,59 @@ def compute_futures_candidates(
             log_movers_skip(source="futures", symbol=chosen, error=str(exc))
             skipped += 1
             continue
-        movers.append(
-            compute_futures_mover(
-                underlying=resolved_names.get(underlying, underlying),
-                symbol=chosen,
-                exchange=exchange,
-                ltp=ltp,
-                volume=volume,
-                value_paisa=value_paisa,
-                oi=oi,
-                prev_close=prev_close,
-                spot_ltp=spot_ltp,
-                prev_oi=prev_oi,
-            )
+        mover = compute_futures_mover(
+            underlying=resolved_names.get(underlying, underlying),
+            symbol=chosen,
+            exchange=exchange,
+            ltp=ltp,
+            volume=volume,
+            value_paisa=value_paisa,
+            oi=oi,
+            prev_close=close_baseline.value,
+            spot_ltp=spot_ltp,
+            prev_oi=oi_baseline.value,
         )
+        # Baseline calendar-contiguity provenance, close + OI judged INDEPENDENTLY
+        # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — a null-OI 1-day bar sends the OI
+        # baseline to the minute fallback on a possibly DIFFERENT day. Served
+        # values are untouched; each strictly-False verdict gets ONE capped WARN.
+        cal_exchange = _calendar_exchange(exchange)
+        close_iso, close_contig = prev_baseline_provenance(
+            close_baseline.found_date, day, exchange=cal_exchange
+        )
+        oi_iso, oi_contig = prev_baseline_provenance(
+            oi_baseline.found_date, day, exchange=cal_exchange
+        )
+        mover = replace(
+            mover,
+            prev_close_session=close_iso,
+            prev_close_contiguous=close_contig,
+            oi_baseline_session=oi_iso,
+            oi_baseline_contiguous=oi_contig,
+        )
+        if close_iso is not None and close_contig is False:
+            warn_prev_baseline_noncontiguous(
+                warn_state,
+                kind="prev_close",
+                exchange=exchange,
+                segment=_FNO_SEGMENT,
+                symbol=chosen,
+                snapshot_day=day,
+                found_session=close_iso,
+                expected_session=previous_trading_session(day, exchange=cal_exchange),
+            )
+        if oi_iso is not None and oi_contig is False:
+            warn_prev_baseline_noncontiguous(
+                warn_state,
+                kind="oi",
+                exchange=exchange,
+                segment=_FNO_SEGMENT,
+                symbol=chosen,
+                snapshot_day=day,
+                found_session=oi_iso,
+                expected_session=previous_trading_session(day, exchange=cal_exchange),
+            )
+        movers.append(mover)
 
     return FuturesCandidates(movers=tuple(movers), skipped=skipped, date=date_str, expiry_tier=tier)
 
