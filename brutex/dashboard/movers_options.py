@@ -1103,7 +1103,14 @@ def compute_options_candidates(
     Raises
     ------
     ValueError
-        On a malformed *date* / *time* (the route maps it to a 400).
+        On a malformed *date* / *time* (the route maps it to a 400). The PCR
+        fold's fail-loud law can raise too (DEC-MOVERS-OPTIONS-PCR-001): a
+        negative OI/volume cell (out-of-band lake VALUE corruption — the
+        ingest boundary clamps negatives, so only a tampered Parquet reaches
+        it) raises :class:`~brutex.data.pcr.PcrCorruptionError` (a
+        ``ValueError`` subclass the route maps to an honest 500, never the
+        client-error 400), and a PCR coverage/side wiring mismatch raises a
+        plain ``ValueError`` (unreachable by construction; unit-pinned).
     """
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
@@ -1327,7 +1334,10 @@ def run_options_snapshot(
     Raises
     ------
     ValueError
-        On a malformed *date* / *time* (the route maps it to a 400).
+        On a malformed *date* / *time* (the route maps it to a 400) — plus
+        the PCR fold's raise surface documented on
+        :func:`compute_options_candidates` (corruption →
+        :class:`~brutex.data.pcr.PcrCorruptionError` → route 500).
     """
     candidates = compute_options_candidates(
         lake_root=lake_root,

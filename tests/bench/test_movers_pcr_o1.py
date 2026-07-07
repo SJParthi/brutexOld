@@ -1,21 +1,34 @@
 """O(1)-repeat + zero-extra-I/O bench for the /movers PCR panel (DEC-MOVERS-OPTIONS-PCR-001).
 
-Two pins:
+Three pins (the second added by the round-1 hostile review — the timing arm
+alone benched the cache PRIMITIVE with the PCR object as inert cargo and could
+not fail for a PCR regression):
 
-1. **O(1) repeat (Golden Rule #5):** the PCR rows ride INSIDE the cached
-   :class:`~brutex.dashboard.movers_options.OptionsCandidates` under the
-   existing ``MoversSnapshotCache`` — a warmed repeat poll is a pure dict
+1. **Cache-layer flatness (Golden Rule #5):** the PCR rows ride INSIDE the
+   cached :class:`~brutex.dashboard.movers_options.OptionsCandidates` under the
+   existing ``MoversSnapshotCache`` — a warmed repeat hit is a pure dict
    handoff whose latency is INDEPENDENT of the tier chain size (10-leg vs
-   200-leg chains, ratio under ``ratio_ceiling(5.0)``, tightened to the strict
-   1.1× M4-Pro tier). The fold NEVER re-runs on a hit.
-2. **Zero new I/O on the cold scan:** the candidate scan performs exactly ONE
-   session read per tier contract — the PCR fold adds NO Parquet read (spied
-   reader call count == contract count).
+   200-leg chains, ratio under ``ratio_ceiling(5.0)``). HONEST: this arm times
+   the content-agnostic cache primitive holding a real PCR payload; the
+   end-to-end "fold never re-runs" property is pinned by arm 2, not here.
+2. **Fold-once END-TO-END:** through the REAL route (``build_app`` +
+   ``TestClient``), a monkeypatch spy on ``compute_pcr_rows`` proves the fold
+   runs EXACTLY ONCE across N repeat polls at one generation — the teeth that
+   trip if fold work ever migrates into the per-request
+   ``build_options_payload`` path (which the route-level
+   ``compute_options_candidates`` spy in the integration suite cannot see).
+3. **Zero new I/O on the cold scan:** the candidate scan performs exactly ONE
+   read per tier contract through EACH of the four movers readers
+   (``_read_future_session`` / ``_prev_day_close`` / ``_prev_day_oi`` /
+   ``_underlying_spot_ltp``) — the PCR fold adds NO Parquet read through ANY
+   of them (all four spied; a PCR edit adding a read through any reader trips).
 
 Honest envelope: the FIRST scan per (coordinate, generation) still pays the
 real O(contracts × bars) read, exactly as before PCR — this bench pins only
-the repeat-hit flatness + the fold's zero-read property, NOT an O(1)-total
-claim.
+the repeat-hit flatness + the fold-once + zero-read properties, NOT an
+O(1)-total claim; a hypothetical direct ``pl.read_parquet`` bypassing all four
+readers is out of this net (structurally excluded instead: ``brutex/data/pcr.py``
+and ``brutex/dashboard/movers_pcr.py`` import no reader).
 """
 
 from __future__ import annotations
@@ -109,6 +122,53 @@ class TestPcrRepeatHitIsO1:
         assert ratio < ratio_ceiling(5.0), f"PCR repeat-hit latency ratio {ratio:.2f} scaled"
 
 
+class TestPcrFoldOnceEndToEnd:
+    def test_fold_runs_once_across_repeat_polls_at_one_generation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-1 hostile-review teeth (design §9 test 31's repeat-poll intent,
+        # pinned end-to-end): drive the PRODUCTION path — real lake, real store,
+        # real route — and prove compute_pcr_rows runs EXACTLY ONCE across five
+        # repeat polls at one generation. A regression that re-folded per
+        # request (e.g. moving fold work into build_options_payload) passes the
+        # cache-primitive timing arm AND the integration compute-spy, but trips
+        # HERE.
+        pytest.importorskip("fastapi")
+        import brutex.dashboard.movers_options as mo_module
+        from brutex.dashboard.app import DashboardState, build_app
+        from brutex.data.instrument_store import InstrumentStore
+        from fastapi.testclient import TestClient
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        for strike in (24000, 24100):
+            for i, side in enumerate(("CE", "PE")):
+                writer.write(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol=f"NSE-NIFTY-27Jun24-{strike}-{side}",
+                    interval="1minute",
+                    bars=[_min_bar(minute=0, oi=1000 + strike + i)],
+                )
+        folds = {"n": 0}
+        real_rows = mo_module.compute_pcr_rows
+
+        def _counting(*args: Any, **kwargs: Any) -> Any:
+            folds["n"] += 1
+            return real_rows(*args, **kwargs)
+
+        monkeypatch.setattr(mo_module, "compute_pcr_rows", _counting)
+        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        try:
+            client = TestClient(build_app(DashboardState(), instrument_store=store))
+            params = {"asset": "options", "interval": "1day", "date": _DAY.isoformat()}
+            bodies = [client.get("/api/v1/movers", params=params).json() for _ in range(5)]
+        finally:
+            store.close()
+        assert folds["n"] == 1, "the PCR fold must run once per (coordinate, generation)"
+        assert bodies[0]["pcr"] != []
+        assert all(body["pcr"] == bodies[0]["pcr"] for body in bodies)
+
+
 def _min_bar(*, minute: int, oi: int) -> CandleBar:
     ts = datetime(_DAY.year, _DAY.month, _DAY.day, 3, 46 + minute, tzinfo=UTC)  # 09:16+ IST
     return CandleBar(
@@ -122,12 +182,38 @@ def _min_bar(*, minute: int, oi: int) -> CandleBar:
     )
 
 
+#: The FOUR per-contract movers reader seams the options scan goes through
+#: (movers_options.py read loop) — ALL spied, so "PCR adds NO Parquet read"
+#: is pinned as stated, not for one reader (round-1 hostile-review widen).
+_READER_NAMES: tuple[str, ...] = (
+    "_read_future_session",
+    "_prev_day_close",
+    "_prev_day_oi",
+    "_underlying_spot_ltp",
+)
+
+
+def spy_all_movers_readers(module: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Wrap every per-contract reader in *module* with a call counter."""
+    counts = dict.fromkeys(_READER_NAMES, 0)
+    for name in _READER_NAMES:
+        real = getattr(module, name)
+
+        def _counting(*args: Any, _name: str = name, _real: Any = real, **kwargs: Any) -> Any:
+            counts[_name] += 1
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, _counting)
+    return counts
+
+
 class TestPcrColdScanAddsNoRead:
-    def test_reader_runs_once_per_contract(
+    def test_every_reader_runs_once_per_contract(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Seed a 6-leg chain (3 strikes × CE/PE) and count session reads through
-        # the real scan: exactly one per contract — the PCR fold adds ZERO.
+        # Seed a 6-leg chain (3 strikes × CE/PE) and count reads through the
+        # real scan across ALL FOUR reader seams: exactly one per contract per
+        # reader — the PCR fold adds ZERO through any of them.
         import brutex.dashboard.movers_options as mo_module
 
         writer = ParquetWriter(lake_root=tmp_path)
@@ -144,17 +230,12 @@ class TestPcrColdScanAddsNoRead:
                 interval="1minute",
                 bars=[_min_bar(minute=0, oi=1000 + i)],
             )
-        calls = {"n": 0}
-        real_read = mo_module._read_future_session  # pyright: ignore[reportPrivateUsage]
-
-        def _counting(*args: Any, **kwargs: Any) -> Any:
-            calls["n"] += 1
-            return real_read(*args, **kwargs)
-
-        monkeypatch.setattr(mo_module, "_read_future_session", _counting)
+        counts = spy_all_movers_readers(mo_module, monkeypatch)
         candidates = compute_options_candidates(
             lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
         )
-        assert calls["n"] == len(symbols)  # one read per contract, none for PCR
+        assert counts == dict.fromkeys(_READER_NAMES, len(symbols)), (
+            "each movers reader must run exactly once per contract — PCR adds none"
+        )
         assert len(candidates.pcr) == 1
         assert candidates.pcr[0].pcr.coverage.legs_total == len(symbols)

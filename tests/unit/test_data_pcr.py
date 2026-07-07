@@ -23,6 +23,7 @@ from brutex.data.pcr import (
     COVERAGE_FULL,
     COVERAGE_PARTIAL,
     PUT_SIDE,
+    PcrCorruptionError,
     PcrCoverage,
     PcrResult,
     RatioOutcome,
@@ -129,6 +130,21 @@ class TestFoldSideRatio:
         # Clause 3: a negative cell is lake corruption — trip, never sum.
         with pytest.raises(ValueError, match="negative metric -7"):
             _fold([(PUT_SIDE, -7, None)])
+
+    def test_negative_metric_is_the_typed_corruption_error(self) -> None:
+        # Round-1 hostile-review fold: the negative-metric trip carries the
+        # DISTINCT PcrCorruptionError type — a ValueError SUBCLASS (the §1.1
+        # clause-3 fail-loud law byte-unchanged for every existing caller) that
+        # a route can single out so lake corruption maps to an honest 500,
+        # never the client-error 400 the plain ValueError mapping serves.
+        assert issubclass(PcrCorruptionError, ValueError)
+        with pytest.raises(PcrCorruptionError, match="negative metric -7"):
+            _fold([(PUT_SIDE, -7, None)])
+        # The wiring/side trips stay PLAIN ValueError — never mislabelled as
+        # lake corruption (they are caller programming errors).
+        with pytest.raises(ValueError) as unknown_side:
+            _fold([("FUT", 1, None)])
+        assert not isinstance(unknown_side.value, PcrCorruptionError)
 
     def test_unknown_side_raises_loudly(self) -> None:
         # Clause 1: a wrong side is a programming error, never a third bucket.

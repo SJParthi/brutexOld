@@ -176,9 +176,12 @@
            DEC-DASHBOARD-XSS-HARDENING-001). OI PCR is a point-in-time ratio of
            each leg's LAST open_interest at the as-of instant; Vol PCR is the
            session-to-cutoff flow ratio — the SAME reads the table rows use, so
-           panel and table can never disagree. "~" marks non-full coverage. -->
+           panel and table can never disagree. "~" marks non-full coverage.
+           Honest limit (design edge 20): the all-exchanges view folds an
+           underlying listed on both NSE and BSE into ONE row — the same
+           population the table ranks; pick an exchange for a per-listing PCR. -->
       <div class="note" id="pcrPanel" hidden>
-        <b>PCR (put/call) — tier expiry · OI at the as-of instant · volume session-to-cutoff</b>
+        <b>PCR (put/call) — tier expiry · OI at the as-of instant · volume session-to-cutoff · all-exchanges view folds both listings of an underlying into one row (the population the table ranks)</b>
         <div id="pcrRows"></div>
       </div>
 

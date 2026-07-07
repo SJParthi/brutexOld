@@ -860,6 +860,10 @@ class TestCalendarDrivenTiersEndToEnd:
         )
         assert cands.movers == ()  # no 21-Jul candles pulled
         assert cands.calendar_only_expiry is True
+        # Design test-plan item 25's calendar-only × PCR permutation: the
+        # early-return honest-no-data shape carries NO pcr rows — never a
+        # fabricated chain (DEC-MOVERS-OPTIONS-PCR-001 edge 15).
+        assert cands.pcr == ()
 
     def test_near_weekly_resolves_to_07jul_with_real_data(self, tmp_path: Path) -> None:
         # Near weekly = 07-Jul, which HAS pulled candles → real movers, not calendar-only.
@@ -1507,6 +1511,33 @@ class TestOptionsPcr:
         assert (row["put_oi"], row["call_oi"]) == (0, 1000)
         assert (row["put_volume"], row["call_volume"]) == (0, 100)
 
+    def test_negative_oi_lake_corruption_is_an_honest_500_not_a_400(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Round-1 hostile-review fold: the fold's fail-loud negative-metric trip
+        # (design edge 5) must surface as a SERVER-side 500 with a
+        # corruption-specific detail — never ride the route's malformed-input
+        # 400 mapping. Reachable ONLY out-of-band (the ingest boundary clamps
+        # `max(0, …)` and CandleBar rejects negatives), so the corruption is
+        # seeded by rewriting the raw Parquet cell directly.
+        import polars as pl
+
+        _seed_pcr_lake(tmp_path)
+        files = list((tmp_path / "bars" / _EXCHANGE / "FNO" / _PE / "1minute").rglob("*.parquet"))
+        assert files
+        for path in files:
+            frame = pl.read_parquet(path)
+            frame.with_columns(pl.col("open_interest") * -1).write_parquet(path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        response = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13"},
+        )
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail.startswith("lake corruption:")
+        assert "negative metric" in detail
+
     def test_all_put_chain_reads_real_put_sums(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
@@ -1603,6 +1634,85 @@ class TestOptionsPcr:
         assert calls["n"] == 2  # recomputed, never stale
         assert third["pcr"] == first["pcr"]
 
+    def test_warm_grid_coordinate_poll_is_a_cache_hit_carrying_pcr(
+        self,
+        store: InstrumentStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Design test #28 (warm parity, round-1 hostile-review fold): prime the
+        # INJECTED movers cache exactly as the app's `_make_opt_job` warm job
+        # does — an `options_warm_grid()` coordinate keyed by `candidate_key` +
+        # `compute_options_candidates` at `latest_movers_date` and the live
+        # generation — then poll the route at that coordinate: a PURE cache hit
+        # (compute never re-invoked) whose payload carries the warmed PCR rows.
+        import brutex.dashboard.app as app_module
+        from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
+        from brutex.dashboard.movers_snapshot import DEFAULT_INTERVAL
+        from brutex.dashboard.movers_warm import latest_movers_date, options_warm_grid
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        _seed_pcr_lake(tmp_path)
+        # A spot 1day partition so latest_movers_date resolves the seeded day —
+        # the SAME date the default (no-date) route poll resolves.
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[_day_bar(day=_DAY, close="23600", oi=None)],
+        )
+        warm_date = latest_movers_date(tmp_path)
+        assert warm_date is not None and warm_date == _DAY.isoformat()
+        # The default-poll coordinate MUST be on the warm grid (all-exchange ×
+        # near × all) — the parity this test pins.
+        exchange: str | None = None
+        tier, track = "near", "all"
+        assert {"exchange": exchange, "expiry_tier": tier, "expiry_track": track} in (
+            options_warm_grid()
+        )
+        movers_cache = MoversSnapshotCache()
+        summary_cache = SummaryCache()
+        warm_date_str: str = warm_date
+        movers_cache.get_or_compute(
+            candidate_key(
+                asset="options",
+                exchange=exchange,
+                interval=DEFAULT_INTERVAL,
+                date=warm_date_str,
+                time=None,
+                expiry_tier=tier,
+                expiry_track=track,
+            ),
+            generation=summary_cache.generation,
+            compute=lambda: compute_options_candidates(
+                lake_root=tmp_path,
+                interval=DEFAULT_INTERVAL,
+                date=warm_date_str,
+                time=None,
+                expiry_tier=tier,
+                expiry_track=track,
+                exchange=exchange,
+            ),
+        )
+
+        def _never(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("a warmed coordinate poll must be a pure cache hit")
+
+        monkeypatch.setattr(app_module, "compute_options_candidates", _never)
+        client = TestClient(
+            build_app(
+                DashboardState(),
+                instrument_store=store,
+                movers_cache=movers_cache,
+                summary_cache=summary_cache,
+            )
+        )
+        body = client.get("/api/v1/movers", params={"asset": "options"}).json()
+        assert len(body["pcr"]) == 1
+        assert body["pcr"][0]["underlying"] == "NIFTY"
+        assert body["pcr"][0]["expiry"] == "2024-06-27"
+
     def test_rename_carries_parsed_key_and_display_label(self, tmp_path: Path) -> None:
         # Edge 14 end-to-end: a display rename never re-keys the PCR group — the
         # row carries the PARSED underlying + the renamed display label, and the
@@ -1634,21 +1744,25 @@ class TestOptionsPcr:
     def test_pcr_reuses_the_scan_reads_zero_extra_io(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Zero-new-I/O pin: the candidate scan performs EXACTLY one session read
-        # per tier contract — the PCR fold adds none.
+        # Zero-new-I/O pin across ALL FOUR per-contract reader seams (round-1
+        # hostile-review widen — a single-reader spy would miss a PCR edit that
+        # added a read through _prev_day_close / _prev_day_oi /
+        # _underlying_spot_ltp): the candidate scan performs EXACTLY one read
+        # per tier contract through EACH reader — the PCR fold adds none.
         import brutex.dashboard.movers_options as mo_module
 
+        from tests.bench.test_movers_pcr_o1 import spy_all_movers_readers
+
         _seed_pcr_lake(tmp_path)
-        calls = {"n": 0}
-        real_read = mo_module._read_future_session
-
-        def _counting(*args: Any, **kwargs: Any) -> Any:
-            calls["n"] += 1
-            return real_read(*args, **kwargs)
-
-        monkeypatch.setattr(mo_module, "_read_future_session", _counting)
+        counts = spy_all_movers_readers(mo_module, monkeypatch)
         candidates = compute_options_candidates(
             lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
         )
-        assert calls["n"] == 2  # one read per contract (CE + PE) — none for PCR
+        # One read per contract (CE + PE) per reader — none for PCR.
+        assert counts == {
+            "_read_future_session": 2,
+            "_prev_day_close": 2,
+            "_prev_day_oi": 2,
+            "_underlying_spot_ltp": 2,
+        }
         assert len(candidates.pcr) == 1

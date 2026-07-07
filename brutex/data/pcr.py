@@ -33,6 +33,7 @@ __all__ = [
     "COVERAGE_FULL",
     "COVERAGE_PARTIAL",
     "PUT_SIDE",
+    "PcrCorruptionError",
     "PcrCoverage",
     "PcrResult",
     "RatioOutcome",
@@ -40,6 +41,22 @@ __all__ = [
     "compute_pcr",
     "fold_side_ratio",
 ]
+
+
+class PcrCorruptionError(ValueError):
+    """A negative metric cell reached the fold — lake VALUE corruption.
+
+    OI/volume are non-negative by lake contract (the ingest boundary clamps
+    ``max(0, …)`` and :class:`~brutex.data.models.CandleBar` rejects
+    negatives), so a negative cell can only come from an OUT-OF-BAND write —
+    a value-corrupted Parquet file. Subclasses :class:`ValueError` so the
+    fold's fail-loud law (§1.1 clause 3) is byte-unchanged for every existing
+    caller, while a ROUTE can distinguish server-side lake corruption from a
+    client-input ``ValueError``: the ``/api/v1/movers`` route answers an
+    honest 500 for this error, never its client-error 400 mapping
+    (DEC-MOVERS-OPTIONS-PCR-001 round-1 hostile-review fold).
+    """
+
 
 #: Canonical option side tokens (the vendor CE/PE vocabulary, CLAUDE.md §6).
 PUT_SIDE: Final[str] = "PE"
@@ -257,8 +274,10 @@ def fold_side_ratio[LegT](
        the fold is a programming error, never a silent third bucket.
     2. ``metric(leg) is None`` → excluded from BOTH sums,
        ``missing_legs += 1`` — an absent cell is NEVER treated as ``0``.
-    3. ``metric(leg) < 0`` → :class:`ValueError` — OI/volume are non-negative
-       by lake contract; a negative cell is corruption and must trip.
+    3. ``metric(leg) < 0`` → :class:`PcrCorruptionError` (a :class:`ValueError`
+       subclass) — OI/volume are non-negative by lake contract; a negative
+       cell is corruption and must trip. The distinct type lets a route map
+       lake corruption to an honest 500, never a client-error 400.
     4. ``denominator_sum > 0`` → ``ratio = Decimal(numerator_sum) /
        Decimal(denominator_sum)`` under the default context (28 significant
        digits — deterministic, full precision; never ``round_money``).
@@ -285,8 +304,11 @@ def fold_side_ratio[LegT](
 
     Raises
     ------
+    PcrCorruptionError
+        On a negative metric cell (lake VALUE corruption; a
+        :class:`ValueError` subclass).
     ValueError
-        On identical side tokens, an unknown leg side, or a negative metric.
+        On identical side tokens or an unknown leg side (caller wiring bugs).
     """
     if numerator_side == denominator_side:
         raise ValueError(f"numerator and denominator sides are identical: {numerator_side!r}")
@@ -302,7 +324,7 @@ def fold_side_ratio[LegT](
             missing_legs += 1
             continue
         if value < 0:
-            raise ValueError(f"negative metric {value!r}")
+            raise PcrCorruptionError(f"negative metric {value!r}")
         if side == numerator_side:
             numerator_sum += value
         else:
@@ -357,9 +379,12 @@ def compute_pcr[LegT](
 
     Raises
     ------
+    PcrCorruptionError
+        On a negative metric cell (lake VALUE corruption; a
+        :class:`ValueError` subclass).
     ValueError
-        On any fold-law violation (unknown side / negative metric) or a
-        coverage wiring mismatch.
+        On any other fold-law violation (unknown side / identical sides) or
+        a coverage wiring mismatch.
     """
     oi = fold_side_ratio(
         legs,

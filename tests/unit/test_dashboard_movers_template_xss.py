@@ -98,6 +98,10 @@ def test_movers_pcr_panel_present_hidden_and_dom_rendered() -> None:
     assert '$("pcrPanel").hidden = true; $("pcrRows").textContent = "";' in html
     # The success-path guard: options-only, non-gated, array-guarded.
     assert 'state.asset === "options" && !j.gated && Array.isArray(j.pcr) && j.pcr.length' in html
+    # Design edge 20's honest limit STATED in the panel help text (round-1
+    # hostile-review fold): the all-exchanges view folds both listings of an
+    # underlying into one row — the same population the table ranks.
+    assert "all-exchanges view folds both listings of an underlying into one row" in html
 
 
 def test_movers_pcr_renderer_never_touches_innerhtml() -> None:
