@@ -28,6 +28,17 @@ reader scanned the ingest ``sweep-all.jsonl`` for the alias NAME, so counts
 were ALWAYS ``None`` and the T5 tripwire was dead). An absent/unreadable
 payload is an HONEST ``None`` — rendered ``"?"``, NEVER a fabricated 0 or a
 ``-1`` sentinel (the ``bars_net_new`` precedent).
+
+FRESHNESS LAW (review round 3, findings 1+2): ``cmd_sweep_all`` opens the
+supervisor chain resume/APPEND across runs, so the file accumulates
+``SUPERVISOR_COMPLETE`` entries from every prior night. A run that writes no
+completion of its own — a preflight refusal (exit 1, returned BEFORE the
+supervisor audit is even opened), a ``SUPERVISOR_ABORT`` (exit 2), a crash —
+must therefore NOT be served the PRIOR run's tally as tonight's.
+:func:`read_sweep_tail_counts` accepts a completion ONLY when its ``ts_utc``
+(stamped ``time.time()`` on every entry, sweep_audit.py) is at/after the
+caller's pre-sweep ``since_utc``; a stale/unverifiable completion is the same
+HONEST ``None``.
 """
 
 from __future__ import annotations
@@ -174,14 +185,23 @@ def nightly_sweep_kwargs(
     return kwargs
 
 
-def read_sweep_tail_counts(audit_path: Path) -> Mapping[str, int] | None:
-    """The last supervisor-completion payload's integer counters, or ``None``.
+def read_sweep_tail_counts(audit_path: Path, *, since_utc: float) -> Mapping[str, int] | None:
+    """THIS run's supervisor-completion integer counters, or ``None``.
 
     *audit_path* must be the SUPERVISOR chain
     (:func:`sweep_supervisor_audit_path`); the match is the imported engine
-    action VALUE (``"SUPERVISOR_COMPLETE"``). Best-effort by contract: ANY
-    read/parse problem (absent file, torn line, no completion entry yet)
-    returns ``None`` — the honest absence the report renders as ``"?"``. Only
+    action VALUE (``"SUPERVISOR_COMPLETE"``). The chain is opened
+    resume/APPEND across sweep runs (cli.py), so the newest completion must
+    additionally be FRESH: its ``ts_utc`` (stamped ``time.time()`` on every
+    entry) must be ``>= since_utc``, the caller's clock reading captured
+    BEFORE invoking the sweep. A refused/aborted/crashed sweep writes no new
+    completion — the tail completion is then a PRIOR run's tally and reading
+    it as tonight's would fabricate counts on exactly the nights the operator
+    most needs the truth (review round 3, findings 1+2; Golden Rule #1).
+
+    Best-effort by contract: ANY read/parse problem (absent file, torn line,
+    no completion entry yet, a stale or timestamp-less completion) returns
+    ``None`` — the honest absence the report renders as ``"?"``. Only
     genuinely-integer payload values are kept (a bool is not a counter).
     """
     try:
@@ -198,6 +218,13 @@ def read_sweep_tail_counts(audit_path: Path) -> Mapping[str, int] | None:
             continue  # a torn tail line — keep scanning upward
         if not isinstance(entry, dict) or entry.get("action") != complete_action:
             continue
+        # The newest completion decides; any earlier one is strictly older,
+        # so a stale/unverifiable timestamp here is a terminal honest None.
+        ts_utc = entry.get("ts_utc")
+        if isinstance(ts_utc, bool) or not isinstance(ts_utc, int | float):
+            return None  # timestamp-less/junk entry — freshness unverifiable
+        if ts_utc < since_utc:
+            return None  # a PRIOR run's tally — never reported as tonight's
         payload = entry.get("payload")
         if not isinstance(payload, dict):
             return None

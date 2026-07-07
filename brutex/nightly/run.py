@@ -496,10 +496,15 @@ def _run_locked(
         # The counts live in the SUPERVISOR audit chain (SweepGuards.audit →
         # sweep-all-supervisor.jsonl) — NEVER the ingest sweep-all.jsonl,
         # which carries no completion payload (review round 2, finding 1).
+        # That chain is APPEND-across-runs, so the read is freshness-gated on
+        # the pre-sweep `since` (the same guard the contract probe already
+        # rode): a refused/aborted/crashed sweep writes no NEW completion and
+        # must read honest-None, never a PRIOR night's tally presented as
+        # tonight's (review round 3, findings 1+2).
         audit_path = sweep_supervisor_audit_path(plan.results_root)
         had_prior_audit = audit_path.exists()
         code = int(run_sweep(**dict(plan.sweep_kwargs)))
-        counts = read_sweep_tail_counts(audit_path)
+        counts = read_sweep_tail_counts(audit_path, since_utc=since)
         probe = probe_contract_artifacts(plan.results_root, since_utc=since)
         absent_artifacts = probe.absent
         if "run_manifest" in probe.found:
@@ -510,7 +515,9 @@ def _run_locked(
                     counts = {**counts, "skipped_dedup_manifest": dedup}
         if counts is None:
             extra_notes.append(
-                "sweep counts unknown — no SUPERVISOR_ACTION_COMPLETE payload readable"
+                "sweep counts unknown — no fresh SUPERVISOR_COMPLETE payload for "
+                "THIS run readable (a prior run's tail tally is never reported "
+                "as tonight's)"
             )
         else:
             _check_sweep_counts(code, counts)

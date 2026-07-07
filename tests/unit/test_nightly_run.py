@@ -104,16 +104,22 @@ def _lake(tmp_path: Path) -> tuple[Path, Path]:
     return lake, results
 
 
-def _write_sweep_completion(results: Path, payload: dict[str, Any]) -> None:
+def _write_sweep_completion(
+    results: Path, payload: dict[str, Any], *, ts_utc: float | None = None
+) -> None:
     """Write the tally the way PRODUCTION does: the SUPERVISOR audit chain
     (``SweepGuards.audit`` → ``audit/sweep-all-supervisor.jsonl``) with the
     REAL engine action constant (value ``"SUPERVISOR_COMPLETE"``) — never the
     ingest ``sweep-all.jsonl`` (review round 1: a fixture shaped after the
-    buggy reader masked both the wrong file AND the wrong action string)."""
+    buggy reader masked both the wrong file AND the wrong action string).
+    *ts_utc* overrides the entry clock (default: the writer's real
+    ``time.time()`` stamp, which reads FRESH against the fake seam clock)."""
     path = results / "audit" / "sweep-all-supervisor.jsonl"
     resume = path.exists()
     with SweepAuditWriter.open(path, actor="sweep", resume=resume) as audit:
-        audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=payload)
+        audit.append(
+            action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=payload, ts_utc=ts_utc
+        )
 
 
 _COHERENT = {
@@ -636,6 +642,46 @@ def test_sweep_refused_exit_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     # No completion payload ⇒ the honest unknown note.
     assert any("sweep counts unknown" in note for note in report.honesty_notes)
     assert report.counts["sweep_run"] is None
+
+
+@pytest.mark.parametrize(
+    ("sweep_exit", "expected_status"),
+    [
+        pytest.param(1, LinkStatus.REFUSED, id="preflight-refusal-exit-1"),
+        pytest.param(2, LinkStatus.FAILED, id="abort-exit-2"),
+    ],
+)
+def test_sweep_without_own_completion_never_reports_prior_run_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sweep_exit: int,
+    expected_status: LinkStatus,
+) -> None:
+    """Review round 3, findings 1+2: the supervisor chain is APPEND across
+    nights, so night 1's SUPERVISOR_COMPLETE stays at the tail. Night 2's
+    sweep is refused (exit 1 — e.g. the documented every-night SLA-overrun
+    refusal, which returns BEFORE the supervisor audit is even opened) or
+    aborted (exit 2, SUPERVISOR_ABORT, no COMPLETE): tonight's report must
+    read honest-None ("?"), never night 1's tally presented as tonight's —
+    which T5 could not catch (a prior night's numbers are internally
+    coherent, and exit 1/2 with failed==0 trips nothing)."""
+    lake, results = _lake(tmp_path)
+    # Night 1's completion, stamped BEFORE tonight's fake clock (1000.0).
+    prior = {**_COHERENT, "tuples_run": 100, "tuples_failed": 0, "tuples_total": 105}
+    _write_sweep_completion(results, prior, ts_utc=500.0)
+    # Tonight's sweep writes NO completion of its own.
+    seams, _alerter, _pipeline, _calls = _seams(
+        monkeypatch, results, sweep_exit=sweep_exit, sweep_payload=None
+    )
+    report = run_nightly(_plan(lake, results, tmp_path), seams=seams)
+    sweep = report.links[5]
+    assert sweep.status is expected_status
+    assert sweep.counts == {}  # night 1's tally NEVER folded into tonight's link
+    assert report.counts["sweep_run"] is None  # rendered "?", not 100
+    assert report.counts["sweep_failed"] is None
+    assert any("sweep counts unknown" in note for note in report.honesty_notes)
+    # No fabricated-coherence tripwire either way — the counts are absent.
+    assert not any(w.name == "sweep_counts_incoherent" for w in report.tripwires)
 
 
 def test_sweep_t5_incoherent_total_marks_suspect(

@@ -13,10 +13,16 @@ This file drives the REAL ``cli.cmd_sweep_all`` over a tiny persisted lake
 reader finds the tally at the production path/action — and that the ingest
 audit genuinely never carries it. The fixture can no longer drift to match a
 buggy reader, because there is no fixture: production writes the bytes.
+
+Round 3 (findings 1+2) added the freshness gate: the same REAL bytes are also
+read with a ``since_utc`` captured AFTER the completion — the next-night
+shape over the append-across-runs chain — and must return honest ``None``,
+never a prior run's tally.
 """
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -90,6 +96,7 @@ def test_tail_counts_read_from_a_real_cmd_sweep_all_run(
     lake_root, catalog_path = _persist(tmp_path)
     results_root = tmp_path / "sweeps"
 
+    since = time.time()  # the nightly's pre-sweep clock capture (run.py)
     rc = cli.cmd_sweep_all(
         lake_root=lake_root,
         catalog_path=catalog_path,
@@ -114,11 +121,14 @@ def test_tail_counts_read_from_a_real_cmd_sweep_all_run(
     )
     assert rc == 0
 
-    # The nightly reader finds the tally at the PRODUCTION path + action.
+    # The nightly reader finds the tally at the PRODUCTION path + action, and
+    # the freshness gate ACCEPTS it against the pre-sweep `since` — the live
+    # proof that production's ts_utc stamp (time.time(), sweep_audit.py) is
+    # clock-coherent with run.py's pre-sweep capture.
     sup_path = sweep_supervisor_audit_path(results_root)
     assert sup_path == results_root / "audit" / "sweep-all-supervisor.jsonl"
     assert sup_path.exists()
-    counts = read_sweep_tail_counts(sup_path)
+    counts = read_sweep_tail_counts(sup_path, since_utc=since)
     assert counts is not None
     # The T5 identity the nightly checks, on REAL supervisor numbers.
     assert counts["tuples_total"] == (
@@ -131,5 +141,11 @@ def test_tail_counts_read_from_a_real_cmd_sweep_all_run(
     assert counts["tuples_total"] >= 1
     assert counts["tuples_failed"] == 0  # exit 0 ⟺ failed == 0 (the exit law)
 
+    # The round-3 freshness gate on REAL bytes: a `since` captured AFTER this
+    # completion (i.e. the NEXT night's pre-sweep capture over the
+    # append-across-runs chain) refuses the tail tally — a refused/aborted
+    # night can never report this run's counts as its own.
+    assert read_sweep_tail_counts(sup_path, since_utc=time.time()) is None
+
     # The round-1 wrong target: the ingest audit NEVER carries the completion.
-    assert read_sweep_tail_counts(results_root / "audit" / "sweep-all.jsonl") is None
+    assert read_sweep_tail_counts(results_root / "audit" / "sweep-all.jsonl", since_utc=0.0) is None

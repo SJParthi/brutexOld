@@ -4,8 +4,10 @@
 The kwargs golden for a representative Namespace, the signature-drift pin
 against ``inspect.signature(cli.cmd_sweep_all)``, the structural absence of
 the UNATTENDED_ESCAPE_FLAGS (argv fuzz), the date defaults, the audit-tail
-counts reader (happy / torn / missing → None — never a ``-1`` sentinel), the
-exit→LinkResult mapping, and both arms of the P2/P3 contract-artifact probe.
+counts reader (happy / torn / missing → None — never a ``-1`` sentinel; the
+round-3 freshness gate: a PRIOR run's completion in the append-across-runs
+chain is never reported as tonight's), the exit→LinkResult mapping, and both
+arms of the P2/P3 contract-artifact probe.
 """
 
 from __future__ import annotations
@@ -162,13 +164,16 @@ def test_explicit_dates_survive_defaults() -> None:
 # ── read_sweep_tail_counts ───────────────────────────────────────────────
 
 
-def _write_audit(path: Path, *, payload: dict[str, Any]) -> None:
+def _write_audit(path: Path, *, payload: dict[str, Any], ts_utc: float | None = None) -> None:
     """Write the completion the way PRODUCTION does — the REAL engine action
     constant (value ``"SUPERVISOR_COMPLETE"``), never the alias NAME literal
-    the review-round-1 reader drifted to."""
+    the review-round-1 reader drifted to. *ts_utc* overrides the entry clock
+    (default: the writer's real ``time.time()`` stamp — production shape)."""
     with SweepAuditWriter.open(path, actor="sweep") as audit:
         audit.append(action="SWEEP_START", subject="sweep:x", payload={"total": 2})
-        audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=payload)
+        audit.append(
+            action=SUPERVISOR_ACTION_COMPLETE, subject="sweep:x", payload=payload, ts_utc=ts_utc
+        )
 
 
 def test_supervisor_audit_path_matches_cli_wiring() -> None:
@@ -193,7 +198,7 @@ def test_reader_keys_on_the_real_supervisor_action_value(tmp_path: Path) -> None
         json.dumps({"action": "SUPERVISOR_ACTION_COMPLETE", "payload": {"tuples_total": 5}}) + "\n",
         encoding="utf-8",
     )
-    assert read_sweep_tail_counts(path) is None
+    assert read_sweep_tail_counts(path, since_utc=0.0) is None
 
 
 def test_tail_counts_happy_path(tmp_path: Path) -> None:
@@ -208,7 +213,7 @@ def test_tail_counts_happy_path(tmp_path: Path) -> None:
         "note": "n/a",  # a string is NOT a counter — filtered
     }
     _write_audit(audit_path, payload=payload)
-    counts = read_sweep_tail_counts(audit_path)
+    counts = read_sweep_tail_counts(audit_path, since_utc=0.0)
     assert counts == {
         "tuples_total": 6,
         "tuples_run": 4,
@@ -223,7 +228,7 @@ def test_tail_counts_last_completion_wins(tmp_path: Path) -> None:
     with SweepAuditWriter.open(audit_path, actor="sweep") as audit:
         audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="s", payload={"tuples_total": 1})
         audit.append(action=SUPERVISOR_ACTION_COMPLETE, subject="s", payload={"tuples_total": 9})
-    assert read_sweep_tail_counts(audit_path) == {"tuples_total": 9}
+    assert read_sweep_tail_counts(audit_path, since_utc=0.0) == {"tuples_total": 9}
 
 
 def test_tail_counts_torn_tail_scans_upward(tmp_path: Path) -> None:
@@ -231,28 +236,102 @@ def test_tail_counts_torn_tail_scans_upward(tmp_path: Path) -> None:
     _write_audit(audit_path, payload={"tuples_total": 3})
     with open(audit_path, "a", encoding="utf-8") as fp:
         fp.write('{"action": "SUPERVISOR_COMPL')  # torn mid-write
-    assert read_sweep_tail_counts(audit_path) == {"tuples_total": 3}
+    assert read_sweep_tail_counts(audit_path, since_utc=0.0) == {"tuples_total": 3}
 
 
 def test_tail_counts_honest_none_arms(tmp_path: Path) -> None:
     # Missing file.
-    assert read_sweep_tail_counts(tmp_path / "absent.jsonl") is None
+    assert read_sweep_tail_counts(tmp_path / "absent.jsonl", since_utc=0.0) is None
     # No completion entry.
     only_start = tmp_path / "start-only.jsonl"
     with SweepAuditWriter.open(only_start, actor="sweep") as audit:
         audit.append(action="SWEEP_START", subject="s", payload={})
-    assert read_sweep_tail_counts(only_start) is None
+    assert read_sweep_tail_counts(only_start, since_utc=0.0) is None
     # Blank lines + non-dict JSON lines are skipped, not crashes.
     weird = tmp_path / "weird.jsonl"
     weird.write_text('\n[1, 2]\n{"action": "OTHER"}\n\n', encoding="utf-8")
-    assert read_sweep_tail_counts(weird) is None
-    # A completion entry whose payload is not a mapping → honest None.
+    assert read_sweep_tail_counts(weird, since_utc=0.0) is None
+    # A FRESH completion entry whose payload is not a mapping → honest None.
     bad_payload = tmp_path / "bad-payload.jsonl"
     bad_payload.write_text(
-        json.dumps({"action": SUPERVISOR_ACTION_COMPLETE, "payload": [1]}) + "\n",
+        json.dumps({"action": SUPERVISOR_ACTION_COMPLETE, "ts_utc": 1.0, "payload": [1]}) + "\n",
         encoding="utf-8",
     )
-    assert read_sweep_tail_counts(bad_payload) is None
+    assert read_sweep_tail_counts(bad_payload, since_utc=0.0) is None
+
+
+# ── read_sweep_tail_counts — the round-3 freshness gate ─────────────────
+#
+# The supervisor chain is opened resume/APPEND across sweep runs (cli.py), so
+# it accumulates SUPERVISOR_COMPLETE entries from prior nights. A run that
+# writes no completion of its own (preflight refusal exit 1 — returned BEFORE
+# the supervisor audit is even opened; SUPERVISOR_ABORT exit 2; a crash) must
+# NOT be served the PRIOR run's tally as tonight's (review round 3, findings
+# 1+2 — Golden Rule #1).
+
+
+def test_tail_counts_stale_prior_run_completion_is_none(tmp_path: Path) -> None:
+    """A completion stamped BEFORE this run's pre-sweep `since` is a PRIOR
+    run's tally — honest None, never fabricated as tonight's counts."""
+    audit_path = tmp_path / "sweep-all-supervisor.jsonl"
+    _write_audit(audit_path, payload={"tuples_total": 100, "tuples_run": 100}, ts_utc=100.0)
+    assert read_sweep_tail_counts(audit_path, since_utc=200.0) is None
+
+
+def test_tail_counts_fresh_completion_at_boundary_is_accepted(tmp_path: Path) -> None:
+    """`ts_utc == since_utc` is fresh (>=): a completion written within the
+    same clock tick as the pre-sweep capture is this run's."""
+    audit_path = tmp_path / "sweep-all-supervisor.jsonl"
+    _write_audit(audit_path, payload={"tuples_total": 3}, ts_utc=200.0)
+    assert read_sweep_tail_counts(audit_path, since_utc=200.0) == {"tuples_total": 3}
+
+
+def test_tail_counts_stale_then_fresh_completion_reads_the_fresh_one(tmp_path: Path) -> None:
+    """The append-across-runs shape: last night's completion + tonight's —
+    the reversed scan finds tonight's first and the gate accepts it."""
+    audit_path = tmp_path / "sweep-all-supervisor.jsonl"
+    with SweepAuditWriter.open(audit_path, actor="sweep") as audit:
+        audit.append(
+            action=SUPERVISOR_ACTION_COMPLETE,
+            subject="s",
+            payload={"tuples_total": 100},
+            ts_utc=100.0,
+        )
+        audit.append(
+            action=SUPERVISOR_ACTION_COMPLETE,
+            subject="s",
+            payload={"tuples_total": 7},
+            ts_utc=300.0,
+        )
+    assert read_sweep_tail_counts(audit_path, since_utc=200.0) == {"tuples_total": 7}
+
+
+def test_tail_counts_timestampless_or_junk_ts_completion_is_none(tmp_path: Path) -> None:
+    """Freshness must be VERIFIABLE: a completion with a missing or non-numeric
+    ``ts_utc`` (a bool is not a timestamp) is an honest None — the reader never
+    guesses a tally is tonight's."""
+    missing_ts = tmp_path / "missing-ts.jsonl"
+    missing_ts.write_text(
+        json.dumps({"action": SUPERVISOR_ACTION_COMPLETE, "payload": {"tuples_total": 5}}) + "\n",
+        encoding="utf-8",
+    )
+    assert read_sweep_tail_counts(missing_ts, since_utc=0.0) is None
+    junk_ts = tmp_path / "junk-ts.jsonl"
+    junk_ts.write_text(
+        json.dumps(
+            {"action": SUPERVISOR_ACTION_COMPLETE, "ts_utc": "yesterday", "payload": {"n": 1}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert read_sweep_tail_counts(junk_ts, since_utc=0.0) is None
+    bool_ts = tmp_path / "bool-ts.jsonl"
+    bool_ts.write_text(
+        json.dumps({"action": SUPERVISOR_ACTION_COMPLETE, "ts_utc": True, "payload": {"n": 1}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert read_sweep_tail_counts(bool_ts, since_utc=0.0) is None
 
 
 # ── sweep_link_result ────────────────────────────────────────────────────
