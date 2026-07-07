@@ -58,7 +58,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
-from brutex.calendars.nse import IST
+from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
@@ -3596,12 +3596,21 @@ def build_app(
                 _pull_job.set_phase("prebuild")
                 _prebuild_gate.set_phase("prebuild")
 
-                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001): resolve the forming-session
-                # daily cutoff ONCE per prebuild run and pin it into BOTH paths
-                # (the sequential closure below AND the threaded path via the
-                # guard) — so a run straddling midnight IST derives the same
-                # `1day` set regardless of path or symbol order.
-                prebuild_cutoff = datetime.now(UTC).astimezone(IST).date()
+                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001) × DEC-DAILY-CUTOFF-
+                # GROUNDED-001: pin the forming-session cutoff's IST INSTANT
+                # ONCE per prebuild run and thread it into BOTH paths (the
+                # sequential closure below AND the threaded path via the
+                # guard) — one instant, so a run straddling midnight IST (or
+                # the session close) derives the same `1day` set regardless of
+                # path or symbol order. Pinning the INSTANT (not a plain
+                # today-IST DATE, the #1401 M1 regression this corrects) keeps
+                # the session-close-aware daily_derive_cutoff default LIVE on
+                # this production path — a POST-CLOSE pipeline run derives the
+                # run day's own 1day bar (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001,
+                # restored) — and keeps the dense symbols' data-grounded arm
+                # reachable (an explicit daily_before date would be LAW and
+                # suppress both).
+                prebuild_cutoff_now = now_ist()
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -3611,7 +3620,7 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
-                        daily_before=prebuild_cutoff,
+                        daily_cutoff_now=prebuild_cutoff_now,
                         # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
                         # substitution WARNs only for a SPOT INDEX target
                         # (PrebuildTarget.dense = Instrument.is_index).
@@ -3640,7 +3649,7 @@ def build_app(
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
                         workers=prebuild_workers,
-                        daily_before=prebuild_cutoff,
+                        daily_cutoff_now=prebuild_cutoff_now,
                         # PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001):
                         # skip the whole prebuild gracefully when the lake
                         # volume can't hold the estimated derived writes

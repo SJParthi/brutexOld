@@ -64,7 +64,7 @@ from brutex.config.hardware_envelope import cpu_pool_workers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
 
     from brutex.data.timeframe_materialize import MaterializeResult, PrebuildKind
@@ -111,8 +111,17 @@ class PrebuildWorkItem:
         path).
     dense_symbol
         ``True`` for a SPOT INDEX underlying (the #1031 density gate) — selects
-        the observe-only ``daily_open.substituted`` per-session WARNs; ``False``
-        for contracts + non-index spot.
+        the observe-only ``daily_open.substituted`` per-session WARNs AND the
+        data-grounded daily-cutoff arm (DEC-DAILY-CUTOFF-GROUNDED-001);
+        ``False`` for contracts + non-index spot.
+    daily_cutoff_now
+        The run's PINNED IST instant (DEC-DAILY-CUTOFF-GROUNDED-001), resolved
+        ONCE per run by the orchestrator when ``daily_before`` is ``None`` —
+        every worker resolves the SAME session-close-aware clock cutoff from
+        it (M1 byte-identity across a midnight-IST boundary) and the grounded
+        per-symbol verdict stays a pure function of ``(instant, own frame)``
+        — order/concurrency-independent. APPENDED defaulted field
+        (back-compat: an existing construction site behaves as before).
     """
 
     lake_root: Path
@@ -124,6 +133,7 @@ class PrebuildWorkItem:
     daily_before: date | None
     incremental: bool | None
     dense_symbol: bool = False
+    daily_cutoff_now: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +185,7 @@ def materialize_work_item(item: PrebuildWorkItem) -> PrebuildWorkResult:
             kind=item.kind,
             include_daily=item.include_daily,
             daily_before=item.daily_before,
+            daily_cutoff_now=item.daily_cutoff_now,
             incremental=item.incremental,
             dense_symbol=item.dense_symbol,
         )
