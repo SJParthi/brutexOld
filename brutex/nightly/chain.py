@@ -433,21 +433,27 @@ def audit_reconcile_tripwire(
     """Tripwire **T2 (audit_reconcile)** — the chain-end audit reconciliation.
 
     Pure function over this run's audit stream, projected as ``(action,
-    link-or-None)`` pairs: there must be exactly ONE ``NIGHTLY_START``, one
-    ``LINK_START`` per ATTEMPTED link (``started_utc`` not ``None``), and one
-    ``LINK_DONE``/``LINK_BLOCKED`` per DECLARED link. Any mismatch returns the
-    tripwire (the caller records it → SUSPECT); a clean stream returns
-    ``None``.
+    link-or-None)`` pairs: there must be exactly ONE ``NIGHTLY_START``; every
+    ``LINK_START`` must name an ATTEMPTED link (``started_utc`` not ``None``)
+    at most once — an extra-outcome link (the PULL step's PREBUILD derivation)
+    legitimately has a ``LINK_DONE`` with NO ``LINK_START``, so the START set
+    is a SUBSET check, not an equality; and there must be exactly one
+    ``LINK_DONE``/``LINK_BLOCKED`` per DECLARED link (the lost/duplicated-
+    append detector). Any mismatch returns the tripwire (the caller records
+    it → SUSPECT); a clean stream returns ``None``.
     """
     starts = sum(1 for action, _ in events if action == "NIGHTLY_START")
     problems: list[str] = []
     if starts != 1:
         problems.append(f"NIGHTLY_START x{starts} (want 1)")
 
-    attempted = [o.link.value for o in outcomes if o.started_utc is not None]
+    attempted = {o.link.value for o in outcomes if o.started_utc is not None}
     link_starts = [link for action, link in events if action == "LINK_START"]
-    if sorted(attempted) != sorted(x for x in link_starts if x is not None):
-        problems.append(f"LINK_START {link_starts!r} != attempted {attempted!r}")
+    named_starts = [x for x in link_starts if x is not None]
+    if len(named_starts) != len(set(named_starts)) or not set(named_starts) <= attempted:
+        problems.append(
+            f"LINK_START {link_starts!r} not a subset of attempted {sorted(attempted)!r}"
+        )
 
     declared = [o.link.value for o in outcomes]
     terminal = [link for action, link in events if action in ("LINK_DONE", "LINK_BLOCKED")]

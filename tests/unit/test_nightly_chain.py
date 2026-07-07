@@ -462,7 +462,8 @@ _Events = list[tuple[str, "str | None"]]
     [
         (lambda ev: [e for e in ev if e[0] != "NIGHTLY_START"], "NIGHTLY_START x0"),
         (lambda ev: [("NIGHTLY_START", None), *ev], "NIGHTLY_START x2"),
-        (lambda ev: [e for e in ev if e != ("LINK_START", "disk")], "LINK_START"),
+        (lambda ev: [("LINK_START", "prebuild"), *ev], "LINK_START"),
+        (lambda ev: [("LINK_START", "disk"), *ev], "LINK_START"),
         (lambda ev: [e for e in ev if e != ("LINK_DONE", "sweep")], "LINK_DONE"),
     ],
 )
