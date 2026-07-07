@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1535 —
+_Last updated: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1537 —
 the test-apparatus debt pack: nine long-ledgered apparatus gaps closed as ONE
 change set, each landed fix-the-violation or measured-green: (a) a repo-wide
 doctest gate (pkgutil walk, measured 55-example teeth floor; the 3 broken
@@ -738,7 +738,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
-  MIGRATION.md #1535** — the test-apparatus debt pack: repo-wide doctest gate (measured
+  MIGRATION.md #1537** — the test-apparatus debt pack: repo-wide doctest gate (measured
   55-example floor; the 3 broken tf_resampler examples fixed — docstring-only, the sole
   brutex/ source edit) · EXPLICIT hypothesis `ci` profile on CI (GHA was already implicitly
   derandomized by hypothesis's built-in auto-CI profile; the real flip: no-env scheduled arms
