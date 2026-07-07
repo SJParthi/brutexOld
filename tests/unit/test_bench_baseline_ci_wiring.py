@@ -95,9 +95,19 @@ class TestBenchM4ProWiring:
         inputs = data.get(True, data.get("on", {}))["workflow_dispatch"]["inputs"]
         assert set(inputs) == {"capture_candidate", "decision_id", "replace_entries"}
 
-    def test_m4pro_job_timeout_is_fifteen(self) -> None:
+    def test_m4pro_job_timeout_bounds_the_combined_budget(self) -> None:
+        """The job timeout covers BOTH budgets on one job.
+
+        DEC-BENCH-ABS-BASELINE-001 sized its measure + compare + one bounded
+        numeric-regression re-measure + a possible 3-run capture at 15 min
+        ("10 -> 15"); DEC-TEST-APPARATUS-DEBTS-001(i) had independently raised
+        the same job to 25 min for the sweep worker-scaling A/B bench (first
+        live run measured that step at 20 s — run 28851211762). The merge
+        keeps the larger 25, which bounds both: a timeout-killed run still
+        alerts via the (failure() || cancelled()) issue step.
+        """
         job = _load(BENCH_YML)["jobs"]["m4pro-absolute-throughput"]
-        assert job["timeout-minutes"] == 15
+        assert job["timeout-minutes"] == 25
 
     def test_m4pro_job_holds_no_write_token(self) -> None:
         """The self-hosted runner NEVER gets contents:write (fatal-flaw pin)."""
