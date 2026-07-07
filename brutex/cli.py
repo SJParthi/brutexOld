@@ -2956,6 +2956,44 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
     return resolved
 
 
+def _open_cli_floor_store(stack: contextlib.ExitStack, lake_root: Path) -> Any:
+    """Open the lake's instrument-master store as the pull's vendor-floor sidecar.
+
+    The CLI twin of the dashboard routes' ``floor_store=instrument_store`` seam
+    (DEC-VENDOR-FLOOR-LAZY-PROBE-001 / DEC-CLI-DEPTH-FLOORS-001): the returned
+    :class:`~brutex.data.instrument_store.InstrumentStore` structurally satisfies
+    :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore` — its
+    generic ``schema_meta`` key/value sidecar carries the
+    ``groww.vendor_floor.<symbol>`` rows, so a floor learned by EITHER entrypoint
+    (dashboard pull or CLI fetch) clamps BOTH. Registered on *stack* so the
+    handle closes when the fetch exits (any exit path — the ExitStack the pull
+    single-flight lock already rides).
+
+    BEST-EFFORT: an unopenable sidecar (a wedged / corrupt / unwritable
+    ``instruments.duckdb``) degrades to ``None`` with ONE warning — the learner
+    then learns for THIS pull only and the planning clamp resolves to the full
+    range; the fetch itself is never blocked (the un-clamped pull is always
+    correct, just slower). Only the store's own error surface is caught
+    (``CatalogError`` / ``OSError``) — a genuine code bug still propagates.
+    """
+    import structlog
+
+    from brutex.data.errors import CatalogError
+    from brutex.data.instrument_store import InstrumentStore
+
+    try:
+        store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    except (CatalogError, OSError) as exc:
+        structlog.get_logger("brutex.cli").warning(
+            "fetch.vendor_floor.store_open_failed",
+            lake_root=str(lake_root),
+            error=str(exc),
+        )
+        return None
+    stack.callback(store.close)
+    return store
+
+
 def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK + network
     lake_root: Path, catalog: Any = None
 ) -> tuple[Any, Any]:
@@ -3566,7 +3604,15 @@ def cmd_fetch(
         drain_write_consumer,
         reconcile_pairs_with_pipeline,
     )
-    from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+    from brutex.adapters.groww.run_ingest import (
+        run_groww_spot_ingest_with_retry,
+        with_paced_client,
+    )
+    from brutex.adapters.groww.vendor_floor import (
+        floor_symbol_windows,
+        load_vendor_floors,
+        make_vendor_floor_learner,
+    )
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
@@ -3822,6 +3868,44 @@ def cmd_fetch(
         # so neither touches the real ledger: `_no_persist` passes `dry_run=True`,
         # so the ledger is None (no skip, no disk touch).
         _no_persist = dry_run or inspect
+        # Lazy vendor-depth-floor learning on the CLI path (DEC-CLI-DEPTH-FLOORS-001,
+        # closing DEC-VENDOR-FLOOR-LAZY-PROBE-001's named follow-up "the CLI
+        # `brutex fetch` path stays UNWIRED — no floor_store seam there"). Mirrors
+        # the dashboard build sites exactly: (a) the per-pull learner is built over
+        # the PACED replica of THIS pull's adapter (`with_paced_client(adapter,
+        # pace)` — the live client carries a no-op pace until the spine binds the
+        # controller, so a learner over the raw adapter would probe OUTSIDE the
+        # 8 r/s ceiling + 500/min governor; DEC-RATE-SINGLE-ADMISSION-001), and
+        # (b) a symbol with a PERSISTED learned floor plans + fetches its 1-minute
+        # windows from `max(GROWW_HISTORY_FLOOR, learned floor)` via the EXISTING
+        # per-symbol `symbol_windows` seam — the DAILY interval stays exempt inside
+        # plan_windows / reconcile / `_resolve_spot_window` (a 1-minute-probed
+        # floor never clamps the 1-day series), so one map serves the CLI's
+        # mixed-interval plan honestly. The sidecar is the SAME instrument-master
+        # `schema_meta` the dashboard writes (`groww.vendor_floor.<symbol>`), so a
+        # floor learned by either entrypoint clamps BOTH (CLAUDE.md §11 COMMON).
+        # Armed ONLY for the genuine persisting live pull: `--dry-run` /
+        # `--inspect` open no store, build no learner, and resolve
+        # `floor_windows=None` — byte-identical planning (the same `_no_persist`
+        # gating every other persistence surface here uses).
+        floor_store = None if _no_persist else _open_cli_floor_store(storm_stack, resolved)
+        floor_learner = (
+            None
+            if _no_persist
+            else make_vendor_floor_learner(
+                with_paced_client(adapter, pace),
+                history_floor=GROWW_HISTORY_FLOOR,
+                today=end_dt.date(),
+                store=floor_store,
+            )
+        )
+        floor_symbols = [inst.symbol_name for inst in fetch_instruments]
+        floor_windows = floor_symbol_windows(
+            floor_symbols,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            floors=load_vendor_floors(floor_store, floor_symbols),
+        )
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
         if ledger is not None:
             # Seed the durable ledger in the SAME (market, tile-width) namespace the
@@ -3842,6 +3926,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                symbol_windows=floor_windows,
             )
             reconcile_ledger_with_lake(
                 ledger,
@@ -3852,6 +3937,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                symbol_windows=floor_windows,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
@@ -3981,6 +4067,13 @@ def cmd_fetch(
                     detect_completeness_gaps=not dry_run,
                     observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
+                    # Learned-floor clamp + in-pull depth learner
+                    # (DEC-CLI-DEPTH-FLOORS-001): the SAME `floor_windows` the
+                    # plan above tiled (planned keys == fetched keys) + the
+                    # per-pull learner over the paced adapter; both `None` for
+                    # `--dry-run` / `--inspect` — byte-identical.
+                    symbol_windows=floor_windows,
+                    floor_learner=floor_learner,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
