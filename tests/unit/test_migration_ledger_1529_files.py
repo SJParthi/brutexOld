@@ -1,6 +1,6 @@
-"""DEC-LEDGER-DELTA-O-PAGE-001 — MIGRATION.md #1528 Files-inventory pin.
+"""DEC-LEDGER-DELTA-O-PAGE-001 — MIGRATION.md #1529 Files-inventory pin.
 
-Regression net for the fix-round ledger-completeness finding: the #1528
+Regression net for the fix-round ledger-completeness finding: the #1529
 ``**Files:**`` list omitted five touched files (``.github/workflows/ci.yml``
 plus four MODIFIED pre-existing test suites) while naming their siblings,
 and an earlier round cited a wrong filename (``tests/unit/test_lake_read.py``
@@ -49,7 +49,7 @@ CHANGE_SET_FILES: tuple[str, ...] = (
     "tests/unit/test_dashboard_window_payload_retry.py",
     "tests/unit/test_data_lake_read.py",
     "tests/unit/test_lake_revision.py",
-    "tests/unit/test_migration_ledger_1528_files.py",
+    "tests/unit/test_migration_ledger_1529_files.py",
     "tests/unit/test_movers_cache.py",
     "tests/unit/test_summary_cache.py",
     "tests/unit/test_sweep_results_scan_split.py",
@@ -57,23 +57,23 @@ CHANGE_SET_FILES: tuple[str, ...] = (
 )
 
 
-def _entry_1528_listed_files() -> list[str]:
-    """Extract the backticked paths of entry #1528's ``**Files:**`` list."""
+def _entry_1529_listed_files() -> list[str]:
+    """Extract the backticked paths of entry #1529's ``**Files:**`` list."""
     text = MIGRATION_PATH.read_text(encoding="utf-8")
     for line in text.splitlines():
-        if line.startswith("1528. "):
+        if line.startswith("1529. "):
             match = re.search(r"\*\*Files:\*\*(.*?)\*\*Decision ID:\*\*", line)
             assert match is not None, (
-                "entry #1528 lacks a '**Files:** ... **Decision ID:**' section"
+                "entry #1529 lacks a '**Files:** ... **Decision ID:**' section"
             )
             listed = re.findall(r"`([^`]+)`", match.group(1))
-            assert listed, "entry #1528 **Files:** list is empty"
+            assert listed, "entry #1529 **Files:** list is empty"
             return listed
-    raise AssertionError("MIGRATION.md entry #1528 not found")
+    raise AssertionError("MIGRATION.md entry #1529 not found")
 
 
-def test_entry_1528_names_every_change_set_file() -> None:
-    """Every file the change set touches appears in the #1528 Files list.
+def test_entry_1529_names_every_change_set_file() -> None:
+    """Every file the change set touches appears in the #1529 Files list.
 
     Fails-before/passes-after: pre-fix the list omitted
     ``.github/workflows/ci.yml``, ``tests/unit/test_dashboard_db_view.py``,
@@ -81,16 +81,16 @@ def test_entry_1528_names_every_change_set_file() -> None:
     ``tests/unit/test_dashboard_window_payload_retry.py`` and
     ``tests/unit/test_summary_cache.py``.
     """
-    listed = set(_entry_1528_listed_files())
+    listed = set(_entry_1529_listed_files())
     missing = [path for path in CHANGE_SET_FILES if path not in listed]
-    assert not missing, f"MIGRATION.md #1528 **Files:** list omits: {missing}"
+    assert not missing, f"MIGRATION.md #1529 **Files:** list omits: {missing}"
 
 
-def test_entry_1528_lists_no_phantom_paths() -> None:
-    """Every path the #1528 Files list names exists in the repo.
+def test_entry_1529_lists_no_phantom_paths() -> None:
+    """Every path the #1529 Files list names exists in the repo.
 
     The round-4 defect class: the entry cited a non-existent
     ``tests/unit/test_lake_read.py`` for ``tests/unit/test_data_lake_read.py``.
     """
-    phantoms = [path for path in _entry_1528_listed_files() if not (REPO_ROOT / path).is_file()]
-    assert not phantoms, f"MIGRATION.md #1528 **Files:** names phantom paths: {phantoms}"
+    phantoms = [path for path in _entry_1529_listed_files() if not (REPO_ROOT / path).is_file()]
+    assert not phantoms, f"MIGRATION.md #1529 **Files:** names phantom paths: {phantoms}"

@@ -699,18 +699,18 @@ class TestDocWordingHonesty:
         assert _REFUTED_STALENESS_CLAIM not in text
         assert _ACCURATE_STALENESS_CLAIM in text
 
-    def test_migration_1528_files_list_paths_all_exist(self) -> None:
-        """MIGRATION.md #1528's Files list cites only paths that exist — the
+    def test_migration_1529_files_list_paths_all_exist(self) -> None:
+        """MIGRATION.md #1529's Files list cites only paths that exist — the
         fix-round citation defect was `tests/unit/test_lake_read.py` (never
         created; the real file is `tests/unit/test_data_lake_read.py`)."""
         text = (_REPO_ROOT / "docs" / "MIGRATION.md").read_text(encoding="utf-8")
         entry = next(
             line
             for line in text.splitlines()
-            if line.startswith("1528. **DEC-LEDGER-DELTA-O-PAGE-001")
+            if line.startswith("1529. **DEC-LEDGER-DELTA-O-PAGE-001")
         )
         files_blob = entry.split("**Files:**", 1)[1].split("**Decision ID:**", 1)[0]
         cited = re.findall(r"`([^`]+)`", files_blob)
         assert "tests/unit/test_data_lake_read.py" in cited  # the corrected citation
         missing = [path for path in cited if not (_REPO_ROOT / path).exists()]
-        assert missing == [], f"MIGRATION.md #1528 cites missing paths: {missing}"
+        assert missing == [], f"MIGRATION.md #1529 cites missing paths: {missing}"
