@@ -174,6 +174,11 @@
     </div>
   </div>
 
+<!-- Shared half-up 2dp display formatter (DEC-STORED-DATA-VALIDATION-001):
+     deliberately NON-defer so bxFixed2 is defined before the inline script
+     below parses — the pinned ROUND_HALF_UP display law
+     (preopen_report._round2 / the #1154 half-up cells). -->
+<script src="/static/bx-format.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -353,17 +358,20 @@ function renderRows() {
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
-       num → 2dp, int → grouped. Cells that already arrive as formatted strings
+       num → 2dp via the SHARED half-up bxFixed2 (DEC-STORED-DATA-VALIDATION-001
+       — the IEEE toFixed rounder diverged from the pinned ROUND_HALF_UP display
+       law at exact half-boundaries: 1.005 rendered "1.00", pinned law "1.01"),
+       int → grouped. Cells that already arrive as formatted strings
        (typeof !== "number") pass through unchanged. */
     if (typeof v === "number") {
       if (type === "int") v = v.toLocaleString("en-IN");
       else if (type === "money") v = "₹" + v.toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
-      else if (type === "num") v = v.toFixed(2);
+      else if (type === "num") v = bxFixed2(v);
       else if (type === "num4") v = v.toFixed(4);  /* Greeks (iv/delta) — display-only 4dp, payload stays full precision */
     }
     if (field==="pct_change" || field==="change" || field==="premium" || field==="oi_chg" || field==="oi_chg_pct") {
       const n = numify(v); if (n!==null && n!==0) cls = n>0 ? "pos" : "neg";
-      if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + n.toFixed(2) + "%";
+      if ((field==="pct_change"||field==="oi_chg_pct") && n!==null) v = (n>0?"+":"") + bxFixed2(n) + "%";
     }
     /* Moneyness chip (DEC-FNO-MONEYNESS-001): the cell reads "ITM -1" / "OTM +10" /
        "ATM" / "?" — tint by the leading bucket (ITM green, OTM red, else muted).

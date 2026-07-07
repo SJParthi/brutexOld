@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 
@@ -47,6 +48,7 @@ from brutex.dashboard.historical_pull import (
     HistoricalPullReport,
     pull_contract_candles,
 )
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.registry_store import (
     CANDLE_STATUS_COMPLETE,
     CANDLE_STATUS_NONE,
@@ -958,28 +960,31 @@ def test_reconcile_round1_success_then_round2_transient_stays_failing() -> None:
         pipeline.drain()
 
 
-def test_market_pull_order_sorts_unknown_market_last() -> None:
-    """The order key sorts the two known markets futures-first, an unknown market LAST.
+def test_bucket_sort_key_sorts_unknown_market_last() -> None:
+    """The bucket key sorts the four known steps 3→4→5→6, an unknown market LAST.
 
-    Covers the ``.get(..., 99)`` deterministic tie-break: an unrecognised market namespace
-    sorts after both known ones, and equal-rank markets fall back to a stable name sort.
+    DEC-PULL-SIX-STEP-ORDER-001 — supersedes the 2-key ``_MARKET_PULL_ORDER``
+    futures-first sort: the ``(ledger-market, is_index)`` buckets rank by their
+    :class:`PullStep` (INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS →
+    STOCKS-OPTIONS); an unrecognised market namespace sorts after all four with
+    a stable ``(market, index-first)`` tie-break.
     """
-    buckets = {
-        GROWW_OPTION_COVERAGE_MARKET: 1,
-        "zzz-unknown-market": 2,
-        GROWW_FUTURE_COVERAGE_MARKET: 0,
-    }
-    ordered = [
-        market
-        for market, _rank in sorted(
-            buckets.items(),
-            key=lambda kv: (hp._MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
-        )
+    buckets = [
+        (GROWW_OPTION_COVERAGE_MARKET, False),
+        ("zzz-unknown-market", False),
+        (GROWW_FUTURE_COVERAGE_MARKET, False),
+        ("zzz-unknown-market", True),
+        (GROWW_OPTION_COVERAGE_MARKET, True),
+        (GROWW_FUTURE_COVERAGE_MARKET, True),
     ]
+    ordered = sorted(buckets, key=hp._bucket_sort_key)
     assert ordered == [
-        GROWW_FUTURE_COVERAGE_MARKET,
-        GROWW_OPTION_COVERAGE_MARKET,
-        "zzz-unknown-market",
+        (GROWW_FUTURE_COVERAGE_MARKET, True),  # 3 indices-futures
+        (GROWW_FUTURE_COVERAGE_MARKET, False),  # 4 stocks-futures
+        (GROWW_OPTION_COVERAGE_MARKET, True),  # 5 indices-options
+        (GROWW_OPTION_COVERAGE_MARKET, False),  # 6 stocks-options
+        ("zzz-unknown-market", True),  # unknowns LAST, index-first tie-break
+        ("zzz-unknown-market", False),
     ]
 
 
@@ -3805,3 +3810,173 @@ def test_dry_run_pull_threads_empty_observed_holidays(
     )
     assert seen
     assert all(observed == frozenset() for observed in seen)
+
+
+# ── Golden Rule #8 — the F&O pull writes the hash-chained ingest audit trail ──
+# (DEC-INGEST-AUDIT-WIRING-001: the F&O spine was 100% unaudited on every path
+# before this — the Dhan-era DEC-OPTION-AUDIT-WIRE-001 wiring died in the
+# ADR-0009 Groww cutover.)
+
+
+def _walk_fno_chain(lake_root: Path) -> list[str]:
+    """Verify the F&O chain end-to-end + link-by-link; return the action list."""
+    from brutex.orchestrator.audit import GENESIS_PREV_HASH, read_entries, verify_chain
+
+    path = lake_root / "audit" / "fno-ingest.jsonl"
+    entries = read_entries(path)
+    assert verify_chain(path) == len(entries)
+    assert entries[0].prev_hash == GENESIS_PREV_HASH
+    for prev, cur in pairwise(entries):
+        assert cur.prev_hash == prev.entry_hash
+        assert cur.seq == prev.seq + 1
+    return [e.action for e in entries]
+
+
+def test_fno_pull_writes_verifiable_hash_chain(registry: RegistryStore, tmp_lake: Path) -> None:
+    """A LIVE-shaped F&O pull writes <lake>/audit/fno-ingest.jsonl and the chain verifies.
+
+    The NIFTY selection = 1 FUT + 2 options over 2 market buckets (groww-future runs
+    first, then groww-option — DEC-FNO-PULL-ORDER-LOOKBACK-001), so the trail carries
+    ONE RUN_START/RUN_COMPLETE pair per bucket + one PAIR_DONE per contract, all on
+    one continuous chain.
+    """
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert report.contracts_completed == 3
+    actions = _walk_fno_chain(tmp_lake)
+    assert actions.count("INGEST_RUN_START") == 2  # one per market bucket (FUT, then CE/PE)
+    assert actions.count("INGEST_RUN_COMPLETE") == 2
+    assert actions.count("INGEST_PAIR_DONE") == 3  # one per selected contract
+    assert "INGEST_PAIR_FAILED" not in actions
+
+
+def test_fno_pull_quarantine_lands_on_the_chain(registry: RegistryStore, tmp_lake: Path) -> None:
+    """A terminally-quarantined contract writes INGEST_PAIR_FAILED on the F&O chain."""
+    bad = "NSE-NIFTY-25Jan24-21000-PE"
+    sdk = _FakeSDK(raise_for={bad: GrowwAPIBadRequestException("nope")})
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert report.failed_pairs == 1
+    from brutex.orchestrator.audit import read_entries
+
+    entries = read_entries(tmp_lake / "audit" / "fno-ingest.jsonl")
+    failed = [e for e in entries if e.action == "INGEST_PAIR_FAILED"]
+    # F&O always fetches 1minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the
+    # requested ("1day",) is echoed in the report but never the fetch granularity.
+    assert [e.subject for e in failed] == [f"{bad}:1minute"]
+    assert failed[0].payload["auth_failure"] is False
+
+
+def test_fno_dry_run_writes_no_audit(registry: RegistryStore, tmp_path: Path) -> None:
+    """A dry-run F&O pull writes no real data → no audit file, no audit dir."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_path / "lake-dry",
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert not (tmp_path / "lake-dry" / "audit").exists()
+
+
+# ── _mark_complete store-write deferral (DEC-STORE-WRITE-DEADLINE-001) ────────
+#
+# The completion stamp runs as ONE deadline-guarded registry batch
+# (``mark_candle_statuses``); a wedged registry DEFERS the stamps — one loud
+# WARN, an honest 0 return — and NEVER raises past the seam (the candles already
+# landed durably; the next pull re-marks idempotently).
+
+
+class _DeferringRegistry:
+    """A registry stub whose batch stamp raises the TRANSIENT store-write defer."""
+
+    def __init__(self, *, defer: bool) -> None:
+        self._defer = defer
+        self.batches: list[tuple[list[tuple[str, str, str]], str]] = []
+
+    def mark_candle_statuses(self, rows: Sequence[tuple[str, str, str]], candle_status: str) -> int:
+        if self._defer:
+            raise StoreWriteDeadlineExceeded(0.2, "registry", "mark_candle_statuses")
+        self.batches.append((list(rows), candle_status))
+        return len(rows)
+
+
+def _rebuilt_row(symbol: str) -> tuple[ContractRow, DerivativeContract]:
+    fetched = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
+    row = ContractRow(
+        "NSE", "NIFTY", date(2024, 1, 25), symbol, 21000.0, "CE", "none", "r", fetched
+    )
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol=symbol,
+        contract_type="CE",
+        strike=21000.0,
+    )
+    return (row, contract)
+
+
+class TestMarkCompleteStoreWriteDefer:
+    def test_healthy_batch_marks_and_returns_the_count(self) -> None:
+        registry = _DeferringRegistry(defer=False)
+        rebuilt = [_rebuilt_row("A-CE"), _rebuilt_row("B-CE"), _rebuilt_row("C-CE")]
+        marked = hp._mark_complete(
+            cast("RegistryStore", registry), rebuilt, frozenset({"A-CE", "C-CE"})
+        )
+        assert marked == 2
+        assert registry.batches == [
+            ([("NSE", "NIFTY", "A-CE"), ("NSE", "NIFTY", "C-CE")], CANDLE_STATUS_COMPLETE)
+        ]
+
+    def test_empty_completion_set_never_touches_the_registry(self) -> None:
+        registry = _DeferringRegistry(defer=False)
+        marked = hp._mark_complete(
+            cast("RegistryStore", registry), [_rebuilt_row("A-CE")], frozenset()
+        )
+        assert marked == 0
+        assert registry.batches == []
+
+    def test_deferred_stamp_warns_and_returns_zero_without_raising(self) -> None:
+        """A wedged registry must NEVER fail the pull whose candles already landed."""
+        registry = _DeferringRegistry(defer=True)
+        rebuilt = [_rebuilt_row("A-CE"), _rebuilt_row("B-CE")]
+        with capture_logs() as logs:
+            marked = hp._mark_complete(
+                cast("RegistryStore", registry), rebuilt, frozenset({"A-CE", "B-CE"})
+            )
+        assert marked == 0  # honest: the durably-marked count is unknown
+        deferred = [r for r in logs if r["event"] == hp.HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT]
+        assert len(deferred) == 1
+        assert deferred[0]["contracts"] == 2
+        assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
+        assert deferred[0]["defer_seconds"] == 0.2

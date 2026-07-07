@@ -57,8 +57,9 @@ remaining sandbox-safe ROADMAP stubs to live Hypothesis properties in
 the two spec-named-but-absent invariants **P-25** (no VIX leak in the
 vocabulary) and **P-26** (audit→dedup replay oracle). **P-08** points at the
 existing golden associativity test. **P-20** (audit→Parquet byte-equality)
-stays deferred — that reconstruction harness does not exist yet (honest
-envelope, Golden Rule #10).
+is now REAL in ``tests/integration/test_replay_audit_log.py`` — a fixture pull
+through the real spine + writers, replayed FROM the verified audit log into a
+fresh lake and asserted byte-identical (DEC-INGEST-AUDIT-WIRING-001).
 
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
@@ -223,10 +224,10 @@ def test_p_19_parquet_writer_deterministic() -> None:
 
 def test_p_20_replay_byte_equals_original() -> None:
     """P-20: ``replay(audit_log) → Parquet`` byte-equals the original Parquet."""
-    # Honest envelope (Golden Rule #10): the end-to-end audit→Parquet
-    # reconstruction harness does not exist yet — only the dedup-subject
-    # set oracle (P-26) does. Stays deferred until the replay harness lands.
-    pytest.skip("Phase 2 implementation pending (audit → Parquet replay harness)")
+    # DEC-INGEST-AUDIT-WIRING-001: the replay harness is REAL — a fixture pull
+    # through the real spine + Parquet writer, replayed FROM the verified audit
+    # log alone into a fresh lake, byte-equality asserted file-for-file.
+    pytest.skip("implemented in tests/integration/test_replay_audit_log.py")
 
 
 # ────────────────────────────────────────────────────────────────────

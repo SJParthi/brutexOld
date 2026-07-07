@@ -182,3 +182,14 @@ def test_daemon_threads_drain_after_a_timeout_storm() -> None:
     finally:
         for event in releases:
             event.set()  # belt-and-suspenders: never leave a daemon blocked
+
+
+def test_shim_reexports_the_common_config_primitive() -> None:
+    """DEC-STORE-WRITE-DEADLINE-001 relocation pin: this module is a byte-compatible
+    re-export of the ONE COMMON primitive at :mod:`brutex.config.deadline` — the
+    exception CLASS is the SAME object on both import paths, so an ``except
+    DeadlineExceeded`` caller catches identically regardless of which path raised."""
+    from brutex.config import deadline as config_deadline
+
+    assert DeadlineExceeded is config_deadline.DeadlineExceeded
+    assert run_with_deadline is config_deadline.run_with_deadline

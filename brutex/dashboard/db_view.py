@@ -992,16 +992,42 @@ def list_candle_datasets(
             manifest_rows, exclude_segments=exclude_segments, intervals=intervals
         )
     # Capture the freshness token BEFORE the walk: a vendor write landing
-    # DURING the (potentially long) walk must stale the rebuilt manifest on the
-    # very next read — a post-walk stamp could claim freshness the walk never
-    # had (Golden Rule #1).
+    # DURING the (potentially long) walk must never let the rebuilt manifest
+    # claim freshness the walk did not have (Golden Rule #1).
     pre_walk_token = ledger_stat_token(lake_root)
     found = _walk_candle_datasets(lake_root, exclude_segments=exclude_segments, intervals=intervals)
     if not exclude_segments and intervals is None and pre_walk_token is not None:
         # Only an UNFILTERED walk sees the whole dataset population, so only it
         # may (re)build the manifest — a filtered walk would persist a
-        # silently-partial row set. Best-effort: a rebuild failure leaves the
-        # walk result (already correct) untouched.
+        # silently-partial row set. The rebuild ALWAYS stamps the PRE-walk
+        # token (`rebuild_manifest`'s contract verbatim — a post-walk stamp
+        # could claim freshness the walk did not have and stays REJECTED). On
+        # a mid-walk ledger move the stamp is therefore STALE and the
+        # load-side token gate refuses to serve it as-is — yet the base is
+        # NOT a wasted write: it is the seed `record_dataset`'s write-side
+        # convergence layers onto (without a base every prebuild record
+        # no-ops — `record_skipped_no_base` — and a manifest-absent lake
+        # stays unconvergeable until the next quiescent unfiltered walk
+        # re-pays the O(files) discovery the manifest exists to kill).
+        # DEC-O1-CLAIMS-HONESTY-001 round-6 review fold: the interim
+        # SKIP-on-mismatch design is REVERTED — only the post-walk token
+        # RE-READ survives, OBSERVE-ONLY: a moved (or unreadable `None`)
+        # post-walk token emits one `db_view.manifest_rebuilt_stale` INFO
+        # carrying both tokens. HONEST bounded window (Golden Rule #10): a
+        # later `record_dataset` re-stamps the CURRENT token and serves the
+        # union of walk + recorded rows, so a dataset created mid-walk whose
+        # own record no-oped before this base landed can be UNDER-LISTED
+        # until the next ledger move + walk — the same bounded class as
+        # lake_manifest's documented cold-walk ∩ active-prebuild window.
+        # Best-effort: a rebuild failure leaves the walk result (already
+        # correct) untouched.
+        post_walk_token = ledger_stat_token(lake_root)
+        if post_walk_token != pre_walk_token:
+            _LOG.info(
+                "db_view.manifest_rebuilt_stale",
+                pre_walk_token=pre_walk_token,
+                post_walk_token=post_walk_token,
+            )
         rebuild_manifest(lake_root, found, ledger_token=pre_walk_token)
     return found
 
@@ -1712,8 +1738,8 @@ _OPTION_SEGMENT_SEP: Final = "__"
 
 #: The option series directory segment's part arity: the writer's partition
 #: key is ``<exchange_segment>|<security_id>|<expiry_flag>|<expiry_code>|
-#: <strike>|<drv_option_type>`` (``option_sink.append_option_bars``), so the
-#: on-disk segment splits into exactly 6 parts on ``__``.
+#: <strike>|<drv_option_type>`` (``option_parquet_writer.partition_key``), so
+#: the on-disk segment splits into exactly 6 parts on ``__``.
 _OPTION_SERIES_ARITY: Final = 6
 
 
@@ -3613,6 +3639,58 @@ def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
     return records
 
 
+#: mtime-keyed cache for the /db window-ledger grid's SERIALISED row tuples —
+#: the projection of ``_ledger_records_cached`` through the canonical
+#: :func:`~brutex.data.window_ledger.ledger_record_row` shape. Kept SEPARATE from
+#: ``_WINDOW_CACHE`` (which holds the record objects several readers share) so a
+#: grid poll never rebuilds the O(rows) tuple projection either. Same
+#: invalidation rule — the composite :func:`_ledger_cache_stamp` (base mtime PLUS
+#: the pending delta name set, DEC-LEDGER-DELTA-FLUSH-001), so a mid-pull delta
+#: append refreshes this cache exactly as a full save does — same lock
+#: (DEC-SUSPICION-SWEEP-FIXES-001 D3).
+_WINDOW_ROWS_CACHE: dict[str, tuple[tuple[int, tuple[str, ...]], tuple[tuple[Any, ...], ...]]] = {}
+
+
+def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
+    """The /db window-ledger grid's row tuples, parsed ONCE per ledger flush.
+
+    DEC-SUSPICION-SWEEP-FIXES-001 (D3): the ``/api/v1/db/window-ledger`` route
+    previously ran an UNCACHED ``load_window_ledger(...).to_rows()`` — a full
+    Parquet re-parse of the whole ledger (a pre-planned full-universe options
+    pull holds ~841k rows, the measured shape behind :data:`WINDOW_ROWS_CAP`) on
+    EVERY paging click. This helper routes the read through the SAME mtime-keyed
+    ``_ledger_records_cached`` single parse the other ledger readers share, then
+    memoises the row projection (the canonical
+    :func:`~brutex.data.window_ledger.ledger_record_row` per record — byte-equal
+    to ``WindowLedger.to_rows`` by construction, ONE source of the shape). A
+    paging click within one ledger generation is an O(1) cache handoff; the
+    composite :func:`_ledger_cache_stamp` (base mtime PLUS the pending delta name
+    set, DEC-LEDGER-DELTA-FLUSH-001) invalidates it on a full save OR a mid-pull
+    delta append → ONE fresh parse + projection (never stale, Golden Rule #1). A
+    lake with no ledger Parquet returns ``()`` — the same empty grid the uncached
+    read produced. HONEST envelope (Golden Rule #10): the first read per
+    generation is still O(rows) (parse + projection); only the REPEAT read is
+    O(1) — true O(page) needs a write-time manifest, NOT claimed (the #867/#1025
+    envelope).
+    """
+    from brutex.data.window_ledger import ledger_record_row
+    from brutex.data.window_ledger_store import ledger_path
+
+    path = ledger_path(lake_root)
+    if not path.is_file():
+        return ()
+    stamp = _ledger_cache_stamp(path)
+    key = str(path)
+    with _WINDOW_CACHE_LOCK:
+        hit = _WINDOW_ROWS_CACHE.get(key)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+    rows = tuple(ledger_record_row(r) for r in _ledger_records_cached(lake_root))
+    with _WINDOW_CACHE_LOCK:
+        _WINDOW_ROWS_CACHE[key] = (stamp, rows)
+    return rows
+
+
 def _window_market_bucket(market: str) -> str:
     """Map a ledger ``market`` namespace to the page's display/filter bucket.
 
@@ -4796,5 +4874,6 @@ __all__ = [
     "summarize_spot_datasets",
     "summarize_spot_verdict_datasets",
     "table_summary",
+    "window_ledger_rows_cached",
     "window_status_label",
 ]

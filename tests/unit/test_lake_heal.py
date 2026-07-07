@@ -62,6 +62,7 @@ from brutex.data.lake_invariants import (
     LakeScanReport,
     OptionIntraFileDup,
     PartitionCoords,
+    PriceSanityRows,
     scan_lake_invariants,
 )
 from brutex.data.models import CandleBar, OptionBar
@@ -2309,3 +2310,77 @@ class TestResidualBranches:
     def test_first_day_after_december_rolls_the_year(self) -> None:
         assert lake_heal._first_day_after(2024, 12) == date(2025, 1, 1)
         assert lake_heal._first_day_after(2024, 6) == date(2024, 7, 1)
+
+
+class TestPriceFindingsObserveOnly:
+    """A PriceSanityRows finding is NEVER healed (DEC-STORED-DATA-VALIDATION-001).
+
+    Healing is strictly row-removing/row-reassigning — "repairing" a price
+    would fabricate data (Golden Rule #1). Fails-before: the new finding type
+    would have fallen through the isinstance dispatch into the option-dup
+    healer and crashed / mis-healed the batch.
+    """
+
+    def _price_finding(self, lake: Path) -> PriceSanityRows:
+        coords = PartitionCoords(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            year=2024,
+            month=6,
+        )
+        return PriceSanityRows(path=lake / Path(coords.relpath()), coords=coords, bad_rows=2)
+
+    def test_price_finding_is_filtered_with_one_warning(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            report = heal_findings(
+                [self._price_finding(tmp_path)],
+                lake_root=tmp_path,
+                files_scanned=10,
+                mode="auto",
+                now=_now,
+            )
+        # Filtered up-front: nothing to heal, nothing quarantined, no crash.
+        assert report.findings == 0
+        assert report.healed == 0
+        assert report.errors == 0
+        assert report.actions == ()
+        warns = _events(logs, "lake_heal.price_findings_observe_only")
+        assert len(warns) == 1
+        assert warns[0]["price_findings"] == 1
+        assert not (tmp_path / ".quarantine").exists()
+
+    def test_mixed_batch_heals_the_actionable_finding_only(self, tmp_path: Path) -> None:
+        # A REAL dup partition + a price finding: the dup heals, the price
+        # finding is observe-only — the batch never crashes on the new type.
+        _poison(_dest(tmp_path), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        scan = scan_lake_invariants(tmp_path)
+        dup_findings = [f for f in scan.findings if isinstance(f, IntraFileDup)]
+        assert len(dup_findings) == 1
+        with capture_logs() as logs:
+            report = heal_findings(
+                [*dup_findings, self._price_finding(tmp_path)],
+                lake_root=tmp_path,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.findings == 1  # the dup only — price is not counted
+        assert report.healed == 1
+        assert len(_events(logs, "lake_heal.price_findings_observe_only")) == 1
+
+    def test_observe_mode_with_price_finding_stays_zero_mutation(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            report = heal_findings(
+                [self._price_finding(tmp_path)],
+                lake_root=tmp_path,
+                files_scanned=10,
+                mode="observe",
+                now=_now,
+            )
+        assert report.mode == "observe"
+        assert report.findings == 0
+        # No observe_only detail fires for an EMPTY post-filter batch.
+        assert _events(logs, "lake_heal.observe_only") == []
+        assert len(_events(logs, "lake_heal.price_findings_observe_only")) == 1
