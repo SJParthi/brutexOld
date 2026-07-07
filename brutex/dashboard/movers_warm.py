@@ -52,6 +52,7 @@ import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date as date_cls
 from pathlib import Path
 from typing import Final
 
@@ -70,6 +71,7 @@ __all__ = [
     "MoversWarmResult",
     "futures_warm_grid",
     "latest_movers_date",
+    "latest_movers_minute",
     "options_warm_grid",
     "resolve_warm_job_deadline_s",
     "spot_warm_grid",
@@ -125,6 +127,10 @@ def resolve_warm_job_deadline_s(raw: str | None = None) -> float:
 #: The spot segments the movers default snapshot reads (INDEX + CASH 1day partitions).
 _SPOT_SEGMENTS: tuple[str, ...] = ("INDEX", "CASH")
 _DAILY_INTERVAL = "1day"
+#: The fetched granularity the latest-minute resolver reads (the ONE granularity
+#: Groww serves — DEC-1MINUTE-ONLY-DERIVE-1DAY-001; the derived TFs never carry a
+#: finer minute than their 1-minute base).
+_MINUTE_INTERVAL = "1minute"
 
 #: The exchange scopes the post-pull warmer pre-warms (DEC-MOVERS-WARM-GRID-001): the
 #: all-exchange population (``None``) PLUS the two per-exchange scopes the operator can
@@ -248,6 +254,78 @@ def latest_movers_date(lake_root: Path) -> str | None:
         _LOG.warning("movers.latest_date.unreadable_lake", error=str(exc))
         return None
     return str(row[0]) if row is not None and row[0] is not None else None
+
+
+def latest_movers_minute(lake_root: Path, day: date_cls) -> str | None:
+    """Return the IST ``"HH:MM"`` of the most recent spot 1-minute bar on *day*, or ``None``.
+
+    The DISPLAY-side sibling of :func:`latest_movers_date`
+    (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): ONE bounded DuckDB
+    ``MAX(minute-of-day)`` over the spot ``INDEX`` + ``CASH`` ``1minute``
+    partitions, converting the max IST bar to its ``HH:MM`` — the latest minute
+    the default as-of snapshot resolves to. It backs the DEFAULT ``/movers``
+    display echo ONLY (the *cut* stays whole-day, `cutoff_min=None`), so its
+    value is honest by construction: it is the SAME ``MAX`` minute the whole-day
+    read's last kept bar carries (``echo == cut`` in value).
+
+    Guarded EXACTLY like :func:`latest_movers_date`
+    (:func:`~brutex.config.hardware_envelope.apply_duckdb_thread_bound` on the
+    ephemeral connection; ``(duckdb.Error, OSError) → None``) — it feeds the
+    default poll, so it must NEVER raise/500. ``None`` (no 1m bar for *day*, an
+    empty/absent spot lake, OR a corrupt Parquet) → the caller shows a plain
+    "latest" label and still cuts whole-day.
+
+    Honest envelope (Golden Rule #10): the read is bounded — not a full-lake
+    scan. It globs only the spot ``1minute`` partitions (skipping F&O), the
+    caller memoises it per write generation (a repeat DEFAULT poll is an O(1)
+    handoff), and DuckDB reads only the Parquet footers/columns needed for the
+    aggregate. Still O(spot-1m-files), so it is called on the threadpool worker,
+    never the event loop.
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (parent of ``bars/``).
+    day
+        The IST calendar day to resolve the latest 1-minute bar for.
+
+    Returns
+    -------
+    str | None
+        The latest 1-minute bar's IST ``"HH:MM"`` on *day*, or ``None``.
+    """
+    import duckdb
+
+    present = [
+        (lake_root / "bars" / "*" / seg / "*" / _MINUTE_INTERVAL).as_posix() + "/**/*.parquet"
+        for seg in _SPOT_SEGMENTS
+        if (lake_root / "bars").is_dir()
+        and any((lake_root / "bars").glob(f"*/{seg}/*/{_MINUTE_INTERVAL}/**/*.parquet"))
+    ]
+    if not present:
+        return None
+    try:
+        with duckdb.connect() as conn:
+            # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
+            # thread pool (mirror `latest_movers_date`).
+            apply_duckdb_thread_bound(conn)
+            row = conn.execute(
+                "SELECT MAX("
+                "  EXTRACT(HOUR FROM (\"timestamp\" AT TIME ZONE 'Asia/Kolkata')) * 60 "
+                "  + EXTRACT(MINUTE FROM (\"timestamp\" AT TIME ZONE 'Asia/Kolkata'))"
+                ") "
+                "FROM read_parquet(?, union_by_name=true) "  # nosec B608 - bound glob-list parameter
+                "WHERE (\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE = ?",
+                [present, day],
+            ).fetchone()
+    except (duckdb.Error, OSError) as exc:
+        _LOG.warning("movers.latest_minute.unreadable_lake", error=str(exc))
+        return None
+    if row is None or row[0] is None:
+        return None
+    from brutex.dashboard.movers_snapshot import minute_to_hhmm
+
+    return minute_to_hhmm(int(row[0]))
 
 
 @dataclass(frozen=True, slots=True)
