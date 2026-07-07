@@ -22,13 +22,18 @@ from brutex.dashboard.pipeline_pull import (
     PHASE_METADATA,
     PHASE_PREBUILD,
     PHASE_SPOT,
+    STRICT_GATE_ENV,
     PipelinePullReport,
+    PriorStepsVerdict,
+    StepSettleVerdict,
     derive_quarantined_name_set,
     derive_quarantined_symbols,
     historical_phase_ok,
     metadata_phase_ok,
     run_full_pipeline,
     spot_phase_ok,
+    step_settle_verdict,
+    strict_gate_enabled,
 )
 from brutex.dashboard.pull_controller import BulkSpotReport, SymbolPullResult
 from hypothesis import given
@@ -73,6 +78,7 @@ def _spot(
     quota_exhausted: bool = False,
     still_failed_windows: int = 0,
     completed: int = 3,
+    mass_empty_cause: str | None = None,
 ) -> BulkSpotReport:
     """Build a :class:`BulkSpotReport` with one symbol carrying *completed* pairs."""
     return BulkSpotReport(
@@ -84,6 +90,7 @@ def _spot(
         auth_cause="token dead" if auth_aborted else None,
         still_failed_windows=still_failed_windows,
         quota_exhausted=quota_exhausted,
+        mass_empty_cause=mass_empty_cause,
     )
 
 
@@ -121,6 +128,7 @@ def _historical_inner(
     start_dates: dict[str, str] | None = None,
     greeks_enrich_ok: bool | None = None,
     greeks_enrich_error: str | None = None,
+    mass_empty_cause: str | None = None,
 ) -> HistoricalPullReport:
     """Build the inner :class:`HistoricalPullReport` (the candle sub-report)."""
     return HistoricalPullReport(
@@ -143,6 +151,7 @@ def _historical_inner(
         contracts_out_of_scope=contracts_out_of_scope,
         greeks_enrich_ok=greeks_enrich_ok,
         greeks_enrich_error=greeks_enrich_error,
+        mass_empty_cause=mass_empty_cause,
     )
 
 
@@ -206,6 +215,24 @@ def test_spot_phase_not_ok_on_still_failed_windows() -> None:
     assert spot_phase_ok(_spot(still_failed_windows=2)) is False
 
 
+def test_spot_phase_not_ok_on_mass_empty_halt() -> None:
+    """A spot mass-empty circuit-breaker halt is a BLOCKING gate failure.
+
+    Review fix (DEC-PULL-SIX-STEP-ORDER-001 round 1 MAJOR): the aborted pass
+    never appends, so a `MassEmptySettleHalt` left ``still_failed_windows == 0``
+    and this gate read a HALTED spot step as clean — the chain proceeded to
+    metadata + F&O vendor calls and the strict all-or-nothing barrier fired the
+    post-steps after a needs-operator pull-wide halt. The exact live-reproduced
+    shape: an otherwise-zero report whose only failure signal is the cause.
+    """
+    report = _spot(
+        completed=0,
+        mass_empty_cause="mass clean-empty responses — pull halted before settling",
+    )
+    assert report.verdict.kind == "mass_empty_halt"
+    assert spot_phase_ok(report) is False
+
+
 # --------------------------------------------------------------------------- #
 # metadata_phase_ok
 # --------------------------------------------------------------------------- #
@@ -258,6 +285,23 @@ def test_historical_phase_not_ok_on_failed_pairs() -> None:
     assert historical_phase_ok(report) is False
 
 
+def test_historical_phase_not_ok_on_mass_empty_halt() -> None:
+    """The F&O mass-empty halt is a BLOCKING gate failure (spot-arm symmetry).
+
+    Review fix: an F&O ``MassEmptySettleHalt`` with every OTHER signal clean
+    (no failed pairs, no still-failing windows — the halt aborts before
+    settling) previously read clean here; only the ``start_dates`` −
+    ``phase1_complete`` quarantine arm accidentally rescued the gate. The gate
+    now reads the halt directly.
+    """
+    report = _composite(
+        historical=_historical_inner(
+            mass_empty_cause="mass clean-empty responses — F&O pull halted before settling",
+        )
+    )
+    assert historical_phase_ok(report) is False
+
+
 def test_historical_phase_not_ok_on_inner_metadata_failure() -> None:
     # Phase 3 re-runs the chain enumeration; an open-cell failure during it must
     # NOT read as clean even when the candle sub-report itself is clean.
@@ -280,14 +324,22 @@ def test_historical_phase_ok_when_inner_metadata_absent() -> None:
 
 
 class _Spy[T]:
-    """A typed zero-arg callable that records whether it was invoked, returns *value*."""
+    """A typed callable recording invocation (+ any positional args), returns *value*.
+
+    Accepts ``*args`` so ONE spy shape serves both the zero-arg phases
+    (``run_spot`` / ``run_metadata``) and ``run_historical``, which receives
+    the sequencer's :class:`PriorStepsVerdict` (DEC-PULL-SIX-STEP-ORDER-001);
+    the received args are captured for the threading assertions.
+    """
 
     def __init__(self, value: T) -> None:
         self.value = value
         self.called = False
+        self.args: tuple[object, ...] = ()
 
-    def __call__(self) -> T:
+    def __call__(self, *args: object) -> T:
         self.called = True
+        self.args = args
         return self.value
 
 
@@ -325,6 +377,31 @@ def test_pipeline_stops_after_spot_failure() -> None:
     assert meta.called is False
     assert hist.called is False
     assert "stopped after spot" in report.note
+
+
+def test_pipeline_stops_after_spot_mass_empty_halt() -> None:
+    """A spot mass-empty halt STOPS the chain like the sibling auth/quota halts.
+
+    Review fix (round 1 MAJOR): the sequencer previously proceeded to the
+    metadata + F&O vendor calls after a needs-operator spot halt (a suspected
+    vendor soft-throttle episode — the LAST thing to hammer with more calls),
+    and under ``BRUTEX_PIPELINE_STRICT_GATE=1`` the "all-or-nothing" barrier
+    fired the post-steps over it.
+    """
+    spot = _Spy(_spot(completed=0, mass_empty_cause="mass clean-empty responses"))
+    meta = _Spy(_metadata())
+    hist = _Spy(_composite(historical=_historical_inner()))
+
+    report = run_full_pipeline(run_spot=spot, run_metadata=meta, run_historical=hist)
+
+    assert report.stopped_after == PHASE_SPOT
+    assert report.metadata is None
+    assert report.historical is None
+    assert report.ok is False
+    assert meta.called is False
+    assert hist.called is False
+    # The stop note names the loud needs-operator verdict, never a generic stop.
+    assert "mass_empty_halt" in report.note
 
 
 def test_pipeline_stops_after_metadata_failure() -> None:
@@ -1553,3 +1630,290 @@ def test_pipeline_report_substituted_none_when_prebuild_not_run() -> None:
     )
     assert report.prebuild_opens_substituted is None
     assert report.to_dict()["prebuild_opens_substituted"] is None
+
+
+# --------------------------------------------------------------------------- #
+# strict post-step gate (DEC-PULL-SIX-STEP-ORDER-001) — T6
+# --------------------------------------------------------------------------- #
+
+
+class TestStrictGateEnabled:
+    """The fail-loud ``BRUTEX_PIPELINE_STRICT_GATE`` parse matrix."""
+
+    def test_unset_is_false(self) -> None:
+        assert strict_gate_enabled(env={}) is False
+
+    def test_blank_is_false(self) -> None:
+        assert strict_gate_enabled(env={STRICT_GATE_ENV: ""}) is False
+
+    def test_whitespace_is_false(self) -> None:
+        assert strict_gate_enabled(env={STRICT_GATE_ENV: "   "}) is False
+
+    def test_zero_is_false(self) -> None:
+        assert strict_gate_enabled(env={STRICT_GATE_ENV: "0"}) is False
+
+    def test_one_is_true(self) -> None:
+        assert strict_gate_enabled(env={STRICT_GATE_ENV: "1"}) is True
+
+    def test_padded_one_is_true(self) -> None:
+        assert strict_gate_enabled(env={STRICT_GATE_ENV: " 1 "}) is True
+
+    @pytest.mark.parametrize("garbage", ["true", "yes", "on", "2", "strict", "01"])
+    def test_garbage_raises_value_error(self, garbage: str) -> None:
+        # Fail-LOUD (Golden Rule #1): a broken knob must never silently fall back.
+        with pytest.raises(ValueError, match=STRICT_GATE_ENV):
+            strict_gate_enabled(env={STRICT_GATE_ENV: garbage})
+
+    def test_none_env_reads_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(STRICT_GATE_ENV, "1")
+        assert strict_gate_enabled() is True
+        monkeypatch.delenv(STRICT_GATE_ENV)
+        assert strict_gate_enabled() is False
+
+
+class TestStepSettleVerdict:
+    """The pure barrier predicate over ALL input combinations."""
+
+    @pytest.mark.parametrize("spot_ok", [True, False])
+    @pytest.mark.parametrize("metadata_ok", [True, False])
+    @pytest.mark.parametrize("historical_ok", [True, False])
+    @pytest.mark.parametrize("quarantined", [frozenset(), frozenset({"NIFTY", "ADANIENT"})])
+    def test_full_matrix(
+        self,
+        spot_ok: bool,
+        metadata_ok: bool,
+        historical_ok: bool,
+        quarantined: frozenset[str],
+    ) -> None:
+        verdict = step_settle_verdict(
+            spot_ok=spot_ok,
+            metadata_ok=metadata_ok,
+            historical_ok=historical_ok,
+            quarantined=quarantined,
+        )
+        expected_settled = spot_ok and metadata_ok and historical_ok
+        assert verdict.settled is expected_settled
+        assert verdict.clean is (expected_settled and not quarantined)
+        # blocking is empty IFF clean, and names every failing signal.
+        assert (verdict.blocking == ()) is verdict.clean
+        assert ("spot unclean" in verdict.blocking) is (not spot_ok)
+        assert ("metadata unclean" in verdict.blocking) is (not metadata_ok)
+        assert ("historical unclean" in verdict.blocking) is (not historical_ok)
+        assert ("2 quarantined symbol(s)" in verdict.blocking) is bool(quarantined)
+
+    def test_is_frozen_value_object(self) -> None:
+        verdict = step_settle_verdict(
+            spot_ok=True, metadata_ok=True, historical_ok=True, quarantined=frozenset()
+        )
+        assert verdict == StepSettleVerdict(settled=True, clean=True, blocking=())
+        with pytest.raises(AttributeError):
+            verdict.clean = False  # type: ignore[misc]
+
+
+class TestPriorStepsVerdict:
+    """The prior-step verdict value object + its sequencer threading."""
+
+    @pytest.mark.parametrize("spot_clean", [True, False])
+    @pytest.mark.parametrize("metadata_clean", [True, False])
+    def test_prior_clean_truth_table(self, spot_clean: bool, metadata_clean: bool) -> None:
+        prior = PriorStepsVerdict(spot_clean=spot_clean, metadata_clean=metadata_clean, strict=True)
+        assert prior.prior_clean is (spot_clean and metadata_clean)
+
+    def test_clean_run_threads_clean_verdict(self) -> None:
+        hist = _Spy(_composite(historical=_historical_inner()))
+        run_full_pipeline(
+            run_spot=_Spy(_spot()), run_metadata=_Spy(_metadata()), run_historical=hist
+        )
+        assert hist.args == (PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False),)
+
+    def test_strict_flag_echoed_into_verdict(self) -> None:
+        hist = _Spy(_composite(historical=_historical_inner()))
+        run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=hist,
+            strict_gate=True,
+        )
+        assert hist.args == (PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=True),)
+
+    def test_spot_quarantine_reads_spot_unclean(self) -> None:
+        # The spot GATE passes (pull-wide signals clean) but one symbol was
+        # quarantined — the threaded verdict must read spot_clean=False so the
+        # strict Greeks seam can withhold (the F&O-local gate alone cannot see it).
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0),
+        )
+        hist = _Spy(_composite(historical=_historical_inner()))
+        run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=hist,
+            strict_gate=True,
+        )
+        assert hist.args == (PriorStepsVerdict(spot_clean=False, metadata_clean=True, strict=True),)
+
+
+class TestStrictGateSequencer:
+    """Strict + cleanset behavior of the post-step barrier in run_full_pipeline."""
+
+    def test_strict_with_quarantine_skips_prebuild_and_movers(self) -> None:
+        from structlog.testing import capture_logs
+
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0),
+        )
+        prebuild = _PrebuildSpy(_outcome())
+        warm = _Spy(_warm(3))
+        with capture_logs() as logs:
+            report = run_full_pipeline(
+                run_spot=_Spy(spot),
+                run_metadata=_Spy(_metadata()),
+                run_historical=_Spy(_composite(historical=_historical_inner())),
+                warm_spot_movers=warm,
+                run_prebuild=prebuild,
+                strict_gate=True,
+            )
+        # Post-steps WITHHELD: prebuild never called, movers never fire.
+        assert prebuild.called is False
+        assert warm.called is False
+        assert report.post_steps_strict_skipped is True
+        assert report.to_dict()["post_steps_strict_skipped"] is True
+        assert report.prebuild_built is None
+        assert report.movers_warmed is None
+        # The note NAMES the strict skip + the blocking signal, loudly.
+        assert ", post-steps SKIPPED (strict gate: 1 quarantined symbol(s))" in report.note
+        skipped = [e for e in logs if e["event"] == "pipeline.post_steps.strict_skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["blocking"] == ["1 quarantined symbol(s)"]
+        assert skipped[0]["quarantined"] == ["NIFTY"]
+
+    def test_strict_with_unclean_historical_skips_post_steps(self) -> None:
+        prebuild = _PrebuildSpy(_outcome())
+        report = run_full_pipeline(
+            run_spot=_Spy(_spot()),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=_historical_inner(still_failed_windows=2))),
+            run_prebuild=prebuild,
+            strict_gate=True,
+        )
+        assert prebuild.called is False
+        assert report.post_steps_strict_skipped is True
+        assert "historical unclean" in report.note
+
+    def test_strict_clean_run_identical_to_cleanset(self) -> None:
+        # A fully-clean strict run behaves EXACTLY like the cleanset default.
+        def _run(*, strict: bool) -> PipelinePullReport:
+            return run_full_pipeline(
+                run_spot=_Spy(_spot()),
+                run_metadata=_Spy(_metadata()),
+                run_historical=_Spy(_composite(historical=_historical_inner())),
+                warm_spot_movers=lambda: _warm(2),
+                run_prebuild=_PrebuildSpy(_outcome()),
+                strict_gate=strict,
+            )
+
+        strict_report = _run(strict=True)
+        cleanset_report = _run(strict=False)
+        assert strict_report == cleanset_report
+        assert strict_report.post_steps_strict_skipped is False
+        assert "post-steps SKIPPED" not in strict_report.note
+
+    def test_cleanset_default_byte_identical_pin(self) -> None:
+        # DEFAULT-PRESERVATION PIN (DEC-PULL-SIX-STEP-ORDER-001): a QUARANTINED
+        # cleanset run with strict_gate OMITTED equals strict_gate=False —
+        # prebuild still fires with the exclusion set, names headlined, no
+        # strict flag/clause anywhere (DEC-PREBUILD-CLEANSET-001 semantics).
+        spot = _spot_with_failures(
+            SymbolPullResult(symbol="NIFTY", completed=1, failed=1, no_data=0),
+        )
+
+        def _run(strict_gate: bool | None) -> tuple[PipelinePullReport, _PrebuildSpy]:
+            prebuild = _PrebuildSpy(_outcome())
+            if strict_gate is None:  # the OMITTED-kwarg default shape
+                report = run_full_pipeline(
+                    run_spot=_Spy(spot),
+                    run_metadata=_Spy(_metadata()),
+                    run_historical=_Spy(_composite(historical=_historical_inner())),
+                    run_prebuild=prebuild,
+                )
+            else:
+                report = run_full_pipeline(
+                    run_spot=_Spy(spot),
+                    run_metadata=_Spy(_metadata()),
+                    run_historical=_Spy(_composite(historical=_historical_inner())),
+                    run_prebuild=prebuild,
+                    strict_gate=strict_gate,
+                )
+            return report, prebuild
+
+        default_report, default_prebuild = _run(None)
+        explicit_report, explicit_prebuild = _run(False)
+        assert default_report == explicit_report
+        assert default_prebuild.called is True
+        assert explicit_prebuild.called is True
+        assert default_prebuild.exclude_symbols == frozenset({"NIFTY"})
+        assert default_report.post_steps_strict_skipped is False
+        assert default_report.to_dict()["post_steps_strict_skipped"] is False
+        assert "post-steps SKIPPED" not in default_report.note
+        assert "1 symbol(s) quarantined: NIFTY" in default_report.note  # headline kept
+
+    @pytest.mark.parametrize("strict", [True, False])
+    @pytest.mark.parametrize(
+        "step",
+        [
+            "indices-spot",
+            "stocks-spot",
+            "indices-futures",
+            "stocks-futures",
+            "indices-options",
+            "stocks-options",
+        ],
+    )
+    def test_failure_at_each_step_strict_vs_cleanset(self, strict: bool, step: str) -> None:
+        """Edge 8 (complete): a per-symbol failure shaped at EACH of the six
+        steps × {strict, cleanset}. Spot-side (steps 1-2) and F&O-side (steps
+        3-6) quarantines are modelled with shaped fake reports; strict
+        withholds the post-steps, cleanset runs the prebuild with the
+        quarantined name excluded + headlined."""
+        contract_by_step = {
+            "indices-futures": "NSE-NIFTY-26Mar26-FUT",
+            "stocks-futures": "NSE-ADANIENT-26Mar26-FUT",
+            "indices-options": "NSE-NIFTY-26Mar26-21000-CE",
+            "stocks-options": "NSE-ADANIENT-26Mar26-2400-PE",
+        }
+        if step in ("indices-spot", "stocks-spot"):
+            symbol = "NIFTY" if step == "indices-spot" else "ADANIENT"
+            spot = _spot_with_failures(
+                SymbolPullResult(symbol=symbol, completed=1, failed=1, no_data=0),
+            )
+            hist_inner = _historical_inner()
+            quarantined_name = symbol
+        else:
+            spot = _spot()
+            contract = contract_by_step[step]
+            hist_inner = _historical_inner(
+                failed_pairs=1,
+                phase1_complete=(),
+                start_dates={contract: "2026-01-01"},
+            )
+            quarantined_name = "NIFTY" if "NIFTY" in contract_by_step[step] else "ADANIENT"
+        prebuild = _PrebuildSpy(_outcome())
+        report = run_full_pipeline(
+            run_spot=_Spy(spot),
+            run_metadata=_Spy(_metadata()),
+            run_historical=_Spy(_composite(historical=hist_inner)),
+            run_prebuild=prebuild,
+            strict_gate=strict,
+        )
+        assert quarantined_name in report.quarantined_symbols
+        if strict:
+            assert prebuild.called is False
+            assert report.post_steps_strict_skipped is True
+            assert "post-steps SKIPPED (strict gate:" in report.note
+        else:
+            assert prebuild.called is True
+            assert prebuild.exclude_symbols is not None
+            assert quarantined_name in prebuild.exclude_symbols
+            assert report.post_steps_strict_skipped is False
+            assert "post-steps SKIPPED" not in report.note
+        assert f"quarantined: {quarantined_name}" in report.note  # headlined either way
