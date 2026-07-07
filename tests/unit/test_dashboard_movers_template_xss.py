@@ -122,6 +122,25 @@ def test_movers_pcr_renderer_never_touches_innerhtml() -> None:
     assert 'r.coverage !== "full" ? " ~" : ""' in pcr_source
 
 
+def test_movers_pcr_null_sum_renders_dash_never_zero() -> None:
+    """The grouped-sum helper ``grp()`` renders a null put/call sum as an honest
+    "—", never a fabricated ``0`` (round-4 hostile-review fold; Golden Rule #1).
+
+    Unreachable on today's wire — ``pcr_row_json`` always emits raw ints for
+    put_oi/call_oi/put_volume/call_volume — but the defensive branch must match
+    the panel's own null law (null ratios render "—"), so a future wire variant
+    carrying a null sum could never display a fabricated 0.
+    """
+    html = _render_movers_html()
+    match = re.search(r"function renderPcr\(rows\).*?function showPcr\(j\).*?\n}", html, re.DOTALL)
+    assert match is not None, "renderPcr + showPcr must both be defined"
+    pcr_source = match.group(0)
+    # The honest null → "—" branch is present…
+    assert 'const grp = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");' in pcr_source
+    # …and the fabricated-zero form is gone.
+    assert "Number(n == null ? 0 : n)" not in pcr_source
+
+
 def test_movers_pcr_rendered_on_both_success_paths() -> None:
     """showPcr runs on the full-render path AND the skip-render-when-unchanged
     fast path (load() hides the panel at its top, so an identical repeat fetch

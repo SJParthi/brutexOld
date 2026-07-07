@@ -1552,6 +1552,12 @@ class TestOptionsPcr:
         assert row["oi_pcr"] is None  # 700/0 → sentinel, puts visible in the sums
         assert (row["put_oi"], row["call_oi"]) == (700, 0)
         assert row["oi_status"] == "zero_denominator"
+        # Design §9 test 23 pins BOTH ratios null for the all-PE chain: the
+        # volume side hits the SAME zero call-side denominator (50/0), so the
+        # wire carries the sentinel on both variants (round-4 review fold).
+        assert row["vol_pcr"] is None
+        assert row["vol_status"] == "zero_denominator"
+        assert (row["put_volume"], row["call_volume"]) == (50, 0)
 
     def test_pre_open_as_of_emits_honest_empty_rows(
         self, store: InstrumentStore, tmp_path: Path

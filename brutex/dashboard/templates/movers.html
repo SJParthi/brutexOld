@@ -358,7 +358,9 @@ function fmtElapsed(s){
    the SAME candidate set the rankings use. Ratios arrive as full-precision
    strings or null (zero call-side denominator — never Infinity, never
    fabricated); display trims to 2dp, full precision rides the title attr;
-   null renders "—" with the typed status string as tooltip. coverage_note is
+   null renders "—" with the typed status string as tooltip; a null put/call
+   SUM (unreachable today — pcr_row_json always emits raw ints) also renders
+   an honest "—", never a fabricated 0 (Golden Rule #1). coverage_note is
    server-composed — never re-derived here. "~" marks non-full coverage (the
    strike_step_confidence marker precedent). XSS-safe BY CONSTRUCTION: every
    payload-derived value is assigned via textContent / the title DOM property
@@ -367,7 +369,7 @@ function fmtElapsed(s){
 function renderPcr(rows) {
   const two = (s) => { if (s == null) return "—";
     const n = parseFloat(s); return isNaN(n) ? String(s) : n.toFixed(2); };
-  const grp = (n) => Number(n == null ? 0 : n).toLocaleString("en-IN");
+  const grp = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
   const box = $("pcrRows");
   box.textContent = "";
   rows.forEach((r) => {
