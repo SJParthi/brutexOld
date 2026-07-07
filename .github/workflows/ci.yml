@@ -1545,6 +1545,14 @@ jobs:
           else
             echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
           fi
+          # DEC-BENCH-ABS-BASELINE-001: the absolute bench-baseline schema/
+          # comparator/capture/governance core — pure stdlib, standalone-gateable
+          # at 100% line+branch with its OWN unit+property+golden suites.
+          if compgen -G "tests/unit/test_bench_baseline.py" > /dev/null; then
+            pytest --cov=brutex.observability.bench_baseline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_bench_baseline.py tests/property/test_bench_baseline_property.py tests/golden/test_bench_baseline_golden.py
+          else
+            echo "(brutex.observability.bench_baseline test file not present yet — gate inactive)"
+          fi
           # DEC-FNO-CANDLE-LAKE-001: the canonical F&O contract-symbol parser + the
           # F&O candle logical-table descriptor/schema_meta registration — pure,
           # stdlib-only, standalone-gateable at 100% line+branch.
@@ -2119,11 +2127,27 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # DEC-BENCH-ABS-BASELINE-001: baseline governance diffs vs base
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+      - name: Bench-baseline structural gate (schema + registry + governance fields)
+        # DEC-BENCH-ABS-BASELINE-001. Green on an EMPTY baselines dir (bootstrap
+        # state) with a loud notice; a committed baseline that fails schema (incl.
+        # tolerance_pct >= 100 — the 2x-must-fail structural cap) blocks merge here.
+        # stdlib-only: loads the core via spec_from_file_location, no pip install.
+        run: python3 scripts/ci/bench_baseline_gate.py validate --baselines-dir tests/bench/baselines
+      - name: Bench-baseline governance gate (no silent re-baseline)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GH_TOKEN: ${{ github.token }}   # read-only: live run verification via `gh api`
+        run: |
+          git fetch --no-tags origin "${BASE_REF}"
+          python3 scripts/ci/bench_baseline_gate.py govern --base "origin/${BASE_REF}"
       - name: Install deps (dev + data — the lake benches need polars/duckdb)
         # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
         # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
