@@ -1,6 +1,6 @@
 # soak-selfhosted.yml — The REAL multi-hour soak on the self-hosted M4-Pro runner.
 #
-# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1534)
+# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1535)
 # ------------------------------------------------------
 # The nightly `stress-nightly.yml` runs on GitHub-hosted `ubuntu-24.04` with a
 # FIXED 60-minute job timeout — which STRUCTURALLY forbids a real multi-hour

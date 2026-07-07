@@ -77,7 +77,7 @@ check**. This is the "no illusion" table.
 | **Property (fuzz)** | edge cases you didn't think of | 🟢 live (`-x`, stops on first falsification) |
 | **Golden-master** | byte-level output drift | 🟢 live (exact-equality fixtures) |
 | **Benchmark** | O(1) speed regressions | 🟢 live (ratio gates) |
-| **Stress / soak** | sustained leaks / drift over hours | 🟢 live — nightly ~5-min stress regression gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, duration-derived timeout; DEC-SOAK-REAL-TIER-001 #1534 — the prior “24-hour (nightly)” claim was false and is retracted) |
+| **Stress / soak** | sustained leaks / drift over hours | 🟢 live — nightly ~5-min stress regression gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, duration-derived timeout; DEC-SOAK-REAL-TIER-001 #1535 — the prior “24-hour (nightly)” claim was false and is retracted) |
 | **Mutation** | "do the tests actually catch bugs?" | 🟢 live (85% threshold on the critical state module; weekly full run) |
 | **Smoke + Red-team** | fast pre-push + gate-integrity (planted bugs) | 🟢 live |
 
