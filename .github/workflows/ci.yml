@@ -831,7 +831,7 @@ jobs:
           # under the aggregate gate, DEC-COV-CLI-HARNESS-001) / the
           # pragma'd live pull path.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_greeks_backfill.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
           fi
