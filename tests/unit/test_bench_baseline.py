@@ -10,9 +10,10 @@ refusals, and the full governance permutation grid are all pinned.
 
 from __future__ import annotations
 
+import ast
 import json
 import math
-import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
@@ -193,19 +194,28 @@ class TestSlugAndKey:
         with pytest.raises(bb.BenchBaselineError, match="unknown entry id"):
             bb.workload_hash("nonexistent_hot_path")
 
-    def test_runtime_hardware_key_resolves_here(self) -> None:
-        """brutex is installed in the test env — the lazy import resolves."""
-        key = bb.runtime_hardware_key()
-        assert bb.KEY_SLUG_RE.fullmatch(key)
+    def test_core_is_a_pure_stdlib_leaf_with_zero_brutex_imports(self) -> None:
+        """CodeQL py/cyclic-import 670/671 regression pin: the core must
+        carry ZERO brutex imports — module scope AND function scope.
 
-    def test_runtime_hardware_key_without_brutex_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The lazy-import failure names the remediation (review round 1 —
-        the branch is genuinely testable, so no coverage pragma)."""
-        monkeypatch.setitem(sys.modules, "brutex.config.hardware_envelope", None)
-        with pytest.raises(bb.BenchBaselineError, match="BRUTEX_BENCH_BASELINE_KEY"):
-            bb.runtime_hardware_key()
+        ``hardware_envelope`` imports the ONE key law FROM this module, so
+        ANY brutex import here (even the old lazy ``runtime_hardware_key``
+        one) re-creates the config <-> observability cycle. The runtime-key
+        lookup now lives in ``scripts/ci/bench_baseline_gate.py::cmd_key``.
+        """
+        source = Path(bb.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=bb.__file__)
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders.extend(
+                    f"line {node.lineno}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name.split(".")[0] == "brutex"
+                )
+            elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "brutex":
+                offenders.append(f"line {node.lineno}: from {node.module} import ...")
+        assert offenders == []
 
     def test_tolerance_cap_is_strictly_below_two_x(self) -> None:
         """The structural 2x-must-fail invariant (S6) — FLOAT-EXACT.

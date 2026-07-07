@@ -126,6 +126,32 @@ class TestKeySubcommand:
         # structlog detection INFO line above it on first probe).
         assert bb.KEY_SLUG_RE.fullmatch(proc.stdout.strip().splitlines()[-1])
 
+    def test_cmd_key_in_process_happy_path(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """cmd_key resolves the key via its OWN lazy brutex import (the
+        lookup moved here from the core — CodeQL py/cyclic-import 670/671)."""
+        assert GATE.cmd_key() == 0
+        out = capsys.readouterr().out.strip().splitlines()
+        assert bb.KEY_SLUG_RE.fullmatch(out[-1])
+
+    def test_cmd_key_without_brutex_exits_two_with_remediation(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The no-brutex branch names the remediation (the old core
+        ``runtime_hardware_key`` contract, relocated verbatim)."""
+        monkeypatch.setitem(sys.modules, "brutex.config.hardware_envelope", None)
+        assert GATE.cmd_key() == 2
+        err = capsys.readouterr().err
+        assert "requires an installed brutex" in err
+        assert "BRUTEX_BENCH_BASELINE_KEY" in err
+
+    def test_cmd_key_invalid_env_override_exits_two(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A slug-law-violating BRUTEX_BENCH_BASELINE_KEY fails loud (exit 2)."""
+        monkeypatch.setenv("BRUTEX_BENCH_BASELINE_KEY", "Bad Key!")
+        assert GATE.cmd_key() == 2
+        assert "violates the hardware-key slug law" in capsys.readouterr().err
+
 
 class TestValidateSubcommand:
     def test_empty_dir_notice_exit_zero(self, tmp_path: Path) -> None:

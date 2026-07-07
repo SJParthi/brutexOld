@@ -197,10 +197,26 @@ def make_gh_run_verifier(
     return verify
 
 
-def cmd_key(core: types.ModuleType) -> int:
-    """Print the runtime hardware key (requires an installed brutex)."""
+def cmd_key() -> int:
+    """Print the runtime hardware key (requires an installed brutex).
+
+    The lazy brutex import lives HERE, not in the core: the core is a
+    pure-stdlib LEAF with ZERO brutex imports (``hardware_envelope``
+    imports the key law FROM it — a strict one-direction DAG, CodeQL
+    py/cyclic-import 670/671), while this subcommand runs only on the
+    bench runner, where brutex is installed.
+    """
     try:
-        print(core.runtime_hardware_key())
+        from brutex.config.hardware_envelope import hardware_key
+    except ImportError:
+        print(
+            "::error::bench-abs key: hardware key requires an installed brutex "
+            "(run on the bench runner, or pass BRUTEX_BENCH_BASELINE_KEY)",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        print(hardware_key())
     except (ValueError, RuntimeError) as exc:
         print(f"::error::bench-abs key: {exc}", file=sys.stderr)
         return 2
@@ -534,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3 if exc.code not in (0, None) else 0
     core = load_core()
     if args.command == "key":
-        return cmd_key(core)
+        return cmd_key()
     if args.command == "validate":
         return cmd_validate(core, Path(args.baselines_dir))
     if args.command == "compare":

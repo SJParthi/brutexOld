@@ -105,6 +105,18 @@ class TestCpuModelString:
         hw.reset_hardware_envelope_cache()
         assert hw.cpu_model_string() == first  # re-detected, same box
 
+    def test_cache_hit_skips_probing_entirely(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The once-per-process pin: a cache HIT returns before ANY probe —
+        the ``_CPU_MODEL_CACHE`` store/read is live dataflow, not a dead
+        write (CodeQL py/unused-global-variable 672 regression)."""
+        first = hw.cpu_model_string()
+
+        def _boom() -> str:
+            raise AssertionError("cache miss — cpu_model_string re-probed the platform")
+
+        monkeypatch.setattr(hw.platform, "system", _boom)
+        assert hw.cpu_model_string() == first
+
     def test_injected_probe_bypasses_the_cache(self) -> None:
         real = hw.cpu_model_string()
         injected = hw.cpu_model_string(

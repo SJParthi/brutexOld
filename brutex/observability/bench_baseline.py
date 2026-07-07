@@ -16,9 +16,14 @@ Contract (CLAUDE.md §11 COMMON · DYNAMIC · AUTOMATED):
   ``importlib.util.spec_from_file_location`` (the ``scripts/ci/_textscan.py``
   sibling-contract idiom), so the shared-CI governance/validate steps need
   zero pip installs.
-* The ONLY brutex import is a **lazy** one inside
-  :func:`runtime_hardware_key` (only called on the bench runner, where
-  brutex is installed).
+* **ZERO brutex imports** — module scope AND function scope. This module
+  is the pure-stdlib LEAF of the hardware-key law:
+  :mod:`brutex.config.hardware_envelope` imports :func:`slugify` /
+  :func:`format_hardware_key` / :data:`KEY_SLUG_RE` FROM here (a strict
+  one-direction import DAG — CodeQL py/cyclic-import 670/671), and the
+  gate CLI's ``key`` subcommand resolves the runtime hardware key itself
+  via a lazy ``brutex.config.hardware_envelope.hardware_key`` import
+  (only on the bench runner, where brutex is installed).
 * **DYNAMIC registry** — adding hot path #7 is one
   :data:`REQUIRED_ENTRY_KEYS` member + one :data:`ENTRY_WORKLOADS` row +
   one row in ``tests/bench/_abs_baseline_registry.py``; existing entries
@@ -263,22 +268,6 @@ def workload_hash(entry_id: str) -> str:
         raise BenchBaselineError(f"unknown entry id {entry_id!r} — not in ENTRY_WORKLOADS")
     canonical = json.dumps(ENTRY_WORKLOADS[entry_id], sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def runtime_hardware_key() -> str:
-    """This machine's hardware key via the ONE hardware leaf (lazy brutex import).
-
-    Only callable where brutex is installed (the bench runner); the
-    standalone-loaded governance/validate paths never call it.
-    """
-    try:
-        from brutex.config.hardware_envelope import hardware_key
-    except ImportError as exc:
-        raise BenchBaselineError(
-            "hardware key requires an installed brutex (run on the bench runner, "
-            "or pass BRUTEX_BENCH_BASELINE_KEY)"
-        ) from exc
-    return hardware_key()
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1257,9 +1246,14 @@ def render_pr_body(
         "",
         f"Decision ID: {BOOTSTRAP_DECISION_ID} (standing first-capture authorization).",
         "",
-        f"Every number below was MEASURED on the runner by run {run_url} and is "
-        "committed verbatim from the runner artifact — no edit surface exists "
-        "between measurement and this diff.",
+        # One PR-body LINE deliberately wrapped across source lines —
+        # EXPLICIT concatenation so a missing list comma can never silently
+        # merge two elements (CodeQL py/implicit-string-concatenation-in-list).
+        (
+            f"Every number below was MEASURED on the runner by run {run_url} and is "
+            + "committed verbatim from the runner artifact — no edit surface exists "
+            + "between measurement and this diff."
+        ),
         "",
         "| entry | blessed ns/op | cross-run spread | decision id |",
         "|---|---|---|---|",
@@ -1276,16 +1270,22 @@ def render_pr_body(
     if replaced:
         parts += [
             "",
-            "GOVERNANCE: this PR replaces blessed cells, so it must ALSO gain a "
-            "human-written docs/MIGRATION.md entry for the new decision id (naming "
-            "each replaced entry key and its literal new value token) before merge — "
-            "the bench-baseline governance gate enforces this mechanically.",
+            # One PR-body LINE — explicit concatenation (see the note above).
+            (
+                "GOVERNANCE: this PR replaces blessed cells, so it must ALSO gain a "
+                + "human-written docs/MIGRATION.md entry for the new decision id (naming "
+                + "each replaced entry key and its literal new value token) before merge — "
+                + "the bench-baseline governance gate enforces this mechanically."
+            ),
         ]
     parts += [
         "",
-        "NUDGE (bootstrap honesty): GITHUB_TOKEN-created PRs do not trigger CI: "
-        "close/reopen this PR (or push an empty commit) so the required "
-        "`CI OK (aggregate gate)` context reports, then merge.",
+        # One PR-body LINE — explicit concatenation (see the note above).
+        (
+            "NUDGE (bootstrap honesty): GITHUB_TOKEN-created PRs do not trigger CI: "
+            + "close/reopen this PR (or push an empty commit) so the required "
+            + "`CI OK (aggregate gate)` context reports, then merge."
+        ),
         "",
     ]
     return "\n".join(parts)
@@ -1687,7 +1687,6 @@ __all__ = [
     "parse_fragment",
     "render_pr_body",
     "render_report",
-    "runtime_hardware_key",
     "slugify",
     "tolerance_multiplier",
     "validate_dir",

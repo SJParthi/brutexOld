@@ -109,6 +109,10 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+# STRICTLY one-direction (CodeQL py/cyclic-import 670/671): the bench-baseline
+# core is a pure-stdlib LEAF with ZERO brutex imports (its runtime-key lookup
+# lives in the gate CLI, not the core), so this module-scope import of the ONE
+# hardware-key law can never re-enter brutex.config.
 from brutex.observability.bench_baseline import (
     KEY_SLUG_RE,
     format_hardware_key,
@@ -857,9 +861,13 @@ def cpu_model_string(
         reader = _read_proc_cpuinfo if cpuinfo_reader is None else cpuinfo_reader
         model = _cpuinfo_model_name(reader())
     resolved = model if model else "unknown"
-    if not injected:
-        _CPU_MODEL_CACHE = resolved
-    return resolved
+    if injected:
+        return resolved
+    # Store-then-serve THROUGH the global so the cache write is provably
+    # live dataflow (the read below + the fast path above), mirroring the
+    # `_DETECTED_RAM_BYTES` memo idiom — CodeQL py/unused-global-variable 672.
+    _CPU_MODEL_CACHE = resolved
+    return _CPU_MODEL_CACHE
 
 
 @dataclass(frozen=True, slots=True)
