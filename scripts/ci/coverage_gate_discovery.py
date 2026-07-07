@@ -557,8 +557,11 @@ def build_plan(base: str) -> Plan:
 #: report`` capture. Observed live (CI + local repro): ``Couldn't use data
 #: file '….coverage…': no such table: tracer`` — the SQLite store was
 #: truncated/half-written at GENERATION time inside the pytest run, so
-#: re-reading the same file can never succeed; the recovery is re-running
-#: the whole pytest section (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold).
+#: re-reading the same file can never succeed. Since the widened-retry fold
+#: EVERY not-measured probe re-runs the whole pytest section once; the
+#: signature only refines the retry WARN's diagnosis (corrupt-at-generation
+#: vs signature-less parallel-mode data loss) — DEC-PULL-BEAT-PERRUN-001
+#: gate-hardening fold + the widened-retry reconcile.
 _CORRUPT_DATA_SIGNATURES: tuple[str, ...] = ("no such table", "Couldn't use data file")
 
 #: Base name of the per-section coverage data files (``COVERAGE_FILE``
@@ -617,6 +620,10 @@ def _erase_section_data(env: dict[str, str]) -> None:
 def _is_corrupt_data(stdout: str, stderr: str) -> bool:
     """Return True if a report capture carries the corrupt-data signature.
 
+    Used only to pick the section-retry WARN's diagnosis (corrupt data file
+    vs a signature-less parallel-mode data loss) — the retry itself fires on
+    ANY not-measured probe, signature or not.
+
     Parameters
     ----------
     stdout:
@@ -661,14 +668,14 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
     prevent).
 
     Data-file hygiene (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold — the
-    red/green-nondeterminism fix): the gate was observed failing on
-    genuinely-100% modules because the coverage DATA FILE was CORRUPT at
-    GENERATION time — pytest-cov's own in-process report already failed with
-    ``Couldn't use data file '…': no such table: tracer`` INSIDE the pytest
-    section (``[tool.coverage.run] parallel = true`` plus suites that
-    deliberately ABANDON daemon threads can race pytest-cov's stop/combine on
-    a shared data file), so the earlier report-only retry re-read the same
-    corrupt file and could never recover. Three-part hardening:
+    spurious-red hardening): the gate was observed failing on genuinely-100%
+    modules because the coverage DATA FILE was CORRUPT at GENERATION time —
+    pytest-cov's own in-process report already failed with ``Couldn't use
+    data file '…': no such table: tracer`` INSIDE the pytest section
+    (``[tool.coverage.run] parallel = true`` plus suites that deliberately
+    ABANDON daemon threads can race pytest-cov's stop/combine on a shared
+    data file), so the earlier report-only retry re-read the same corrupt
+    file and could never recover. Four-part hardening:
 
     * every subprocess of the section — the pytest run AND both ``coverage
       report`` reads — shares ONE per-module ``COVERAGE_FILE``
@@ -676,12 +683,24 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
     * every attempt opens with ``coverage erase``
       (:func:`_erase_section_data`) so a stale/corrupt leftover can never
       poison it;
-    * a not-measured probe WITH the corrupt-data signature
-      (:func:`_is_corrupt_data`) re-runs the WHOLE pytest section ONCE (a
-      fresh data file — not a doomed re-read); WITHOUT the signature it
-      fails immediately (the genuine 0%-masking case). The failure
-      direction stays LOUD: the gate can still go red spuriously, never
-      green wrongly.
+    * ANY not-measured probe re-runs the WHOLE pytest section ONCE (a fresh
+      data file — never a doomed re-read of the same one). The corrupt-data
+      signature (:func:`_is_corrupt_data`) only refines the retry WARN's
+      diagnosis: observed live (widened-retry reconcile — a 3-run HEAD
+      sample went red 2-of-3, one failure a SIGNATURE-LESS not-measured on
+      a module the same section's in-process pytest-cov table printed at
+      100.00%), parallel-mode data LOSS can surface as a clean not-measured
+      with NO signature, so a signature-less miss is NOT proof of the
+      genuine 0%-masking case and the earlier signature-gated retry never
+      fired for it. FAIL-CLOSED: a module whose tests genuinely never
+      import it is not-measured on BOTH attempts deterministically, so the
+      widened retry can never turn 0%-masking green — the failure direction
+      stays LOUD (red spuriously possible, green wrongly never);
+    * the pytest run passes ``--cov-report=``: the gate never reads
+      pytest-cov's in-process terminal report, and that reporter is itself
+      one more reader racing on the parallel-mode data file — suppressing
+      it removes the race participant for free (the out-of-process probe is
+      the ONLY reader).
 
     Parameters
     ----------
@@ -704,6 +723,7 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
         "--cov=brutex",
         "--cov-branch",
         "--cov-fail-under=0",
+        "--cov-report=",
         *tests,
     ]
     include = f"*/{module}"
@@ -723,12 +743,19 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
         if module in measured.stdout:
             break
         _print_report_stderr(measured.stderr)
-        if section_retries_left and _is_corrupt_data(measured.stdout, measured.stderr):
+        if section_retries_left:
             section_retries_left -= 1
-            print(
-                f"  WARN: corrupt coverage data for {module} (the data file was "
-                "corrupt at generation time) — re-running the pytest section once"
-            )
+            if _is_corrupt_data(measured.stdout, measured.stderr):
+                print(
+                    f"  WARN: corrupt coverage data for {module} (the data file was "
+                    "corrupt at generation time) — re-running the pytest section once"
+                )
+            else:
+                print(
+                    f"  WARN: {module} not measured with NO corrupt-data signature "
+                    "(spurious parallel-mode data loss is possible) — "
+                    "re-running the pytest section once"
+                )
             continue
         print(f"  FAIL: {module} was not measured by its tests — gate failed")
         return False

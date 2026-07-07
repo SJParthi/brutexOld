@@ -32,13 +32,20 @@ Added-vs-Modified handling, renamed (R) path resolution, git-error
 fail-closed exit 2, and multi-file curated-suite discovery. No
 ``# pragma: no cover`` is needed — every branch is reached honestly.
 
-The corrupt-data hardening (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold) is
-pinned too: per-section ``COVERAGE_FILE`` isolation on EVERY subprocess of a
-section, ``coverage erase`` opening every attempt, and — on the observed
+The corrupt-data hardening (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold +
+its widened-retry reconcile) is pinned too: per-section ``COVERAGE_FILE``
+isolation on EVERY subprocess of a section, ``coverage erase`` opening every
+attempt, ``--cov-report=`` suppressing the unused in-process pytest-cov
+report (itself a racing reader of the parallel-mode data file), and a re-run
+of the WHOLE pytest section ONCE on ANY not-measured probe (never a doomed
+re-read of the same corrupt file, the superseded report-only retry) — the
 ``no such table`` / ``Couldn't use data file`` corrupt-at-generation
-signature — a re-run of the WHOLE pytest section ONCE (never a doomed
-re-read of the same corrupt file, the superseded report-only retry), while
-a not-measured module WITHOUT that signature still fails immediately.
+signature only refines the retry WARN's diagnosis (observed live: parallel-
+mode data LOSS surfaces as a SIGNATURE-LESS not-measured on a genuinely-100%
+module, so the earlier signature-gated retry never fired for it). FAIL-
+CLOSED: a module whose tests genuinely never import it is not-measured on
+BOTH attempts deterministically — the widened retry can never turn the
+genuine 0%-masking case green.
 """
 
 from __future__ import annotations
@@ -612,8 +619,9 @@ class TestIsCorruptData:
         assert gate._is_corrupt_data("", stderr) is True
 
     def test_clean_not_measured_output_is_not_corrupt(self, gate: ModuleType) -> None:
-        # The genuine 0%-masking case (tests never imported the module) must
-        # NOT read as corruption — it fails immediately, no re-run.
+        # A signature-less capture must NOT read as corruption — it selects
+        # the data-loss retry WARN diagnosis (the retry itself fires on ANY
+        # not-measured probe; only the message differs).
         assert gate._is_corrupt_data("some other file only", "No data to report.") is False
 
 
@@ -622,9 +630,10 @@ class TestRunCoverage:
 
     Call order per section attempt: ``coverage erase`` → pytest →
     measured-probe ``coverage report``; then (module measured) the final
-    ``--fail-under=100`` report. The corrupt-data signature re-runs the
-    WHOLE section ONCE (erase + pytest + probe — never a re-read of the
-    same corrupt file).
+    ``--fail-under=100`` report. ANY not-measured probe re-runs the WHOLE
+    section ONCE (erase + pytest + probe — never a re-read of the same
+    data file); the corrupt-data signature only refines the retry WARN's
+    diagnosis. A module not measured on BOTH attempts fails (fail-closed).
     """
 
     def _patch_runs(
@@ -663,6 +672,10 @@ class TestRunCoverage:
         # --cov=brutex pytest form.
         assert calls[0][1:] == ["-m", "coverage", "erase"]
         assert "--cov=brutex" in calls[1]
+        # The unused in-process pytest-cov terminal report is SUPPRESSED —
+        # it was one more reader racing on the parallel-mode data file; the
+        # gate's own out-of-process probe is the only reader.
+        assert "--cov-report=" in calls[1]
 
     def test_every_subprocess_shares_the_isolated_coverage_file(
         self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
@@ -693,33 +706,86 @@ class TestRunCoverage:
         assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
         assert len(calls) == 2  # no report, no retry
 
-    def test_not_measured_without_corruption_fails_immediately(
+    def test_not_measured_without_signature_retries_section_once_and_recovers(
         self,
         gate: ModuleType,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A module absent from the report WITHOUT the corrupt-data signature is
-        the genuine 0%-masking case: FAIL immediately with NO retry of any kind
-        (a report re-read of the same valid file can never help, and a pytest
-        re-run cannot make tests import a module they don't), with the captured
-        stderr SURFACED (the swallowed-error diagnosability fix)."""
+        """The WIDENED retry (the reconcile of the signature-gated fold):
+        observed live, ``parallel = true`` data LOSS surfaces as a clean
+        not-measured probe with NO corrupt-data signature on a genuinely-100%
+        module (the same section's in-process pytest-cov table printed
+        100.00%), so a signature-less miss is NOT proof of genuine 0%-masking
+        — the superseded fail-immediately policy went red on it spuriously.
+        The recovery is the SAME whole-section re-run (erase + pytest + a
+        fresh probe), the captured stderr still SURFACED (the swallowed-error
+        diagnosability fix), and the WARN names the data-loss diagnosis."""
         calls, _ = self._patch_runs(
             gate,
             monkeypatch,
             [
-                _completed(returncode=0),  # erase
-                _completed(returncode=0),  # pytest
+                _completed(returncode=0),  # erase (attempt 1)
+                _completed(returncode=0),  # pytest (attempt 1)
                 _completed(
                     returncode=0, stdout="some other file only", stderr="No data to report."
                 ),
+                _completed(returncode=0),  # erase (attempt 2 — clean slate again)
+                _completed(returncode=0),  # pytest (attempt 2 — the re-GENERATION)
+                _completed(returncode=0, stdout="brutex/x.py 10 0 100%"),  # fresh probe
+                _completed(returncode=0),  # report --fail-under=100
+            ],
+        )
+        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is True
+        assert len(calls) == 7
+        # The RETRY is the pytest SECTION, not a report re-read: erase runs
+        # again, then pytest again.
+        assert calls[3][1:] == ["-m", "coverage", "erase"]
+        assert "pytest" in calls[4]
+        out = capsys.readouterr().out
+        assert "coverage report stderr: No data to report." in out
+        assert (
+            "brutex/x.py not measured with NO corrupt-data signature "
+            "(spurious parallel-mode data loss is possible) — "
+            "re-running the pytest section once" in out
+        )
+        assert "corrupt coverage data" not in out  # the OTHER diagnosis is not claimed
+        assert "gate failed" not in out
+
+    def test_genuinely_unmeasured_module_fails_both_attempts(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """FAIL-CLOSED teeth of the widened retry: a module whose tests
+        genuinely never import it is signature-less not-measured on BOTH
+        attempts deterministically (a pytest re-run cannot make tests import
+        a module they don't), so the gate burns exactly ONE re-run then
+        fails LOUDLY — the widened retry can never turn the genuine
+        0%-masking case green (red spuriously possible, green wrongly
+        never)."""
+        calls, _ = self._patch_runs(
+            gate,
+            monkeypatch,
+            [
+                _completed(returncode=0),  # erase (attempt 1)
+                _completed(returncode=0),  # pytest (attempt 1)
+                _completed(
+                    returncode=0, stdout="some other file only", stderr="No data to report."
+                ),
+                _completed(returncode=0),  # erase (attempt 2)
+                _completed(returncode=0),  # pytest (attempt 2)
+                # Not measured AGAIN; blank stderr — the silent branch of
+                # _print_report_stderr.
+                _completed(returncode=0, stdout="some other file only", stderr=""),
             ],
         )
         assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
-        assert len(calls) == 3  # erase + pytest + ONE probe — nothing re-run
+        assert len(calls) == 6  # exactly ONE section re-run, never more
         out = capsys.readouterr().out
+        assert out.count("re-running the pytest section once") == 1
         assert "coverage report stderr: No data to report." in out
-        assert "re-running the pytest section" not in out
         assert "was not measured by its tests — gate failed" in out
 
     def test_corrupt_data_re_runs_the_pytest_section_once_and_recovers(
