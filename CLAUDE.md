@@ -21,7 +21,7 @@
 _Last updated: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
 DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
 DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
-MIGRATION.md #1527–#1531 — the 5-item engine cleanup pack (reapplied onto
+MIGRATION.md #1528–#1532 — the 5-item engine cleanup pack (reapplied onto
 current main after the original 2026-07-06 lineage was wiped), ONE change set:
 (1) the combo `\x1f` reject-only guard is MIRRORED into both previously-
 unguarded run-identity joins (`refinement_run_id` + `_walk_forward_run_hash`)
@@ -37,7 +37,7 @@ consumer of the verified ordering is the engine sweep's
 `ComboDedup(OptionDedupIndex)` dedup tier (`sweep_launch.py`/`cli.py`); the
 original sink-path pin covered the since-deleted `OptionBarSink` orchestration
 (removed on main by DEC-INGEST-AUDIT-WIRING-001 #1500 — dropped in the rebase),
-with the mark-after-durable-write LAW recorded as history in #1528. (3) the
+with the mark-after-durable-write LAW recorded as history in #1529. (3) the
 hand-synced Python `VwapState` +
 `MarketStructureState`/`Trend` twins DELETED — the `rust/trading-core`
 pyclasses are the SINGLE SOURCE (additive `last_swing_high/low` getters
@@ -60,7 +60,7 @@ trio DELETED with its 8 test surfaces + golden fixture + dead ci.yml gates
 (grep-proven zero production consumers; `types.py` kept whole —
 `InstrumentMeta` live — and `errors.py` semantics untouched, its five
 subclasses honestly ledgered as orphaned; landed as ONE atomic commit — the
-wiped first lineage's two-commit accident is recorded as history in #1531) —
+wiped first lineage's two-commit accident is recorded as history in #1532) —
 the pack's ONLY behaviour-visible item (import surface). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; run identity bit-identical for all currently-legal
 inputs (golden-proven); no scope/vocab/rate change; touched modules 100%
@@ -569,7 +569,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
   DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
-  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1527–#1531** — the
+  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1528–#1532** — the
   5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
   (1) the combo `\x1f` reject-only guard mirrored into BOTH
   previously-unguarded run-identity joins via ONE COMMON `strategies.combo.reject_unit_separator`
@@ -579,7 +579,7 @@ hostile-review pass._
   docs only, ZERO executable change (AST-proven); the PRODUCTION consumer is the engine sweep's
   `ComboDedup(OptionDedupIndex)` dedup tier (the `OptionBarSink` pin was dropped in the rebase —
   main's #1500 deleted that dead orchestration; the mark-after-durable-write LAW recorded as
-  history in #1528);
+  history in #1529);
   (3) the hand-synced Python `VwapState` + `MarketStructureState`/`Trend` twins DELETED — the
   `rust/trading-core` pyclasses are the single source (additive `last_swing_high/low` getters,
   core untouched — TickVault-safe; crate 0.3.0→0.3.1 moves the live `_indicator_version()`
@@ -592,7 +592,7 @@ hostile-review pass._
   `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver` trio DELETED in full (8 test surfaces +
   golden fixture + dead ci.yml gates; `types.py` whole + `errors.py` semantics untouched, five
   subclasses honestly orphaned; ONE atomic commit — the wiped lineage's two-commit shape recorded
-  as history in #1531) — the
+  as history in #1532) — the
   pack's ONLY behaviour-visible item. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
   bit-identical for all currently-legal inputs (golden-proven); no scope/vocab/rate change;
   touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
@@ -2094,7 +2094,7 @@ hostile-review pass._
   `LookAheadError`; wired into the strategy runner — the deprecated
   execution driver, the historical second wiring site, was DELETED with
   the simulator/driver trio per DEC-EXECUTION-TRIO-DELETE-001
-  (MIGRATION.md #1531) — integration-tested) — a *timestamp*-based check
+  (MIGRATION.md #1532) — integration-tested) — a *timestamp*-based check
   on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
