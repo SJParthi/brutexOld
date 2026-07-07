@@ -381,6 +381,43 @@ class TestBeatChannelLifecycle:
         assert built[0].beats == 1  # the seam beat reached the run's watchdog
         assert recorded == [job.pull_id]  # journaled under the RUN id, never skipped
 
+    def test_finished_run_keyed_closure_beats_inertly_but_journals_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REGRESSION (review fold NIT-1): the keyed-channel closure carries the SAME
+        live-run guard ``_beat`` received in round 3 — a LAST in-flight keyed beat
+        delivered after the run's ``finally`` still beats the already-STOPPED
+        watchdog (inert acceptance, unchanged) but journals NOTHING, so a durable
+        heartbeat record can never land AFTER the run's finish record."""
+        recorded: list[str] = []
+
+        def _spy(_root: Path, *, pull_id: str) -> None:
+            recorded.append(pull_id)
+
+        monkeypatch.setattr("brutex.observability.pull_journal.record_pull_heartbeat", _spy)
+        built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=lambda fn: fn(),
+            watchdog_factory=factory,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: contextlib.nullcontext(),
+            account_key_resolver=lambda: None,
+            journal_heartbeat_interval_s=0.0,  # throttle disabled — every beat journals
+        )
+        captured: list[Callable[[], None]] = []
+
+        def work(_on_progress: ProgressHook) -> None:
+            captured.append(pb._BEATS[job.pull_id])  # the run's LIVE keyed closure
+            emit_progress_beat()  # an in-run seam beat — journals under the run id
+
+        assert job.start(work, total=1) is True
+        assert built[0].beats == 1
+        assert recorded == [job.pull_id]  # the in-run journal record landed
+        captured[0]()  # the LAST in-flight keyed beat, delivered AFTER the finish
+        assert built[0].beats == 2  # inert beat still fires (identity gate passes)
+        assert recorded == [job.pull_id]  # NOTHING journals after the finish record
+
     def test_watchdog_never_beaten_channel_still_alarms(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -690,3 +727,161 @@ class TestRefusedStartRollback:
             watchdog_factory=_spy_factory()[1],
         )
         assert job2.start(lambda _h: None, total=1) is True
+
+    @staticmethod
+    def _second_start_refused_factory(
+        tmp_path: Path,
+    ) -> Callable[[Path], contextlib.AbstractContextManager[None]]:
+        """A lake-lock factory refusing EXACTLY the SECOND acquire (a passing peer)."""
+        from brutex.adapters.groww.pull_singleflight import PullAlreadyRunningError
+
+        class _HeldGuard:
+            def __enter__(self) -> None:
+                raise PullAlreadyRunningError(tmp_path / "pull.flock")
+
+            def __exit__(self, *_exc: object) -> None:
+                return None
+
+        acquires: list[int] = []
+
+        def factory(_root: Path) -> contextlib.AbstractContextManager[None]:
+            acquires.append(1)
+            if len(acquires) == 2:
+                return _HeldGuard()
+            return contextlib.nullcontext()
+
+        return factory
+
+    def test_refused_start_restores_the_prior_finished_runs_identity(self, tmp_path: Path) -> None:
+        """REGRESSION (review fold NIT-2): a singleflight-REFUSED start RESTORES the
+        pre-claim identity — the PRIOR finished run's deliberately RETAINED
+        ``(watchdog, pull_id)`` token (the ``pull_id`` property contract) survives
+        the rollback instead of being wiped to ``(None, "")``."""
+        built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=lambda fn: fn(),
+            watchdog_factory=factory,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=self._second_start_refused_factory(tmp_path),
+            account_key_resolver=lambda: None,
+        )
+        # Run A completes; its identity token is RETAINED between runs.
+        assert job.start(lambda _h: None, total=1, pull_id="abc123def456") is True
+        assert job.running is False
+        assert job.pull_id == "abc123def456"
+        assert job._watchdog is built[0]
+
+        # The refused start must RESTORE that retained token, never wipe it.
+        assert job.start(lambda _h: None, total=1, pull_id="feedfacef00d") is False
+        assert job.pull_id == "abc123def456"  # never "" and never the phantom id
+        assert job._watchdog is built[0]  # the prior identity token, restored
+        assert job.running is False
+        # A later start is unaffected by the refused rollback.
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.running is False  # sync spawn — ran to completion
+        assert job.pull_id not in {"", "abc123def456", "feedfacef00d"}  # fresh mint
+
+    def test_refused_start_restores_the_prior_runs_warn_throttle(self, tmp_path: Path) -> None:
+        """The once-per-run foreign-beat WARN throttle also survives a refusal (review
+        fold NIT-2): a refused claim must not silently re-arm the between-runs WARN —
+        a post-refusal foreign direct beat stays throttled (dropped WITHOUT a second
+        ``pull_job.foreign_beat_dropped``)."""
+        _built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(),
+            spawn=lambda fn: fn(),
+            watchdog_factory=factory,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=self._second_start_refused_factory(tmp_path),
+            account_key_resolver=lambda: None,
+        )
+
+        def work_a(_on_progress: ProgressHook) -> None:
+            def _foreign_fold() -> None:
+                with pull_id_scope("feedfacef00d"):  # a foreign run's bound id
+                    job.add_bars(1)  # dropped + WARNed — the throttle flag flips
+
+            thread = threading.Thread(target=_foreign_fold)
+            thread.start()
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+
+        with structlog.testing.capture_logs() as logs_a:
+            assert job.start(work_a, total=1, pull_id="abc123def456") is True
+        assert [e["event"] for e in logs_a].count("pull_job.foreign_beat_dropped") == 1
+        assert job._foreign_beat_warned is True  # fired during run A, retained after it
+
+        assert job.start(lambda _h: None, total=1, pull_id="feedfacef00d") is False
+        assert job._foreign_beat_warned is True  # RESTORED — the refusal re-armed nothing
+        # Observable contract: a between-runs foreign direct beat stays throttled.
+        with structlog.testing.capture_logs() as logs_b, pull_id_scope("feedfacef00d"):
+            job._beat()
+        assert [e["event"] for e in logs_b].count("pull_job.foreign_beat_dropped") == 0
+
+
+class TestEmptyAmbientBeatSummary:
+    """The MINOR-hardening observability fold: empty-ambient direct beats ACCEPTED
+    while a run is LIVE are counted and flushed as ONE debug
+    ``pull_job.empty_ambient_beat_summary`` at run end (mirrors
+    ``progress_beat.drop_summary``'s epoch-close flush; 0 = silent). The acceptance
+    behaviour itself is deliberately UNCHANGED (the reviewer-sanctioned envelope)."""
+
+    def test_accepted_empty_ambient_beats_flush_one_debug_summary(self) -> None:
+        built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=lambda fn: fn(), watchdog_factory=factory
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            def _legacy_folds() -> None:
+                job.add_bars(3)  # fresh thread — empty ambient: ACCEPTED + counted
+                job.add_bars(4)
+
+            thread = threading.Thread(target=_legacy_folds)
+            thread.start()
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+
+        with structlog.testing.capture_logs() as logs:
+            assert job.start(work, total=1) is True
+        assert built[0].beats == 2  # ACCEPTANCE UNCHANGED — both beats reached the watchdog
+        summaries: list[EventDict] = [
+            e for e in logs if e["event"] == "pull_job.empty_ambient_beat_summary"
+        ]
+        assert len(summaries) == 1  # exactly ONE flush per run, at run end
+        assert summaries[0]["empty_ambient_beats"] == 2  # the magnitude signal
+        assert summaries[0]["pull_id"] == job.pull_id
+        assert summaries[0]["log_level"] == "debug"  # observability only, never a WARN
+
+    def test_run_with_no_empty_ambient_beats_flushes_nothing(self) -> None:
+        built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=lambda fn: fn(), watchdog_factory=factory
+        )
+
+        def work(on_progress: ProgressHook) -> None:
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # own-run ambient beat
+
+        with structlog.testing.capture_logs() as logs:
+            assert job.start(work, total=1) is True
+        assert built[0].beats == 1  # the own-run beat still landed
+        assert not [e for e in logs if e["event"] == "pull_job.empty_ambient_beat_summary"]
+
+    def test_between_runs_empty_ambient_beat_is_not_counted(self) -> None:
+        built, factory = _spy_factory()
+        job = BackgroundPullJob(
+            progress=PullProgress(), spawn=lambda fn: fn(), watchdog_factory=factory
+        )
+        assert job.start(lambda _h: None, total=1) is True  # run A finished
+        assert job.running is False
+
+        def _between() -> None:
+            job.add_bars(1)  # unscoped thread BETWEEN runs — inert beat, never tallied
+
+        thread = threading.Thread(target=_between)
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert built[0].beats == 1  # the inert acceptance still beat the stopped watchdog
+        assert job._empty_ambient_beats == 0  # nothing accrues while no run is live

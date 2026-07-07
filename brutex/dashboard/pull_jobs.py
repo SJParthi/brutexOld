@@ -435,6 +435,15 @@ class BackgroundPullJob:
         #: DEC-PULL-BEAT-PERRUN-001 fix round). Reset on every :meth:`start`; guarded by
         #: :attr:`_lock`.
         self._foreign_beat_warned = False
+        #: Count of EMPTY-ambient direct-hook beats ACCEPTED while the run is LIVE —
+        #: the documented, reviewer-sanctioned legacy envelope of :meth:`_beat`
+        #: (unscoped threads / tests / unrebound hooks). OBSERVABILITY ONLY (review
+        #: fold MINOR — the acceptance behaviour itself is deliberately UNCHANGED):
+        #: flushed to ONE debug ``pull_job.empty_ambient_beat_summary`` line when the
+        #: run finishes (mirrors ``progress_beat.drop_summary``'s epoch-close flush;
+        #: 0 = silent) so drift toward systematically-unattributed direct emitters
+        #: stays VISIBLE. Reset on every :meth:`start`; guarded by :attr:`_lock`.
+        self._empty_ambient_beats = 0
 
     def start(
         self,
@@ -518,6 +527,15 @@ class BackgroundPullJob:
             if self._running:
                 return False
             self._running = True
+            # Capture the PRE-CLAIM identity state — the PRIOR finished run's RETAINED
+            # token (``pull_id`` property contract) or the fresh-job defaults — so the
+            # singleflight-REFUSED rollback below can RESTORE it exactly (review fold
+            # NIT-2): the refused run never existed, so it must not wipe the retained
+            # prior identity the between-runs gates (``_on_hung`` / ``_beat``) key on.
+            prior_watchdog = self._watchdog
+            prior_pull_id = self._pull_id
+            prior_foreign_beat_warned = self._foreign_beat_warned
+            prior_empty_ambient_beats = self._empty_ambient_beats
             # Publish the run-identity token ATOMICALLY with the single-flight flag, under
             # the SAME lock the gates read it under. Otherwise a stale worker A's finally
             # could acquire the lock in the gap between ``_running = True`` and a later
@@ -526,9 +544,12 @@ class BackgroundPullJob:
             self._watchdog = watchdog
             # Publish the run's pull_id under the SAME lock (the property reads it; the
             # stall-edge handlers stamp the race-free ``watchdog.run_id`` twin on their
-            # events) + re-arm the once-per-run direct-hook foreign-beat drop WARN.
+            # events) + re-arm the once-per-run direct-hook foreign-beat drop WARN and
+            # the per-run empty-ambient direct-beat tally (defensive: the run-end flush
+            # normally already zeroed it).
             self._pull_id = run_pull_id
             self._foreign_beat_warned = False
+            self._empty_ambient_beats = 0
         # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
         # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
         # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
@@ -543,13 +564,20 @@ class BackgroundPullJob:
                 # here (unlike _run / _on_hung): _acquire_singleflight runs SYNCHRONOUSLY in
                 # this same start() call and never spawns / publishes a worker, so no other
                 # run can have superseded this one's watchdog between claiming the flag and
-                # here — this run unconditionally still owns it. ALSO roll back the
-                # published identity token + pull_id (DEC-PULL-BEAT-PERRUN-001 fix round):
-                # the refused run never existed, so ``job.pull_id`` must not report a
-                # phantom id and a stale timer edge must never stamp one.
+                # here — this run unconditionally still owns it. ALSO RESTORE the pre-claim
+                # identity state captured above (review fold NIT-2, superseding the fix
+                # round's unconditional wipe to ``(None, "")``): the refused run never
+                # existed, so ``job.pull_id`` must not report a phantom id, a stale timer
+                # edge must never stamp one, AND a PRIOR finished run's deliberately
+                # RETAINED identity token (the ``pull_id`` property contract; the
+                # ``_on_hung`` / ``_beat`` between-runs gates key on it) must survive the
+                # refusal untouched — including its once-per-run WARN throttle and its
+                # empty-ambient tally.
                 self._running = False
-                self._watchdog = None
-                self._pull_id = ""
+                self._watchdog = prior_watchdog
+                self._pull_id = prior_pull_id
+                self._foreign_beat_warned = prior_foreign_beat_warned
+                self._empty_ambient_beats = prior_empty_ambient_beats
             return False
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
@@ -585,6 +613,8 @@ class BackgroundPullJob:
         superseded-run gates + :meth:`_beat`'s ambient gate key on it), so between runs
         this reports the finished run's id with :attr:`running` ``False`` — honest
         envelope (review fold, round 3), never "the current run" while none is live.
+        A singleflight-REFUSED :meth:`start` RESTORES the retained token it briefly
+        claimed over (review fold NIT-2), so this contract also holds across a refusal.
         """
         with self._lock:
             return self._pull_id
@@ -841,13 +871,28 @@ class BackgroundPullJob:
         ``_on_recovered`` / ``_on_wedged`` / ``finally`` gates): it beats ONLY while
         *watchdog* is still the CURRENT run's — so even a somehow-leaked channel can
         only ever beat its OWN, already-stopped watchdog, never a newer run's. The
-        journal throttle stays COMMON via :meth:`_maybe_journal_heartbeat`.
+        journal throttle stays COMMON via :meth:`_maybe_journal_heartbeat`, and the
+        journal append carries the SAME live-run guard :meth:`_beat` received in
+        round 3 (review fold NIT-1): ``(watchdog, running)`` are read atomically
+        under :attr:`_lock` and the beat lands OUTSIDE it (the same job-lock →
+        watchdog-lock ordering discipline as :meth:`_beat` — the timer thread holds
+        the watchdog lock while calling the edge handlers, which take the job lock).
         """
 
         def _run_beat() -> None:
-            if self._watchdog is not watchdog:
-                return
+            with self._lock:
+                if self._watchdog is not watchdog:
+                    return
+                running = self._running
             watchdog.beat()
+            if not running:
+                # Between runs (the finished run's identity token is RETAINED — see
+                # :attr:`pull_id`): a LAST in-flight keyed beat delivered after the
+                # run's ``finally`` hit the already-STOPPED watchdog above (inert),
+                # but a durable journal heartbeat would land AFTER the run's finish
+                # record — skip it, exactly like :meth:`_beat`'s round-3 guard
+                # (review fold NIT-1).
+                return
             # The routed channel key IS the run id — pass it so the journal never
             # pays a second ambient contextvars scan per delivered beat (fix round
             # NIT) and is guaranteed identical to the channel key.
@@ -946,6 +991,7 @@ class BackgroundPullJob:
                 # already returned / raised). Outside the lock: stop() only sets an Event,
                 # never blocks. Idempotent with _on_hung's stop() (both target the SAME watchdog).
                 watchdog.stop()
+                empty_ambient_beats = 0
                 with self._lock:
                     # Identity gate (defence in depth): clear ``_running`` ONLY when THIS run
                     # is still the current one. Under DEC-PIPELINE-STALL-HEARTBEAT-001 the
@@ -956,6 +1002,14 @@ class BackgroundPullJob:
                     # let a stale worker clobber a newer run.
                     if self._watchdog is watchdog:
                         self._running = False
+                        # Collect the run's ACCEPTED empty-ambient direct-beat tally for
+                        # the observability-only debug flush below (review fold MINOR —
+                        # logged OUTSIDE the lock, mirroring
+                        # ``progress_beat.drop_summary``'s epoch-close flush; the
+                        # identity gate keeps a superseded stale worker from flushing a
+                        # NEWER run's tally under this run's id).
+                        empty_ambient_beats = self._empty_ambient_beats
+                        self._empty_ambient_beats = 0
                         # Fire the completion hook (DEC-PULL-INTENT-RESUME-001: the durable
                         # pull-intent clear) INSIDE the identity gate — a superseded stale
                         # worker must never clear a NEWER run's intent — and strictly BEFORE
@@ -976,6 +1030,22 @@ class BackgroundPullJob:
                         # the worker thread actually exits (never by the watchdog while the
                         # thread may still be writing — the double-run race).
                         self._release_singleflight()
+                if empty_ambient_beats:
+                    # ONE debug summary per run (0 = silent) — the empty-ambient
+                    # direct-hook magnitude signal (review fold MINOR: observability
+                    # only; every counted beat WAS accepted — the sanctioned envelope).
+                    _LOG.debug(
+                        "pull_job.empty_ambient_beat_summary",
+                        empty_ambient_beats=empty_ambient_beats,
+                        pull_id=run_pull_id,
+                        reason=(
+                            "direct-hook heartbeats from threads with NO bound pull_id "
+                            "were ACCEPTED during this run (the documented legacy "
+                            "envelope — unscoped callers / unrebound hooks); flushed "
+                            "once per run so drift toward systematically-unattributed "
+                            "direct emitters stays visible, never silent"
+                        ),
+                    )
 
     def _on_progress(self, label: str, bars: int, failed: bool, gap: bool = False) -> None:
         """Adapt the drivers' positional hook onto the tracker's kw advance.
@@ -1058,7 +1128,10 @@ class BackgroundPullJob:
         never see those calls, so this gate mirrors them at the direct path: the
         emitting thread's ambient ``pull_id`` (the consumers/fan-out workers carry their
         OWN run's re-bound id) must be EMPTY (legacy callers / tests / unrebound hooks —
-        pre-gate behaviour preserved) or match the CURRENT run's id; a non-empty
+        pre-gate behaviour preserved; while the run is LIVE each such ACCEPTED
+        empty-ambient beat is additionally COUNTED and debug-flushed once at run end as
+        ``pull_job.empty_ambient_beat_summary`` — observability only, review fold MINOR)
+        or match the CURRENT run's id; a non-empty
         mismatch is DROPPED + WARNed once per run (``pull_job.foreign_beat_dropped``) —
         a stale run's thread can never refresh a newer run's heartbeat and mask a real
         stall. The gate reads ``(watchdog, pull_id, running)`` atomically under
@@ -1089,13 +1162,21 @@ class BackgroundPullJob:
         with self._lock:
             # Re-read under the lock: the unlocked read above can lose the race with
             # a refused start()'s identity rollback (the singleflight-refused branch
-            # nulls the token) — nothing to beat then.
+            # RESTORES the pre-claim token — ``None`` on a fresh job, review fold
+            # NIT-2) — nothing to beat then.
             watchdog = self._watchdog
             if watchdog is None:
                 return
             run_pull_id = self._pull_id
             running = self._running
             foreign = bool(ambient) and ambient != run_pull_id
+            if running and not ambient:
+                # Observability-ONLY tally (review fold MINOR): an empty-ambient
+                # direct beat during a LIVE run rides the documented legacy-acceptance
+                # envelope below — count it (debug-flushed once at run end by
+                # :meth:`_run`'s ``finally``); the acceptance itself is deliberately
+                # UNCHANGED (reviewer-sanctioned back-compat, never a drop).
+                self._empty_ambient_beats += 1
             warn = foreign and not self._foreign_beat_warned
             if warn:
                 self._foreign_beat_warned = True

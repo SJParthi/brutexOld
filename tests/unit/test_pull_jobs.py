@@ -946,7 +946,8 @@ def test_beat_lost_race_with_identity_rollback_is_a_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The in-lock ``watchdog is None`` re-check: the unlocked fast exit saw a watchdog,
-    but a refused ``start()``'s identity rollback nulled the token before the locked
+    but a refused ``start()``'s identity rollback restored a ``None`` pre-claim token
+    (a FRESH job's refusal — the rollback RESTORES, review fold NIT-2) before the locked
     snapshot — simulated deterministically by nulling it inside the contextvars scan.
     The beat is a silent no-op, never an ``AttributeError`` on ``None``."""
     job = _job()
