@@ -39,7 +39,6 @@ from pathlib import Path
 from typing import Final
 
 import pytest
-from playwright.sync_api import Route, expect
 
 from tests.browser._fixtures import (
     XSS_NAME2,
@@ -48,8 +47,19 @@ from tests.browser._fixtures import (
     build_results_app,
     build_universe_app,
 )
-from tests.browser.conftest import WIDGET_STUBS, NewPageFactory
+from tests.browser._guards import browser_suite_enabled
+from tests.browser.conftest import WIDGET_STUBS, NewPageFactory, freeze_page_clock
 from tests.unit.test_surface_trial_results import _SPECS
+
+if not browser_suite_enabled():
+    # Direct-file invocation outside the opt-in (collect_ignore governs only
+    # directory-shaped collection): a playwright-less box gets an HONEST skip
+    # here instead of a collection ImportError; the conftest modifyitems hook
+    # skips the collected items. With the suite ENABLED a missing playwright
+    # stays a LOUD import error — never a silent green skip in CI.
+    pytest.importorskip("playwright.sync_api")
+
+from playwright.sync_api import Route, expect
 
 pytestmark = pytest.mark.browser
 
@@ -231,7 +241,11 @@ def test_rate_widget_flow_state_drives_dot_classes(
     for path in ("/api/v1/universe/pull-progress", "/api/v1/liveproof"):
         page.route(f"**{path}", _fulfill_json(json.dumps(WIDGET_STUBS[path])))
 
-    page.clock.install()
+    # Install AND PAUSE the fake clock (install() alone keeps ticking in real
+    # time, so a wall-clock stall >= the 3 s poll period would fire a phantom
+    # widget poll and break the exact `1 + len(steps)` ledger assert). Each
+    # poll cycle below fires ONLY under fast_forward.
+    freeze_page_clock(page)
     session.goto("/universe")
     page.wait_for_selector("#bxrmDot")
 

@@ -7,8 +7,11 @@ the pinned ready selector appears, and the page produced ZERO console
 messages / pageerrors / dialogs (the harness teardown enforces the ledgers).
 
 Plus the route-policy-armed proof: an in-page fetch to a non-loopback origin
-must REJECT — the abort-all-external-egress policy is demonstrably live, not
-assumed.
+must die on ``route.abort()``'s OWN error code ``net::ERR_FAILED`` — a bare
+promise rejection cannot distinguish the armed policy from plain DNS failure
+(``.invalid`` never resolves, so an UNARMED context also rejects, with
+``net::ERR_NAME_NOT_RESOLVED``), so the abort-specific code is what proves
+the policy demonstrably live, not assumed.
 """
 
 from __future__ import annotations
@@ -16,11 +19,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import expect
 
 from tests.browser._fixtures import build_db_app
+from tests.browser._guards import browser_suite_enabled
 from tests.browser._registry import PAGE_REGISTRY, PageSpec
 from tests.browser.conftest import NewPageFactory
+
+if not browser_suite_enabled():
+    # Direct-file invocation outside the opt-in (collect_ignore governs only
+    # directory-shaped collection): a playwright-less box gets an HONEST skip
+    # here instead of a collection ImportError; the conftest modifyitems hook
+    # skips the collected items. With the suite ENABLED a missing playwright
+    # stays a LOUD import error — never a silent green skip in CI.
+    pytest.importorskip("playwright.sync_api")
+
+from playwright.sync_api import expect
 
 pytestmark = pytest.mark.browser
 
@@ -43,7 +56,18 @@ def test_page_renders_console_clean(
 
 
 def test_route_policy_blocks_external_egress(new_page: NewPageFactory, tmp_path: Path) -> None:
-    """An in-page fetch to a non-loopback host REJECTS — the abort policy is live.
+    """An external fetch dies on ``net::ERR_FAILED`` — the abort policy is live.
+
+    Anti-vacuity: a rejected promise alone CANNOT distinguish armed from
+    unarmed — ``example.invalid`` is a guaranteed-non-resolvable RFC 2606 TLD
+    and the browser launches ``--no-proxy-server``, so even a disarmed
+    context rejects the fetch (on DNS, ``net::ERR_NAME_NOT_RESOLVED``). The
+    proof therefore pins ``route.abort()``'s OWN error code
+    ``net::ERR_FAILED`` on the failed request (via ``expect_event`` — a
+    bounded, payload-driven wait) and bans the DNS code from the console, so
+    a silently-disarmed policy fails this test loudly (probe-verified: the
+    unarmed context reads ``ERR_NAME_NOT_RESOLVED`` here, never
+    ``ERR_FAILED``).
 
     ``expect_console_clean=False``: Chromium itself logs the blocked resource
     load to the console; the test instead asserts every console entry is the
@@ -52,11 +76,18 @@ def test_route_policy_blocks_external_egress(new_page: NewPageFactory, tmp_path:
     session = new_page(build_db_app(tmp_path), expect_console_clean=False)
     session.goto("/db")
     session.page.wait_for_selector("#tables .tbl")
-    verdict = session.page.evaluate(
-        "() => fetch('https://example.invalid/x').then(() => 'resolved', () => 'rejected')"
-    )
+    with session.page.expect_event(
+        "requestfailed", lambda request: "example.invalid" in request.url
+    ) as failed_info:
+        verdict = session.page.evaluate(
+            "() => fetch('https://example.invalid/x').then(() => 'resolved', () => 'rejected')"
+        )
     assert verdict == "rejected"
+    # route.abort()'s error code — the armed-vs-unarmed distinguisher.
+    assert failed_info.value.failure == "net::ERR_FAILED"
     assert session.page_errors == []
     assert session.dialogs == []
     for entry in session.console:
         assert "example.invalid" in entry or "Failed to load resource" in entry, entry
+    # The DNS failure code would mean the request left the route policy.
+    assert not any("ERR_NAME_NOT_RESOLVED" in entry for entry in session.console)

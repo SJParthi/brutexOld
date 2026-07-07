@@ -31,10 +31,20 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
-from playwright.sync_api import expect
 
 from tests.browser._fixtures import build_db_app
+from tests.browser._guards import browser_suite_enabled
 from tests.browser.conftest import NewPageFactory, PageSession
+
+if not browser_suite_enabled():
+    # Direct-file invocation outside the opt-in (collect_ignore governs only
+    # directory-shaped collection): a playwright-less box gets an HONEST skip
+    # here instead of a collection ImportError; the conftest modifyitems hook
+    # skips the collected items. With the suite ENABLED a missing playwright
+    # stays a LOUD import error — never a silent green skip in CI.
+    pytest.importorskip("playwright.sync_api")
+
+from playwright.sync_api import expect
 
 pytestmark = pytest.mark.browser
 

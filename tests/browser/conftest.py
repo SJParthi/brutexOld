@@ -2,12 +2,21 @@
 
 Contract (final-design §2):
 
-* **Collection guard** — the suite is opt-in via ``BRUTEX_BROWSER_TESTS=1``.
-  When disabled, every playwright-importing test module is ``collect_ignore``d
-  and only the playwright-free sentinel (``test_suite_visibility.py``) is
-  collected, emitting an HONEST skip — so a bare ``pytest`` run (e.g.
-  verify-m4pro's) neither crashes on a missing playwright install nor hides
-  the suite's existence.
+* **Collection guard (three layers)** — the suite is opt-in via
+  ``BRUTEX_BROWSER_TESTS=1``. (1) When disabled, every playwright-importing
+  test module is ``collect_ignore``d for directory-shaped runs and only the
+  playwright-free sentinel (``test_suite_visibility.py``) is collected,
+  emitting an HONEST skip — so a bare ``pytest`` run (e.g. verify-m4pro's)
+  neither crashes on a missing playwright install nor hides the suite's
+  existence. (2) ``collect_ignore`` does NOT govern paths passed explicitly
+  on the command line, so :func:`pytest_collection_modifyitems` skip-marks
+  directly-addressed browser items when the switch is unset — a direct
+  ``pytest tests/browser/test_db_paging.py`` can never silently run Chromium
+  outside the opt-in. (3) Each playwright module carries an env-gated
+  ``pytest.importorskip`` so the same direct invocation on a playwright-less
+  box is an honest skip, never a collection ImportError — while an ENABLED
+  run (CI) keeps a missing playwright a LOUD import error, never a silent
+  green skip.
 * **Function-scoped uvicorn server per test** (127.0.0.1, port 0 — the
   TrustedHost loopback allowlist stays untouched), on a daemon thread with a
   bounded readiness poll and an asserted clean shutdown.
@@ -39,13 +48,19 @@ import threading
 import time
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Protocol
 from urllib.parse import urlsplit
 
 import pytest
 
-from tests.browser._guards import MAX_TIMEOUT_MS, browser_suite_enabled
+from tests.browser._guards import (
+    BROWSER_DIR,
+    ENABLE_ENV_VAR,
+    MAX_TIMEOUT_MS,
+    browser_suite_enabled,
+)
 
 if not browser_suite_enabled():
     # Ignore every playwright-importing module; ONLY the sentinel stays
@@ -59,9 +74,55 @@ if not browser_suite_enabled():
 else:
     collect_ignore = []
 
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Skip directly-addressed browser items when the suite is disabled.
+
+    ``collect_ignore`` governs only directory-shaped collection — pytest
+    treats explicit command-line paths as init paths and collects them
+    regardless, so a direct ``pytest tests/browser/test_db_paging.py`` would
+    otherwise RUN real Chromium tests with the opt-in switch unset. The
+    sentinel stays un-marked: its own in-test honest skip names the switch.
+    """
+    if browser_suite_enabled():
+        return
+    marker = pytest.mark.skip(
+        reason=(
+            f"browser truth suite disabled — set {ENABLE_ENV_VAR}=1 "
+            "(directly-addressed path bypasses the collect_ignore guard)"
+        )
+    )
+    for item in items:
+        item_path = getattr(item, "path", None)
+        if item_path is None:
+            continue
+        path = Path(item_path).resolve()
+        if path.parent == BROWSER_DIR and path.name != "test_suite_visibility.py":
+            item.add_marker(marker)
+
+
 #: One default for the browser context AND every explicit expect() timeout —
 #: sourced from the guard cap so the two can never drift.
 DEFAULT_TIMEOUT_MS: Final[int] = MAX_TIMEOUT_MS
+
+
+def freeze_page_clock(page: Any) -> None:
+    """Install Playwright's fake clock and PAUSE it (COMMON — the clock tests).
+
+    ``page.clock.install()`` alone does NOT freeze time: the installed clock
+    keeps ticking in REAL time (the driver's ``_syncRealTime`` advances it
+    from the wall clock and fires due timers), so on a loaded runner a
+    wall-clock stall >= a page timer's period would fire a phantom poll/retry
+    and break the exact request-ledger asserts. ``pause_at`` one minute ahead
+    stops the tick entirely — callers freeze BEFORE ``goto``, so no page
+    timers exist yet and the jump fires nothing; thereafter timers fire ONLY
+    under ``page.clock.fast_forward`` (probe-verified: a paused clock fires
+    zero interval ticks across a multi-second real-time gap, and ``expect``
+    locator polling still works).
+    """
+    page.clock.install()
+    page.clock.pause_at(datetime.now(UTC) + timedelta(minutes=1))
+
 
 #: Repo root (tests/browser/conftest.py → tests/browser → tests → root).
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -332,16 +393,19 @@ def new_page(browser_session: Any, request: pytest.FixtureRequest) -> Iterator[N
     failed = _test_failed(request.node)
     problems: list[str] = []
     for index, (session, server, fixture) in enumerate(live):
+        # Per-session containment: NOTHING in one session's artifact capture
+        # may abort a later session's teardown (a raise here would leak the
+        # later sessions' uvicorn threads + duckdb stores for the rest of the
+        # pytest process).
         try:
             if failed:
                 suffix = f"-{index}" if len(live) > 1 else ""
                 artifact_dir = ARTIFACT_ROOT / (_sanitize_nodeid(request.node.nodeid) + suffix)
                 artifact_dir.mkdir(parents=True, exist_ok=True)
-                session.context.tracing.stop(path=str(artifact_dir / "trace.zip"))
-                try:
-                    session.page.screenshot(path=str(artifact_dir / "screenshot.png"))
-                except Exception as exc:  # page may already be gone — note it
-                    (artifact_dir / "screenshot-error.txt").write_text(str(exc), encoding="utf-8")
+                # Ledgers FIRST: they depend only on in-process lists — never
+                # on the browser being alive — so a crashed page/context (the
+                # very failure class artifacts exist to diagnose) can't cost
+                # the most diagnostic artifact.
                 (artifact_dir / "ledgers.json").write_text(
                     json.dumps(
                         {
@@ -355,12 +419,32 @@ def new_page(browser_session: Any, request: pytest.FixtureRequest) -> Iterator[N
                     ),
                     encoding="utf-8",
                 )
+                # Trace + screenshot each individually guarded: either can
+                # raise on a dead context/page, and one dead artifact source
+                # must not lose the other.
+                try:
+                    session.context.tracing.stop(path=str(artifact_dir / "trace.zip"))
+                except Exception as exc:  # context may already be gone — note it
+                    (artifact_dir / "trace-error.txt").write_text(str(exc), encoding="utf-8")
+                try:
+                    session.page.screenshot(path=str(artifact_dir / "screenshot.png"))
+                except Exception as exc:  # page may already be gone — note it
+                    (artifact_dir / "screenshot-error.txt").write_text(str(exc), encoding="utf-8")
             else:
                 session.context.tracing.stop()
-        finally:
-            session.context.close()
-            server.stop()
-            fixture.cleanup()
+        except Exception as exc:
+            problems.append(f"session {index}: artifact capture failed: {exc!r}")
+        # Each cleanup step guarded independently: a dead context must not
+        # leak THIS session's server/store, and no step may skip a later one.
+        for label, step in (
+            ("context.close", session.context.close),
+            ("server.stop", server.stop),
+            ("fixture.cleanup", fixture.cleanup),
+        ):
+            try:
+                step()
+            except Exception as exc:
+                problems.append(f"session {index}: {label} failed: {exc!r}")
         if not failed:
             if session.expect_console_clean and session.console:
                 problems.append(f"session {index}: console not clean: {session.console}")

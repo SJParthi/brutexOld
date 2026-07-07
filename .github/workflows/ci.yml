@@ -2134,9 +2134,17 @@ jobs:
             sleep 10
           done
       - name: Resolve Playwright version (Chromium cache key)
+        # importlib.metadata — the playwright package exposes NO top-level
+        # __version__ attribute (probing it raises AttributeError). The
+        # assignment form + emptiness check make a resolution failure fail
+        # the STEP loudly: a $(…) substitution inlined into echo would exit 0
+        # under bash -e and silently write an EMPTY version, degrading the
+        # cache key to a constant (round-1 review finding).
         id: pwver
         run: |
-          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> "$GITHUB_OUTPUT"
+          version="$(python -c 'from importlib.metadata import version; print(version("playwright"))')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright Chromium
         # Keyed on the RESOLVED installed playwright version (not the range
         # pin in pyproject) so a playwright upgrade invalidates the cache

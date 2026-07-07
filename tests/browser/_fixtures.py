@@ -15,10 +15,14 @@ teardown (store close).
 Hostile strings: the production lake boundary REJECTS ``/ \\ : * ? " < > |``
 in symbols (``brutex/data/partition.py`` ``_FORBIDDEN_SYMBOL_CHARS``), so a
 markup-bearing name can never be a lake directory — :data:`XSS_NAME` is
-therefore a lake-LEGAL attribute-breakout payload (single quotes + ``=`` are
-legal) that flows through the REAL lake + instrument master into the movers
-rows, while :data:`XSS_NAME2` (real ``<script>`` markup) rides the store-only
-universe display-name surface where no path validation intervenes.
+therefore a lake-LEGAL two-arm payload (single quotes, ``&``, ``;`` and ``=``
+are all legal): an attribute-breakout arm PLUS an ``&lt;…&gt;`` HTML-entity
+arm whose double-escape divergence gives the movers ``esc()`` sink MUTATION
+TEETH (an unescaped body sink decodes the entities and the cell's
+``textContent`` diverges from the raw string — see :data:`XSS_NAME`). It
+flows through the REAL lake + instrument master into the movers rows, while
+:data:`XSS_NAME2` (real ``<script>`` markup) rides the store-only universe
+display-name surface where no path validation intervenes.
 """
 
 # pyright: reportPrivateUsage=none
@@ -74,12 +78,21 @@ DB_INTERVAL: Final[str] = "1minute"
 DB_DAY: Final[str] = "2025-01-02"
 
 #: Lake-LEGAL hostile instrument name (every char passes the production
-#: ``_validate_symbol`` — no ``< > " | * ? : / \\``): a single-quote
-#: attribute-breakout with a REAL event-handler payload. An unescaped
-#: single-quoted-attribute sink would attach the handler and stamp
-#: ``window.__bx_xss`` — the DOM assertions' tripwire; the cell's
-#: ``textContent`` must equal this raw string.
-XSS_NAME: Final[str] = "EVIL' onmouseover='window.__bx_xss=1"
+#: ``_validate_symbol`` — no ``< > " | * ? : / \\``), carrying TWO arms:
+#:
+#: * an **HTML-entity smuggling arm** ``&lt;img …&gt;`` — the arm that gives
+#:   the ``esc()`` escape MUTATION TEETH in the innerHTML body-context sink
+#:   (movers.html renderRows): WITH ``esc()`` the ``&`` double-escapes to
+#:   ``&amp;lt;`` and the cell's ``textContent`` equals this raw string;
+#:   WITHOUT it the browser decodes ``&lt;``/``&gt;`` to ``<``/``>`` and the
+#:   textContent diverges (a bare quote/handler payload is inert in body
+#:   context either way — the round-1 vacuity finding this arm closes);
+#: * a **single-quote attribute-breakout arm** with a REAL event handler — an
+#:   unescaped single-quoted-attribute sink would attach the handler and
+#:   stamp ``window.__bx_xss`` (the hover tripwire).
+XSS_NAME: Final[str] = (
+    "EVIL&lt;img src=x onerror=window.__bx_xss=1&gt;' onmouseover='window.__bx_xss=1"
+)
 
 #: Element-breakout hostile display name with REAL ``<script>`` markup —
 #: store-field only (the lake boundary forbids ``< > " /`` in symbols), so it

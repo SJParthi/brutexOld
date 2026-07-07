@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from tests.browser import _guards
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +56,49 @@ def test_no_forbidden_patterns_in_browser_suite() -> None:
 def test_guards_cap_matches_law() -> None:
     """The timeout cap is the pinned design value (one source of truth)."""
     assert _guards.MAX_TIMEOUT_MS == 10_000
+
+
+def test_guard_patterns_catch_sneaky_evasion_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a) Teeth: the realistic evasion shapes the scan claims to ban ARE caught.
+
+    Round-1 review finding (DEC-DASHBOARD-BROWSER-TRUTH-001 fix set): the scan
+    missed positional ``set_default_timeout`` literals and the sleep-capable
+    ``time`` import forms. This pins every added pattern against a synthetic
+    suite tree so a pattern regression fails the MAIN test job.
+    """
+    sneaky = {
+        "t_default_timeout.py": "page.set_default_timeout(600000)\n",
+        "t_nav_default_timeout.py": "ctx.set_default_navigation_timeout(60_000)\n",
+        "t_from_import_sleep.py": "from time import sleep\n",
+        "t_import_time_as.py": "import time as t\n",
+        "t_getattr_time.py": 'waiter = getattr(time, "sle" "ep")\n',
+        "t_asyncio_sleep.py": "await asyncio.sleep(5)\n",
+        "t_kwarg_timeout.py": "page.goto(url, timeout=999_999)\n",
+    }
+    for name, body in sneaky.items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
+    monkeypatch.setattr(_guards, "BROWSER_DIR", tmp_path)
+    flagged = {line.split(":", 1)[0] for line in _guards.iter_violations()}
+    assert flagged == set(sneaky)
+
+
+def test_guard_patterns_stay_clean_on_sanctioned_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a) No false positives: capped literals + plain `import time` pass."""
+    (tmp_path / "t_clean.py").write_text(
+        "import time\n"
+        "from datetime import UTC, datetime, timedelta\n"
+        "context.set_default_timeout(DEFAULT_TIMEOUT_MS)\n"
+        "page.set_default_timeout(10_000)\n"
+        "expect(locator).to_have_text(x, timeout=10000)\n"
+        "deadline = time.monotonic() + 15.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_guards, "BROWSER_DIR", tmp_path)
+    assert list(_guards.iter_violations()) == []
 
 
 def test_browser_job_exists_with_required_pins() -> None:

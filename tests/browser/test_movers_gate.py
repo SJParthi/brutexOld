@@ -12,21 +12,28 @@ Chromium renders):
   NOT rebuilt — proven by an expando probe stamped on the shell's empty row
   surviving the retry (and provably DESTROYED by the recovery repaint, so the
   probe has teeth).
-* **Self-recovery** — the 5 s retry is driven deterministically via
-  ``page.clock.fast_forward(5000)`` wrapped in ``page.expect_response`` (no
-  wall-clock waits); after ``gate.release(ok=True)`` the next retry renders
-  the real ranked rows (anti-vacuity: zero ``.preview-badge`` — the JS
-  catch-branch paints SAMPLE rows with preview badges, so a crashed render
-  can never fake a pass) with the pinned NIFTY/BANKNIFTY cells.
+* **Self-recovery** — the page clock is installed AND PAUSED before load
+  (:func:`~tests.browser.conftest.freeze_page_clock` — ``install()`` alone
+  keeps ticking in real time, so a loaded-runner stall >= 5 s would fire a
+  phantom retry and break the exact ledger asserts); the 5 s retry is driven
+  deterministically via ``page.clock.fast_forward(5000)`` wrapped in
+  ``page.expect_response`` (no wall-clock waits); after ``gate.release(
+  ok=True)`` the next retry renders the real ranked rows (anti-vacuity: zero
+  ``.preview-badge`` — the JS catch-branch paints SAMPLE rows with preview
+  badges, so a crashed render can never fake a pass) with the pinned
+  NIFTY/BANKNIFTY cells.
 * **Timer-disarm** — after recovery a DEAD 6 s clock advance fires NO movers
   request, and the ↻ Refresh click's response round-trip is the ordering
   barrier: the movers ledger grows by EXACTLY one (a still-armed gateTimer
   would give +2).
 * **XSS inertness** — the lake-legal hostile symbol (:data:`XSS_NAME`,
-  single-quote attribute breakout + real event handler) flows through the
-  REAL server payload into the name cell as INERT TEXT: ``textContent``
-  equals the raw string, the cell has no element children, hovering never
-  stamps ``window.__bx_xss``, and no pageerror/dialog fires.
+  HTML-entity smuggling arm + single-quote attribute breakout with a real
+  event handler) flows through the REAL server payload into the name cell as
+  INERT TEXT: ``textContent`` equals the raw string, the cell has no element
+  children, hovering never stamps ``window.__bx_xss``, and no
+  pageerror/dialog fires. The entity arm is the MUTATION TEETH: dropping the
+  ``esc()`` escape from the renderRows sink decodes ``&lt;``/``&gt;`` and the
+  ``textContent`` assert fails (an escape-drop mutation is verified KILLED).
 """
 
 from __future__ import annotations
@@ -36,10 +43,20 @@ from pathlib import Path
 
 import pytest
 from brutex.dashboard.prebuild_gate import PrebuildGate
-from playwright.sync_api import expect
 
 from tests.browser._fixtures import XSS_NAME, build_movers_app
-from tests.browser.conftest import NewPageFactory
+from tests.browser._guards import browser_suite_enabled
+from tests.browser.conftest import NewPageFactory, freeze_page_clock
+
+if not browser_suite_enabled():
+    # Direct-file invocation outside the opt-in (collect_ignore governs only
+    # directory-shaped collection): a playwright-less box gets an HONEST skip
+    # here instead of a collection ImportError; the conftest modifyitems hook
+    # skips the collected items. With the suite ENABLED a missing playwright
+    # stays a LOUD import error — never a silent green skip in CI.
+    pytest.importorskip("playwright.sync_api")
+
+from playwright.sync_api import expect
 
 pytestmark = pytest.mark.browser
 
@@ -76,9 +93,12 @@ def test_gate_paint_once_recovery_and_timer_disarm(
     gate: PrebuildGate = fixture.ground["gate"]
     gate.begin()
     gate.set_phase("prebuild")
-    # Freeze timer scheduling BEFORE load: the 5 s gate retry then fires only
-    # under fast_forward — every wait below is payload/DOM-driven.
-    session.page.clock.install()
+    # Freeze timer scheduling BEFORE load — install AND PAUSE the fake clock
+    # (install() alone keeps ticking in real time, so a wall-clock stall
+    # >= 5 s between fast_forwards would fire a phantom gate retry and break
+    # the ==N ledger asserts). The 5 s retry then fires ONLY under
+    # fast_forward — every wait below is payload/DOM-driven.
+    freeze_page_clock(session.page)
     session.goto("/movers")
 
     # 1) Gated shell: honest status + note, one empty row, probe stamped.
@@ -156,7 +176,12 @@ def test_hostile_symbol_renders_inert(new_page: NewPageFactory, tmp_path: Path) 
     row = session.page.locator("#rows tr").filter(has_text=fixture.ground["hostile_pct"])
     expect(row).to_have_count(1)
     name_cell = row.locator("td.name")
-    # textContent equals the RAW hostile string — rendered as text, not markup.
+    # textContent equals the RAW hostile string — rendered as text, not
+    # markup. This assert carries the esc() MUTATION TEETH: without esc() the
+    # innerHTML sink decodes the payload's smuggled `&lt;img…&gt;` entities
+    # (`&` never double-escapes to `&amp;lt;`) and the textContent diverges —
+    # verified by running this test against an `${esc(v)}` → `${v}` mutation
+    # of movers.html renderRows (FAILS mutated, passes shipped).
     expect(name_cell).to_have_text(XSS_NAME)
     assert name_cell.evaluate("td => td.children.length") == 0
     # No injected element anywhere in the rendered table.

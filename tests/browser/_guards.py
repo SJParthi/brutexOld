@@ -9,8 +9,17 @@ can never land even when the browser job itself is not running.
 ZERO-FLAKINESS LAW (DEC-DASHBOARD-BROWSER-TRUTH-001): retries are FORBIDDEN —
 the suite polices itself. Synchronisation must be payload-driven
 (``page.expect_response`` wrappers, ``expect(locator)`` polling, ``page.clock``),
-never wall-clock sleeps, and every explicit timeout is capped at
-:data:`MAX_TIMEOUT_MS`.
+never wall-clock sleeps, and every explicit LITERAL timeout — including a
+literal ``set_default_timeout``/``set_default_navigation_timeout`` argument —
+is capped at :data:`MAX_TIMEOUT_MS`.
+
+HONEST ENVELOPE (Golden Rule #10): the scan is a line-regex over the suite
+sources, not an AST/dataflow analysis — a timeout smuggled through a variable
+or arithmetic expression (``timeout=SLOW_MS``) is beyond its reach and is
+left to code review; the sleep-capable ``time`` import forms it CAN see
+(``from time import …``, ``import time as …``, ``getattr(time, …)``,
+``asyncio.sleep``) are banned wholesale so ``time.sleep`` cannot be smuggled
+past the direct-call pattern by renaming.
 """
 
 from __future__ import annotations
@@ -39,8 +48,9 @@ def browser_suite_enabled() -> bool:
 
 #: ``(name, regex, reason)`` triples scanned line-by-line over every
 #: ``tests/browser/*.py`` EXCEPT this module (which necessarily carries the
-#: pattern text itself). ``oversized_timeout`` is special-cased: its captured
-#: integer must exceed :data:`MAX_TIMEOUT_MS` to be a violation.
+#: pattern text itself). The ``oversized_*`` patterns are special-cased:
+#: their captured integer must exceed :data:`MAX_TIMEOUT_MS` to be a
+#: violation.
 FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "wait_for_timeout",
@@ -52,6 +62,22 @@ FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "time_sleep",
         r"\btime\.sleep\b",
         "blind wall-clock sleep — synchronise on a payload instead",
+    ),
+    (
+        "time_import_evasion",
+        r"from\s+time\s+import|import\s+time\s+as\s",
+        "sleep-capable time import forms (from-import / aliasing) defeat the "
+        "time.sleep pattern — use plain `import time` and direct member calls",
+    ),
+    (
+        "time_getattr_evasion",
+        r"getattr\s*\(\s*time\b",
+        "dynamic time-member access defeats the time.sleep pattern — call members directly",
+    ),
+    (
+        "asyncio_sleep",
+        r"\basyncio\.sleep\b",
+        "blind async wall-clock sleep — synchronise on a payload instead",
     ),
     (
         "retry_plugin",
@@ -78,7 +104,13 @@ FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "oversized_timeout",
         r"timeout\s*=\s*([0-9][0-9_]*)",
-        f"explicit timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} cap",
+        f"explicit literal timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} cap",
+    ),
+    (
+        "oversized_default_timeout",
+        r"set_default(?:_navigation)?_timeout\s*\(\s*([0-9][0-9_]*)",
+        f"literal set_default_timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} "
+        "cap — it silently raises the effective cap for EVERY subsequent wait",
     ),
     (
         "network_idle_wait",
@@ -88,10 +120,14 @@ FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     ),
 )
 
-#: Per-file allowlist: pattern names a specific module may legitimately carry.
-#: The sentinel's honest opt-out skip is the ONLY entry (design-pinned).
+#: Per-file allowlist: pattern names a specific module may legitimately carry
+#: (design-pinned): the sentinel's honest opt-out skip, and the conftest's
+#: skip MARKER for directly-addressed items when the suite is disabled
+#: (``collect_ignore`` does not govern explicit command-line paths — the
+#: marker is part of the collection guard, not a flakiness escape).
 FILE_ALLOWLIST: Final[dict[str, frozenset[str]]] = {
     "test_suite_visibility.py": frozenset({"pytest_skip_call"}),
+    "conftest.py": frozenset({"mark_skip"}),
 }
 
 # ── CI wiring pins (consumed by tests/unit/test_browser_suite_discipline.py) ──
@@ -133,7 +169,7 @@ def iter_violations() -> Iterator[str]:
                 if name in allowed:
                     continue
                 for match in re.finditer(pattern, line):
-                    if name == "oversized_timeout":
+                    if name.startswith("oversized_"):
                         value = int(match.group(1).replace("_", ""))
                         if value <= MAX_TIMEOUT_MS:
                             continue
