@@ -6,7 +6,12 @@ the CI wiring are policed on EVERY push even though the browser job itself
 runs separately:
 
 (a) forbidden-pattern scan — no blind sleeps / retries / oversized timeouts /
-    skip escapes anywhere in ``tests/browser/*.py``;
+    skip escapes anywhere under ``tests/browser/`` (RECURSIVE — subdirectory
+    modules are scanned too; round-4 review), incl. the literal skip shapes
+    the mark patterns alone missed (the ``pytest.xfail(…)`` call form,
+    unittest-style ``SkipTest``, an unsanctioned ``pytest.importorskip``, the
+    pytest import-aliasing routes) and the dict-key-timeout /
+    seconds-denominated ``.wait`` smuggles;
 (b) ci.yml wiring pins — the ``browser`` job exists, is wired into the
     ``ci-ok`` aggregate in ALL THREE places (``needs:`` + the echo block + the
     for-loop enumeration), carries NO job-level ``if:`` escape (the aggregate
@@ -22,13 +27,19 @@ runs separately:
     grow ``tests/browser`` (the browser suite is deliberately outside the
     coverage paths; its opt-in env var keeps bare ``pytest`` runs — e.g.
     verify-m4pro.yml's ``pytest -q`` — protected via the conftest collection
-    guard + the always-collected honest-skip sentinel).
+    guard + the always-collected honest-skip sentinel);
+(d) collection-guard recursion — the conftest ``collect_ignore`` computation
+    and the direct-path ``pytest_collection_modifyitems`` skip guard both
+    cover subdirectory modules (round-4 review: their prior top-level-only
+    shapes would have let a future ``tests/browser/<sub>/test_x.py`` be
+    collected — and RUN — by a bare ``pytest`` with the opt-in unset).
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -81,8 +92,18 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
     literal (``timeout=(60000)``), a formatter-split
     ``set_default_timeout(\\n    60000\\n)``, or a dynamic
     ``__import__("time")`` / ``import_module("time")`` sleep smuggle — all
-    five shapes are pinned here too. This pins every added pattern against a
-    synthetic suite tree so a pattern regression fails the MAIN test job.
+    five shapes are pinned here too. Round-4 review findings: (i) three
+    literal SKIP shapes scanned clean — the runtime ``pytest.xfail(…)`` call
+    (caught before only when its message happened to carry a retry keyword),
+    an ungated ``pytest.importorskip`` of an absent package (pytest exits 0
+    on skips → a green browser job with zero Chromium proofs), and a raised
+    unittest-style SkipTest — plus the pytest import-aliasing routes around
+    them; (ii) a dict-key literal timeout (``**{"timeout": 60_000}``) and a
+    SECONDS-denominated ``Event``-style ``.wait(30.0)`` (which the ms cap
+    would mis-validate as ``30 < 10_000``) both scanned clean; (iii) the scan
+    was top-level-only, so a subdirectory module escaped it entirely. All are
+    pinned here too. This pins every added pattern against a synthetic suite
+    tree so a pattern regression fails the MAIN test job.
     """
     sneaky = {
         "t_default_timeout.py": "page.set_default_timeout(600000)\n",
@@ -105,9 +126,24 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
         "t_split_default_timeout.py": "page.set_default_timeout(\n    60000\n)\n",
         "t_dunder_import_time.py": '__import__("time").sleep(5)\n',
         "t_import_module_time.py": 'importlib.import_module("time").sleep(5)\n',
+        "t_xfail_call.py": 'pytest.xfail("known upstream issue")\n',
+        "t_importorskip_absent.py": 'pytest.importorskip("not_installed_pkg")\n',
+        "t_skiptest_raise.py": 'raise unittest.SkipTest("revisit later")\n',
+        "t_from_pytest_import.py": "from pytest import xfail\n",
+        "t_import_pytest_as.py": "import pytest as pt\n",
+        "t_getattr_pytest.py": 'escape = getattr(pytest, "sk" "ip")\n',
+        "t_dunder_import_pytest.py": '__import__("pytest").skip("later")\n',
+        "t_dict_timeout_spread.py": 'page.goto(url, **{"timeout": 60_000})\n',
+        "t_dict_timeout_opts.py": "opts = {'timeout': 600000}\n",
+        "t_event_wait.py": "threading.Event().wait(30.0)\n",
+        "t_event_wait_kwarg.py": "done.wait(timeout=30.0)\n",
+        "t_unbounded_wait.py": "ready.wait()\n",
+        "sub/t_subdir_sleep.py": "time.sleep(60)\n",
     }
     for name, body in sneaky.items():
-        (tmp_path / name).write_text(body, encoding="utf-8")
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
     monkeypatch.setattr(_guards, "BROWSER_DIR", tmp_path)
     flagged = {line.split(":", 1)[0] for line in _guards.iter_violations()}
     assert flagged == set(sneaky)
@@ -124,9 +160,16 @@ def test_guard_patterns_stay_clean_on_sanctioned_forms(
     Round-3 additions: under-cap paren-wrapped (``(5_000)``), unary-plus
     (``+10000`` — exactly the cap) and formatter-split
     (``set_default_timeout(\\n    9_000\\n)``) literals stay clean too.
+    Round-4 additions: plain ``import pytest``, the ONE sanctioned
+    ``pytest.importorskip("playwright.sync_api")`` argument, a sub-second
+    pacing ``.wait(0.01)`` (the harness's own poll idiom) and an under-cap
+    dict-key ``{"timeout": 9_000}`` literal stay clean too (value-checked,
+    not shape-banned).
     """
     (tmp_path / "t_clean.py").write_text(
         "import time\n"
+        "import pytest\n"
+        'pytest.importorskip("playwright.sync_api")\n'
         "from datetime import UTC, datetime, timedelta\n"
         "context.set_default_timeout(DEFAULT_TIMEOUT_MS)\n"
         "page.set_default_timeout(10_000)\n"
@@ -139,11 +182,87 @@ def test_guard_patterns_stay_clean_on_sanctioned_forms(
         "page.set_default_timeout(\n"
         "    9_000\n"
         ")\n"
+        "pacer.wait(0.01)\n"
+        'page.goto(url, **{"timeout": 9_000})\n'
         "deadline = time.monotonic() + 15.0\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(_guards, "BROWSER_DIR", tmp_path)
     assert list(_guards.iter_violations()) == []
+
+
+def test_collect_ignore_module_list_is_recursive(tmp_path: Path) -> None:
+    """(d) Round-4 review: the collect_ignore computation covers subdirectories.
+
+    The prior top-level ``glob("test_*.py")`` would have let a future
+    ``tests/browser/<sub>/test_x.py`` be COLLECTED by a bare ``pytest`` run
+    (pyproject ``testpaths=["tests"]`` — e.g. verify-m4pro's ``pytest -q``)
+    with the opt-in unset: an ImportError crash on a playwright-less box, or
+    an unsanctioned Chromium run on a playwright-carrying one. Only the exact
+    TOP-LEVEL sentinel is exempt — a subdirectory clone of its name is still
+    ignored.
+    """
+    from tests.browser import conftest as browser_conftest
+
+    (tmp_path / "test_top.py").write_text("", encoding="utf-8")
+    (tmp_path / "test_suite_visibility.py").write_text("", encoding="utf-8")
+    sub = tmp_path / "pages"
+    sub.mkdir()
+    (sub / "test_sub.py").write_text("", encoding="utf-8")
+    (sub / "test_suite_visibility.py").write_text("", encoding="utf-8")
+    assert browser_conftest.playwright_test_modules(tmp_path) == [
+        "pages/test_sub.py",
+        "pages/test_suite_visibility.py",
+        "test_top.py",
+    ]
+    # And the REAL suite: every playwright module ignored, the sentinel never.
+    real = browser_conftest.playwright_test_modules()
+    assert "test_suite_visibility.py" not in real
+    assert {
+        "test_db_paging.py",
+        "test_harness_selfcheck.py",
+        "test_movers_gate.py",
+        "test_universe_results.py",
+    } <= set(real)
+
+
+def test_modifyitems_guard_covers_subdirectory_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(d) Round-4 review: the direct-path skip guard covers subdirectories.
+
+    The prior ``path.parent == BROWSER_DIR`` exact-parent check let a
+    directly-addressed ``pytest tests/browser/<sub>/test_x.py`` run real
+    Chromium with the opt-in unset — the exact class the round-1 hook closed
+    for top-level files. Items at ANY depth under the suite are now marked;
+    the exact top-level sentinel and items outside the suite are not; the
+    enabled mode marks nothing.
+    """
+    from tests.browser import conftest as browser_conftest
+
+    class _FakeItem:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.markers: list[object] = []
+
+        def add_marker(self, marker: object) -> None:
+            self.markers.append(marker)
+
+    sub_item = _FakeItem(_guards.BROWSER_DIR / "pages" / "test_sub.py")
+    top_item = _FakeItem(_guards.BROWSER_DIR / "test_db_paging.py")
+    sentinel_item = _FakeItem(_guards.BROWSER_DIR / "test_suite_visibility.py")
+    outside_item = _FakeItem(_guards.BROWSER_DIR.parent / "unit" / "test_other.py")
+    items = [sub_item, top_item, sentinel_item, outside_item]
+
+    monkeypatch.delenv(_guards.ENABLE_ENV_VAR, raising=False)
+    browser_conftest.pytest_collection_modifyitems(cast("list[pytest.Item]", items))
+    marked = [len(item.markers) for item in items]
+    assert marked == [1, 1, 0, 0], f"disabled-mode marking drifted: {marked}"
+
+    monkeypatch.setenv(_guards.ENABLE_ENV_VAR, "1")
+    browser_conftest.pytest_collection_modifyitems(cast("list[pytest.Item]", items))
+    marked = [len(item.markers) for item in items]
+    assert marked == [1, 1, 0, 0], f"enabled mode must mark nothing: {marked}"
 
 
 def test_browser_job_exists_with_required_pins() -> None:

@@ -2,21 +2,24 @@
 
 Contract (final-design §2):
 
-* **Collection guard (three layers)** — the suite is opt-in via
+* **Collection guard (three layers, RECURSIVE)** — the suite is opt-in via
   ``BRUTEX_BROWSER_TESTS=1``. (1) When disabled, every playwright-importing
-  test module is ``collect_ignore``d for directory-shaped runs and only the
-  playwright-free sentinel (``test_suite_visibility.py``) is collected,
-  emitting an HONEST skip — so a bare ``pytest`` run (e.g. verify-m4pro's)
-  neither crashes on a missing playwright install nor hides the suite's
-  existence. (2) ``collect_ignore`` does NOT govern paths passed explicitly
-  on the command line, so :func:`pytest_collection_modifyitems` skip-marks
-  directly-addressed browser items when the switch is unset — a direct
-  ``pytest tests/browser/test_db_paging.py`` can never silently run Chromium
-  outside the opt-in. (3) Each playwright module carries an env-gated
-  ``pytest.importorskip`` so the same direct invocation on a playwright-less
-  box is an honest skip, never a collection ImportError — while an ENABLED
-  run (CI) keeps a missing playwright a LOUD import error, never a silent
-  green skip.
+  test module — subdirectories included (round-4 review: the prior top-level
+  glob would have let a future ``tests/browser/<sub>/test_x.py`` be collected
+  by a bare ``pytest`` run) — is ``collect_ignore``d for directory-shaped
+  runs and only the TOP-LEVEL playwright-free sentinel
+  (``test_suite_visibility.py``) is collected, emitting an HONEST skip — so a
+  bare ``pytest`` run (e.g. verify-m4pro's) neither crashes on a missing
+  playwright install nor hides the suite's existence. (2) ``collect_ignore``
+  does NOT govern paths passed explicitly on the command line, so
+  :func:`pytest_collection_modifyitems` skip-marks directly-addressed browser
+  items (ANY depth under ``tests/browser/``) when the switch is unset — a
+  direct ``pytest tests/browser/test_db_paging.py`` can never silently run
+  Chromium outside the opt-in. (3) Each playwright module carries an
+  env-gated ``pytest.importorskip`` so the same direct invocation on a
+  playwright-less box is an honest skip, never a collection ImportError —
+  while an ENABLED run (CI) keeps a missing playwright a LOUD import error,
+  never a silent green skip.
 * **Function-scoped uvicorn server per test** (127.0.0.1, port 0 — the
   TrustedHost loopback allowlist stays untouched), on a daemon thread with a
   bounded readiness poll and an asserted clean shutdown.
@@ -63,17 +66,27 @@ from tests.browser._guards import (
     browser_suite_enabled,
 )
 
-if not browser_suite_enabled():
-    # Ignore every playwright-importing module; ONLY the sentinel stays
-    # collected (its honest skip keeps the suite's absence visible). Computed
-    # by glob so adding a page-test module needs no conftest edit (DYNAMIC).
-    collect_ignore = sorted(
-        p.name
-        for p in Path(__file__).resolve().parent.glob("test_*.py")
-        if p.name != "test_suite_visibility.py"
-    )
-else:
-    collect_ignore = []
+
+def playwright_test_modules(root: Path | None = None) -> list[str]:
+    """Conftest-relative posix paths of every playwright-importing test module.
+
+    RECURSIVE (round-4 review): a test module in a future subdirectory (e.g.
+    ``tests/browser/pages/test_x.py``) must not escape the collection guard —
+    only the exact TOP-LEVEL sentinel is exempt (a subdirectory clone of its
+    name earns nothing). Returned as posix-relative strings, the shape
+    ``collect_ignore`` expects (entries resolve against this conftest's own
+    directory). Computed by glob so adding a page-test module — at any depth —
+    needs no conftest edit (DYNAMIC).
+    """
+    base = Path(__file__).resolve().parent if root is None else root
+    sentinel = base / "test_suite_visibility.py"
+    return sorted(p.relative_to(base).as_posix() for p in base.rglob("test_*.py") if p != sentinel)
+
+
+# When the suite is disabled, ignore every playwright-importing module; ONLY
+# the top-level sentinel stays collected (its honest skip keeps the suite's
+# absence visible).
+collect_ignore = playwright_test_modules() if not browser_suite_enabled() else []
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -82,8 +95,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     ``collect_ignore`` governs only directory-shaped collection — pytest
     treats explicit command-line paths as init paths and collects them
     regardless, so a direct ``pytest tests/browser/test_db_paging.py`` would
-    otherwise RUN real Chromium tests with the opt-in switch unset. The
-    sentinel stays un-marked: its own in-test honest skip names the switch.
+    otherwise RUN real Chromium tests with the opt-in switch unset. Items at
+    ANY depth under the suite are marked (round-4 review: the prior
+    exact-parent check let a future subdirectory item through); only the
+    exact TOP-LEVEL sentinel stays un-marked — its own in-test honest skip
+    names the switch.
     """
     if browser_suite_enabled():
         return
@@ -93,12 +109,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             "(directly-addressed path bypasses the collect_ignore guard)"
         )
     )
+    sentinel = BROWSER_DIR / "test_suite_visibility.py"
     for item in items:
         item_path = getattr(item, "path", None)
         if item_path is None:
             continue
         path = Path(item_path).resolve()
-        if path.parent == BROWSER_DIR and path.name != "test_suite_visibility.py":
+        if path != sentinel and path.is_relative_to(BROWSER_DIR):
             item.add_marker(marker)
 
 
