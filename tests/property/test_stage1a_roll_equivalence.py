@@ -14,9 +14,16 @@ invariance test in ``tests/unit/test_engine_stage1a.py``), and the
 ``_roll_to_new_contract`` TOTAL hard reset restores the exact fresh-builder
 state. Any partial-reset mutant (an omitted member in the reset body — EMA,
 market structure, prior history, day extremes, daily history, anchors) breaks
-the equivalence on a crafted stream, so this property is the permanent CI
-teeth behind "every session/level indicator recomputes per-contract"
-(``brutex/data/futures_roll.py`` roll policy).
+the equivalence on a crafted stream IN THIS FILE, so this property is the
+permanent CI teeth behind "every session/level indicator recomputes
+per-contract" (``brutex/data/futures_roll.py`` roll policy). One member needs
+a dedicated stream shape (review round-3 finding 1): ``_daily_history`` is
+only POPULATED under a non-PREV_DAY fib anchor (``stage1a.py`` records
+completed days for the multi-day anchors only), so the default-anchor streams
+are structurally BLIND to its reset — the deterministic rolling-weekly /
+weekly-static cases below (>= 5 warm sessions per segment, post-roll prices
+inside the pre-roll band) are the killers for that member, with a dedicated
+mutant-teeth test proving their discriminating power.
 
 The hypothesis stream deliberately includes a **muhurat-style evening-dated
 segment** (bars at 18:15+ IST — legitimately in FNO lakes since #1294) and a
@@ -30,7 +37,8 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from brutex.data.models import CandleBar
-from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.stage1a import Stage1AMatrixBuilder, build_bar_bits
+from brutex.strategies.fib_definitions import FibAnchorKind
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -103,13 +111,17 @@ def _multi_contract_stream(
     return segments, tuple(schedule)
 
 
-def _assert_roll_equivalence(segments: list[list[CandleBar]], schedule: tuple[int, ...]) -> None:
+def _assert_roll_equivalence(
+    segments: list[list[CandleBar]],
+    schedule: tuple[int, ...],
+    fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+) -> None:
     """The P1 oracle body — stitched == concatenated fresh builds, bit for bit."""
     stitched_bars = [bar for seg in segments for bar in seg]
-    stitched = build_bar_bits(stitched_bars, roll_schedule=schedule)
+    stitched = build_bar_bits(stitched_bars, fib_anchor=fib_anchor, roll_schedule=schedule)
     fresh: list[int] = []
     for seg in segments:
-        fresh.extend(build_bar_bits(seg))
+        fresh.extend(build_bar_bits(seg, fib_anchor=fib_anchor))
     assert stitched == fresh
 
 
@@ -156,6 +168,89 @@ def test_muhurat_evening_segment_equivalence() -> None:
         (_BASE_DAY + timedelta(days=1)).toordinal(),
     )
     _assert_roll_equivalence([seg_a, seg_muhurat], schedule)
+
+
+def _trading_weekdays(start: date, count: int) -> list[date]:
+    """The first *count* Mon–Fri dates from *start* (June-2025 holds no NSE holiday)."""
+    days: list[date] = []
+    d = start
+    while len(days) < count:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def _multi_day_anchor_segments() -> tuple[list[CandleBar], list[CandleBar], tuple[int, int]]:
+    """Two 8-trading-day segments; post-roll prices INSIDE the pre-roll band.
+
+    The crafted stream of review round-3 finding 1: >= 5 completed sessions
+    per segment keep the 5-session rolling-weekly anchor (and the
+    completed-ISO-week weekly-static anchor) WARM before AND after the roll,
+    and the overlapping price band makes the STALE pre-roll fib levels
+    condition-relevant post-roll — so an omitted ``_daily_history.clear()``
+    in the roll reset genuinely moves the post-roll Group-4 bits. Real 2025
+    NSE trading days (the multi-day anchors walk the REAL calendar).
+    """
+    days = _trading_weekdays(_BASE_DAY, 16)
+    seg_a_days, seg_b_days = days[:8], days[8:]
+    seg_a = [
+        _seg_bar(dd, m, 100 + i * 3 + m, 102 + i * 3 + m, evening=False)
+        for i, dd in enumerate(seg_a_days)
+        for m in range(4)
+    ]
+    seg_b = [
+        _seg_bar(dd, m, 110 + i + m, 112 + i + m, evening=False)
+        for i, dd in enumerate(seg_b_days)
+        for m in range(4)
+    ]
+    return seg_a, seg_b, (seg_a_days[-1].toordinal(), seg_b_days[-1].toordinal())
+
+
+def test_rolling_weekly_fib_anchor_roll_equivalence() -> None:
+    """The `_daily_history` killer (round-3 finding 1), ROLLING_WEEKLY arm.
+
+    ``_daily_history`` is populated ONLY under a non-PREV_DAY fib anchor, so
+    every PREV_DAY stream in this file is blind to its reset — a mutant that
+    omits ``self._daily_history.clear()`` in ``_roll_to_new_contract`` would
+    evaluate post-roll Group-4 fib levels from PRE-roll daily candles across
+    the roll basis gap (the exact D11 violation class) with zero test signal.
+    This warm-anchor case makes the P1 oracle see that member.
+    """
+    seg_a, seg_b, schedule = _multi_day_anchor_segments()
+    _assert_roll_equivalence([seg_a, seg_b], schedule, fib_anchor=FibAnchorKind.ROLLING_WEEKLY)
+
+
+def test_weekly_static_fib_anchor_roll_equivalence() -> None:
+    """The `_daily_history` killer, WEEKLY_STATIC arm (same crafted stream)."""
+    seg_a, seg_b, schedule = _multi_day_anchor_segments()
+    _assert_roll_equivalence([seg_a, seg_b], schedule, fib_anchor=FibAnchorKind.WEEKLY_STATIC)
+
+
+class _DailyHistoryLeakMutant(Stage1AMatrixBuilder):
+    """The round-3 finding-1 mutant: the roll reset 'forgets' `_daily_history.clear()`."""
+
+    def _roll_to_new_contract(self) -> None:
+        saved = dict(self._daily_history)
+        super()._roll_to_new_contract()
+        self._daily_history.update(saved)  # simulate the omitted clear
+
+
+def test_daily_history_leak_mutant_is_killed_by_the_multi_day_anchor_cases() -> None:
+    """Teeth: omitting ONLY the `_daily_history` clear breaks the new cases.
+
+    Non-vacuity for the rolling-weekly/weekly-static equivalence tests above:
+    the SAME stream under a builder whose roll reset preserves
+    ``_daily_history`` diverges from the per-segment fresh concat — so the
+    mutant those cases exist to kill is genuinely killable BY them (it is
+    provably invisible to every PREV_DAY stream in this file).
+    """
+    seg_a, seg_b, schedule = _multi_day_anchor_segments()
+    for anchor in (FibAnchorKind.ROLLING_WEEKLY, FibAnchorKind.WEEKLY_STATIC):
+        mutant = _DailyHistoryLeakMutant(fib_anchor=anchor, roll_schedule=schedule)
+        stitched_mutant = mutant.build(seg_a + seg_b)
+        fresh = build_bar_bits(seg_a, fib_anchor=anchor) + build_bar_bits(seg_b, fib_anchor=anchor)
+        assert stitched_mutant != fresh
 
 
 def test_partial_reset_would_break_the_oracle_teeth() -> None:
