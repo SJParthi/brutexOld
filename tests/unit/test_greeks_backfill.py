@@ -337,11 +337,11 @@ class TestScanner:
         _write_month(lake, _CE, 2024, 2, [_CURRENT_PID])
         _write_month(lake, _PE, 2024, 1, [_CURRENT_PID])
         beats: list[None] = []
-        register_progress_beat(lambda: beats.append(None))
+        handle = register_progress_beat(lambda: beats.append(None))
         try:
             scan = _scan(lake)
         finally:
-            unregister_progress_beat()
+            unregister_progress_beat(handle)
         assert scan.files_probed == 3
         # ≥ one beat per ENUMERATED symbol dir (2 — the manifest-absent walk
         # fallback, fix round 2: enumeration fully materialises BEFORE the
@@ -359,11 +359,11 @@ class TestScanner:
 
         _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
         beats: list[None] = []
-        register_progress_beat(lambda: beats.append(None))
+        handle = register_progress_beat(lambda: beats.append(None))
         try:
             scan = _scan(lake, force=True)
         finally:
-            unregister_progress_beat()
+            unregister_progress_beat(handle)
         assert scan.files_probed == 0 and len(beats) >= 1
 
     def test_per_file_pause_sleeps_between_probes(self, lake: Path) -> None:
@@ -642,6 +642,82 @@ class TestRunner:
         )
         assert resumed.calls == [list(plan.targets[2:4])]  # targets 0-1 never redone
         assert report.resumed_from == 2 and "resumed from target 2" in report.note
+
+    def test_resume_never_skips_an_errored_prefix(self, lake: Path) -> None:
+        """A crash-resume RE-FEEDS errored (stamps-unchanged) contracts (fix round 3).
+
+        Refuter-confirmed: batch 1's contract ERRORED (per-contract driver
+        quarantine — its stale stamps unchanged by design), batch 2 halted
+        (``LakeWriteHalt`` — the module's own advertised resume path). The old
+        unconditional per-batch ``record`` checkpointed PAST the errored
+        contract; because an unchanged re-scan reproduces the IDENTICAL
+        content-addressed ``backfill_id``, the resumed run adopted the surviving
+        checkpoint, SKIPPED the errored contract entirely, and reported a
+        false-clean ``errored=0`` run — bypassing the CLI's
+        ``EXIT_USER_ERROR`` gate and firing the ✅ Telegram head for a plan
+        with a known-errored contract. The freeze holds the high-water mark at
+        the last fully-clean prefix boundary instead.
+        """
+        from structlog.testing import capture_logs
+
+        plan = _plan(2)
+        spy = _SpyEnrich(
+            reports=[_enrich_report(enriched=0, errored=1, bars_written=0, bars_solved=0)],
+            raise_on_call=2,
+            raise_exc=LakeWriteHalt("disk_full"),
+        )
+        with capture_logs() as logs, pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=spy)
+        # The freeze is LOUD (the held batch logs why the checkpoint stopped) …
+        assert any(r["event"] == "greeks_backfill.checkpoint_held" for r in logs)
+        # … and DURABLE: no checkpoint was ever recorded past the errored batch.
+        assert not checkpoint_path(lake).exists()
+        resumed = _SpyEnrich()
+        report = run_greeks_backfill(
+            lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=resumed
+        )
+        # The errored contract IS re-fed (idempotent + cheap via the driver's
+        # stamp+value reuse gate), then the halted one.
+        assert resumed.calls == [list(plan.targets[0:1]), list(plan.targets[1:2])]
+        assert report.resumed_from == 0
+        assert report.enriched == 2 and report.errored == 0  # honest THIS run
+
+    def test_checkpoint_freezes_at_the_last_fully_clean_boundary(self, lake: Path) -> None:
+        """A CLEAN batch after an errored one must NOT leapfrog the checkpoint.
+
+        The freeze is CUMULATIVE (``tallies.errored``, not the batch's own
+        count): gating ``record`` on the batch-local errored count would let a
+        later clean batch's monotonic ``record`` advance the high-water mark
+        past the earlier errored contract anyway — the same silent skip
+        through a side door.
+        """
+        plan = _plan(4)
+        spy = _SpyEnrich(
+            reports=[
+                _enrich_report(enriched=1),  # batch 1 (target 0): clean → recorded
+                _enrich_report(  # batch 2 (target 1): ERRORED → freeze
+                    enriched=0, errored=1, bars_written=0, bars_solved=0
+                ),
+                _enrich_report(enriched=1),  # batch 3 (target 2): clean — must NOT record
+            ],
+            raise_on_call=4,
+            raise_exc=LakeWriteHalt("disk_full"),  # batch 4: crash
+        )
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=spy)
+        resumed = _SpyEnrich()
+        report = run_greeks_backfill(
+            lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=resumed
+        )
+        # Resume starts at the last fully-CLEAN prefix boundary (after target
+        # 0): the errored target 1 IS re-fed; only the genuinely-clean prefix
+        # is skipped.
+        assert resumed.calls == [
+            list(plan.targets[1:2]),
+            list(plan.targets[2:3]),
+            list(plan.targets[3:4]),
+        ]
+        assert report.resumed_from == 1 and "resumed from target 1" in report.note
 
     def test_foreign_backfill_id_checkpoint_is_ignored(self, lake: Path) -> None:
         other = SweepCheckpointStore(

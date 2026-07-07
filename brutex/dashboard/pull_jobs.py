@@ -824,9 +824,13 @@ class BackgroundPullJob:
         # ANTISTALL-001 GAP #15): the bounded partition lock-wait + the rate pacer fire
         # ``emit_progress_beat`` on the FAN-OUT worker threads, which reaches this beat
         # and keeps the watchdog alive while a pull is slow-but-progressing under lock
-        # contention — so the watchdog never false-positive-kills it. Removed in the
-        # ``finally`` so a finished run leaves no stale beat.
-        register_progress_beat(self._beat)
+        # contention — so the watchdog never false-positive-kills it. The registry is
+        # MULTI-registrant (DEC-GREEKS-BULK-REENRICH-001 fix round 3): build_app owns
+        # TWO BackgroundPullJob instances (the pull + the Greeks backfill) and a dry-run
+        # backfill is sanctioned to run CONCURRENTLY with a real pull, so each run holds
+        # its OWN handle — registering can never clobber a sibling job's beat, and the
+        # ``finally`` removes exactly this run's registration, never the sibling's.
+        beat_handle = register_progress_beat(self._beat)
         try:
             result = work(self._on_progress)
         except Exception as exc:  # report ANY failure to the live feed, never crash the thread
@@ -856,9 +860,11 @@ class BackgroundPullJob:
                 except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
                     _LOG.exception("pull_job.on_success failed; the completed pull is unaffected")
         finally:
-            # Remove this run's liveness beat so a later poll can never fire into a dead
-            # watchdog (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15).
-            unregister_progress_beat()
+            # Remove THIS run's liveness beat (its own handle ONLY) so a later poll can
+            # never fire into a dead watchdog — while a concurrently-running sibling
+            # job's beat stays registered (idempotent — DEC-PULL-CONTENTION-ANTISTALL-001
+            # GAP #15 + the fix-round-3 multi-registrant registry).
+            unregister_progress_beat(beat_handle)
             # Stop this run's stall timer first (so it can never fire after the worker has
             # already returned / raised). Outside the lock: stop() only sets an Event,
             # never blocks. Idempotent with _on_hung's stop() (both target the SAME watchdog).

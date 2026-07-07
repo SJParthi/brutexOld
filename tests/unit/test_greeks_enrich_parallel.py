@@ -528,11 +528,11 @@ class TestParallelDriver:
         lake = tmp_path / "lake"
         targets = _build_two_underlying_lake(lake)
         beats: list[int] = []
-        register_progress_beat(lambda: beats.append(1))
+        handle = register_progress_beat(lambda: beats.append(1))
         try:
             enrich_greeks_for_targets(targets=targets, lake_root=lake, rate_source=_RATE, workers=2)
         finally:
-            unregister_progress_beat()
+            unregister_progress_beat(handle)
         assert len(beats) == 1 + 2  # pre-dispatch + 2 completed units
 
     def test_worker_halt_cancels_pending_and_reraises_lake_write_halt(

@@ -659,7 +659,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Contracts per batch (default 25 or $BRUTEX_GREEKS_BACKFILL_BATCH); "
-            "one durable checkpoint write per batch"
+            "one durable checkpoint write per batch while the run is error-free "
+            "(the resume mark never advances past an errored contract)"
         ),
     )
     greeks_backfill.add_argument(

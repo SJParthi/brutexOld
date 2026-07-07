@@ -48,7 +48,7 @@ from brutex.data.timeframe_materialize import MaterializeResult, materialize_tim
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.progress_beat import (
     register_progress_beat,
-    unregister_progress_beat,
+    reset_progress_beats_for_tests,
 )
 from brutex.observability.watchdog import WorkerEvent
 from brutex.options.risk_free import FixedRateSource
@@ -84,9 +84,9 @@ def _make_clock() -> tuple[Callable[[], float], _ClockBox]:
 @pytest.fixture(autouse=True)
 def _clean_beat_seam() -> Iterator[None]:
     """Every test starts + ends with NO process-global beat registered."""
-    unregister_progress_beat()
+    reset_progress_beats_for_tests()
     yield
-    unregister_progress_beat()
+    reset_progress_beats_for_tests()
 
 
 @pytest.fixture(autouse=True)

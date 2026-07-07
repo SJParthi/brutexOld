@@ -41,10 +41,20 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   ``latest-wins`` byte-identical restate (``stats.changed == 0`` ⇒ no write);
   the checkpoint is a resume ACCELERATOR only (the ``tuple_complete``
   advisory-cache discipline). In DEFAULT incremental mode the STAMPS are the
-  real resume mechanism — a crash-restart re-scans, completed contracts no
+  usual resume mechanism — a crash-restart re-scans, completed contracts no
   longer classify stale, the plan shrinks, the ``backfill_id`` changes and the
-  stale checkpoint is ignored; in ``force`` mode the plan is stamp-INdependent
-  and stable, so the checkpoint genuinely resumes at ``next_index``.
+  stale checkpoint is ignored. THE ERRORED-PREFIX EXCEPTION (fix round 3,
+  refuter-confirmed): an ERRORED contract keeps its stale stamps (the driver's
+  per-contract quarantine), so a recorded prefix containing only errored
+  contracts reproduces the IDENTICAL plan — same ``backfill_id`` — and a
+  checkpoint recorded past it would make the resume SKIP those contracts
+  silently and report a false-clean ``errored=0`` run. The runner therefore
+  FREEZES the durable high-water mark at the last fully-clean prefix boundary
+  (``record`` fires only while the run's CUMULATIVE ``errored == 0``): a
+  crash-resume always re-feeds every errored contract, cheaply restating any
+  clean ones redone alongside. In ``force`` mode the plan is stamp-INdependent
+  and stable, so the checkpoint genuinely resumes at ``next_index`` — under
+  the same clean-prefix-only guarantee.
 * BLIND SPOT, stated everywhere: the stamp prefilter cannot see a rate/spot
   VALUE drift under an unchanged ``(rate_source_id, RISK_FREE_SOURCE_VERSION)``
   — ``force=True`` routes every contract through the driver's VALUE-checked
@@ -887,7 +897,16 @@ def run_greeks_backfill(
     Checkpoint discipline (ADVISORY — the ``tuple_complete`` rule): the
     monotonic per-batch ``record`` is a resume ACCELERATOR; true idempotence is
     the driver's stamp+value gate (a redone batch restates byte-identically
-    with ``changed == 0`` ⇒ no write). A corrupt / foreign-``backfill_id``
+    with ``changed == 0`` ⇒ no write). The high-water mark advances ONLY over a
+    fully-CLEAN prefix — ``record`` fires only while the run's cumulative
+    ``errored == 0`` (fix round 3): an errored contract keeps its stale stamps,
+    so an unchanged re-scan reproduces the IDENTICAL ``backfill_id`` and a
+    checkpoint recorded past it would make a crash-resume SKIP the errored
+    contract and report a false-clean ``errored=0`` run (bypassing the CLI's
+    ``EXIT_USER_ERROR`` gate + flipping the Telegram head to a dishonest ✅);
+    freezing at the last clean boundary re-feeds every errored contract on
+    resume, at the cost of cheaply restating any clean batch redone alongside.
+    A corrupt / foreign-``backfill_id``
     checkpoint is ignored LOUDLY (fresh start — correct via the stamps); a
     FAILING ``record`` logs + continues (checkpoint loss ≠ halt — a deliberate,
     documented deviation from the lake writers' ``atomic_write_via`` rule: the
@@ -983,17 +1002,40 @@ def run_greeks_backfill(
         tallies.fold(report)
         batches += 1
         completed = batch_start + len(batch)
-        try:
-            store.record(completed - 1)
-        except SweepCheckpointError as exc:
-            # ADVISORY sidecar: a lost checkpoint costs a re-scan, never data —
-            # log LOUDLY and keep enriching (a REAL lake ENOSPC already halts
-            # via the driver's LakeWriteHalt above).
-            _LOG.warning(
-                "greeks_backfill.checkpoint_failed",
-                path=str(store.path),
-                error=str(exc),
+        if tallies.errored == 0:
+            try:
+                store.record(completed - 1)
+            except SweepCheckpointError as exc:
+                # ADVISORY sidecar: a lost checkpoint costs a re-scan, never data —
+                # log LOUDLY and keep enriching (a REAL lake ENOSPC already halts
+                # via the driver's LakeWriteHalt above).
+                _LOG.warning(
+                    "greeks_backfill.checkpoint_failed",
+                    path=str(store.path),
+                    error=str(exc),
+                    completed=completed,
+                )
+        else:
+            # ERRORED-prefix freeze (fix round 3, refuter-confirmed): the durable
+            # resume index NEVER advances past an errored (per-contract-
+            # quarantined) contract. An errored contract keeps its STALE stamps
+            # by design, so an unchanged re-scan reproduces the IDENTICAL plan
+            # (same content-addressed ``backfill_id``) — a checkpoint recorded
+            # past it would make a crash-resume adopt it, SKIP the errored
+            # contract silently, and report a false-clean ``errored=0`` run
+            # (EXIT_OK + a green ✅ Telegram head for a plan with known-errored
+            # contracts). Holding the high-water mark at the last fully-clean
+            # prefix boundary is correct-by-stamps: the resume re-feeds every
+            # errored contract, and any clean contract redone alongside restates
+            # byte-identically through the driver's stamp+value reuse gate
+            # (cheap, idempotent). The freeze is CUMULATIVE (``tallies.errored``,
+            # not the batch's own count) so a later clean batch's monotonic
+            # ``record`` can never leapfrog an earlier errored one.
+            _LOG.info(
+                "greeks_backfill.checkpoint_held",
                 completed=completed,
+                errored=tallies.errored,
+                reason="errored contract(s) in the prefix — a resume must re-feed them",
             )
         if report.bars_written > 0:
             # This batch WROTE overlay bars: move the cross-process freshness

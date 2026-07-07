@@ -77,7 +77,20 @@ advisory contract); every bar-writing wet batch touches
 `<lake>/.greeks_backfill/revision.json` and `lake_revision` stats it as a
 THIRD component, so a CLI backfill's Greeks reach a running dashboard's
 caches on the next poll; the wet report's scan-census carry gains killing
-tests. ENGINE
+tests.
+FIX ROUND 3 folded (refuter-majority-confirmed, MIGRATION.md #1482): the
+durable checkpoint FREEZES at the last fully-clean prefix boundary (`record`
+only while the run's CUMULATIVE `errored == 0` — an errored contract keeps its
+stale stamps, so an identical-plan crash-resume could silently SKIP it and
+report a false-clean `errored=0` exit-0 ✅ run; the "plan shrinks so the stale
+checkpoint self-ignores" resume claim is corrected for the errored-prefix
+case); the `progress_beat` seam is MULTI-registrant (register returns an
+opaque handle, emit BROADCASTS to every registered watchdog, unregister
+removes only its own — the two now-concurrent `BackgroundPullJob`s can no
+longer clobber/clear each other's liveness beat and resurrect the false
+CRITICAL stall-alert class this branch closed); a stray FILE at
+`.greeks_backfill` (ENOTDIR) reads the stable `absent` token instead of
+muting the ENTIRE composite `lake_revision` probe. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
 + `pull_jobs.py`/`lake_revision.py` ALL 100% line+branch; every touched
@@ -679,7 +692,11 @@ hostile-review pass._
   (the DEC-PIPELINE-STALL-HEARTBEAT-001 false-CRITICAL class closed on the new phase); `force`+`limit` REFUSED at
   scanner/CLI/route (chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects non-object JSON with
   `SweepCheckpointError`; schema-poisoned stamp columns + out-of-range month filenames fold into `probe_failed`/skip
-  instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). ENGINE UNCHANGED —
+  instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). FIX ROUND 3 folded
+  (refuter-majority-confirmed, #1482): the checkpoint freezes at the last fully-clean prefix boundary (an errored
+  contract is always re-fed on resume — never a false-clean `errored=0` skip); `progress_beat` is a multi-registrant
+  handle-keyed registry (two concurrent jobs keep independent watchdog liveness); a stray file at `.greeks_backfill`
+  reads `absent` instead of muting the whole `lake_revision` composite. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/
   `sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
   Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,

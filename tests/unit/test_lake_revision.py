@@ -21,7 +21,12 @@ the sweeps-tree component of DEC-RESULTS-SURFACE-HONESTY-001).
   against ``brutex.data.greeks_backfill``'s constants);
 * any non-missing-file :class:`OSError` (permissions, mid-scan fault) maps to
   ``None`` — "unknown, no signal" — never a raise, never a spurious
-  invalidation, for ANY component.
+  invalidation, for ANY component;
+* EXCEPT ``ENOTDIR`` (fix round 3): a stray regular FILE squatting where a
+  sidecar directory belongs (the tolerated advisory-corruption state at
+  ``.greeks_backfill``) reads the stable ``absent`` sentinel — the marker
+  genuinely does not exist — so one stray file can never permanently mute the
+  ENTIRE composite's cross-process invalidation.
 """
 
 # The drift-pin tests read module-private constants deliberately.
@@ -399,6 +404,40 @@ class TestGreeksBackfillComponent:
         _write_greeks_marker(tmp_path, b'{"backfill_id": "x", "bars_written": 3000}')
         third = lake_revision(tmp_path)
         assert third is not None and third != second
+
+    def test_stray_file_at_the_sidecar_dir_reads_absent_never_mutes_the_composite(
+        self, tmp_path: Path
+    ) -> None:
+        """A stray regular FILE at ``.greeks_backfill`` must NOT mute the probe.
+
+        Refuter-confirmed (DEC-GREEKS-BULK-REENRICH-001 fix round 3): the
+        marker stat raises ``NotADirectoryError`` (ENOTDIR — NOT a
+        ``FileNotFoundError``), which mapped to ``None`` → ``lake_revision``
+        returned ``None`` on EVERY poll → ``SummaryCache`` made no freshness
+        decision — cross-process invalidation for pulls AND sweeps (which
+        worked on main, where this path was never probed) silently stopped
+        until manual cleanup, even though the branch's own advisory contract
+        TOLERATES exactly this stray file (the checkpoint store + the marker
+        touch both log + continue on it). The marker genuinely does not exist
+        under a non-directory path, so the stable ``absent`` sentinel is the
+        semantically-correct token and the OTHER components keep invalidating.
+        """
+        _write_ledger_bytes(tmp_path, b"v1")
+        clean = lake_revision(tmp_path)
+        assert clean is not None
+        (tmp_path / ".greeks_backfill").write_text("stray", encoding="utf-8")
+        with_stray = lake_revision(tmp_path)
+        assert with_stray is not None  # NOT muted (returned None before the fix)
+        # The greeks half reads the stable "absent" sentinel — a marker under a
+        # non-directory ancestor genuinely does not exist …
+        assert with_stray.rsplit("|", 1)[1] == ABSENT_TOKEN
+        assert with_stray == clean  # … and never oscillates vs the clean lake.
+        # The ledger component STILL invalidates: a pull's checkpoint moves the
+        # composite despite the stray file (the muted-probe regression).
+        _write_ledger_bytes(tmp_path, b"v2-longer")
+        after_pull = lake_revision(tmp_path)
+        assert after_pull is not None
+        assert after_pull != with_stray
 
     def test_unreadable_marker_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

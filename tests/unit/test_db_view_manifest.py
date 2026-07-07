@@ -416,11 +416,11 @@ class TestWalkLiveness:
         _seed_lake(tmp_path)
         assert lm.load_manifest_datasets(tmp_path) is None  # manifest absent → forced walk
         beats: list[None] = []
-        register_progress_beat(lambda: beats.append(None))
+        handle = register_progress_beat(lambda: beats.append(None))
         try:
             listed = db_view.list_candle_datasets(tmp_path)
         finally:
-            unregister_progress_beat()
+            unregister_progress_beat(handle)
         symbols = {d["symbol"] for d in listed}
         assert symbols  # the walk really ran and found datasets
         # ≥ one beat per walked (valid-coordinate) symbol directory.

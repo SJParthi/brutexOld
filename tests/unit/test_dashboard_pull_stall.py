@@ -404,10 +404,10 @@ class TestBackgroundPullJobWatchdog:
         """
         from brutex.observability.progress_beat import (
             emit_progress_beat,
-            unregister_progress_beat,
+            reset_progress_beats_for_tests,
         )
 
-        unregister_progress_beat()  # clean slate
+        reset_progress_beats_for_tests()  # clean slate
         built, factory = _spy_factory()
         job = _job(factory)
         seen_running: list[bool] = []
@@ -428,6 +428,63 @@ class TestBackgroundPullJobWatchdog:
         # After the run the beat is unregistered — a stray emit no longer reaches it.
         emit_progress_beat()
         assert spy.beats == 3
+
+    def test_concurrent_jobs_never_clobber_or_clear_each_others_beat(self) -> None:
+        """Two concurrent jobs keep INDEPENDENT liveness beats (fix round 3).
+
+        DEC-GREEKS-BULK-REENRICH-001 broke the seam's old single-flight
+        invariant: ``build_app`` owns TWO :class:`BackgroundPullJob` instances
+        (the pull + the Greeks backfill), and a DRY-RUN backfill is sanctioned
+        to run concurrently with a real pull (``cross_process_lock=False`` —
+        the route note says "a concurrent pull on this lake is unaffected").
+        Refuter-confirmed against the old single-slot registry: (a) the
+        backfill's register CLOBBERED the running pull's beat, so every seam
+        beat fed the WRONG watchdog (a healthy pull phase > 600 s silent
+        false-tripped ``_on_hung`` → CRITICAL "pull halted" Telegram alert +
+        STALLED-SUSPECT); (b) whichever job finished FIRST unconditionally
+        CLEARED the slot, stripping the still-running sibling's only
+        defence-in-depth liveness source. Fails on the single-slot design;
+        passes with the multi-registrant registry.
+        """
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            reset_progress_beats_for_tests,
+        )
+
+        reset_progress_beats_for_tests()  # clean slate
+        pull_built, pull_factory = _spy_factory()
+        backfill_built, backfill_factory = _spy_factory()
+        pull_job = _job(pull_factory)
+        backfill_job = _job(backfill_factory)
+
+        def backfill_work(_on_progress: ProgressHook) -> None:
+            # While BOTH jobs are live a seam beat must reach BOTH watchdogs
+            # (a beat is pure liveness — the broadcast can only keep
+            # heartbeats alive, never corrupt anything).
+            emit_progress_beat()
+
+        def pull_work(_on_progress: ProgressHook) -> None:
+            emit_progress_beat()  # baseline: the pull's own seam beat
+            # A dry-run Greeks-backfill scan starts AND finishes MID-PULL (the
+            # sanctioned lock-free concurrency of the dashboard route; the
+            # sync spawner runs it inline here).
+            assert backfill_job.start(backfill_work, total=0, cross_process_lock=False) is True
+            # The finished backfill removed ONLY its own handle — the pull's
+            # beat must still be registered (the clobber/clear regression).
+            emit_progress_beat()
+
+        assert pull_job.start(pull_work, total=1) is True
+        pull_spy, backfill_spy = pull_built[0], backfill_built[0]
+        # The pull's watchdog received EVERY seam beat fired while it ran: its
+        # baseline, the one during the concurrent backfill, and the one AFTER
+        # the backfill finished (the old single slot lost the last two).
+        assert pull_spy.beats == 3
+        # The backfill's watchdog received the seam beat fired while IT ran.
+        assert backfill_spy.beats == 1
+        # Both runs finished: every handle is gone — a stray emit reaches nobody.
+        emit_progress_beat()
+        assert pull_spy.beats == 3
+        assert backfill_spy.beats == 1
 
     def test_hung_edge_alerts_and_marks_stalled_suspect_without_release(
         self, monkeypatch: pytest.MonkeyPatch

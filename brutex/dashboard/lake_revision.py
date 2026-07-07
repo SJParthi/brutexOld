@@ -111,16 +111,27 @@ _GREEKS_REVISION_FILENAME: Final[str] = "revision.json"
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
     """One path's ``"<mtime_ns>:<size>"`` stat token — the shared O(1) probe core.
 
-    Returns :data:`ABSENT_TOKEN` when the path does not exist yet, ``None``
-    (logged under *event*) on any other :class:`OSError`. ``include_ino=True``
-    appends ``":<st_ino>"`` — sound for an atomic-``os.replace`` writer (every
-    publish swaps the inode), so the token moves even on a coarse-mtime
-    filesystem with an equal-size rewrite; the default ``False`` keeps every
-    pre-existing token byte-unchanged (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
+    Returns :data:`ABSENT_TOKEN` when the path does not exist yet — including
+    the ``ENOTDIR`` case (:class:`NotADirectoryError`: a stray regular FILE
+    squatting where a sidecar DIRECTORY belongs, e.g. at
+    ``<lake>/.greeks_backfill``). That stray-file state is a TOLERATED
+    advisory-corruption class elsewhere (the checkpoint store + the wet
+    backfill's marker touch both log + continue on it), so a marker under a
+    non-directory ancestor genuinely does not exist and "absent" is the
+    semantically-correct token — mapping it to ``None`` instead muted the
+    ENTIRE composite probe (cross-process invalidation for pulls AND sweeps)
+    until manual cleanup (refuter-confirmed, DEC-GREEKS-BULK-REENRICH-001 fix
+    round 3). Returns ``None`` (logged under *event*) on any OTHER
+    :class:`OSError` — a genuinely-unknown state (permissions, I/O fault).
+    ``include_ino=True`` appends ``":<st_ino>"`` — sound for an
+    atomic-``os.replace`` writer (every publish swaps the inode), so the token
+    moves even on a coarse-mtime filesystem with an equal-size rewrite; the
+    default ``False`` keeps every pre-existing token byte-unchanged
+    (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
     """
     try:
         st = os.stat(target)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return ABSENT_TOKEN
     except OSError as exc:
         _LOG.warning(
@@ -283,7 +294,10 @@ def _greeks_backfill_revision(lake_root: Path) -> str | None:
     generation-keyed caches recompute (the backfill never checkpoints the
     window ledger, making this its ONLY cross-process revision signal).
     Returns :data:`ABSENT_TOKEN` when no backfill has ever written (the
-    common case), ``None`` (logged) on any other :class:`OSError`.
+    common case) — and equally for a stray regular FILE at
+    ``.greeks_backfill`` (``ENOTDIR``; the tolerated advisory-corruption
+    state, see :func:`_stat_token`) — ``None`` (logged) on any other
+    :class:`OSError`.
     """
     return _stat_token(
         lake_root / _GREEKS_BACKFILL_DIRNAME / _GREEKS_REVISION_FILENAME,
