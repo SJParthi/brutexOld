@@ -52,6 +52,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 
 from tests.bench._o1_tiers import ratio_ceiling
+from tests.fakes.movers_spies import MOVERS_READER_NAMES, spy_all_movers_readers
 
 _DAY = date(2024, 6, 13)
 _EXPIRY = date(2024, 6, 27)
@@ -182,31 +183,6 @@ def _min_bar(*, minute: int, oi: int) -> CandleBar:
     )
 
 
-#: The FOUR per-contract movers reader seams the options scan goes through
-#: (movers_options.py read loop) — ALL spied, so "PCR adds NO Parquet read"
-#: is pinned as stated, not for one reader (round-1 hostile-review widen).
-_READER_NAMES: tuple[str, ...] = (
-    "_read_future_session",
-    "_prev_day_close",
-    "_prev_day_oi",
-    "_underlying_spot_ltp",
-)
-
-
-def spy_all_movers_readers(module: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
-    """Wrap every per-contract reader in *module* with a call counter."""
-    counts = dict.fromkeys(_READER_NAMES, 0)
-    for name in _READER_NAMES:
-        real = getattr(module, name)
-
-        def _counting(*args: Any, _name: str = name, _real: Any = real, **kwargs: Any) -> Any:
-            counts[_name] += 1
-            return _real(*args, **kwargs)
-
-        monkeypatch.setattr(module, name, _counting)
-    return counts
-
-
 class TestPcrColdScanAddsNoRead:
     def test_every_reader_runs_once_per_contract(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -234,7 +210,7 @@ class TestPcrColdScanAddsNoRead:
         candidates = compute_options_candidates(
             lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
         )
-        assert counts == dict.fromkeys(_READER_NAMES, len(symbols)), (
+        assert counts == dict.fromkeys(MOVERS_READER_NAMES, len(symbols)), (
             "each movers reader must run exactly once per contract — PCR adds none"
         )
         assert len(candidates.pcr) == 1

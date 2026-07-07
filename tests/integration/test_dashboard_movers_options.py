@@ -1751,7 +1751,7 @@ class TestOptionsPcr:
         # per tier contract through EACH reader — the PCR fold adds none.
         import brutex.dashboard.movers_options as mo_module
 
-        from tests.bench.test_movers_pcr_o1 import spy_all_movers_readers
+        from tests.fakes.movers_spies import spy_all_movers_readers
 
         _seed_pcr_lake(tmp_path)
         counts = spy_all_movers_readers(mo_module, monkeypatch)
