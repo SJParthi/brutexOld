@@ -17,8 +17,9 @@ semantics lives next to that function in :mod:`brutex.engine.sweep_driver`
 
 :func:`sweep_rust_metrics_enabled` reads the env per call, exactly like the
 sibling :func:`brutex.engine.sweep_lookahead.sweep_lookahead_guard_enabled`
-(whose ``_TRUTHY`` / ``_FALSY`` literal sets are IMPORTED, not copied —
-CLAUDE.md §11 COMMON). Per-call resolution (one ``os.environ`` dict probe,
+(whose ``_TRUTHY`` / ``_FALSY`` literal sets are consumed through the
+PUBLIC :func:`~brutex.engine.sweep_lookahead.env_flag_tristate`
+classifier, not copied — CLAUDE.md §11 COMMON). Per-call resolution (one ``os.environ`` dict probe,
 ~0.1 µs against a multi-ms per-mask tail; pinned by the OFF-cost A/B bench)
 was chosen over a once-per-process memo so that (a) there is no
 module-global FLAG state, and (b) every ``sweep_parallel`` worker process
@@ -120,14 +121,12 @@ from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
-# Intentional friend access (DEC-P0-017 per-site convention): the truthy +
-# falsy literal sets are defined ONCE on the sibling sweep-flag module —
-# importing them keeps the sweep env flags accepting the identical vocabulary
-# (CLAUDE.md §11 COMMON; reviewer-directed "import it, don't copy").
-from brutex.engine.sweep_lookahead import (
-    _FALSY,  # pyright: ignore[reportPrivateUsage]
-    _TRUTHY,  # pyright: ignore[reportPrivateUsage]
-)
+# The truthy + falsy literal sets are defined ONCE on the sibling sweep-flag
+# module (their vocabulary home) and consumed through its PUBLIC
+# ``env_flag_tristate`` classifier — the sweep env flags accept the identical
+# vocabulary with zero copied strip/lower/membership logic (CLAUDE.md §11
+# COMMON; reviewer-directed "import it, don't copy").
+from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
@@ -217,16 +216,17 @@ def sweep_rust_metrics_enabled() -> bool:
       (silent) OFF; a garbage value's OFF is WARNED.
 
     The vocabulary is the SAME ``_TRUTHY`` / ``_FALSY`` pair as the sweep
-    look-ahead guard flag. Read per call — see the module docstring for why
-    (no global flag state; parallel workers read their own env).
+    look-ahead guard flag, classified through the COMMON
+    :func:`brutex.engine.sweep_lookahead.env_flag_tristate` (this function
+    owns only the default + warn policy for the ``None`` verdict). Read per
+    call — see the module docstring for why (no global flag state; parallel
+    workers read their own env).
     """
     raw = os.environ.get(SWEEP_RUST_METRICS_ENV, "")
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    if value:
+    verdict = env_flag_tristate(raw)
+    if verdict is not None:
+        return verdict
+    if raw.strip():
         # An unrecognised NON-EMPTY value fails SAFE to OFF, loudly: under a
         # default-ON kernel a typo'd kill switch ("flase", "0ff") must still
         # KILL — never a silently-ignored operator intent (warn-once).

@@ -96,17 +96,49 @@ _TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 #: explicit kill-switch vocabulary, the mirror of :data:`_TRUTHY`. Defined
 #: HERE (the sweep env-flag vocabulary home, CLAUDE.md §11 COMMON) so a
 #: default-ON sibling flag (``brutex.engine.rust_metrics``,
-#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001) can recognise an explicit OFF;
-#: this module's own default-OFF flag needs no falsy set — anything
-#: non-truthy is already OFF.
+#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001) can recognise an explicit OFF via
+#: :func:`env_flag_tristate`; this module's own default-OFF flag needs no
+#: falsy branch — anything non-truthy is already OFF.
 _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",
     "GuardedBarWindow",
+    "env_flag_tristate",
     "maybe_guard_bars",
     "sweep_lookahead_guard_enabled",
 ]
+
+
+def env_flag_tristate(raw: str) -> bool | None:
+    """Classify *raw* against the ONE sweep env-flag vocabulary.
+
+    The COMMON classifier for every sweep env flag (CLAUDE.md §11 — the
+    truthy/falsy literal sets live HERE, their vocabulary home, and the
+    default-ON sibling flag in :mod:`brutex.engine.rust_metrics` delegates to
+    this helper instead of copying the ``strip().lower()`` + membership
+    logic).
+
+    Parameters
+    ----------
+    raw
+        The raw env value (surrounding whitespace ignored,
+        case-insensitive).
+
+    Returns
+    -------
+    bool | None
+        ``True`` for a :data:`_TRUTHY` literal (``1/true/yes/on``),
+        ``False`` for a :data:`_FALSY` literal (``0/false/no/off``), and
+        ``None`` for anything else — unset/empty AND unrecognised both map
+        to ``None``; the CALLER owns the default + warn policy for those.
+    """
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    return None
 
 
 def sweep_lookahead_guard_enabled() -> bool:
@@ -115,9 +147,11 @@ def sweep_lookahead_guard_enabled() -> bool:
     Truthy literals are ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive,
     surrounding whitespace ignored). Anything else — including unset, empty,
     ``0``, ``false`` or garbage — is OFF: an unrecognised value must never
-    silently enable an instrumented mode (fail-safe default).
+    silently enable an instrumented mode (fail-safe default). Classification
+    rides the COMMON :func:`env_flag_tristate` (an explicit falsy literal and
+    an unrecognised value are equally OFF here — only ``True`` enables).
     """
-    return os.environ.get(SWEEP_LOOKAHEAD_GUARD_ENV, "").strip().lower() in _TRUTHY
+    return env_flag_tristate(os.environ.get(SWEEP_LOOKAHEAD_GUARD_ENV, "")) is True
 
 
 class GuardedBarWindow(Sequence["CandleBar"]):
