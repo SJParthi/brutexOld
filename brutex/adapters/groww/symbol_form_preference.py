@@ -113,7 +113,9 @@ _MAX_FORM_WINNER_LEN: Final[int] = 64
 _PERSIST_DISABLED_VALUES: Final[frozenset[str]] = frozenset({"0", "off", "false", "no"})
 
 #: Wall-clock bound on the one-shot durable seed READ (``get_meta``) per ``&`` key per
-#: process. A normal sidecar read is sub-millisecond; a WEDGED ``instruments.duckdb``
+#: preference INSTANCE (one instance per pull run — NOT a per-process bound, matching
+#: the module-header single-flight contract). A normal sidecar read is
+#: sub-millisecond; a WEDGED ``instruments.duckdb``
 #: on a stalled external volume would otherwise hang the reading worker FOREVER (the
 #: #999/#1522/DEC-STORE-WRITE-DEADLINE-001 hazard class — a hung call never raises, so
 #: no retry ladder can help). On expiry the COMMON ``run_with_deadline`` freeze guard

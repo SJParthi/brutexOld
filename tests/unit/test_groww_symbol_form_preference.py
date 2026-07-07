@@ -1215,3 +1215,31 @@ def test_cross_pull_durability_second_pull_first_call_is_the_learned_winner() ->
     # Pull 2 (fresh preference, same store): the FIRST vendor call is the winner.
     assert sdk2.symbols[0] == "NSE-M%26M-02Jan25-2400-CE"
     assert len(sdk2.symbols) == 1  # zero wasted plain fetch
+
+
+# ── honest-wording pin: the seed-read bound is per INSTANCE, never per process ──
+
+
+def test_module_never_overstates_the_seed_read_bound_as_per_process() -> None:
+    """No comment/docstring claims the seed read is "per ``&`` key per process".
+
+    Round-5 wording pin (Golden Rule #10): the round-2 review downgraded the
+    single-flight claim to per preference INSTANCE (production wires ONE
+    instance per pull run — a long-lived dashboard deliberately pays one seed
+    read per ``&`` key per PULL, so a fresh run picks up rows written by
+    another process), but the overstated "per process" phrasing survived in
+    the ``FORM_WINNER_READ_DEADLINE_S`` comment by WRAPPING across lines
+    ("per\\n#: process"), evading a line-based grep. Comment markers +
+    newlines are normalized before matching so a re-wrap cannot evade again;
+    the corrected per-INSTANCE wording must be present.
+    """
+    import inspect
+    import re
+
+    source = inspect.getsource(sfp)
+    # Strip leading comment markers per line, then collapse ALL whitespace so a
+    # phrase wrapped across "#:" continuation lines matches as one string.
+    normalized = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*#:?\s?", "", source))
+    assert "per ``&`` key per process" not in normalized  # the overstated bound
+    # The honest bound (module header + the deadline comment agree).
+    assert "per ``&`` key per preference INSTANCE" in normalized

@@ -778,6 +778,10 @@ def _patch_composite(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) 
         captured["skipped"] = skipped
         captured["intervals"] = kwargs["intervals"]
         captured["until_clean"] = kwargs["until_clean"]
+        # DEC-FORM-WINNER-PERSIST-001 (round-5 pin): the composite route threads
+        # the DURABLE form-winner map — captured for assertion (fail-loud key
+        # access: dropping the wiring fails every composite-route test).
+        captured["form_preference"] = kwargs["form_preference"]
         return _composite_report(names=names, skipped=skipped, dry_run=kwargs["dry_run"])
 
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake)
@@ -803,6 +807,32 @@ def test_composite_symbols_starts_job(
     # only NIFTY reached the composite; INDIAVIX was partitioned out.
     assert captured["names"] == ["NIFTY"]
     assert captured["skipped"] == ["INDIAVIX"]
+
+
+def test_composite_threads_durable_form_preference(
+    ref_client: TestClient, ref_store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``?symbols=`` composite branch wires the DURABLE form-winner map.
+
+    The round-5 regression pin (the direct-selection route's round-2
+    discipline, mirrored): this route's ``form_preference=...`` kwarg was
+    asserted by ZERO tests, so deleting the wiring — silently degrading the
+    composite back to the fresh-per-pass amnesiac default — passed every
+    suite. The FUNCTIONAL pin: a winner recorded through the ROUTED
+    preference lands in the wired ``InstrumentStore``'s ``schema_meta``
+    (never a fresh store-less map) on a non-dry-run.
+    """
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_composite(monkeypatch, captured)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(ref_client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert ref_store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store
 
 
 def test_composite_enumerate_flag_without_symbols_400(

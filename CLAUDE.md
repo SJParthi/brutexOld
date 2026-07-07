@@ -46,7 +46,9 @@ passes the CELL key, never the queried spelling form) and wired at every
 production pull seam (ONE instance per `/pull-pipeline` run shared by the
 metadata + historical phases; the standalone metadata/composite routes AND the
 `/pull-historical` direct-selection grammar — the latter MISSED in round 1 and
-wired by the round-2 review fix, route-pinned;
+wired by the round-2 review fix; ALL FOUR seams route-pinned as of round 5
+(pipeline identity-sharing + dry-run store=None + metadata/composite
+real-store persist — previously only the direct-selection seam was);
 `run_groww_option_ingest`'s fresh-per-pass default stands down — also fixing
 the within-one-pull amnesia across market buckets/until-clean rounds; a
 dry-run threads store=None, byte-identical to the process-local base). The
