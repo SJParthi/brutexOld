@@ -576,6 +576,104 @@ class TestStaleServeManyStampsBehind:
         assert {r.security_id for r in refreshed} == {"NIFTY", *flushed}
 
 
+#: The fix-round-2 REFUTED log-attribution claim: the derived docstrings said
+#: every stale serve lands "on the ``ledger-records`` key" — the second-phase
+#: serve (past the records floor, within the derived entry's OWN floor) logs
+#: on the SERVING derived key (``ledger-rows`` / ``spot-rollup``).
+_MISATTRIBUTED_LOG_CLAIM = "on the ``ledger-records`` key"
+
+
+class TestComposedDerivedFloorHonesty:
+    """Fix-round-2 pin: derived staleness COMPOSES two floors, logged per key.
+
+    The round-3 docstrings confined derived staleness to the RECORDS adaptive
+    floor — ONE ``min(max(2 s, the parse's own duration), 120 s)`` bound,
+    "logged … on the ``ledger-records`` key". Reality (reproduced with the
+    injectable clock): once the records floor passes and the records refresh,
+    a derived projection (rows / rollup) ADDITIONALLY serves stale under its
+    OWN #920 floor — driven by the projection's own compute duration — and
+    THAT serve logs ``movers_cache.stale_served`` on the SERVING key
+    (``ledger-rows`` / ``spot-rollup``), so worst-case derived staleness is
+    records floor + derived floor (each capped at 120 s). The behaviour is
+    sound (time-bounded, self-healing, honestly logged per serving key); this
+    pins the ACCURATE envelope the reworded docs now state (Golden Rule #10).
+    """
+
+    def test_rows_serve_stale_under_their_own_floor_after_the_records_floor_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE composed-floor sequence: records parse 2 s (records floor 2 s),
+        rows projection 10 s (rows floor 10 s), stamp move, poll PAST the
+        records floor → the records read FRESH (post-flush truth) while the
+        rows entry STILL serves the pre-flush projection under its own floor —
+        logged on the ``ledger-rows`` key; past the composed bound the rows
+        reconverge to on-disk truth."""
+        clock = _install_clocked_cache(monkeypatch)
+        _seed(tmp_path, ["NIFTY"])
+        real_load = load_window_ledger
+
+        def _timed_load(lake_root: Path, **kwargs: object) -> WindowLedger:
+            clock["t"] += 2.0  # the records parse "takes" 2 s → records floor 2 s
+            return real_load(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("brutex.data.window_ledger_store.load_window_ledger", _timed_load)
+        from brutex.data import window_ledger as wl_mod
+
+        real_row = wl_mod.ledger_record_row
+        slow_once = {"armed": True}
+
+        def _slow_row(record: Any) -> tuple[Any, ...]:
+            if slow_once["armed"]:
+                slow_once["armed"] = False
+                clock["t"] += 10.0  # the rows projection "takes" 10 s → rows floor 10 s
+            return real_row(record)
+
+        monkeypatch.setattr("brutex.data.window_ledger.ledger_record_row", _slow_row)
+        # Cold: records parse (t 0→2, floor 2 s), rows projection (t 2→12, floor 10 s).
+        assert [r[1] for r in window_ledger_rows_cached(tmp_path)] == ["NIFTY"]
+        _append_delta(tmp_path, "BANKNIFTY")  # the flush — the stamp moves
+        # Poll PAST the records floor (records age 13 s > 2 s): the records
+        # parse FRESH (t 15→17), then the rows entry — generation-mismatched
+        # but only 5 s old against its OWN 10 s floor — serves STALE.
+        clock["t"] = 15.0
+        with capture_logs() as logs:
+            stale_rows = window_ledger_rows_cached(tmp_path)
+        assert {r.security_id for r in _ledger_records_cached(tmp_path)} == {
+            "NIFTY",
+            "BANKNIFTY",
+        }  # the records ARE fresh — past their floor, delta folded in
+        assert [r[1] for r in stale_rows] == ["NIFTY"]  # rows: the SECOND stale phase
+        (served,) = _events(logs, "movers_cache.stale_served")
+        assert str(served["key"]).startswith("ledger-rows|")  # the SERVING key, never records
+        assert served["floor_s"] == 10.0  # the rows entry's OWN floor drives this phase
+        assert served["age_s"] == 5.0  # within the rows floor, past the records floor
+        assert served["entry_generation"] != served["generation"]
+        # Self-healing: past the composed bound the rows reconverge fresh.
+        clock["t"] = 40.0  # rows age 28 s > their 10 s floor
+        with capture_logs() as logs:
+            rows = window_ledger_rows_cached(tmp_path)
+        assert sorted(r[1] for r in rows) == ["BANKNIFTY", "NIFTY"]
+        assert list(rows) == load_window_ledger(tmp_path).to_rows()
+        assert _events(logs, "movers_cache.stale_served") == []  # genuinely fresh
+
+    @pytest.mark.parametrize(
+        ("func", "family"),
+        [(window_ledger_rows_cached, "ledger-rows"), (spot_window_rollup, "spot-rollup")],
+        ids=["rows", "rollup"],
+    )
+    def test_derived_docstrings_state_the_composed_floor_and_serving_key(
+        self, func: Any, family: str
+    ) -> None:
+        """Doc pin (fails-before/passes-after): the derived consumers' honesty
+        paragraphs no longer misattribute every stale-serve log to the
+        ``ledger-records`` key, and state the COMPOSED two-floor bound with
+        their own serving key named."""
+        doc = " ".join((func.__doc__ or "").split())  # whitespace-normalized
+        assert _MISATTRIBUTED_LOG_CLAIM not in doc
+        assert "COMPOSE" in doc  # the two-floor composition stated
+        assert f"``{family}`` in the second" in doc  # the second-phase SERVING key named
+
+
 class TestDocWordingHonesty:
     """Fix-round doc pins: the refuted claim is scrubbed everywhere it was
     stated (Golden Rule #10) and the ledger entry's Files citations resolve to

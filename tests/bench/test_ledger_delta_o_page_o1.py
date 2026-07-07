@@ -18,9 +18,17 @@ Honest, narrow claims (Golden Rule #10) — NONE is a literal O(1)-total claim:
   measured slack, and the caching proof rides deterministic spies/sentinels
   so the timing assertions can stay loose on shared CI.
 
-Every ratio routes through :func:`tests.bench._o1_tiers.ratio_ceiling` (the
+Ceiling mechanisms, PER PIN (not one shared tier): the phase-progress flatness
+ratio (B-3) routes through :func:`tests.bench._o1_tiers.ratio_ceiling` (the
 DuckDB-I/O-noisy 8.0 tier — the ``test_registry_pagination_o1.py`` precedent;
-strict 1.1 only under ``BRUTEX_M4PRO_STRICT=1``).
+strict 1.1 only under ``BRUTEX_M4PRO_STRICT=1``); the window-payload depth
+ratio (B-1) routes through :func:`tests.bench._o1_tiers.cache_tier_ceiling`
+(8.0 shared / strict **3.0**, NOT 1.1 — its 10× workload legitimately scans
+10× the columnar rows, so the strict 1.1 tier is physically unsatisfiable
+there, the DEC-O1-CACHE-TIER-001 discipline); the fresh-fold delta-file growth
+pin (B-4, ``< 20.0×``) and the cold-scan bound (B-6, ``< 2 s`` mean) are
+ABSOLUTE measured-slack ceilings, deliberately not tier-routed; B-2/B-5/B-7
+are deterministic spy/sentinel pins with no timing ratio at all.
 """
 
 from __future__ import annotations
@@ -589,3 +597,18 @@ def test_results_poll_flat_during_pull(tmp_path: Path, monkeypatch: pytest.Monke
                 assert poll.json() == primed
     finally:
         instrument_store.close()
+
+
+def test_module_header_enumerates_the_real_ceiling_mechanisms() -> None:
+    """Fix-round-2 doc pin (DEC-LEDGER-DELTA-O-PAGE-001): the module header must
+    enumerate the REAL per-pin ceiling mechanisms — never the refuted blanket
+    claim that "Every ratio routes through ``ratio_ceiling`` … strict 1.1"
+    (B-1 routes through ``cache_tier_ceiling``, whose strict tier is 3.0, and
+    B-4/B-6 assert raw ABSOLUTE bounds not routed through any tier helper).
+    Golden Rule #10: a maintainer must not be told the strict M4-Pro tier
+    enforces 1.1× on every pin in this file."""
+    assert __doc__ is not None
+    assert "Every ratio routes through" not in __doc__  # the refuted blanket claim
+    assert "cache_tier_ceiling" in __doc__  # B-1's tier named…
+    assert "3.0" in __doc__  # …with its ACTUAL strict ceiling
+    assert "ABSOLUTE" in __doc__  # B-4/B-6 honestly not tier-routed

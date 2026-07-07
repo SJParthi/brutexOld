@@ -3622,7 +3622,10 @@ def _make_ledger_read_cache(
 #: the records were ACTUALLY served at (:func:`_ledger_records_stamped` embeds
 #: it in the cached value), so a projection built from a floor-stale records
 #: serve is itself generation-stale — never latched under the fresh generation
-#: (the fix-round latch defect, Golden Rule #1).
+#: (the fix-round latch defect, Golden Rule #1). A derived entry then ages
+#: under its OWN floor once the records floor passes, so a derived family's
+#: worst-case staleness COMPOSES the records floor with its own (each capped
+#: at 120 s) — every stale serve logged on the key that served it.
 _LEDGER_READ_CACHE: MoversSnapshotCache = _make_ledger_read_cache()
 
 
@@ -3771,10 +3774,12 @@ def _ledger_records_stamped(lake_root: Path) -> tuple[int, tuple[Any, ...]]:
     The derived key families (``ledger-rows`` / ``spot-rollup``) MUST stamp
     their projections with THIS served generation: a projection built from
     floor-stale records is then cached generation-STALE itself and recomputes
-    the moment the records floor passes — never latched under the fresh
-    generation serving pre-flush content indefinitely (the fix-round latch
-    defect: a derived value may never be cached at a generation newer than the
-    records it was built from — Golden Rule #1).
+    once the records floor passes AND its OWN #920 floor permits (a derived
+    entry ages under its own floor after the records refresh — the two floors
+    COMPOSE; see the derived consumers' envelopes) — never latched under the
+    fresh generation serving pre-flush content indefinitely (the fix-round
+    latch defect: a derived value may never be cached at a generation newer
+    than the records it was built from — Golden Rule #1).
 
     HONEST envelope (Golden Rule #10): concurrent stamp-miss pollers pay ONE
     parse (single-flight); a stamp move within ``min(max(2 s, the last parse's
@@ -3830,17 +3835,21 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     projection returned ``()``). The projection is stamped with the SERVED
     records generation (:func:`_ledger_records_stamped` — never the fresh stamp
     a floor-stale records serve did not reach), so rows built from floor-stale
-    records stay generation-stale and recompute the moment the records floor
-    passes — never latched (the fix-round latch defect, Golden Rule #1).
+    records stay generation-stale and recompute once the records floor passes
+    and this entry's own floor permits — never latched (the fix-round latch
+    defect, Golden Rule #1).
     HONEST envelope (Golden Rule #10): the first read per stamp is still O(rows)
-    (parse + projection) and a stamp move within the records adaptive floor
-    serves the prior rows STALE — stale by at most ``min(max(2 s, the parse's
-    own duration), 120 s)`` of ledger movement (possibly spanning several ≥2 s
-    delta flushes — a time bound, never a stamp-count bound) and logged on
-    EVERY such serve
-    (``movers_cache.stale_served``, on the ``ledger-records`` key); only the
-    REPEAT read is O(1) — true O(page) needs a write-time manifest, NOT claimed
-    (the #867/#1025 envelope).
+    (parse + projection), and staleness after a stamp move is TWO-phase — the
+    records adaptive floor (``min(max(2 s, the parse's own duration), 120 s)``)
+    serves the prior rows first, and once it passes this ``ledger-rows`` entry
+    serves stale under its OWN #920 floor (``min(max(2 s, the projection's own
+    duration), 120 s)``), so the two floors COMPOSE: worst-case staleness =
+    records floor + rows floor, EACH capped at 120 s (possibly spanning several
+    ≥2 s delta flushes — a time bound, never a stamp-count bound). EVERY stale
+    serve is logged (``movers_cache.stale_served``) on the key that actually
+    served it — ``ledger-records`` in the first phase, ``ledger-rows`` in the
+    second; only the REPEAT read is O(1) — true O(page) needs a write-time
+    manifest, NOT claimed (the #867/#1025 envelope).
     """
     from brutex.data.window_ledger import ledger_record_row
     from brutex.data.window_ledger_store import ledger_path
@@ -3929,14 +3938,18 @@ def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int,
     concurrent cold stamp. The rollup is stamped with the SERVED records
     generation (:func:`_ledger_records_stamped` — never the fresh stamp a
     floor-stale records serve did not reach), so a rollup built from floor-stale
-    records stays generation-stale and recomputes the moment the records floor
-    passes — never latched (the fix-round latch defect, Golden Rule #1). HONEST
-    envelope (Golden Rule #10): a stamp move within the records adaptive floor
-    serves the prior rollup STALE — stale by at most ``min(max(2 s, the parse's
-    own duration), 120 s)`` of ledger movement (possibly spanning several ≥2 s
-    delta flushes — a time bound, never a stamp-count bound) and logged on
-    EVERY such serve
-    (``movers_cache.stale_served``, on the ``ledger-records`` key).
+    records stays generation-stale and recomputes once the records floor passes
+    and this entry's own floor permits — never latched (the fix-round latch
+    defect, Golden Rule #1). HONEST envelope (Golden Rule #10): staleness after
+    a stamp move is TWO-phase — the records adaptive floor (``min(max(2 s, the
+    parse's own duration), 120 s)``) serves the prior rollup first, and once it
+    passes this ``spot-rollup`` entry serves stale under its OWN #920 floor
+    (``min(max(2 s, the grouping's own duration), 120 s)``), so the two floors
+    COMPOSE: worst-case staleness = records floor + rollup floor, EACH capped
+    at 120 s (possibly spanning several ≥2 s delta flushes — a time bound,
+    never a stamp-count bound). EVERY stale serve is logged
+    (``movers_cache.stale_served``) on the key that actually served it —
+    ``ledger-records`` in the first phase, ``spot-rollup`` in the second.
     """
     from brutex.data.window_ledger import EMPTY, FAILED, SETTLED_STATUSES
     from brutex.data.window_ledger_store import ledger_path

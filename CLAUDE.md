@@ -513,9 +513,11 @@ hostile-review pass._
   appear mid-pull. (b) `_WINDOW_CACHE`/`_WINDOW_ROWS_CACHE`/`_SPOT_ROLLUP_CACHE` collapse onto ONE reused
   `MoversSnapshotCache` (`_LEDGER_READ_CACHE`: single-flight — 8 concurrent cold pollers pay exactly 1 parse; the #920
   adaptive floor EXTRACTED to `summary_cache.effective_adaptive_floor` with `SummaryCache._plan` + `movers_cache`
-  delegating byte-equal — §11 COMMON, no second copy; floor cap 120 s, a stale serve bounded to min(max(2 s, parse
-  duration), 120 s) of ledger movement — possibly spanning several ≥2 s delta flushes, a TIME bound never a
-  stamp-count bound — ALWAYS logged `movers_cache.stale_served`; NEW
+  delegating byte-equal — §11 COMMON, no second copy; floor cap 120 s, each stale serve bounded to min(max(2 s, the
+  serving entry's own compute duration), 120 s) of ledger movement — possibly spanning several ≥2 s delta flushes, a
+  TIME bound never a stamp-count bound — ALWAYS logged `movers_cache.stale_served` on the key that served it; a
+  derived rows/rollup family additionally ages under its OWN floor once the records floor passes, so its worst-case
+  staleness COMPOSES records floor + derived floor, each ≤ 120 s; NEW
   `lake_revision.revision_generation` digest bridge; the base-less delta-only /db grid inconsistency FIXED). (c)
   `api_sweep_leaderboard` keys on NEW `lake_revision.sweep_results_revision` (the sweeps dir-mtime digest + the audit
   chain's `(mtime_ns:size)` stat — a SWEEP_START append moves NO dir mtime, the stat closes that gap; a CLI `brutex
