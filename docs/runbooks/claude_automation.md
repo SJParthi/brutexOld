@@ -40,8 +40,8 @@ ignores them; the parallel-review pattern is ALSO invoked explicitly each PR reg
 > `anthropics/claude-code-action@v1`, shipped dormant by DEC-CLAUDE-AUTOMATION-001
 > (MIGRATION.md #831: "job-gated off by a `CLAUDE_AUTOFIX_ENABLED` repo variable so it stays
 > dormant until enabled") — is **withdrawn**. It was never wired: no workflow file, no secret,
-> no repo variable, no test ever existed (grep-verified 2026-07-06 — the 13 files in
-> `.github/workflows/` carry zero references to
+> no repo variable, no test ever existed (grep re-verified 2026-07-07 against the committed
+> tree — the 18 files in `.github/workflows/` carry zero references to
 > `claude-autofix` / `CLAUDE_AUTOFIX` / `claude-code-action` / `ANTHROPIC_API_KEY`; the only
 > repo-wide hits were this section and ledger entry #831). Do not resurrect the snippet from
 > git history without meeting the revival preconditions below.

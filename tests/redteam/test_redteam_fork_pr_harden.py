@@ -79,7 +79,7 @@ def _workflow_triggers(workflow: dict[Any, Any]) -> dict[Any, Any]:
 #: GitHub Actions loads BOTH workflow filename extensions.
 _WORKFLOW_GLOBS = ("*.yml", "*.yaml")
 
-#: 13 workflows exist today; a scan finding fewer than this went vacuous.
+#: 18 workflows exist today (re-counted 2026-07-07); fewer than this floor = vacuous scan.
 _MIN_EXPECTED_WORKFLOWS = 10
 
 
@@ -429,18 +429,40 @@ def _job_has_leading_trust_gate(job: dict[str, Any]) -> bool:
     """True iff a DEC-CI-FORK-PR-HARDEN-001-pattern trust-check step (a
     live ``author_association`` lookup restricted to
     OWNER|MEMBER|COLLABORATOR) appears BEFORE any privileged step (a
-    checkout, or a step referencing a non-``GITHUB_TOKEN`` secret)."""
+    checkout, or a step referencing a non-``GITHUB_TOKEN`` secret) AND
+    every privileged step is conditioned on the gate's VERDICT — an
+    ``if:`` referencing ``steps.<gate id>.outputs.`` (the real #1180
+    shape: ``if: steps.trust-check.outputs.trusted == 'true'``). The
+    substring match ALONE was spoofable (round-1 reconstruction-review
+    fix): a no-op ``run: echo "author_association
+    OWNER|MEMBER|COLLABORATOR"`` first step exempted the WHOLE job from
+    all three checks fail-open, so the gate must now carry an ``id:``
+    (an id-less verdict is unreferencable) and every subsequent
+    privileged step must reference it. DISCLOSED residual (the sibling
+    GPU-pin convention): the gate script's CONTENT is still matched by
+    substring, never executed — a gate-SHAPED script whose privileged
+    steps ARE ``if:``-conditioned on its output is accepted on shape;
+    the teeth for the real script's verdict live in the
+    ``_run_trust_check`` functional tests above."""
+    gate_ref: str | None = None
     for step in job.get("steps", []) or []:
         if not isinstance(step, dict):
             continue
         run = str(step.get("run", ""))
-        if "author_association" in run and "OWNER|MEMBER|COLLABORATOR" in run:
-            return True
-        if "actions/checkout" in str(step.get("uses", "")):
+        if gate_ref is None and "author_association" in run and "OWNER|MEMBER|COLLABORATOR" in run:
+            step_id = str(step.get("id", "")).strip()
+            if not step_id:
+                return False
+            gate_ref = f"steps.{step_id}.outputs."
+            continue
+        privileged = "actions/checkout" in str(step.get("uses", "")) or bool(
+            _job_foreign_secrets(step)
+        )
+        if not privileged:
+            continue
+        if gate_ref is None or gate_ref not in str(step.get("if", "")):
             return False
-        if _job_foreign_secrets(step):
-            return False
-    return False
+    return gate_ref is not None
 
 
 def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str]:
@@ -448,8 +470,12 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     no comment-family trigger. A comment-triggered job may not (a) hold
     write permissions, (b) reference a secret other than the implicit
     ``secrets.GITHUB_TOKEN``, or (c) check out a PR-controlled ref —
-    unless a #1180-pattern trust-check step precedes the privileged steps
-    (the ledgered revival-precondition shape). The ``on:`` value is
+    unless an id-carrying #1180-pattern trust-check step precedes the
+    privileged steps AND every one of them is ``if:``-conditioned on the
+    gate's ``steps.<id>.outputs.`` verdict (the ledgered
+    revival-precondition shape; ``_job_has_leading_trust_gate`` — the
+    bare substring exemption was spoofable, round-1 reconstruction-review
+    fix). The ``on:`` value is
     normalized via ``_workflow_triggers`` so the scalar/list trigger
     spellings can never bypass the pin (round-1 hostile-review fix)."""
     triggers = _workflow_triggers(workflow)
@@ -489,8 +515,9 @@ def test_no_issue_comment_privileged_workflows() -> None:
     ``discussion_comment`` — all run in base-repo context on
     attacker-authored input) may combine that trigger with write
     permissions, a non-``GITHUB_TOKEN`` secret, or a PR-controlled
-    checkout, unless a DEC-CI-FORK-PR-HARDEN-001-pattern trust check
-    precedes the privileged steps. The retired cloud auto-fix design
+    checkout, unless an id-carrying DEC-CI-FORK-PR-HARDEN-001-pattern
+    trust check precedes the privileged steps and every one of them is
+    ``if:``-conditioned on its verdict. The retired cloud auto-fix design
     would have slipped past the workflow_run/pull_request_target-only
     sweep above; this pin closes that blind spot directory-wide."""
     violations: list[str] = []
@@ -580,8 +607,10 @@ def test_issue_comment_sweep_carve_outs() -> None:
     """The two deliberate non-violations: (a) the ``secrets.GITHUB_TOKEN``
     carve-out — a read-only comment-triggered job using ONLY the implicit
     token is benign; (b) the #1180 trust-gate exemption — a job whose
-    FIRST step is the REAL auto-merge.yml trust-check script (the
-    ledgered revival-precondition shape) is exempt."""
+    FIRST step is the REAL auto-merge.yml trust-check script carrying an
+    ``id:``, with EVERY subsequent privileged step ``if:``-conditioned on
+    its ``steps.trust-check.outputs.`` verdict (the ledgered
+    revival-precondition shape) is exempt."""
     benign = yaml.safe_load(
         """
 name: comment ack
@@ -602,11 +631,67 @@ jobs:
     )
 
     gated = yaml.safe_load(_RETIRED_AUTOFIX_SNIPPET)
-    gated["jobs"]["claude"]["steps"].insert(0, {"id": "trust-check", "run": _trust_check_script()})
+    steps = gated["jobs"]["claude"]["steps"]
+    steps.insert(0, {"id": "trust-check", "run": _trust_check_script()})
+    for step in steps[1:]:
+        step["if"] = "steps.trust-check.outputs.trusted == 'true'"
     assert _comment_trigger_violations("gated.yml", gated) == [], (
         "a job trust-gated by the real #1180 trust-check script before any "
-        "privileged step is still flagged — the revival-precondition shape "
-        "would be un-landable"
+        "privileged step, every privileged step conditioned on its verdict, "
+        "is still flagged — the revival-precondition shape would be "
+        "un-landable"
+    )
+
+
+def test_issue_comment_sweep_flags_spoofed_trust_gate() -> None:
+    """Round-1 reconstruction-review regression pin: the trust-gate
+    exemption was a bare substring heuristic — ANY early ``run:`` step
+    merely CONTAINING ``author_association`` + ``OWNER|MEMBER|COLLABORATOR``
+    (e.g. a no-op ``echo``) exempted the WHOLE job from all three checks,
+    so the full retired auto-fix shape behind a spoofed gate produced ZERO
+    violations (fail-OPEN, and undisclosed). The exemption now requires
+    the gate step to carry an ``id:`` AND every subsequent privileged step
+    to carry an ``if:`` referencing ``steps.<id>.outputs.``; a gate-shaped
+    no-op echo, an id-less REAL gate, and a gated job with even ONE
+    unconditioned privileged step must all be flagged."""
+    spoofed = yaml.safe_load(_RETIRED_AUTOFIX_SNIPPET)
+    spoofed["jobs"]["claude"]["steps"].insert(
+        0, {"run": 'echo "author_association OWNER|MEMBER|COLLABORATOR"'}
+    )
+    violations = _comment_trigger_violations("spoofed.yml", spoofed)
+    joined = "\n".join(violations)
+    assert violations, (
+        "a no-op echo containing the gate substrings exempted the whole "
+        "job — the trust-gate exemption is spoofable (fail-open) again"
+    )
+    for expected in (
+        "'contents: write'",
+        "'pull-requests: write'",
+        "'issues: write'",
+        "secrets.ANTHROPIC_API_KEY",
+    ):
+        assert expected in joined, (
+            f"spoofed gate: {expected} was not flagged; violations were:\n{joined}"
+        )
+
+    idless = yaml.safe_load(_RETIRED_AUTOFIX_SNIPPET)
+    idless_steps = idless["jobs"]["claude"]["steps"]
+    idless_steps.insert(0, {"run": _trust_check_script()})  # REAL script, no id:
+    for step in idless_steps[1:]:
+        step["if"] = "steps.trust-check.outputs.trusted == 'true'"
+    assert _comment_trigger_violations("idless.yml", idless), (
+        "an id-less gate step (verdict unreferencable — nothing can truly "
+        "be conditioned on it) still exempted the job"
+    )
+
+    half_gated = yaml.safe_load(_RETIRED_AUTOFIX_SNIPPET)
+    half_steps = half_gated["jobs"]["claude"]["steps"]
+    half_steps.insert(0, {"id": "trust-check", "run": _trust_check_script()})
+    half_steps[1]["if"] = "steps.trust-check.outputs.trusted == 'true'"
+    # …the checkout is gated, but the secret-bearing action step is not.
+    assert _comment_trigger_violations("half-gated.yml", half_gated), (
+        "a job with ONE unconditioned privileged step after the gate was "
+        "exempted — the per-step conditioning requirement regressed"
     )
 
 
