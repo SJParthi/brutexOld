@@ -248,6 +248,10 @@ let lastGatedKey = null;
    round-trip (DEC-MOVERS-O1-LATENCY-001). Reset to null on a failed/preview fetch
    so a pill switch then falls back to a real fetch. */
 let lastPayload = null;
+/* The last real server note (j.note) — stored so applyCategory() can rebuild the
+   baseline-contiguity legend on a cached pill switch WITHOUT a refetch
+   (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 legend-desync fix). */
+let baseNote = "";
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): "params|bodyText"
    signature of the last fully-rendered NON-gated payload. A repeat fetch that
    round-trips to the byte-identical body for the SAME coordinate (repeat
@@ -284,12 +288,24 @@ function fillTimes() {
   while (t < 15*60+30) { opts += `<option>${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}</option>`; t += m; }
   sel.innerHTML = opts; state.time = sel.value;
 }
+/* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 + the hostile-review
+   legend-desync fix): recompute the " *" legend from the CURRENT rowsData every time
+   the rendered rows change — load() AND the cached applyCategory() pill switch — so
+   switching to a category whose cached rows carry a strictly-false contiguity flag
+   always shows the legend, and switching away always drops it (previously the legend
+   was computed only inside load(), so a cached pill switch showed " *" markers with
+   NO legend / a stale legend). textContent only — never innerHTML for server strings
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
+function refreshBaselineLegend(note) {
+  const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
+  $("noteText").textContent = (note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
+}
 /* Sub-filter (pill) switch: re-render the already-fetched payload's other category
    list IN THE BROWSER — the server returned every category for this coordinate, so
    no round-trip is needed (DEC-MOVERS-O1-LATENCY-001). Only falls back to a fetch
    when no payload is cached yet (first paint, or after a failed/preview fetch). */
 function applyCategory() {
-  if (lastPayload) { rowsData = lastPayload[state.category] || lastPayload.gainers || []; renderRows(); }
+  if (lastPayload) { rowsData = lastPayload[state.category] || lastPayload.gainers || []; renderRows(); refreshBaselineLegend(baseNote); }
   else { load(); }
 }
 function renderPills() {
@@ -481,7 +497,11 @@ async function load() {
        view never takes this path (DEC-DASHBOARD-JS-PERF-001). */
     const sig = p.toString() + "|" + bodyText;
     if (state.sort.idx === null && sig === lastRenderSig) {
-      $("noteText").textContent = (j.note||"");
+      /* rowsData is unchanged (the DOM already shows this snapshot) — restore the
+         note THROUGH the legend helper so the " *" legend survives the "Loading…"
+         overwrite too (the same desync class as the pill switch). */
+      baseNote = j.note || "";
+      refreshBaselineLegend(baseNote);
       return;
     }
     lastRenderSig = sig;
@@ -491,10 +511,10 @@ async function load() {
     $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
     /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001): when any
        rendered row carries a strictly-false contiguity flag (the EMIT-ON-FALSE
-       keys), explain the " *" marker in the note. textContent only — never
-       innerHTML for server strings (DEC-DASHBOARD-XSS-HARDENING-001). */
-    const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
-    $("noteText").textContent = (j.note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
+       keys), explain the " *" marker in the note — via the SAME helper the cached
+       pill switch uses, recomputed from the CURRENT rowsData. */
+    baseNote = j.note || "";
+    refreshBaselineLegend(baseNote);
   } catch (e) {
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     lastRenderSig = null;  /* a recovered fetch must always repaint over the preview. */
