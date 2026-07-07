@@ -150,7 +150,7 @@ class TestBenchM4ProWiring:
         capture while that red stands. The runbook must therefore document
         the REMOVAL-FIRST recovery (ledgered baseline delete -> abstain ->
         first-capture context refresh), never a dispatch that "self-heals"
-        a standing structural red (round-3 review, MIGRATION.md #1527).
+        a standing structural red (round-3 review, MIGRATION.md #1528).
         """
         job = _load(BENCH_YML)["jobs"]["m4pro-absolute-throughput"]
         condition = _step_named(job, "Capture baseline candidate")["if"]

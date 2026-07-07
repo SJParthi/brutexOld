@@ -1648,8 +1648,11 @@ jobs:
           # backoff + the injected known-gap predicate (both the passed + default arms).
           # PR-J4a additionally relocated synthetic / synthetic_adapter / pull_verdict /
           # until_clean into this module; their moved test files join this gate.
+          # DEC-PULL-SIX-STEP-ORDER-001 added the six-step vocabulary (PullStep +
+          # partition_spot_steps + StepOrderMonitor incl. the begin_phase rewind);
+          # tests/unit/test_ingest_common_pull_step_vocab.py joins this gate.
           if compgen -G "tests/unit/test_ingest_common.py" > /dev/null; then
-            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py tests/unit/test_ingest_common_pull_verdict.py tests/unit/test_ingest_common_until_clean.py tests/unit/test_ingest_common_synthetic.py tests/unit/test_ingest_common_synthetic_adapter.py
+            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py tests/unit/test_ingest_common_pull_verdict.py tests/unit/test_ingest_common_until_clean.py tests/unit/test_ingest_common_synthetic.py tests/unit/test_ingest_common_synthetic_adapter.py tests/unit/test_ingest_common_pull_step_vocab.py
           else
             echo "(brutex.adapters.ingest_common test file not present yet — gate inactive)"
           fi
@@ -1733,10 +1736,34 @@ jobs:
           # _reconcile_pairs_with_pipeline) are covered by
           # tests/unit/test_dashboard_fetch_pipeline_wiring.py, which MUST likewise
           # join the per-module gate so its coverage of those lines registers.
+          # DEC-PULL-SIX-STEP-ORDER-001: the spot step-group loop (_run_grouped +
+          # begin_phase rewind + make_step_write_observer + the group-scoped
+          # until-clean reads) is covered by
+          # tests/unit/test_pull_controller_step_groups.py, which MUST likewise
+          # join the per-module gate so its coverage of those lines registers.
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py tests/unit/test_dashboard_fetch_pipeline_wiring.py
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_dashboard_pull_health_wiring.py tests/unit/test_dashboard_pull_stall.py tests/unit/test_dashboard_write_batch_wiring.py tests/unit/test_dashboard_fetch_pipeline_wiring.py tests/unit/test_pull_controller_step_groups.py
           else
             echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-SIX-STEP-ORDER-001 (review round 3): the F&O/historical pull
+          # driver `brutex.dashboard.historical_pull` is held to a strict STATIC
+          # per-module gate. Its dedicated suites are stem-INVERTED
+          # (tests/unit/test_pull_historical*.py, NOT test_historical_pull*.py /
+          # test_dashboard_historical_pull*.py), so the discovery gate
+          # (scripts/ci/coverage_gate_discovery.py) finds no name-matched test and
+          # warn-skips the module ("ride the static gate") — this gate IS that
+          # static gate, asserting per-module 100% line+branch independence with
+          # the curated multi-file suite: the three test_pull_historical* unit
+          # files (four-bucket step-major loop, strict Greeks arm, progress
+          # honesty) + test_storm_breaker_arming_wiring.py (the error-storm
+          # breaker arm) + tests/integration/test_lake_heal_pull_seam.py (the
+          # DEC-LAKE-HEAL-001 post-drain L2 heal seam lines 1683-1685/1707-1711,
+          # unreachable from the unit files alone).
+          if compgen -G "tests/unit/test_pull_historical.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.historical_pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_historical.py tests/unit/test_pull_historical_progress_honesty.py tests/unit/test_pull_historical_step_buckets.py tests/unit/test_storm_breaker_arming_wiring.py tests/integration/test_lake_heal_pull_seam.py
+          else
+            echo "(brutex.dashboard.historical_pull test file not present yet — gate inactive)"
           fi
           # DEC-PULL-STALL-DETECTION-001: the NEW pull-stall watchdog module
           # (PullWatchdog + resolve_stall_timeout_seconds) ships at 100% line+branch
