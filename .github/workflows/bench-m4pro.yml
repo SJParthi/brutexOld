@@ -116,15 +116,11 @@ jobs:
     # can disable the workflow if registration is delayed.
     runs-on: [self-hosted, macos, m4pro]
     # 25 min (was 10): the sweep worker-scaling A/B bench step below runs the
-    # REAL run_parallel_grid at 4 worker arms; the runbook
-    # (docs/runbooks/sweep-worker-scaling-bench.md) estimates "single-digit
-    # minutes on the M4 Pro (UNVERIFIED until first run)" on top of the 4
-    # existing pytest steps + 2 maturin builds. Tune down after first
-    # real-run evidence (DEC-TEST-APPARATUS-DEBTS-001(i)) — first live run
-    # measured the step at 20 s (run 28851211762). The
-    # DEC-BENCH-ABS-BASELINE-001 budget (measure + compare + one bounded
-    # numeric-regression re-measure + a possible 3-run capture — main's
-    # "10 -> 15" sizing) fits comfortably inside the same 25.
+    # REAL run_parallel_grid at 4 worker arms (DEC-TEST-APPARATUS-DEBTS-001(i);
+    # measured 20 s wall on the live runner — generous headroom kept), AND the
+    # DEC-BENCH-ABS-BASELINE-001 measure + compare + one bounded
+    # numeric-regression re-measure + a possible 3-run capture (main's 15-min
+    # budget) both fit under 25.
     timeout-minutes: 25
 
     outputs:
