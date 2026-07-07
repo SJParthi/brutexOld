@@ -333,6 +333,45 @@ def test_manual_cascade_replays_then_refuses_a_drifted_lake(
     assert report_path.read_bytes() == launch_report  # the report is NOT rewritten
 
 
+def test_dashboard_cascade_route_400s_a_drifted_lake(tmp_path: Path) -> None:
+    """Round-2 findings 10/12 at the dashboard mouth: the "Run cascade" route
+    turns the replay's schedule cross-check refusal AND a futures-series
+    resolution refusal into clear 400s — never a 500 traceback."""
+    pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
+    import shutil
+
+    from brutex.dashboard.app import DashboardState, build_app
+    from brutex.data.instrument_store import InstrumentStore
+    from fastapi.testclient import TestClient
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    # The route derives the lake from the injected store's path parent and
+    # replays <lake>/sweeps — sweep into exactly that root.
+    rc = cmd_sweep_all(
+        **_kwargs(lake_root, catalog_path, lake_root / "sweeps", intervals="1minute")
+    )
+    assert rc == EXIT_OK
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as client:
+            # (a) schedule drift: the lake loses its newest contract.
+            shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _AUG[0])
+            resp = client.post("/api/v1/cascade/run")
+            assert resp.status_code == 400
+            payload = resp.json()
+            assert payload["ok"] is False
+            assert "contract set changed" in payload["error"]
+            # (b) resolution refusal (FuturesSeriesError): the whole futures
+            # tree vanished since launch — re-resolution refuses loudly.
+            shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUL[0])
+            shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUN[0])
+            resp = client.post("/api/v1/cascade/run")
+            assert resp.status_code == 400
+            assert "zero NIFTY futures contract dirs" in resp.json()["error"]
+    finally:
+        store.close()
+
+
 def test_manual_cascade_interior_hole_is_a_clean_user_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

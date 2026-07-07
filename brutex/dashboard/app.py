@@ -5464,6 +5464,7 @@ def build_app(
 
         def _run() -> tuple[int, dict[str, object]]:
             """Replay the cascade off the event loop (threadpool worker)."""
+            from brutex.data.futures_series import FuturesSeriesError
             from brutex.engine.cascade_wire import (
                 CascadeWireError,
                 load_bars_for_manifest,
@@ -5475,8 +5476,16 @@ def build_app(
                 manifest = load_manifest(root)
             except CascadeWireError as exc:
                 return 400, {"ok": False, "error": str(exc)}
-            bars_for = load_bars_for_manifest(manifest, lake_root=lake)
-            report = run_and_write_from_manifest(root, bars_for=bars_for)
+            # The dashboard twin of cmd_cascade's user-error net (review
+            # round-2 findings 10/12): the replay's frozen-vs-re-derived
+            # roll-schedule cross-check refusal + a futures-series resolution
+            # refusal (interior hole appeared since launch) are operator-
+            # remediable lake states — a clear 400, never a 500 traceback.
+            try:
+                bars_for = load_bars_for_manifest(manifest, lake_root=lake)
+                report = run_and_write_from_manifest(root, bars_for=bars_for)
+            except (CascadeWireError, FuturesSeriesError) as exc:
+                return 400, {"ok": False, "error": str(exc)}
             return 200, {
                 "ok": True,
                 "sweep_id": manifest.sweep_id,
