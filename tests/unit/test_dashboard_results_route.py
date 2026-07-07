@@ -188,24 +188,34 @@ def test_leaderboard_top_param_validated(client: TestClient) -> None:
     assert client.get("/api/v1/sweep/leaderboard?top=99999").status_code == 422
 
 
-def test_leaderboard_generation_cache(
+def test_leaderboard_revision_cache(
     client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
 ) -> None:
-    """A repeat poll is served from cache; a write-generation bump re-reads."""
+    """The leaderboard keys on the sweeps-tree CONTENT revision, not the generation.
+
+    DEC-LEDGER-DELTA-O-PAGE-001 (flips the pre-change generation-keyed pin): a
+    store written into the tree — with NO ``mark_dirty`` at all, the CLI
+    ``brutex sweep-all`` case the old keying never covered — is seen on the very
+    next poll because the write moves ``sweep_results_revision``; a repeat poll
+    at an UNCHANGED tree is a cache hit (spy-pinned in
+    ``test_dashboard_results_revision_key.py``).
+    """
     lake_root = store.path.parent
     _write_sweeps(lake_root, [_row(1)])
     first = client.get("/api/v1/sweep/leaderboard").json()
     assert first["total_rows"] == 1
 
-    # Add a second store WITHOUT bumping the generation → cache still serves the old result.
+    # Add a second store WITHOUT any generation bump → the revision token moved,
+    # so the next poll re-reads (the cross-process CLI-sweep honesty fix).
     _write_sweeps(lake_root, [_row(2)], tf="15m")
-    cached = client.get("/api/v1/sweep/leaderboard").json()
-    assert cached["total_rows"] == 1  # stale (cache hit) — proves the cache is active
-
-    # Bump the write generation (the same signal a real sweep/pull bumps) → re-read.
-    summary_cache.mark_dirty()
     fresh = client.get("/api/v1/sweep/leaderboard").json()
     assert fresh["total_rows"] == 2
+
+    # A mark_dirty storm at the UNCHANGED tree changes nothing (same payload —
+    # the pull's per-window generation bumps no longer thrash the leaderboard).
+    summary_cache.mark_dirty()
+    again = client.get("/api/v1/sweep/leaderboard").json()
+    assert again == fresh
 
 
 def test_completed_sweep_refreshes_leaderboard_cache(
@@ -248,11 +258,18 @@ def test_completed_sweep_refreshes_leaderboard_cache(
     assert fresh["total_rows"] == 1
 
 
-def test_failed_sweep_does_not_refresh_leaderboard_cache(
+def test_failed_sweep_written_store_still_visible(
     client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
 ) -> None:
-    """A FAILED sweep never bumps the generation, so the stale cache is preserved
-    (the success-only contract of the on_success hook — MAJOR-1).
+    """A FAILED sweep never fires on_success, but a store it DID write is shown.
+
+    The on_success success-only contract (MAJOR-1) is unchanged — the hook does
+    not fire on a crash (asserted via the generation staying put). Under
+    DEC-LEDGER-DELTA-O-PAGE-001's revision keying the /results payload reflects
+    the ACTUAL tree content regardless: the store the crashing sweep flushed
+    before dying moved ``sweep_results_revision``, so the next poll honestly
+    shows it (Golden Rule #1 — data that exists is never hidden behind a cache;
+    flips the pre-change generation-keyed staleness pin).
     """
     from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 
@@ -270,11 +287,15 @@ def test_failed_sweep_does_not_refresh_leaderboard_cache(
         summary_cache=summary_cache,
         lake_root_resolver=lambda: lake_root,  # DEC-ACCOUNT-PULL-SINGLEFLIGHT-001
     )
+    generation_before = summary_cache.generation
     assert job.start(_work, total=1, on_success=summary_cache.mark_dirty) is True
 
-    # The cache is NOT invalidated by the failed sweep → the next poll is still stale.
-    stale = client.get("/api/v1/sweep/leaderboard").json()
-    assert stale["available"] is False
+    # The success-only hook contract holds: the failed sweep bumped NO generation…
+    assert summary_cache.generation == generation_before
+    # …yet the written store is honestly visible (the revision token moved).
+    fresh = client.get("/api/v1/sweep/leaderboard").json()
+    assert fresh["available"] is True
+    assert fresh["total_rows"] == 1
 
 
 def test_leaderboard_no_lake_root_degrades(store: InstrumentStore) -> None:

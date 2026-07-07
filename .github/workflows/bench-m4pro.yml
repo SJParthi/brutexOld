@@ -49,6 +49,12 @@ on:
       - "tests/bench/test_engine_results_store_o1.py"
       - "tests/bench/test_market_structure_o1.py"
       - "tests/bench/_o1_tiers.py"
+      - "tests/bench/test_absolute_baseline.py"
+      - "tests/bench/_abs_baseline_registry.py"
+      - "tests/bench/baselines/**"
+      - "brutex/observability/bench_baseline.py"
+      - "brutex/config/hardware_envelope.py"
+      - "scripts/ci/bench_baseline_gate.py"
       - ".github/workflows/bench-m4pro.yml"
       - "brutex/vocabulary/**"
       - "rust/fno-math/**"
@@ -62,6 +68,19 @@ on:
   # `pull_request:` here once the runner is registered if pre-merge strict checks
   # are wanted.
   workflow_dispatch:
+    inputs:
+      capture_candidate:
+        description: "Capture a fresh baseline candidate (bless/re-bless flow)"
+        type: boolean
+        default: false
+      decision_id:
+        description: "NEW DEC id for a re-bless of EXISTING entries (blank = bootstrap additive-only)"
+        required: false
+        type: string
+      replace_entries:
+        description: "Comma-separated entry ids to REPLACE (requires decision_id)"
+        required: false
+        type: string
   schedule:
     # Daily 11:00 UTC = 16:30 IST (post-market). Catches CPU/OS/thermal
     # regressions even when no code changed.
@@ -91,7 +110,16 @@ jobs:
     # set is online the job sits in "queued" indefinitely — the operator
     # can disable the workflow if registration is delayed.
     runs-on: [self-hosted, macos, m4pro]
-    timeout-minutes: 10
+    # 10 -> 15 (DEC-BENCH-ABS-BASELINE-001): measure + compare + one bounded
+    # numeric-regression re-measure + a possible 3-run capture fit the budget.
+    timeout-minutes: 15
+
+    outputs:
+      needs_capture: ${{ steps.abscompare.outputs.needs_capture }}
+      baseline_missing: ${{ steps.abscompare.outputs.baseline_missing }}
+      abstain_entries: ${{ steps.abscompare.outputs.abstain_entries }}
+      hardware_key: ${{ steps.abscompare.outputs.hardware_key }}
+      candidate_ready: ${{ steps.abscapture.outputs.candidate_ready }}
 
     env:
       # The literal "1" activates the absolute gate per
@@ -261,6 +289,108 @@ jobs:
             tests/bench/test_market_structure_o1.py \
             tests/bench/test_throughput_canary.py -q --tb=short -p no:cacheprovider
 
+      - name: Measure absolute hot-path benchmarks (DEC-BENCH-ABS-BASELINE-001)
+        run: |
+          . .venv/bin/activate
+          rm -rf abs-bench && mkdir -p abs-bench/run1
+          # House best-of-min perf_counter_ns idiom (DEC-CANARY-MINTIME-001);
+          # 6 fragments + fingerprint.json land in abs-bench/run1. Gated on
+          # BRUTEX_M4PRO_ABS=1 (job env) — a no-op skip anywhere else; a skip
+          # here is caught by the comparator's fragment-set equality (STRUCTURAL).
+          BRUTEX_ABS_BENCH_OUT="$PWD/abs-bench/run1" \
+            pytest tests/bench/test_absolute_baseline.py -q -s -rA --tb=short -p no:cacheprovider
+
+      - name: Absolute-baseline compare gate (committed per-hardware floor)
+        id: abscompare
+        run: |
+          . .venv/bin/activate
+          # Repo-owned comparator — deliberately NOT --benchmark-compare (native
+          # compare warns-and-passes on missing runs, keys on machine_info, cannot
+          # abstain or govern; ledgered in DEC-BENCH-ABS-BASELINE-001; precedent:
+          # MIGRATION.md entry #158 DEC-P0-020 Agent-2 finding).
+          # rc=1 numeric regression (ONE bounded reproduce-before-fail re-measure);
+          # rc=2 structural/schema (NEVER retried); rc=0 ok or LOUD abstain.
+          set +e
+          python scripts/ci/bench_baseline_gate.py compare \
+            --fragments-dir abs-bench/run1 \
+            --baselines-dir tests/bench/baselines \
+            --github-output "$GITHUB_OUTPUT"
+          rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning::numeric regression measured — re-measuring ONCE in a fresh process to confirm (both reports archived)"
+            mkdir -p abs-bench/retry
+            BRUTEX_ABS_BENCH_OUT="$PWD/abs-bench/retry" \
+              pytest tests/bench/test_absolute_baseline.py -q -s -rA --tb=short -p no:cacheprovider || exit 1
+            python scripts/ci/bench_baseline_gate.py compare \
+              --fragments-dir abs-bench/retry \
+              --baselines-dir tests/bench/baselines \
+              --github-output "$GITHUB_OUTPUT"
+            rc=$?
+          fi
+          exit $rc
+
+      - name: Capture baseline candidate (abstain bootstrap / dispatch re-bless)
+        id: abscapture
+        if: >
+          steps.abscompare.outputs.needs_capture == '1' ||
+          (github.event_name == 'workflow_dispatch' && inputs.capture_candidate)
+        run: |
+          . .venv/bin/activate
+          # Two more PROCESS-FRESH measurement runs (run1 reused) — capture
+          # REFUSES a noisy triple (spread > tolerance/2), so a thermally-
+          # throttled machine can never mint a baseline.
+          for i in 2 3; do
+            mkdir -p "abs-bench/run$i"
+            BRUTEX_ABS_BENCH_OUT="$PWD/abs-bench/run$i" \
+              pytest tests/bench/test_absolute_baseline.py -q -s -rA --tb=short -p no:cacheprovider
+          done
+          REPLACE=""
+          if [ -n "${{ inputs.replace_entries }}" ]; then
+            REPLACE="--replace-entries ${{ inputs.replace_entries }}"
+          fi
+          # $REPLACE is deliberately word-split:
+          # shellcheck disable=SC2086
+          python scripts/ci/bench_baseline_gate.py capture \
+            --runs abs-bench/run1 abs-bench/run2 abs-bench/run3 \
+            --baselines-dir tests/bench/baselines \
+            --candidate-out abs-bench/candidate.json \
+            --pr-body-out abs-bench/pr-body.md \
+            --decision-id "${{ inputs.decision_id || 'DEC-BENCH-ABS-BASELINE-001' }}" \
+            --commit "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --runner-name "${RUNNER_NAME}" \
+            $REPLACE
+          echo "candidate_ready=1" >> "$GITHUB_OUTPUT"
+
+      - name: Upload absolute-bench artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: abs-bench
+          path: abs-bench/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Track missing baseline (scheduled abstain — distinct, non-critical)
+        # S1: abstain is GREEN but never invisible. Distinct title + labels so it
+        # can never be confused with a regression red; dedup by title (per key).
+        if: steps.abscompare.outputs.needs_capture == '1' && github.event_name == 'schedule'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const key = '${{ steps.abscompare.outputs.hardware_key }}';
+            const title = `bench-m4pro: absolute baseline missing/incomplete for ${key}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bench', per_page: 100,
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `Absolute gate ABSTAINED (no/partial baseline for \`${key}\`). A bless PR should open automatically from this run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}. See docs/runbooks/bench-baseline.md.`,
+              labels: ['bench'],
+            });
+
       - name: Print summary
         if: always()
         run: |
@@ -273,7 +403,10 @@ jobs:
         # dedup-by-title (per-sha) then open a labelled issue. `failure()` fires
         # on ANY earlier step failing (incl. any perf/O(1) gate); scheduled runs
         # only (an operator-watched dispatch/push needs no issue).
-        if: failure() && github.event_name == 'schedule'
+        # DEC-BENCH-ABS-BASELINE-001 (mirrors DEC-MUTATION-ALERT-CANCELLED-001
+        # #1511): a timeout-KILLED job reports CANCELLED, not failure — alert on
+        # both so a silent timeout death is impossible.
+        if: (failure() || cancelled()) && github.event_name == 'schedule'
         uses: actions/github-script@v9
         with:
           script: |
@@ -283,12 +416,92 @@ jobs:
               repo: context.repo.repo,
               state: 'open',
               labels: 'bug,bench',
+              per_page: 100,
             });
             if (existing.data.find((i) => i.title === title)) return;
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Bench M4Pro gate failed on ${context.sha}. See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`,
+              body: `Bench M4Pro gate failed or was cancelled (e.g. timeout-killed) on ${context.sha}. See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`,
               labels: ['bug', 'bench', 'critical'],
             });
+
+  bless-baseline:
+    name: Bless baseline candidate (bot PR from measured artifact)
+    needs: m4pro-absolute-throughput
+    # Pinned: main ref + schedule/dispatch ONLY + a candidate actually captured.
+    # A push-run on a feature branch can NEVER arm this job (workflow-contract-
+    # test-pinned), and a REGRESSION outcome never reaches here (needs_capture
+    # is set only on abstain / explicit dispatch — a red compare fails the
+    # m4pro job, so `needs` blocks this job entirely on regression).
+    # The self-hosted runner never holds a contents/PR-write token (its
+    # inherited workflow-level token is issues:write only, for its own alert
+    # steps) — THIS GitHub-hosted job is the only contents/pull-requests write
+    # holder, and its only inputs are the artifact bytes (committed verbatim)
+    # and job outputs. No `pull_request` trigger exists on this workflow
+    # (DEC-M4PRO-PR-TRIGGER-001), so fork code never runs near it.
+    if: >
+      needs.m4pro-absolute-throughput.outputs.candidate_ready == '1' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      # issues: write is REQUIRED here: a job-level permissions block zeroes
+      # every unspecified scope (the workflow-level issues: write does NOT
+      # apply), and the "Alert on bless failure" step calls
+      # github.rest.issues.listForRepo/create — without this scope the alert
+      # itself 403s, silencing the exact failure it exists to surface
+      # (review round 2).
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: abs-bench
+      - name: Open bless PR (candidate committed VERBATIM — numbers measured on the runner, no edit surface here)
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const key = '${{ needs.m4pro-absolute-throughput.outputs.hardware_key }}';
+            const branch = `claude/bench-baseline-${key}`;
+            const path = `tests/bench/baselines/${key}.json`;
+            const open = await github.rest.pulls.list({owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', head: `${context.repo.owner}:${branch}`});
+            if (open.data.length > 0) { core.notice(`bless PR for ${key} already open — skipping`); return; }
+            const main = await github.rest.git.getRef({owner: context.repo.owner, repo: context.repo.repo, ref: 'heads/main'});
+            try {
+              await github.rest.git.createRef({owner: context.repo.owner, repo: context.repo.repo,
+                ref: `refs/heads/${branch}`, sha: main.data.object.sha});
+            } catch (e) { if (e.status !== 422) throw e; }
+            // If the file already exists on the branch/main, pass its sha (update vs create).
+            let sha = undefined;
+            try {
+              const cur = await github.rest.repos.getContent({owner: context.repo.owner, repo: context.repo.repo, path, ref: branch});
+              sha = cur.data.sha;
+            } catch (e) { if (e.status !== 404) throw e; }
+            // download-artifact extracts the abs-bench/ upload into the job
+            // workspace root, so candidate.json / pr-body.md sit at CWD —
+            // verified against actions/download-artifact@v8 flattening; the
+            // workflow-contract test pins these two paths.
+            await github.rest.repos.createOrUpdateFileContents({owner: context.repo.owner, repo: context.repo.repo, path, branch, sha,
+              message: `feat(bench): bless absolute benchmark baseline for ${key}\n\nDEC-BENCH-ABS-BASELINE-001 measured capture (see PR body for run provenance).`,
+              content: fs.readFileSync('candidate.json').toString('base64')});
+            await github.rest.pulls.create({owner: context.repo.owner, repo: context.repo.repo,
+              title: `feat(bench): bless absolute benchmark baseline for ${key}`,
+              head: branch, base: 'main',
+              body: fs.readFileSync('pr-body.md').toString()});
+      - name: Alert on bless failure (a broken bootstrap loop must not be silent)
+        if: (failure() || cancelled()) && github.event_name == 'schedule'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `bench-m4pro: bless-baseline job failed on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'bug,bench', per_page: 100});
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `The bless-baseline job failed or was cancelled — the absolute gate stays dormant until fixed. Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['bug', 'bench', 'critical']});
