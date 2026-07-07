@@ -233,7 +233,7 @@ class TestDelegatorObservableIdentity:
         """Exactly one ``fno.greeks_enrich.done`` with the 13 counters VERBATIM,
         in the pre-refactor emission order, at info level."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
 
@@ -266,7 +266,7 @@ class TestDelegatorObservableIdentity:
         SAME target produce EQUAL captured events, EQUAL outcomes, and hand the
         driver EQUAL target lists — the moved-code equivalence pin."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
         from brutex.data.greeks_enrich import GreeksEnrichTarget
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
@@ -303,7 +303,7 @@ class TestDelegatorObservableIdentity:
         ``fno.greeks_enrich.error`` (error level, message only), no ``done``,
         outcome ``ok=False`` + ``"RuntimeError: boom"``."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
         from brutex.data.greeks_enrich import GreeksEnrichTarget
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
@@ -346,7 +346,7 @@ class TestDelegatorObservableIdentity:
         resolved FIRST, the dashboard target loop built second (its
         ``contract_exchange`` call is the probe), the driver invoked last."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         order: list[str] = []
 
@@ -416,7 +416,7 @@ class TestDelegatorSkipRules:
         reaches the driver, mapped field-for-field (exchange from the symbol's
         leading token, the window endpoints verbatim)."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
         from brutex.data.greeks_enrich import GreeksEnrichTarget
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
@@ -454,7 +454,7 @@ class TestDelegatorSkipRules:
         ``futures_skipped`` counter would silently zero (the documented
         dashboard/CLI asymmetry)."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
         captured: list[str] = []
@@ -479,7 +479,7 @@ class TestDelegatorSkipRules:
         """Empty ``rebuilt`` still calls the driver and logs ``done`` — the
         pre-refactor shape had NO early-out, and the delegation must not add one."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
         calls: list[list[object]] = []
@@ -527,7 +527,7 @@ class TestDelegatorHaltReRaise:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exc: BaseException
     ) -> list[EventDict]:
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
 
@@ -685,7 +685,7 @@ class TestOutcomeConsumedByPullFlow:
         common-dataclass instance's fields — spied at the real seam, with the
         real fence + a fake driver (``errored=5`` reaches the report)."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
         from brutex.data.registry_store import RegistryStore
 
         monkeypatch.delenv("BRUTEX_GROWW_FETCH_PIPELINE", raising=False)

@@ -29,8 +29,8 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import brutex.data.greeks_enrich_pass as gep
 import pytest
+from brutex.data import greeks_enrich_pass as gep
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_enrich_pass import (
     CLI_GREEKS_ENRICH_ENV,
@@ -99,9 +99,21 @@ def _make_contract(
     return contract_dir
 
 
+def _only(rows: tuple[DiscoveredOptionWindow, ...]) -> DiscoveredOptionWindow:
+    """Assert exactly one discovered row and return it.
+
+    An explicit length assertion instead of 1-tuple unpacking:
+    ``discover_option_windows`` has a literal ``return ()`` branch, so
+    CodeQL's tuple-length inference flags ``(row,) = ...`` as an error-tier
+    "Mismatch in multiple assignment" (PR #1236 CodeQL gate).
+    """
+    assert len(rows) == 1
+    return rows[0]
+
+
 def _report(**overrides: int) -> Any:
     """Build a real ``GreeksEnrichReport`` (wheel required — callers importorskip)."""
-    import brutex.data.greeks_enrich as ge
+    from brutex.data import greeks_enrich as ge
 
     fields: dict[str, int] = {
         "enriched": 0,
@@ -194,7 +206,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """One ``done`` event carrying each of the 13 report counters verbatim."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         # 13 DISTINCT values so a swapped/dropped field can never pass.
         report = _report(**{name: idx + 1 for idx, name in enumerate(_DONE_FIELDS)})
@@ -229,7 +241,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """The dashboard's resolve → build → drive order is preserved."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         order: list[str] = []
 
@@ -257,7 +269,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """A builder error degrades to ``ok=False`` — the discovery seam is fenced."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         def _never(**_kwargs: object) -> Any:  # pragma: no cover - must not run
             raise AssertionError("driver must not be reached")
@@ -306,7 +318,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """A broken rate source fails the pass LOUDLY — and before target build."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
         from brutex.options.risk_free import RiskFreeError
 
         def _broken() -> object:
@@ -343,7 +355,7 @@ class TestRunGreeksEnrichPass:
 
     def test_driver_error_is_fenced(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         def _bad(**_kwargs: object) -> Any:
             raise ValueError("bad targets")
@@ -366,7 +378,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """The two pull-wide HOST halts re-raise past the fence — zero events."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         def _halt(**_kwargs: object) -> Any:
             raise halt
@@ -387,7 +399,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """A halt raised by the BUILDER leg (discovery-time) also re-raises."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         def _never(**_kwargs: object) -> Any:  # pragma: no cover - must not run
             raise AssertionError("driver must not be reached")
@@ -406,7 +418,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """``BaseException`` is NOT fenced — a Ctrl-C propagates raw (deliberate)."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.setattr(ge, "resolve_risk_free_source", object)
 
@@ -423,7 +435,7 @@ class TestRunGreeksEnrichPass:
     ) -> None:
         """The ``log`` seam: an injected logger gets the events, the module one none."""
         pytest.importorskip("trading_core")
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.setattr(ge, "resolve_risk_free_source", object)
         monkeypatch.setattr(ge, "enrich_greeks_for_targets", lambda **_kwargs: _report(errored=4))
@@ -679,37 +691,39 @@ class TestDiscoverOptionWindows:
     def test_year_rollover_window(self, tmp_path: Path) -> None:
         symbol = "NSE-NIFTY-30Jan25-21000-CE"
         _make_contract(tmp_path, symbol, [(2024, 12), (2025, 1)])
-        (row,) = discover_option_windows(tmp_path)
+        row = _only(discover_option_windows(tmp_path))
         assert row.start == date(2024, 12, 1)
         assert row.end == date(2025, 2, 1)
 
     def test_clamp_start_inside_narrows(self, tmp_path: Path) -> None:
         _make_contract(tmp_path, _CE, [(2024, 1), (2024, 2)])
-        (row,) = discover_option_windows(tmp_path, start=date(2024, 1, 15))
+        row = _only(discover_option_windows(tmp_path, start=date(2024, 1, 15)))
         assert row.start == date(2024, 1, 15)
         assert row.end == date(2024, 3, 1)
 
     def test_clamp_start_before_span_is_noop(self, tmp_path: Path) -> None:
         _make_contract(tmp_path, _CE, [(2024, 1)])
-        (row,) = discover_option_windows(tmp_path, start=date(2023, 12, 1))
+        row = _only(discover_option_windows(tmp_path, start=date(2023, 12, 1)))
         assert row.start == date(2024, 1, 1)
         assert row.end == date(2024, 2, 1)
 
     def test_clamp_end_inside_narrows(self, tmp_path: Path) -> None:
         _make_contract(tmp_path, _CE, [(2024, 1), (2024, 2)])
-        (row,) = discover_option_windows(tmp_path, end=date(2024, 2, 10))
+        row = _only(discover_option_windows(tmp_path, end=date(2024, 2, 10)))
         assert row.start == date(2024, 1, 1)
         assert row.end == date(2024, 2, 10)
 
     def test_clamp_end_after_span_is_noop(self, tmp_path: Path) -> None:
         _make_contract(tmp_path, _CE, [(2024, 1)])
-        (row,) = discover_option_windows(tmp_path, end=date(2024, 6, 1))
+        row = _only(discover_option_windows(tmp_path, end=date(2024, 6, 1)))
         assert row.start == date(2024, 1, 1)
         assert row.end == date(2024, 2, 1)
 
     def test_clamp_both_straddling_narrows_both_ends(self, tmp_path: Path) -> None:
         _make_contract(tmp_path, _CE, [(2024, 1), (2024, 2), (2024, 3)])
-        (row,) = discover_option_windows(tmp_path, start=date(2024, 1, 10), end=date(2024, 3, 20))
+        row = _only(
+            discover_option_windows(tmp_path, start=date(2024, 1, 10), end=date(2024, 3, 20))
+        )
         assert row.start == date(2024, 1, 10)
         assert row.end == date(2024, 3, 20)
 
@@ -753,7 +767,7 @@ class TestDiscoverOptionWindows:
     def test_exchange_taken_from_tree_dir_name(self, tmp_path: Path) -> None:
         """A drift-keyed partition is enriched where it physically SITS."""
         _make_contract(tmp_path, _CE, [(2024, 1)], exchange="WEIRD")
-        (row,) = discover_option_windows(tmp_path)
+        row = _only(discover_option_windows(tmp_path))
         assert row.exchange == "WEIRD"
         assert row.symbol == _CE
 
@@ -788,7 +802,7 @@ class TestDiscoverOptionWindows:
         if expected_start >= expected_end:
             assert rows == ()
         else:
-            (row,) = rows
+            row = _only(rows)
             assert (row.start, row.end) == (expected_start, expected_end)
             assert row.start < row.end  # never an empty window
             # A clamp only ever NARROWS the natural month span.

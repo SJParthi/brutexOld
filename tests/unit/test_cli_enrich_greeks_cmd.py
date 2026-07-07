@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
 
-import brutex.data.greeks_enrich_pass as gep
 import pytest
 from brutex import cli
 from brutex.config.credentials import CredentialsError
+from brutex.data import greeks_enrich_pass as gep
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.greeks_enrich_pass import GreeksEnrichOutcome
 from brutex.observability import power_keepawake
