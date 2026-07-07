@@ -3,8 +3,9 @@
 R29 / Golden Rule #5: after the resolver/source caches warm, the per-trade
 cost of front-month resolution + entry/exit fill lookup must be independent of
 (a) how many trades the run prices and (b) how many contracts the calendar
-lists — a fixed front-month pick over ≤ ~3 live serial months (here scaled to
-30 to prove flatness) + two O(1) dict probes.
+lists — a front-month pick over the cached FUT calendar (scaled here to 30
+all-live AND to the real 60-expired+3-live registry shape to prove flatness)
++ two O(1) dict probes.
 
 ## HONEST ENVELOPE (Golden Rule #10 — stated, never hidden)
 
@@ -15,9 +16,14 @@ lists — a fixed front-month pick over ≤ ~3 live serial months (here scaled t
 * The per-trade MAE/MFE walk is O(bars-in-[entry, exit]) (≤ ~375 intraday
   minutes) — inherent R22 work; this bench holds the window size CONSTANT
   across tiers so the per-trade ratio isolates the lookup cost.
-* The front-month pick is O(k log k) over k live contracts — effectively O(1)
-  for the real k ≤ 3, and proven FLAT here at k = 3 vs 30 (never a literal
-  O(1)-total claim).
+* The front-month pick is O(M) over the underlying's FULL cached calendar —
+  the registry deliberately RETAINS expired months (no live filter is
+  possible at cache-build time: ``on_date`` varies per historical trade), so
+  the real M is the whole accumulated calendar (~13/listed-year, ~78 for
+  NIFTY 2020→2026, growing ~13/yr), NOT merely the ≤ ~3 currently-live
+  serial months. M is bounded (dozens) + trade-count-independent, so the
+  per-trade cost is effectively O(1) — proven FLAT here at 3 vs 30 all-live
+  AND at 3-live vs 60-expired+3-live (never a literal O(1)-total claim).
 * The AGGREGATE is O(N signals) — inherent work over the input.
 
 Tiers: mean per-trade latency ratio gated at the shared-CI robust ceiling
@@ -140,8 +146,7 @@ def _per_trade_seconds(n: int, resolver: _CalendarResolver, source: _DictSource)
     return best
 
 
-def _contracts(k: int) -> tuple[FutContract, ...]:
-    base = date(2025, 1, 30)
+def _contracts(k: int, *, base: date = date(2025, 1, 30)) -> tuple[FutContract, ...]:
     out = []
     for i in range(k):
         month = (base.month - 1 + i) % 12 + 1
@@ -162,10 +167,33 @@ class TestFuturesExecO1:
         assert ratio <= ratio_ceiling(5.0), f"per-trade ratio {ratio:.2f} vs signals"
 
     def test_r29_per_trade_flat_vs_contract_count(self) -> None:
-        # [R29] a 10× deeper contract calendar (3 → 30 live serial months —
-        # far beyond the real ≤ 3) must not move the per-trade cost.
+        # [R29] a 10× deeper ALL-LIVE contract calendar (3 → 30 live serial
+        # months — far beyond the real ≤ ~3 live at a time) must not move the
+        # per-trade cost. The real registry shape (expired months retained)
+        # is pinned separately below.
         source = _session_source()
         shallow = _per_trade_seconds(_N_SMALL, _CalendarResolver(_contracts(3)), source)
         deep = _per_trade_seconds(_N_SMALL, _CalendarResolver(_contracts(30)), source)
         ratio = deep / shallow
         assert ratio <= ratio_ceiling(5.0), f"per-trade ratio {ratio:.2f} vs contracts"
+
+    def test_r29_per_trade_flat_vs_expired_calendar_depth(self) -> None:
+        # [R29 regression — O1-WORDING finding] the REAL registry shape: the
+        # cached FUT calendar retains EXPIRED months (registry_store.py's
+        # incremental-skip design; no live filter is possible at cache-build
+        # time since on_date varies per historical trade), so the per-trade
+        # pick is O(M) over the WHOLE accumulated calendar, not the ≤ ~3 live
+        # months. Pin: 60 expired (2020→2024) + the same 3 live months (the
+        # ~78-contract NIFTY 2020→2026 shape) vs 3-live-only must stay flat —
+        # both tiers resolve the IDENTICAL front month (27Jan25), so the
+        # ratio isolates the calendar-depth term.
+        expired_plus_live = _contracts(63, base=date(2020, 1, 30))
+        assert sum(c.expiry_date < _ENTRY.date() for c in expired_plus_live) == 60
+        assert resolve_front_month(expired_plus_live, on_date=_ENTRY.date()) == (
+            resolve_front_month(_contracts(3), on_date=_ENTRY.date())
+        )
+        source = _session_source()
+        live_only = _per_trade_seconds(_N_SMALL, _CalendarResolver(_contracts(3)), source)
+        deep = _per_trade_seconds(_N_SMALL, _CalendarResolver(expired_plus_live), source)
+        ratio = deep / live_only
+        assert ratio <= ratio_ceiling(5.0), f"per-trade ratio {ratio:.2f} vs expired depth"

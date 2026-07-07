@@ -28,9 +28,17 @@ are the lake partition key). Still nothing → ``None`` → the executor's hones
 
 The per-underlying ``(contract_symbol, expiry)`` calendar loads ONCE and is
 cached; each per-trade resolve is then one :func:`select_near_month` pass over
-the ≤ ~3 live serial months — O(k log k) over a tiny fixed k, effectively O(1)
-per trade, honestly NOT a literal O(1). The FIRST load is O(contracts) (one
-registry query or one directory scan) — stated, never hidden.
+the underlying's FULL cached FUT calendar. HONEST BOUND: the registry
+deliberately RETAINS expired months (its incremental-skip reason for being,
+``registry_store.py``) and the resolver applies no live filter at cache-build
+time (it cannot — ``on_date`` varies per historical trade), so the pass is
+**O(M) over the whole accumulated calendar** (~13 monthly contracts per
+listed year, ~78 for NIFTY 2020→2026, growing ~13/yr) — NOT merely the ≤ ~3
+currently-live serial months. M is bounded (dozens) and independent of the
+trade count, so the per-trade cost is effectively O(1) — honestly NOT a
+literal O(1); bench-pinned flat on the real expired-plus-live registry shape
+(``tests/bench/test_futures_exec_o1.py``). The FIRST load is O(contracts)
+(one registry query or one directory scan) — stated, never hidden.
 """
 
 from __future__ import annotations

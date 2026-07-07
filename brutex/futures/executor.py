@@ -41,10 +41,12 @@ reachable in a unit test (a cost-bearing stock-future signal fed straight to
 
 :func:`materialize_futures_trade` is pure given deterministic seams: same signal
 + resolver + source → the same priced trade, bit-for-bit. Per-trade cost is
-O(1)-effective after the resolver/source caches warm (one front-month pick over
-≤ ~3 live serial months + two O(1) dict bar lookups); the MAE/MFE path walk is
-O(bars-in-trade) (≤ ~375 intraday minutes) — inherent per-trade work, honestly
-stated, never an O(1)-total claim.
+O(1)-effective after the resolver/source caches warm (one front-month pick —
+O(M) over the underlying's FULL cached FUT calendar, which retains expired
+months: ~dozens, bounded, trade-count-independent, see the honest bound in
+:mod:`brutex.futures.contract_resolver` — + two O(1) dict bar lookups); the
+MAE/MFE path walk is O(bars-in-trade) (≤ ~375 intraday minutes) — inherent
+per-trade work, honestly stated, never an O(1)-total claim.
 """
 
 from __future__ import annotations
