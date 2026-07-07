@@ -988,6 +988,60 @@ class TestFuturesRollScheduleCarriage:
         assert cw.load_manifest(tmp_path).roll_schedules is None
 
 
+class TestCheckReplayRollSchedule:
+    """The replay's frozen-vs-re-derived schedule cross-check (review round-2
+    findings 1/4/9): `load_bars_for_manifest` stitches bars from the CURRENT
+    lake while `run_and_write_from_manifest` re-scores under the manifest's
+    FROZEN schedule — a drifted lake must REFUSE loudly naming both schedules,
+    never silently rewrite the report under mismatched Stage-1A resets."""
+
+    def test_matching_schedules_pass(self) -> None:
+        cw.check_replay_roll_schedule(
+            instrument=_FUT_ALIAS,
+            frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+            fresh_schedule=_FUT_SCHEDULE,
+        )
+
+    def test_drifted_lake_refuses_naming_both_schedules(self) -> None:
+        fresh = (*_FUT_SCHEDULE, date(2026, 7, 30).toordinal())  # a pulled successor
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.check_replay_roll_schedule(
+                instrument=_FUT_ALIAS,
+                frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+                fresh_schedule=fresh,
+            )
+        message = str(excinfo.value)
+        assert str(list(_FUT_SCHEDULE)) in message  # the FROZEN schedule named
+        assert str(list(fresh)) in message  # the re-derived schedule named
+        assert "contract set changed" in message
+        assert "brutex sweep-all" in message  # the remediation
+
+    def test_backfilled_head_contract_refuses_too(self) -> None:
+        # The silent-D11 direction: a head contract backfilled AFTER the
+        # launch (the head_unowned WARN's own remediation) PREPENDS an expiry.
+        fresh = (date(2026, 4, 30).toordinal(), *_FUT_SCHEDULE)
+        with pytest.raises(cw.CascadeWireError, match="contract set changed"):
+            cw.check_replay_roll_schedule(
+                instrument=_FUT_ALIAS,
+                frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+                fresh_schedule=fresh,
+            )
+
+    @pytest.mark.parametrize(
+        "frozen", [None, {}, {"OTHER": _FUT_SCHEDULE}], ids=["no-map", "empty", "other-instrument"]
+    )
+    def test_pre_carriage_manifest_abstains(
+        self, frozen: dict[str, tuple[int, ...]] | None
+    ) -> None:
+        # No frozen schedule for this instrument ⇒ nothing to enforce — the
+        # pool is loudly SKIPPED downstream by run_cascade_over_specs instead.
+        cw.check_replay_roll_schedule(
+            instrument=_FUT_ALIAS,
+            frozen_schedules=frozen,
+            fresh_schedule=_FUT_SCHEDULE,
+        )
+
+
 # ── Report serialisation ──────────────────────────────────────────────────────
 
 
