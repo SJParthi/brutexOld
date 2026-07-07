@@ -75,6 +75,10 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "candidate-discovery aggregate over symbols (ranking warm), not a bar-serving read"
     ),
     "brutex/options/lake_source.py": "wired: _contract_bars dedups before the bar map build",
+    "brutex/futures/lake_source.py": (
+        "wired: _contract_bars dedups (keep-FIRST) before the bar map build — "
+        "the futures twin of options/lake_source (DEC-FUTURES-EXEC-TRANSLATION-001)"
+    ),
     # DEC-SUSPICION-SWEEP-FIXES-001 (G1): the doctor's freshness `_read` moved into
     # the COMMON tf_autoderive.read_lake_bars_frame (shared by the doctor probe AND
     # the sweep-preflight freshness gate) — the raw read feeds dedup_bars_frame
