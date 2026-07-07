@@ -1434,3 +1434,70 @@ class TestIsPoolIsolatable:
         assert _is_pool_isolatable(GrowwAuthError("dead credential")) is False
         assert _is_pool_isolatable(GrowwTokenIssuanceThrottled("mint throttled")) is True
         assert _is_pool_isolatable(GrowwTokenStillStaleError("same dead token")) is True
+
+
+# ─────────────────── per-run consumer scope (DEC-PULL-BEAT-PERRUN-001) ───────────────────
+
+
+class TestConsumerRunScope:
+    """Consumer threads re-bind the run id captured at construction, so their seam
+    beats route to the run's KEYED progress-beat channel (never dropped, never a
+    silent bind regression)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_beats(self):  # type: ignore[no-untyped-def]
+        from brutex.observability.progress_beat import reset_progress_beats
+
+        reset_progress_beats()
+        yield
+        reset_progress_beats()
+
+    def test_consumer_thread_carries_captured_run_id_and_hits_keyed_channel(self) -> None:
+        """A keyed-registered counting beat receives emits fired from the REAL
+        consumer thread (kills a silent bind regression), and the consumer's ambient
+        id equals the id captured at pipeline construction."""
+        from brutex.observability.correlation import current_pull_id, pull_id_scope
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+        )
+
+        beats: list[int] = []
+        register_progress_beat(lambda: beats.append(1), pull_id="runbeat00001")
+        seen_ids: list[str] = []
+
+        def _proc(_tail: FetchTail) -> None:
+            seen_ids.append(current_pull_id())  # the REAL consumer thread's ambient id
+            emit_progress_beat()  # must route to the run's keyed channel
+
+        with pull_id_scope("runbeat00001"):
+            pipeline = FetchPipeline(workers=1)  # constructed INSIDE the run scope
+        # Submitted OUTSIDE the scope — the consumer's own binding must carry the id.
+        pipeline.submit(_result("series-scope", _proc))
+        pipeline.drain()
+        assert seen_ids == ["runbeat00001"]
+        assert beats == [1]  # the keyed channel was hit from the consumer thread
+
+    def test_cli_shape_without_scope_binds_legacy_channel(self) -> None:
+        """A pipeline built with NO ambient scope (the CLI path) captures ``""`` —
+        the consumer binds the legacy channel and a legacy registrant still fires
+        (byte-identical no-op semantics there)."""
+        from brutex.observability.correlation import current_pull_id
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+        )
+
+        beats: list[int] = []
+        register_progress_beat(lambda: beats.append(1))  # legacy ""
+        seen_ids: list[str] = []
+
+        def _proc(_tail: FetchTail) -> None:
+            seen_ids.append(current_pull_id())
+            emit_progress_beat()
+
+        pipeline = FetchPipeline(workers=1)
+        pipeline.submit(_result("series-cli", _proc))
+        pipeline.drain()
+        assert seen_ids == [""]
+        assert beats == [1]

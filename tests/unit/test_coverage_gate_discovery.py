@@ -31,6 +31,21 @@ zero-touched PASS, the curated exclude-allowlist, deterministic ordering,
 Added-vs-Modified handling, renamed (R) path resolution, git-error
 fail-closed exit 2, and multi-file curated-suite discovery. No
 ``# pragma: no cover`` is needed — every branch is reached honestly.
+
+The corrupt-data hardening (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold +
+its widened-retry reconcile) is pinned too: per-section ``COVERAGE_FILE``
+isolation on EVERY subprocess of a section, ``coverage erase`` opening every
+attempt, ``--cov-report=`` suppressing the unused in-process pytest-cov
+report (itself a racing reader of the parallel-mode data file), and a re-run
+of the WHOLE pytest section ONCE on ANY not-measured probe (never a doomed
+re-read of the same corrupt file, the superseded report-only retry) — the
+``no such table`` / ``Couldn't use data file`` corrupt-at-generation
+signature only refines the retry WARN's diagnosis (observed live: parallel-
+mode data LOSS surfaces as a SIGNATURE-LESS not-measured on a genuinely-100%
+module, so the earlier signature-gated retry never fired for it). FAIL-
+CLOSED: a module whose tests genuinely never import it is not-measured on
+BOTH attempts deterministically — the widened retry can never turn the
+genuine 0%-masking case green.
 """
 
 from __future__ import annotations
@@ -537,61 +552,318 @@ class TestPlan:
         assert gate.Plan([], [], ["brutex/a.py"]).is_empty() is False
 
 
+class TestSectionEnv:
+    """``_section_env``: per-module COVERAGE_FILE isolation."""
+
+    def test_coverage_file_is_per_module_and_environ_preserved(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The section env is a COPY of os.environ (existing vars preserved)
+        # with COVERAGE_FILE pointing at the module's OWN data file under
+        # ROOT — never the repo-shared `.coverage`.
+        monkeypatch.setenv("GATE_SENTINEL_VAR", "kept")
+        env = gate._section_env("brutex/adapters/groww/deadline.py")
+        assert env["COVERAGE_FILE"] == str(
+            gate.ROOT / ".coverage.gate.brutex.adapters.groww.deadline"
+        )
+        assert env["COVERAGE_FILE"] != str(gate.ROOT / ".coverage")
+        assert env["GATE_SENTINEL_VAR"] == "kept"
+
+    def test_two_modules_get_distinct_data_files(self, gate: ModuleType) -> None:
+        a = gate._section_env("brutex/a.py")["COVERAGE_FILE"]
+        b = gate._section_env("brutex/b.py")["COVERAGE_FILE"]
+        assert a != b
+
+
+class TestEraseSectionData:
+    """``_erase_section_data``: the clean-slate `coverage erase` call."""
+
+    def test_runs_coverage_erase_under_the_section_env(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[tuple[list[str], dict[str, Any]]] = []
+
+        def fake_run(cmd: list[str], **kw: Any) -> SimpleNamespace:
+            seen.append((cmd, kw))
+            return _completed()
+
+        monkeypatch.setattr(gate.subprocess, "run", fake_run)
+        env = {"COVERAGE_FILE": str(gate.ROOT / ".coverage.gate.brutex.x")}
+        gate._erase_section_data(env)
+        ((cmd, kw),) = seen
+        assert cmd == [sys.executable, "-m", "coverage", "erase"]
+        assert kw["env"] is env  # the SECTION env — erases the isolated file
+        assert kw["cwd"] == gate.ROOT
+
+
+class TestIsCorruptData:
+    """``_is_corrupt_data``: the corrupt-at-generation signature match."""
+
+    def test_no_such_table_in_stderr_detected(self, gate: ModuleType) -> None:
+        # The captured production mode: pytest-cov combined a data file some
+        # abandoned traced thread was still writing — the SQLite store is
+        # missing its `tracer` table.
+        stderr = "Couldn't use data file '/r/.coverage.gate.brutex.x': no such table: tracer"
+        assert gate._is_corrupt_data("", stderr) is True
+
+    def test_signature_in_stdout_also_detected(self, gate: ModuleType) -> None:
+        # coverage's per-file `couldnt-parse` CoverageWarnings can surface the
+        # signature on stdout too — either stream must trip the detector.
+        assert gate._is_corrupt_data("… no such table: arc …", "") is True
+
+    def test_couldnt_use_data_file_alone_detected(self, gate: ModuleType) -> None:
+        # A different corruption mode (e.g. "file is not a database") still
+        # carries coverage's wrapper message — the SECOND signature matches
+        # after the first misses.
+        stderr = "Couldn't use data file '/r/.coverage.gate.brutex.x': file is not a database"
+        assert gate._is_corrupt_data("", stderr) is True
+
+    def test_clean_not_measured_output_is_not_corrupt(self, gate: ModuleType) -> None:
+        # A signature-less capture must NOT read as corruption — it selects
+        # the data-loss retry WARN diagnosis (the retry itself fires on ANY
+        # not-measured probe; only the message differs).
+        assert gate._is_corrupt_data("some other file only", "No data to report.") is False
+
+
 class TestRunCoverage:
-    """``_run_coverage``: every outcome with subprocess.run faked."""
+    """``_run_coverage``: every outcome with subprocess.run faked.
+
+    Call order per section attempt: ``coverage erase`` → pytest →
+    measured-probe ``coverage report``; then (module measured) the final
+    ``--fail-under=100`` report. ANY not-measured probe re-runs the WHOLE
+    section ONCE (erase + pytest + probe — never a re-read of the same
+    data file); the corrupt-data signature only refines the retry WARN's
+    diagnosis. A module not measured on BOTH attempts fails (fail-closed).
+    """
 
     def _patch_runs(
         self,
         gate: ModuleType,
         monkeypatch: pytest.MonkeyPatch,
         results: list[SimpleNamespace],
-    ) -> list[list[str]]:
-        """Make subprocess.run return *results* in order; record argvs."""
+    ) -> tuple[list[list[str]], list[dict[str, Any]]]:
+        """Make subprocess.run return *results* in order; record argvs + kwargs."""
         calls: list[list[str]] = []
+        kwargs_seen: list[dict[str, Any]] = []
         seq = iter(results)
 
-        def fake_run(cmd: list[str], **_k: Any) -> SimpleNamespace:
+        def fake_run(cmd: list[str], **kw: Any) -> SimpleNamespace:
             calls.append(cmd)
+            kwargs_seen.append(kw)
             return next(seq)
 
         monkeypatch.setattr(gate.subprocess, "run", fake_run)
-        return calls
+        return calls, kwargs_seen
 
     def test_module_passes(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls = self._patch_runs(
+        calls, _ = self._patch_runs(
             gate,
             monkeypatch,
             [
+                _completed(returncode=0),  # coverage erase (clean slate)
                 _completed(returncode=0),  # pytest
                 _completed(returncode=0, stdout="brutex/data/x.py 10 0 100%"),  # measured?
                 _completed(returncode=0),  # report --fail-under=100
             ],
         )
         assert gate._run_coverage("brutex/data/x.py", ["tests/unit/test_data_x.py"]) is True
-        # The pytest invocation uses the numpy-safe --cov=brutex form.
-        assert "--cov=brutex" in calls[0]
+        assert len(calls) == 4
+        # The section opens with `coverage erase`, then the numpy-safe
+        # --cov=brutex pytest form.
+        assert calls[0][1:] == ["-m", "coverage", "erase"]
+        assert "--cov=brutex" in calls[1]
+        # The unused in-process pytest-cov terminal report is SUPPRESSED —
+        # it was one more reader racing on the parallel-mode data file; the
+        # gate's own out-of-process probe is the only reader.
+        assert "--cov-report=" in calls[1]
 
-    def test_pytest_error_fails(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch_runs(gate, monkeypatch, [_completed(returncode=1)])
-        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
-
-    def test_not_measured_fails(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch_runs(
+    def test_every_subprocess_shares_the_isolated_coverage_file(
+        self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-section COVERAGE_FILE isolation: the erase, the pytest run AND
+        both coverage-report reads all run under the SAME per-module data file
+        — never the repo-shared ``.coverage`` other sections/the main suite own."""
+        _, kwargs_seen = self._patch_runs(
             gate,
             monkeypatch,
             [
-                _completed(returncode=0),
-                _completed(returncode=0, stdout="some other file only"),  # path absent
+                _completed(returncode=0),  # erase
+                _completed(returncode=0),  # pytest
+                _completed(returncode=0, stdout="brutex/data/x.py 10 0 100%"),  # probe
+                _completed(returncode=0),  # report --fail-under=100
+            ],
+        )
+        assert gate._run_coverage("brutex/data/x.py", ["tests/unit/test_data_x.py"]) is True
+        expected = str(gate.ROOT / ".coverage.gate.brutex.data.x")
+        assert [kw["env"]["COVERAGE_FILE"] for kw in kwargs_seen] == [expected] * 4
+
+    def test_pytest_error_fails(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls, _ = self._patch_runs(
+            gate,
+            monkeypatch,
+            [_completed(returncode=0), _completed(returncode=1)],  # erase, pytest fails
+        )
+        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
+        assert len(calls) == 2  # no report, no retry
+
+    def test_not_measured_without_signature_retries_section_once_and_recovers(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The WIDENED retry (the reconcile of the signature-gated fold):
+        observed live, ``parallel = true`` data LOSS surfaces as a clean
+        not-measured probe with NO corrupt-data signature on a genuinely-100%
+        module (the same section's in-process pytest-cov table printed
+        100.00%), so a signature-less miss is NOT proof of genuine 0%-masking
+        — the superseded fail-immediately policy went red on it spuriously.
+        The recovery is the SAME whole-section re-run (erase + pytest + a
+        fresh probe), the captured stderr still SURFACED (the swallowed-error
+        diagnosability fix), and the WARN names the data-loss diagnosis."""
+        calls, _ = self._patch_runs(
+            gate,
+            monkeypatch,
+            [
+                _completed(returncode=0),  # erase (attempt 1)
+                _completed(returncode=0),  # pytest (attempt 1)
+                _completed(
+                    returncode=0, stdout="some other file only", stderr="No data to report."
+                ),
+                _completed(returncode=0),  # erase (attempt 2 — clean slate again)
+                _completed(returncode=0),  # pytest (attempt 2 — the re-GENERATION)
+                _completed(returncode=0, stdout="brutex/x.py 10 0 100%"),  # fresh probe
+                _completed(returncode=0),  # report --fail-under=100
+            ],
+        )
+        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is True
+        assert len(calls) == 7
+        # The RETRY is the pytest SECTION, not a report re-read: erase runs
+        # again, then pytest again.
+        assert calls[3][1:] == ["-m", "coverage", "erase"]
+        assert "pytest" in calls[4]
+        out = capsys.readouterr().out
+        assert "coverage report stderr: No data to report." in out
+        assert (
+            "brutex/x.py not measured with NO corrupt-data signature "
+            "(spurious parallel-mode data loss is possible) — "
+            "re-running the pytest section once" in out
+        )
+        assert "corrupt coverage data" not in out  # the OTHER diagnosis is not claimed
+        assert "gate failed" not in out
+
+    def test_genuinely_unmeasured_module_fails_both_attempts(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """FAIL-CLOSED teeth of the widened retry: a module whose tests
+        genuinely never import it is signature-less not-measured on BOTH
+        attempts deterministically (a pytest re-run cannot make tests import
+        a module they don't), so the gate burns exactly ONE re-run then
+        fails LOUDLY — the widened retry can never turn the genuine
+        0%-masking case green (red spuriously possible, green wrongly
+        never)."""
+        calls, _ = self._patch_runs(
+            gate,
+            monkeypatch,
+            [
+                _completed(returncode=0),  # erase (attempt 1)
+                _completed(returncode=0),  # pytest (attempt 1)
+                _completed(
+                    returncode=0, stdout="some other file only", stderr="No data to report."
+                ),
+                _completed(returncode=0),  # erase (attempt 2)
+                _completed(returncode=0),  # pytest (attempt 2)
+                # Not measured AGAIN; blank stderr — the silent branch of
+                # _print_report_stderr.
+                _completed(returncode=0, stdout="some other file only", stderr=""),
             ],
         )
         assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
+        assert len(calls) == 6  # exactly ONE section re-run, never more
+        out = capsys.readouterr().out
+        assert out.count("re-running the pytest section once") == 1
+        assert "coverage report stderr: No data to report." in out
+        assert "was not measured by its tests — gate failed" in out
+
+    def test_corrupt_data_re_runs_the_pytest_section_once_and_recovers(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The captured production mode: the data file is corrupt at GENERATION
+        time ("no such table: tracer" — pytest-cov's combine raced an abandoned
+        traced thread), so the recovery re-runs the WHOLE pytest section (erase
+        + pytest + probe) on a fresh data file. The superseded report-only retry
+        re-read the same corrupt file and could never recover this mode."""
+        corrupt = "Couldn't use data file '/r/.coverage.gate.brutex.x': no such table: tracer"
+        calls, _ = self._patch_runs(
+            gate,
+            monkeypatch,
+            [
+                _completed(returncode=0),  # erase (attempt 1)
+                _completed(returncode=0),  # pytest (attempt 1)
+                _completed(returncode=1, stderr=corrupt),  # probe: corrupt data file
+                _completed(returncode=0),  # erase (attempt 2 — clean slate again)
+                _completed(returncode=0),  # pytest (attempt 2 — the re-GENERATION)
+                _completed(returncode=0, stdout="brutex/x.py 10 0 100%"),  # fresh probe
+                _completed(returncode=0),  # report --fail-under=100
+            ],
+        )
+        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is True
+        assert len(calls) == 7
+        # The RETRY is the pytest SECTION, not a report re-read: erase runs
+        # again, then pytest again.
+        assert calls[3][1:] == ["-m", "coverage", "erase"]
+        assert "pytest" in calls[4]
+        out = capsys.readouterr().out
+        assert "corrupt coverage data for brutex/x.py" in out
+        assert "re-running the pytest section once" in out
+        assert "gate failed" not in out
+
+    def test_corrupt_data_persisting_fails_after_one_section_re_run(
+        self,
+        gate: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The section is re-run exactly ONCE; a second corrupt probe fails the
+        gate (the LOUD direction — red on a persistent environment defect,
+        never an unbounded loop, never a wrong green)."""
+        corrupt_stdout = "brutex/other.py skipped: no such table: arc"
+        calls, _ = self._patch_runs(
+            gate,
+            monkeypatch,
+            [
+                _completed(returncode=0),  # erase (attempt 1)
+                _completed(returncode=0),  # pytest (attempt 1)
+                # Corrupt signature on STDOUT this time; stderr non-blank —
+                # exercised through _print_report_stderr's printing branch.
+                _completed(returncode=1, stdout=corrupt_stdout, stderr="boom"),
+                _completed(returncode=0),  # erase (attempt 2)
+                _completed(returncode=0),  # pytest (attempt 2)
+                # Corrupt AGAIN; blank stderr — the silent branch of
+                # _print_report_stderr.
+                _completed(returncode=1, stdout=corrupt_stdout, stderr=""),
+            ],
+        )
+        assert gate._run_coverage("brutex/x.py", ["tests/unit/test_x.py"]) is False
+        assert len(calls) == 6  # exactly ONE section re-run, never more
+        out = capsys.readouterr().out
+        assert out.count("re-running the pytest section once") == 1
+        assert "coverage report stderr: boom" in out
+        assert "was not measured by its tests — gate failed" in out
 
     def test_below_100_fails(self, gate: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_runs(
             gate,
             monkeypatch,
             [
-                _completed(returncode=0),
+                _completed(returncode=0),  # erase
+                _completed(returncode=0),  # pytest
                 _completed(returncode=0, stdout="brutex/x.py 10 2 80%"),
                 _completed(returncode=2),  # report --fail-under=100 -> non-zero
             ],

@@ -129,8 +129,9 @@ jobs:
     # baseline stays UNMEASURED until the first scheduled verification run; at
     # its siblings' measured ~2.3-3 s pace it would be ~14-19 min instead)
     # ~= 31-43 min; + 6 spin mutants x one wrap-kill each (wrap = 5 x the
-    # preflight-measured baseline, capped 30 s -> ~1-3.5 min across the
-    # admitted regime); + the ~2-10 s preflight baseline run.
+    # MIN of the two preflight-measured baselines, capped 30 s -> ~1-3.5 min
+    # across the admitted regime); + the TWO ~2-10 s preflight baseline runs
+    # (~4-20 s total; two samples + min per fixer round 4 R4-2).
     # Total ~= 94-106 min nominal at that band -> an HONEST 14-26 min margin
     # under 120 (>= ~35 min if rate_common paces like its siblings — and the
     # measured-baseline wrap sizing makes a sibling-pace baseline a
@@ -266,7 +267,7 @@ jobs:
           #    focused-runner subset argument as the rest of the loop).
           #
           # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
-          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1538) with a
+          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1541) with a
           # per-pair hard pytest timeout: the module carries bounded fail-open spin
           # loops (_GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP) whose loop-counter mutants spin
           # forever; mutmut's internal timeout kills only the `sh` wrapper and the
@@ -277,7 +278,7 @@ jobs:
           # round 2's FIXED 30 s wrap) — kills the pytest subtree INSIDE the sh, the
           # pipe closes, and mutmut reads the `|| exit 1` as a kill (an infinite-loop
           # mutant IS a caught defect). HONEST classifier arithmetic (fixer rounds,
-          # MIGRATION.md #1538 — the round-1 "scores KILLED, never TIMEOUT, locally
+          # MIGRATION.md #1541 — the round-1 "scores KILLED, never TIMEOUT, locally
           # verified" claim was FALSE as written, and round 2's own "measured 5-7 s
           # CI baseline" was NOT measured either — it was local 2.5-3.4 s x an
           # ASSUMED 2x shared-GHA factor, see the budget comment; a plausible
@@ -296,14 +297,38 @@ jobs:
           #     that classifier (verified on the local confirmation runs: the spin
           #     mutants KILLED, 0 suspicious).
           #   * The wrap must beat mutmut's NON-configurable hard timeout
-          #     (baseline x 10, BAD_TIMEOUT, exit bit 4): with wrap = 5 x baseline
-          #     (integer-truncated) the worst-case kill completion is
-          #     wrap + 5 <= 5 x b + 5 < 10 x b for every baseline b > 1 s — the
-          #     inequality holds BY CONSTRUCTION across the whole admitted regime,
-          #     fast runners included (round 2's fixed 30 s wrap held it only for
-          #     baselines > ~3.5 s). Local confirmations use the same sizing (a
-          #     ~1.5 s local baseline -> a 7 s wrap; the round-2 local run's 8 s
-          #     wrap was the same idea, hand-sized).
+          #     (BAD_TIMEOUT, exit bit 4). HONEST two-baseline caveat (fixer
+          #     round 4, R4-2 — round 3's "holds BY CONSTRUCTION" was an
+          #     overclaim): that hard timer is 10 x mutmut's OWN baseline
+          #     b_mut, re-timed on mutmut's later clean run (mutmut 2.5.1
+          #     __main__.py:396 `time_test_suite` -> __init__.py:865/:1096
+          #     `timeout=config.baseline_time_elapsed * 10`; the per-pass
+          #     cache `mv` guarantees the re-time), while the wrap is 5 x the
+          #     SHELL preflight's b_pre — TWO independently-measured samples
+          #     of the same suite, not one symbol b. With wrap = 5 x b_pre
+          #     (integer-truncated), the worst-case kill completion
+          #     wrap + 5 <= 5 x b_pre + 5 < 10 x b_mut holds whenever
+          #     b_mut > b_pre / 2 + 0.5 s — i.e. ASSUMING the two baselines
+          #     agree within ~2x, not unconditionally (round 2's fixed 30 s
+          #     wrap held it only for baselines > ~3.5 s, under the same
+          #     unstated assumption). The preflight therefore times TWO clean
+          #     runs and sizes the wrap from the MIN, removing the dominant
+          #     one-directional skew — cold first-run import/collection/
+          #     pyc-compile lands in preflight sample 1 only and never in
+          #     mutmut's warm re-time. Disclosed residual (LOUD false-RED,
+          #     bounded — the third disclosed residual besides the mid-pass
+          #     false-green + the regime edges below): if b_mut still lands
+          #     under ~b_pre/2 (a transient runner stall spanning BOTH
+          #     preflight samples), mutmut's Timer fires FIRST; it kills only
+          #     the direct `sh` (__init__.py:1036 `process_.kill()`), the
+          #     ORPHANED `timeout` keeps running and SIGKILLs the pytest
+          #     subtree at wrap + 5, the pty closes, and the spin mutant
+          #     records BAD_TIMEOUT (exit bit 4) — a red flake on a clean
+          #     tree that a rerun clears, NOT a recurrence of the 120-min
+          #     orphaned-pipe wedge (that needs an UNBOUNDED orphan; the wrap
+          #     bounds it) and NOT a false green. Local confirmations use the
+          #     same sizing (a ~1.5 s local baseline -> a 7 s wrap; the
+          #     round-2 local run's 8 s wrap was the same idea, hand-sized).
           #   * The 5x sizing also clears the worst-case LEGITIMATE pass: a ~3x
           #     shared-runner degradation of the suite stays under the 5x wrap
           #     for every baseline up to the 30 s cap (baseline > 6 s), beyond
@@ -365,28 +390,37 @@ jobs:
               # own sibling-pace scenario: a plausible ~2-3 s CI baseline sat
               # inside the refusal band, so the FIRST scheduled verification run
               # risked a designed preflight red). The wrap is sized from the
-              # baseline this preflight itself measures — wrap = 5 x baseline
-              # (integer-truncated seconds), capped at the pair's $tmo (30 s) —
-              # so the classifier arithmetic above holds by construction for
-              # every admitted baseline; the pair's 3rd field is now the CAP,
-              # not the wrap. Refusal band (1200, 20000) ms: at or below 1.2 s
+              # MIN of TWO baselines this preflight itself measures — wrap =
+              # 5 x min(sample1, sample2) (integer-truncated seconds), capped
+              # at the pair's $tmo (30 s); two samples + min per the fixer
+              # round 4 R4-2 two-baseline caveat above (sample 1 alone carries
+              # the cold first-run collection/pyc-compile skew that mutmut's
+              # warm re-timed baseline never pays) — so the classifier
+              # arithmetic above holds for every admitted baseline GIVEN the
+              # disclosed ~2x preflight/mutmut agreement assumption; the
+              # pair's 3rd field is now the CAP, not the wrap. Refusal band
+              # (1200, 20000) ms on the MIN: at or below 1.2 s
               # mutmut's 10x-baseline hard timer leaves < 1 s of slack over the
               # wrap + the `-k 5` grace (spin kills would flake BAD_TIMEOUT);
               # above 20 s the capped wrap sits < 1.5x a legit pass (widening
               # the mid-pass false-green window and risking a wrap-killed
-              # unmutated baseline). Time one clean run and REFUSE loudly
+              # unmutated baseline). Time two clean runs and REFUSE loudly
               # outside the regime instead of failing silently in either
               # direction.
               start_ms=$(date +%s%3N)
               pytest "$tf" -x -q --no-header
-              base_ms=$(( $(date +%s%3N) - start_ms ))
+              base1_ms=$(( $(date +%s%3N) - start_ms ))
+              start_ms=$(date +%s%3N)
+              pytest "$tf" -x -q --no-header
+              base2_ms=$(( $(date +%s%3N) - start_ms ))
+              base_ms=$(( base1_ms < base2_ms ? base1_ms : base2_ms ))
               wrap_s=$(( base_ms * 5 / 1000 ))
               if [ "$wrap_s" -gt "$tmo" ]; then
                 wrap_s="$tmo"
               fi
-              echo "preflight baseline for $name: ${base_ms} ms -> wrap ${wrap_s} s (5 x baseline, cap ${tmo} s)"
+              echo "preflight baselines for $name: ${base1_ms} ms / ${base2_ms} ms -> min ${base_ms} ms -> wrap ${wrap_s} s (5 x min baseline, cap ${tmo} s)"
               if [ "$base_ms" -lt 1200 ] || [ "$base_ms" -gt 20000 ]; then
-                echo "❌ $name preflight baseline ${base_ms} ms is outside the (1200, 20000) ms regime the measured-baseline wrap sizing (5 x baseline capped at ${tmo} s, -k 5 grace) + --test-time-base 45 classifier arithmetic covers — re-derive the sizing for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
+                echo "❌ $name preflight min baseline ${base_ms} ms (samples ${base1_ms}/${base2_ms} ms) is outside the (1200, 20000) ms regime the measured-baseline wrap sizing (5 x min baseline capped at ${tmo} s, -k 5 grace) + --test-time-base 45 classifier arithmetic covers — re-derive the sizing for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
                 exit 1
               fi
               # --test-time-base 45: keep a wrap-killed spin mutant BELOW the
@@ -512,7 +546,7 @@ jobs:
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
-  # there + in MIGRATION.md #1538 (Golden Rule #10 — out openly, not
+  # there + in MIGRATION.md #1541 (Golden Rule #10 — out openly, not
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
@@ -568,12 +602,12 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/5)
         run: |
-          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1538):
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1541):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 556 mutants measured
           #   2026-07-07 (`cargo mutants --list | wc -l`, post-reshape final tree).
-          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1538.
+          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1541.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
@@ -653,13 +687,19 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
         run: |
-          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1538):
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1541):
           # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
           #   evaluator.rs + spec.rs + python.rs = 619 mutants measured 2026-07-07
           #   (`cargo mutants --list | wc -l`); features python,serde (python.rs is
-          #   feature-gated at lib.rs:66; spec.rs mask_hex is serde-gated — without
-          #   them those 381 mutants build a byte-identical crate and trivially
-          #   "survive": 3 mask_hex MISSED measured under default features).
+          #   feature-gated at lib.rs:66 — all 368 of its mutants — and spec.rs's
+          #   mask_hex module is serde-gated — 3 of its 13; without the features
+          #   those 368 + 3 = 371 mutants build a byte-identical crate and
+          #   trivially "survive": 3 mask_hex MISSED measured under default
+          #   features, the other 10 spec.rs mutants compile there and were
+          #   killed/unviable — 8 caught + 2 unviable measured. Fixer round 4,
+          #   R4-1: the earlier "381" wrongly summed ALL 13 spec.rs mutants
+          #   into the feature-dead count; per-file counts re-verified on HEAD
+          #   via `cargo mutants --list`).
           #   spec.rs + python.rs are the Golden-Rule-#4 run-identity stamping
           #   surfaces, previously UNGATED.
           # - --in-place: the golden test reads ../../tests/golden/fixtures/... and
@@ -792,7 +832,7 @@ jobs:
               }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issue.number,
-                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1538 / STANDARDS row 3.`,
+                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1541 / STANDARDS row 3.`,
               });
               await github.rest.issues.update({
                 owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',
