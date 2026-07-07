@@ -475,7 +475,10 @@ class TestRustMetricsTail:
     def test_empty_bars_raises_identically_on_both_arms(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         with pytest.raises(ValueError, match="build_equity_curve: bars must be non-empty"):
             metrics_from_trades([], [], start_equity_paisa=1_000, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
@@ -488,11 +491,10 @@ class TestRustMetricsTail:
         """The EquityCurve invariant error text is IDENTICAL on both arms."""
         bars = _session_bars()
         errors: list[str] = []
-        for env in (None, "1"):
-            if env is None:
-                monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
-            else:
-                monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+        # Explicit "0" (not delenv) — under the ADR-0017 default-ON constant an
+        # unset env resolves ON, so only the kill switch spans both arms.
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
                 metrics_from_trades(bars, [], start_equity_paisa=0, tf_minutes=1)
             errors.append(str(exc_info.value))
@@ -515,11 +517,10 @@ class TestRustMetricsTail:
             direction=Side.BUY,
         )
         errors: list[str] = []
-        for env in (None, "1"):
-            if env is None:
-                monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
-            else:
-                monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+        # Explicit "0" (not delenv) — under the ADR-0017 default-ON constant an
+        # unset env resolves ON, so only the kill switch spans both arms.
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
                 metrics_from_trades(bars, [stray], start_equity_paisa=1_000, tf_minutes=1)
             errors.append(str(exc_info.value))
@@ -533,11 +534,10 @@ class TestRustMetricsTail:
         EquityCurve span error on both arms (the ON arm falls through)."""
         bars = _session_bars()[:1]
         errors: list[str] = []
-        for env in (None, "1"):
-            if env is None:
-                monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
-            else:
-                monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
+        # Explicit "0" (not delenv) — under the ADR-0017 default-ON constant an
+        # unset env resolves ON, so only the kill switch spans both arms.
+        for env in ("0", "1"):
+            monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, env)
             with pytest.raises(ValueError) as exc_info:
                 metrics_from_trades(bars, [], start_equity_paisa=1_000, tf_minutes=0)
             errors.append(str(exc_info.value))
@@ -585,7 +585,10 @@ class TestRustMetricsTail:
     ) -> None:
         """Any kernel-side fallback (None) serves the mask from Python."""
         bars = _session_bars()
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
             bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
         )
@@ -630,7 +633,10 @@ class TestRustMetricsTail:
         """A domain-INVALID kernel result is refused LOUDLY, never adopted:
         the mask is served by the Python oracle bit-identically."""
         bars = _session_bars()
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(
             bars, _hand_trades(bars), start_equity_paisa=1_000_000, tf_minutes=1
         )
@@ -655,7 +661,10 @@ class TestRustMetricsTail:
         (the sweep re-attribution oracle + evaluate_combo core) is
         bit-identical across arms."""
         bars = _session_bars()
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         on = evaluate_combo(bars, 0, direction=Side.BUY, tf_minutes=1)
@@ -697,7 +706,10 @@ class TestExitIndexFastPath:
     def test_fast_path_equals_off_arm_bitwise(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bars = _session_bars()
         trades = _hand_trades(bars)
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         fast = metrics_from_trades(
@@ -786,7 +798,10 @@ class TestExitIndexFastPath:
         """OFF never reads the hint — even a poisoned stream is inert."""
         bars = _session_bars()
         trades = _hand_trades(bars)
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off_plain = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
         off_poison = metrics_from_trades(
             bars,
@@ -848,7 +863,10 @@ class TestKernelSelfCheck:
         the Python tail with a warn-once kernel_disabled fallback."""
         bars = _session_bars()
         trades = _hand_trades(bars)
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        # Explicit "0" — the operator kill switch — so this arm stays the
+        # Python tail under the ADR-0017 default-ON constant (delenv would
+        # resolve ON and silently compare kernel-vs-kernel).
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(bars, trades, start_equity_paisa=1_000_000, tf_minutes=1)
         monkeypatch.setattr(
             fno_math,
