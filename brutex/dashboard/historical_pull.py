@@ -117,6 +117,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.greeks_enrich_pass import GREEKS_NOT_RUN as _GREEKS_NOT_RUN
 from brutex.data.greeks_enrich_pass import GreeksEnrichOutcome as _GreeksEnrichOutcome
 from brutex.data.greeks_enrich_pass import run_greeks_enrich_pass
@@ -136,12 +137,14 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.data.write_consumer import WriteConsumer
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
+from brutex.orchestrator.audit import open_ingest_audit
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.data.greeks_enrich import GreeksEnrichTarget
+    from brutex.orchestrator.audit import AuditWriter
 
 #: The ONLY granularity fetched from Groww for an F&O contract
 #: (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the heavy ``1minute`` fill. ``1day`` is DERIVED
@@ -166,6 +169,13 @@ _ONE_DAY: Final[timedelta] = timedelta(days=1)
 #: SAME discipline the bulk pull uses (DEC-GROWW-FUTURE-INGEST-001) so the two never
 #: collide on the same expiry.
 _FUTURE_SIDE: Final[str] = "FUT"
+
+#: WARN — the completion-stamp batch (``mark_candle_statuses``) blew the store-write
+#: wall-clock deadline (DEC-STORE-WRITE-DEADLINE-001): the stamps are DEFERRED — the
+#: unmarked contracts keep ``candle_status="none"`` and are re-marked idempotently by
+#: the next pull (the window ledger, not this stamp, drives window re-pull — no candle
+#: data is ever lost). Fields: ``contracts`` / ``error_type`` / ``defer_seconds``.
+HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT: Final[str] = "historical.mark_complete.write_deferred"
 
 #: Deterministic pull ORDER over the per-market buckets: the FUTURES market is processed
 #: BEFORE the OPTIONS market (futures-first), with any unknown market sorted LAST. Without
@@ -881,15 +891,34 @@ def _mark_complete(
     (an EMPTY window is a settled, clean window), so the selected contracts ARE marked
     complete — the registry status reflects coverage of the SELECTED range, which the
     dry-run honestly settled as empty.
+
+    The whole stamp loop runs as ONE deadline-guarded registry write batch
+    (:meth:`~brutex.data.registry_store.RegistryStore.mark_candle_statuses` — O(1)
+    guard cost, DEC-STORE-WRITE-DEADLINE-001). A store-write-deadline breach DEFERS
+    the stamps (one loud WARN, return ``0`` — the durably-marked count is honestly
+    unknown): the unmarked contracts keep ``candle_status="none"`` and are re-marked
+    idempotently by the next pull; the window LEDGER, not this stamp, drives window
+    re-pull, so no candle data is ever lost. Never a raise past this seam — a wedged
+    registry volume must not fail the pull whose candles already landed durably.
     """
-    marked = 0
-    for row, _contract in rebuilt:
-        if row.contract_symbol in completed_symbols:
-            registry.set_candle_status(
-                row.exch, row.underlying, row.contract_symbol, CANDLE_STATUS_COMPLETE
-            )
-            marked += 1
-    return marked
+    rows = [
+        (row.exch, row.underlying, row.contract_symbol)
+        for row, _contract in rebuilt
+        if row.contract_symbol in completed_symbols
+    ]
+    if not rows:
+        return 0
+    try:
+        registry.mark_candle_statuses(rows, CANDLE_STATUS_COMPLETE)
+    except StoreWriteDeadlineExceeded as exc:
+        _LOG.warning(
+            HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT,
+            contracts=len(rows),
+            error_type=type(exc).__name__,
+            defer_seconds=exc.deadline_seconds,
+        )
+        return 0
+    return len(rows)
 
 
 #: The per-window ledger identity — ``(market, security_id, interval, window_start,
@@ -1017,6 +1046,7 @@ def _run_phase(
     run_parallel: RunParallel | None,
     write_pool: WriteConsumer | None,
     fetch_pipeline: FetchPipeline | None,
+    audit: AuditWriter | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
 ) -> _PhaseResult:
@@ -1210,6 +1240,7 @@ def _run_phase(
                     observed_holidays=observed_holidays,
                     breaker_health_probe=breaker_canary,
                     storm_breaker=storm_breaker,
+                    audit=audit,
                 )
             except GrowwAuthError as exc:
                 # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1892,43 +1923,52 @@ def pull_contract_candles(
     empty_retry_by_symbol = dict(empty_retry_budget.by_symbol) or None
 
     # ── The SINGLE vendor phase — 1-minute ONLY (1-day is derived, not fetched) ─────────
-    try:
-        minute = _run_phase(
-            interval=_MINUTE_INTERVAL,
-            by_market=by_market,
-            selected_symbols=selected_symbols,
-            client=client,
-            sink=sink,
-            lake_root=lake_root,
-            dry_run=dry_run,
-            start=start,
-            end=end,
-            pace=pace,
-            on_rate_limit=on_rate_limit,
-            on_timeout=on_timeout,
-            on_success=on_success,
-            on_progress=on_progress,
-            session_rate=session_rate,
-            until_clean=until_clean,
-            until_clean_rounds=until_clean_rounds,
-            contract_windows=minute_windows,
-            empty_retry_by_symbol=empty_retry_by_symbol,
-            run_parallel=run_parallel,
-            write_pool=write_pool,
-            fetch_pipeline=fetch_pipeline,
-            on_bars=on_bars,
-            on_ledger_sync=on_ledger_sync,
-        )
-    finally:
-        # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute lake
-        # (every settled window must be durable first) and BEFORE returning (so the caller's
-        # ledger persist sees a fully-flushed lake). Drain the fetch_pipeline FIRST (it owns the
-        # tail incl. ``sink.append`` → ``ledger.record``), then the write_pool — mirroring the
-        # #951 MAJOR-4 drain-order fix (the producer must flush before the writer). Only ONE is
-        # ever non-``None`` (they are mutually exclusive above), so this is a single real drain;
-        # both helpers are best-effort + a no-op on ``None``.
-        _drain_fetch_pipeline(fetch_pipeline)
-        _drain_write_consumer(write_pool)
+    # Golden Rule #8 (DEC-INGEST-AUDIT-WIRING-001): the F&O twin of the spot pull's
+    # hash-chained ingest audit — the ONE COMMON factory opens
+    # ``<lake>/audit/fno-ingest.jsonl`` (resume = continue the existing chain) for a
+    # REAL pull and a null context for a dry-run (no real data → no audit), and the
+    # spine appends RUN_START → per-pair → RUN_COMPLETE on its controller drain
+    # thread. Held open across the whole phase (every until-clean round + market
+    # bucket rides one chain), closed after the drains below.
+    with open_ingest_audit(lake_root, name="fno-ingest", enabled=not dry_run) as ingest_audit:
+        try:
+            minute = _run_phase(
+                interval=_MINUTE_INTERVAL,
+                by_market=by_market,
+                selected_symbols=selected_symbols,
+                client=client,
+                sink=sink,
+                lake_root=lake_root,
+                dry_run=dry_run,
+                start=start,
+                end=end,
+                pace=pace,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
+                on_progress=on_progress,
+                session_rate=session_rate,
+                until_clean=until_clean,
+                until_clean_rounds=until_clean_rounds,
+                contract_windows=minute_windows,
+                empty_retry_by_symbol=empty_retry_by_symbol,
+                run_parallel=run_parallel,
+                write_pool=write_pool,
+                fetch_pipeline=fetch_pipeline,
+                audit=ingest_audit,
+                on_bars=on_bars,
+                on_ledger_sync=on_ledger_sync,
+            )
+        finally:
+            # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute
+            # lake (every settled window must be durable first) and BEFORE returning (so the
+            # caller's ledger persist sees a fully-flushed lake). Drain the fetch_pipeline FIRST
+            # (it owns the tail incl. ``sink.append`` → ``ledger.record``), then the write_pool —
+            # mirroring the #951 MAJOR-4 drain-order fix (the producer must flush before the
+            # writer). Only ONE is ever non-``None`` (they are mutually exclusive above), so this
+            # is a single real drain; both helpers are best-effort + a no-op on ``None``.
+            _drain_fetch_pipeline(fetch_pipeline)
+            _drain_write_consumer(write_pool)
 
     # Fold the async pipeline's post-drain per-series totals back into the phase result
     # (DEC-FNO-ASYNC-PIPELINE-WIRE-001 completion-count fix): in async mode the producer returned

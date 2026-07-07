@@ -2849,3 +2849,73 @@ class TestSeedRefusalFetchComposition:
         # bars stopping ~8 sessions before the window end → demotes re-pullable.
         assert rec.status == "FAILED"
         assert rec.last_error == "SUSPECTED_PARTIAL"
+
+
+class _SelfReportingClientStub:
+    """A client stub advertising the SELF-REPORTS surfaces (the live-client shape)."""
+
+    self_paces = False  # keep the window pace path unchanged for these pins
+    self_reports_rate_limits = True
+    self_reports_successes = True
+
+
+class _SelfHookedAdapter(_Adapter):
+    """Fake adapter whose ``.client`` self-reports — the rebound live shape."""
+
+    def __init__(
+        self, *, bars: Sequence[CandleBar] | None = None, error: Exception | None = None
+    ) -> None:
+        super().__init__(bars=bars, error=error)
+        self.client = _SelfReportingClientStub()
+
+
+class TestIngestSpotFeedbackStandDown:
+    """DEC-SUSPICION-SWEEP-FIXES-001 (D1 companion): when the adapter's client
+    SELF-REPORTS (``run_groww_spot_ingest`` binds the controller's
+    on_rate_limit/on_success into the live client, which fires them per 429
+    OCCURRENCE / per clean call), the spine's per-window hooks stand DOWN — the
+    propagated final occurrence is never double-counted and the per-window
+    recovery is never double-credited. ``on_timeout`` stays spine-owned (the
+    client never fires the timeout ladder)."""
+
+    def test_spine_on_rate_limit_stands_down_for_self_reporting_client(self) -> None:
+        hits: list[int] = []
+        report = ingest_spot(
+            _SelfHookedAdapter(error=GrowwRateLimitError("rl")),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            on_rate_limit=lambda: hits.append(1),
+            max_retry_passes=0,
+        )
+        assert report.transient_failures == 1  # the window still counted/deferred
+        assert hits == []  # the client already reported every occurrence
+
+    def test_spine_on_success_stands_down_for_self_reporting_client(self) -> None:
+        ok: list[int] = []
+        ingest_spot(
+            _SelfHookedAdapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            on_success=lambda: ok.append(1),
+        )
+        assert ok == []  # the client already recovered per clean call
+
+    def test_spine_on_timeout_never_stands_down(self) -> None:
+        timeouts: list[int] = []
+        ingest_spot(
+            _SelfHookedAdapter(error=GrowwTimeoutError("to")),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            on_timeout=lambda: timeouts.append(1),
+            max_retry_passes=0,
+        )
+        assert timeouts == [1]  # the spine remains the timeout ladder's only feeder

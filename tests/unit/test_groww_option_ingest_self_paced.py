@@ -42,3 +42,73 @@ class TestFnoSelfPacedSingleAdmission:
         assert report.bars_appended == 1
         assert sdk.calls == 1
         assert admissions.count == sdk.calls  # exactly ONE admission per fetch (was 2)
+
+
+class GrowwAPIRateLimitException(Exception):
+    """SDK-named fake — maps by class name to the retryable ``GrowwRateLimitError``."""
+
+
+class TestFnoSelfReportedFeedbackStandDown:
+    """DEC-SUSPICION-SWEEP-FIXES-001 (D2): the spine's feedback hooks stand DOWN
+    when the client self-hooks — the client already fires ``on_rate_limit`` on
+    EVERY 429 occurrence (the final, budget-exhausting one included) and
+    ``on_success`` per clean call, so the spine firing again on the propagated
+    error double-counted the final occurrence (7 ladder hits per exhausted
+    window instead of 6 → two+ step-downs from one window)."""
+
+    def test_exhausted_429_counts_once_per_occurrence(self) -> None:
+        hits: list[int] = []
+        sdk = _FakeSDK(
+            script=[GrowwAPIRateLimitException("429"), GrowwAPIRateLimitException("429")]
+        )
+        # Production wiring twin (historical_pull): the SAME controller hook is
+        # baked into the client AND threaded to the spine.
+        client = GrowwClient(
+            sdk=sdk,
+            sleep=lambda _s: None,
+            max_attempts=2,
+            on_rate_limit=lambda: hits.append(1),
+        )
+        ingest_option_contract(
+            client,
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            on_rate_limit=lambda: hits.append(1),
+            max_attempts=0,
+        )
+        assert sdk.calls == 2
+        assert len(hits) == 2  # pre-fix: 3 (client's 2 occurrences + the spine's +1)
+
+    def test_clean_window_success_credited_once(self) -> None:
+        ok: list[int] = []
+        client = GrowwClient(sdk=_FakeSDK(), sleep=lambda _s: None, on_success=lambda: ok.append(1))
+        report = ingest_option_contract(
+            client,
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            on_success=lambda: ok.append(1),
+        )
+        assert report.bars_appended == 1
+        assert len(ok) == 1  # the client's per-call credit only — no spine double credit
+
+    def test_unhooked_client_keeps_spine_fallback_feedback(self) -> None:
+        hits: list[int] = []
+        sdk = _FakeSDK(script=[GrowwAPIRateLimitException("429")])
+        client = GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+        ingest_option_contract(
+            client,
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            on_rate_limit=lambda: hits.append(1),
+            max_attempts=0,
+        )
+        assert len(hits) == 1  # the fallback (dry-run / fake) path still reports

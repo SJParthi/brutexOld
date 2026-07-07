@@ -39,9 +39,12 @@ from brutex.options.lot_size_history import OptionsUnderlying
 from brutex.options.strike_rules import RULES_BY_NAME, TradeDirection
 
 _IST = ZoneInfo("Asia/Kolkata")
-_ENTRY = datetime(2024, 5, 2, 9, 16, tzinfo=_IST)
-_EXIT = datetime(2024, 5, 2, 15, 20, tzinfo=_IST)
-_EXPIRY = date(2024, 5, 2)
+# Canonical priced-path date: post-2024-10-01 (the verified ETC window —
+# DEC-ETC-REGIME-HISTORY-001 made pre-boundary dates reject) and clear of
+# the 2024-11-20 NIFTY lot transition.
+_ENTRY = datetime(2024, 10, 3, 9, 16, tzinfo=_IST)
+_EXIT = datetime(2024, 10, 3, 15, 20, tzinfo=_IST)
+_EXPIRY = date(2024, 10, 3)
 
 
 # ── builders ────────────────────────────────────────────────────────────────
@@ -134,7 +137,7 @@ def test_spot_signal_naive_entry_rejected() -> None:
         SpotSignal(
             instrument=OptionsUnderlying.NIFTY,
             direction=TradeDirection.BULL,
-            entry_ts=datetime(2024, 5, 2, 9, 16),
+            entry_ts=datetime(2024, 10, 3, 9, 16),
             exit_ts=_EXIT,
             spot_at_entry=Decimal("25012"),
             expiry_date=_EXPIRY,
@@ -147,7 +150,7 @@ def test_spot_signal_naive_exit_rejected() -> None:
             instrument=OptionsUnderlying.NIFTY,
             direction=TradeDirection.BULL,
             entry_ts=_ENTRY,
-            exit_ts=datetime(2024, 5, 2, 15, 20),
+            exit_ts=datetime(2024, 10, 3, 15, 20),
             spot_at_entry=Decimal("25012"),
             expiry_date=_EXPIRY,
         )
@@ -185,7 +188,7 @@ def test_spot_signal_expiry_before_entry_rejected() -> None:
             entry_ts=_ENTRY,
             exit_ts=_EXIT,
             spot_at_entry=Decimal("25012"),
-            expiry_date=date(2024, 5, 1),
+            expiry_date=date(2024, 10, 2),
         )
 
 
@@ -497,8 +500,8 @@ class _Trade:
 
 def test_signals_from_spot_trades_converts_and_resolves() -> None:
     # Entry/exit supplied in UTC → must be converted to IST.
-    entry_utc = datetime(2024, 5, 2, 3, 46, tzinfo=UTC)  # 09:16 IST
-    exit_utc = datetime(2024, 5, 2, 9, 50, tzinfo=UTC)  # 15:20 IST
+    entry_utc = datetime(2024, 10, 3, 3, 46, tzinfo=UTC)  # 09:16 IST
+    exit_utc = datetime(2024, 10, 3, 9, 50, tzinfo=UTC)  # 15:20 IST
     trades = [_Trade(entry_ts=entry_utc, exit_ts=exit_utc)]
     sigs = signals_from_spot_trades(
         trades,
@@ -513,7 +516,7 @@ def test_signals_from_spot_trades_converts_and_resolves() -> None:
     assert sig.entry_ts.hour == 9
     assert sig.entry_ts.minute == 16
     assert sig.spot_at_entry == Decimal("25012")
-    assert sig.expiry_date == next_weekly_expiry(OptionsUnderlying.NIFTY, date(2024, 5, 2))
+    assert sig.expiry_date == next_weekly_expiry(OptionsUnderlying.NIFTY, date(2024, 10, 3))
 
 
 def test_signals_from_spot_trades_empty() -> None:

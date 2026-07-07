@@ -1242,3 +1242,72 @@ def test_reauth_raise_path_still_logged_exactly_once_per_attempt() -> None:
     failed = _failed_calls(logs)
     assert len(failed) == 1  # the attempt logged ONCE; the reauth raise adds no second line
     assert failed[0]["error_type"] == "GrowwAuthError"
+
+
+class TestSelfReportsPredicatesAndRateHooksRebind:
+    """DEC-SUSPICION-SWEEP-FIXES-001 — the 429/success feedback twins of ``self_paces``.
+
+    ``GrowwClient._call`` fires ``on_rate_limit`` on EVERY 429 occurrence (the
+    final, budget-exhausting one included) and ``on_success`` on every clean
+    call; the ingest spines consult these predicates to stand their own hooks
+    down so the final propagated occurrence is never double-counted (D2) — and
+    ``with_rate_hooks`` is the spot spine's seam for binding the FULL controller
+    hook triple after the adapter is built (D1).
+    """
+
+    def test_self_reports_rate_limits_iff_bound(self) -> None:
+        from brutex.adapters.groww.client import client_self_reports_rate_limits
+
+        unbound = GrowwClient(sdk=_FakeSDK())
+        bound = GrowwClient(sdk=_FakeSDK(), on_rate_limit=lambda: None)
+        assert unbound.self_reports_rate_limits is False
+        assert bound.self_reports_rate_limits is True
+        assert client_self_reports_rate_limits(bound) is True
+        assert client_self_reports_rate_limits(unbound) is False
+        assert client_self_reports_rate_limits(None) is False  # getattr-safe
+        assert client_self_reports_rate_limits(object()) is False
+
+    def test_self_reports_successes_iff_bound(self) -> None:
+        from brutex.adapters.groww.client import client_self_reports_successes
+
+        unbound = GrowwClient(sdk=_FakeSDK())
+        bound = GrowwClient(sdk=_FakeSDK(), on_success=lambda: None)
+        assert unbound.self_reports_successes is False
+        assert bound.self_reports_successes is True
+        assert client_self_reports_successes(bound) is True
+        assert client_self_reports_successes(unbound) is False
+        assert client_self_reports_successes(None) is False  # getattr-safe
+
+    def test_with_rate_hooks_binds_all_three(self) -> None:
+        def _pace() -> None:
+            """Sentinel pace hook — identity-compared after the rebind."""
+
+        def _rl() -> None:
+            """Sentinel on_rate_limit hook — identity-compared after the rebind."""
+
+        def _ok() -> None:
+            """Sentinel on_success hook — identity-compared after the rebind."""
+
+        client = GrowwClient(sdk=_FakeSDK())
+        rebound = client.with_rate_hooks(pace=_pace, on_rate_limit=_rl, on_success=_ok)
+        assert rebound.pace is _pace
+        assert rebound.on_rate_limit is _rl
+        assert rebound.on_success is _ok
+        assert rebound.self_paces and rebound.self_reports_rate_limits
+        assert rebound.self_reports_successes
+        # The original frozen client is untouched (immutable rebind).
+        assert client.self_paces is False
+
+    def test_with_rate_hooks_none_keeps_current_bindings(self) -> None:
+        """A ``None`` hook keeps the CURRENT binding — it can never downgrade a
+        bound hook back to the no-op (the pace-only-caller back-compat)."""
+
+        def _rl() -> None:
+            """Sentinel on_rate_limit hook — identity-compared after the rebind."""
+
+        client = GrowwClient(sdk=_FakeSDK(), on_rate_limit=_rl)
+        rebound = client.with_rate_hooks()
+        assert rebound.on_rate_limit is _rl
+        assert rebound.self_paces is False  # pace stayed the no-op
+        assert rebound.self_reports_successes is False  # on_success stayed the no-op
+        assert rebound.meter is client.meter  # shared meter carried through

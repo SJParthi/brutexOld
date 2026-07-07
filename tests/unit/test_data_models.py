@@ -359,3 +359,90 @@ class TestCatalogEntryValidation:
     def test_rejects_naive_fetched_at(self) -> None:
         with pytest.raises(ValueError, match="fetched_at"):
             _valid_entry(fetched_at=datetime(2024, 1, 1, 9, 59))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Price positivity is a READ-BOUNDARY concern, NOT a constructor one
+# (DEC-STORED-DATA-VALIDATION-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestConstructorPermitsNonPositivePriceForDownstreamClassifiers:
+    """The bar CONSTRUCTOR deliberately accepts a non-positive price.
+
+    DEC-STORED-DATA-VALIDATION-001 puts the corrupt-stored-bar positivity gate
+    at the ENGINE READ BOUNDARY (``arrow_table_to_bars`` / the prebuild
+    ``price_sanity`` seam), NOT the universal constructor — because legitimate
+    consumers build a non-positive-price bar ON PURPOSE to feed their own
+    corrupt-input classifier (the Greeks ``BAD_INPUT`` / ``BELOW_INTRINSIC``
+    path, the executor ``require_tradeable_price`` guard, the Rust trade-sim
+    out-of-envelope fallback, the columnar-writer round-trip). Rejecting at
+    construction would turn every one of those into dead code. These pins lock
+    the container's permissiveness so a future well-meaning "just add
+    positivity to the constructor" change fails LOUDLY here.
+    """
+
+    def test_ordered_all_negative_bar_constructs(self) -> None:
+        # THE audit repro (open=-5, high=-1, low=-10, close=-2) is a VALID
+        # container — it is the READER (arrow_table_to_bars) that rejects it.
+        bar = CandleBar(
+            timestamp=_ts(),
+            open=Decimal("-5"),
+            high=Decimal("-1"),
+            low=Decimal("-10"),
+            close=Decimal("-2"),
+            volume=5,
+            open_interest=None,
+        )
+        assert bar.low == Decimal("-10")
+
+    def test_zero_price_bar_constructs(self) -> None:
+        # A zero-price bar is the Greeks BAD_INPUT / executor-reject fixture.
+        bar = CandleBar(
+            timestamp=_ts(),
+            open=Decimal("0"),
+            high=Decimal("0"),
+            low=Decimal("0"),
+            close=Decimal("0"),
+            volume=0,
+            open_interest=None,
+        )
+        assert bar.open == Decimal("0")
+
+    def test_option_bar_permits_non_positive_ohlc(self) -> None:
+        bar = _option(
+            open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2")
+        )
+        assert bar.close == Decimal("-2")
+
+    def test_greeks_bar_permits_non_positive_ohlc(self) -> None:
+        bar = _greeks_bar(
+            open=Decimal("-5"), high=Decimal("-1"), low=Decimal("-10"), close=Decimal("-2")
+        )
+        assert bar.open == Decimal("-5")
+
+    def test_ordering_is_still_enforced(self) -> None:
+        # The constructor STILL rejects broken ordering (positive prices).
+        with pytest.raises(ValueError, match="high.*must be >= low|must be in"):
+            CandleBar(
+                timestamp=_ts(),
+                open=Decimal("100"),
+                high=Decimal("50"),  # high < low
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=0,
+                open_interest=None,
+            )
+
+    def test_smallest_tick_price_is_accepted(self) -> None:
+        tick = Decimal("0.05")
+        bar = CandleBar(
+            timestamp=_ts(),
+            open=tick,
+            high=tick,
+            low=tick,
+            close=tick,
+            volume=1,
+            open_interest=None,
+        )
+        assert bar.low == tick
