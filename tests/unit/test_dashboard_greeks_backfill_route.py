@@ -169,12 +169,12 @@ class TestPostTrigger:
         emitted = _patch_pipeline(monkeypatch, captured, run_result=report)
         resp = client.post(
             "/api/v1/universe/greeks-backfill",
-            params={"force": "true", "expired_only": "true", "batch": "7", "limit": "2"},
+            params={"expired_only": "true", "batch": "7", "limit": "2"},
         )
         assert resp.status_code == 200
         body = resp.json()
         assert body["started"] is True and body["dry_run"] is False
-        assert body["force"] is True and body["expired_only"] is True
+        assert body["force"] is False and body["expired_only"] is True
         assert body["batch"] == 7 and body["limit"] == 2
         snap = _wait_for_backfill(client)
         assert snap["state"] == "done"
@@ -184,11 +184,25 @@ class TestPostTrigger:
         assert captured["scan_kwargs"] == {
             "rate_source": captured["scan_kwargs"]["rate_source"],
             "expired_only": True,
-            "force": True,
+            "force": False,
             "limit": 2,
         }
-        assert captured["plan_force"] is True and captured["plan_expired_only"] is True
+        assert captured["plan_force"] is False and captured["plan_expired_only"] is True
         assert captured["run_kwargs"]["batch_size"] == 7
+
+    def test_force_alone_threads_to_scan_and_plan(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """force WITHOUT limit stays a first-class wet run (only the combo is refused)."""
+        captured: dict[str, Any] = {}
+        report = _report()
+        _patch_pipeline(monkeypatch, captured, run_result=report)
+        resp = client.post("/api/v1/universe/greeks-backfill", params={"force": "true"})
+        assert resp.status_code == 200 and resp.json()["force"] is True
+        assert _wait_for_backfill(client)["state"] == "done"
+        assert captured["scan_kwargs"]["force"] is True
+        assert captured["scan_kwargs"]["limit"] is None
+        assert captured["plan_force"] is True
 
     def test_dry_run_is_inert_no_run_no_alert(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -212,6 +226,15 @@ class TestPostTrigger:
         resp = client.post("/api/v1/universe/greeks-backfill", params={"limit": "-3"})
         assert resp.status_code == 400
         assert "limit must be >= 1" in resp.json()["detail"]
+
+    def test_force_with_limit_is_400(self, client: TestClient) -> None:
+        """force+limit never progresses (stamp-independent selection re-picks the
+        SAME first N every run) — refused at POST time, never a job-thread crash."""
+        resp = client.post(
+            "/api/v1/universe/greeks-backfill", params={"force": "true", "limit": "2"}
+        )
+        assert resp.status_code == 400
+        assert "force with limit never progresses" in resp.json()["detail"]
 
     def test_second_trigger_is_refused_single_flight(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

@@ -47,10 +47,20 @@ boundary (checkpoint survives → next run resumes). HONEST: the scan is
 O(files) NEVER O(1); no wall-clock SLA claimed; the stamp prefilter is blind
 to a rate/spot VALUE drift under unchanged source kinds — `--force` routes
 every contract through the driver's value-checked gate, which catches exactly
-that class. NO formula bump (the enrich goldens stay frozen). ENGINE
+that class. NO formula bump (the enrich goldens stay frozen).
+ADVERSARIAL-REVIEW FIX ROUND folded (same branch, pre-merge): the CLI wet run
+HOLDS the lake-root `pull_singleflight_lock` (contention → loud refusal;
+`--dry-run` lock-free); the scan/probe fire per-contract/per-file watchdog
+liveness beats + an honest "scanning…" job label (no false CRITICAL stall
+alert on a deep-lake backfill); `force`+`limit` REFUSED at scanner/CLI/route
+(chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects a
+valid-JSON non-object payload as `SweepCheckpointError` (never a wedging
+`AttributeError`); a schema-poisoned stamp column + an out-of-range month
+filename fold into `probe_failed`/skip instead of crashing the scan; the
+`expired_only` expiry==today boundary regression-pinned. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
-`greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py` ALL 100%
-line+branch; every touched `cli.py`/`app.py` line+branch covered).
+`greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
+ALL 100% line+branch; every touched `cli.py`/`app.py` line+branch covered).
 Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
@@ -642,9 +652,15 @@ hostile-review pass._
   whole-tree sha-pinned; the one documented read side effect is the shared `.manifest/` cache self-heal); exactly ONE
   Telegram completion summary (`greeks_backfill_complete` ✅/⚠️ + `emit_greeks_backfill_complete_alert`). HONEST: the
   scan is O(files) NEVER O(1); no wall-clock SLA; the stamp prefilter is blind to rate/spot VALUE drift under
-  unchanged source kinds — `--force` routes everything through the driver's value-checked gate. ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py` ALL 100%
-  line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
+  unchanged source kinds — `--force` routes everything through the driver's value-checked gate. ADVERSARIAL-REVIEW FIX
+  ROUND folded (same branch, pre-merge; details in #1482): CLI wet run HOLDS the lake-root single-flight (refusal on
+  contention; `--dry-run` lock-free); scan/probe per-contract/per-file watchdog liveness beats + honest scanning label
+  (the DEC-PIPELINE-STALL-HEARTBEAT-001 false-CRITICAL class closed on the new phase); `force`+`limit` REFUSED at
+  scanner/CLI/route (chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects non-object JSON with
+  `SweepCheckpointError`; schema-poisoned stamp columns + out-of-range month filenames fold into `probe_failed`/skip
+  instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/
+  `sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
   Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
   MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
   widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →

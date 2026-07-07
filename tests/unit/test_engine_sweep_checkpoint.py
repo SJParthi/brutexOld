@@ -115,6 +115,20 @@ def test_from_dict_malformed_field_raises() -> None:
         SweepCheckpoint.from_dict(d)
 
 
+@pytest.mark.parametrize("payload", [[], None, "hello", 42, True])
+def test_from_dict_non_object_payload_raises(payload: object) -> None:
+    """A valid-JSON NON-OBJECT payload is the caller-catchable domain error.
+
+    Refuter-confirmed defect: ``required - set(data.keys())`` raised
+    ``AttributeError`` on a list/None/str/int/bool payload, which escaped every
+    consumer's ``except SweepCheckpointError`` (the greeks-backfill runner's
+    documented graceful fresh start, the sweep-daemon's checkpoint view) and
+    wedged the run behind one hand-edited/planted checkpoint file.
+    """
+    with pytest.raises(SweepCheckpointError, match="must be a JSON object"):
+        SweepCheckpoint.from_dict(payload)
+
+
 # ── SweepCheckpointStore construction ───────────────────────────────────────
 
 
@@ -158,6 +172,16 @@ def test_load_malformed_json_raises(tmp_path: Path) -> None:
     p = tmp_path / "ckpt.json"
     p.write_text("{not json", encoding="utf-8")
     with pytest.raises(SweepCheckpointError, match="Malformed checkpoint JSON"):
+        _store(tmp_path).load()
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", '"hello"', "42", "true"])
+def test_load_non_object_json_raises_domain_error(tmp_path: Path, payload: str) -> None:
+    """load() on valid-JSON-non-object corruption raises SweepCheckpointError, never
+    the AttributeError that escaped every caller's narrow catch (refuter repro)."""
+    p = tmp_path / "ckpt.json"
+    p.write_text(payload, encoding="utf-8")
+    with pytest.raises(SweepCheckpointError, match="must be a JSON object"):
         _store(tmp_path).load()
 
 

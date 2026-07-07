@@ -643,7 +643,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Skip the stamp prefilter and feed EVERY option contract to the "
             "driver's value-checked reuse gate — the escape for the "
             "stamp-invisible rate/spot VALUE-drift class (slower; still "
-            "idempotent — unchanged bars are never rewritten)"
+            "idempotent — unchanged bars are never rewritten). Not combinable "
+            "with --limit (force-mode selection is stamp-independent, so a "
+            "limited force run would re-select the same head every run)"
         ),
     )
     greeks_backfill.add_argument(
@@ -664,7 +666,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=None,
-        help="Bound this invocation to the first N stale contracts (incremental chipping)",
+        help=(
+            "Bound this invocation to the first N stale contracts — incremental "
+            "chipping in the DEFAULT stamp-driven mode only (the next run "
+            "self-resumes the remainder because completed contracts classify "
+            "current); refused with --force"
+        ),
     )
     greeks_backfill.add_argument(
         "--pause-s",
@@ -1875,7 +1882,29 @@ def cmd_greeks_backfill(
     :class:`~brutex.data.errors.GreeksEnrichPoolBroken`) fires the CRITICAL
     pull-halt Telegram alert then RE-RAISES (the ``cmd_fetch`` convention) —
     the checkpoint survives, so the next run resumes.
+
+    **Single-flight guard (the ``cmd_reopen_skipped`` convention):** the WET
+    run holds the lake-root
+    :func:`~brutex.adapters.groww.pull_singleflight.pull_singleflight_lock`
+    for its whole duration — the SAME ``flock`` a dashboard/CLI pull (and the
+    dashboard backfill job) holds — so "one lake-writer job at a time" is
+    enforced on the CLI surface too. Without it a CLI backfill racing a live
+    pull could read a live contract's bars BEFORE the pull's spot minutes
+    landed, compute v2-stamped ``NO_SPOT`` NULLs, and latest-wins-overwrite
+    the pull enrich's freshly-solved OK Greeks (the write spine's documented
+    safety rests on the single-ENRICH-PASS-per-lake model). Contention
+    REFUSES loudly (``EXIT_USER_ERROR``); ``--dry-run`` stays lock-free
+    (read-only — zero writes to protect).
+
+    ``--force`` combined with ``--limit`` is REFUSED (:class:`CliUserError`):
+    force-mode selection is stamp-independent, so a limited force run would
+    re-select the SAME first N contracts every run — the incremental-chipping
+    promise holds only for the default stamp-driven mode.
     """
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_singleflight_lock,
+    )
     from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
     from brutex.data.greeks_backfill import (
         dry_run_backfill_report,
@@ -1893,6 +1922,14 @@ def cmd_greeks_backfill(
         raise CliUserError(f"--batch must be >= 1, got {batch}")
     if limit is not None and limit < 1:
         raise CliUserError(f"--limit must be >= 1, got {limit}")
+    if force and limit is not None:
+        raise CliUserError(
+            "--force with --limit never progresses: force-mode selection is "
+            "stamp-independent, so every run re-selects the SAME first "
+            f"{limit} sorted contract(s) and the remainder is unreachable — "
+            "incremental chipping (--limit) works only in the default "
+            "stamp-driven mode. Drop --force or drop --limit."
+        )
     if pause_s is not None and pause_s < 0:
         raise CliUserError(f"--pause-s must be >= 0, got {pause_s}")
     try:
@@ -1934,20 +1971,37 @@ def cmd_greeks_backfill(
         )
 
     try:
-        report = run_greeks_backfill(
-            resolved,
-            plan=plan,
-            rate_source=rate_source,
-            batch_size=batch,
-            pause_s=pause_s,
-            on_progress=_progress,
+        # WET run only: hold the lake-root single-flight flock for the whole
+        # write pass, so a live pull (dashboard or CLI) on the SAME lake is
+        # mutually excluded — never a concurrent second enrich pass whose
+        # stale-read→late-write could latest-wins-clobber freshly-solved
+        # Greeks. The scan above is read-only and deliberately lock-free.
+        with pull_singleflight_lock(resolved):
+            try:
+                report = run_greeks_backfill(
+                    resolved,
+                    plan=plan,
+                    rate_source=rate_source,
+                    batch_size=batch,
+                    pause_s=pause_s,
+                    on_progress=_progress,
+                )
+            except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+                # The cmd_fetch halt convention: ONE best-effort CRITICAL Telegram
+                # alert, then re-raise so the CLI exits non-zero and the checkpoint
+                # survives for the next run's resume.
+                _emit_pull_halt_alert(exc)
+                raise
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] greeks-backfill REFUSED — a pull (or another backfill) is currently "
+            f"running against this lake ({exc}). Running the backfill concurrently with a "
+            "lake writer could overwrite freshly-solved Greeks with stale-read NULLs "
+            "(one lake-writer job at a time). Wait for it to finish (or stop it), then "
+            "re-run.",
+            file=sys.stderr,
         )
-    except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
-        # The cmd_fetch halt convention: ONE best-effort CRITICAL Telegram
-        # alert, then re-raise so the CLI exits non-zero and the checkpoint
-        # survives for the next run's resume.
-        _emit_pull_halt_alert(exc)
-        raise
+        return EXIT_USER_ERROR
     emit_greeks_backfill_complete_alert(report)
     print(f"[brutex] {report.note}")
     if report.errored > 0:

@@ -4080,11 +4080,27 @@ def build_app(
         the same lake — refuses with ``started: false``. A disk-full / broken
         pool halts through the job's existing ``is_pull_halt`` handling (one
         CRITICAL Telegram alert; the durable checkpoint survives for resume).
+        ``force`` + ``limit`` together is a 400: force-mode selection is
+        stamp-independent, so a limited force run re-selects the SAME first N
+        contracts every run — chipping works only in the default mode.
         """
         if batch is not None and batch < 1:
             raise HTTPException(status_code=400, detail=f"batch must be >= 1, got {batch}")
         if limit is not None and limit < 1:
             raise HTTPException(status_code=400, detail=f"limit must be >= 1, got {limit}")
+        if force and limit is not None:
+            # force+limit never progresses: force-mode selection is stamp-
+            # independent, so every run re-selects the SAME first N sorted
+            # contracts — the incremental-chipping promise holds only for the
+            # default stamp-driven mode (Golden Rule #1, no illusions).
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "force with limit never progresses (force-mode selection is "
+                    "stamp-independent, so every run re-selects the same first "
+                    "N contracts) — drop force or drop limit"
+                ),
+            )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info(
             "universe.greeks_backfill.requested",
@@ -4099,6 +4115,17 @@ def build_app(
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: scan → plan → (dry-run report | run + ONE Telegram summary)."""
             rate_source = resolve_risk_free_source()
+            # Honest live label for the O(files) scan phase (the poller would
+            # otherwise show a blank ""). Liveness itself is owned by the
+            # scan's own per-contract/per-file emit_progress_beat seams
+            # (DEC-PIPELINE-STALL-HEARTBEAT-001 — the 600 s watchdog stays fed).
+            _greeks_backfill_job.sync_from_ledger(
+                completed=0,
+                total=0,
+                bars=None,
+                failed=0,
+                current="scanning lake for stale Greeks stamps (O(files)) …",
+            )
             scan = scan_stale_greeks_targets(
                 lake_root,
                 rate_source=rate_source,

@@ -201,6 +201,18 @@ class TestScanner:
         assert scan.live_skipped == 1
         assert [t.symbol for t in scan.targets] == [_CE]
 
+    def test_expired_only_boundary_expiry_today_is_still_live(self, lake: Path) -> None:
+        """A contract expiring TODAY trades until 15:30 IST — LIVE, never expired.
+
+        Exact-boundary regression pin (refuter-confirmed): kills the
+        ``expiry >= today`` → ``expiry > today`` mutant, which survived the
+        whole suite because no fixture seeded ``expiry == today``.
+        """
+        today_ce = "NSE-NIFTY-06Jul26-21500-CE"  # expiry == the injected _TODAY
+        _write_month(lake, today_ce, 2026, 7, [None])
+        scan = _scan(lake, expired_only=True)
+        assert scan.live_skipped == 1 and scan.targets == ()
+
     def test_default_scan_reaches_live_contracts_gap_b(self, lake: Path) -> None:
         """expired_only defaults False so a CLI-pulled lake's LIVE contracts are reachable."""
         live = "NSE-NIFTY-30Dec26-21500-CE"
@@ -268,6 +280,85 @@ class TestScanner:
         scan = _scan(lake, force=True)
         assert len(scan.targets) == 1 and scan.files_probed == 0 and scan.current == 0
 
+    def test_force_with_limit_is_refused_loudly(self, lake: Path) -> None:
+        """force+limit never progresses (stamp-independent selection re-picks the
+        SAME head every run) — refused, never a silent chipping illusion."""
+        _write_month(lake, _CE, 2024, 1, [None])
+        with pytest.raises(ValueError, match="force combined with limit never progresses"):
+            _scan(lake, force=True, limit=1)
+
+    def test_schema_poisoned_utf8_stamp_column_is_probe_failed_not_fatal(self, lake: Path) -> None:
+        """A wrong-dtype ``greeks_provenance_id`` (utf8) folds into probe_failed.
+
+        Refuter-confirmed: the ``int("poison")`` coercion previously raised an
+        uncaught ``ValueError`` that killed the WHOLE scan — the
+        DEC-MOVERS-CORRUPT-SKIP-001 one-corrupt-file class.
+        """
+        from structlog.testing import capture_logs
+
+        poisoned = _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
+        pl.DataFrame({"greeks_provenance_id": pl.Series(["poison"], dtype=pl.Utf8)}).write_parquet(
+            poisoned
+        )
+        _write_month(lake, _PE, 2024, 1, [_V1_PID])  # the healthy sibling still scans
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.current == 1
+        assert [t.symbol for t in scan.targets] == [_PE]
+        assert any(r["event"] == "greeks_backfill.probe_skip" and "dtype" in r for r in logs)
+
+    def test_schema_poisoned_nan_float_stamp_column_is_probe_failed_not_fatal(
+        self, lake: Path
+    ) -> None:
+        """A non-null NaN float stamp (bypasses the null fast path) never crashes."""
+        poisoned = _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
+        pl.DataFrame(
+            {"greeks_provenance_id": pl.Series([float("nan")], dtype=pl.Float64)}
+        ).write_parquet(poisoned)
+        scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.targets == () and scan.current == 1
+
+    def test_scan_beats_the_stall_watchdog_per_contract_and_per_file(self, lake: Path) -> None:
+        """The O(files) scan feeds the pull stall watchdog (refuter-confirmed):
+
+        beat-less it false-tripped the dashboard job's 600 s watchdog into a
+        CRITICAL "pull halted" alert + stalled-suspect on a healthy backfill
+        (the DEC-PIPELINE-STALL-HEARTBEAT-001 class).
+        """
+        from brutex.observability.progress_beat import (
+            register_progress_beat,
+            unregister_progress_beat,
+        )
+
+        _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
+        _write_month(lake, _CE, 2024, 2, [_CURRENT_PID])
+        _write_month(lake, _PE, 2024, 1, [_CURRENT_PID])
+        beats: list[None] = []
+        register_progress_beat(lambda: beats.append(None))
+        try:
+            scan = _scan(lake)
+        finally:
+            unregister_progress_beat()
+        assert scan.files_probed == 3
+        # ≥ one beat per considered contract (2) + one per probed month file (3).
+        assert len(beats) >= 2 + scan.files_probed
+
+    def test_force_scan_still_beats_per_contract(self, lake: Path) -> None:
+        """force skips the probe (no per-file beats) — the per-contract beat covers it."""
+        from brutex.observability.progress_beat import (
+            register_progress_beat,
+            unregister_progress_beat,
+        )
+
+        _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
+        beats: list[None] = []
+        register_progress_beat(lambda: beats.append(None))
+        try:
+            scan = _scan(lake, force=True)
+        finally:
+            unregister_progress_beat()
+        assert scan.files_probed == 0 and len(beats) >= 1
+
     def test_per_file_pause_sleeps_between_probes(self, lake: Path) -> None:
         _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
         _write_month(lake, _CE, 2024, 2, [_CURRENT_PID])
@@ -311,6 +402,40 @@ class TestScanner:
         (base / "2024" / "01.parquet").write_bytes(b"x")
         (base / "2024" / "junk.parquet").write_bytes(b"x")
         assert [(y, m) for y, m, _ in _month_files(base)] == [(2024, 1)]
+
+    def test_month_files_skips_out_of_range_numeric_names(self, lake: Path) -> None:
+        """Numeric-but-invalid names (13.parquet / 0.parquet / year 0 / year 9999)
+        are skipped like non-numeric ones — the docstring's "a foreign tree
+        never raises" claim made true (refuter-confirmed ``ValueError`` crash)."""
+        base = lake / "1minute"
+        (base / "2024").mkdir(parents=True)
+        (base / "2024" / "01.parquet").write_bytes(b"x")
+        (base / "2024" / "13.parquet").write_bytes(b"x")
+        (base / "2024" / "00.parquet").write_bytes(b"x")
+        (base / "0000").mkdir()
+        (base / "0000" / "01.parquet").write_bytes(b"x")
+        # date.max.year: _contract_window's December wrap computes year + 1, so
+        # 9999 must be skipped too (date(10000, …) raises).
+        (base / "9999").mkdir()
+        (base / "9999" / "12.parquet").write_bytes(b"x")
+        assert [(y, m) for y, m, _ in _month_files(base)] == [(2024, 1)]
+
+    def test_scan_survives_a_numeric_out_of_range_month_file(self, lake: Path) -> None:
+        """One foreign ``13.parquet`` must never kill the WHOLE scan (refuter repro:
+        an uncaught ``ValueError: month must be in 1..12`` crashed both the CLI
+        command and the dashboard job with zero census)."""
+        _write_month(lake, _CE, 2024, 1, [None])
+        junk = lake / "bars" / "NSE" / "FNO" / _CE / "1minute" / "2024" / "13.parquet"
+        junk.write_bytes(b"junk - not even parquet")
+        # A sibling whose ONLY file is out-of-range degrades to no_files.
+        only_junk = lake / "bars" / "NSE" / "FNO" / _PE / "1minute" / "2024" / "00.parquet"
+        only_junk.parent.mkdir(parents=True)
+        only_junk.write_bytes(b"junk")
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        (target,) = scan.targets
+        assert target.end == date(2024, 2, 2)  # window derived from VALID months only
+        assert scan.no_files == 1
 
     def test_contract_window_non_december(self) -> None:
         files = [(2024, 3, Path("a")), (2024, 5, Path("b"))]
@@ -534,6 +659,30 @@ class TestRunner:
             )
         assert report.resumed_from == 0 and report.batches == 1
         assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+
+    @pytest.mark.parametrize("payload", ["[]", "null", '"hello"', "42", "true"])
+    def test_non_object_json_checkpoint_is_ignored_loudly_never_a_crash(
+        self, lake: Path, payload: str
+    ) -> None:
+        """Valid-JSON-NON-OBJECT corruption lands in the SAME loud fresh start.
+
+        Refuter-confirmed: ``SweepCheckpoint.from_dict`` raised ``AttributeError``
+        on these shapes, escaping the narrow ``except SweepCheckpointError`` and
+        wedging EVERY wet run behind one planted/hand-edited file.
+        """
+        path = checkpoint_path(lake)
+        path.parent.mkdir(parents=True)
+        path.write_text(payload, encoding="utf-8")
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=_plan(1), rate_source=_RATE, batch_size=1, enrich=_SpyEnrich()
+            )
+        assert report.resumed_from == 0 and report.batches == 1
+        assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+        # Clean completion deletes the sidecar — the poison never wedges twice.
+        assert not checkpoint_path(lake).exists()
 
     def test_record_failure_logs_and_continues(self, lake: Path) -> None:
         class _BoomStore(SweepCheckpointStore):

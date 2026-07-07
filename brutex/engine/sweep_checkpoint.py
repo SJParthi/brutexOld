@@ -131,15 +131,22 @@ class SweepCheckpoint:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SweepCheckpoint:
+    def from_dict(cls, data: object) -> SweepCheckpoint:
         """Rebuild a :class:`SweepCheckpoint` from its on-disk dict.
 
         Raises
         ------
         SweepCheckpointError
-            If a required field is missing, has the wrong type, or the
-            schema version is unknown.
+            If the payload is not a JSON object (a valid-JSON non-dict like
+            ``[]`` / ``null`` / ``"hello"`` / ``42`` — every corruption class
+            must land in the caller's ``SweepCheckpointError`` handling, never
+            an ``AttributeError`` that wedges the run), a required field is
+            missing, has the wrong type, or the schema version is unknown.
         """
+        if not isinstance(data, dict):
+            raise SweepCheckpointError(
+                f"Checkpoint payload must be a JSON object, got {type(data).__name__}"
+            )
         required = {"version", "sweep_id", "total_combos", "last_completed_index", "updated_at"}
         missing = required - set(data.keys())
         if missing:

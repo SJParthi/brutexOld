@@ -107,6 +107,20 @@ class TestValidation:
         assert main(["greeks-backfill", "--pause-s", "-0.5"]) == EXIT_USER_ERROR
         assert "--pause-s must be >= 0" in capsys.readouterr().err
 
+    def test_force_with_limit_refused(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """force+limit never progresses (stamp-independent selection re-picks the
+        SAME first N every run) — refused loudly, the chipping claim is honest."""
+        scanned: list[Any] = []
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.scan_stale_greeks_targets",
+            lambda *a, **k: scanned.append(a),
+        )
+        assert main(["greeks-backfill", "--force", "--limit", "2"]) == EXIT_USER_ERROR
+        assert "--force with --limit never progresses" in capsys.readouterr().err
+        assert scanned == []  # refused BEFORE any scan work
+
     def test_broken_risk_free_source_fails_fast_before_any_scan(
         self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -202,6 +216,73 @@ class TestWetRun:
             main(["greeks-backfill"])
         assert halted == [halt]  # ONE CRITICAL pull-halt alert, then re-raise
         assert completed == []  # no completion summary on a halted run
+
+
+class TestSingleFlight:
+    """The CLI wet run takes the lake-root cross-process single-flight flock.
+
+    Refuter-confirmed defect: the CLI surface previously took NO lock, so a
+    ``brutex greeks-backfill`` racing a live pull on the same lake could
+    stale-read a live contract before the pull's spot minutes landed and
+    latest-wins-overwrite freshly-solved OK Greeks with v2 NO_SPOT NULLs
+    (the write spine's safety rests on the single-ENRICH-PASS-per-lake model).
+    """
+
+    def test_wet_run_refused_while_a_pull_holds_the_lake_lock(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        _patch_scan_plan(monkeypatch, {})
+        ran: list[Any] = []
+        monkeypatch.setattr(
+            "brutex.data.greeks_backfill.run_greeks_backfill", lambda *a, **k: ran.append(a)
+        )
+        emitted = _patch_alert(monkeypatch)
+        with pull_singleflight_lock(lake):  # a concurrent pull holds the lake
+            assert main(["greeks-backfill"]) == EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert "greeks-backfill REFUSED" in err
+        assert "one lake-writer job at a time" in err
+        assert ran == [] and emitted == []  # never raced the pull, no fake summary
+
+    def test_wet_run_holds_the_lake_singleflight_lock(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flock is HELD for the whole write pass, not just checked once."""
+        from brutex.adapters.groww.pull_singleflight import (
+            PullAlreadyRunningError,
+            pull_singleflight_lock,
+        )
+
+        _patch_scan_plan(monkeypatch, {})
+        _patch_alert(monkeypatch)
+        held: list[bool] = []
+
+        def _probe_run(lake_root: Path, **kwargs: Any) -> GreeksBackfillReport:
+            try:
+                with pull_singleflight_lock(lake_root):
+                    held.append(False)
+            except PullAlreadyRunningError:
+                held.append(True)
+            return _report()
+
+        monkeypatch.setattr("brutex.data.greeks_backfill.run_greeks_backfill", _probe_run)
+        assert main(["greeks-backfill"]) == EXIT_OK
+        assert held == [True]  # a peer acquire DURING the run is refused ⇒ lock held
+
+    def test_dry_run_stays_lock_free_while_a_pull_holds_the_lake_lock(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--dry-run is read-only — it must run fine mid-pull, lock-free."""
+        from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
+
+        _patch_scan_plan(monkeypatch, {})
+        emitted = _patch_alert(monkeypatch)
+        with pull_singleflight_lock(lake):
+            assert main(["greeks-backfill", "--dry-run"]) == EXIT_OK
+        assert "DRY RUN" in capsys.readouterr().out
+        assert emitted == []
 
 
 class TestParserWiring:

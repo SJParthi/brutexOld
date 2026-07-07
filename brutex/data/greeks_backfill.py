@@ -82,6 +82,7 @@ from brutex.data.greeks_enrich import (
     unpack_greeks_provenance,
 )
 from brutex.engine.sweep_checkpoint import SweepCheckpointError, SweepCheckpointStore
+from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.risk_free import RISK_FREE_SOURCE_VERSION
 
 if TYPE_CHECKING:
@@ -136,6 +137,10 @@ _MINUTE_INTERVAL: Final[str] = "1minute"
 
 #: Fixed +05:30 IST (no DST) — the expiry-comparison calendar.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+
+#: December — the year-wrap month for the contract-window derivation and the
+#: upper bound of the valid month-file range (one COMMON constant, ruff PLR2004).
+_DECEMBER: Final[int] = 12
 
 #: The per-contract staleness verdicts the probe can return.
 _STALE_NULL: Final[str] = "null"
@@ -374,15 +379,24 @@ def _today_ist() -> date:
 def _month_files(minute_dir: Path) -> list[tuple[int, int, Path]]:
     """The contract's ``<yyyy>/<mm>.parquet`` month files, ascending.
 
-    Non-numeric directory / file names are skipped (a foreign tree never
-    raises). O(contract's month files).
+    Non-numeric AND numeric-but-out-of-calendar-range directory / file names
+    are skipped (a foreign tree never raises): a ``13.parquet`` / ``0.parquet``
+    or a year outside ``[1, 9998]`` would make :func:`_contract_window`'s
+    :class:`datetime.date` construction raise ``ValueError`` and kill the WHOLE
+    scan (the December wrap computes ``year + 1``, hence the ``9998`` cap —
+    ``date.max.year - 1``). No lake writer produces such names; the guard is
+    the same foreign-file tolerance the probe already grants corrupt bytes.
+    O(contract's month files).
     """
     out: list[tuple[int, int, Path]] = []
+    max_window_year = date.max.year - 1  # _contract_window's December wrap needs year + 1
     for candidate in minute_dir.glob("*/*.parquet"):
         try:
             year = int(candidate.parent.name)
             month = int(candidate.stem)
         except ValueError:
+            continue
+        if not (1 <= month <= _DECEMBER) or not (date.min.year <= year <= max_window_year):
             continue
         out.append((year, month, candidate))
     out.sort()
@@ -401,9 +415,8 @@ def _contract_window(files: list[tuple[int, int, Path]]) -> tuple[date, date]:
     first_year, first_month, _ = files[0]
     last_year, last_month, _ = files[-1]
     start = date(first_year, first_month, 1)
-    december: Final[int] = 12
     after = (
-        date(last_year + 1, 1, 1) if last_month == december else date(last_year, last_month + 1, 1)
+        date(last_year + 1, 1, 1) if last_month == _DECEMBER else date(last_year, last_month + 1, 1)
     )
     return start, after + timedelta(days=1)
 
@@ -423,10 +436,18 @@ def _probe_contract_staleness(
     :data:`_STALE_DRIFT` or ``None`` (every probed stamp current).
     Short-circuits on the FIRST stale file. A legacy 7-column partition (no
     ``greeks_provenance_id`` column at all) classifies :data:`_STALE_NULL`. A
-    corrupt/unreadable file is counted + logged and the probe continues (a
-    genuine code bug still propagates — the narrow
-    ``(PolarsError, OSError)`` catch is the movers_resilient set); healing is
-    :mod:`brutex.data.lake_heal`'s job, never re-implemented here.
+    corrupt/unreadable file is counted + logged and the probe continues — and
+    so is a SCHEMA-POISONED stamp column (a wrong-dtype ``greeks_provenance_id``
+    like utf8, or a non-null NaN float — values the ``int()`` coercion rejects
+    with ``ValueError``/``TypeError``): both fold into ``probe_failed`` so ONE
+    junk file never kills the whole scan (the DEC-MOVERS-CORRUPT-SKIP-001
+    class). A genuine code bug elsewhere still propagates — the read catch is
+    the narrow movers_resilient ``(PolarsError, OSError)`` set, the value
+    catch only the coercion pair; healing is :mod:`brutex.data.lake_heal`'s
+    job, never re-implemented here. Each probed file fires one liveness
+    :func:`~brutex.observability.progress_beat.emit_progress_beat` (a no-op
+    outside a dashboard job) so the O(files) probe never trips the pull stall
+    watchdog (DEC-PIPELINE-STALL-HEARTBEAT-001).
     """
     import polars as pl
 
@@ -435,6 +456,10 @@ def _probe_contract_staleness(
     for _year, _month, path in files:
         if per_file_pause > 0:
             sleep(per_file_pause)
+        # Liveness beat per probed file: the stamp probe is the scan's O(files)
+        # bulk — silent for >600 s on a deep lake it would false-trip the
+        # dashboard watchdog (false CRITICAL pull-halt alert). No-op on the CLI.
+        emit_progress_beat()
         files_probed += 1
         try:
             series = pl.read_parquet(path, columns=["greeks_provenance_id"])["greeks_provenance_id"]
@@ -450,15 +475,29 @@ def _probe_contract_staleness(
                 error=f"{type(exc).__name__}: {exc}",
             )
             continue
-        if series.null_count() > 0:
-            return _STALE_NULL, files_probed, probe_failed
-        for value in series.unique().to_list():
-            pid = int(value)
-            if not stamp_is_current_inputs(pid, rate_source=rate_source):
-                stored = unpack_greeks_provenance(pid)
-                if stored.formula_version != GREEKS_FORMULA_VERSION:
-                    return _STALE_V1, files_probed, probe_failed
-                return _STALE_DRIFT, files_probed, probe_failed
+        try:
+            if series.null_count() > 0:
+                return _STALE_NULL, files_probed, probe_failed
+            for value in series.unique().to_list():
+                pid = int(value)
+                if not stamp_is_current_inputs(pid, rate_source=rate_source):
+                    stored = unpack_greeks_provenance(pid)
+                    if stored.formula_version != GREEKS_FORMULA_VERSION:
+                        return _STALE_V1, files_probed, probe_failed
+                    return _STALE_DRIFT, files_probed, probe_failed
+        except (ValueError, TypeError) as exc:
+            # A schema-poisoned stamp column (utf8 "poison", a NaN float, …):
+            # data corruption, not a code bug — count + log + continue, exactly
+            # like the unreadable-file arm above.
+            probe_failed += 1
+            _LOG.warning(
+                "greeks_backfill.probe_skip",
+                symbol=symbol,
+                file=str(path),
+                dtype=str(series.dtype),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            continue
     return None, files_probed, probe_failed
 
 
@@ -482,6 +521,14 @@ def scan_stale_greeks_targets(
     :func:`brutex.dashboard.db_view.list_fno_candle_datasets`
     (O(manifest-rows), graceful O(files) walk fallback).
 
+    LIVENESS (DEC-PIPELINE-STALL-HEARTBEAT-001): one
+    :func:`~brutex.observability.progress_beat.emit_progress_beat` fires per
+    considered contract AND per probed month file, so a long scan on the
+    dashboard job thread keeps the 600 s pull stall watchdog fed instead of
+    false-tripping a CRITICAL "pull halted" alert on a healthy backfill (the
+    beat is a documented no-op outside a dashboard job — the CLI path is
+    unaffected).
+
     READ-only in lake-DATA terms — the scan never touches ``bars/`` /
     ``options/`` / the checkpoint. HONEST side-effect note: the manifest-first
     enumeration may SELF-HEAL the shared ``.manifest/`` dataset cache (the
@@ -504,10 +551,17 @@ def scan_stale_greeks_targets(
         Skip the stamp probe entirely — EVERY decoded option contract becomes
         a target and the driver's VALUE-checked reuse gate decides per bar (the
         documented escape for the stamp-invisible rate/spot value-drift class).
+        REFUSED in combination with *limit* (see below).
     limit
-        Truncate the SORTED target list to the first *limit* contracts (an
-        incremental chip; the next invocation self-resumes the remainder
-        because completed contracts classify current).
+        Truncate the SORTED target list to the first *limit* contracts — an
+        incremental chip for the DEFAULT stamp-driven mode ONLY: there the
+        next invocation self-resumes the remainder because completed contracts
+        classify current. Combined with *force* the scan raises
+        :class:`ValueError` — force-mode selection is stamp-INdependent, so a
+        limited force run would deterministically re-select the SAME first
+        *limit* sorted contracts on EVERY run and the remainder would be
+        unreachable (the chipping promise would be an illusion, Golden
+        Rule #1).
     today
         Injectable IST "today" for the ``expired_only`` comparison (defaults
         to the real IST date).
@@ -521,9 +575,24 @@ def scan_stale_greeks_targets(
     -------
     BackfillScan
         The sorted stale targets + the honest census counters.
+
+    Raises
+    ------
+    ValueError
+        On ``force=True`` combined with a non-``None`` *limit* (the
+        never-progressing chip — refused loudly, never a silent footgun).
     """
     from brutex.dashboard.db_view import list_fno_candle_datasets
 
+    if force and limit is not None:
+        msg = (
+            "force combined with limit never progresses: force-mode selection is "
+            "stamp-independent, so every run re-selects the SAME first "
+            f"{limit} sorted contract(s) and the remainder is unreachable — "
+            "incremental chipping (limit) works only in the default stamp-driven "
+            "mode. Drop force or drop limit."
+        )
+        raise ValueError(msg)
     today_resolved = _today_ist() if today is None else today
     seen: set[tuple[str, str]] = set()
     decoded: list[tuple[FnoSymbolParts, str, str]] = []
@@ -558,6 +627,10 @@ def scan_stale_greeks_targets(
     for _parts, exchange, symbol in decoded:
         if limit is not None and len(targets) >= limit:
             break
+        # Liveness beat per considered contract (DEC-PIPELINE-STALL-HEARTBEAT-001):
+        # covers the force / no-files arms the per-file probe beat never reaches.
+        # No-op outside a dashboard job; best-effort; O(1).
+        emit_progress_beat()
         minute_dir = lake_root / "bars" / exchange / FNO_CANDLE_LAKE_SEGMENT / symbol
         files = _month_files(minute_dir / _MINUTE_INTERVAL)
         if not files:
