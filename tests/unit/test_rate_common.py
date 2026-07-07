@@ -2395,3 +2395,121 @@ class TestPendingLogLevelSlotPins:
             ),
         ]
         assert captured == expected
+
+
+class _RaisingClock:
+    """A clock that reads normally until :meth:`arm`, then always raises.
+
+    The sanctioned injected-clock seam (``RateController(clock=...)``) used to
+    FORCE the in-lock exception path: ``now = self._clock()`` is the first
+    in-lock statement of ``pace``'s two gates and of every ``on_*`` method, so
+    once armed the raise fires with every pending-log slot still at its
+    ``None`` initializer — the exception-safety path those initializers exist
+    for. Construction stays benign (``RateController.__init__`` itself reads
+    the clock to seed ``_last_step`` and friends).
+    """
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+        self.armed = False
+
+    def __call__(self) -> float:
+        if self.armed:
+            raise RuntimeError("forced in-lock failure")
+        return self.t
+
+    def arm(self) -> None:
+        self.armed = True
+
+
+class TestInLockExceptionSlotSafety:
+    """The documented ``_flush_rate_logs`` exception-safety contract, forced.
+
+    DEC-MUTATION-RUNTIME-003 fixer round 3 (F2): the ``_PendingLogSlot``
+    ``None`` initializers on the unconditionally-overwritten slots are LIVE on
+    the in-lock-exception path — each method's ``finally`` reads them — and
+    that path is forceable through the injected-clock seam (or, for
+    ``_maybe_log_snapshot``, whose clock read sits OUTSIDE the try, a raising
+    ``_handle_clock_gap_locked``). Each test pins: (a) the injected error
+    propagates UNMASKED (an ``= ""`` initializer mutant instead crashes the
+    finally's flush — ``"" is not None`` passes the guard and the 3-tuple
+    unpack raises ValueError, replacing the RuntimeError); (b) the lock is
+    provably released; (c) NO partial rate.* event is emitted. This suite is
+    what licenses dropping the 9 line-scoped slot pragmas — the ``""`` mutants
+    are now suite-killed, not argued equivalent.
+    """
+
+    @staticmethod
+    def _assert_lock_released(ctl: RateController) -> None:
+        assert ctl._lock.acquire(blocking=False), "controller lock leaked"
+        ctl._lock.release()
+
+    def _assert_propagates_clean(self, ctl: RateController, call: Callable[[], None]) -> None:
+        with (
+            capture_logs() as logs,
+            pytest.raises(RuntimeError, match="forced in-lock failure"),
+        ):
+            call()
+        assert logs == []  # no partial event emitted from initializer slots
+        self._assert_lock_released(ctl)
+
+    @staticmethod
+    def _armed_controller(
+        *, smooth_pacing: bool = False, ceiling_per_min: int | None = None
+    ) -> RateController:
+        clock = _RaisingClock()
+        ctl = RateController(
+            clock=clock,
+            sleep=lambda _s: None,
+            smooth_pacing=smooth_pacing,
+            ceiling_per_min=ceiling_per_min,
+        )
+        clock.arm()
+        return ctl
+
+    def test_on_rate_limit_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the ``gap_evt``/``hit_evt``/``latch_evt`` ``None → ""`` mutants."""
+        ctl = self._armed_controller()
+        self._assert_propagates_clean(ctl, ctl.on_rate_limit)
+
+    def test_on_timeout_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the ``gap_evt``/``to_evt`` ``None → ""`` mutants."""
+        ctl = self._armed_controller()
+        self._assert_propagates_clean(ctl, ctl.on_timeout)
+
+    def test_on_success_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the ``gap_evt`` ``None → ""`` mutant in ``on_success``."""
+        ctl = self._armed_controller()
+        self._assert_propagates_clean(ctl, ctl.on_success)
+
+    def test_pace_smooth_gate_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the gate-0 ``gap_evt`` ``None → ""`` mutant in ``pace``."""
+        ctl = self._armed_controller(smooth_pacing=True)
+        self._assert_propagates_clean(ctl, ctl.pace)
+
+    def test_pace_governor_gate_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the gate-1 ``gov_gap_evt`` ``None → ""`` mutant in ``pace``.
+
+        Smooth pacing stays OFF (the default) so gate 0 is skipped entirely and
+        the FIRST clock read is gate 1's — the raise lands with ``gov_gap_evt``
+        at its initializer.
+        """
+        ctl = self._armed_controller(ceiling_per_min=500)
+        self._assert_propagates_clean(ctl, ctl.pace)
+
+    def test_snapshot_log_in_lock_failure_propagates_unmasked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kills the ``gap_evt`` ``None → ""`` mutant in ``_maybe_log_snapshot``.
+
+        Its ``now = self._clock()`` read sits OUTSIDE the try, so the in-lock
+        exception is forced one statement deeper: the first in-lock statement
+        is ``self._handle_clock_gap_locked(now)`` — patched to raise.
+        """
+        ctl = _controller(_Clock())
+
+        def _raise(now: float) -> tuple[str, str, dict[str, object]] | None:
+            raise RuntimeError("forced in-lock failure")
+
+        monkeypatch.setattr(ctl, "_handle_clock_gap_locked", _raise)
+        self._assert_propagates_clean(ctl, ctl._maybe_log_snapshot)

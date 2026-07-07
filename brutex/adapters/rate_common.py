@@ -97,20 +97,31 @@ _PendingLog = tuple[str, str, dict[str, object]]  # (level, event, fields)
 # initializer value ``None`` → ``""`` (mutmut 2.5.1 mutates an annotated
 # ``= None`` to ``= ""`` — measured; the earlier "``None`` is not a mutmut
 # target" proof comment was FALSE and is superseded by this one). That ``""``
-# mutant is:
+# mutant is SUITE-KILLED on EVERY slot line — no pragma anywhere
+# (DEC-MUTATION-RUNTIME-003 fixer round 3, F2; supersedes the earlier
+# "dominated dead store … unobservable" claim, which was an untested-path
+# admission, not an equivalence proof):
 #
-# * SUITE-KILLED — so NO pragma — wherever the initializer can FLOW into
-#   ``_flush_rate_logs`` on a tested path: the RETURNED ``pending`` slot in
+# * wherever the initializer can FLOW into ``_flush_rate_logs`` on a plain
+#   tested path: the RETURNED ``pending`` slot in
 #   :meth:`RateController._handle_clock_gap_locked` (the common no-gap path
 #   returns it) and every CONDITIONALLY-assigned ``step_evt`` slot (the
 #   no-step path flushes the initializer). ``""`` fails the callers'
 #   ``is not None`` guard and crashes the tuple unpack — loud.
-# * a DOMINATED DEAD STORE on the unconditionally-overwritten slots
-#   (``gap_evt`` / ``gov_gap_evt`` / ``hit_evt`` / ``latch_evt`` / ``to_evt``):
-#   the initializer there is readable ONLY when an in-lock exception fires
-#   before the overwrite — the exception-safety path the initializer exists
-#   for, which no test forces — so the ``""`` mutant is unobservable and those
-#   lines keep a line-scoped ``# pragma: no mutate`` citing this comment.
+# * on the unconditionally-overwritten slots (``gap_evt`` / ``gov_gap_evt`` /
+#   ``hit_evt`` / ``latch_evt`` / ``to_evt``): the initializer is LIVE on the
+#   in-lock-exception path — each method's ``finally`` reads it — and that
+#   path is FORCED through the sanctioned injected-clock seam
+#   (``now = self._clock()`` is the first in-lock statement of both ``pace``
+#   gates and every ``on_*`` method; ``_maybe_log_snapshot`` reads its clock
+#   pre-try, so its gap handler is patched to raise instead) by
+#   ``TestInLockExceptionSlotSafety`` (tests/unit/test_rate_common.py), which
+#   pins the documented :func:`_flush_rate_logs` exception-safety contract:
+#   the injected error propagates unmasked, the lock is released, and NO
+#   partial event is emitted. A ``""`` mutant instead passes the flush's
+#   ``is not None`` guard and dies on the 3-tuple unpack (ValueError replaces
+#   the injected error) — all 9 mutants probe-verified killed, one slot line
+#   each.
 _PendingLogSlot = _PendingLog | None
 
 
@@ -982,13 +993,13 @@ class RateController:
             iterations = 0
             while True:
                 # ``gap_evt`` NEEDS the None initializer (the finally reads it on an
-                # in-lock exception path); ``wait`` deliberately has NO initializer —
-                # every path that reads it is dominated by the in-lock assignment
-                # below (an in-lock exception propagates past all reads), and a dead
-                # ``wait = 0.0`` here was flagged by CodeQL (py/multiple-definition).
-                # (Pragma: unconditionally overwritten before any tested read — the
-                # dominated-dead-store class proven at :data:`_PendingLogSlot`.)
-                gap_evt: _PendingLogSlot = None  # pragma: no mutate
+                # in-lock exception path — forced by the raising-clock test, so its
+                # ``""`` mutant is suite-killed; :data:`_PendingLogSlot`); ``wait``
+                # deliberately has NO initializer — every path that reads it is
+                # dominated by the in-lock assignment below (an in-lock exception
+                # propagates past all reads), and a dead ``wait = 0.0`` here was
+                # flagged by CodeQL (py/multiple-definition).
+                gap_evt: _PendingLogSlot = None
                 try:
                     with self._lock:
                         now = self._clock()
@@ -1032,11 +1043,12 @@ class RateController:
             iterations = 0
             while True:
                 # Mirrors gate 0: ``gov_gap_evt`` keeps its None initializer (read in
-                # the finally on an in-lock exception); ``gov_wait`` has NO initializer
-                # — the in-lock assignment dominates every read (CodeQL
-                # py/multiple-definition on the dead ``gov_wait = 0.0``).
-                # (Pragma: the dominated-dead-store class — :data:`_PendingLogSlot`.)
-                gov_gap_evt: _PendingLogSlot = None  # pragma: no mutate
+                # the finally on an in-lock exception — forced by the raising-clock
+                # test, ``""`` mutant suite-killed; :data:`_PendingLogSlot`);
+                # ``gov_wait`` has NO initializer — the in-lock assignment dominates
+                # every read (CodeQL py/multiple-definition on the dead
+                # ``gov_wait = 0.0``).
+                gov_gap_evt: _PendingLogSlot = None
                 try:
                     with self._lock:
                         now = self._clock()
@@ -1105,8 +1117,9 @@ class RateController:
         Observability only — it changes no pacing decision.
         """
         now = self._clock()
-        # (Pragma: the dominated-dead-store class — :data:`_PendingLogSlot`.)
-        gap_evt: _PendingLogSlot = None  # pragma: no mutate
+        # Read in the finally on an in-lock exception (forced by the raising
+        # gap-handler test, ``""`` mutant suite-killed; :data:`_PendingLogSlot`).
+        gap_evt: _PendingLogSlot = None
         try:
             with self._lock:
                 # Re-base on a sleep/wake gap FIRST (DEC-RATE-CLOCK-SLEEPWAKE-001) so even a
@@ -1149,14 +1162,15 @@ class RateController:
         values are captured at the decision point; telemetry is emitted
         post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        # The first three slots are unconditionally overwritten in the lock —
-        # dominated dead stores, pragma'd per the :data:`_PendingLogSlot` proof.
+        # The first three slots are unconditionally overwritten in the lock but
+        # their initializers are LIVE on the in-lock-exception path (the finally
+        # flushes them) — forced by the raising-clock test, so every ``None →
+        # ""`` mutant here is suite-killed (:data:`_PendingLogSlot`).
         # ``step_evt`` is CONDITIONALLY assigned: on the no-step path its
-        # initializer reaches ``_flush_rate_logs``, so its ``None → ""`` mutant
-        # is suite-killed — NO pragma (DEC-MUTATION-RUNTIME-003 fixer round).
-        gap_evt: _PendingLogSlot = None  # pragma: no mutate
-        hit_evt: _PendingLogSlot = None  # pragma: no mutate
-        latch_evt: _PendingLogSlot = None  # pragma: no mutate
+        # initializer reaches ``_flush_rate_logs`` on the plain tested path too.
+        gap_evt: _PendingLogSlot = None
+        hit_evt: _PendingLogSlot = None
+        latch_evt: _PendingLogSlot = None
         step_evt: _PendingLogSlot = None
         try:
             with self._lock:
@@ -1251,12 +1265,13 @@ class RateController:
         are captured at the decision point; telemetry is emitted post-release
         (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        # ``gap_evt``/``to_evt``: dominated dead stores (pragma per
-        # :data:`_PendingLogSlot`); ``step_evt``: conditionally assigned — its
-        # ``""`` mutant reaches the flush on the no-step path, suite-killed, NO
-        # pragma (DEC-MUTATION-RUNTIME-003 fixer round).
-        gap_evt: _PendingLogSlot = None  # pragma: no mutate
-        to_evt: _PendingLogSlot = None  # pragma: no mutate
+        # ``gap_evt``/``to_evt``: initializers LIVE on the in-lock-exception
+        # path (the finally flushes them) — forced by the raising-clock test,
+        # ``""`` mutants suite-killed (:data:`_PendingLogSlot`); ``step_evt``:
+        # conditionally assigned — its ``""`` mutant reaches the flush on the
+        # plain no-step path too.
+        gap_evt: _PendingLogSlot = None
+        to_evt: _PendingLogSlot = None
         step_evt: _PendingLogSlot = None
         try:
             with self._lock:
@@ -1310,11 +1325,12 @@ class RateController:
         trickle-trap this closes. Field values are captured at the decision
         point; telemetry is emitted post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        # ``gap_evt``: dominated dead store (pragma per :data:`_PendingLogSlot`);
-        # ``step_evt``: conditionally assigned — its ``""`` mutant reaches the
-        # flush on the no-step path, suite-killed, NO pragma
-        # (DEC-MUTATION-RUNTIME-003 fixer round).
-        gap_evt: _PendingLogSlot = None  # pragma: no mutate
+        # ``gap_evt``: initializer LIVE on the in-lock-exception path (the
+        # finally flushes it) — forced by the raising-clock test, ``""`` mutant
+        # suite-killed (:data:`_PendingLogSlot`); ``step_evt``: conditionally
+        # assigned — its ``""`` mutant reaches the flush on the plain no-step
+        # path too.
+        gap_evt: _PendingLogSlot = None
         step_evt: _PendingLogSlot = None
         try:
             with self._lock:
