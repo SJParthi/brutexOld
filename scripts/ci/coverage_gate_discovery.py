@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import subprocess  # nosec B404 — git/pytest invocation is the gate's purpose
 import sys
 from collections.abc import Sequence
@@ -552,6 +553,88 @@ def build_plan(base: str) -> Plan:
     )
 
 
+#: Substrings identifying a CORRUPT coverage data file in a ``coverage
+#: report`` capture. Observed live (CI + local repro): ``Couldn't use data
+#: file '….coverage…': no such table: tracer`` — the SQLite store was
+#: truncated/half-written at GENERATION time inside the pytest run, so
+#: re-reading the same file can never succeed; the recovery is re-running
+#: the whole pytest section (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold).
+_CORRUPT_DATA_SIGNATURES: tuple[str, ...] = ("no such table", "Couldn't use data file")
+
+#: Base name of the per-section coverage data files (``COVERAGE_FILE``
+#: isolation). Matched by the repo ``.gitignore``'s ``.coverage.*`` entry.
+_GATE_DATA_FILE_PREFIX = ".coverage.gate"
+
+
+def _section_env(module: str) -> dict[str, str]:
+    """Return the section's subprocess env with an ISOLATED ``COVERAGE_FILE``.
+
+    Every subprocess of one module's gate section — the pytest run AND both
+    ``coverage report`` reads — must share ONE per-module data file (e.g.
+    ``.coverage.gate.brutex.data.sink``), NEVER the repo-shared ``.coverage``:
+    the shared root file is written by the main suite and by every other gate
+    section, so a stale/corrupt leftover there could poison this section's
+    report (and the gate previously clobbered the main suite's data in turn).
+
+    Parameters
+    ----------
+    module:
+        The POSIX module path being covered.
+
+    Returns
+    -------
+    dict[str, str]
+        A copy of ``os.environ`` with ``COVERAGE_FILE`` pointing at the
+        section's own data file under ``ROOT``.
+    """
+    slug = module.removesuffix(".py").replace("/", ".")
+    return {**os.environ, "COVERAGE_FILE": str(ROOT / f"{_GATE_DATA_FILE_PREFIX}.{slug}")}
+
+
+def _erase_section_data(env: dict[str, str]) -> None:
+    """Erase the section's coverage data file (and its parallel shards).
+
+    Runs ``coverage erase`` under the section env so every attempt starts
+    from a clean slate — ``[tool.coverage.run] parallel = true`` means a
+    crashed or corrupt earlier attempt can leave both the combined data file
+    and stray ``<data-file>.<host>.<pid>.*`` shards behind, which the next
+    pytest-cov combine would otherwise fold in.
+
+    Parameters
+    ----------
+    env:
+        The section env from :func:`_section_env`.
+    """
+    subprocess.run(  # nosec B603 — fixed argv (sys.executable), no shell
+        [sys.executable, "-m", "coverage", "erase"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        check=False,
+    )
+
+
+def _is_corrupt_data(stdout: str, stderr: str) -> bool:
+    """Return True if a report capture carries the corrupt-data signature.
+
+    Parameters
+    ----------
+    stdout:
+        The captured stdout of a ``coverage report`` invocation.
+    stderr:
+        The captured stderr of the same invocation (the usual carrier —
+        coverage prints ``Couldn't use data file '…': no such table: …``
+        there).
+
+    Returns
+    -------
+    bool
+        Whether either stream names a corrupt data file.
+    """
+    blob = f"{stdout}\n{stderr}"
+    return any(signature in blob for signature in _CORRUPT_DATA_SIGNATURES)
+
+
 def _print_report_stderr(stderr: str) -> None:
     """Print a non-empty ``coverage report`` stderr (the swallowed-error fix).
 
@@ -575,10 +658,30 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
     2.x. The per-file 100% assertion is ``--fail-under=100`` on the
     filtered report; a file the tests never imported is reported as
     not-measured and also fails (the exact 0%-masking this gate exists to
-    prevent). The not-measured probe retries ONCE with its stderr surfaced —
-    the out-of-process report has been observed to intermittently miss a
-    just-written ``.coverage`` data file (a read race on heavily-threaded
-    suites), and a silently-swallowed stderr made that flake undiagnosable.
+    prevent).
+
+    Data-file hygiene (DEC-PULL-BEAT-PERRUN-001 gate-hardening fold — the
+    red/green-nondeterminism fix): the gate was observed failing on
+    genuinely-100% modules because the coverage DATA FILE was CORRUPT at
+    GENERATION time — pytest-cov's own in-process report already failed with
+    ``Couldn't use data file '…': no such table: tracer`` INSIDE the pytest
+    section (``[tool.coverage.run] parallel = true`` plus suites that
+    deliberately ABANDON daemon threads can race pytest-cov's stop/combine on
+    a shared data file), so the earlier report-only retry re-read the same
+    corrupt file and could never recover. Three-part hardening:
+
+    * every subprocess of the section — the pytest run AND both ``coverage
+      report`` reads — shares ONE per-module ``COVERAGE_FILE``
+      (:func:`_section_env`), never the repo-shared ``.coverage``;
+    * every attempt opens with ``coverage erase``
+      (:func:`_erase_section_data`) so a stale/corrupt leftover can never
+      poison it;
+    * a not-measured probe WITH the corrupt-data signature
+      (:func:`_is_corrupt_data`) re-runs the WHOLE pytest section ONCE (a
+      fresh data file — not a doomed re-read); WITHOUT the signature it
+      fails immediately (the genuine 0%-masking case). The failure
+      direction stays LOUD: the gate can still go red spuriously, never
+      green wrongly.
 
     Parameters
     ----------
@@ -592,6 +695,7 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
     bool
         Whether the module is at 100% line + branch coverage.
     """
+    env = _section_env(module)
     pytest_cmd = [
         sys.executable,
         "-m",
@@ -602,31 +706,30 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
         "--cov-fail-under=0",
         *tests,
     ]
-    proc = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
-        pytest_cmd, cwd=ROOT, text=True, check=False
-    )
-    if proc.returncode != 0:
-        print(f"  FAIL: pytest errored for {module} (exit {proc.returncode})")
-        return False
     include = f"*/{module}"
     measured_cmd = [sys.executable, "-m", "coverage", "report", f"--include={include}"]
-    measured = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
-        measured_cmd, cwd=ROOT, capture_output=True, text=True, check=False
-    )
-    if module not in measured.stdout:
-        # Diagnosability + ONE defensive retry (DEC-PULL-BEAT-PERRUN-001 review fold,
-        # round 3 MINOR): the out-of-process report has been observed to
-        # intermittently see no data for a module right after pytest-cov wrote
-        # ``.coverage`` (the flaky victims were the heavily-threaded suites), and its
-        # captured stderr was never printed — so the real error was invisible and the
-        # gate could red/green nondeterministically on a genuinely-100% module.
-        _print_report_stderr(measured.stderr)
-        print(f"  WARN: {module} absent from the coverage report — retrying the report once")
-        measured = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
-            measured_cmd, cwd=ROOT, capture_output=True, text=True, check=False
+    section_retries_left = 1
+    while True:
+        _erase_section_data(env)
+        proc = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
+            pytest_cmd, cwd=ROOT, env=env, text=True, check=False
         )
-    if module not in measured.stdout:
+        if proc.returncode != 0:
+            print(f"  FAIL: pytest errored for {module} (exit {proc.returncode})")
+            return False
+        measured = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
+            measured_cmd, cwd=ROOT, env=env, capture_output=True, text=True, check=False
+        )
+        if module in measured.stdout:
+            break
         _print_report_stderr(measured.stderr)
+        if section_retries_left and _is_corrupt_data(measured.stdout, measured.stderr):
+            section_retries_left -= 1
+            print(
+                f"  WARN: corrupt coverage data for {module} (the data file was "
+                "corrupt at generation time) — re-running the pytest section once"
+            )
+            continue
         print(f"  FAIL: {module} was not measured by its tests — gate failed")
         return False
     report = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv (sys.executable), no shell
@@ -640,6 +743,7 @@ def _run_coverage(module: str, tests: Sequence[str]) -> bool:
             "--fail-under=100",
         ],
         cwd=ROOT,
+        env=env,
         text=True,
         check=False,
     )
