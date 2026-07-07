@@ -171,6 +171,7 @@ class TestEnrichGreeksParser:
         flat = " ".join(help_text.split())
         assert "INCLUSIVE" in flat  # --end is inclusive (+1 day internally)
         assert "repeatable" in flat  # --underlying repeats
+        assert "case-sensitive" in flat  # --underlying matching is exact (round-4)
         assert "take no lock" in flat  # --dry-run takes no lock
 
     def test_parser_defaults(self) -> None:
@@ -524,7 +525,10 @@ class TestEnrichGreeksLive:
         """Ordering law: single-flight lock → keep_awake → the COMMON pass; the
         whole-lake default threads ``underlyings=None`` + no clamps; there is NO
         ``has_option_candles`` pre-gate (an empty lake still runs the pass and
-        exits 0 — the operator explicitly asked)."""
+        exits 0 — the operator explicitly asked); the CLI's counting wrapper
+        delegates to the builder's closure exactly once and the clean summary
+        echoes ``contracts=0`` — with NO zero-match WARNING, because no
+        explicit ``--underlying`` filter was given (review round-4)."""
         _skip_account_lock(monkeypatch)
         events: list[tuple[str, Any]] = []
         real_enter = cli._enter_pull_singleflight
@@ -537,8 +541,10 @@ class TestEnrichGreeksLive:
         _record_keep_awake(monkeypatch, events)
 
         builder_calls: list[dict[str, Any]] = []
+        sentinel_invocations: list[None] = []
 
-        def _sentinel_builder() -> list[Any]:  # pragma: no cover — never invoked
+        def _sentinel_builder() -> list[Any]:
+            sentinel_invocations.append(None)
             return []
 
         def _fake_builder(lake_root: Path, **kwargs: Any) -> Any:
@@ -551,7 +557,9 @@ class TestEnrichGreeksLive:
 
         def _fake_pass(*, build_targets: Any, lake_root: Path) -> GreeksEnrichOutcome:
             events.append(("pass", lake_root))
-            pass_calls.append({"build_targets": build_targets, "lake_root": lake_root})
+            # Mirror the real pass contract: build_targets is ALWAYS invoked
+            # before an ok=True return — this drives the counting wrapper.
+            pass_calls.append({"targets": list(build_targets()), "lake_root": lake_root})
             return _OK_CLEAN
 
         monkeypatch.setattr(gep, "run_greeks_enrich_pass", _fake_pass)
@@ -566,19 +574,26 @@ class TestEnrichGreeksLive:
         assert builder_calls == [
             {"lake_root": tmp_path, "underlyings": None, "start": None, "end": None}
         ]
-        assert pass_calls == [{"build_targets": _sentinel_builder, "lake_root": tmp_path}]
+        assert pass_calls == [{"targets": [], "lake_root": tmp_path}]
+        assert sentinel_invocations == [None]  # the counting wrapper delegates ONCE
         captured = capsys.readouterr()
         assert (
             f"[brutex] enrich-greeks — window=[lake-start → lake-end) lake: {tmp_path}"
             in captured.err
         )
-        assert "[brutex] enrich-greeks done — errored_targets=0" in captured.out
+        assert "[brutex] enrich-greeks done — contracts=0 errored_targets=0" in captured.out
+        # Whole-lake (tokens=None) zero stays QUIET — the empty-lake exit-0
+        # contract is unchanged; only an EXPLICIT filter zero-match warns.
+        assert "WARNING" not in captured.err
 
     def test_live_filters_thread_inclusive_end_to_builder(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Repeatable ``--underlying`` tokens become ONE frozenset and the
-        INCLUSIVE ``--end`` reaches the builder widened ``+1 day``."""
+        INCLUSIVE ``--end`` reaches the builder widened ``+1 day``; a stubbed
+        pass that never invokes the builder leaves the count honestly UNKNOWN
+        (``contracts=?`` — never a fabricated 0, and never a spurious
+        zero-match WARNING; review round-4)."""
         _skip_account_lock(monkeypatch)
         builder_calls: list[dict[str, Any]] = []
 
@@ -605,7 +620,13 @@ class TestEnrichGreeksLive:
                 "end": date(2024, 2, 1),  # inclusive --end 2024-01-31 → half-open +1
             }
         ]
-        assert "window=[2024-01-01 → 2024-02-01)" in capsys.readouterr().err
+        captured = capsys.readouterr()
+        assert "window=[2024-01-01 → 2024-02-01)" in captured.err
+        # The stub pass never invoked the builder, so the count is honestly
+        # UNKNOWN — rendered "?" (never a fabricated 0, Golden Rule #10) and
+        # never treated as an explicit-filter zero-match (no WARNING).
+        assert "[brutex] enrich-greeks done — contracts=? errored_targets=0" in captured.out
+        assert "WARNING" not in captured.err
 
     def test_live_refused_under_peer_pull(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -687,3 +708,100 @@ class TestEnrichGreeksLive:
         # The ExitStack released the lock on the raise — a fresh acquire succeeds.
         with pull_singleflight_lock(tmp_path):
             pass
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Zero-match --underlying visibility (review round-4)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEnrichGreeksZeroMatchVisibility:
+    """An explicit ``--underlying`` matching NOTHING must never read green-silent.
+
+    Review round-4 regression: ``brutex enrich-greeks --underlying nifty``
+    (lowercase, or any typo) over a lake that stores NIFTY previously ran the
+    full live pass over ZERO targets and exited 0 printing only
+    ``errored_targets=0`` — the same silent-green typo class the round-1
+    ``_require_lake_dir`` fix targeted, one level down (the token filter is
+    exact + case-sensitive frozenset membership against the canonical-
+    uppercase ``parse_fno_symbol`` underlyings). The live summary now echoes
+    ``contracts=N`` and an explicit filter with zero matches prints one loud
+    stderr WARNING naming the tokens; the exit code is deliberately unchanged
+    (the pass genuinely completed — warn, not fail).
+    """
+
+    @staticmethod
+    def _wire_filter_faithful_seams(
+        monkeypatch: pytest.MonkeyPatch, *, stored: str = "NIFTY"
+    ) -> None:
+        """Stub builder + pass at the seam, faithful to the real contracts.
+
+        The builder honors the exact/case-sensitive ``underlyings`` filter the
+        way the real discovery does (one dummy target iff *stored* is in the
+        token set), and the pass invokes ``build_targets`` before returning
+        ``ok=True`` — exactly like the real ``run_greeks_enrich_pass`` — so the
+        CLI's counting wrapper is exercised end-to-end while the file stays
+        wheel-free (the true full-stack repro lives in
+        ``tests/integration/test_cli_greeks_enrich_e2e.py``).
+        """
+
+        def _fake_builder(
+            lake_root: Path, *, underlyings: frozenset[str] | None, start: Any, end: Any
+        ) -> Any:
+            def _build() -> list[Any]:
+                if underlyings is None or stored in underlyings:
+                    return [object()]
+                return []
+
+            return _build
+
+        monkeypatch.setattr(gep, "lake_target_builder", _fake_builder)
+
+        def _invoking_pass(*, build_targets: Any, lake_root: Path) -> GreeksEnrichOutcome:
+            list(build_targets())
+            return _OK_CLEAN
+
+        monkeypatch.setattr(gep, "run_greeks_enrich_pass", _invoking_pass)
+
+    def test_lowercase_token_zero_match_warns_and_echoes_contracts_zero(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--underlying nifty`` over a NIFTY lake warns LOUDLY, still exit 0."""
+        _skip_account_lock(monkeypatch)
+        self._wire_filter_faithful_seams(monkeypatch)
+        rc = cli.cmd_enrich_greeks(
+            tmp_path, underlying=["nifty"], start=None, end=None, dry_run=False
+        )
+        assert rc == cli.EXIT_OK  # the pass genuinely completed — warn, not fail
+        captured = capsys.readouterr()
+        assert "WARNING: --underlying matched ZERO stored option contracts" in captured.err
+        assert "(tokens: nifty)" in captured.err
+        assert "exact and case-sensitive" in captured.err
+        assert "--dry-run" in captured.err  # the operator is pointed at the scope probe
+        assert "[brutex] enrich-greeks done — contracts=0 errored_targets=0" in captured.out
+
+    def test_exact_token_match_echoes_count_and_stays_quiet(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact token enriches: ``contracts=1`` echoed, no WARNING."""
+        _skip_account_lock(monkeypatch)
+        self._wire_filter_faithful_seams(monkeypatch)
+        rc = cli.cmd_enrich_greeks(
+            tmp_path, underlying=["NIFTY"], start=None, end=None, dry_run=False
+        )
+        assert rc == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+        assert "[brutex] enrich-greeks done — contracts=1 errored_targets=0" in captured.out
+
+    def test_multi_token_zero_match_warning_names_tokens_sorted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The warning names EVERY token, sorted — a deterministic operator hint."""
+        _skip_account_lock(monkeypatch)
+        self._wire_filter_faithful_seams(monkeypatch, stored="BANKNIFTY")
+        rc = cli.cmd_enrich_greeks(
+            tmp_path, underlying=["nifty", "banknifty"], start=None, end=None, dry_run=False
+        )
+        assert rc == cli.EXIT_OK
+        assert "(tokens: banknifty, nifty)" in capsys.readouterr().err

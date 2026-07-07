@@ -269,7 +269,7 @@ class TestEnrichGreeksSubcommandE2E:
     """``brutex enrich-greeks`` — the #1188 bulk re-enrich, real driver."""
 
     def test_enrich_greeks_subcommand_bulk_reenriches_out_of_window_contract(
-        self, tmp_path: Path
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A contract NO fetch ever covered gains stamps via the subcommand."""
         lake = tmp_path / "lake"
@@ -283,7 +283,39 @@ class TestEnrichGreeksSubcommandE2E:
         assert len(done) == 1
         assert done[0]["enriched"] == 1
         assert done[0]["errored"] == 0
+        # The clean summary carries the REAL target count (review round-4).
+        assert "enrich-greeks done — contracts=1 errored_targets=0" in capsys.readouterr().out
         ce = pl.read_parquet(_month_file(lake, _CE_FEB, 2024, 2))
         assert ce["iv"].null_count() == 0
         assert ce["greeks_provenance_id"].null_count() == 0
         assert ce["spot_at_bar"].to_list() == [21000.0]
+
+    def test_enrich_greeks_lowercase_underlying_is_loud_zero_match(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Round-4 regression, full real stack: ``--underlying nifty`` is LOUD.
+
+        The case-mismatched token matches zero contracts through the REAL
+        discovery (exact frozenset membership against the canonical-uppercase
+        ``parse_fno_symbol`` underlying), nothing is enriched, and the run
+        prints one stderr WARNING + ``contracts=0`` on the summary instead of
+        the old silent ``errored_targets=0`` green (exit 0 — the pass
+        genuinely completed; warn, not fail).
+        """
+        lake = tmp_path / "lake"
+        _seed_lake(lake, ts=_TS_FEB, contracts={_CE_FEB: "105"})
+        with capture_logs() as logs:
+            rc = cli.cmd_enrich_greeks(
+                lake, underlying=["nifty"], start=None, end=None, dry_run=False
+            )
+        assert rc == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "WARNING: --underlying matched ZERO stored option contracts" in captured.err
+        assert "(tokens: nifty)" in captured.err
+        assert "exact and case-sensitive" in captured.err
+        assert "enrich-greeks done — contracts=0 errored_targets=0" in captured.out
+        done = _done_events(logs)
+        assert len(done) == 1
+        assert done[0]["enriched"] == 0
+        raw = pl.read_parquet(_month_file(lake, _CE_FEB, 2024, 2))
+        assert "iv" not in raw.columns  # untouched — the filter matched nothing

@@ -62,7 +62,10 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from brutex.data.greeks_enrich import GreeksEnrichTarget
 
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
@@ -827,6 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Bare underlying token, repeatable (NIFTY, BAJAJ-AUTO); "
+            "matching is exact + case-sensitive; "
             "default: every stored option underlying"
         ),
     )
@@ -4308,7 +4312,14 @@ def cmd_enrich_greeks(
     zero writes, zero locks, zero ``fno.greeks_enrich.*`` events. Live: takes
     the cross-process pull single-flight lock (deterministic refusal under a
     peer pull), runs the COMMON fenced pass under ``keep_awake``, and alerts +
-    re-raises halts (the ``_one_fetch_pass`` pattern). Exit: :data:`EXIT_OK`
+    re-raises halts (the ``_one_fetch_pass`` pattern). The clean-done summary
+    echoes ``contracts=N`` (the fenced build's ACTUAL target count — captured
+    by wrapping the builder, never a second discovery walk; ``?`` when the
+    pass whole-failed before the build ran), and an explicit ``--underlying``
+    that matched ZERO stored option contracts prints a loud stderr WARNING
+    naming the tokens — matching is exact + case-sensitive, so ``nifty``
+    never matches stored ``NIFTY`` (review round-4 fix, the one-level-down
+    sibling of the typo'd ``--lake-root`` guard). Exit: :data:`EXIT_OK`
     iff ``ok is True`` AND ``errored_targets == 0``; :data:`EXIT_INTERNAL_ERROR`
     otherwise (the ``lake audit-unique`` cron-visible precedent — a DELIBERATE,
     documented divergence from the never-fail ``fetch`` pull path).
@@ -4403,6 +4414,22 @@ def cmd_enrich_greeks(
     from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
     from brutex.observability.power_keepawake import keep_awake
 
+    build_targets = lake_target_builder(resolved, underlyings=tokens, start=start_d, end=end_d)
+    # contracts = how many targets the fenced build ACTUALLY put in scope,
+    # captured by wrapping the builder — NEVER a second discovery walk
+    # (discovery is O(option partition dirs); doubling it would be a hidden
+    # cost, Golden Rule #10). -1 = the build never ran (the pass whole-failed
+    # before it) — rendered "?" on the summary and never treated as a
+    # zero-match (a count the pass did not produce is never fabricated).
+    contracts = -1
+
+    def _counting_build() -> Sequence[GreeksEnrichTarget]:
+        """Delegate to the fence-safe builder, capturing the target count."""
+        nonlocal contracts
+        targets = build_targets()
+        contracts = len(targets)
+        return targets
+
     with contextlib.ExitStack() as stack:
         if not _enter_pull_singleflight(stack, resolved):
             return EXIT_USER_ERROR
@@ -4410,9 +4437,7 @@ def cmd_enrich_greeks(
             print(f"[brutex] enrich-greeks — window={span} lake: {resolved}", file=sys.stderr)
             try:
                 outcome = run_greeks_enrich_pass(
-                    build_targets=lake_target_builder(
-                        resolved, underlyings=tokens, start=start_d, end=end_d
-                    ),
+                    build_targets=_counting_build,
                     lake_root=resolved,
                 )
             except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
@@ -4421,8 +4446,22 @@ def cmd_enrich_greeks(
                 # halt convention (DEC-CLI-GREEKS-ENRICH-001).
                 _emit_pull_halt_alert(exc)
                 raise
+    if outcome.ok is True and tokens is not None and contracts == 0:
+        # An explicit --underlying that matched NOTHING must never read as a
+        # silent green run — matching is exact + case-sensitive ("nifty" never
+        # matches stored NIFTY), the one-level-down sibling of the typo'd
+        # --lake-root guard (review round-4 fix, DEC-CLI-GREEKS-ENRICH-001).
+        # Exit code deliberately unchanged: the pass genuinely completed.
+        print(
+            "[brutex] WARNING: --underlying matched ZERO stored option contracts "
+            f"(tokens: {', '.join(sorted(tokens))}) — matching is exact and "
+            "case-sensitive ('NIFTY', not 'nifty'); check the spelling/case or "
+            "run --dry-run to inspect the scope",
+            file=sys.stderr,
+        )
     if outcome.ok is True and outcome.errored_targets == 0:
-        print("[brutex] enrich-greeks done — errored_targets=0")
+        shown = str(contracts) if contracts >= 0 else "?"
+        print(f"[brutex] enrich-greeks done — contracts={shown} errored_targets=0")
         return EXIT_OK
     if outcome.ok is True:
         print(

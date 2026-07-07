@@ -364,7 +364,13 @@ hostile-review pass._
   degenerate `--end 9999-12-31` pull previously died on an uncaught post-drain `OverflowError`); `enrich-greeks`
   refuses `--end 9999-12-31` cleanly (`EXIT_USER_ERROR`, never a traceback) and refuses a nonexistent `--lake-root`
   loudly via the COMMON `_require_lake_dir` (previously a green `errored_targets=0` illusion + a materialised
-  phantom `.locks/`). HONEST: NOT O(1) — discovery is O(option partition dirs + month entries)
+  phantom `.locks/`). Review round-4 fix folded: the `enrich-greeks` clean-done summary echoes `contracts=N` (the
+  fenced build's actual target count, captured by wrapping the builder — never a second discovery walk; `?` when the
+  pass whole-failed before the build ran) and an explicit `--underlying` matching ZERO stored option contracts
+  prints one loud stderr WARNING naming the sorted tokens (matching is exact + case-sensitive — `nifty` never
+  matches stored `NIFTY`; exit 0 unchanged, the pass genuinely completed; a whole-lake zero stays quiet) — closing
+  the silent-green typo class one level below the `_require_lake_dir` guard. HONEST: NOT O(1) — discovery is
+  O(option partition dirs + month entries)
   and the pass re-READS the scoped stored bars every run (`already_current` skips writes/solves, not reads; a
   full-floor fetch over a dashboard-populated lake re-reads the whole stored index-options history inside the lock —
   levers: window scoping, `BRUTEX_CLI_GREEKS_ENRICH=0`, `BRUTEX_GREEKS_WORKERS=1`); NO CLI L2 heal seam (the
