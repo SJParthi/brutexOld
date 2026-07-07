@@ -18,7 +18,40 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+_Last updated: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1482 —
+the bulk Greeks v1→v2 re-enrichment BACKFILL closing the #1188 named follow-up:
+NEW `brutex/data/greeks_backfill.py` — a stamp-driven target-DISCOVERY +
+batching layer feeding the EXISTING `enrich_greeks_for_targets` driver
+UNMODIFIED (its value-checked reuse gate + honest NO_RATE/NO_SPOT/
+BELOW_INTRINSIC/BAD_INPUT/AT_EXPIRY demotions do ALL the correctness work; a
+Greek is NEVER fabricated), so EXPIRED contracts frozen at formula v1 AND
+CLI-`brutex fetch`-only lakes are now re-stamped to the current formula/inputs.
+Scanner (manifest-first enumeration, 1minute-only, per-contract
+`greeks_provenance_id` column probe via the NEW exported
+`stamp_is_current_inputs`/`current_inputs_pack` predicate — ONE pack shared
+with the driver gate, property-pinned) → content-addressed plan (`backfill_id`
+sha256 over formula ‖ rate-source ‖ modes ‖ sorted target keys) → bounded
+batches with a DURABLE advisory checkpoint (`SweepCheckpointStore` reused
+verbatim at `<lake>/.greeks_backfill/checkpoint.json`; crash → resume; deleted
+on completion — the stamps are the durable done-record). Surfaces: `POST
+/api/v1/universe/greeks-backfill` (+ O(1) progress route, a dedicated
+`BackgroundPullJob` — account lock skipped, lake-root single-flight KEPT so a
+backfill and a pull on the same lake serialise) + a `universe.html` panel
+(textContent-only), and `brutex greeks-backfill` with a FULLY INERT
+`--dry-run` (zero writes / checkpoint / Telegram — whole-tree sha-pinned; the
+one documented read side effect is the shared `.manifest/` cache self-heal);
+exactly ONE best-effort Telegram completion summary
+(`greeks_backfill_complete`, ✅/⚠️ honesty heads, MarkdownV2-escaped);
+`LakeWriteHalt`/`GreeksEnrichPoolBroken` never caught below the job/CLI
+boundary (checkpoint survives → next run resumes). HONEST: the scan is
+O(files) NEVER O(1); no wall-clock SLA claimed; the stamp prefilter is blind
+to a rate/spot VALUE drift under unchanged source kinds — `--force` routes
+every contract through the driver's value-checked gate, which catches exactly
+that class. NO formula bump (the enrich goldens stay frozen). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+`greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py` ALL 100%
+line+branch; every touched `cli.py`/`app.py` line+branch covered).
+Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
 `bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
@@ -590,7 +623,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+- **Active branch:** `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1482** — the bulk
+  Greeks v1→v2 re-enrichment BACKFILL closing the two #1188 named gaps: EXPIRED option contracts frozen at formula v1 +
+  CLI-`brutex fetch`-only lakes that never enriched. NEW `brutex/data/greeks_backfill.py` — a stamp-driven
+  target-DISCOVERY + batching layer feeding the EXISTING `enrich_greeks_for_targets` driver UNMODIFIED (value-checked
+  reuse gate + every honest demotion ride through; a Greek is NEVER fabricated; NO formula bump — the enrich goldens
+  stay frozen). Scanner: manifest-first enumeration, `1minute`-only, per-contract `greeks_provenance_id` column probe
+  through the NEW exported `stamp_is_current_inputs`/`current_inputs_pack` (ONE pack shared with the driver gate),
+  honest census (unstamped/v1/inputs-drift/current/futures/undecodable/probe_failed), targets sorted
+  (underlying, exchange, symbol), `force`/`expired_only`/`limit`/`per_file_pause` modes. Runner: bounded batches
+  (default 25; fail-loud `BRUTEX_GREEKS_BACKFILL_BATCH`/`_PAUSE_S`), DURABLE advisory checkpoint =
+  `SweepCheckpointStore` reused verbatim at `<lake>/.greeks_backfill/checkpoint.json` (corrupt/foreign-id → ignored
+  loudly; record failure → logged + continue; DELETED on completion — the stamps are the durable done-record);
+  `LakeWriteHalt`/`GreeksEnrichPoolBroken` never caught below the job/CLI boundary. Surfaces: `POST
+  /api/v1/universe/greeks-backfill` + O(1) progress route on a dedicated `BackgroundPullJob` (account lock skipped —
+  zero vendor calls; lake-root single-flight KEPT so a backfill and a pull on one lake serialise) + a `universe.html`
+  panel (textContent-only); `brutex greeks-backfill` with a FULLY INERT `--dry-run` (zero writes/checkpoint/Telegram,
+  whole-tree sha-pinned; the one documented read side effect is the shared `.manifest/` cache self-heal); exactly ONE
+  Telegram completion summary (`greeks_backfill_complete` ✅/⚠️ + `emit_greeks_backfill_complete_alert`). HONEST: the
+  scan is O(files) NEVER O(1); no wall-clock SLA; the stamp prefilter is blind to rate/spot VALUE drift under
+  unchanged source kinds — `--force` routes everything through the driver's value-checked gate. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py` ALL 100%
+  line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
+  Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
   MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
   widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
   LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
@@ -2131,7 +2186,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/kind-goldberg-wln56a`
+- **Active feature branch:** `claude/peaceful-newton-fehcc3`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
