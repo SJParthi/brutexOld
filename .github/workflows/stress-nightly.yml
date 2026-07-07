@@ -159,6 +159,18 @@ jobs:
               exit 1
               ;;
           esac
+          # Magnitude fence BEFORE the `[ -gt ]` comparison (SEC7-1): the test
+          # builtin is int64 — a digits-only value ABOVE int64 makes it ERROR
+          # ("integer expression expected"), and inside an `if` condition that
+          # error evaluates FALSE, silently falling through to launch the
+          # un-completable run. Any value with more digits than $max already
+          # exceeds it, so refuse on LENGTH without ever parsing the number.
+          if [ "${#ev}" -gt "${#max}" ]; then
+            echo "::error::STRESS_EVENTS=$STRESS_EVENTS exceeds the ubuntu-tier ceiling ($max)." >&2
+            echo "::error::This job's 60-min timeout cannot complete a soak-scale run." >&2
+            echo "::error::Run a real multi-hour soak via .github/workflows/soak-selfhosted.yml (soak_minutes input)." >&2
+            exit 1
+          fi
           if [ "$ev" -gt "$max" ]; then
             echo "::error::STRESS_EVENTS=$STRESS_EVENTS exceeds the ubuntu-tier ceiling ($max)." >&2
             echo "::error::This job's 60-min timeout cannot complete a soak-scale run." >&2
@@ -193,7 +205,12 @@ jobs:
         # dispatched mini-run's failure — e.g. the fence refusing an oversized
         # event count — must not be eyeball-only, DEC-SOAK-REAL-TIER-001 G5); a
         # push is an operator-watched dev event and still needs no issue.
-        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        # `|| cancelled()` (SOAK-R7-2 / SEC7-3): a job killed by its own
+        # job-level `timeout-minutes: 60` reports CANCELLED, not FAILED, so a
+        # bare `failure()` step SKIPS and a hung/deadlocked nightly stress run
+        # would die silently — the exact DEC-MUTATION-ALERT-CANCELLED-001
+        # pathology, mirrored from soak-selfhosted.yml's AL-SOAK-1 fix.
+        if: (failure() || cancelled()) && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: actions/github-script@v9
         with:
           script: |

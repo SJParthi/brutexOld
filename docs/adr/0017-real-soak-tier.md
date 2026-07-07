@@ -81,6 +81,12 @@ breach (a) fires a CRITICAL `SweepAlerter.soak_drift` Telegram alert in
 real time — the driver's `on_breach` is WIRED to it (DEC-PULL-HEALTH-WIRING-001
 precedent, which bound the originally-dormant pull-health monitor), a
 trigger-independent push that is a silent no-op when Telegram is disabled.
+HONEST prerequisite (OH7-1): `soak-selfhosted.yml` wires NO Telegram
+secrets/env, so on the soak tier this push is live ONLY if the self-hosted
+runner daemon's own environment exports `BRUTEX_TELEGRAM_BOT_TOKEN` /
+`BRUTEX_TELEGRAM_CHAT_ID` / `BRUTEX_TELEGRAM_ENABLED=true` — an operator
+runner-service configuration, out-of-band of the workflow; without it the
+auto-opened issue is the ONLY automatic failure signal.
 `soak.p99_drift` is OBSERVE-ONLY — it fires NEITHER this push NOR the hard gate
 (see below). The
 end-of-run HARD gate (b) is the DETERMINISTIC oracles ONLY — the RSS ceiling, the

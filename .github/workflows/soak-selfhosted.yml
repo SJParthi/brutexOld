@@ -16,7 +16,13 @@
 # the driver WIRES the monitor's on_breach to `SweepAlerter.soak_drift`, so the
 # INSTANT a MONOTONE RSS-ceiling / fd-growth rule edges into breach a CRITICAL
 # Telegram alert fires in real time (trigger-independent; a silent no-op when
-# Telegram is disabled). The end-of-run HARD gate is the DETERMINISTIC oracles —
+# Telegram is disabled). HONEST prerequisite (OH7-1): this workflow wires NO
+# Telegram secrets/env — the real-time push is LIVE only if the self-hosted
+# runner daemon's own environment exports BRUTEX_TELEGRAM_BOT_TOKEN /
+# BRUTEX_TELEGRAM_CHAT_ID / BRUTEX_TELEGRAM_ENABLED=true (an operator
+# runner-service configuration, out-of-band of this file); without them the
+# alert is a SILENT NO-OP and the issue watchdog below is the ONLY automatic
+# signal. The end-of-run HARD gate is the DETERMINISTIC oracles —
 # an RSS-ceiling / fd-growth / audit-chain breach fails the pytest run so the
 # "open issue on failure" step files a tracked issue. `soak.p99_drift` is
 # OBSERVE-ONLY (a sub-second window's p99 is fsync/GC/scheduler-jitter-bound, so
@@ -55,7 +61,11 @@
 # 6 h (`soak_minutes` default 360). ru_maxrss on macOS is a PEAK not a slope, so
 # the RSS rule is an absolute ceiling backstop, not a growth gate (see
 # process_probe.py). A garbage `soak_minutes` dispatch fails the `plan` job
-# (operator-watched — a dispatch is interactive) and the soak job is SKIPPED;
+# (operator-watched — a dispatch is interactive) and the soak job is SKIPPED —
+# including the numeric-but-degenerate shapes: a leading-zero value is
+# base-10-coerced (never silently octal-shortened, SOAK-R7-3) and an
+# above-2-weeks / int64-wrapping value is REFUSED (SEC7-2), so a zero or
+# negative timeout/duration can never reach the soak job;
 # the issue watchdog covers the SOAK job's failure/cancellation, which is the
 # unattended (cron) risk the watchdog exists for.
 
@@ -68,7 +78,7 @@ on:
   workflow_dispatch:
     inputs:
       soak_minutes:
-        description: "Soak wall-clock minutes (job timeout is this + 30)"
+        description: "Soak wall-clock minutes, max 20160 (job timeout is this + 30 + this/6)"
         required: false
         default: "360"
 
@@ -115,9 +125,37 @@ jobs:
               exit 1
               ;;
           esac
-          echo "timeout_minutes=$((m + 30))" >> "$GITHUB_OUTPUT"
-          echo "duration_s=$((m * 60))" >> "$GITHUB_OUTPUT"
-          echo "Soak plan: soak_minutes=$m timeout_minutes=$((m + 30)) duration_s=$((m * 60))"
+          # Magnitude fence BEFORE any arithmetic (SEC7-2): bash arithmetic is
+          # 64-bit and WRAPS modulo 2^64 — a digits-only value near 2^64 turns
+          # `$((m + 30))` into 0 and `$((m * 60))` NEGATIVE, which would emit a
+          # degenerate job timeout plus a negative STRESS_DURATION_S that the
+          # soak's deadline loop treats as "one window" (a fake-green ~1 s
+          # 'multi-hour' soak). Refuse on LENGTH first (never parsing the
+          # oversized number), then bound to 2 weeks.
+          if [ "${#m}" -gt 5 ]; then
+            echo "::error::soak_minutes='$SOAK_MINUTES' is absurdly large (max 20160 = 2 weeks)." >&2
+            exit 1
+          fi
+          # Force DECIMAL (SOAK-R7-3): the digits fence admits a leading zero,
+          # and $(( )) would parse '0360' as OCTAL 240 — a silent 2/3-length
+          # soak ('090' would instead abort with a raw bash base error). The
+          # fence guarantees non-empty digits, so base-10 coercion is safe.
+          m=$((10#$m))
+          if [ "$m" -gt 20160 ]; then
+            echo "::error::soak_minutes=$m exceeds the 2-week ceiling (20160)." >&2
+            exit 1
+          fi
+          # Slack SCALES with duration (SOAK-R7-4): the end-of-run cost is
+          # LINEAR in soak minutes (the in-step verify_chain over the grown
+          # audit JSONL, artifact summarize/upload, teardown) while a fixed
+          # +30 is not — a 6 h soak whose oracles all PASSED could be
+          # timeout-killed mid-teardown and file a spurious CRITICAL issue.
+          # +30 covers the fixed install/rebuild cost; +m/6 the linear tail.
+          timeout_minutes=$((m + 30 + m / 6))
+          duration_s=$((m * 60))
+          echo "timeout_minutes=$timeout_minutes" >> "$GITHUB_OUTPUT"
+          echo "duration_s=$duration_s" >> "$GITHUB_OUTPUT"
+          echo "Soak plan: soak_minutes=$m timeout_minutes=$timeout_minutes duration_s=$duration_s"
 
   soak:
     name: Real multi-hour soak (drift-gated)
@@ -127,11 +165,13 @@ jobs:
     # block). Same precedent as verify-m4pro.yml / bench-m4pro.yml.
     runs-on: [self-hosted, macos, m4pro]
     # SELF-KILL FIX (DEC-SOAK-REAL-TIER-001): the job timeout is DERIVED from the
-    # requested duration (+30 min for install/teardown), NOT a fixed 60 — computed
-    # by the `plan` job (GHA expressions have no arithmetic; fromJSON of a
-    # precomputed needs-output is valid). A scheduled run reads the '360'
-    # default → 390. This is the structural fix for the #208 trap where a soak
-    # could never fit its own fixed-60 timeout.
+    # requested duration (+30 min fixed install/rebuild slack + m/6 for the
+    # duration-LINEAR teardown cost — verify_chain over the grown audit JSONL,
+    # artifact summarize/upload; SOAK-R7-4), NOT a fixed 60 — computed by the
+    # `plan` job (GHA expressions have no arithmetic; fromJSON of a precomputed
+    # needs-output is valid). A scheduled run reads the '360' default → 450.
+    # This is the structural fix for the #208 trap where a soak could never fit
+    # its own fixed-60 timeout.
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
 
     env:
@@ -197,7 +237,7 @@ jobs:
       - name: Run soak (drift-gated)
         # G2 belt-and-suspenders: the SAME derived bound is ALSO applied as a
         # per-step timeout, so even if the job-level expression silently
-        # no-op'd the run still cannot outrun `soak_minutes + 30`.
+        # no-op'd the run still cannot outrun `soak_minutes + 30 + m/6`.
         # --basetemp pins pytest's temp root to the JOB-scoped $RUNNER_TEMP
         # (SOAK-R6-2 / SEC6-1): on this persistent macOS runner the default
         # basetemp lives under TMPDIR (`/var/folders/.../T/`, NOT `/tmp`), so a
@@ -216,12 +256,39 @@ jobs:
           echo "Soaking for STRESS_DURATION_S=$STRESS_DURATION_S seconds"
           pytest tests/stress -m 'stress or soak' --tb=short --basetemp "$RUNNER_TEMP/soak-tmp"
 
+      - name: Summarize soak artifacts (bounded)
+        # SOAK-R7-4: NEVER upload the raw soak tree — a 6 h soak measurably
+        # produces a multi-GiB fsync'd audit JSONL (~1.4K appends/s extrapolates
+        # to ~8+ GiB), whose upload (a) burns public-repo artifact storage and
+        # (b) runs inside the job clock, risking a mid-teardown timeout-kill
+        # that files a spurious CRITICAL issue for a soak that PASSED. The
+        # chain was already verified IN-RUN by the pytest oracle; the drift
+        # verdicts live in the last windows — so upload a small bounded
+        # summary: the tree listing + the last 64 KiB of each log/JSONL.
+        if: always()
+        run: |
+          src="$RUNNER_TEMP/soak-tmp"
+          dst="$RUNNER_TEMP/soak-drift-summary"
+          mkdir -p "$dst"
+          if [ -d "$src" ]; then
+            ls -lR "$src" > "$dst/tree.txt" || true
+            i=0
+            find "$src" -type f \( -name '*.jsonl' -o -name '*.log' -o -name '*.json' -o -name '*.txt' \) -print |
+              while IFS= read -r f; do
+                i=$((i + 1))
+                {
+                  echo "== $f (last 64 KiB) =="
+                  tail -c 65536 "$f"
+                } > "$dst/tail-$i-$(basename "$f").txt" || true
+              done
+          fi
+
       - name: Upload soak drift artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: soak-drift-logs
-          path: ${{ runner.temp }}/soak-tmp/**
+          path: ${{ runner.temp }}/soak-drift-summary/**
           if-no-files-found: ignore
           retention-days: 14
 
@@ -252,6 +319,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any MONOTONE RSS/fd drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time (a timeout-kill did not); soak.p99_drift is observe-only (structlog + the brutex_soak_p99_ratio gauge) — it fires no Telegram alert and never opens this issue.`,
+              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any MONOTONE RSS/fd drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time ONLY IF the runner daemon's environment exports the BRUTEX_TELEGRAM_* credentials (this workflow wires no Telegram secrets; without them the push is a silent no-op — and a timeout-kill fires none either), so this issue is the guaranteed signal; soak.p99_drift is observe-only (structlog + the brutex_soak_p99_ratio gauge) — it fires no Telegram alert and never opens this issue.`,
               labels: ['bug', 'soak', 'critical'],
             });

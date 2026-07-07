@@ -46,8 +46,14 @@ Knobs (DYNAMIC)
 
 Marker discipline
 -----------------
-Every stress test carries ``@pytest.mark.stress``; the long soak ALSO carries
-``@pytest.mark.soak`` so it is selected only on the self-hosted tier. Unit /
-property / integration runs SKIP both markers. Bench tests are separate
-(``tests/bench/``).
+Every stress test carries ``@pytest.mark.stress`` — EXCEPT the long soak
+(``test_soak_sustained``), which carries ``@pytest.mark.soak`` INSTEAD so the
+nightly ``-m stress`` tier never runs the multi-hour driver and the per-PR
+``-m 'not soak'`` step deselects it; ONLY the self-hosted
+``-m 'stress or soak'`` tier selects it. Because both marker tiers select BY
+MARKER, an UNMARKED stress test silently drops out of both (only the per-PR
+``-m 'not soak'`` step would still run it) — the SOAK-R7-1 drift; the
+collection pin is ``-m stress`` == everything except the long soak and
+``-m 'stress or soak'`` == the whole directory. Unit / property / integration
+runs SKIP both markers. Bench tests are separate (``tests/bench/``).
 """
