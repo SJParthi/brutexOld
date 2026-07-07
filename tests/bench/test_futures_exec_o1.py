@@ -16,8 +16,9 @@ all-live AND to the real 60-expired+3-live registry shape to prove flatness)
 * The per-trade MAE/MFE walk is O(bars-in-[entry, exit]) (≤ ~375 intraday
   minutes) — inherent R22 work; this bench holds the window size CONSTANT
   across tiers so the per-trade ratio isolates the lookup cost.
-* The front-month pick is O(M) over the underlying's FULL cached calendar —
-  the registry deliberately RETAINS expired months (no live filter is
+* The front-month pick is O(M log M) over the underlying's FULL cached
+  calendar (the SHARED ``select_near_month`` SORTS the live set) — the
+  registry deliberately RETAINS expired months (no live filter is
   possible at cache-build time: ``on_date`` varies per historical trade), so
   the real M is the whole accumulated calendar (~13/listed-year, ~78 for
   NIFTY 2020→2026, growing ~13/yr), NOT merely the ≤ ~3 currently-live
@@ -182,7 +183,8 @@ class TestFuturesExecO1:
         # cached FUT calendar retains EXPIRED months (registry_store.py's
         # incremental-skip design; no live filter is possible at cache-build
         # time since on_date varies per historical trade), so the per-trade
-        # pick is O(M) over the WHOLE accumulated calendar, not the ≤ ~3 live
+        # pick is O(M log M) (sort-based) over the WHOLE accumulated
+        # calendar, not the ≤ ~3 live
         # months. Pin: 60 expired (2020→2024) + the same 3 live months (the
         # ~78-contract NIFTY 2020→2026 shape) vs 3-live-only must stay flat —
         # both tiers resolve the IDENTICAL front month (27Jan25), so the

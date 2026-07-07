@@ -743,15 +743,19 @@ hostile-review pass._
   brokerage min(₹20, 0.03%×turnover) (PLAN_FINALIZATION §8.1 row 2) + futures STT 0.02% eff. 2024-10-01 / 0.05% eff.
   2026-04-01 (TAX_HANDLING §8.1 + DEC-COST-003) are encoded; EVERY futures-ETC window + NSE futures IPFT + futures
   stamp + pre-2024-10-01 futures STT ship as rate-less REFUSAL rows (figures live in source TEXT only — the §14
-  proposal block is not a verification) ⇒ a cost-bearing stock future counts COST_REGIME_UNVERIFIED; INDEX futures
+  proposal block is not a verification) ⇒ a cost-bearing stock future counts COST_REGIME_UNVERIFIED (exercised via
+  the SYNTHETIC cited-regime/lot test fixture — no NATURAL input reaches the gate today: index futures are cost-free
+  and skip it, a natural stock future trips LOT_SIZE_UNKNOWN first; the designed forward path, naturally reachable
+  only once a cost-bearing stock-futures scope decree + cited RegimeRows land); INDEX futures
   are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 — net == gross; the ±tick is R15 fill realism, not a statutory
   cost). Lots via the ONE date-keyed derivative-lot history (2020-dated / stock signals ⇒ counted LOT_SIZE_UNKNOWN,
   never invented). STOCK winners → ExecutionKind.STOCK_SPOT_DEFERRED with an honest note NAMING the future scope
   decree (R11); routing lives ABOVE the instrument-agnostic executor. R22 MAE/MFE from the contract's OWN minute
   path; R31 VIX passthrough (missing = honest None, counted); R45 differential vs an independent naive
   Decimal-pipeline reference (AST-pinned to share only the primitive readers; run_id-seeded deterministic sample;
-  mismatch ⇒ SUSPECT + loud); R42 content-hash-stamped atomic sidecar (tampered/torn fails its stamp, rebuilt
-  byte-identical); R4 preflight disk-verifies each trade month's front-month partition(s) across the roll seam and
+  mismatch ⇒ SUSPECT + loud); R42 content-hash-stamped atomic sidecar (an UNKEYED sha256 integrity checksum —
+  corrupted/torn fails its stamp, rebuilt byte-identical; NOT tamper-evidence: no secret key, a rewriter could
+  restamp); R4 preflight disk-verifies each trade month's front-month partition(s) across the roll seam and
   refuses naming exact months — no Phase-1 file edited (the pure helper is exposed for the shim). ROLL-9
   suffix-independence property-gated (fills+MAE/MFE bit-identical under absent/mutated/extreme post-exit suffixes);
   R13/R30 rank-independence property-gated (annotation additive-only under ONE `futures_exec` key). O(1) honest

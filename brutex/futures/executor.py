@@ -33,17 +33,24 @@ pinned reject order, hash-chained audit) without touching the options path (R12)
 
 :func:`route_execution` classifies an instrument label (INDEX → futures; STOCK →
 spot, deferred per the future scope decree; junk → unsupported) so the executor
-core stays instrument-agnostic — which keeps the cost-scope branch genuinely
-reachable in a unit test (a cost-bearing stock-future signal fed straight to
-:func:`materialize_futures_trade` exercises the ``COST_REGIME_UNVERIFIED`` gate).
+core stays instrument-agnostic. HONEST reachability (Golden Rule #10): the
+``COST_REGIME_UNVERIFIED`` gate is exercised today ONLY via the SYNTHETIC
+cited-regime test fixture (a stock-future signal with a monkeypatched lot fed
+straight to :func:`materialize_futures_trade`) — NO natural input reaches it:
+index futures are cost-free per the verified table and skip the gate, and a
+natural stock future has no verifiable lot history so ``LOT_SIZE_UNKNOWN``
+fires first. The branch is the DESIGNED forward path, deliberately kept — it
+becomes naturally reachable only when a cost-bearing (stock) futures scope
+decree + cited RegimeRows land.
 
 ## Determinism + O(1) (Golden Rules #4 / #5)
 
 :func:`materialize_futures_trade` is pure given deterministic seams: same signal
 + resolver + source → the same priced trade, bit-for-bit. Per-trade cost is
 O(1)-effective after the resolver/source caches warm (one front-month pick —
-O(M) over the underlying's FULL cached FUT calendar, which retains expired
-months: ~dozens, bounded, trade-count-independent, see the honest bound in
+O(M log M) over the underlying's FULL cached FUT calendar, since the SHARED
+picker SORTS and the calendar retains expired months: M ~dozens, bounded,
+trade-count-independent, see the honest bound in
 :mod:`brutex.futures.contract_resolver` — + two O(1) dict bar lookups); the
 MAE/MFE path walk is O(bars-in-trade) (≤ ~375 intraday minutes) — inherent
 per-trade work, honestly stated, never an O(1)-total claim.

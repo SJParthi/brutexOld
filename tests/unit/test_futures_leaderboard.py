@@ -163,9 +163,11 @@ class TestTranslationSidecar:
         record = json.loads(path.read_text())
         assert set(record) == {"payload", "content_hash"}
 
-    def test_r42_tampered_sidecar_fails_stamp(self, tmp_path: Path) -> None:
-        # [R42] a tampered payload fails verification — discard + rebuild.
-        path = write_translation_sidecar(_result(), out_root=tmp_path, run_id="tamper-run")
+    def test_r42_corrupted_sidecar_fails_stamp(self, tmp_path: Path) -> None:
+        # [R42] a corrupted (rewritten-payload) record fails the UNKEYED
+        # integrity checksum — discard + rebuild. NOT a tamper-evidence claim:
+        # the stamp is a keyless self-hash (a rewriter could also restamp).
+        path = write_translation_sidecar(_result(), out_root=tmp_path, run_id="corrupt-run")
         record = json.loads(path.read_text())
         record["payload"]["net_pnl_paisa"] = 999_999_999
         path.write_text(json.dumps(record))

@@ -27,18 +27,21 @@ are the lake partition key). Still nothing → ``None`` → the executor's hones
 ## O(1) story (Golden Rule #10)
 
 The per-underlying ``(contract_symbol, expiry)`` calendar loads ONCE and is
-cached; each per-trade resolve is then one :func:`select_near_month` pass over
-the underlying's FULL cached FUT calendar. HONEST BOUND: the registry
+cached; each per-trade resolve is then one :func:`select_near_month` pick over
+the underlying's FULL cached FUT calendar. HONEST BOUND: the shared picker
+SORTS the live set (kept as the ONE front-month source per §11 COMMON —
+deliberately NOT forked into a second min-scan picker), the registry
 deliberately RETAINS expired months (its incremental-skip reason for being,
-``registry_store.py``) and the resolver applies no live filter at cache-build
-time (it cannot — ``on_date`` varies per historical trade), so the pass is
-**O(M) over the whole accumulated calendar** (~13 monthly contracts per
-listed year, ~78 for NIFTY 2020→2026, growing ~13/yr) — NOT merely the ≤ ~3
-currently-live serial months. M is bounded (dozens) and independent of the
-trade count, so the per-trade cost is effectively O(1) — honestly NOT a
-literal O(1); bench-pinned flat on the real expired-plus-live registry shape
-(``tests/bench/test_futures_exec_o1.py``). The FIRST load is O(contracts)
-(one registry query or one directory scan) — stated, never hidden.
+``registry_store.py``), and the resolver applies no live filter at cache-build
+time (it cannot — ``on_date`` varies per historical trade), so the pick is
+**O(M log M) over the whole accumulated calendar** (~13 monthly contracts per
+listed year, ~78 for NIFTY 2020→2026, growing ~13/yr) — sort-based, NOT one
+pass, and NOT merely the ≤ ~3 currently-live serial months. M is bounded
+(dozens) and independent of the trade count, so the per-trade cost is
+effectively O(1) — honestly NOT a literal O(1); bench-pinned flat on the real
+expired-plus-live registry shape (``tests/bench/test_futures_exec_o1.py``).
+The FIRST load is O(contracts) (one registry query or one directory scan) —
+stated, never hidden.
 """
 
 from __future__ import annotations

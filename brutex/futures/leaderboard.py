@@ -17,10 +17,13 @@ surfaces (the options precedent):
   untouched (R13 annotation-never-reranks). A STOCK winner annotates its
   honest deferral note, never a fabricated leg.
 * :func:`write_translation_sidecar` / :func:`read_translation_sidecar` — the
-  R42 atomic, content-hash-STAMPED JSONL stage output: a half-written sidecar
-  fails its stamp on read and is discarded + rebuilt; upstream spot artifacts
-  are never touched (the write goes through the COMMON
-  :func:`~brutex.data.atomic_io.atomic_write_simple`).
+  R42 atomic, content-hash-STAMPED JSONL stage output: a half-written /
+  corrupted sidecar fails its stamp on read and is discarded + rebuilt;
+  upstream spot artifacts are never touched (the write goes through the COMMON
+  :func:`~brutex.data.atomic_io.atomic_write_simple`). HONEST (Golden Rule
+  #10): the stamp is an UNKEYED sha256 self-hash — a torn-write / corruption
+  integrity CHECKSUM, NOT tamper-evidence (no secret key: whoever can rewrite
+  the payload can restamp it).
 """
 
 from __future__ import annotations
@@ -208,7 +211,11 @@ def _sidecar_record(result: FuturesRuleResult, *, run_id: str) -> dict[str, obje
 
 
 def _payload_hash(payload: Mapping[str, object]) -> str:
-    """The canonical content hash of a sidecar payload (sorted-key JSON, sha256)."""
+    """The canonical content hash of a sidecar payload (sorted-key JSON, sha256).
+
+    An UNKEYED self-hash: it detects torn writes / on-disk corruption, NOT
+    tampering (no secret key — anyone who can rewrite the payload can restamp).
+    """
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -267,7 +274,9 @@ def read_translation_sidecar(path: Path) -> dict[str, object]:
     ------
     ValueError
         On a malformed record or a content-hash mismatch (a half-written /
-        tampered sidecar) — the caller discards + rebuilds, never consumes it.
+        corrupted sidecar — torn write, bit rot) — the caller discards +
+        rebuilds, never consumes it. The stamp is an unkeyed integrity
+        checksum, NOT tamper-evidence (see :func:`_payload_hash`).
     """
     raw = path.read_text(encoding="utf-8").strip()
     try:
