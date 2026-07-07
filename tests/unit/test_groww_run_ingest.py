@@ -1333,9 +1333,7 @@ class TestReplayCaptureDrainSeams:
                     _capture_record("NSE:INDEX:NIFTY:1minute", seq=0),
                     _capture_record("NSE:INDEX:NIFTY:1minute", seq=1),
                 ),
-                ("BANKNIFTY", "1minute"): (
-                    _capture_record("NSE:INDEX:BANKNIFTY:1minute", seq=2),
-                ),
+                ("BANKNIFTY", "1minute"): (_capture_record("NSE:INDEX:BANKNIFTY:1minute", seq=2),),
             },
             remaining=(_capture_record("NSE:INDEX:NIFTY:1day", seq=3),),
         )

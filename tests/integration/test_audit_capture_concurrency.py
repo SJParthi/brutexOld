@@ -114,7 +114,13 @@ class TestParallelSamePartitionConflictRace:
             barrier = threading.Barrier(2)
             errors: list[BaseException] = []
 
-            def _race(price: str, *, cap: AuditCaptureSink, gate: threading.Barrier) -> None:
+            def _race(
+                price: str,
+                *,
+                cap: AuditCaptureSink,
+                gate: threading.Barrier,
+                sink_errors: list[BaseException],
+            ) -> None:
                 # SAME timestamps, DIFFERENT values — a genuine keep-first
                 # conflict whose stored winner depends on apply order.
                 bars = [_bar(0, price), _bar(1, price)]
@@ -127,11 +133,15 @@ class TestParallelSamePartitionConflictRace:
                         interval="1minute",
                         bars=bars,
                     )
-                except BaseException as exc:  # pragma: no cover — fail loud below
-                    errors.append(exc)
+                except Exception as exc:  # recorded, re-asserted on the main thread
+                    sink_errors.append(exc)  # pragma: no cover — fail loud below
 
             threads = [
-                threading.Thread(target=_race, args=(price,), kwargs={"cap": capture, "gate": barrier})
+                threading.Thread(
+                    target=_race,
+                    args=(price,),
+                    kwargs={"cap": capture, "gate": barrier, "sink_errors": errors},
+                )
                 for price in ("101.00", "202.00")
             ]
             for t in threads:

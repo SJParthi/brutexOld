@@ -76,7 +76,12 @@ def _run_schedule(sink: ParquetBarSink | AuditCaptureSink, *, symbol: str) -> fl
             segment="INDEX",
             symbol=symbol,
             interval="1minute",
-            bars=_bars(day=4 + (i % 5), start_minute=i * _BARS_PER_APPEND, count=_BARS_PER_APPEND, base="150.25"),
+            bars=_bars(
+                day=4 + (i % 5),
+                start_minute=i * _BARS_PER_APPEND,
+                count=_BARS_PER_APPEND,
+                base="150.25",
+            ),
         )
     return time.perf_counter() - started
 
