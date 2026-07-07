@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1482 —
+_Last updated: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1531 —
 the bulk Greeks v1→v2 re-enrichment BACKFILL closing the #1188 named follow-up:
 NEW `brutex/data/greeks_backfill.py` — a stamp-driven target-DISCOVERY +
 batching layer feeding the EXISTING `enrich_greeks_for_targets` driver
@@ -60,7 +60,7 @@ valid-JSON non-object payload as `SweepCheckpointError` (never a wedging
 `AttributeError`); a schema-poisoned stamp column + an out-of-range month
 filename fold into `probe_failed`/skip instead of crashing the scan; the
 `expired_only` expiry==today boundary regression-pinned.
-FIX ROUND 2 folded (refuter-majority-confirmed, MIGRATION.md #1482): BOTH
+FIX ROUND 2 folded (refuter-majority-confirmed, MIGRATION.md #1531): BOTH
 dashboard jobs' cross-process flock re-keyed onto the STORE-derived WRITE
 root (`app._job_lake_root_resolver` — a `--lake-root X`/env-divergent launch
 no longer yields disjoint lock files that let a CLI backfill race a dashboard
@@ -78,7 +78,7 @@ advisory contract); every bar-writing wet batch touches
 THIRD component, so a CLI backfill's Greeks reach a running dashboard's
 caches on the next poll; the wet report's scan-census carry gains killing
 tests.
-FIX ROUND 3 folded (refuter-majority-confirmed, MIGRATION.md #1482): the
+FIX ROUND 3 folded (refuter-majority-confirmed, MIGRATION.md #1531): the
 durable checkpoint FREEZES at the last fully-clean prefix boundary (`record`
 only while the run's CUMULATIVE `errored == 0` — an errored contract keeps its
 stale stamps, so an identical-plan crash-resume could silently SKIP it and
@@ -91,7 +91,7 @@ longer clobber/clear each other's liveness beat and resurrect the false
 CRITICAL stall-alert class this branch closed); a stray FILE at
 `.greeks_backfill` (ENOTDIR) reads the stable `absent` token instead of
 muting the ENTIRE composite `lake_revision` probe.
-FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1482): the
+FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1531): the
 `backfill_id` binds a rate-source VALUE fingerprint (exact fixed rate / sha256
 of the loaded CSV curve), so a crashed FORCE run's surviving checkpoint
 self-ignores across a rate-value change instead of exempting the recorded
@@ -688,7 +688,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1482** — the bulk
+- **Active branch:** `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1531** — the bulk
   Greeks v1→v2 re-enrichment BACKFILL closing the two #1188 named gaps: EXPIRED option contracts frozen at formula v1 +
   CLI-`brutex fetch`-only lakes that never enriched. NEW `brutex/data/greeks_backfill.py` — a stamp-driven
   target-DISCOVERY + batching layer feeding the EXISTING `enrich_greeks_for_targets` driver UNMODIFIED (value-checked
@@ -708,17 +708,17 @@ hostile-review pass._
   Telegram completion summary (`greeks_backfill_complete` ✅/⚠️ + `emit_greeks_backfill_complete_alert`). HONEST: the
   scan is O(files) NEVER O(1); no wall-clock SLA; the stamp prefilter is blind to rate/spot VALUE drift under
   unchanged source kinds — `--force` routes everything through the driver's value-checked gate. ADVERSARIAL-REVIEW FIX
-  ROUND folded (same branch, pre-merge; details in #1482): CLI wet run HOLDS the lake-root single-flight (refusal on
+  ROUND folded (same branch, pre-merge; details in #1531): CLI wet run HOLDS the lake-root single-flight (refusal on
   contention; `--dry-run` lock-free); scan/probe per-contract/per-file watchdog liveness beats + honest scanning label
   (the DEC-PIPELINE-STALL-HEARTBEAT-001 false-CRITICAL class closed on the new phase); `force`+`limit` REFUSED at
   scanner/CLI/route (chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects non-object JSON with
   `SweepCheckpointError`; schema-poisoned stamp columns + out-of-range month filenames fold into `probe_failed`/skip
   instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). FIX ROUND 3 folded
-  (refuter-majority-confirmed, #1482): the checkpoint freezes at the last fully-clean prefix boundary (an errored
+  (refuter-majority-confirmed, #1531): the checkpoint freezes at the last fully-clean prefix boundary (an errored
   contract is always re-fed on resume — never a false-clean `errored=0` skip); `progress_beat` is a multi-registrant
   handle-keyed registry (two concurrent jobs keep independent watchdog liveness); a stray file at `.greeks_backfill`
   reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
-  (refuter-majority-confirmed, #1482): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
+  (refuter-majority-confirmed, #1531): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
   checkpoint self-ignores across a rate-value change, so the recorded prefix is always re-routed through the driver's
   value-checked gate (spot-heal-in-crash-window = documented residue); progress beats are JOB-SCOPED on the emitting
   thread (a concurrent backfill scan no longer masks a wedged pull's HUNG→WEDGED chain; the round-3 broadcast's
