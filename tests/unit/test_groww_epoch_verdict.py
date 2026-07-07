@@ -22,6 +22,7 @@ from brutex.adapters.groww.epoch_verdict import (
     classify_epoch_sample,
     classify_epoch_timestamps,
 )
+from structlog.testing import capture_logs
 
 
 def _epoch_utc(year: int, month: int, day: int, hour: int, minute: int) -> float:
@@ -185,3 +186,51 @@ class TestClassifyEpochTimestamps:
         verdict = classify_epoch_timestamps([EPOCH_AMBIGUOUS])
         with pytest.raises(AttributeError):
             verdict.verdict = EpochVerdictKind.CONTRADICTORY  # type: ignore[misc]
+
+
+# ── silent out-of-coverage abstain (round-1 review log-storm fold) ──────────
+
+
+class TestOutOfCoverageSilentAbstain:
+    """Out-of-coverage samples abstain with ZERO per-sample calendar WARNs.
+
+    Pre-fix, ``_wall_in_session`` routed every out-of-coverage date through
+    the strict ``get_session_checked``, whose ``is_holiday_checked`` emits one
+    undeduplicated ``calendar.holiday_data_unavailable`` WARNING per call —
+    2 checks/sample x 1024 samples/payload x every window of a pull: an
+    all-epoch out-of-coverage payload (e.g. a 2027 pull after a vendor epoch
+    flip — the exact scenario this module diagnoses) stormed up to 2,048
+    WARNs PER WINDOW. The non-warning ``is_holiday_data_available`` pre-check
+    abstains silently; the ONE aggregate ``epoch_timestamp_verdict`` WARN
+    (the parser) stays the loud surface.
+    """
+
+    def test_out_of_coverage_payload_emits_zero_calendar_warns(self) -> None:
+        # FAILS BEFORE the fix: 2 calendar WARNs per sample (128 here).
+        samples: list[object] = [EPOCH_ABSTAINED] * 64
+        with capture_logs() as logs:
+            verdict = classify_epoch_timestamps(samples)
+        calendar_warns = [e for e in logs if e["event"] == "calendar.holiday_data_unavailable"]
+        assert calendar_warns == []
+        assert verdict.verdict == EpochVerdictKind.NO_EVIDENCE
+        assert verdict.abstained == 64
+
+    def test_out_of_coverage_weekend_abstains_deliberately(self) -> None:
+        # 2040-01-01 is a Sunday: its no-session verdict is data-complete, but
+        # the sample abstains anyway (the documented conservative choice — an
+        # out-of-coverage date can never read in-session, so abstaining loses
+        # no directional evidence and keeps the pre-check WARN-free).
+        epoch_2040_sunday = _epoch_utc(2040, 1, 1, 5, 0)
+        assert classify_epoch_sample(epoch_2040_sunday) == EpochSampleEvidence.ABSTAINED
+
+    def test_in_coverage_classification_unaffected_by_the_pre_check(self) -> None:
+        # The covered-span paths are byte-identical: directional, ambiguous,
+        # out-of-session and the covered SUNDAY (session is None) all classify
+        # exactly as before, with zero calendar WARNs either.
+        with capture_logs() as logs:
+            assert (
+                classify_epoch_sample(EPOCH_SUPPORTS_UNIX_UTC)
+                == EpochSampleEvidence.SUPPORTS_UNIX_UTC
+            )
+            assert classify_epoch_sample(EPOCH_SUNDAY) == EpochSampleEvidence.OUT_OF_SESSION
+        assert [e for e in logs if e["event"] == "calendar.holiday_data_unavailable"] == []

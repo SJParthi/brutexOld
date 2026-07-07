@@ -51,7 +51,11 @@ transient + (1 if bars) == in_pull_fetches`; ACCEPTS the follow-up #924 +
 NOT persisted, the #924 caveat stands); (5) the defensive epoch-timestamp
 branch gains a deterministic session-plausibility VERDICT (NEW
 `epoch_verdict.py`, unix-utc vs ist-naive against the real NSE calendar, ONE
-`groww.parse.epoch_timestamp_verdict` WARN per epoch payload) + a live-probe
+`groww.parse.epoch_timestamp_verdict` WARN per epoch payload; round-1 review
+fold: out-of-coverage dates abstain SILENTLY via the non-warning
+`is_holiday_data_available` pre-check — the strict-calendar routing would
+have stormed up to 2,048 `calendar.holiday_data_unavailable` WARNs per
+out-of-coverage payload per window) + a live-probe
 runbook — parsing byte-unchanged, the Unix-UTC assumption stays honestly
 UNVERIFIED; (6) the CLI `brutex fetch` gains the vendor-depth-floor learner +
 learned-floor planning clamp (`max(GROWW_HISTORY_FLOOR, learned floor)` via

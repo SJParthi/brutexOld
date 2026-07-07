@@ -35,12 +35,23 @@ UNVERIFIED stamp on the epoch semantics stands until a live probe transcript
 lands (the runbook). Parsing behaviour is UNCHANGED — this module is
 observe-only and never influences the stored bar.
 
-Out-of-coverage calendar dates ABSTAIN (never fabricate a session verdict):
-:func:`~brutex.calendars.nse.get_session_checked` raising
-:class:`~brutex.calendars.nse.HolidayDataUnavailableError` marks the sample
-``abstained`` (the calendar emits its own loud
-``calendar.holiday_data_unavailable`` WARNING per refusal — pre-existing
-calendar behaviour, bounded here by :data:`MAX_VERDICT_SAMPLES`).
+Out-of-coverage calendar dates ABSTAIN (never fabricate a session verdict) —
+SILENTLY, via the non-warning
+:func:`~brutex.calendars.nse.is_holiday_data_available` pre-check (the
+round-1 review log-storm fold): routing such a date through the strict
+:func:`~brutex.calendars.nse.get_session_checked` emits one
+``calendar.holiday_data_unavailable`` WARNING per call, and with TWO
+interpretation checks per sample × :data:`MAX_VERDICT_SAMPLES` samples per
+payload × every window of a pull, an out-of-coverage epoch payload (e.g. a
+2027 pull after a vendor epoch flip — the exact scenario this module
+diagnoses) would have stormed up to 2,048 undeduplicated WARNs PER WINDOW.
+The ONE aggregate ``groww.parse.epoch_timestamp_verdict`` WARN (the parser)
+stays the loud surface. The pre-check deliberately abstains on
+out-of-coverage WEEKENDS too — their no-session verdict is data-complete,
+but an abstain is strictly conservative (an out-of-coverage date can never
+read IN-session under the strict calendar, so no directional evidence is
+ever produced there; at most an ``out_of_session`` tally becomes
+``abstained``).
 
 O(1) per sample (two calendar dict lookups); the aggregate is O(min(samples,
 :data:`MAX_VERDICT_SAMPLES`)) — bounded, deterministic (first-N in input
@@ -55,7 +66,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Final
 
-from brutex.calendars.nse import HolidayDataUnavailableError, get_session_checked
+from brutex.calendars.nse import get_session_checked, is_holiday_data_available
 
 #: The fixed IST offset (+05:30, no DST) between the two candidate
 #: interpretations of one epoch value.
@@ -127,21 +138,28 @@ class EpochVerdict:
 def _wall_in_session(wall_ist: datetime) -> bool | None:
     """Is the naive IST wall-clock instant inside its date's trading session?
 
-    ``None`` = ABSTAIN — the date is an out-of-coverage weekday, where the
-    strict calendar refuses rather than fabricate a session
-    (:func:`~brutex.calendars.nse.get_session_checked`). Boundary instants
-    (exactly at open / close) count as in-session — inclusive on BOTH ends,
-    deliberately WIDER than the bar-label half-open convention of
+    ``None`` = ABSTAIN — the date lies outside the covered holiday span,
+    pre-checked with the NON-warning
+    :func:`~brutex.calendars.nse.is_holiday_data_available` (the round-1
+    review log-storm fold: routing an out-of-coverage date through the strict
+    :func:`~brutex.calendars.nse.get_session_checked` fires one
+    ``calendar.holiday_data_unavailable`` WARNING per call — up to 2 × 1024
+    per payload, per window). The abstain covers out-of-coverage WEEKENDS too
+    (data-complete but deliberately abstained — see the module docstring; an
+    out-of-coverage date can never read in-session, so no directional
+    evidence is lost). Within coverage, the strict calendar never raises, so
+    the session resolves directly. Boundary instants (exactly at open /
+    close) count as in-session — inclusive on BOTH ends, deliberately WIDER
+    than the bar-label half-open convention of
     :func:`brutex.data.session.filter_to_trading_session` (``open <= t <
     close``): a boundary instant then reads in-session under both candidate
     interpretations more often, i.e. it can only ADD ambiguity, never
     manufacture directional evidence from a knife-edge (conservative for an
     evidence check).
     """
-    try:
-        session = get_session_checked(wall_ist.date())
-    except HolidayDataUnavailableError:
+    if not is_holiday_data_available(wall_ist.date()):
         return None
+    session = get_session_checked(wall_ist.date())
     if session is None:
         return False
     return session.open_time_ist <= wall_ist.time() <= session.close_time_ist
