@@ -6,6 +6,20 @@
 //! rounds half-to-even. The Rust literals parse to the *same* IEEE-754 bit
 //! patterns as Python's, and the operation order (`pdh - 0.236*range`) is
 //! mirrored token-for-token, so the rounded results are identical.
+//!
+//! ## The BULLISH retracement ladder (`retrace_bull_*`)
+//!
+//! The bullish ladder measures UP from PDL (`pdl + ratio * range`) — it is
+//! NOT a relabeling of the bearish PDH-anchored ladder (`pdh - ratio *
+//! range`): Fibonacci ratios are asymmetric (`0.236 + 0.786 = 1.022 ≠
+//! 1.000`), so bullish 23%/78% sit at DIFFERENT prices than bearish 78%/23%
+//! (the 38/62 pair coincides only because `0.382 + 0.618 = 1.000` in IEEE —
+//! an observation, never relied on; DEC-FIB-BULLISH-RETRACE-001). Chart
+//! basis: ES Trading Academy AmiBroker, NIFTY 07-May-2026 (bullish gap-up).
+//! The 0%/100% bullish anchors are `pdl`/`pdh`, the bullish midpoint IS the
+//! shared `retrace_50_paisa` (exact integer-sum midpoint — no separate
+//! `bull_50`), and the extensions above PDH are the existing `ext_up_*`. The
+//! 52→60-condition EVALUATOR does NOT read the four `retrace_bull_*` fields.
 
 use crate::indicators::round_half_even;
 
@@ -24,6 +38,14 @@ pub struct FibLevels {
     pub retrace_62_paisa: i64,
     pub retrace_78_paisa: i64,
     pub retrace_level_at_pdl_paisa: i64,
+    /// Bullish 23% retracement: `round_half_even(pdl + 0.236 * range)`.
+    pub retrace_bull_23_paisa: i64,
+    /// Bullish 38% retracement: `round_half_even(pdl + 0.382 * range)`.
+    pub retrace_bull_38_paisa: i64,
+    /// Bullish 62% retracement: `round_half_even(pdl + 0.618 * range)`.
+    pub retrace_bull_62_paisa: i64,
+    /// Bullish 78% retracement: `round_half_even(pdl + 0.786 * range)`.
+    pub retrace_bull_78_paisa: i64,
     pub ext_up_127_paisa: i64,
     pub ext_up_162_paisa: i64,
     pub ext_up_200_paisa: i64,
@@ -64,6 +86,10 @@ pub fn compute_fib_levels(pdh_paisa: i64, pdl_paisa: i64) -> FibLevels {
         retrace_62_paisa: round_half_even(pdh_f - 0.618 * r),
         retrace_78_paisa: round_half_even(pdh_f - 0.786 * r),
         retrace_level_at_pdl_paisa: pdl_paisa,
+        retrace_bull_23_paisa: round_half_even(pdl_f + 0.236 * r),
+        retrace_bull_38_paisa: round_half_even(pdl_f + 0.382 * r),
+        retrace_bull_62_paisa: round_half_even(pdl_f + 0.618 * r),
+        retrace_bull_78_paisa: round_half_even(pdl_f + 0.786 * r),
         ext_up_127_paisa: round_half_even(pdh_f + 0.272 * r),
         ext_up_162_paisa: round_half_even(pdh_f + 0.618 * r),
         ext_up_200_paisa: round_half_even(pdh_f + r),
