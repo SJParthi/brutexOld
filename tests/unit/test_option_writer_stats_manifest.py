@@ -5,9 +5,11 @@ ONLY when bytes are rendered (``_merge_partition``'s ``added > 0`` branch and
 the ``heal_partition`` rewrite), stamping ``kind="options"`` rows whose count
 is the post-``unique`` DISTINCT ``(side, timestamp)`` height with
 ``raw_hash=None``; a pure re-pull (``added == 0``), an unchanged heal, and the
-kill switch touch NOTHING; an absent shard costs one probe and is never
-created by the writer (lazy accretion); the defensive abstain branches log and
-skip — never raise into the pull.
+kill switch touch NOTHING; an absent shard costs one probe-FIRST existence
+check (one key digest + one failed ``os.stat`` — the O(frame) bounds fold and
+the ``os.stat(dest)`` never run; review round 2) and is never created by the
+writer (lazy accretion); the defensive abstain branches log and skip — never
+raise into the pull.
 
 Whitebox per the DEC-P0-017 convention (drives ``_record_option_stats``
 directly for the abstain branches), so ``reportPrivateUsage`` is silenced.
@@ -22,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.data import lake_stats_manifest as lsm
@@ -212,9 +215,15 @@ class TestBestEffortAbstains:
         assert logs == []  # a pure no-op — not even a warning
 
     def test_underivable_bounds_are_logged_and_skipped(self, tmp_path: Path) -> None:
-        """An empty/null timestamp column (defensive) warns — never raises."""
+        """An empty/null timestamp column (defensive) warns — never raises.
+
+        The shard must EXIST to reach the bounds fold (the hook probes shard
+        existence FIRST — review round 2), so the fixture seeds it.
+        """
         import polars as pl
 
+        assert _write(tmp_path, [_option_bar(side="CE")]) == 1
+        _seed_shard(tmp_path, rows=1)
         frame = pl.DataFrame(
             {"timestamp": []},
             schema={"timestamp": pl.Datetime(time_unit="us", time_zone="UTC")},
@@ -224,13 +233,50 @@ class TestBestEffortAbstains:
         assert len(_events(logs, "lake.stats_manifest.bounds_underivable")) == 1
 
     def test_stat_failure_is_logged_and_skipped(self, tmp_path: Path) -> None:
-        """A vanished dest at the hook's ``os.stat`` warns — never raises."""
+        """A vanished dest at the hook's ``os.stat`` warns — never raises.
+
+        The GHOST dest sits under the SAME (shard-seeded) series, so the
+        probe-first hook flows through to its own ``os.stat(dest)``.
+        """
         import polars as pl
 
+        assert _write(tmp_path, [_option_bar(side="CE")]) == 1
+        _seed_shard(tmp_path, rows=1)
+        ghost = tmp_path / "options" / _SERIES / "2021-02.parquet"
         frame = pl.DataFrame(
             {"timestamp": [datetime(2021, 1, 4, 4, 0, tzinfo=UTC)]},
             schema={"timestamp": pl.Datetime(time_unit="us", time_zone="UTC")},
         )
         with capture_logs() as logs:
-            _record_option_stats(tmp_path, dest=_dest(tmp_path), frame=frame)
+            _record_option_stats(tmp_path, dest=ghost, frame=frame)
         assert len(_events(logs, "lake.stats_manifest.stat_failed")) == 1
+
+    def test_absent_shard_probe_first_touches_neither_frame_nor_dest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Probe-FIRST lazy accretion (review round 2, fails-before): with NO
+        shard the hook returns after ONE shard-path probe — the O(frame)
+        bounds fold never runs (no defensive warning even on a null-bounds
+        frame) and ``dest`` is never statted."""
+        import polars as pl
+
+        assert _write(tmp_path, [_option_bar(side="CE")]) == 1
+        statted: list[str] = []
+        real = os.stat
+
+        def _rec(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            statted.append(str(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", _rec)
+        # A frame whose bounds fold WOULD warn — proving the fold never ran.
+        frame = pl.DataFrame(
+            {"timestamp": []},
+            schema={"timestamp": pl.Datetime(time_unit="us", time_zone="UTC")},
+        )
+        with capture_logs() as logs:
+            _record_option_stats(tmp_path, dest=_dest(tmp_path), frame=frame)
+        assert logs == []  # no bounds_underivable — the fold never ran
+        assert str(_dest(tmp_path)) not in statted  # dest never statted
+        shard = str(lsm.stats_shard_path(tmp_path, lsm.KIND_OPTIONS, _SERIES_KEY))
+        assert statted.count(shard) == 1  # exactly the one probe

@@ -20,6 +20,15 @@ Two teeth, one deterministic and one timed:
   manifest click still pays an O(D) stat-token revalidation (D = the ONE
   dataset's month files — metadata syscalls), so this is O(page) Parquet work
   + O(D) statx, NOT a literal O(1).
+* **FLAT IN LAKE SIZE (spec §10 bench (c), review round 2):** the per-consult
+  validation cost depends on the ONE consulted dataset only — a click's
+  python-level filesystem operations (``os.stat`` + ``os.scandir``: the stat
+  sweep, the set-equality walk, the shard read) and its touched parquet files
+  are counted EXACTLY EQUAL on a bare one-series lake vs the same series
+  inside a lake padded with 48 unrelated datasets (a deterministic
+  operation-count gate, chosen over a wall-clock ratio: equal op-counts make
+  wall-clock flatness trivial, and the repo's bench history pins shared-CI
+  GIL noise as the flake source — DEC-HARDENING-LEFTOVERS-001 (3)).
 
 The expired-options pager is benched because it is the pure surface: no
 %-change baseline reads (those are deliberately untouched this round) — every
@@ -29,6 +38,7 @@ The expired-options pager is benched because it is the pure surface: no
 from __future__ import annotations
 
 import glob as globmod
+import os
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -45,8 +55,9 @@ pytest.importorskip("duckdb")
 import duckdb
 from brutex.dashboard.db_view import query_option_candles
 from brutex.dashboard.movers_cache import MoversSnapshotCache
-from brutex.data.models import OptionBar
+from brutex.data.models import CandleBar, OptionBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
+from brutex.data.parquet_writer import ParquetWriter
 
 _OPT_PK = "NSE_FNO|13|WEEK|0|ATM|CALL"
 _OPT_SERIES = "NSE_FNO__13__WEEK__0__ATM__CALL"
@@ -211,3 +222,94 @@ class TestManifestPagingIsOPage:
             f"have regressed to an O(files) read. t_small={t_small:.0f}ns, "
             f"t_large={t_large:.0f}ns."
         )
+
+
+#: Unrelated spot datasets the padded lake carries (bench (c) fixture).
+_PADDING_DATASETS = 48
+
+
+def _build_spot_padding(root: Path, n_datasets: int) -> None:
+    """Write *n_datasets* single-bar UNRELATED spot datasets — pure lake bulk."""
+    writer = ParquetWriter(lake_root=root)
+    price = Decimal("100.00")
+    for i in range(n_datasets):
+        writer.write(
+            bars=[
+                CandleBar(
+                    timestamp=datetime(2024, 1, 5, 4, 0, tzinfo=UTC),
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=10,
+                    open_interest=None,
+                )
+            ],
+            exchange="NSE",
+            segment="CASH",
+            symbol=f"PAD{i:03d}",
+            interval="1minute",
+        )
+
+
+class TestValidationFlatInLakeSize:
+    """Spec §10 bench (c): per-consult validation cost is FLAT in LAKE size.
+
+    Deterministic, noise-free teeth (see the module docstring): the SAME
+    manifest-served click is measured on a bare one-series lake and on a lake
+    padded with :data:`_PADDING_DATASETS` unrelated spot datasets — every
+    python-level filesystem operation (``os.stat`` / ``os.scandir``) and every
+    parquet file it touches must be EXACTLY equal, because
+    ``scan_dataset_rels`` walks ONLY the consulted dataset's dir and every
+    stat/read binds only that dataset's rels. Structural non-vacuity: the
+    padded lake provably carries the extra datasets on disk.
+    """
+
+    def _measured_click(self, tmp: Path, *, padding: int) -> tuple[int, int, int]:
+        """(os.stat count, os.scandir count, files touched) for one served click."""
+        root = tmp / f"lake_pad{padding}"
+        _build_series(root, _SMALL_MONTHS)
+        _build_spot_padding(root, padding)
+        cache = MoversSnapshotCache()
+        conn = duckdb.connect()
+        probe = _FileProbeConn(conn)
+        _click(probe, root, use=True, cache=cache)  # fallback + write-behind seed
+        _click(probe, root, use=True, cache=cache)  # manifest-served; memos warmed
+        counts = {"stat": 0, "scandir": 0}
+        real_stat = os.stat
+        real_scandir = os.scandir
+
+        def _stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            counts["stat"] += 1
+            return real_stat(path, *args, **kwargs)
+
+        def _scandir(path: Any = ".", *args: Any, **kwargs: Any) -> Any:
+            counts["scandir"] += 1
+            return real_scandir(path, *args, **kwargs)
+
+        probe.reset()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "stat", _stat)
+            patch.setattr(os, "scandir", _scandir)
+            served = _click(probe, root, use=True, cache=cache)  # the measured click
+        assert served["total"] == _SMALL_MONTHS * _BARS_PER_MONTH
+        return (counts["stat"], counts["scandir"], len(probe.touched))
+
+    def test_click_fs_ops_flat_in_lake_size(self, tmp_path: Path) -> None:
+        bare = self._measured_click(tmp_path, padding=0)
+        padded = self._measured_click(tmp_path, padding=_PADDING_DATASETS)
+        # Structural non-vacuity: the padding really is on disk.
+        bare_files = (
+            len(list((tmp_path / "lake_pad0" / "bars").rglob("*.parquet")))
+            if (tmp_path / "lake_pad0" / "bars").is_dir()
+            else 0
+        )
+        padded_files = len(
+            list((tmp_path / f"lake_pad{_PADDING_DATASETS}" / "bars").rglob("*.parquet"))
+        )
+        assert padded_files == bare_files + _PADDING_DATASETS
+        assert padded == bare, (
+            "a manifest-served click's validation cost must be flat in LAKE size "
+            f"(bare lake (stat, scandir, files)={bare}, padded lake={padded})"
+        )
+        assert padded[2] == 1, "the click touches ONLY its page file at either lake size"

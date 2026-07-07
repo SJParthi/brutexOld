@@ -43,6 +43,7 @@ from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
 from brutex.data.lake_stats_manifest import (
     KIND_OPTIONS,
+    partition_stats_tracked,
     record_partition_stats,
     stats_manifest_enabled,
 )
@@ -453,16 +454,27 @@ def _record_option_stats(lake_root: Path, *, dest: Path, frame: pl.DataFrame) ->
     post-``unique`` DISTINCT ``(side, timestamp)`` count — with bounds from
     the rendered frame and ``raw_hash=None`` (the options writer computes
     none; forensics-only field). The dataset key is the on-disk series dir
-    name VERBATIM (``{"series": dest.parent.name}``). Delegates to the
-    lazy-accreting, best-effort
+    name VERBATIM (``{"series": dest.parent.name}``). LAZY ACCRETION, probed
+    FIRST (:func:`~brutex.data.lake_stats_manifest.partition_stats_tracked`,
+    review round 2): an unviewed series' write costs exactly ONE cheap O(1)
+    probe — a shard-path key digest + one failed ``os.stat`` — and never runs
+    the O(frame) bounds fold or the ``os.stat(dest)``. When the shard exists,
+    delegates to the best-effort
     :func:`~brutex.data.lake_stats_manifest.record_partition_stats` — a shard
     failure can never raise into the pull (a
     :class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation on a
     genuinely full disk deliberately propagates). Kill switch off ⇒ pure
-    no-op. A frame whose timestamp bounds are not datetimes (defensive — an
-    empty/null column) or a vanished-file stat is logged and skipped.
+    no-op (not even the probe). A frame whose timestamp bounds are not
+    datetimes (defensive — an empty/null column) or a vanished-file stat is
+    logged and skipped.
     """
     if not stats_manifest_enabled():
+        return
+    key = {"series": dest.parent.name}
+    if not partition_stats_tracked(lake_root, KIND_OPTIONS, key):
+        # Lazy accretion, probe-FIRST (review round 2): an unviewed series
+        # pays only this probe — the O(frame) min/max fold and the
+        # os.stat(dest) below never run; seeding stays read-side only.
         return
     min_ts = frame["timestamp"].min()
     max_ts = frame["timestamp"].max()
@@ -482,7 +494,7 @@ def _record_option_stats(lake_root: Path, *, dest: Path, frame: pl.DataFrame) ->
     record_partition_stats(
         lake_root,
         kind=KIND_OPTIONS,
-        key={"series": dest.parent.name},
+        key=key,
         dest=dest,
         rows=int(frame.height),
         min_ts=min_ts,

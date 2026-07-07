@@ -925,19 +925,19 @@ class TestLoadValidDatasetStats:
 
     def test_file_set_fallback_rel_lists_are_capped(self, tmp_path: Path) -> None:
         """The per-consult ``file_set`` event bounds its rel enumerations at
-        ``_FALLBACK_REL_LOG_CAP`` (a drifted dataset with thousands of strays
+        ``FALLBACK_REL_LOG_CAP`` (a drifted dataset with thousands of strays
         must never inflate every log line to ~100 KB — log-volume exhaustion);
         the TRUE totals ride the ``extra_count`` / ``missing_count`` ints."""
         _seed_bars(tmp_path)
         ddir = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY)
-        n_strays = lsm._FALLBACK_REL_LOG_CAP + 5
+        n_strays = lsm.FALLBACK_REL_LOG_CAP + 5
         for i in range(n_strays):
             (ddir / f"stray{i:04d}.parquet").write_bytes(b"x")
         with capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         events = [e for e in logs if e["event"] == "lake.stats_manifest.fallback"]
         assert len(events) == 1 and events[0]["clause"] == "file_set"
-        assert len(events[0]["extra"]) == lsm._FALLBACK_REL_LOG_CAP
+        assert len(events[0]["extra"]) == lsm.FALLBACK_REL_LOG_CAP
         assert events[0]["extra_count"] == n_strays
         assert events[0]["missing"] == []
         assert events[0]["missing_count"] == 0
@@ -1086,6 +1086,49 @@ class TestUnlinkAndProbeHelpers:
 
         monkeypatch.setattr(lsm.os, "stat", _boom)
         assert lsm._shard_exists(target) is False
+
+
+class TestPartitionStatsTracked:
+    """The writers' probe-FIRST existence check (review round 2).
+
+    The lazy-accretion pre-probe the write hooks run before ANY other
+    per-write work: one shard-path key digest + one ``os.stat`` — an unviewed
+    dataset's write pays exactly this and nothing else.
+    """
+
+    def test_absent_shard_is_false(self, tmp_path: Path) -> None:
+        assert lsm.partition_stats_tracked(tmp_path, lsm.KIND_BARS, BARS_KEY) is False
+
+    def test_present_shard_is_true(self, tmp_path: Path) -> None:
+        _seed_bars(tmp_path)
+        assert lsm.partition_stats_tracked(tmp_path, lsm.KIND_BARS, BARS_KEY) is True
+
+    def test_kill_switch_is_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _seed_bars(tmp_path)
+        monkeypatch.setenv(lsm.STATS_MANIFEST_ENV, "off")
+        assert lsm.partition_stats_tracked(tmp_path, lsm.KIND_BARS, BARS_KEY) is False
+
+    def test_malformed_key_is_false_never_raises(self, tmp_path: Path) -> None:
+        """Fail-closed: unknown kind / malformed key → silent False (the hook
+        abstains; record_partition_stats still validates loudly for direct
+        callers)."""
+        assert lsm.partition_stats_tracked(tmp_path, "bogus-kind", BARS_KEY) is False
+        assert lsm.partition_stats_tracked(tmp_path, lsm.KIND_BARS, {"exchange": "NSE"}) is False
+
+    def test_probe_is_one_stat_on_the_shard_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The absent-shard cost claim, pinned: ONE os.stat, on the shard path."""
+        statted: list[str] = []
+        real = os.stat
+
+        def _rec(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            statted.append(str(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(lsm.os, "stat", _rec)
+        assert lsm.partition_stats_tracked(tmp_path, lsm.KIND_BARS, BARS_KEY) is False
+        assert statted == [str(lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, BARS_KEY))]
 
 
 class TestRecordPartitionStats:

@@ -837,6 +837,90 @@ class TestToctouAndDegradeLaw:
             tmp_path, kind=lsm.KIND_OPTIONS, key={"series": _OPT_SERIES}
         ), "the options shard must have been reseeded"
 
+    def test_persistent_degraded_recount_memoised_per_generation(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """Review round 2 (fails-before): a dataset whose pruned page fails
+        PERSISTENTLY — the schema-heterogeneous star union whose ASC sublist
+        cannot bind the full-union projection — pays the O(files) degrade-law
+        legacy ``COUNT`` recount ONCE per generation, never on every paging
+        click (the "pays today's price ONCE" law extended to the degraded
+        corner); every click's numbers stay byte-equal to legacy, and a
+        generation bump honestly recounts."""
+        _write_months(tmp_path, ((2024, 1),), n_bars=4)
+        _plant_extra_column_month(tmp_path, 2024, 2, n_rows=5)
+        _seed_by_reading(conn, tmp_path)
+        cache = MoversSnapshotCache()
+        # ASC limit-2 pages at offsets 0/1/2 all live WHOLLY in the extra-LESS
+        # January file, so every planned sublist fails to bind the full-union
+        # projection — the persistent mid-request failure shape.
+        offsets = (0, 1, 2)
+        legacy = [
+            _q(conn, tmp_path, use=False, descending=False, limit=2, offset=off) for off in offsets
+        ]
+        counts: list[int] = []
+        for off, expected in zip(offsets, legacy, strict=True):
+            rec = _RecordingConn(conn)
+            with capture_logs() as logs:
+                served = _q(
+                    rec,
+                    tmp_path,
+                    use=True,
+                    descending=False,
+                    limit=2,
+                    offset=off,
+                    count_cache=cache,
+                    generation=7,
+                )
+            assert served == expected
+            assert "page_read" in _fallback_clauses(logs), "the pruned page must keep failing"
+            counts.append(
+                sum(
+                    1
+                    for sql, src in rec.sources
+                    if "COUNT(DISTINCT" in sql and isinstance(src, str)
+                )
+            )
+        assert counts == [1, 0, 0], (
+            "the degraded legacy COUNT must run ONCE per generation; later clicks "
+            f"serve the memoised degraded total (glob COUNTs per click: {counts})"
+        )
+        # A generation bump (pull/heal) honestly recounts — never stale.
+        rec = _RecordingConn(conn)
+        bumped = _q(
+            rec,
+            tmp_path,
+            use=True,
+            descending=False,
+            limit=2,
+            count_cache=cache,
+            generation=8,
+        )
+        assert bumped == legacy[0]
+        assert rec.legacy_count_ran()
+
+    def test_options_degraded_recount_rides_the_cache(self, conn: Any, tmp_path: Path) -> None:
+        """The options twin memoises its degrade-law recount under the SAME
+        disjoint ``legacytotal|`` key (the injected-cache branch): the
+        degraded total still counts only the readable subset — never the
+        cached manifest total."""
+        _write_option_months(tmp_path)
+        _qopt(conn, tmp_path, use=True)  # seed
+        series_dir = tmp_path / "options" / _OPT_SERIES
+        cache = MoversSnapshotCache()
+        rig = _MutatingConn(
+            conn,
+            trigger=_pruned_page_trigger,
+            side_effect=lambda: _corrupt(series_dir / "2024-04.parquet"),
+        )
+        served = _qopt(
+            rig, tmp_path, use=True, descending=True, limit=5, count_cache=cache, generation=3
+        )
+        legacy = _qopt(conn, tmp_path, use=False, descending=True, limit=5)
+        assert rig.fired
+        assert served == legacy
+        assert served["total"] == 12, "the degraded total counts only the readable month"
+
 
 # ── read-side seed: every abort clause ──────────────────────────────────────────────
 
@@ -979,6 +1063,38 @@ class TestSeedAborts:
         with capture_logs() as logs:
             assert self._seed(conn, tmp_path) is False
         assert _seed_skip_reasons(logs) == ["empty_file"]
+
+    def test_missing_rel_log_list_is_capped(self, conn: Any, tmp_path: Path) -> None:
+        """The seed-skip event bounds its ``missing`` rel enumeration at the
+        COMMON ``FALLBACK_REL_LOG_CAP`` with the TRUE total on
+        ``missing_count`` (review round 2 — the same log-volume guard the
+        leaf's ``file_set`` fallback event carries: frequency is latched to
+        once per generation, but a pathological dataset with thousands of
+        zero-row files must still never inflate that one line to ~100 KB)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        _write_months(tmp_path, ((2020, 1),))
+        base = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, _COORDS)
+        empty = pa.table({"timestamp": pa.array([], type=pa.timestamp("us", tz="UTC"))})
+        n_empty = lsm.FALLBACK_REL_LOG_CAP + 5
+        rels: list[str] = []
+        year, month = 2020, 2
+        for _ in range(n_empty):
+            dest = base / f"{year:04d}" / f"{month:02d}.parquet"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(empty, dest)
+            rels.append(f"{year:04d}/{month:02d}.parquet")
+            month += 1
+            if month > 12:
+                year, month = year + 1, 1
+        with capture_logs() as logs:
+            assert self._seed(conn, tmp_path) is False
+        (event,) = [e for e in logs if e["event"] == "db.stats_manifest.seed_skipped"]
+        assert event["reason"] == "empty_file"
+        assert event["missing_count"] == n_empty
+        assert event["missing"] == sorted(rels)[: lsm.FALLBACK_REL_LOG_CAP]
+        assert len(event["missing"]) == lsm.FALLBACK_REL_LOG_CAP
 
     def test_missing_group_row_with_moved_file_is_file_set_changed(
         self, conn: Any, tmp_path: Path

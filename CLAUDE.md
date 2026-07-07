@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1482 —
+_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1482 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -35,20 +35,27 @@ post-query TOCTOU re-stat; a manifest total is NEVER paired with a degraded
 page). Write hooks at all five partition-locked chokepoints (spot writer
 both branches + heal rewrite/quarantine + option writer merge/heal +
 `lake_heal._quarantine_move`) are best-effort + incremental + LAZILY
-accreted (absent shard = one failed `os.stat`; the prebuild storm costs one
-probe per write; seeding is read-side only), keyed on the NEW explicit
+accreted (absent shard = one cheap probe: key digest + one failed `os.stat`,
+probed FIRST — round 2; the prebuild storm costs one probe per write;
+seeding is read-side only), keyed on the NEW explicit
 `WriteResult.file_rewritten` (bytes RENDERED, never `bars_added`). Kill
-switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ byte-identical legacy behavior.
+switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ byte-identical legacy scans
+(modulo the sanctioned unconditional ORDER BY tie-order pin).
 HONEST: a hit is O(page-files) Parquet work + an O(D) per-consult
 revalidation stat sweep (D = the ONE dataset's month files) — NOT literal
-O(1); the first view per dataset pays today's O(files) once (the seed), and
-a permanently-REJECTED seed (un-healed poison / 0-row parquet) is LATCHED
-per (dataset, generation) so the doomed scan never repays per click (review
-round 1 — which also caught the read-thread `LakeWriteHalt` 500, the
-RecursionError shard-parse escape, the uncapped fallback rel lists, the
-DEBUG-invisible provenance [now INFO], and the red option-writer CI gate); a
-same-`(mtime_ns,size)` in-place overwrite stays the documented stat-token
-residual. Results-safe — never in run identity / partition bytes /
+O(1); the FIRST star-select click per (generation × file-state) also pays
+one O(D)-footer union-order DESCRIBE (memoised); the first view per dataset
+pays today's O(files) once (the seed), and a permanently-REJECTED seed
+(un-healed poison / 0-row parquet) is LATCHED per (dataset, generation) so
+the doomed scan never repays per click — review round 1 (which also caught
+the read-thread `LakeWriteHalt` 500, the RecursionError shard-parse escape,
+the uncapped fallback rel lists, the DEBUG-invisible provenance [now INFO],
+and the red option-writer CI gate) then round 2 (which memoised the
+degrade-law legacy recount under its own `legacytotal|` key so a
+persistently-unprunable page recounts ONCE per generation, landed the
+spec-§10 bench (c) lake-size-flatness gate, capped the seed-skip `missing`
+list, and made the hooks probe-first); a same-`(mtime_ns,size)` in-place
+overwrite stays the documented stat-token residual. Results-safe — never in run identity / partition bytes /
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
 parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
 modules 100% line+branch).
@@ -368,19 +375,27 @@ hostile-review pass._
   bytes RENDERED, never `bars_added` · heal rewrite/quarantine · option writer merge/heal ·
   `lake_heal._quarantine_move` shard unlink) are ALL inside the already-held partition locks, best-effort (never
   raise into the pull; `LakeWriteHalt` from `.locks/` creation deliberately propagates), incremental (one row
-  upsert, never a rescan), and LAZILY accreted (absent shard = one failed `os.stat`; seeding is read-side only — the
-  prebuild's ~10⁵-10⁶ derived-TF writes cost one probe each). Kill switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ hooks +
-  reads no-op ⇒ byte-identical legacy; shard flock via the COMMON `partition_write_lock` with fail-loud
+  upsert, never a rescan), and LAZILY accreted (absent shard = one cheap probe — a key digest + one failed
+  `os.stat`, probed FIRST via the public `partition_stats_tracked` so an unviewed write never stats dest / folds
+  frame bounds [round 2]; seeding is read-side only — the prebuild's ~10⁵-10⁶ derived-TF writes cost one probe
+  each). Kill switch `BRUTEX_LAKE_STATS_MANIFEST=off` ⇒ hooks +
+  reads no-op ⇒ byte-identical legacy scans (modulo the sanctioned tie-order pin below, which applies
+  unconditionally); shard flock via the COMMON `partition_write_lock` with fail-loud
   `STATS_LOCK_TIMEOUT_S=5.0` (env `BRUTEX_STATS_LOCK_TIMEOUT_S`; 5+75 < 90 s write-deadline pin). SANCTIONED
   behavior change: both pagers' ORDER BY gains the physical `filename, file_row_number` tiebreaker so an options
   CE+PE same-minute tie has ONE total order on the pruned AND the full path. HONEST (Golden Rule #10): a hit is
   O(page-files) Parquet work + an O(D) per-consult revalidation stat sweep (D = the dataset's month files, ~80) —
   NOT literal O(1) (only the repeat TOTAL/span lookup is O(1) via the generation cache — a repeat PAGE click
-  re-pays the O(D) revalidation + O(page-files) read); the FIRST view per dataset/invalidation pays today's
+  re-pays the O(D) revalidation + O(page-files) read; the FIRST star-select click per (generation × file-state)
+  additionally pays ONE O(D)-footer union-order DESCRIBE, memoised on the file-state fingerprint — measured 72/72
+  files on that first click, 1 thereafter [the bench's 1-file figure is the warmed-memo click]); the FIRST view
+  per dataset/invalidation pays today's
   O(files) scan once, and a permanently-REJECTED seed (un-healed poison / an out-of-band 0-row parquet — the
   distinct `empty_file` reason) is LATCHED per (dataset, generation) so the doomed grouped scan never repays per
-  click; a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (gated A/B pins the
-  median overhead under the 12 ms merge-budget floor; unviewed = one stat, pinned); a same-`(mtime_ns,size)`
+  click, and the degrade-law LEGACY recount memoises under its own `legacytotal|` generation key so a
+  persistently-unprunable page (heterogeneous star union) recounts ONCE per generation, never per click [round 2];
+  a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (gated A/B pins the
+  median overhead under the 12 ms merge-budget floor; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
   in-place overwrite is the documented stat-token residual; the new module's mutation score rides the weekly
   Mutation workflow (not verified in-session). REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
   a fails-before regression): the option-writer CI 100% gate joined its new suite (was RED at 94.74%); the
@@ -391,6 +406,12 @@ hostile-review pass._
   the `BRUTEX_STATS_LOCK_TIMEOUT_S` × 90 s write-deadline interaction documented + doc-pinned (not clamped — leaf
   discipline); the spec §10 hypothesis paging-equivalence + Σ-pages==total + concurrent-writer thread-fuzz
   properties landed (multi-process soak / crash-loop stress / CLI cross-process leg stay named follow-ups).
+  REVIEW ROUND 2 (refuter panel — every CONFIRMED finding fixed at root cause): the degrade-law recount memo +
+  the probe-first hooks + the star-DESCRIBE disclosure above; the spec §10 bench (c) lake-size-flatness gate
+  landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
+  48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
+  capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
+  overclaim softened; the #1482 GATES counts refreshed.
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
   Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +

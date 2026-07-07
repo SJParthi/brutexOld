@@ -81,6 +81,7 @@ from brutex.data.lake_read import (
     distinct_count_sql,
 )
 from brutex.data.lake_stats_manifest import (
+    FALLBACK_REL_LOG_CAP,
     KIND_BARS,
     KIND_OPTIONS,
     DatasetStats,
@@ -2445,12 +2446,19 @@ def _seed_stats_manifest(
                 return False
 
         unmoved = all(_rel_unmoved(rel) for rel in missing)
+        # Capped enumeration (review round 2 — the same log-volume guard the
+        # leaf module's file_set fallback event carries): frequency is bounded
+        # by the per-(dataset, generation) seed latch, but a pathological
+        # dataset with thousands of zero-row/vanished files must still never
+        # inflate one structured log line to ~100 KB; the honest TRUE total
+        # rides ``missing_count``.
         _LOG.info(
             _STATS_SEED_SKIPPED_EVENT,
             kind=kind,
             key=key,
             reason="empty_file" if unmoved else "file_set_changed",
-            missing=missing,
+            missing=missing[:FALLBACK_REL_LOG_CAP],
+            missing_count=len(missing),
         )
         return False
     for rel in rels:
@@ -2616,6 +2624,25 @@ def option_candle_span_key(series: str) -> str:
     exchange-opening spot count keys (see :func:`candle_span_key`).
     """
     return f"optspan|{series}"
+
+
+def _degraded_total_key(count_key: str) -> str:
+    """Cache key for the degrade-law LEGACY recount of a page total. O(1).
+
+    DELIBERATELY disjoint from the plain count key (the ``legacytotal|``
+    prefix — a plain spot key opens with a validated exchange token, an
+    options key with ``opt|``): under the whole-request degrade law the plain
+    key may hold a MANIFEST-served total, which must never be paired with a
+    degraded page, so the degraded recount memoises under its OWN key. The
+    degraded legacy total is paging-invariant exactly like the plain total
+    (same ``(coords, start, end)`` → the same resilient ``COUNT``), so a
+    dataset whose pruned page fails PERSISTENTLY — e.g. a schema-heterogeneous
+    star union whose sublist cannot bind the full-union projection — pays the
+    O(files) legacy recount ONCE per generation instead of on every paging
+    click (review round 2: the "pays today's price ONCE" law extended to the
+    degraded corner; a pull/heal bumps the generation → recount, never stale).
+    """
+    return f"legacytotal|{count_key}"
 
 
 def query_candles(
@@ -2910,9 +2937,21 @@ def query_candles(
             # manifest validated but its pruned page path failed mid-request —
             # recompute the total on the SAME legacy resilient path the page
             # just ran, so a manifest total is never paired with a degraded
-            # page (the count cache keeps its entry; it was valid when
-            # computed and the generation bump remains its invalidation).
-            total = _legacy_count_total()
+            # page (the count cache keeps its normal entry; it was valid when
+            # computed and the generation bump remains its invalidation). The
+            # DEGRADED recount memoises under its own disjoint key so a
+            # PERSISTENTLY unprunable page never re-pays the O(files) legacy
+            # COUNT per click (review round 2 — see _degraded_total_key).
+            if count_cache is None:
+                total = _legacy_count_total()
+            else:
+                total = count_cache.get_or_compute(
+                    _degraded_total_key(
+                        candle_count_key(exchange, segment, symbol, interval, start, end)
+                    ),
+                    generation=generation,
+                    compute=_legacy_count_total,
+                )
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
@@ -4139,8 +4178,17 @@ def query_option_candles(
         )
         if manifest_total_candidate:
             # Whole-request degrade law: never pair a manifest total with a
-            # degraded page (see query_candles).
-            total = _legacy_count_total()
+            # degraded page; the degraded recount memoises under its own
+            # disjoint generation-stamped key (see query_candles /
+            # _degraded_total_key — review round 2).
+            if count_cache is None:
+                total = _legacy_count_total()
+            else:
+                total = count_cache.get_or_compute(
+                    _degraded_total_key(option_candle_count_key(series, start, end)),
+                    generation=generation,
+                    compute=_legacy_count_total,
+                )
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,

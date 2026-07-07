@@ -3,7 +3,8 @@
 Spec §10 bench (b): the writer hook's added cost, hooks-ON vs kill-switch-OFF,
 on BOTH a VIEWED dataset (a shard exists — the only case that pays a shard
 flock + ~KB-scale fsync'd rewrite) and an UNVIEWED one (lazy accretion — one
-failed ``os.stat`` probe, no shard ever created). Two layers:
+cheap probe: a shard-path key digest + one failed ``os.stat``, probed FIRST;
+no shard ever created; review round 2). Two layers:
 
 * **Deterministic teeth (every runner, never wall-clock):**
 

@@ -7,9 +7,10 @@ no-op · keep-first conflict-only merge · heal probe-failure abstain ·
 kill-switch off). Keying is the NEW explicit ``WriteResult.file_rewritten``
 flag — bytes rendered, never ``bars_added``. Every hook is best-effort (a
 shard failure logs + unlinks + returns; the write NEVER raises), lazily
-accreting (an ABSENT shard costs exactly ONE existence probe and is never
-created by the writer), and captures its stat token INSIDE the still-held
-partition flock.
+accreting (an ABSENT shard costs exactly ONE probe-FIRST existence check —
+one key digest + one failed ``os.stat``, before the hook even stats *dest* —
+and is never created by the writer; review round 2), and captures its stat
+token INSIDE the still-held partition flock.
 
 Whitebox per the DEC-P0-017 convention (drives ``_record_stats_hook`` /
 ``_remove_stats_hook`` / ``_stats_key_for_dest`` directly for the abstain
@@ -26,6 +27,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.data import lake_stats_manifest as lsm
@@ -353,6 +355,27 @@ class TestHookDoesNotFire:
         assert probes[0] == lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, _COORDS)
         assert not probes[0].exists()  # never created by the writer
         assert not lsm.stats_dir(tmp_path).exists()  # no stats tree either
+
+    def test_absent_shard_probe_first_never_stats_dest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Probe-FIRST lazy accretion (review round 2, fails-before): with NO
+        shard the hook's cost is the one shard-path probe — ``dest`` itself is
+        never statted (the pre-fix hook statted dest before probing)."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        jan = writer.write(bars=[_bar(_ts(0))], **_COORDS)
+        statted: list[str] = []
+        real = os.stat
+
+        def _rec(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            statted.append(str(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", _rec)
+        writer._record_stats_hook(jan.path, jan)
+        assert str(jan.path) not in statted  # dest never statted
+        shard = str(lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, _COORDS))
+        assert statted.count(shard) == 1  # exactly the one probe
 
     def test_heal_probe_failure_abstains(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

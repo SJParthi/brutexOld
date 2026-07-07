@@ -83,12 +83,16 @@ ValueError)``; a :class:`~brutex.data.errors.LakeWriteHalt` raised by
 deliberately NOT swallowed). Each upsert is INCREMENTAL: ONE file-row upsert +
 an in-memory aggregate refold — never a dataset rescan.
 
-LAZY ACCRETION (the anti-storm law): a hook first does ONE O(1) ``os.stat``
-existence probe of the shard — if NO shard exists it returns immediately.
-Shards are seeded ONLY by the read side (:func:`seed_dataset_stats`, the
-write-behind rebuild after a clean legacy scan), so the prebuild's ~10⁵–10⁶
-derived-TF partition writes cost one failed ``stat`` each — no shard-IO/inode
-storm — and never-viewed datasets stay ~zero-cost.
+LAZY ACCRETION (the anti-storm law): a hook first probes shard EXISTENCE —
+:func:`partition_stats_tracked`, one shard-path key digest + ONE failed
+``os.stat``, an O(1) probe with zero shard/partition IO — and returns
+immediately when no shard exists; the writer hooks run this probe BEFORE any
+other per-write work (never an ``os.stat(dest)`` or a frame-bounds fold on an
+unviewed dataset). Shards are seeded ONLY by the read side
+(:func:`seed_dataset_stats`, the write-behind rebuild after a clean legacy
+scan), so the prebuild's ~10⁵–10⁶ derived-TF partition writes cost one such
+probe each — no shard-IO/inode storm — and never-viewed datasets stay
+~zero-cost.
 
 Locking: shards serialise on the COMMON
 :func:`~brutex.data.partition_lock.partition_write_lock` keyed on the SHARD
@@ -99,7 +103,11 @@ takes a partition lock while holding a shard lock. Readers take NO lock
 (``os.replace`` atomicity: a read sees a complete old or new shard).
 
 Kill switch: env :data:`STATS_MANIFEST_ENV` = ``off`` ⇒ every writer hook AND
-every reader consult no-ops ⇒ byte-identical legacy behaviour. Default ON.
+every reader consult no-ops ⇒ byte-identical legacy SCAN behaviour — modulo
+the pagers' sanctioned deterministic ORDER BY tie-order pin, which applies
+unconditionally (MIGRATION.md #1482: an options CE/PE same-minute tie renders
+in ONE pinned order either way; the pre-manifest tie order was engine-plan
+whim, the row SET is identical). Default ON.
 
 Leaf discipline (PR #1177 ``py/cyclic-import``): imports are stdlib +
 :mod:`brutex.data.atomic_io` + :mod:`brutex.data.partition_lock` +
@@ -228,7 +236,10 @@ _MONTHS_PER_YEAR: Final[int] = 12
 #: (a log-volume exhaustion vector). Mirrors the repo's capped-enumeration
 #: precedent (option_ingest caps at 20 names; the pipeline headline at 10);
 #: the TRUE totals always ride the ``extra_count`` / ``missing_count`` ints.
-_FALLBACK_REL_LOG_CAP: Final[int] = 20
+#: PUBLIC (review round 2): the ONE cap every stats-manifest rel enumeration
+#: shares — the read-side seed's ``seed_skipped`` event (db_view) reuses it
+#: rather than growing a private copy (CLAUDE.md §11 COMMON).
+FALLBACK_REL_LOG_CAP: Final[int] = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,8 +320,12 @@ def stats_manifest_enabled() -> bool:
 
     Returns ``False`` iff :data:`STATS_MANIFEST_ENV` is set to
     :data:`STATS_MANIFEST_OFF` (case-insensitive, whitespace-stripped).
-    Disabled means every writer hook AND every reader consult no-ops, so
-    behaviour is byte-identical to the pre-manifest legacy paths.
+    Disabled means every writer hook AND every reader consult no-ops, so the
+    pagers run the byte-identical legacy SCAN — modulo the sanctioned
+    deterministic ORDER BY tie-order pin, which applies unconditionally
+    (MIGRATION.md #1482: an options CE/PE same-minute tie renders in ONE
+    pinned order with the switch on OR off; the pre-manifest tie order was
+    engine-plan whim, the row SET is identical).
     """
     raw = os.environ.get(STATS_MANIFEST_ENV)
     if raw is None:
@@ -926,7 +941,7 @@ def load_valid_dataset_stats(
     if on_disk != stamped:
         # Capped enumerations (log-volume exhaustion guard): this event fires
         # on EVERY consult while the dataset stays drifted, so the rel lists
-        # are bounded at _FALLBACK_REL_LOG_CAP entries; the honest TRUE totals
+        # are bounded at FALLBACK_REL_LOG_CAP entries; the honest TRUE totals
         # ride the *_count integers.
         extra_rels = sorted(on_disk - stamped)
         missing_rels = sorted(stamped - on_disk)
@@ -934,9 +949,9 @@ def load_valid_dataset_stats(
             kind,
             canonical,
             "file_set",
-            extra=extra_rels[:_FALLBACK_REL_LOG_CAP],
+            extra=extra_rels[:FALLBACK_REL_LOG_CAP],
             extra_count=len(extra_rels),
-            missing=missing_rels[:_FALLBACK_REL_LOG_CAP],
+            missing=missing_rels[:FALLBACK_REL_LOG_CAP],
             missing_count=len(missing_rels),
         )
         return None
@@ -997,6 +1012,30 @@ def _shard_exists(shard_path: Path) -> bool:
     return True
 
 
+def partition_stats_tracked(lake_root: Path, kind: str, key: Mapping[str, str]) -> bool:
+    """Whether a stats shard EXISTS for the dataset — the writers' pre-probe. O(1).
+
+    The lazy-accretion fast-path check the write hooks run FIRST, before ANY
+    other per-write work (``os.stat(dest)``, the option twin's frame-bounds
+    fold): an unviewed dataset's write costs exactly this probe — one
+    shard-path key digest + ONE failed ``os.stat`` — and nothing else (review
+    round 2; the honest cost is "one cheap O(1) probe", never literally "one
+    failed stat" — the digest is unavoidable, it locates the shard).
+    Fail-closed: the kill switch, an unknown *kind*, or a malformed *key*
+    (both programming-error classes at a hook site, which derives the key
+    from a real on-disk path) return ``False`` silently — the hook abstains;
+    :func:`record_partition_stats` still validates its own inputs loudly for
+    direct callers.
+    """
+    if not stats_manifest_enabled():
+        return False
+    try:
+        shard_path = stats_shard_path(lake_root, kind, key)
+    except ValueError:
+        return False
+    return _shard_exists(shard_path)
+
+
 def record_partition_stats(
     lake_root: Path,
     *,
@@ -1014,10 +1053,13 @@ def record_partition_stats(
     Called by the lake writers INSIDE their already-held data-partition lock,
     immediately after the durable ``os.replace`` (*stat* must be the fresh
     ``os.stat(dest)`` taken while that lock is still held, so the token is the
-    durable file's). LAZY ACCRETION: when NO shard exists this is ONE failed
-    ``os.stat`` and an immediate ``False`` — shards are seeded only by the
-    read side (:func:`seed_dataset_stats`), which is what caps the prebuild's
-    ~10⁵–10⁶ writes to one probe each.
+    durable file's). LAZY ACCRETION: when NO shard exists this is one
+    shard-path key digest + ONE failed ``os.stat`` and an immediate ``False``
+    — shards are seeded only by the read side (:func:`seed_dataset_stats`),
+    which is what caps the prebuild's ~10⁵–10⁶ writes to one cheap probe each
+    (the writer hooks additionally pre-probe via
+    :func:`partition_stats_tracked` BEFORE their ``os.stat(dest)`` /
+    frame-bounds work, so an unviewed dataset's write pays ONLY that probe).
 
     When the shard exists: take the shard flock
     (:func:`resolve_stats_lock_timeout_seconds`-bounded), re-read + parse
@@ -1311,6 +1353,7 @@ def seed_dataset_stats(
 
 
 __all__ = [
+    "FALLBACK_REL_LOG_CAP",
     "KIND_BARS",
     "KIND_OPTIONS",
     "STATS_IDENTITY_KEYS",
@@ -1330,6 +1373,7 @@ __all__ = [
     "load_shard_stats",
     "load_valid_dataset_stats",
     "parse_rel_month",
+    "partition_stats_tracked",
     "record_partition_stats",
     "rel_month_bounds",
     "remove_dataset_stats",

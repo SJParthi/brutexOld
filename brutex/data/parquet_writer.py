@@ -109,6 +109,7 @@ from brutex.data.errors import WriterError, parquet_read_skip_errors
 from brutex.data.lake_manifest import invalidate_manifest, record_dataset
 from brutex.data.lake_stats_manifest import (
     KIND_BARS,
+    partition_stats_tracked,
     record_partition_stats,
     remove_partition_stats,
     stats_manifest_enabled,
@@ -1291,15 +1292,18 @@ class ParquetWriter:
         branches, when ``result.file_rewritten``) and by the heal rewrite —
         always INSIDE the already-held partition locks, so the ``os.stat``
         taken here is the durable file's content token (no concurrent
-        ``os.replace`` is possible). Delegates to
-        :func:`~brutex.data.lake_stats_manifest.record_partition_stats`, which
-        is lazy-accreting (an ABSENT shard costs one failed stat and returns)
-        and best-effort by contract (a shard failure logs + unlinks + returns
-        — it NEVER raises into the pull; a
+        ``os.replace`` is possible). LAZY ACCRETION, probed FIRST
+        (:func:`~brutex.data.lake_stats_manifest.partition_stats_tracked`,
+        review round 2): an unviewed dataset's write costs exactly ONE cheap
+        O(1) probe — a shard-path key digest + one failed ``os.stat`` — and
+        never even stats *dest*. When the shard exists, delegates to
+        :func:`~brutex.data.lake_stats_manifest.record_partition_stats`,
+        which is best-effort by contract (a shard failure logs + unlinks +
+        returns — it NEVER raises into the pull; a
         :class:`~brutex.data.errors.LakeWriteHalt` from ``.locks/`` creation
         on a genuinely full disk deliberately propagates). The kill switch
         (``BRUTEX_LAKE_STATS_MANIFEST=off``) makes this a pure no-op — not
-        even the ``os.stat`` runs (byte-identical legacy behaviour). A *dest*
+        even the probe runs (byte-identical legacy write behaviour). A *dest*
         outside the canonical ``bars/`` layout or a vanished-file stat is
         logged and skipped — never an error into the write path.
         """
@@ -1308,6 +1312,11 @@ class ParquetWriter:
         key = self._stats_key_for_dest(dest)
         if key is None:
             _LOG.warning("lake.stats_manifest.key_underivable", partition=str(dest))
+            return
+        if not partition_stats_tracked(self._lake_root, KIND_BARS, key):
+            # Lazy accretion, probe-FIRST (review round 2): an unviewed
+            # dataset pays only this probe — the os.stat(dest) below never
+            # runs; seeding stays read-side only.
             return
         try:
             stat = os.stat(dest)
