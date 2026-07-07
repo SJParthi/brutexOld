@@ -41,6 +41,7 @@ from brutex.dashboard.composite_pull import (
     CompositePullReport,
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.pipeline_pull import PriorStepsVerdict
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.registry_store import RegistryStore
 from brutex.data.sink import BarSink, SinkAppendResult
@@ -234,6 +235,7 @@ def _run(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: Callable[[int, int, int, int, str], None] | None = None,
+    prior_steps: PriorStepsVerdict | None = None,
 ) -> CompositePullReport:
     if lake_root is None:
         # Each test gets its OWN lake (so the persisted WindowLedger never bleeds across
@@ -264,6 +266,7 @@ def _run(
         scope_end=scope_end,
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
+        prior_steps=prior_steps,
     )
 
 
@@ -498,6 +501,45 @@ def test_registry_read_keys_resolve_alias_normalize_and_dedup() -> None:
         _instrument("NIFTY", 4),  # canonical → byte-unchanged
     ]
     assert cp._registry_read_keys(instruments) == ("NIFTYNXT50", "BAJAJAUTO", "NIFTY")
+
+
+def test_underlying_kind_map_first_wins_on_key_collision() -> None:
+    """Two spot spellings sharing one F&O primary keep the FIRST row's kind.
+
+    ``_underlying_kind_map`` mirrors the read-key first-wins de-dup
+    (DEC-PULL-SIX-STEP-ORDER-001): a later row landing on an already-mapped
+    primary key must NEVER overwrite the classification (order decides).
+    """
+
+    def _kinded(symbol: str, security_id: int, kind: InstrumentType) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=security_id,
+            symbol_name=symbol,
+            display_name=symbol,
+            instrument=kind,
+            segment=Segment.INDEX if kind == InstrumentType.IDX else Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0 if kind == InstrumentType.IDX else 500,
+            tick_size=Decimal("0") if kind == InstrumentType.IDX else Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+
+    # Hyphen-normalized stock first, then a contrived IDX row on the SAME
+    # primary key — the collision arm must keep the FIRST row's kind.
+    stock_first = [
+        _kinded("BAJAJ-AUTO", 1, InstrumentType.EQ),
+        _kinded("BAJAJAUTO", 2, InstrumentType.IDX),
+    ]
+    assert cp._underlying_kind_map(stock_first) == {"BAJAJAUTO": False}
+    # Order flipped → the index classification wins instead (order decides).
+    assert cp._underlying_kind_map(list(reversed(stock_first))) == {"BAJAJAUTO": True}
 
 
 def test_aliased_underlying_chain_visible_to_candle_phase(tmp_path: Path) -> None:
@@ -901,3 +943,143 @@ def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
     assert report.historical is not None
     assert report.historical.greeks_enrich_ok is True
     assert "Greeks enrichment FAILED" not in report.note
+
+
+def test_prior_steps_threaded_to_candle_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``prior_steps`` reaches ``pull_contract_candles`` (DEC-PULL-SIX-STEP-ORDER-001).
+
+    A capture spy on the candle spine proves the composite forwards a verdict
+    EQUAL to the sequencer's when its own phase (a) enumerates cleanly (the
+    inner-metadata fold is an AND with ``True`` — see
+    ``test_prior_steps_folds_inner_metadata_failure`` for the unclean arm) —
+    and that the DEFAULT is ``None`` (every non-pipeline caller keeps today's
+    behavior byte-identical).
+    """
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    registry = _registry(tmp_path)
+    verdict = PriorStepsVerdict(spot_clean=False, metadata_clean=True, strict=True)
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        prior_steps=verdict,
+    )
+    assert len(captured) == 1
+    assert captured[0]["prior_steps"] == verdict
+    # And the DEFAULT threads None (regression pin — non-pipeline callers untouched).
+    _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_nifty_sdk(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+    )
+    assert captured[1]["prior_steps"] is None
+
+
+def test_prior_steps_folds_inner_metadata_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phase-(a) enumeration failure folds into the forwarded ``metadata_clean``.
+
+    Review fix (DEC-PULL-SIX-STEP-ORDER-001 round 1): the sequencer builds
+    :class:`PriorStepsVerdict` from the phase-2 metadata gate BEFORE the
+    composite re-enumerates; a phase-(a) expiry failure here (a transient
+    ``get_expiries`` raise on an open cell) previously left the Greeks seam
+    reading ``metadata_clean=True`` — the enrichment RAN while the sequencer's
+    post-step barrier withheld the prebuild + movers on the SAME signal. The
+    composite now ANDs its own inner re-run gate into the verdict, so all
+    three post-steps agree.
+    """
+
+    class _RaisingExpiriesSDK(_FakeSDK):
+        def get_expiries(self, **kw: object) -> Mapping[str, object]:
+            self.calls.append("get_expiries")
+            raise RuntimeError("transient enumeration failure")
+
+    captured: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> object:
+        captured.append(dict(kwargs))
+        from brutex.dashboard.historical_pull import HistoricalPullReport
+
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1day",),
+            contracts_selected=0,
+            contracts_completed=0,
+            bars_appended=0,
+            windows=0,
+            failed_pairs=0,
+            still_failed_windows=0,
+            auth_aborted=False,
+            note="spy",
+            phase1_clean=True,
+            phase1_complete=(),
+            start_dates={},
+            minute_requested=True,
+            minute_skipped=False,
+        )
+
+    monkeypatch.setattr(cp, "pull_contract_candles", _spy)
+    registry = _registry(tmp_path)
+    # Pre-seed the registry so phase (b) still has cached contracts to select
+    # (the exact production shape: an earlier pull cached the chain; today's
+    # phase-(a) re-run fails transiently but the candle phase proceeds).
+    registry.upsert_contract(
+        "NSE",
+        "NIFTY",
+        date(2024, 1, 25),
+        "NSE-NIFTY-25Jan24-21000-CE",
+        side="CE",
+        strike=21000.0,
+        run_id="r",
+        fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    verdict = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=True)
+    report = _run(
+        [_instrument("NIFTY", 13)],
+        sdk=_RaisingExpiriesSDK(),
+        sink=_RecordingSink(),
+        registry=registry,
+        coverage=_CoverageSink(),
+        prior_steps=verdict,
+    )
+    assert report.metadata is not None
+    assert report.metadata.expiry_failures > 0
+    assert len(captured) == 1
+    forwarded = captured[0]["prior_steps"]
+    assert isinstance(forwarded, PriorStepsVerdict)
+    # The fold flips ONLY the metadata arm; spot + strict thread through intact.
+    assert forwarded.metadata_clean is False
+    assert forwarded.spot_clean is True
+    assert forwarded.strict is True
+    assert forwarded.prior_clean is False

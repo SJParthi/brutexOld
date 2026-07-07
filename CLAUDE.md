@@ -44,6 +44,112 @@ vocabulary bits read the untouched bearish fields, and tests/golden incl.
 the frozen 400-case vocab_golden_vectors.json pass with the fixture
 byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
+Earlier: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
+`SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
+deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
+per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
+`sweep_lookahead`, consumed via its public `env_flag_tristate`, never
+copied), licensed by TWO safety layers —
+ORIGINALLY authored + proven fully green under the prior default-OFF before
+the flip, though the pushed branch is ONE reconstructed post-wipe commit so
+no shipped-first commit boundary exists (see ADR-0017 Status / #1532): (a) the
+exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
+simulators return each mask's certified exit-bar indices
+(`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
+over the NEW stdlib-only COMMON `brutex/engine/exit_index.py`:
+`build_ts_index` consolidating the three inline dict copies +
+`bars_strictly_increasing` producer certificate + `exit_indices_consistent`
+consumer belt) so the kernel arm consumes them O(trades) with NO per-mask
+O(N_bars) `exit_ts`→index dict build (an inconsistent stream DEMOTES to the
+dict, never to the Python oracle — results byte-identical; measured 6.1×
+sandbox tail ratio, bench-gated ≥1.15×; the sweep spine threads the pairs
+through the ONE `_iter_mask_metrics`; `_reattribute_chunk_failure` stays on
+the oracle); and (b) a per-process BURN-IN SELF-CHECK — the first 16
+kernel-served masks are bit-compared (`struct.pack` floats, signed zeros
+included) against the Python `_drawdown_stats` oracle; a mismatch SHIPS THE
+ORACLE VALUE and AUTOREVERTS the kernel for the process
+(`kernel_autoreverted` ERROR + latch; `kernel_disabled` short-circuit). The
+frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the default
+(no-env) arm reproduces them byte-for-byte with exactly ONE engaged event
+(golden-pinned; a burn-in-poisoned kernel lands on the pinned bytes with one
+autorevert event). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline).
+Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
+source change; tests + docs excepted): both poll surfaces (the site-wide
+`bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
+CLIENT-clock "updated Xs ago" readout on a ~1 s ticker (amber → LOUD RED explicit
+"STALE" past justified thresholds — widget warn 10 s / red 30 s = 10× cadence =
+backoff cap; universe warn 5 s past the retained 600 ms quick-retry envelope /
+red 15 s) + a SELF-RECOVERING poll (fetch rejection AND non-ok AND malformed body
+all counted failures; quick retries then 3 s→30 s capped exponential backoff,
+NEVER gives up — the 2026-07-06 38-minute frozen-tab incident fix; the bounded
+give-up that painted "live progress feed dropped" via innerHTML and stopped
+polling forever is REMOVED, its pinned tokens kept with genuine semantics; a
+non-ok poll can no longer settle the header as "— nothing to pull"; the stale
+state clears automatically on the next successful poll), and the `/universe`
+header + a new `#subunit` counter show per-expiry sub-unit progress ("expiry
+30Sep25 · sub-unit N this unit") derived ENTIRELY client-side from
+`s.current`/`s.completed` transitions (distinct-label count per completed/total
+anchor, Set-capped 4096; the `data/fno_symbol.py` grammar mirrored right-anchored
+so hyphenated underlyings never confuse the parse; spot/empty labels degrade to
+omission, never garbage). textContent-only DOM; substring tests pin PRESENCE of
+the JS, not execution (honest envelope — no headless JS runner); ZERO backend
+change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX).
+Earlier: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
+preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
+cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
+interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
+rebuild always stamps the PRE-walk ledger token (mid-walk race → the stale-stamped base still LANDS — it is
+record_dataset's write-side convergence seed, the round-6 restore of an interim SKIP design — plus one
+observe-only db_view.manifest_rebuilt_stale INFO; the load-side token gate stays the freshness authority),
+welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
+tests/bench/_o1_tiers.py (robust 3–10× shared-CI / strict 1.1× M4-Pro via BRUTEX_M4PRO_STRICT=1 / measured 3×
+cache-tier — words only, NO gate weakened), and two new bench pins (u128 two-limb mask + orchestrator audit
+append). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527 —
+the operator's STRICT six-step pull order: every Groww pull executes
+INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES → STOCKS-FUTURES →
+INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO
+existing execution chokepoints with ONE pool/controller build each — an
+always-on `ingest_common.partition_spot_steps` group loop INSIDE
+`pull_all_spot` (the COMMON `PullStep` IntEnum, value==rank 1-6;
+`progress_counts(symbols=)` group-scoped until-clean) and a 4-key
+`(ledger-market, is_index)` F&O bucket sort with STEP-major until-clean
+(`_contract_market` KEPT verbatim — ledger namespaces byte-unchanged, no
+re-pull; unresolved underlyings order stock-side, WARNed + counted, never
+dropped); post-steps (Greeks → prebuild → movers) fire only after ALL
+applicable steps SETTLE (settle-based, never `bars > 0`) — cleanset default
+byte-compatible with DEC-PREBUILD-CLEANSET-001, NEW opt-in
+`BRUTEX_PIPELINE_STRICT_GATE=1` all-or-nothing barrier (fail-loud parse
+resolved once at launch → clean 400; pure `step_settle_verdict` +
+`PriorStepsVerdict` threaded to the Greeks seam — a withheld pass reads
+"withheld (strict gate) — re-attempted next pull", never FAILED). COMMON
+`pull.step.started/settled/halted` events + an observe-only thread-safe
+`StepOrderMonitor` (`raise_on_violation=True` is the test oracle); the
+2026-07-05 log-shaped ordering regression + a fetch-count parity bench pin
+"reorders, never re-fetches". HONEST: an ORDERING change, NOT a speedup —
+~seconds added per pull (bounded analysis, not measured); in async-pipeline
+mode a step's k→k+1 settle is PRODUCER-side (fetch-issue order strict; tail
+writes drain terminally but are INVISIBLE to the producer-fed
+`StepOrderMonitor` — `pull.step.late_write` observes only producer-side
+writes and stays 0 on a healthy async pull; submit-time step stamping
+through `FetchPipeline` is a named follow-up, NOT claimed)
+while the POST-step barrier is fully drain-guarded; the mass-empty
+breaker's trip evidence is now per-STEP-GROUP pass on BOTH spines — F&O
+per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a
+disclosed narrowing, #1527 R6+R9 — evidence resets at the group boundary;
+the ~4-series INDICES-SPOT group on an incremental pull is below every trip
+threshold, so throttle-poisoned ENGINE index windows can settle SKIPPED
+before the stocks group's breaker trips — remediation `brutex
+reopen-skipped`; thresholds/canary/bounded-settle machinery unchanged); the
+CLI `brutex fetch`
+spot path is the NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, NOT
+claimed. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+touched modules 100% line+branch).
 Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
@@ -567,6 +673,92 @@ hostile-review pass._
   the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
   `mypy --strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
+  ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
+  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
+  authored + proven fully green under the prior default-OFF before the flip, though the pushed branch is ONE
+  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1532): the
+  exit_idx-native FAST PATH — both trade simulators return each
+  mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
+  consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
+  `exit_indices_consistent` consumer belt) so the kernel arm consumes them O(trades) with NO per-mask O(N_bars)
+  `exit_ts`→index dict build (inconsistent stream DEMOTES to the dict, never to the Python oracle — results
+  byte-identical; measured 6.1× sandbox tail ratio, bench-gated ≥1.15×) — and a per-process BURN-IN SELF-CHECK: the
+  first 16 kernel-served masks are bit-compared (`struct.pack` floats, signed zeros) against the Python
+  `_drawdown_stats` oracle; a mismatch SHIPS THE ORACLE VALUE and AUTOREVERTS the kernel for the process (ERROR +
+  latch + `kernel_disabled` short-circuit). The frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the
+  default (no-env) arm reproduces them byte-for-byte with exactly ONE engaged event (golden-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+  tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+  MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
+  widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
+  LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
+  exponential backoff, never gives up — the 38-minute frozen-tab incident fix; a non-ok poll can no longer settle
+  the header), and the `/universe` header + `#subunit` counter show per-expiry sub-unit progress derived entirely
+  client-side from `s.current` transitions (fno_symbol grammar mirrored right-anchored; spot/empty → omission).
+  textContent-only; substring tests pin presence not execution (honest envelope); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
+  Earlier: `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528** —
+  the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
+  COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by
+  `warm_discovery_memos` off its ONE unfiltered walk, `_MEMOS_SEEDED` 5→7; pullability tagging deliberately
+  live — the keyless `load-instruments` `master_revision` trap); `resolve_report_datasets` discovers FILTERED
+  at the source (`exclude_segments={FNO}` prunes the contract tree at walk descent + `intervals={required}`;
+  SANCTIONED: an F&O contract partition is no longer offered as a report symbol) with a NEW `datasets=`
+  pre-walked seam; the `db_view.list_candle_datasets` manifest rebuild always stamps the PRE-walk ledger token
+  (mid-walk race → the stale-stamped base still LANDS — it is `record_dataset`'s write-side convergence
+  seed, the round-6 review restore of an interim SKIP design — plus one observe-only
+  `db_view.manifest_rebuilt_stale` INFO; the load-side token gate stays the freshness authority); welcome.html + Golden Rule #5 reworded to the TRUE
+  two-tier O(1) enforcement of `tests/bench/_o1_tiers.py` (robust 3–10× shared-CI / strict 1.1× M4-Pro via
+  `BRUTEX_M4PRO_STRICT=1` / measured 3× cache-tier — words only, NO gate weakened); two NEW bench pins
+  (u128 two-limb mask + `AuditWriter.append` flat vs chain length, prefill via the COMMON
+  `tests/fakes/audit_chain.py`). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; dashboard read-side + docs +
+  bench only; touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  pre-change baseline).
+  Earlier: `claude/ecstatic-pascal-7vjsju` (**DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527** — the
+  operator's STRICT six-step pull order: every Groww pull executes INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES →
+  STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO existing execution
+  chokepoints with ONE pool/controller build each (the ONE `SessionRateController` + 500/min governor spans all steps
+  as today): (a) SPOT — always-on `ingest_common.partition_spot_steps` group loop INSIDE `pull_all_spot` (the COMMON
+  `PullStep` IntEnum, value==rank 1-6; rollup fold zero-change, proven; `WindowLedger.progress_counts(symbols=)`
+  group-scopes each until-clean — indices exit `stop_clean`, no wasted round); (b) F&O — 4-key
+  `(ledger-market, is_index)` bucket sort + STEP-major until-clean (`_contract_market` KEPT verbatim, ledger
+  namespaces byte-unchanged — no re-pull; write/read-symmetric `primary_fno_underlying` classification, unresolved →
+  stock-side + WARN + `class_unresolved`; `underlying_kinds=None` — the CLI, tests — degrades to the legacy 2-bucket
+  order byte-identically; REVIEW ROUND 1: the `/pull-historical` DIRECT-selection grammars now build + thread the
+  whole-universe kinds map, so BOTH production dashboard routes run the six-step order); metadata stays between
+  steps 2 and 3 (not a numbered step). POST-steps (Greeks → prebuild →
+  movers) fire only after ALL applicable steps SETTLE (settle-based, never `bars > 0`): cleanset default
+  byte-compatible with DEC-PREBUILD-CLEANSET-001; NEW opt-in `BRUTEX_PIPELINE_STRICT_GATE=1` literal all-or-nothing
+  barrier (fail-loud parse once at launch → clean 400; pure `step_settle_verdict` + `PriorStepsVerdict` threaded
+  sequencer → composite → `pull_contract_candles` so even the Greeks seam sees spot+metadata cleanliness — withheld
+  reads "withheld (strict gate) — re-attempted next pull", never FAILED; REVIEW ROUND 1: `spot_phase_ok` /
+  `historical_phase_ok` fold the MASS-EMPTY halt causes — a spot mass-empty halt now stops the chain like auth/quota
+  and can never read settled to the barrier — and the composite folds its phase-(a) re-run gate into the forwarded
+  verdict so Greeks/prebuild/movers agree). COMMON `pull.step.started/settled/halted`
+  events + observe-only `StepOrderMonitor` (test oracle `raise_on_violation=True`); the 2026-07-05 log-shaped
+  ordering regression + fetch-count parity bench pin "reorders, never re-fetches". HONEST: ~seconds added per pull,
+  NOT a speedup (bounded analysis, not measured); async-mode step settles are PRODUCER-side (tail writes drain
+  terminally but are INVISIBLE to the producer-fed `StepOrderMonitor` — `pull.step.late_write` observes only
+  producer-side writes, stays 0 on a healthy async pull; submit-time step stamping through `FetchPipeline` is a
+  named follow-up, NOT claimed; the settle events' `bars`/`clean` are producer-side counts, deferred
+  0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain; the
+  SPOT settle event's sync counts SUM every until-clean pass and its `clean` folds the group's terminal quarantines —
+  round-2 review, F&O-twin parity); the mass-empty breaker's trip evidence is per-STEP-GROUP pass on BOTH spines —
+  F&O per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a disclosed narrowing, #1527 R6+R9 — evidence
+  resets at the group boundary; the ~4-series INDICES-SPOT group on an incremental pull sits below every trip
+  threshold, so a vendor soft-throttle's clean empties can settle ENGINE index windows SKIPPED with no halt before
+  the stocks group's breaker trips — remediation `brutex reopen-skipped`; sharing one breaker across a phase's groups
+  deliberately NOT done, the groups run sequentially so cross-group evidence cannot protect the FIRST group;
+  thresholds/canary/bounded-settle machinery unchanged); `historical_pull.py` gains a dedicated STATIC ci.yml
+  per-module 100% gate (round-3 R10 — its suites are stem-inverted `test_pull_historical*.py`, so the discovery gate
+  warn-skips it; measured 100.00% over the curated five-file suite); on a
+  mid-pull global stop a never-started later group's symbols read honest unknown-ZEROS in the per-symbol rollup (not
+  synthesized FAILED — the ledger stays the retry authority); the CLI spot path is the NAMED follow-up
+  DEC-PULL-SIX-STEP-ORDER-CLI-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; every touched module 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/`pyright` clean).
   Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
@@ -1881,8 +2073,23 @@ hostile-review pass._
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
-   append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
-   for each hot path. Any regression fails CI.
+   append must all be O(1). The decree TARGET is
+   `p99(N=1M) / p99(N=1K) ≤ 1.1` per hot path; ENFORCEMENT is the
+   two-tier gate defined once in `tests/bench/_o1_tiers.py`
+   (DEC-O1-CLAIMS-HONESTY-001 wording reconcile — no gate value
+   changed): every O(1) bench asserts a robust/mean-based **3–10×**
+   ratio ceiling on the shared 2-core GitHub runners (DEC-P0-020 —
+   the raw 1.1× is too noisy to gate there without flaking), and the
+   decreed strict **1.1×** tier is enforced where
+   `BRUTEX_M4PRO_STRICT=1` on the dedicated self-hosted M4-Pro runner
+   (DEC-O1-STRICT-TIER-001; per `bench-m4pro.yml` that tier is DORMANT
+   until the operator registers the runner — the shared-CI tier is what
+   actually gates every push today), with a measured **3×** cache-tier
+   allowance for ratio tests whose big/small workloads cross a CPU
+   cache tier (DEC-O1-CACHE-TIER-001 — memory-tier physics, not an
+   algorithmic regression; `cache_tier_ceiling` never returns looser
+   than the shared default). Any regression past its tier's ceiling
+   fails CI.
 6. **Rate-limit safety.** Groww publishes type-level limits (the
    **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
@@ -2202,7 +2409,7 @@ bruteX/
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
-| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146; the candle PULL ORDER is the strict six-step law — futures before options, indices before stocks within each: INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS, ledger namespaces byte-unchanged — DEC-PULL-SIX-STEP-ORDER-001 #1527) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
