@@ -16,7 +16,9 @@ the policy demonstrably live, not assumed.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -91,3 +93,51 @@ def test_route_policy_blocks_external_egress(new_page: NewPageFactory, tmp_path:
         assert "example.invalid" in entry or "Failed to load resource" in entry, entry
     # The DNS failure code would mean the request left the route policy.
     assert not any("ERR_NAME_NOT_RESOLVED" in entry for entry in session.console)
+
+
+class _DeadBrowser:
+    """Session-browser stand-in whose ``new_context`` raises (browser died)."""
+
+    def new_context(self) -> Any:
+        raise RuntimeError("session browser is dead")
+
+
+class TestFactoryConstructionContainment:
+    """Round-2 review regression: a factory construction failure leaks nothing.
+
+    The ``new_page`` factory registers a session for teardown only at the very
+    END of construction, so a raise BETWEEN ``server.start()`` and that
+    registration (the session-scoped browser died on an earlier test →
+    ``new_context`` throws) previously left the already-started uvicorn daemon
+    thread running and the fixture's duckdb store open for the rest of the
+    pytest process. The class-scoped ``browser_session`` override injects
+    exactly that failure against the REAL factory + a REAL fixture app.
+    """
+
+    @pytest.fixture
+    def browser_session(self) -> _DeadBrowser:
+        """Override the session browser with the dead stand-in (class-local)."""
+        return _DeadBrowser()
+
+    def test_construction_failure_stops_server_and_cleans_fixture(
+        self, new_page: NewPageFactory, tmp_path: Path
+    ) -> None:
+        fixture = build_db_app(tmp_path)
+        cleaned: list[str] = []
+        real_cleanup = fixture.cleanup
+
+        def _tracking_cleanup() -> None:
+            cleaned.append("cleanup")
+            real_cleanup()
+
+        fixture.cleanup = _tracking_cleanup
+        # Precondition: every earlier test's server thread was joined at its
+        # own teardown — nothing alive to mis-attribute to this test.
+        assert [t for t in threading.enumerate() if t.name == "bx-browser-uvicorn"] == []
+        with pytest.raises(RuntimeError, match="session browser is dead"):
+            new_page(fixture)
+        # The construction error re-raised verbatim AND: the fixture's store
+        # was closed exactly once, and the started uvicorn thread was stopped
+        # (a leaked daemon thread would still be alive + enumerable here).
+        assert cleaned == ["cleanup"]
+        assert [t for t in threading.enumerate() if t.name == "bx-browser-uvicorn"] == []

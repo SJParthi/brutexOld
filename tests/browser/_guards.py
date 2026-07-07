@@ -10,8 +10,13 @@ ZERO-FLAKINESS LAW (DEC-DASHBOARD-BROWSER-TRUTH-001): retries are FORBIDDEN —
 the suite polices itself. Synchronisation must be payload-driven
 (``page.expect_response`` wrappers, ``expect(locator)`` polling, ``page.clock``),
 never wall-clock sleeps, and every explicit LITERAL timeout — including a
-literal ``set_default_timeout``/``set_default_navigation_timeout`` argument —
-is capped at :data:`MAX_TIMEOUT_MS`.
+literal ``set_default_timeout``/``set_default_navigation_timeout`` argument,
+in ANY Python numeric-literal spelling (decimal, underscored, float,
+scientific ``6e4``, hex/octal/binary ``0x186A0``) — is VALUE-checked against
+:data:`MAX_TIMEOUT_MS`; a digit-leading token the parser cannot read is a
+violation OUTRIGHT (fail-closed, round-2 review fix — the previous
+digits-only capture read ``timeout=6e4`` as 6 and ``0x186A0`` as 0, silently
+passing 60 s / 100 s literals under the 10 s cap).
 
 HONEST ENVELOPE (Golden Rule #10): the scan is a line-regex over the suite
 sources, not an AST/dataflow analysis — a timeout smuggled through a variable
@@ -46,11 +51,20 @@ def browser_suite_enabled() -> bool:
     return os.environ.get(ENABLE_ENV_VAR) == "1"
 
 
+#: A digit-leading literal token in a timeout position — deliberately BROAD
+#: (first digit through any ``[A-Za-z0-9_.]`` run) so float (``10.5``),
+#: scientific (``6e4`` / ``1e9``), underscored (``1_000_000``) and
+#: hex/octal/binary (``0x186A0``) spellings are all captured whole and
+#: VALUE-checked by :func:`_timeout_literal_violates`; anything captured that
+#: cannot be parsed is flagged fail-closed instead of silently passing.
+_NUMERIC_LITERAL: Final[str] = r"([0-9][\w.]*)"
+
 #: ``(name, regex, reason)`` triples scanned line-by-line over every
 #: ``tests/browser/*.py`` EXCEPT this module (which necessarily carries the
 #: pattern text itself). The ``oversized_*`` patterns are special-cased:
-#: their captured integer must exceed :data:`MAX_TIMEOUT_MS` to be a
-#: violation.
+#: their captured numeric literal is value-parsed and must exceed
+#: :data:`MAX_TIMEOUT_MS` to be a violation — except an unparseable
+#: digit-leading token, which is a violation OUTRIGHT (fail-closed).
 FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "wait_for_timeout",
@@ -103,12 +117,13 @@ FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     ),
     (
         "oversized_timeout",
-        r"timeout\s*=\s*([0-9][0-9_]*)",
-        f"explicit literal timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} cap",
+        rf"timeout\s*=\s*{_NUMERIC_LITERAL}",
+        f"explicit literal timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} cap "
+        "(an unparseable digit-leading literal is flagged fail-closed)",
     ),
     (
         "oversized_default_timeout",
-        r"set_default(?:_navigation)?_timeout\s*\(\s*([0-9][0-9_]*)",
+        rf"set_default(?:_navigation)?_timeout\s*\(\s*{_NUMERIC_LITERAL}",
         f"literal set_default_timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} "
         "cap — it silently raises the effective cap for EVERY subsequent wait",
     ),
@@ -146,6 +161,15 @@ CI_BROWSER_JOB_PINS: Final[tuple[str, ...]] = (
     "pytest tests/browser",
 )
 
+#: The browser job's pytest STEP run line, pinned EXACTLY (round-2 review):
+#: the substring pins above are presence checks, so a narrowed invocation
+#: (``pytest tests/browser/test_suite_visibility.py -q`` — the sentinel-only
+#: run) would keep every substring green while executing ZERO Chromium
+#: proofs. The discipline test asserts the pytest step's run line equals this
+#: verbatim, that the opt-in env var is scoped to THAT step, and that the
+#: step carries no step-level ``if:``.
+CI_BROWSER_PYTEST_RUN_LINE: Final[str] = "run: pytest tests/browser -q"
+
 #: The main test job's pytest path list — MUST NOT grow tests/browser (the
 #: browser suite is cov-free by design; the main job runs with --cov).
 MAIN_TEST_JOB_PYTEST_PATHS: Final[str] = "tests/unit tests/integration tests/property"
@@ -154,6 +178,28 @@ MAIN_TEST_JOB_PYTEST_PATHS: Final[str] = "tests/unit tests/integration tests/pro
 def _scan_targets() -> list[Path]:
     """Every suite module the discipline law applies to (self excluded)."""
     return sorted(p for p in BROWSER_DIR.glob("*.py") if p.name != Path(__file__).name)
+
+
+def _timeout_literal_violates(token: str) -> bool:
+    """True iff a captured digit-leading timeout literal breaks the cap.
+
+    Parses every Python numeric-literal family: ``int(…, 0)`` covers decimal,
+    underscored, and hex/octal/binary spellings; ``float`` covers float and
+    scientific notation (``6e4``). A digit-leading token NEITHER can read
+    (e.g. ``1j``, or a sign-split ``1e+9`` whose exponent the capture cannot
+    span) is a violation OUTRIGHT — fail-closed, never a silent pass
+    (round-2 review: the previous digits-only capture parsed ``6e4`` as 6 and
+    ``0x186A0`` as 0, positively validating 60 s / 100 s literals).
+    """
+    cleaned = token.replace("_", "")
+    try:
+        value = float(int(cleaned, 0))
+    except ValueError:
+        try:
+            value = float(cleaned)
+        except ValueError:
+            return True
+    return value > MAX_TIMEOUT_MS
 
 
 def iter_violations() -> Iterator[str]:
@@ -169,8 +215,8 @@ def iter_violations() -> Iterator[str]:
                 if name in allowed:
                     continue
                 for match in re.finditer(pattern, line):
-                    if name.startswith("oversized_"):
-                        value = int(match.group(1).replace("_", ""))
-                        if value <= MAX_TIMEOUT_MS:
-                            continue
+                    if name.startswith("oversized_") and not _timeout_literal_violates(
+                        match.group(1)
+                    ):
+                        continue
                     yield f"{path.name}:{lineno}: [{name}] {reason} :: {line.strip()}"

@@ -11,7 +11,13 @@ runs separately:
     ``ci-ok`` aggregate in ALL THREE places (``needs:`` + the echo block + the
     for-loop enumeration), carries NO job-level ``if:`` escape (the aggregate
     treats skipped==pass, so a conditional browser job could merge green with
-    a broken DOM), runs cov-free, and is runtime-bounded;
+    a broken DOM), runs cov-free, and is runtime-bounded; the pytest STEP
+    itself is shape-pinned (round-2 review): its run line must equal
+    ``run: pytest tests/browser -q`` verbatim (a narrowed sentinel-only path
+    would green the job with zero Chromium proofs), the opt-in env var must
+    be scoped to THAT step (detached, the suite collects only the honest-skip
+    sentinel → exit 0 on skips → green job), and the step carries no
+    step-level ``if:``;
 (c) main-CI-path exclusion — the main test job's pytest invocations never
     grow ``tests/browser`` (the browser suite is deliberately outside the
     coverage paths; its opt-in env var keeps bare ``pytest`` runs — e.g.
@@ -65,8 +71,12 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
 
     Round-1 review finding (DEC-DASHBOARD-BROWSER-TRUTH-001 fix set): the scan
     missed positional ``set_default_timeout`` literals and the sleep-capable
-    ``time`` import forms. This pins every added pattern against a synthetic
-    suite tree so a pattern regression fails the MAIN test job.
+    ``time`` import forms. Round-2 review finding: the digits-only capture
+    read ``timeout=6e4`` as 6, ``timeout=1e9`` as 1 and ``timeout=0x186A0``
+    as 0 — positively VALIDATING 60 s / 100 s literals under the 10 s cap —
+    so the scientific/hex shapes (plus the unparseable-literal fail-closed
+    arm) are pinned here too. This pins every added pattern against a
+    synthetic suite tree so a pattern regression fails the MAIN test job.
     """
     sneaky = {
         "t_default_timeout.py": "page.set_default_timeout(600000)\n",
@@ -76,6 +86,11 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
         "t_getattr_time.py": 'waiter = getattr(time, "sle" "ep")\n',
         "t_asyncio_sleep.py": "await asyncio.sleep(5)\n",
         "t_kwarg_timeout.py": "page.goto(url, timeout=999_999)\n",
+        "t_sci_timeout_big.py": 'page.wait_for_selector("#x", timeout=1e9)\n',
+        "t_sci_timeout.py": "page.goto(url, timeout=6e4)\n",
+        "t_hex_timeout.py": "page.goto(url, timeout=0x186A0)\n",
+        "t_sci_default_timeout.py": "page.set_default_timeout(1e9)\n",
+        "t_unparseable_timeout.py": "page.goto(url, timeout=1j)\n",
     }
     for name, body in sneaky.items():
         (tmp_path / name).write_text(body, encoding="utf-8")
@@ -87,13 +102,21 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
 def test_guard_patterns_stay_clean_on_sanctioned_forms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """(a) No false positives: capped literals + plain `import time` pass."""
+    """(a) No false positives: capped literals + plain `import time` pass.
+
+    Round-2 additions: under-cap scientific (``5e3`` = 5 000), float
+    (``join(timeout=10.0)`` — the harness's own thread-join bound) and hex
+    (``0x2328`` = 9 000) literals are VALUE-checked, not shape-banned.
+    """
     (tmp_path / "t_clean.py").write_text(
         "import time\n"
         "from datetime import UTC, datetime, timedelta\n"
         "context.set_default_timeout(DEFAULT_TIMEOUT_MS)\n"
         "page.set_default_timeout(10_000)\n"
         "expect(locator).to_have_text(x, timeout=10000)\n"
+        "page.wait_for_selector(sel, timeout=5e3)\n"
+        "self._thread.join(timeout=10.0)\n"
+        "page.goto(url, timeout=0x2328)\n"
         "deadline = time.monotonic() + 15.0\n",
         encoding="utf-8",
     )
@@ -140,6 +163,49 @@ def test_browser_job_pytest_invocation_is_cov_free() -> None:
     assert "--cov" not in pytest_lines[0], (
         "the browser job's pytest invocation must stay cov-free — the DOM layer is a "
         f"truth gate, not a coverage surface: {pytest_lines[0]!r}"
+    )
+
+
+def _pytest_step_block(job_block: str) -> str:
+    """The one browser-job STEP block carrying the pytest invocation."""
+    steps = re.split(r"^      - ", job_block.split("steps:", 1)[1], flags=re.MULTILINE)
+    hits = [step for step in steps if "pytest tests/browser" in step]
+    assert len(hits) == 1, (
+        f"expected exactly one step containing `pytest tests/browser`, got {len(hits)}"
+    )
+    return hits[0]
+
+
+def test_browser_job_pytest_step_shape_pinned() -> None:
+    """(b) Round-2 review: the pytest STEP's exact shape, not just substrings.
+
+    Two verified mutations survived the presence/substring pins: (M11) a
+    narrowed ``run: pytest tests/browser/test_suite_visibility.py -q`` — the
+    sentinel-only run greens the job with ZERO Chromium proofs while still
+    containing the ``pytest tests/browser`` substring; (M12) detaching the
+    opt-in env var onto another step — the job-block substring still matches,
+    but the suite then collects only the honest-skip sentinel (pytest exits 0
+    on skips → green job → green ci-ok). A step-level ``if:`` on the pytest
+    step is the same unpinned-step escape class. All three are closed by
+    pinning the STEP itself.
+    """
+    text = _CI_YML.read_text(encoding="utf-8")
+    step = _pytest_step_block(_job_block(text, _guards.CI_BROWSER_JOB))
+    run_lines = [line.strip() for line in step.splitlines() if line.strip().startswith("run:")]
+    assert run_lines == [_guards.CI_BROWSER_PYTEST_RUN_LINE], (
+        "the browser job's pytest run line drifted from the exact pinned invocation "
+        f"{_guards.CI_BROWSER_PYTEST_RUN_LINE!r} — a narrowed path (e.g. the sentinel "
+        f"module only) greens the job with zero Chromium proofs executed: {run_lines}"
+    )
+    assert f'{_guards.ENABLE_ENV_VAR}: "1"' in step, (
+        "the opt-in env var must be scoped to the pytest STEP itself — attached to any "
+        "other step it still satisfies the job-block substring pin while the suite "
+        "collects only the honest-skip sentinel (exit 0 on skips → green browser job "
+        "with zero DOM tests)"
+    )
+    assert not re.search(r"^\s*if\s*:", step, flags=re.MULTILINE), (
+        "the pytest step must not carry a step-level `if:` — a conditional pytest step "
+        "is the same silent merge-green escape as the banned job-level `if:`"
     )
 
 

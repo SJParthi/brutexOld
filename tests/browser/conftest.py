@@ -42,6 +42,7 @@ Contract (final-design §2):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
@@ -362,29 +363,51 @@ def new_page(browser_session: Any, request: pytest.FixtureRequest) -> Iterator[N
         stub_widgets: bool = True,
         expect_console_clean: bool = True,
     ) -> PageSession:
-        server = AppServer(fixture.app)
-        base_url = server.start()
-        context = browser_session.new_context()
-        context.set_default_timeout(DEFAULT_TIMEOUT_MS)
-        _arm_route_policy(context, stub_widgets=stub_widgets)
-        context.tracing.start(screenshots=True, snapshots=True, sources=True)
-        page = context.new_page()
-        session = PageSession(
-            page=page,
-            context=context,
-            base_url=base_url,
-            expect_console_clean=expect_console_clean,
-        )
+        # Construction containment (round-2 review): ``live`` is appended only
+        # at the very END, so a raise mid-construction (e.g. the session
+        # browser died on an earlier test and ``new_context`` throws) would
+        # otherwise leak the already-started uvicorn daemon thread + the
+        # fixture's open duckdb store for the rest of the pytest process — the
+        # exact leak class the teardown loop below contains for REGISTERED
+        # sessions. Cleanup here is best-effort (suppressed) so a secondary
+        # teardown failure can never mask the original construction error,
+        # which re-raises verbatim.
+        server: AppServer | None = None
+        context: Any = None
+        try:
+            server = AppServer(fixture.app)
+            base_url = server.start()
+            context = browser_session.new_context()
+            context.set_default_timeout(DEFAULT_TIMEOUT_MS)
+            _arm_route_policy(context, stub_widgets=stub_widgets)
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+            page = context.new_page()
+            session = PageSession(
+                page=page,
+                context=context,
+                base_url=base_url,
+                expect_console_clean=expect_console_clean,
+            )
 
-        def _on_dialog(dialog: Any) -> None:
-            session.dialogs.append(dialog.message)
-            dialog.dismiss()
+            def _on_dialog(dialog: Any) -> None:
+                session.dialogs.append(dialog.message)
+                dialog.dismiss()
 
-        page.on("console", lambda msg: session.console.append(f"[{msg.type}] {msg.text}"))
-        page.on("pageerror", lambda exc: session.page_errors.append(str(exc)))
-        page.on("dialog", _on_dialog)
-        page.on("request", lambda req: session.requests.append(req.url))
-        page.on("response", lambda resp: session.responses.append(f"{resp.status} {resp.url}"))
+            page.on("console", lambda msg: session.console.append(f"[{msg.type}] {msg.text}"))
+            page.on("pageerror", lambda exc: session.page_errors.append(str(exc)))
+            page.on("dialog", _on_dialog)
+            page.on("request", lambda req: session.requests.append(req.url))
+            page.on("response", lambda resp: session.responses.append(f"{resp.status} {resp.url}"))
+        except BaseException:
+            if context is not None:
+                with contextlib.suppress(Exception):
+                    context.close()
+            if server is not None:
+                with contextlib.suppress(Exception):
+                    server.stop()
+            with contextlib.suppress(Exception):
+                fixture.cleanup()
+            raise
         live.append((session, server, fixture))
         return session
 
