@@ -4106,10 +4106,18 @@ def cmd_fetch(
                 # THIS seam (the drain_fetch_pipeline swallow pattern): a chain-write
                 # failure here must never mask the pull's real outcome nor skip the
                 # end_pull_ledger persist below — replay then honestly reports the
-                # gap (the torn-capture class), never a silent success.
+                # gap (the torn-capture class), never a silent success. DELIBERATELY
+                # broader than drain_fetch_pipeline's `except LakeWriteHalt: raise`
+                # carve-out: the capture chain is a FORENSIC sidecar, not lake data
+                # — a flush-raised halt propagating out of this `finally` would
+                # mask the pull's real outcome AND skip the ledger persist, while a
+                # genuine disk-full is not lost: `end_pull_ledger`'s own
+                # `atomic_write_via` (moments below, on the DURABLE ledger path)
+                # still maps ENOSPC → `LakeWriteHalt` (round-3 review; regression:
+                # tests/integration/test_cli_fetch_capture_wiring.py).
                 try:
                     flush_capture_to_audit(capture, ingest_audit)
-                except Exception:  # pragma: no cover — pylint: disable=broad-exception-caught
+                except Exception:  # pylint: disable=broad-exception-caught
                     import structlog
 
                     structlog.get_logger("brutex.cli").exception("pull.capture_flush_failed")

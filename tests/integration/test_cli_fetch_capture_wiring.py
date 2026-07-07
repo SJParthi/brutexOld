@@ -39,10 +39,22 @@ REAL production stack) and asserts from the durable chain ALONE:
 This also executes ``cmd_fetch``'s ``resolve_audit_capture`` wiring in the
 WRAPPED (env=capture) arm — the pragma lifted from that seam in this round
 rides these tests plus the pre-existing live-path suites (identity arm).
+
+Round-3 review fix (MAJOR): the fourth seam's best-effort swallow arm
+(``except Exception`` → ``pull.capture_flush_failed``) carried its own
+``# pragma: no cover`` with ZERO executing tests — the exact pragma class
+round 2 lifted one screen up. The pragma is DELETED and
+``test_cmd_fetch_flush_failure_never_masks_pull_outcome`` fault-injects a
+raising ``flush_capture_to_audit`` (an ENOSPC ``OSError`` — the audit
+chain's per-entry fsync failure class) through the same harness, pinning
+the load-bearing invariant the comment sells: the pull's real outcome is
+unmasked (rc == EXIT_OK), ``end_pull_ledger`` still persists the durable
+window ledger, and exactly one ``pull.capture_flush_failed`` event logs.
 """
 
 from __future__ import annotations
 
+import errno
 import importlib
 import threading
 from datetime import UTC, date, datetime
@@ -60,6 +72,7 @@ from brutex.data.audit_capture import (
 from brutex.data.models import CandleBar
 from brutex.orchestrator.audit import AuditEntry, read_entries, verify_chain
 from brutex.orchestrator.lake_replay import assert_lake_byte_equal, replay_lake_from_audit
+from structlog.testing import capture_logs
 
 #: The KNOWN-GREEN live-path fixture range (mirrors
 #: ``test_cli_fetch_isolation.py``): ~8 monthly 1-minute vendor windows, one
@@ -274,3 +287,68 @@ def test_cmd_fetch_async_path_fourth_seam_lands_pipeline_deferred_records(
     # missing for ANY durable append would flag an un-audited partition).
     replayed = _assert_chain_replays_byte_equal(lake, audit_path, tmp_path / "replayed")
     assert replayed == len(capture_idx)
+
+
+def test_cmd_fetch_flush_failure_never_masks_pull_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raising fourth-seam flush is swallowed: outcome + ledger + one log.
+
+    Round-3 review fix (MAJOR): the ``except Exception`` swallow arm around
+    ``flush_capture_to_audit`` in ``cmd_fetch``'s ``finally`` was
+    pragma-excluded with zero executing tests. This fault-injection pins the
+    invariant its comment sells — with the flush raising the audit chain's
+    real failure class (an ENOSPC ``OSError`` from the per-entry fsync):
+
+    * the pull's REAL outcome is unmasked (``rc == EXIT_OK`` — a mutant that
+      deletes/narrows the ``except`` lets the ``OSError`` propagate out of
+      the ``finally`` and replace the return);
+    * ``end_pull_ledger`` still persists the durable window ledger (skipped
+      entirely if the exception escapes the seam);
+    * exactly one ``pull.capture_flush_failed`` event is logged (loud, never
+      silent — Golden Rule #10).
+
+    ``cmd_fetch`` binds ``flush_capture_to_audit`` via a call-time
+    ``from brutex.adapters.groww.run_ingest import ...``, so patching the
+    source-module attribute is exactly what the production seam executes.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    lake = tmp_path / "lake"
+    _fake_live_path(monkeypatch)
+    _capture_env(monkeypatch)
+    monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    flush_calls: list[object] = []
+
+    def _raising_flush(capture: object, audit: object) -> int:
+        del audit
+        flush_calls.append(capture)
+        raise OSError(errno.ENOSPC, "audit chain fsync: disk full")
+
+    monkeypatch.setattr(run_ingest, "flush_capture_to_audit", _raising_flush)
+
+    with capture_logs() as logs:
+        rc = cli.cmd_fetch(
+            lake,
+            _START,
+            _END,
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=False,
+            rows_per_chunk=1,
+        )
+
+    # The seam WAS attempted (capture is wired non-None in capture mode)…
+    assert len(flush_calls) == 1
+    assert flush_calls[0] is not None
+    # …the pull's real outcome is unmasked…
+    assert rc == cli.EXIT_OK
+    # …the durable window ledger still persisted (end_pull_ledger ran)…
+    assert (lake / "window_ledger" / "ledger.parquet").is_file()
+    # …and the failure was loud: exactly one pull.capture_flush_failed event.
+    events = [entry for entry in logs if entry.get("event") == "pull.capture_flush_failed"]
+    assert len(events) == 1
