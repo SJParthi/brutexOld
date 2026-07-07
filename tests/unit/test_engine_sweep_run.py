@@ -125,7 +125,7 @@ def _dedup() -> ComboDedup:
 #
 # The wired sweep batch-simulates via `sweep_run.ResidentTradeSim`; failure
 # injection therefore targets (a) the batch call (a subclass whose
-# `simulate_masks` raises — the chunk-failure seam), (b) the construction
+# `simulate_masks_with_exit_indices` raises — the chunk-failure seam), (b) the construction
 # (`__init__` raises), and (c) the per-mask metrics tail
 # (`sweep_run.metrics_from_trades`). The per-mask ORACLE seam
 # (`sweep_run.metrics_for_mask`) is now exercised by the chunk-failure
@@ -152,14 +152,14 @@ def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[Residen
     """A ResidentTradeSim subclass whose BATCH call raises — chunk-failure injection."""
 
     class _RaisingSim(ResidentTradeSim):
-        def simulate_masks(self, *args: object, **kwargs: object) -> NoReturn:
+        def simulate_masks_with_exit_indices(self, *args: object, **kwargs: object) -> NoReturn:
             raise exc_factory()
 
     return _RaisingSim
 
 
 class _ShortChunkSim(ResidentTradeSim):
-    """A sim that RETURNS one fewer trade list than masks — batch-contract violation.
+    """A sim that RETURNS one fewer pair than masks — batch-contract violation.
 
     The kernel-misbehaviour shape that RETURNS wrong instead of RAISING (a PyO3
     marshalling bug, a kernel bug): unreachable from the real kernel (Rust
@@ -169,8 +169,10 @@ class _ShortChunkSim(ResidentTradeSim):
     ``ValueError`` escaping ``run_persisted_sweep`` as a grid-wide abort.
     """
 
-    def simulate_masks(self, masks: Sequence[int], **kwargs: Any) -> list[list[ClosedTrade]]:
-        return super().simulate_masks(masks, **kwargs)[:-1]
+    def simulate_masks_with_exit_indices(
+        self, masks: Sequence[int], **kwargs: Any
+    ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
+        return super().simulate_masks_with_exit_indices(masks, **kwargs)[:-1]
 
 
 def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[object]:
@@ -2407,7 +2409,7 @@ class TestChunkLengthContract:
         msg = str(excinfo.value)
         # The SweepComboError names the CHUNK + carries the length ValueError.
         assert "trade-sim chunk of 5 masks" in msg
-        assert "returned 4 trade lists for a chunk of 5 masks" in msg
+        assert "returned 4 trade/exit-index pairs for a chunk of 5 masks" in msg
         assert "batch-contract violation" in msg
         assert "every mask passed the per-mask Python-oracle re-run" in msg
         assert isinstance(excinfo.value.__cause__, ValueError)

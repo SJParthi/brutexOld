@@ -3,7 +3,7 @@
 //!
 //! THE single VWAP source: the hand-synced bit-for-bit Python twin that used
 //! to live at `brutex/indicators/vwap.py::VwapState` was DELETED by
-//! DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (`docs/MIGRATION.md` #1530) —
+//! DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (`docs/MIGRATION.md` #1535) —
 //! BruteX drives this state via the PyO3 pyclass. Running
 //! `cum(price·vol) / cum(vol)`, anchored per trading session:
 //!

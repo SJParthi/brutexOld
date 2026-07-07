@@ -491,7 +491,7 @@ def test_walk_forward_dual_arm_rust_metrics_flag_is_bit_identical(
             step_days=5,
         )
 
-    monkeypatch.delenv("BRUTEX_SWEEP_RUST_METRICS", raising=False)
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "0")
     off = _run()
     monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
     on = _run()
