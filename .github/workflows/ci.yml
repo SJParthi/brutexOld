@@ -258,7 +258,16 @@ jobs:
     # 60 keeps an honest hang guard with ~45% headroom over the observed
     # ~40m wall time. Continues the 15->25->40 ratchet (60 = the higher of
     # the two concurrent 2026-07-04 raises, union-resolved at merge).
-    timeout-minutes: 60
+    # 60 -> 75 (2026-07-07, PR #1230 run 28854276463): a fully-GREEN run on
+    # 56f29620 measured exactly 60:00 wall — 33m05 pytest+coverage + 13m25
+    # strict per-module gate + 11m43 touched-module gate + setup, EVERY
+    # executed step green — and was cancelled AT the wall, failing the
+    # CI OK aggregate with zero real failures. The PR legitimately grew the
+    # job (new scoped per-module gates + the ampersand-probe/doctor suites).
+    # 75 gives evidenced ~25% headroom over the measured ~60m wall;
+    # wall-clock budget only — no gate is weakened. Continues the
+    # 15->25->40->60 ratchet.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
