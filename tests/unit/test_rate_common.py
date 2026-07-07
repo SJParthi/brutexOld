@@ -2139,3 +2139,114 @@ class TestMutationLiteralPins:
         ctl.pace()  # stamps _last_issue_ts at 1000.0
         clock.advance(100.0)  # far past the 1/5 s interval
         assert ctl._smooth_wait_locked(ctl._clock()) == 0.0
+
+
+class TestPendingLogLevelSlotPins:
+    """T8 re-probe kills (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528).
+
+    The scoped mutmut re-run on THIS base enumerated never-probed #1202
+    deferred-log mutants. The level SLOT of a pending tuple is invisible to a
+    log-sink observer — ``_flush_rate_logs`` dispatches ``level == "info"`` vs
+    ELSE-warning, so a mutated ``"warning"`` (``"XXwarningXX"``) emits
+    identically — the ONLY kill surface is the raw tuple itself. These tests
+    pin every pending-tuple level slot byte-exact by capturing the tuples
+    BEFORE dispatch (monkeypatched ``_flush_rate_logs``) or from a
+    ``*_locked`` helper's return value, plus the ``_PendingLog`` alias object
+    (whose ``= None`` mutant is unobservable through PEP-563 annotations).
+    """
+
+    def test_pending_log_alias_is_the_exact_triple_shape(self) -> None:
+        """Kills the ``_PendingLog = tuple[...] → None`` alias mutant.
+
+        Under PEP 563 the alias is never evaluated inside an annotation, so
+        the module-level alias OBJECT is pinned directly instead.
+        """
+        assert rate_common._PendingLog == tuple[str, str, dict[str, object]]
+
+    def test_clock_gap_pending_tuple_is_byte_exact_including_level(self) -> None:
+        """Kills the clock-gap ``"warning" → "XXwarningXX"`` level-slot mutant."""
+        clock = _Clock()
+        ctl = _controller(clock)
+        clock.advance(400.0)  # > CLOCK_GAP_THRESHOLD_S — a real sleep/wake gap
+        with ctl._lock:
+            pending = ctl._handle_clock_gap_locked(clock.t)
+        assert pending == (
+            "warning",
+            "rate.clock_gap",
+            {"gap_s": 400.0, "current_rps": CEILING_RPS},
+        )
+
+    def test_smooth_latch_pending_tuple_level_slot_is_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kills the latch ``"warning" → "XXwarningXX"`` level-slot mutant."""
+        captured: list[tuple[str, str, dict[str, object]]] = []
+
+        def _capture(*events: tuple[str, str, dict[str, object]] | None) -> None:
+            captured.extend(e for e in events if e is not None)
+
+        monkeypatch.setattr(rate_common, "_flush_rate_logs", _capture)
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)  # 9 > 8.0 — burst evidence
+        ctl.on_rate_limit()  # latches → latch_evt rides the same flush
+        latch = [e for e in captured if e[1] == "rate.smooth_pacing_latched"]
+        assert len(latch) == 1
+        assert latch[0][0] == "warning"
+        assert latch[0][2]["current_rps"] == 8.0
+
+    def test_flush_fed_pending_tuples_are_byte_exact_including_levels(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kills the 429/stepdown/timeout/stepup level-slot mutants.
+
+        Mirrors the T2 deferred-emit golden's scenario but captures the RAW
+        (level, event, fields) tuples before dispatch, so the level slot of
+        EVERY flush-fed emission site is pinned byte-exact — including the
+        ``"info"`` stepup slot, whose mutation WOULD flip the emitted level
+        yet was never level-pinned (the existing goldens drop ``log_level``).
+        """
+        captured: list[tuple[str, str, dict[str, object]]] = []
+
+        def _capture(*events: tuple[str, str, dict[str, object]] | None) -> None:
+            captured.extend(e for e in events if e is not None)
+
+        monkeypatch.setattr(rate_common, "_flush_rate_logs", _capture)
+        clock = _Clock()
+        ctl = _controller(clock)
+        for _ in range(STEP_DOWN_HITS):  # 429 burst at one instant → 5→4
+            ctl.on_rate_limit()
+        for _ in range(STEP_DOWN_TIMEOUT_HITS):  # timeout storm → 4→3
+            ctl.on_timeout()
+        clock.advance(STEP_UP_WINDOW)  # one clean recovery window
+        ctl.on_success()  # → 3→4 (rate.stepup, the one "info" site)
+        expected: list[tuple[str, str, dict[str, object]]] = [
+            ("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 1}),
+            ("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 2}),
+            ("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 3}),
+            (
+                "warning",
+                "rate.stepdown",
+                {"from_rps": 5.0, "to_rps": 4.0, "floor_rps": FLOOR_RPS},
+            ),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 1}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 2}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 3}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 4}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 5}),
+            (
+                "warning",
+                "rate.stepdown",
+                {
+                    "from_rps": 4.0,
+                    "to_rps": 3.0,
+                    "floor_rps": TIMEOUT_FLOOR_RPS,
+                    "cause": "timeout",
+                },
+            ),
+            (
+                "info",
+                "rate.stepup",
+                {"from_rps": 3.0, "to_rps": 4.0, "ceiling_rps": CEILING_RPS},
+            ),
+        ]
+        assert captured == expected

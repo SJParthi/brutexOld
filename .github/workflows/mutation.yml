@@ -107,9 +107,11 @@ jobs:
     # Budget (DEC-MUTATION-RUNTIME-003, measured): pass 1 (245 mutants x ~2.2 s CI)
     # ~= 9 min; compute.py (354) ~= 13 min; remaining 8 loop modules (~384) ~= 14 min
     # — reconciled to the 06-15 green step's 34m51s (run 27526937751);
-    # rate_common (~290 after pragmas) at ~5-7 s CI (local 2.5-3.4 s x2 shared-GHA
-    # factor) ~= 24-34 min + 6 spin mutants x 20 s wrap ~= 2 min.
-    # Total ~= 64-74 min nominal, ~80 worst -> >= 40 min margin under 120.
+    # rate_common (347 measured after pragmas on the FINAL base — the probe's
+    # ~290 estimate predated the T8 re-probe's enumeration of the never-probed
+    # #1202 deferred-log mutants) at ~5-7 s CI (local 2.5-3.4 s x2 shared-GHA
+    # factor) ~= 29-40 min + 6 spin mutants x 20 s wrap ~= 2 min.
+    # Total ~= 69-80 min nominal, ~87 worst -> >= 33 min margin under 120.
     # (The OLD broad `pytest tests/unit` runner could never finish here —
     # 123/804 mutants at cancellation, DEC-MUTATION-RUNTIME-001.)
     timeout-minutes: 120

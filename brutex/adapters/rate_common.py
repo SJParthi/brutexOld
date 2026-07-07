@@ -615,7 +615,18 @@ class RateController:
         accumulates into a false trip. O(1): one subtraction + (rarely) a few deque
         clears.
         """
-        pending: _PendingLog | None = None
+        # (Pragma class — PEP-563 local annotation: this file's
+        # ``from __future__ import annotations`` (:39) makes every LOCAL
+        # variable annotation an unevaluated string at runtime (PEP 526 —
+        # locals' annotations are never even stored), so an operator mutant
+        # INSIDE the annotation (``|`` → ``&``) is provably equivalent and
+        # unkillable by any test. Applies to every
+        # ``x: _PendingLog | None = None`` capture slot in this file — the
+        # T8 scoped re-probe on this base enumerated the class (the alias
+        # OBJECT itself is test-pinned instead, and ``None`` is not a mutmut
+        # target, so nothing real hides on these lines).
+        # DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528.)
+        pending: _PendingLog | None = None  # pragma: no mutate
         if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
             self._issues.clear()
             # Clear the observe-only trailing-hour issue counter ring too
@@ -916,7 +927,7 @@ class RateController:
                 # every path that reads it is dominated by the in-lock assignment
                 # below (an in-lock exception propagates past all reads), and a dead
                 # ``wait = 0.0`` here was flagged by CodeQL (py/multiple-definition).
-                gap_evt: _PendingLog | None = None
+                gap_evt: _PendingLog | None = None  # pragma: no mutate
                 try:
                     with self._lock:
                         now = self._clock()
@@ -963,7 +974,7 @@ class RateController:
                 # the finally on an in-lock exception); ``gov_wait`` has NO initializer
                 # — the in-lock assignment dominates every read (CodeQL
                 # py/multiple-definition on the dead ``gov_wait = 0.0``).
-                gov_gap_evt: _PendingLog | None = None
+                gov_gap_evt: _PendingLog | None = None  # pragma: no mutate
                 try:
                     with self._lock:
                         now = self._clock()
@@ -1032,7 +1043,7 @@ class RateController:
         Observability only — it changes no pacing decision.
         """
         now = self._clock()
-        gap_evt: _PendingLog | None = None
+        gap_evt: _PendingLog | None = None  # pragma: no mutate
         due = False
         try:
             with self._lock:
@@ -1068,10 +1079,10 @@ class RateController:
         values are captured at the decision point; telemetry is emitted
         post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        gap_evt: _PendingLog | None = None
-        hit_evt: _PendingLog | None = None
-        latch_evt: _PendingLog | None = None
-        step_evt: _PendingLog | None = None
+        gap_evt: _PendingLog | None = None  # pragma: no mutate
+        hit_evt: _PendingLog | None = None  # pragma: no mutate
+        latch_evt: _PendingLog | None = None  # pragma: no mutate
+        step_evt: _PendingLog | None = None  # pragma: no mutate
         try:
             with self._lock:
                 now = self._clock()
@@ -1165,9 +1176,9 @@ class RateController:
         are captured at the decision point; telemetry is emitted post-release
         (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        gap_evt: _PendingLog | None = None
-        to_evt: _PendingLog | None = None
-        step_evt: _PendingLog | None = None
+        gap_evt: _PendingLog | None = None  # pragma: no mutate
+        to_evt: _PendingLog | None = None  # pragma: no mutate
+        step_evt: _PendingLog | None = None  # pragma: no mutate
         try:
             with self._lock:
                 now = self._clock()
@@ -1220,8 +1231,8 @@ class RateController:
         trickle-trap this closes. Field values are captured at the decision
         point; telemetry is emitted post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        gap_evt: _PendingLog | None = None
-        step_evt: _PendingLog | None = None
+        gap_evt: _PendingLog | None = None  # pragma: no mutate
+        step_evt: _PendingLog | None = None  # pragma: no mutate
         try:
             with self._lock:
                 now = self._clock()
