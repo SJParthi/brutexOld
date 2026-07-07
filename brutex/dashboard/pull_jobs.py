@@ -42,6 +42,7 @@ from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.pull_stall import ALIVE_LOG_MIN_INTERVAL_S, PullWatchdog
 from brutex.dashboard.summary_cache import CoverageCounters
+from brutex.data.sweep_exclusion import SweepRunningError, check_pull_exclusion
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.progress_beat import (
     register_progress_beat,
@@ -545,6 +546,12 @@ class BackgroundPullJob:
         Resolves the lake root via :attr:`_lake_root_resolver`; a ``None`` root DISABLES
         BOTH guards (a dry-run / test) and returns ``True`` (nothing to hold). Otherwise:
 
+        0. **Sweep-vs-pull exclusion PRE-probe** (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001
+           §8): a WRITE-FREE :func:`~brutex.data.sweep_exclusion.check_pull_exclusion`
+           probe of ``<lake>/.locks/sweep.lock`` — a running sweep holds ``LOCK_SH``
+           on it for its WHOLE run, so the pull refuses fast and honestly (the
+           "lock wins" law; one ``pull.sweep_exclusion_refused`` structlog per
+           refusal, emitted inside the probe).
         1. **Account-keyed lock FIRST** (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001): the key
            resolver supplies the api_key; a ``None`` key SKIPS this lock gracefully (the
            resolver already logged why — no credentials ⇒ no vendor calls ⇒ no account
@@ -552,17 +559,31 @@ class BackgroundPullJob:
            DIFFERENT lake root) refuses the pull.
         2. **Lake-root lock second** (:attr:`_singleflight_factory`). Contention rolls
            the account lock back (LIFO) and refuses the pull.
+        3. **Sweep-exclusion RE-probe** (the TOCTOU close, both-check-both): a sweep
+           that slipped in between the pre-probe and the lock acquires is caught
+           here — the pull rolls BOTH just-taken locks back (LIFO) and refuses, so
+           every simultaneous-start interleaving ends with both sides refusing
+           (fail-closed, never a double-run; the sweep side re-probes symmetrically
+           in ``sweep_run_guard``).
 
         Held guards are stashed in :attr:`_account_singleflight` / :attr:`_singleflight`
         so :meth:`_run` releases them in its ``finally``. On refusal the progress is
         failed with the actionable message + one warning log (Golden Rule #6 — never
-        double the account request rate).
+        double the account request rate; a held sweep surfaces the honest
+        sweep-exclusion message as the job's error state).
         """
         lake_root = self._lake_root_resolver()
         if lake_root is None:
             self._singleflight = None
             self._account_singleflight = None
             return True
+        try:
+            check_pull_exclusion(lake_root)
+        except SweepRunningError as exc:
+            self._singleflight = None
+            self._account_singleflight = None
+            self._progress.fail(f"{type(exc).__name__}: {exc}")
+            return False
         account_key = self._account_key_resolver()
         if account_key is None:
             # Graceful skip (already logged by the resolver): the lake-root lock below
@@ -598,6 +619,16 @@ class BackgroundPullJob:
             )
             return False
         self._singleflight = guard
+        # Sweep-exclusion RE-probe (TOCTOU close, DEC-SWEEP-PREFLIGHT-ESTIMATOR-001
+        # §8): a sweep that acquired its shared lock between the pre-probe and our
+        # lock acquires wins — roll BOTH just-taken locks back (LIFO: lake-root
+        # first, then account) and refuse, so both sides refuse (fail-closed).
+        try:
+            check_pull_exclusion(lake_root)
+        except SweepRunningError as exc:
+            self._release_singleflight()
+            self._progress.fail(f"{type(exc).__name__}: {exc}")
+            return False
         return True
 
     def _release_singleflight(self) -> None:

@@ -231,7 +231,8 @@ from brutex.dashboard.sweep_results_view import (
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
-    resolve_sweep_request,
+    preflight_sweep_request,
+    resolve_sweep_launches,
     run_sweep_from_request,
     sweep_progress_file,
 )
@@ -5605,6 +5606,72 @@ def build_app(
         status_code, payload = await run_in_threadpool(_run)
         return JSONResponse(payload, status_code=status_code)
 
+    @app.post("/api/v1/sweep/preflight")
+    async def api_sweep_preflight(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        exchange: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/sweep/preflight — the synchronous, PROBE-ONLY sweep gate + estimate.
+
+        DEC-SWEEP-PREFLIGHT-ESTIMATOR-001 (§3.3): resolves the D8 launch
+        fan-out (blank symbols ⇒ ALL 3 engine indices, NIFTY-first) via
+        :func:`~brutex.dashboard.sweep_runner.resolve_sweep_launches` (a bad
+        field is a 400), then runs the SAME composed
+        ``run_sweep_data_preflight`` gate ``cmd_sweep_all`` uses per launch on
+        the threadpool (the app.py offload doctrine) and merges refuse-whole:
+        refusals UNIONED, estimate SUMMED with the per-launch breakdown, ONE
+        ``confirm_token`` over the whole fan-out
+        (``lake_token=lake_revision(lake_root)``).
+
+        **Always 200 when the selection parses** — a refusal is DATA (the
+        payload carries ``ok=False`` + the complete refusal text + the
+        estimate of what was refused), never an opaque HTTP error (hunt G5).
+        PROBE-ONLY: never takes the sweep lock, never writes anything —
+        repeat polls leave the lake and the results volume byte-identical.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            launches = resolve_sweep_launches(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                exchange=exchange,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla=acknowledge_sla,
+                today=date.today(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = await run_in_threadpool(
+            preflight_sweep_request,
+            launches,
+            lake_root=lake,
+            results_root=default_results_root(lake),
+        )
+        return JSONResponse(payload)
+
     @app.post("/api/v1/sweep/run")
     async def api_sweep_run(
         symbols: str | None = Query(default=None),
@@ -5619,24 +5686,39 @@ def build_app(
         segment: str | None = Query(default=None),
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
+        confirm_token: str | None = Query(default=None),
+        acknowledge_sla: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/sweep/run — launch the brute-force grid sweep from the dashboard.
 
-        The "🚀 Run Sweep" button (DEC-SWEEP-RUN-BUTTON-001): the ONE-CLICK web
-        replacement for the ``brutex sweep-all …`` terminal command. Every form
-        field is normalised + validated by the pure
-        :func:`~brutex.dashboard.sweep_runner.resolve_sweep_request` (a bad field is
-        a 400 with a clear message — never a deep background crash); the resolved
-        request runs the SAME ``cmd_sweep_all`` engine the CLI uses on the
-        **single-flight** background job (poll the live tick at
-        ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
-        the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
-        pull OR sweep is already running is a no-op (``{"started": false}``) — one
-        lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
+        The "🚀 Run Sweep" button (DEC-SWEEP-RUN-BUTTON-001, gated by
+        DEC-SWEEP-PREFLIGHT-ESTIMATOR-001): the ONE-CLICK web replacement for
+        the ``brutex sweep-all …`` terminal command. Every form field is
+        normalised + validated by the pure
+        :func:`~brutex.dashboard.sweep_runner.resolve_sweep_launches` (a bad
+        field is a 400 with a clear message — never a deep background crash;
+        blank symbols fan out to ALL 3 engine indices, NIFTY-first), then the
+        merged probe-only preflight re-runs synchronously and gates the start:
 
-        The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
-        partly-pulled lake simply sweeps whatever slices exist and reports the
-        honest tuple count in the progress feed (Golden Rule #10).
+        * a REFUSED verdict ⇒ **409** ``{"reason": "preflight_refused", …}``
+          with the full payload — NO job is registered;
+        * an absent/mismatched *confirm_token* (the selection was edited OR
+          ``lake_revision`` moved — e.g. a pull finished between estimate and
+          click) ⇒ **409** ``{"reason": "confirm_token_stale", …}`` carrying a
+          FRESH payload incl. the new token — the page re-renders the gate;
+        * ok + match ⇒ the launches run sequentially on the **single-flight**
+          background job (worst exit code wins; poll the live tick at
+          ``/api/v1/sweep-progress``), and the estimate is echoed in the
+          response. The AUTHORITATIVE gate re-runs inside ``cmd_sweep_all``
+          under the held sweep lock — one seam, two chances, zero divergence.
+
+        A second click while a pull OR sweep is already running is a no-op
+        (``{"started": false}``) — one lake, one writer (CLAUDE.md §2 Rule 7
+        idempotence).
+
+        The sweep reads the LOCAL lake (no vendor creds, no network); a
+        not-ready lake now REFUSES loudly with the complete not-ready list
+        (O-a refuse-whole — never a silent sweep over holes, Golden Rule #10).
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -5644,7 +5726,7 @@ def build_app(
             raise HTTPException(status_code=400, detail="no lake configured for sweep")
         lake = lake_root.parent
         try:
-            request = resolve_sweep_request(
+            launches = resolve_sweep_launches(
                 symbols=symbols,
                 intervals=intervals,
                 directions=directions,
@@ -5657,31 +5739,55 @@ def build_app(
                 segment=segment,
                 start=start,
                 end=end,
+                acknowledge_sla=acknowledge_sla,
                 today=date.today(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         results_root = default_results_root(lake)
+        # The mandatory confirm gate (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001 §3.3):
+        # re-run the merged probe-only preflight synchronously so a refused
+        # verdict / a stale token can never register a job.
+        gate = await run_in_threadpool(
+            preflight_sweep_request,
+            launches,
+            lake_root=lake,
+            results_root=results_root,
+        )
+        if not gate["ok"]:
+            return JSONResponse({"reason": "preflight_refused", **gate}, status_code=409)
+        if confirm_token is None or confirm_token != gate["confirm_token"]:
+            # The FRESH payload (incl. the new token) rides the 409 so the
+            # page re-renders the gate and the operator re-confirms the
+            # numbers + lake state actually being launched.
+            return JSONResponse({"reason": "confirm_token_stale", **gate}, status_code=409)
+
         # Point the live sweep-progress panel at the exact file cmd_sweep_all
         # publishes to, so GET /api/v1/sweep-progress serves THIS run with no new
         # plumbing (the cross-process file bridge — DEC-SWEEP-WIRE-GA-001).
         state.sweep_progress_path = sweep_progress_file(results_root)
         _LOG.info(
             "sweep.run.requested",
-            symbols=request.symbols,
-            intervals=request.intervals,
-            directions=request.directions,
-            k=request.k,
-            exchange=request.exchange,
-            segment=request.segment,
-            start=request.start,
-            end=request.end,
+            launches=[
+                {"exchange": launch.exchange, "segment": launch.segment, "symbols": launch.symbols}
+                for launch in launches
+            ],
+            intervals=launches[0].intervals,
+            directions=launches[0].directions,
+            k=launches[0].k,
+            start=launches[0].start,
+            end=launches[0].end,
+            confirm_token=confirm_token,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: run the grid sweep; the live tick streams to the progress file."""
-            return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            """Background body: run each launch sequentially; worst exit code wins."""
+            worst = 0
+            for launch in launches:
+                code = run_sweep_from_request(launch, lake_root=lake, results_root=results_root)
+                worst = max(worst, code)
+            return worst
 
         # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
         # _work never reports per-bar progress, so the _on_progress mark_dirty
@@ -5695,11 +5801,15 @@ def build_app(
         started = _pull_job.start(
             _work,
             total=1,
-            detail=f"sweep {request.symbols}",
+            detail=f"sweep {'; '.join(launch.symbols for launch in launches)}",
             on_success=_summary_cache.mark_dirty,
         )
-        payload = request.to_dict()
+        payload = launches[0].to_dict()
         payload["started"] = started
+        payload["launches"] = [launch.to_dict() for launch in launches]
+        payload["estimate"] = gate["estimate"]
+        payload["headline"] = gate["headline"]
+        payload["confirm_token"] = gate["confirm_token"]
         return JSONResponse(payload)
 
     @app.get("/api/v1/sweep/leaderboard")

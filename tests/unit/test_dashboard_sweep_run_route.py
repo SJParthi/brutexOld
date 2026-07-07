@@ -1,19 +1,20 @@
 """The ``/api/v1/sweep/run`` route (DEC-SWEEP-RUN-BUTTON-001).
 
-Covers the route glue — the happy-path start (defaults + custom params), the
-400 validation arms (delegated to the pure resolver), the "no lake" guard, the
-single-flight no-op, and the /reports page wiring. The background ``_work`` body
-(which calls ``run_sweep_from_request`` on the job thread) is replaced by an
-offline fake — NEVER a real lake/sweep. Mirrors
-``test_dashboard_pull_derivatives_route.py``: a real DuckDB-backed store + a
-``TestClient``. Skipped cleanly when the ``[ui]`` extra (FastAPI) or duckdb is
-absent.
+Covers the route glue that fires BEFORE the mandatory preflight/confirm gate
+(DEC-SWEEP-PREFLIGHT-ESTIMATOR-001) — the eager 400 validation arms (delegated
+to the pure resolver), the "no lake" guard, and the /reports page wiring. The
+happy-path start / echo / progress / single-flight scenarios live in
+``test_dashboard_sweep_preflight_route.py`` (they need a preflight-passing lake
+plus a matching ``confirm_token``). The background ``_work`` body (which calls
+``run_sweep_from_request`` on the job thread) is replaced by an offline fake —
+NEVER a real lake/sweep. Mirrors ``test_dashboard_pull_derivatives_route.py``:
+a real DuckDB-backed store + a ``TestClient``. Skipped cleanly when the
+``[ui]`` extra (FastAPI) or duckdb is absent.
 """
 
 from __future__ import annotations
 
 import importlib
-import time
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -82,72 +83,12 @@ def _fake_run_sweep_from_request(request: Any, *, lake_root: Path, results_root:
     return 0
 
 
-def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        snap = client.get("/api/v1/universe/pull-progress").json()
-        assert isinstance(snap, dict)
-        if snap["state"] in {"done", "error"}:
-            return snap
-        time.sleep(0.01)
-    raise AssertionError("background sweep job did not settle within the timeout")
-
-
-# ── happy paths ───────────────────────────────────────────────────────────────
-
-
-def test_default_params_start_job(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _CAPTURED.clear()
-    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
-    resp = client.post("/api/v1/sweep/run")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["started"] is True
-    assert body["symbols"] == "NIFTY,BANKNIFTY"
-    assert body["intervals"] == "1minute,5minute,15minute"
-    assert body["start"] == "2020-01-01"
-    assert body["exchange"] == "NSE"
-    assert body["segment"] == "INDEX"
-    assert _wait_for_job(client)["state"] == "done"
-    # The background body received the resolved request + the lake-relative roots.
-    assert _CAPTURED["request"].symbols == "NIFTY,BANKNIFTY"
-    assert _CAPTURED["results_root"] == _CAPTURED["lake_root"] / "sweeps"
-
-
-def test_custom_params_are_echoed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
-    resp = client.post(
-        "/api/v1/sweep/run",
-        params={
-            "symbols": "NIFTY",
-            "intervals": "5minute",
-            "directions": "BUY",
-            "k": "2",
-            "start": "2022-01-01",
-            "end": "2022-12-31",
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["symbols"] == "NIFTY"
-    assert body["intervals"] == "5minute"
-    assert body["directions"] == "BUY"
-    assert body["k"] == "2"
-    assert body["start"] == "2022-01-01"
-    assert body["end"] == "2022-12-31"
-    assert _wait_for_job(client)["state"] == "done"
-
-
-def test_progress_path_points_at_the_sweep_file(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """After a start, GET /api/v1/sweep-progress is served (idle until the file lands)."""
-    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
-    assert client.post("/api/v1/sweep/run").status_code == 200
-    _wait_for_job(client)
-    prog = client.get("/api/v1/sweep-progress").json()
-    assert isinstance(prog, dict)
-    assert "state" in prog  # the offline fake writes no file ⇒ idle snapshot
+# NOTE (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001): the happy-start / custom-echo /
+# progress-path / second-click scenarios moved to
+# tests/unit/test_dashboard_sweep_preflight_route.py — the run route now
+# requires a matching confirm_token over a preflight-passing lake, which these
+# store-only fixtures cannot supply. The eager 400 validation arms below still
+# fire BEFORE the preflight gate and remain route-pinned here.
 
 
 # ── 400 arms (delegated to the pure resolver) ─────────────────────────────────
@@ -234,30 +175,6 @@ def test_no_lake_configured_400(monkeypatch: pytest.MonkeyPatch) -> None:
         resp = c.post("/api/v1/sweep/run")
         assert resp.status_code == 400
         assert resp.json()["detail"] == "no lake configured for sweep"
-
-
-def test_second_click_while_running_is_a_noop(
-    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """While a sweep (or pull) holds the single-flight job, a second start no-ops."""
-    started = __import__("threading").Event()
-    release = __import__("threading").Event()
-
-    def _blocking(request: Any, *, lake_root: Path, results_root: Path) -> int:
-        started.set()
-        release.wait(timeout=10.0)
-        return 0
-
-    monkeypatch.setattr(app_module, "run_sweep_from_request", _blocking)
-    with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
-        first = c.post("/api/v1/sweep/run")
-        assert first.status_code == 200
-        assert first.json()["started"] is True
-        assert started.wait(timeout=10.0)
-        second = c.post("/api/v1/sweep/run")
-        assert second.status_code == 200
-        assert second.json()["started"] is False  # single-flight no-op
-        release.set()
 
 
 # ── page wiring ───────────────────────────────────────────────────────────────

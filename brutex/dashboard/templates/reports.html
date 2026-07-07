@@ -262,24 +262,28 @@
       <h1>🚀 Run Sweep (brute-force backtest)</h1>
       <p class="lede">
         The ONE-CLICK web version of the <code>brutex sweep-all</code> terminal
-        command — no typing required. BruteX tries <b>every</b> strategy combo
-        from the 52-condition vocabulary across your downloaded index data,
+        command — no typing required. BruteX first runs a <b>probe-only data
+        preflight + live estimate</b> (trials · est. hours · est. GB) and asks
+        you to confirm before anything starts; a not-ready lake refuses loudly
+        naming the exact missing spans ("pull on /universe first") — it never
+        silently sweeps over holes. Then it tries <b>every</b> strategy combo
+        from the condition vocabulary across your downloaded index data,
         simulates each one's trades, scores them, and saves the ranked winners.
-        Then press <b>🪜 Run cascade</b> below to keep only the ones that survive
-        the nine anti-luck filters. Leave the boxes blank for the sensible
-        defaults (<code>NIFTY,BANKNIFTY</code> · <code>1minute,5minute,15minute</code>
-        · 2020-01-01 → today). SENSEX is BSE-listed, so run it separately with
-        <code>SENSEX</code> + exchange <code>BSE</code>.
+        Press <b>🪜 Run cascade</b> below to keep only the ones that survive
+        the nine anti-luck filters. Leave the boxes blank for the defaults:
+        <b>all 3 indices</b> (NIFTY + BANKNIFTY on NSE, then SENSEX on BSE —
+        run automatically back-to-back) · <b>all 21 timeframes</b> ·
+        2020-01-01 → today.
       </p>
       <div class="row" style="margin-top:14px;gap:10px;flex-wrap:wrap;align-items:flex-end;">
         <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
           SYMBOLS
-          <input id="swSymbols" type="text" placeholder="NIFTY,BANKNIFTY"
+          <input id="swSymbols" type="text" placeholder="blank = all 3 indices"
                  style="min-width:180px;">
         </label>
         <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
           TIMEFRAMES
-          <input id="swIntervals" type="text" placeholder="1minute,5minute,15minute"
+          <input id="swIntervals" type="text" placeholder="blank = all 21 TFs"
                  style="min-width:200px;">
         </label>
         <label style="display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:4px;">
@@ -503,10 +507,16 @@ cascadeBtn.onclick = async () => {
   }
 };
 
-/* 🚀 Run Sweep trigger (DEC-SWEEP-RUN-BUTTON-001): POST the form fields (blank ⇒
-   server defaults), then poll the existing /api/v1/sweep-progress feed for the
-   live per-tuple tick. The sweep engine is the engine's job — this just kicks it
-   and renders the honest progress (tuples · combos/sec · survivors). */
+/* 🚀 Run Sweep trigger (DEC-SWEEP-RUN-BUTTON-001, gated by
+   DEC-SWEEP-PREFLIGHT-ESTIMATOR-001): a TWO-STEP confirm — (1) POST
+   /api/v1/sweep/preflight (probe-only; always-200 payload) and render the
+   refuse-whole verdict or window.confirm() the live estimate headline +
+   notes/warnings; (2) POST /api/v1/sweep/run WITH the confirm_token. A 409
+   (preflight_refused / confirm_token_stale) renders the exact refusal text.
+   Then poll the existing /api/v1/sweep-progress feed for the live per-tuple
+   tick. All server text lands via textContent — NEVER innerHTML (the repo
+   XSS law). Shipped LIVE in Phase 1 so the confirm gate is never dormant
+   (the #935 trap); the full estimator page is P4. */
 const sweepBtn = document.getElementById("run-sweep");
 const sweepMsg = document.getElementById("sweep-msg");
 const sweepBar = document.getElementById("sweep-bar");
@@ -539,9 +549,7 @@ async function pollSweep() {
   }
 }
 
-sweepBtn.onclick = async () => {
-  sweepBtn.disabled = true;
-  sweepMsg.textContent = "Starting the brute-force sweep…";
+function sweepQuery() {
   const q = new URLSearchParams();
   const sym = document.getElementById("swSymbols").value.trim();
   const itv = document.getElementById("swIntervals").value.trim();
@@ -551,18 +559,55 @@ sweepBtn.onclick = async () => {
   if (itv) q.set("intervals", itv);
   if (st) q.set("start", st);
   if (en) q.set("end", en);
+  return q;
+}
+
+sweepBtn.onclick = async () => {
+  sweepBtn.disabled = true;
+  sweepMsg.textContent = "Preflighting the selection (probe-only — nothing runs yet)…";
+  const q = sweepQuery();
   try {
+    // Step 1 — the probe-only preflight + live estimate (always 200 when the
+    // selection parses; a refusal is DATA, rendered verbatim below).
+    const pf = await fetch("/api/v1/sweep/preflight?" + q.toString(), { method: "POST" });
+    const pj = await pf.json();
+    if (!pf.ok) {
+      sweepMsg.textContent = "Sweep error: " + (pj.detail || ("HTTP " + pf.status));
+      sweepBtn.disabled = false; return;
+    }
+    if (!pj.ok) {
+      sweepMsg.textContent = pj.refusal_text || "sweep preflight refused";
+      sweepBtn.disabled = false; return;
+    }
+    const confirmLines = [pj.headline || ""]
+      .concat(pj.notes || [])
+      .concat((pj.warnings || []).map((w) => w.text || ""))
+      .filter(Boolean);
+    if (!window.confirm(confirmLines.join("\n\n"))) {
+      sweepMsg.textContent = "Sweep cancelled — nothing was started, nothing was written.";
+      sweepBtn.disabled = false; return;
+    }
+    // Step 2 — launch WITH the token binding this exact estimate + lake state.
+    q.set("confirm_token", pj.confirm_token || "");
     const r = await fetch("/api/v1/sweep/run?" + q.toString(), { method: "POST" });
     const j = await r.json();
     if (r.status === 400) {
       sweepMsg.textContent = "Sweep error: " + (j.detail || ("HTTP " + r.status));
       sweepBtn.disabled = false; return;
     }
+    if (r.status === 409) {
+      const stale = j.reason === "confirm_token_stale"
+        ? "The lake or selection changed since the estimate — press 🚀 again to re-confirm.\n"
+        : "";
+      sweepMsg.textContent = stale + (j.refusal_text || j.reason || "sweep refused");
+      sweepBtn.disabled = false; return;
+    }
     if (!j.started) {
       sweepMsg.textContent = "A pull or sweep is already running — wait for it to finish.";
       sweepBtn.disabled = false; return;
     }
-    sweepMsg.textContent = "Sweep started — " + j.symbols + " · " + j.intervals +
+    const launches = (j.launches || []).map((l) => l.exchange + "/" + l.segment + " " + l.symbols);
+    sweepMsg.textContent = "Sweep started — " + (launches.join(" · ") || j.symbols) +
       " · " + j.start + " → " + j.end + ". Watching progress…";
     if (sweepPoll) clearInterval(sweepPoll);
     sweepPoll = setInterval(pollSweep, 1200);
