@@ -1963,7 +1963,14 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
     core + the manifest round-trip are fully tested with injected bars; the L1
     heal wiring below is exercised end-to-end by
-    ``tests/integration/test_cascade_reconcile_heal.py``).
+    ``tests/integration/test_cascade_reconcile_heal.py``; the FUTURES replay
+    branch below — the once-per-replay ``resolve_futures_series`` +
+    :func:`check_replay_roll_schedule` cross-check + the per-slice
+    ``resolution=`` threading — is exercised end-to-end, with negative
+    assertions, by ``tests/integration/test_sweep_all_futures_launch.py``'s
+    ``test_manual_cascade_replays_then_refuses_a_drifted_lake``,
+    ``test_dashboard_cascade_route_400s_a_drifted_lake`` and
+    ``test_manual_cascade_interior_hole_is_a_clean_user_error``).
 
     DEC-LAKE-HEAL-001 (L1): the reconcile's free invariant piggyback returns
     any poisoned-partition findings on ``ReconcileResult.findings``; ONE
