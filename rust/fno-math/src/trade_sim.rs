@@ -159,11 +159,15 @@ const MAX_PRICE_PAISA: i64 = i64::MAX / 8;
 /// Validate one boundary price column against [`MAX_PRICE_PAISA`]. Pure
 /// (`Result<_, String>`, NO `PyErr`) so the no-libpython `cargo test` link
 /// exercises every branch; the PyO3 wrappers map the error to `ValueError`.
-fn check_price_column(name: &str, column: &[i64]) -> Result<(), String> {
+/// `label` names the raising pyclass (`"ResidentSweepSim"` /
+/// `"ResidentSweepSimU128"`) so both width variants emit self-naming
+/// messages through the ONE shared guard — the u64 message is byte-identical
+/// to the pre-generic kernel's (DEC-TRADE-SIM-U128-KERNEL-001).
+fn check_price_column(label: &str, name: &str, column: &[i64]) -> Result<(), String> {
     for &v in column {
         if !(-MAX_PRICE_PAISA..=MAX_PRICE_PAISA).contains(&v) {
             return Err(format!(
-                "ResidentSweepSim: {name} value {v} out of the overflow-safe range \
+                "{label}: {name} value {v} out of the overflow-safe range \
                  [-{MAX_PRICE_PAISA}, {MAX_PRICE_PAISA}] paisa"
             ));
         }
@@ -175,17 +179,29 @@ fn check_price_column(name: &str, column: &[i64]) -> Result<(), String> {
 /// boundary: non-negative (a negative stop/target DISTANCE is nonsensical —
 /// same stance as trading-core's bps guard) and `≤` [`MAX_PRICE_PAISA`] so
 /// [`Walker::levels`]'s `entry ± d` is bounded per the ceiling's derivation.
-/// `None` (leg disabled) is always valid. Pure — see [`check_price_column`].
-fn check_level_distance(name: &str, distance: Option<i64>) -> Result<(), String> {
+/// `None` (leg disabled) is always valid. Pure — see [`check_price_column`];
+/// same shared-`label` convention (the u64 message stays byte-identical via
+/// the [`check_level_distance`] delegator the existing suite pins).
+fn check_level_distance_for(label: &str, name: &str, distance: Option<i64>) -> Result<(), String> {
     if let Some(d) = distance {
         if !(0..=MAX_PRICE_PAISA).contains(&d) {
             return Err(format!(
-                "ResidentSweepSim: {name} ({d}) out of the overflow-safe range \
+                "{label}: {name} ({d}) out of the overflow-safe range \
                  [0, {MAX_PRICE_PAISA}] paisa"
             ));
         }
     }
     Ok(())
+}
+
+/// u64-kernel SL/TP distance guard — thin delegator onto
+/// [`check_level_distance_for`] with the historical `"ResidentSweepSim"`
+/// label, so the pre-generic message bytes (and the `#[cfg(test)]` suite
+/// calling this two-argument form) are preserved verbatim. Test-only since
+/// the pyclass impls moved onto the labeled core (same bytes for u64).
+#[cfg(test)]
+fn check_level_distance(name: &str, distance: Option<i64>) -> Result<(), String> {
+    check_level_distance_for("ResidentSweepSim", name, distance)
 }
 
 /// Pure-Rust faithful port of `TradeSimWalker` — a forward-only per-bar state
@@ -513,13 +529,40 @@ fn policy_from_flags(sl_next_open: bool, tp_next_open: bool, tp_first: bool) -> 
     }
 }
 
-/// Resident bar window for the Stage-2 trade-sim sweep — OHLC paisa + forced flags
-/// + the per-bar condition bitset, held Rust-side so a whole mask grid is
-/// simulated without re-marshalling the window per combo.
+/// Width-generic mask word for the sweep-sim core (DEC-TRADE-SIM-U128-KERNEL-001).
 ///
-/// See the module docs for the bit-exactness + honest-envelope contracts.
-#[pyclass(frozen, module = "fno_math")]
-pub struct ResidentSweepSim {
+/// The ONLY mask-touching operation in the whole trade walk is the per-bar
+/// SUPERSET containment test; every other instruction is width-independent
+/// i64 price arithmetic in [`Walker`]. Making that single operation generic
+/// lets the u64 production kernel and the u128 headroom kernel share ONE core
+/// (CLAUDE.md §11 COMMON — no parallel copy of the walk), monomorphized by
+/// the compiler to the exact pre-generic code for `W = u64` (the existing
+/// `#[cfg(test)]` suite passing UNMODIFIED is the frozen-behaviour gate).
+/// For `W = u128` the compiler's two-limb lowering of the 128-bit `&`/`==`
+/// is the "two-limb" evaluation — no hand-rolled limb pairs needed.
+trait MaskWord: Copy + Send + Sync {
+    /// True iff `bar` is a SUPERSET of `mask` — `(bar & mask) == mask`.
+    fn is_superset(bar: Self, mask: Self) -> bool;
+}
+
+impl MaskWord for u64 {
+    #[inline(always)]
+    fn is_superset(bar: u64, mask: u64) -> bool {
+        (bar & mask) == mask
+    }
+}
+
+impl MaskWord for u128 {
+    #[inline(always)]
+    fn is_superset(bar: u128, mask: u128) -> bool {
+        (bar & mask) == mask
+    }
+}
+
+/// The width-INDEPENDENT resident columns — OHLC paisa + forced flags + the
+/// per-bar session ordinals. Shared verbatim by both kernel widths; only the
+/// `bar_bits` vector (held next to this struct in each pyclass) is width-typed.
+struct SweepColumns {
     open: Vec<i64>,
     high: Vec<i64>,
     low: Vec<i64>,
@@ -529,6 +572,182 @@ pub struct ResidentSweepSim {
     /// in Python from bar `i`'s own timestamp (P-06: no look-ahead). A pending
     /// entry only fills on a bar with the SAME value it armed on (R2-OC-2).
     session_idx: Vec<i64>,
+}
+
+/// Build + validate the width-independent columns — the ONE length-mismatch
+/// guard and R2-RC-F1 price-boundary scan both kernels ride. `label` names
+/// the constructing pyclass; `bar_bits_len` is the width-typed vector's
+/// length (validated here so the mismatch message stays complete, the vector
+/// itself stays with the caller). The u64 path's messages are byte-identical
+/// to the pre-generic kernel's.
+fn build_columns(
+    label: &str,
+    open: Vec<i64>,
+    high: Vec<i64>,
+    low: Vec<i64>,
+    close: Vec<i64>,
+    is_forced: Vec<bool>,
+    session_idx: Vec<i64>,
+    bar_bits_len: usize,
+) -> Result<SweepColumns, String> {
+    let n = open.len();
+    if high.len() != n
+        || low.len() != n
+        || close.len() != n
+        || is_forced.len() != n
+        || session_idx.len() != n
+        || bar_bits_len != n
+    {
+        return Err(format!(
+            "{label}: column length mismatch — open={}, high={}, low={}, close={}, \
+             is_forced={}, session_idx={}, bar_bits={} (all must be equal)",
+            n,
+            high.len(),
+            low.len(),
+            close.len(),
+            is_forced.len(),
+            session_idx.len(),
+            bar_bits_len,
+        ));
+    }
+    // R2-RC-F1 overflow boundary: every paisa price must sit inside
+    // [-MAX_PRICE_PAISA, MAX_PRICE_PAISA] so the walker's raw i64 add/sub
+    // is provably panic-free (see the ceiling's derivation doc). One-time
+    // O(N_bars) scan at construction — NOT on the hot loop. `is_forced`
+    // (bool), `bar_bits` (u64/u128, only `&`-compared against masks) and
+    // `session_idx` (i64 day ordinal, only `==`-compared for the R2-OC-2
+    // same-session entry gate) do no arithmetic and need no bound.
+    check_price_column(label, "open", &open)?;
+    check_price_column(label, "high", &high)?;
+    check_price_column(label, "low", &low)?;
+    check_price_column(label, "close", &close)?;
+    Ok(SweepColumns {
+        open,
+        high,
+        low,
+        close,
+        is_forced,
+        session_idx,
+    })
+}
+
+/// Simulate ONE mask over a resident window — the width-generic pure-Rust core
+/// both pyclasses (and the `#[cfg(test)]` suite, via the u64 delegator) call.
+/// Entry signal for bar `i` is `W::is_superset(bar_bits[i], mask)` — the ONLY
+/// width-touching line; there is no Mode-B exit-signal stream on the sweep
+/// path (it matches `metrics_for_mask`, which passes none).
+// The loop indexes SEVEN parallel per-bar sequences by the same `i` (six
+// columns + the width-typed bar_bits); a 7-way iterator zip would obscure the
+// walk, so the index form is kept deliberately.
+#[allow(clippy::needless_range_loop)]
+fn simulate_one_core<W: MaskWord>(
+    cols: &SweepColumns,
+    bar_bits: &[W],
+    mask: W,
+    is_buy: bool,
+    sl: Option<i64>,
+    tp: Option<i64>,
+    policy: FillPolicy,
+) -> Vec<TradeRecord> {
+    let n = cols.open.len();
+    let mut walker = Walker::new(is_buy, sl, tp, policy);
+    let mut trades: Vec<TradeRecord> = Vec::new();
+    for i in 0..n {
+        let entry_signal = W::is_superset(bar_bits[i], mask);
+        if let Some(t) = walker.push(
+            cols.open[i],
+            cols.high[i],
+            cols.low[i],
+            i,
+            cols.is_forced[i],
+            cols.session_idx[i],
+            entry_signal,
+            false,
+        ) {
+            trades.push(t);
+        }
+    }
+    if let Some(t) = walker.finish(|idx| cols.close[idx]) {
+        trades.push(t);
+    }
+    trades
+}
+
+/// Width-generic core of the batch `simulate_masks` — validates the SL/TP
+/// distances at the batch boundary (R2-RC-F1, see [`check_level_distance_for`]
+/// / [`MAX_PRICE_PAISA`]) then runs the serial/parallel sweep. `Result<_,
+/// String>` (NO `PyErr`) so the `#[cfg(test)]` suite exercises both the
+/// reject and compute branches without pulling Python C-API symbols into
+/// the no-libpython `cargo test` link. (The flat batch ABI mirrors the
+/// PyO3 methods; `clippy::too_many_arguments` is allowed crate-wide.)
+fn simulate_masks_core<W: MaskWord>(
+    label: &str,
+    cols: &SweepColumns,
+    bar_bits: &[W],
+    masks: &[W],
+    is_buy: bool,
+    sl_paisa: Option<i64>,
+    tp_paisa: Option<i64>,
+    sl_next_open: bool,
+    tp_next_open: bool,
+    tp_first: bool,
+) -> Result<Vec<Vec<TradeRecord>>, String> {
+    check_level_distance_for(label, "sl_paisa", sl_paisa)?;
+    check_level_distance_for(label, "tp_paisa", tp_paisa)?;
+    let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
+    let work = (masks.len() as u64).saturating_mul(cols.open.len() as u64);
+    Ok(if work < PARALLEL_WORK_THRESHOLD {
+        masks
+            .iter()
+            .map(|&m| simulate_one_core(cols, bar_bits, m, is_buy, sl_paisa, tp_paisa, policy))
+            .collect()
+    } else {
+        masks
+            .par_iter()
+            .map(|&m| simulate_one_core(cols, bar_bits, m, is_buy, sl_paisa, tp_paisa, policy))
+            .collect()
+    })
+}
+
+/// Width-generic core of the batch `count_trades` — same boundary validation +
+/// sweep as [`simulate_masks_core`], returning only the per-mask counts.
+fn count_trades_core<W: MaskWord>(
+    label: &str,
+    cols: &SweepColumns,
+    bar_bits: &[W],
+    masks: &[W],
+    is_buy: bool,
+    sl_paisa: Option<i64>,
+    tp_paisa: Option<i64>,
+    sl_next_open: bool,
+    tp_next_open: bool,
+    tp_first: bool,
+) -> Result<Vec<u64>, String> {
+    check_level_distance_for(label, "sl_paisa", sl_paisa)?;
+    check_level_distance_for(label, "tp_paisa", tp_paisa)?;
+    let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
+    let work = (masks.len() as u64).saturating_mul(cols.open.len() as u64);
+    let run = |m: W| {
+        simulate_one_core(cols, bar_bits, m, is_buy, sl_paisa, tp_paisa, policy).len() as u64
+    };
+    Ok(if work < PARALLEL_WORK_THRESHOLD {
+        masks.iter().map(|&m| run(m)).collect()
+    } else {
+        masks.par_iter().map(|&m| run(m)).collect()
+    })
+}
+
+/// Resident bar window for the Stage-2 trade-sim sweep — OHLC paisa + forced flags
+/// + the per-bar u64 condition bitset, held Rust-side so a whole mask grid is
+/// simulated without re-marshalling the window per combo. The production kernel
+/// for today's 60-bit vocabulary; thin `W = u64` delegators onto the width-
+/// generic [`MaskWord`] core (byte-identical surface + behaviour to the
+/// pre-generic kernel — the existing suite is the frozen gate).
+///
+/// See the module docs for the bit-exactness + honest-envelope contracts.
+#[pyclass(frozen, module = "fno_math")]
+pub struct ResidentSweepSim {
+    columns: SweepColumns,
     bar_bits: Vec<u64>,
 }
 
@@ -546,52 +765,23 @@ impl ResidentSweepSim {
         session_idx: Vec<i64>,
         bar_bits: Vec<u64>,
     ) -> Result<Self, String> {
-        let n = open.len();
-        if high.len() != n
-            || low.len() != n
-            || close.len() != n
-            || is_forced.len() != n
-            || session_idx.len() != n
-            || bar_bits.len() != n
-        {
-            return Err(format!(
-                "ResidentSweepSim: column length mismatch — open={}, high={}, low={}, close={}, \
-                 is_forced={}, session_idx={}, bar_bits={} (all must be equal)",
-                n,
-                high.len(),
-                low.len(),
-                close.len(),
-                is_forced.len(),
-                session_idx.len(),
-                bar_bits.len(),
-            ));
-        }
-        // R2-RC-F1 overflow boundary: every paisa price must sit inside
-        // [-MAX_PRICE_PAISA, MAX_PRICE_PAISA] so the walker's raw i64 add/sub
-        // is provably panic-free (see the ceiling's derivation doc). One-time
-        // O(N_bars) scan at construction — NOT on the hot loop. `is_forced`
-        // (bool), `bar_bits` (u64, only `&`-compared against masks) and
-        // `session_idx` (i64 day ordinal, only `==`-compared for the R2-OC-2
-        // same-session entry gate) do no arithmetic and need no bound.
-        check_price_column("open", &open)?;
-        check_price_column("high", &high)?;
-        check_price_column("low", &low)?;
-        check_price_column("close", &close)?;
-        Ok(Self {
+        let columns = build_columns(
+            "ResidentSweepSim",
             open,
             high,
             low,
             close,
             is_forced,
             session_idx,
-            bar_bits,
-        })
+            bar_bits.len(),
+        )?;
+        Ok(Self { columns, bar_bits })
     }
 
-    /// Simulate ONE mask over the resident window — the pure-Rust core both the
-    /// PyO3 methods and the `#[cfg(test)]` suite call. Entry signal for bar `i` is
-    /// `(bar_bits[i] & mask) == mask`; there is no Mode-B exit-signal stream on the
-    /// sweep path (it matches `metrics_for_mask`, which passes none).
+    /// Simulate ONE u64 mask over the resident window — thin delegator onto
+    /// [`simulate_one_core`] (kept, test-only, so the `#[cfg(test)]` suite's
+    /// call surface is unchanged; the batch paths call the core directly).
+    #[cfg(test)]
     fn simulate_one(
         &self,
         mask: u64,
@@ -600,37 +790,11 @@ impl ResidentSweepSim {
         tp: Option<i64>,
         policy: FillPolicy,
     ) -> Vec<TradeRecord> {
-        let n = self.open.len();
-        let mut walker = Walker::new(is_buy, sl, tp, policy);
-        let mut trades: Vec<TradeRecord> = Vec::new();
-        for i in 0..n {
-            let entry_signal = (self.bar_bits[i] & mask) == mask;
-            if let Some(t) = walker.push(
-                self.open[i],
-                self.high[i],
-                self.low[i],
-                i,
-                self.is_forced[i],
-                self.session_idx[i],
-                entry_signal,
-                false,
-            ) {
-                trades.push(t);
-            }
-        }
-        if let Some(t) = walker.finish(|idx| self.close[idx]) {
-            trades.push(t);
-        }
-        trades
+        simulate_one_core(&self.columns, &self.bar_bits, mask, is_buy, sl, tp, policy)
     }
 
-    /// Pure core of [`Self::simulate_masks`] — validates the SL/TP distances at
-    /// the batch boundary (R2-RC-F1, see [`check_level_distance`] /
-    /// [`MAX_PRICE_PAISA`]) then runs the serial/parallel sweep. `Result<_,
-    /// String>` (NO `PyErr`) so the `#[cfg(test)]` suite exercises both the
-    /// reject and compute branches without pulling Python C-API symbols into
-    /// the no-libpython `cargo test` link. (The flat batch ABI mirrors the
-    /// PyO3 method; `clippy::too_many_arguments` is allowed crate-wide.)
+    /// Pure core of [`Self::simulate_masks`] — `W = u64` delegator onto
+    /// [`simulate_masks_core`].
     fn simulate_masks_impl(
         &self,
         masks: &[u64],
@@ -641,25 +805,22 @@ impl ResidentSweepSim {
         tp_next_open: bool,
         tp_first: bool,
     ) -> Result<Vec<Vec<TradeRecord>>, String> {
-        check_level_distance("sl_paisa", sl_paisa)?;
-        check_level_distance("tp_paisa", tp_paisa)?;
-        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
-        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
-        Ok(if work < PARALLEL_WORK_THRESHOLD {
-            masks
-                .iter()
-                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
-                .collect()
-        } else {
-            masks
-                .par_iter()
-                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
-                .collect()
-        })
+        simulate_masks_core(
+            "ResidentSweepSim",
+            &self.columns,
+            &self.bar_bits,
+            masks,
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+            sl_next_open,
+            tp_next_open,
+            tp_first,
+        )
     }
 
-    /// Pure core of [`Self::count_trades`] — same boundary validation + sweep
-    /// as [`Self::simulate_masks_impl`], returning only the per-mask counts.
+    /// Pure core of [`Self::count_trades`] — `W = u64` delegator onto
+    /// [`count_trades_core`].
     fn count_trades_impl(
         &self,
         masks: &[u64],
@@ -670,19 +831,18 @@ impl ResidentSweepSim {
         tp_next_open: bool,
         tp_first: bool,
     ) -> Result<Vec<u64>, String> {
-        check_level_distance("sl_paisa", sl_paisa)?;
-        check_level_distance("tp_paisa", tp_paisa)?;
-        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
-        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
-        let run = |m: u64| {
-            self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy)
-                .len() as u64
-        };
-        Ok(if work < PARALLEL_WORK_THRESHOLD {
-            masks.iter().map(|&m| run(m)).collect()
-        } else {
-            masks.par_iter().map(|&m| run(m)).collect()
-        })
+        count_trades_core(
+            "ResidentSweepSim",
+            &self.columns,
+            &self.bar_bits,
+            masks,
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+            sl_next_open,
+            tp_next_open,
+            tp_first,
+        )
     }
 }
 
@@ -711,7 +871,7 @@ impl ResidentSweepSim {
     /// Number of resident bars (the only exposed view of the buffer).
     #[getter]
     fn n_bars(&self) -> usize {
-        self.open.len()
+        self.columns.open.len()
     }
 
     /// Simulate a BATCH of masks over the resident window → per-mask trade lists.
