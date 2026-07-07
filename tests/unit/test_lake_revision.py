@@ -27,7 +27,13 @@ import os
 from pathlib import Path
 
 import pytest
-from brutex.dashboard.lake_revision import ABSENT_TOKEN, lake_revision, sweeps_revision
+from brutex.dashboard.lake_revision import (
+    ABSENT_TOKEN,
+    lake_revision,
+    revision_generation,
+    sweep_results_revision,
+    sweeps_revision,
+)
 from brutex.data.window_ledger_store import deltas_dir, ledger_path
 
 
@@ -287,3 +293,58 @@ class TestLedgerDeltaComponent:
 
         monkeypatch.setattr(os, "stat", _denying_stat)
         assert lake_revision(tmp_path) is None
+
+
+class TestRevisionGeneration:
+    """The token→generation digest bridge (DEC-LEDGER-DELTA-O-PAGE-001).
+
+    Standalone twin of the wired pins in
+    ``test_dashboard_db_view_ledger_read_cache.py`` so this module's OWN
+    stem-matched suite proves the bridge (the discovery-gate contract).
+    """
+
+    def test_deterministic_64bit_and_token_sensitive(self) -> None:
+        """Same token → same generation; any token change moves it; fits u64."""
+        first = revision_generation("base:1|deltas:a.parquet")
+        assert first == revision_generation("base:1|deltas:a.parquet")
+        assert 0 <= first < 2**64
+        assert first != revision_generation("base:1|deltas:b.parquet")
+
+
+class TestSweepResultsRevisionNoSignal:
+    """``sweep_results_revision``'s two ``None`` ("no signal") branches.
+
+    Standalone twins of ``TestSweepResultsRevisionToken`` in
+    ``test_dashboard_results_revision_key.py`` (the discovery-gate contract:
+    this module's stem-matched suite must prove them on its own).
+    """
+
+    def test_dirs_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing OSError on the sweeps root → ``None`` — never a token."""
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(tmp_path / "sweeps"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweep_results_revision(tmp_path) is None
+
+    def test_chain_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dirs digest OK but a non-missing OSError on the audit-chain stat → ``None``."""
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path).endswith("sweep-all.jsonl"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweep_results_revision(tmp_path) is None
