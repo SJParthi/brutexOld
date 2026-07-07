@@ -283,6 +283,46 @@ class LakeHealReportLike(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
+class GreeksBackfillReportLike(Protocol):
+    """The report slice the Greeks-backfill completion alert reads.
+
+    Structural (DEC-GREEKS-BULK-REENRICH-001) — matches
+    ``brutex.data.greeks_backfill.GreeksBackfillReport`` without importing the
+    data layer (this module stays wheel-free at import time; the same
+    precedent as :class:`LakeHealReportLike`).
+    """
+
+    @property
+    def backfill_id(self) -> str:
+        """The plan's content-addressed id (the dedupe key)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def planned(self) -> int:
+        """Contracts the plan targeted."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def enriched(self) -> int:
+        """Contracts whose overlay was (re)written."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def already_current(self) -> int:
+        """Contracts already carrying the current stamps (no write)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def errored(self) -> int:
+        """Contracts quarantined by a per-contract error (re-runnable)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def bars_written(self) -> int:
+        """Bars carried in the latest-wins writes."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
 class SweepAlerter:
     """Best-effort Telegram alert emitter for the sweep supervisor + live pull.
 
@@ -816,6 +856,39 @@ class SweepAlerter:
             dedupe_key=summary.sweep_id,
         )
 
+    def greeks_backfill_complete(self, report: GreeksBackfillReportLike) -> bool:
+        """Alert that a bulk Greeks v1→v2 backfill run finished (INFO).
+
+        DEC-GREEKS-BULK-REENRICH-001 — mirrors :meth:`sweep_complete`'s honesty
+        pattern: the ✅ head downgrades to ⚠️ with an ``N errored (re-runnable)``
+        clause when any contract was quarantined (an errored contract keeps its
+        stale stamp, so the next run retries it automatically — Golden Rule
+        #10). A zero-target run still reads honestly ("0/0 contracts
+        re-stamped") — an operator-initiated one-shot deserves an answer.
+        Best-effort; silent no-op when Telegram is disabled.
+        """
+        if report.errored > 0:
+            head = (
+                f"⚠️ Greeks backfill complete with failures — "
+                f"{report.enriched}/{report.planned} contracts re-stamped v2; "
+                f"{report.errored} errored (re-runnable)"
+            )
+        else:
+            head = (
+                f"✅ Greeks backfill complete — "
+                f"{report.enriched}/{report.planned} contracts re-stamped v2"
+            )
+        message = escape_markdown_v2(
+            f"{head}; already current={report.already_current}, "
+            f"bars written={report.bars_written} (backfill {report.backfill_id[:12]})."
+        )
+        return self._publish(
+            kind=TelegramEventKind.RUN_COMPLETE,
+            severity=TelegramSeverity.INFO,
+            message=message,
+            dedupe_key=f"greeks-backfill:{report.backfill_id[:12]}",
+        )
+
     # ── Callback adapters for the existing seams ────────────────────
 
     def watchdog_hung_callback(self) -> Callable[[WorkerEventLike], None]:
@@ -1033,10 +1106,36 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
         )
 
 
+def emit_greeks_backfill_complete_alert(report: GreeksBackfillReportLike) -> None:
+    """Fire the ONE best-effort Greeks-backfill completion summary (DEC-GREEKS-BULK-REENRICH-001).
+
+    The COMMON module helper mirroring :func:`emit_pull_halt_alert` — the ONE
+    place the two backfill surfaces (the dashboard job's work-body tail + the
+    CLI ``brutex greeks-backfill`` clean finish) map a
+    ``brutex.data.greeks_backfill.GreeksBackfillReport`` onto
+    :meth:`SweepAlerter.greeks_backfill_complete`. EXACTLY-ONCE by call
+    discipline (one chokepoint per surface, never inside the batch loop) with
+    the ``backfill_id``-scoped dedupe key as the second belt. A DRY-RUN never
+    calls this (dry-run is inert by construction). The whole body is wrapped
+    in a blanket ``try/except`` so the fire-and-forget contract is STRUCTURAL:
+    an alert failure is swallowed + logged and can NEVER fail the backfill.
+    Silent no-op when Telegram is disabled (the default).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().greeks_backfill_complete(report)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never fails the backfill
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "greeks_backfill_alert_failed"
+        )
+
+
 __all__ = [
     "CONFLICT_DELTA_ALERT_ENV",
     "CRASH_LOOP_RELAUNCH_THRESHOLD",
     "DEFAULT_CONFLICT_DELTA_ALERT",
+    "GreeksBackfillReportLike",
     "LakeHealActionLike",
     "LakeHealReportLike",
     "NotifierResolver",
@@ -1046,6 +1145,7 @@ __all__ = [
     "SymbolFailureLike",
     "WorkerEventLike",
     "conflict_alert_threshold",
+    "emit_greeks_backfill_complete_alert",
     "emit_lake_heal_alert",
     "emit_pull_halt_alert",
     "emit_vendor_conflict_alert",
