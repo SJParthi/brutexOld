@@ -23,6 +23,7 @@ from brutex.dashboard.movers_cache import (
     MAX_ADAPTIVE_FLOOR_CAP_S,
     MoversSnapshotCache,
     candidate_key,
+    revision_generation,
 )
 from structlog.testing import capture_logs
 
@@ -71,6 +72,25 @@ class TestCandidateKey:
             expiry_track="all",
         )
         assert spot != opt
+
+
+class TestRevisionGeneration:
+    """The token→generation digest bridge (DEC-LEDGER-DELTA-O-PAGE-001).
+
+    Standalone twin of the wired pins in
+    ``test_dashboard_db_view_ledger_read_cache.py`` so this module's OWN
+    stem-matched suite proves the bridge (the discovery-gate contract).
+    Homed HERE — beside the :class:`MoversSnapshotCache` whose generations it
+    feeds — not in ``lake_revision`` (a ``db_view → lake_revision`` import
+    edge closes the CodeQL ``py/cyclic-import`` cycle, alert 690).
+    """
+
+    def test_deterministic_64bit_and_token_sensitive(self) -> None:
+        """Same token → same generation; any token change moves it; fits u64."""
+        first = revision_generation("base:1|deltas:a.parquet")
+        assert first == revision_generation("base:1|deltas:a.parquet")
+        assert 0 <= first < 2**64
+        assert first != revision_generation("base:1|deltas:b.parquet")
 
 
 class TestHitAndMiss:

@@ -1080,3 +1080,97 @@ class TestVixStamp:
         assert final is not None
         assert final.vix_at_entry == Decimal("15.20")
         assert final.vix_at_exit == Decimal("15.30")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-SWEEP-EXIT-INDEX-FASTPATH-001 — exit-index-carrying walk
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestExitIndices:
+    """run_with_exit_indices / simulate_trades_with_exit_indices."""
+
+    def _bars(self) -> list[CandleBar]:
+        """Two closed trades: a TP exit on bar 2 and an end-of-data close on bar 4."""
+        return [
+            _bar(9, 16, "100", "100", "100", "100"),  # signal arms here
+            _bar(9, 17, "100", "100", "100", "100"),  # entry at open
+            _bar(9, 18, "100", "101", "100", "101"),  # TP +50 hits (exit idx 2)
+            _bar(9, 19, "100", "100", "100", "100"),  # signal arms again
+            _bar(9, 20, "100", "100", "100", "100"),  # entry; end-of-data close (idx 4)
+        ]
+
+    def _signals(self) -> list[bool]:
+        return [True, False, False, True, False]
+
+    def test_indices_align_with_the_trades(self) -> None:
+        trades, exit_indices = ts_mod.simulate_trades_with_exit_indices(
+            self._bars(),
+            self._signals(),
+            direction=Side.BUY,
+            tf_minutes=1,
+            take_profit_paisa=50,
+        )
+        assert exit_indices is not None
+        assert len(trades) == 2
+        assert exit_indices == [2, 4]
+        assert trades[0].exit_ts == self._bars()[2].timestamp
+        assert trades[1].exit_ts == self._bars()[4].timestamp
+
+    def test_trades_are_byte_identical_to_simulate_trades(self) -> None:
+        plain = simulate_trades(
+            self._bars(),
+            self._signals(),
+            direction=Side.BUY,
+            tf_minutes=1,
+            take_profit_paisa=50,
+        )
+        with_idx, _ = ts_mod.simulate_trades_with_exit_indices(
+            self._bars(),
+            self._signals(),
+            direction=Side.BUY,
+            tf_minutes=1,
+            take_profit_paisa=50,
+        )
+        assert plain == with_idx
+
+    def test_uncertified_window_returns_none_indices(self) -> None:
+        """Duplicate timestamps fail the bars_strictly_increasing certificate:
+        the trades still simulate, the indices are withheld."""
+        bars = self._bars()
+        bars.append(bars[-1])  # duplicate final timestamp
+        signals = [*self._signals(), False]
+        trades, exit_indices = ts_mod.simulate_trades_with_exit_indices(
+            bars,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            take_profit_paisa=50,
+        )
+        assert exit_indices is None
+        assert len(trades) == 2
+
+    def test_no_trades_yields_empty_indices(self) -> None:
+        trades, exit_indices = ts_mod.simulate_trades_with_exit_indices(
+            self._bars(),
+            [False] * 5,
+            direction=Side.BUY,
+            tf_minutes=1,
+        )
+        assert trades == []
+        assert exit_indices == []
+
+    def test_run_with_exit_indices_validates_signal_lengths(self) -> None:
+        walker = TradeSimWalker(direction=Side.BUY, tf_minutes=1)
+        with pytest.raises(ValueError, match="entry_signals length"):
+            walker.run_with_exit_indices(self._bars(), [True])
+        with pytest.raises(ValueError, match="exit_signals length"):
+            walker.run_with_exit_indices(self._bars(), [False] * 5, [True])
+
+    def test_run_delegates_to_the_index_walk(self) -> None:
+        """run() is the thin delegate — same trades, indices dropped."""
+        walker_a = TradeSimWalker(direction=Side.BUY, tf_minutes=1, take_profit_paisa=50)
+        walker_b = TradeSimWalker(direction=Side.BUY, tf_minutes=1, take_profit_paisa=50)
+        via_run = walker_a.run(self._bars(), self._signals())
+        via_pair, _ = walker_b.run_with_exit_indices(self._bars(), self._signals())
+        assert via_run == via_pair

@@ -16,6 +16,7 @@ import pytest
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 
+from brutex.dashboard.discovery_warm import latest_movers_minute_key
 from brutex.dashboard.movers_warm import (
     WARM_EXCHANGES,
     WARM_OPTIONS_TIERS,
@@ -23,6 +24,7 @@ from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
+    latest_movers_minute,
     options_warm_grid,
     spot_warm_grid,
     warm_coordinate_label,
@@ -89,6 +91,163 @@ def test_latest_movers_date_none_when_only_non_spot_segments(tmp_path: Path) -> 
         bars=[_day_bar(date(2024, 6, 13), "100")],
     )
     assert latest_movers_date(tmp_path) is None
+
+
+def _minute_bar(day: date, hh: int, mm: int, close: str) -> CandleBar:
+    """A 1-minute bar stamped at *hh:mm* IST (stored UTC = IST − 5:30) on *day*."""
+    ist_min = hh * 60 + mm
+    utc_min = ist_min - (5 * 60 + 30)  # IST is a fixed +05:30, no DST.
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(day.year, day.month, day.day, utc_min // 60, utc_min % 60, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=100,
+        open_interest=None,
+    )
+
+
+def test_latest_movers_minute_finalized_day_returns_session_close(tmp_path: Path) -> None:
+    # A finalized day whose last 1-minute bar opens at 15:29 IST → "15:29".
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _minute_bar(date(2024, 6, 13), 9, 15, "20000"),
+            _minute_bar(date(2024, 6, 13), 15, 28, "20050"),
+            _minute_bar(date(2024, 6, 13), 15, 29, "20100"),
+        ],
+    )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) == "15:29"
+
+
+def test_latest_movers_minute_truncated_day_returns_last_traded_minute(tmp_path: Path) -> None:
+    # A live/truncated day (last bar 14:32 IST) → the true last minute, not 15:29.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="RELIANCE",
+        interval="1minute",
+        bars=[
+            _minute_bar(date(2024, 6, 14), 9, 15, "1300"),
+            _minute_bar(date(2024, 6, 14), 14, 32, "1305"),
+        ],
+    )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 14)) == "14:32"
+
+
+def test_latest_movers_minute_scopes_to_the_requested_day(tmp_path: Path) -> None:
+    # Bars on two days; asking for the earlier day returns THAT day's last minute.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _minute_bar(date(2024, 6, 13), 13, 5, "20000"),
+            _minute_bar(date(2024, 6, 14), 15, 29, "20100"),
+        ],
+    )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) == "13:05"
+
+
+def test_latest_movers_minute_none_on_empty_lake(tmp_path: Path) -> None:
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) is None
+
+
+def test_latest_movers_minute_none_when_only_non_spot_segments(tmp_path: Path) -> None:
+    # An FNO-only lake (no INDEX/CASH 1minute) → no spot movers minute.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NIFTY24JUN20000CE",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 13), 15, 29, "100")],
+    )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) is None
+
+
+def test_latest_movers_minute_none_when_no_bar_on_the_requested_day(tmp_path: Path) -> None:
+    # Spot 1-minute data exists, but not for the asked day → None (MAX over empty rows).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_minute_bar(date(2024, 6, 14), 15, 29, "20100")],
+    )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) is None
+
+
+def test_latest_movers_minute_none_on_corrupt_lake(tmp_path: Path) -> None:
+    """DEC-MOVERS-ASOF-LATEST-DEFAULT-001: a corrupt spot 1minute Parquet → None, never a raise.
+
+    Mirrors `latest_movers_date`'s guard — it backs the DEFAULT `/movers` poll, so an
+    unguarded DuckDB error would 500 the whole page; degrade to None instead.
+    """
+    corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "06.parquet"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"this is not a parquet file at all")
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) is None
+
+
+def test_latest_movers_minute_reads_only_the_requested_days_month(tmp_path: Path) -> None:
+    """Month-prune regression: a sibling month's file is NEVER read.
+
+    The day's `<yyyy>/<mm>` partition fully determines where its bars live, so
+    the resolver globs ONLY that month's spot 1minute files. Teeth: the OTHER
+    month's file is corrupt — the pre-prune `1minute/**/*.parquet` glob would
+    hand it to DuckDB and the corrupt-lake guard would degrade the whole resolve
+    to None (proven by `test_latest_movers_minute_none_on_corrupt_lake`); the
+    month-bounded read never touches it and still resolves the real minute.
+    """
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _minute_bar(date(2024, 6, 13), 9, 15, "20000"),
+            _minute_bar(date(2024, 6, 13), 15, 29, "20100"),
+        ],
+    )
+    poisoned = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "05.parquet"
+    poisoned.write_bytes(b"this is not a parquet file at all")
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) == "15:29"
+
+
+def test_latest_movers_minute_multi_month_lake_matches_single_month_result(
+    tmp_path: Path,
+) -> None:
+    # Byte-identical pin: pruning the glob to the day's month resolves the SAME
+    # minute a multi-month lake holds for that day (the WHERE date filter always
+    # selected it; the prune only removes I/O, never changes the answer).
+    writer = ParquetWriter(lake_root=tmp_path)
+    for bar in (
+        _minute_bar(date(2024, 5, 20), 15, 29, "19900"),
+        _minute_bar(date(2024, 6, 13), 13, 5, "20000"),
+        _minute_bar(date(2024, 7, 1), 15, 29, "20200"),
+    ):
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[bar],
+        )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) == "13:05"
+    assert latest_movers_minute(tmp_path, date(2024, 5, 20)) == "15:29"
+
+
+def test_latest_movers_minute_key_is_date_scoped_and_distinct() -> None:
+    # The memo key carries the ISO date (O(1) repeat poll per day) and never collides
+    # with the sibling latest-DATE key.
+    assert latest_movers_minute_key("2024-06-13") == "latest_movers_minute|2024-06-13"
+    assert latest_movers_minute_key("2024-06-13") != latest_movers_minute_key("2024-06-14")
 
 
 def test_latest_movers_date_none_on_corrupt_lake(tmp_path: Path) -> None:

@@ -1145,7 +1145,7 @@ def plan_windows(
 #: the WHOLE ``bars/`` tree — spot AND ``segment="FNO"`` contract partitions alike),
 #: plus an OPTIONAL ``session_dates`` frozenset on the opted-in dense INDEX ``1minute``
 #: spans (DEC-COLDSTART-SEED-INTERIOR-GAP-001 — the seed's density cross-check input).
-_SpanIndex = dict[tuple[str, str, str, str], dict[str, Any]]
+LakeSpanIndex = dict[tuple[str, str, str, str], dict[str, Any]]
 
 #: The lake segments whose SPOT cold-start spans carry ``session_dates`` for the
 #: interior-gap density cross-check (DEC-COLDSTART-SEED-INTERIOR-GAP-001): the DENSE
@@ -1161,7 +1161,7 @@ _SESSION_DATE_SEGMENTS: Final[frozenset[str]] = frozenset({"INDEX"})
 SeedCandidate = tuple[WindowKey, tuple[str, str, str, str]]
 
 
-def index_lake_spans(spans: Sequence[dict[str, Any]]) -> _SpanIndex:
+def index_lake_spans(spans: Sequence[dict[str, Any]]) -> LakeSpanIndex:
     """Build the ``(exchange, segment, symbol, interval) -> span`` lookup — the COMMON index.
 
     Shared by BOTH the spot (:func:`reconcile_ledger_windows`) and the F&O
@@ -1179,7 +1179,7 @@ def index_lake_spans(spans: Sequence[dict[str, Any]]) -> _SpanIndex:
 
 def seed_enclosed_windows(
     ledger: WindowLedger,
-    span_index: _SpanIndex,
+    span_index: LakeSpanIndex,
     candidates: Iterable[SeedCandidate],
     *,
     now: datetime,
@@ -1820,6 +1820,7 @@ __all__ = [
     "LEDGER_SAVE_SLOW_WARN_ENV",
     "LIVE_FLUSH_MIN_INTERVAL_S",
     "SKIPPED_AUDIT_CURSOR_FILENAME",
+    "LakeSpanIndex",
     "LedgerRow",
     "append_ledger_delta",
     "begin_pull_ledger",

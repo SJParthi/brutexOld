@@ -991,6 +991,67 @@ def trading_days_between_checked(
     return days
 
 
+def previous_trading_session(d: date, *, exchange: str | None = None) -> date | None:
+    """Return the trading session immediately preceding *d*, or ``None`` (abstain).
+
+    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the ONE COMMON "which session should a
+    previous-day baseline come from?" primitive (CLAUDE.md §11 COMMON). Walks
+    backwards from ``d − 1 day`` and returns the first date the STRICT
+    :func:`is_trading_day_checked` confirms as a trading day — stepping over
+    weekends and every listed holiday, and honouring the special-weekend Budget
+    sessions (:data:`SPECIAL_WEEKEND_TRADING_SESSIONS`).
+
+    ABSTAIN, never guess (Golden Rule #1): when the back-walk crosses the
+    published-holiday coverage floor before finding a session (the strict
+    variant raises :class:`HolidayDataUnavailableError` on an out-of-coverage
+    weekday), ONE ``calendar.previous_session_coverage_exhausted`` warning is
+    emitted and ``None`` is returned — a caller must treat that as "unknown",
+    not as "no prior session". The checked variant's raise on the first
+    out-of-coverage weekday GUARANTEES termination (the walk is bounded by the
+    coverage floor; within coverage the longest gap is a holiday cluster of a
+    few days).
+
+    Honest limit (Golden Rule #10): a Diwali **Muhurat** day is a NON-session
+    here — :func:`is_trading_day_checked` scores the Muhurat date a holiday
+    (the ~1-hour evening/afternoon session is deliberately outside the
+    regular-session vocabulary), so a baseline actually carrying Muhurat bars
+    will read as NOT the immediately-preceding session. Accepted + documented,
+    not papered over.
+
+    Parameters
+    ----------
+    d
+        The reference date; the returned session is strictly before it.
+    exchange
+        ``None`` (default) / ``"NSE"`` / ``"BSE"`` — selects the holiday set;
+        see :func:`is_holiday` (DEC-CALENDAR-EXCHANGE-SPLIT-001). The two sets
+        are identical for every covered year, so today the argument is inert
+        parity plumbing.
+
+    Raises
+    ------
+    ValueError
+        If *exchange* is neither ``None`` nor ``"NSE"`` / ``"BSE"`` (validated
+        eagerly, before any date-path work).
+    """
+    _resolve_holiday_set(exchange)  # eager validation: invalid exchange always raises
+    probe = d - timedelta(days=1)
+    while True:
+        try:
+            if is_trading_day_checked(probe, exchange=exchange):
+                return probe
+        except HolidayDataUnavailableError:
+            _LOG.warning(
+                "calendar.previous_session_coverage_exhausted",
+                requested_date=d.isoformat(),
+                probe_date=probe.isoformat(),
+                covered_first_year=HOLIDAY_COVERAGE_FIRST_YEAR,
+                covered_last_year=HOLIDAY_COVERAGE_LAST_YEAR,
+            )
+            return None
+        probe -= timedelta(days=1)
+
+
 def session_minutes_per_day() -> int:
     """Standard regular session length in minutes (375 = 09:15-15:30)."""
     return SESSION_DURATION_MINUTES

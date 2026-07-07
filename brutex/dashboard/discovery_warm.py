@@ -1,6 +1,6 @@
 """Post-pipeline **discovery-memo warm** — ONE lake walk seeds every discovery cache.
 
-DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 (item 1b). The dashboard keeps FOUR
+DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 (item 1b). The dashboard keeps SIX
 generation-stamped discovery memos over the same ``bars/`` tree (all
 :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` instances in
 ``build_app``):
@@ -13,6 +13,8 @@ generation-stamped discovery memos over the same ``bars/`` tree (all
    DEC-DB-SPOT-CASCADE-001);
 4. the ``/db`` F&O underlying→expiry→contract cascade (:data:`FNO_CASCADE_KEY`
    — DEC-DB-FNO-CASCADE-001);
+5. the ``/reports`` pre-open symbol triples, one memo per basis
+   (:func:`preopen_datasets_key` — DEC-O1-CLAIMS-HONESTY-001);
 
 plus the sibling latest-movers-date memo (:data:`LATEST_MOVERS_DATE_KEY` — the
 ``/movers`` default-day resolve, GAP #4). After the pull pipeline's final
@@ -59,6 +61,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.fno_cascade import build_fno_cascade
 from brutex.dashboard.movers_warm import latest_movers_date
+from brutex.dashboard.preopen_report import REPORT_BASES, resolve_report_datasets
 from brutex.dashboard.spot_cascade import build_spot_cascade
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 
@@ -67,6 +70,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.dashboard.movers_cache import MoversSnapshotCache
+    from brutex.dashboard.preopen_report import ReportBasis
 
 _LOG = structlog.get_logger(__name__)
 
@@ -74,10 +78,14 @@ __all__ = [
     "DB_DATASETS_KEY",
     "FNO_CASCADE_KEY",
     "LATEST_MOVERS_DATE_KEY",
+    "LATEST_MOVERS_MINUTE_KEY_PREFIX",
     "MOVERS_DATASETS_KEY",
+    "PREOPEN_DATASETS_KEY_PREFIX",
     "SPOT_CASCADE_KEY",
     "build_db_datasets_payload",
     "filter_spot_datasets",
+    "latest_movers_minute_key",
+    "preopen_datasets_key",
     "warm_discovery_memos",
 ]
 
@@ -94,9 +102,46 @@ SPOT_CASCADE_KEY: Final[str] = "db_spot_cascade"
 FNO_CASCADE_KEY: Final[str] = "db_fno_cascade"
 #: Cache key of the ``/movers`` default-day latest-date resolve (GAP #4).
 LATEST_MOVERS_DATE_KEY: Final[str] = "latest_movers_date"
+#: Key PREFIX of the ``/movers`` default-day latest-MINUTE display resolve
+#: (DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — the date is IN the key (the ``|``-join
+#: discipline; a repeat DEFAULT intraday poll on the same day is an O(1) handoff,
+#: a new latest day re-resolves), so it never collides with the date key above.
+LATEST_MOVERS_MINUTE_KEY_PREFIX: Final[str] = "latest_movers_minute"
 
-#: How many memos one successful warm seeds (the log + return contract).
-_MEMOS_SEEDED: Final[int] = 5
+#: Key PREFIX of the /reports pre-open symbol-discovery memos
+#: (DEC-O1-CLAIMS-HONESTY-001) in the SAME ``_db_datasets_cache``. One memo
+#: per report basis — the triples differ per basis, so the basis is IN the
+#: key (the ``|``-join discipline of the sibling discovery keys: ``|`` cannot
+#: appear in a basis literal, so the join is unambiguous and collision-free
+#: against every other key sharing the instance).
+PREOPEN_DATASETS_KEY_PREFIX: Final[str] = "preopen_datasets"
+
+
+def preopen_datasets_key(basis: str) -> str:
+    """The generation-memo key of one basis's pre-open symbol triples."""
+    return f"{PREOPEN_DATASETS_KEY_PREFIX}|{basis}"
+
+
+def latest_movers_minute_key(date_str: str) -> str:
+    """The generation-memo key of the default-day latest-MINUTE display resolve.
+
+    The ISO date is IN the key (DEC-MOVERS-ASOF-LATEST-DEFAULT-001), so a repeat
+    DEFAULT intraday poll on the same latest day is an O(1) handoff and a new
+    latest day re-resolves — never colliding with the sibling latest-DATE memo.
+    """
+    return f"{LATEST_MOVERS_MINUTE_KEY_PREFIX}|{date_str}"
+
+
+#: The five discovery memos seeded OUTSIDE the per-basis preopen loop
+#: (db datasets · movers datasets · spot cascade · fno cascade · latest date).
+_LEGACY_MEMOS: Final[int] = 5
+
+#: How many memos one successful warm seeds (the log + return contract) —
+#: DERIVED from :data:`REPORT_BASES`, never a hand-summed literal: a new
+#: report basis moves this contract automatically, so ``discovery.warm_done``
+#: can never silently under-report the seeded count (round-1 review fix,
+#: DEC-O1-CLAIMS-HONESTY-001).
+_MEMOS_SEEDED: Final[int] = _LEGACY_MEMOS + len(REPORT_BASES)
 
 
 def filter_spot_datasets(candle_datasets: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -163,8 +208,10 @@ def warm_discovery_memos(
     """Seed every discovery memo at *generation* off ONE shared walk — best-effort.
 
     Runs the ``bars/`` candle walk ONCE (plus the F&O decode walk and the
-    expired-options walk once each) and seeds the five memos listed in the
-    module docstring via ``get_or_compute(..., force_fresh=True)`` — the
+    expired-options walk once each) and seeds every memo listed in the module
+    docstring (:data:`_MEMOS_SEEDED` of them — five fixed plus one preopen
+    memo per :data:`REPORT_BASES` entry) via
+    ``get_or_compute(..., force_fresh=True)`` — the
     ``force_fresh`` matters because the warm executes while the pull job is
     still ``running``, so an opted-in pull-active floor would otherwise serve
     the stale pre-pull entry instead of storing the fresh one.
@@ -205,6 +252,18 @@ def warm_discovery_memos(
         db_datasets_cache.get_or_compute(
             MOVERS_DATASETS_KEY, generation=generation, compute=lambda: candles, force_fresh=True
         )
+
+        def _preopen_compute(b: ReportBasis) -> Callable[[], list[tuple[str, str, str]]]:
+            """Bind one basis's compute over the SHARED pre-walked candle list."""
+            return lambda: resolve_report_datasets(lake_root, basis=b, datasets=candles)
+
+        for report_basis in REPORT_BASES:
+            db_datasets_cache.get_or_compute(
+                preopen_datasets_key(report_basis),
+                generation=generation,
+                compute=_preopen_compute(report_basis),
+                force_fresh=True,
+            )
         spot_cascade_cache.get_or_compute(
             SPOT_CASCADE_KEY,
             generation=generation,

@@ -910,6 +910,62 @@ class TestPullControllerCorrelation:
         assert isinstance(pid, str) and len(pid) == 12  # a freshly minted id
         assert done["pull_id"] == pid  # start + done share it
 
+    def test_pull_candles_inherits_an_ambient_run_id(self) -> None:
+        """DEC-PULL-BEAT-PERRUN-001 (the deliberate journal-grouping change): under an
+        outer run scope the entrypoint INHERITS the run id instead of shadow-minting —
+        so the journal/summary records and every spine worker's capture-then-rebind
+        carry the JOB's run id (the registered beat-channel key)."""
+        from brutex.observability.correlation import pull_id_scope
+
+        with capture_logs() as logs, pull_id_scope("cafe00000001"):
+            pull_candles(
+                _index("13"),
+                lake_root=Path("/unused"),
+                from_date="2021-01-01",
+                to_date="2021-01-05",
+                dry_run=True,
+            )
+        (start,) = _events(logs, "universe.pull.start")
+        (done,) = _events(logs, "universe.pull.done")
+        assert start["pull_id"] == "cafe00000001"  # inherited, NOT a shadow mint
+        assert done["pull_id"] == "cafe00000001"
+        underlying = _events(logs, "ingest.underlying")
+        assert underlying and all(e["pull_id"] == "cafe00000001" for e in underlying)
+
+    def test_pull_candles_explicit_pull_id_still_wins_over_ambient(self) -> None:
+        from brutex.observability.correlation import pull_id_scope
+
+        with capture_logs() as logs, pull_id_scope("cafe00000001"):
+            pull_candles(
+                _index("13"),
+                lake_root=Path("/unused"),
+                from_date="2021-01-01",
+                to_date="2021-01-05",
+                dry_run=True,
+                pull_id="ctlpull00009",
+            )
+        (start,) = _events(logs, "universe.pull.start")
+        assert start["pull_id"] == "ctlpull00009"
+
+    def test_pull_all_spot_inherits_an_ambient_run_id(self) -> None:
+        """The bulk-spot twin of the inherit pin (the load-bearing entrypoint: the spot
+        fan-out workers' rebinds must carry the job's run id or their seam beats drop)."""
+        from brutex.observability.correlation import pull_id_scope
+
+        with capture_logs() as logs, pull_id_scope("cafe00000002"):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=Path("/unused"),
+                dry_run=True,
+                now=_LOG_NOW,
+            )
+        (start,) = _events(logs, "universe.pull_all.start")
+        (done,) = _events(logs, "universe.pull_all.done")
+        assert start["pull_id"] == "cafe00000002"
+        assert done["pull_id"] == "cafe00000002"
+        underlying = _events(logs, "ingest.underlying")
+        assert underlying and all(e["pull_id"] == "cafe00000002" for e in underlying)
+
     def test_pull_all_spot_correlates_under_one_pull_id(self) -> None:
         with capture_logs() as logs:
             pull_all_spot(

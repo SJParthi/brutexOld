@@ -19,11 +19,19 @@ import pytest
 from brutex.engine.rust_metrics import (
     FLAT_DRAWDOWN_STATS,
     MAX_EXACT_EQUITY_PAISA,
+    SELF_CHECK_SAMPLES,
+    SWEEP_RUST_METRICS_DEFAULT,
     SWEEP_RUST_METRICS_ENV,
     _valid_drawdown,  # pyright: ignore[reportPrivateUsage] — the seam's own suite
+    consume_self_check_sample,
+    disable_kernel,
+    drawdown_compare_key,
     drawdown_stats_via_kernel,
     exceeds_exact_equity_envelope,
+    kernel_disabled,
     reset_observability_memo_for_tests,
+    reset_self_check_for_tests,
+    self_check_pending,
     sweep_rust_metrics_enabled,
     warn_fallback_once,
 )
@@ -36,8 +44,10 @@ from tests.unit.test_metrics_compute import _trade  # pyright: ignore[reportPriv
 
 @pytest.fixture(autouse=True)
 def _fresh_memo() -> None:
-    """Each test observes first-occurrence log events (memo isolation)."""
+    """Each test observes first-occurrence log events (memo isolation) and a
+    fresh burn-in budget / unlatched kernel (self-check isolation)."""
     reset_observability_memo_for_tests()
+    reset_self_check_for_tests()
 
 
 def _bits(x: float) -> bytes:
@@ -53,16 +63,124 @@ def test_flag_truthy_values_enable(monkeypatch: pytest.MonkeyPatch, value: str) 
     assert sweep_rust_metrics_enabled() is True
 
 
-@pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "garbage", "2"])
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
 def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, value)
     assert sweep_rust_metrics_enabled() is False
 
 
-def test_flag_unset_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default is OFF — the flip to ON-by-default is a separate later ADR."""
+def test_flag_unset_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is ON — ADR-0017 (DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001),
+    the 'separate later ADR' DEC-SWEEP-RUST-METRICS-001 deferred the flip to.
+    ``BRUTEX_SWEEP_RUST_METRICS=0`` is the operator kill switch."""
     monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+    assert sweep_rust_metrics_enabled() is True
+    assert SWEEP_RUST_METRICS_DEFAULT is True
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_flag_empty_follows_the_default(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """Unset/whitespace-empty falls to the default constant — the flip lever
+    (the ONLY vocabulary that follows :data:`SWEEP_RUST_METRICS_DEFAULT`)."""
+    monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, value)
+    assert sweep_rust_metrics_enabled() is SWEEP_RUST_METRICS_DEFAULT
+
+
+@pytest.mark.parametrize("value", ["flase", "0ff", "disable", "garbage", "2"])
+def test_flag_unrecognised_fails_safe_off_with_one_warning(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A typo'd kill switch still KILLS under default-ON — fail-safe OFF.
+
+    An unrecognised non-empty value resolves OFF with exactly one
+    ``flag_unrecognised`` fallback warning naming the value; a silent
+    follow-the-default would leave a misbehaving kernel serving every mask
+    while the operator believes it disabled (the seeded fail-safe law).
+    """
+    monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, value)
+    with capture_logs() as logs:
+        assert sweep_rust_metrics_enabled() is False
+        assert sweep_rust_metrics_enabled() is False  # warn-once, still OFF
+    events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+    assert len(events) == 1
+    assert events[0]["reason"] == "flag_unrecognised"
+    assert events[0]["value"] == value
+
+
+def test_flag_unset_follows_the_default_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset resolves to the ONE default constant — the flip lever."""
+    monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+    assert sweep_rust_metrics_enabled() is SWEEP_RUST_METRICS_DEFAULT
+
+
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off", "  Off  "])
+def test_flag_explicit_falsy_is_the_kill_switch(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A ``_FALSY`` value is OFF regardless of the default constant."""
+    monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, value)
     assert sweep_rust_metrics_enabled() is False
+
+
+# ── burn-in self-check + autorevert latch primitives ────────────────────
+
+
+def test_self_check_budget_counts_down_and_clamps() -> None:
+    reset_self_check_for_tests(remaining=2)
+    assert self_check_pending() is True
+    consume_self_check_sample()
+    assert self_check_pending() is True
+    consume_self_check_sample()
+    assert self_check_pending() is False
+    consume_self_check_sample()  # clamped — never goes negative
+    assert self_check_pending() is False
+
+
+def test_reset_restores_the_full_burn_in_budget() -> None:
+    reset_self_check_for_tests(remaining=0)
+    assert self_check_pending() is False
+    reset_self_check_for_tests()
+    assert self_check_pending() is True
+    assert SELF_CHECK_SAMPLES > 0
+
+
+def test_disable_kernel_latches_and_logs_error_once() -> None:
+    assert kernel_disabled() is False
+    with capture_logs() as logs:
+        disable_kernel("self_check_mismatch", n_bars=5)
+        disable_kernel("some_other_reason")  # no-op: already latched
+    assert kernel_disabled() is True
+    events = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
+    assert len(events) == 1
+    assert events[0]["reason"] == "self_check_mismatch"
+    assert events[0]["n_bars"] == 5
+
+
+def test_latched_kernel_short_circuits_with_warn_once() -> None:
+    """Once autoreverted, the seam never touches the kernel again this process."""
+    disable_kernel("self_check_mismatch")
+    with capture_logs() as logs:
+        assert drawdown_stats_via_kernel(2, 1_000, [(0, -10)]) is None
+        assert drawdown_stats_via_kernel(2, 1_000, [(0, -10)]) is None
+    events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+    assert [e["reason"] for e in events] == ["kernel_disabled"]
+    assert not [e for e in logs if e["event"] == "sweep_rust_metrics.engaged"]
+
+
+def test_drawdown_compare_key_is_bit_exact_on_signed_zero() -> None:
+    """-0.0 == +0.0 under ==; the compare key must distinguish them."""
+    plus = (0, 0.0, 0, 0.0)
+    minus = (0, -0.0, 0, 0.0)
+    assert plus == minus  # float equality is blind to the sign
+    assert drawdown_compare_key(plus) != drawdown_compare_key(minus)
+    assert drawdown_compare_key(plus) == drawdown_compare_key((0, 0.0, 0, 0.0))
+
+
+def test_drawdown_compare_key_is_total_on_huge_ints() -> None:
+    """A poisoned huge int must not raise (ints are compared, never packed)."""
+    huge = (1 << 100, 1.0, 3, 2.0)
+    assert drawdown_compare_key(huge) == drawdown_compare_key((1 << 100, 1.0, 3, 2.0))
+    assert drawdown_compare_key(huge) != drawdown_compare_key((0, 1.0, 3, 2.0))
 
 
 # ── the flat-curve shortcut constant ────────────────────────────────────

@@ -72,7 +72,11 @@ def current_pull_id() -> str:
     :func:`pull_id_scope`). Returns the empty string when called outside any
     scope, so a spine function logs a benign ``pull_id=""`` rather than raising
     when exercised in isolation (e.g. a direct unit test that does not open a
-    scope). O(1).
+    scope). O(bound contextvars) — ``structlog.contextvars.get_contextvars``
+    copies the thread's contextvars context and scans EVERY bound var into a
+    fresh dict per call (≤ ~3 keys on this repo's threads), no I/O — NOT a
+    literal O(1) (Golden Rule #10; matches :func:`emit_progress_beat`'s stated
+    cost, whose per-beat channel resolution this function is).
     """
     return str(structlog.contextvars.get_contextvars().get(PULL_ID_KEY, ""))
 
@@ -105,6 +109,31 @@ def pull_id_scope(pull_id: str | None = None) -> Generator[str, None, None]:
     resolved = pull_id if pull_id is not None else new_pull_id()
     with structlog.contextvars.bound_contextvars(**{PULL_ID_KEY: resolved}):
         yield resolved
+
+
+@contextlib.contextmanager
+def inherited_pull_id_scope(pull_id: str | None = None) -> Generator[str, None, None]:
+    """Bind a ``pull_id`` that INHERITS an already-bound ambient id; unbind on exit.
+
+    The inherit-aware sibling of :func:`pull_id_scope` (whose ``None`` path always
+    MINTS — the COMMON primitive is deliberately untouched). Resolution order:
+
+    * an explicit *pull_id* wins — including an explicit ``""`` (which binds the
+      empty string, mirroring ``pull_id_scope("")``; the documented
+      binds-empty trap — pass ``None``, not ``""``, to mean "no explicit id");
+    * ``None`` with a non-empty ambient id → INHERIT it (a nesting-safe re-bind,
+      so the enclosing job-level RUN scope reaches this entrypoint's inner scope
+      instead of being shadow-minted over — DEC-PULL-BEAT-PERRUN-001: the spot
+      fan-out workers' capture-then-rebind then carries the RUN id, and their
+      seam beats route to the run's registered channel);
+    * ``None`` with no ambient id → MINT a fresh one (byte-identical to
+      :func:`pull_id_scope` for a standalone caller).
+
+    Yields the resolved id; delegates the bind/restore to :func:`pull_id_scope`.
+    """
+    resolved = pull_id if pull_id is not None else (current_pull_id() or new_pull_id())
+    with pull_id_scope(resolved) as pid:
+        yield pid
 
 
 #: The contextvar / event key every dashboard HTTP request is correlated by
@@ -160,6 +189,7 @@ __all__ = [
     "REQUEST_ID_KEY",
     "current_pull_id",
     "current_request_id",
+    "inherited_pull_id_scope",
     "new_pull_id",
     "new_request_id",
     "pull_id_scope",

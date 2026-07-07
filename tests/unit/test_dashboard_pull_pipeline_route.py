@@ -1316,3 +1316,55 @@ def test_pull_pipeline_wedged_warm_times_out_and_job_completes(
         assert gate_snap.last_ok is True
     finally:
         release.set()  # let the abandoned daemon workers exit promptly
+
+
+# ── the strict post-step gate env knob (DEC-PULL-SIX-STEP-ORDER-001) ──────────
+
+
+def test_pull_pipeline_garbage_strict_gate_env_is_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A garbage BRUTEX_PIPELINE_STRICT_GATE is a clean 400 AT LAUNCH.
+
+    The knob is resolved ONCE, eagerly, inside ``_launch_pipeline``'s
+    validation try — never a mid-pull 500 on the job thread; the detail
+    names the variable (fail-loud, Golden Rule #1).
+    """
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.setenv("BRUTEX_PIPELINE_STRICT_GATE", "banana")
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 400
+    assert "BRUTEX_PIPELINE_STRICT_GATE" in resp.json()["detail"]
+
+
+def test_pull_pipeline_strict_gate_enabled_launches_and_logs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``BRUTEX_PIPELINE_STRICT_GATE=1`` launches normally + is logged on the request."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.setenv("BRUTEX_PIPELINE_STRICT_GATE", "1")
+    with capture_logs() as logs:
+        resp = client.post("/api/v1/universe/pull-pipeline")
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+        assert _wait_for_job(client)["state"] == "done"
+    requested = [e for e in logs if e["event"] == "universe.pull_pipeline.requested"]
+    assert len(requested) == 1
+    assert requested[0]["strict_gate"] is True
+
+
+def test_pull_pipeline_default_strict_gate_is_false(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset knob ⇒ strict_gate=False on the request log (the cleanset default)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.delenv("BRUTEX_PIPELINE_STRICT_GATE", raising=False)
+    with capture_logs() as logs:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        assert _wait_for_job(client)["state"] == "done"
+    requested = [e for e in logs if e["event"] == "universe.pull_pipeline.requested"]
+    assert len(requested) == 1
+    assert requested[0]["strict_gate"] is False
