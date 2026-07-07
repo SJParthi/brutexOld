@@ -514,6 +514,26 @@ def _futures_sentinel_refusal(
     return None
 
 
+def _existing_fresh_sentinel(
+    fresh_sentinel_paths: Mapping[str, Sequence[Path]] | None,
+    instrument: str,
+) -> Path | None:
+    """First EXISTING expected fresh-digest sentinel for *instrument*, or ``None``.
+
+    The digest-aware probe primitive (review round-5 finding 11 + round-6
+    finding 4): a sentinel at one of THIS launch's exact expected paths folded
+    the fresh ``data_snapshot_hash`` into its tuple digest, so it — and only
+    it — can short-circuit this grid's tuples. ``None`` mapping / an absent
+    instrument key / no path on disk all abstain.
+    """
+    if fresh_sentinel_paths is None:
+        return None
+    return next(
+        (path for path in fresh_sentinel_paths.get(instrument, ()) if path.exists()),
+        None,
+    )
+
+
 def stale_roll_schedule_refusal(
     audit_path: Path,
     *,
@@ -568,8 +588,13 @@ def stale_roll_schedule_refusal(
         ``data_snapshot_hash``, so only a sentinel at one of THESE exact
         paths can short-circuit this grid's tuples: an EXISTING fresh-digest
         sentinel with no matching-generation recorded schedule refuses with
-        zero false positives. ``None`` (or an instrument absent from the
-        mapping) abstains as before.
+        zero false positives. The same probe guards the ZERO-matching-entries
+        arm (review round-6 finding 4): an audit whose fresh-generation
+        ``SWEEP_START``s were ALL lost (tail truncation at a line boundary, a
+        pre-launch backup restore) is indistinguishable from a legitimate
+        moved snapshot by the entries alone, but only the lossy shape leaves
+        a sentinel at a fresh expected path. ``None`` (or an instrument
+        absent from the mapping) abstains as before.
 
     Returns
     -------
@@ -584,7 +609,14 @@ def stale_roll_schedule_refusal(
         and a crash-resume of the LATEST launch compares only against its own
         generation. A snapshot with NO matching recorded entries MOVED —
         every tuple digest re-keys (the stores/sentinels re-address), so no
-        sentinel can pair stale rows with the fresh schedule — abstain. An
+        sentinel can pair stale rows with the fresh schedule — abstain,
+        UNLESS a sentinel already exists at one of THIS launch's expected
+        *fresh_sentinel_paths* (review round-6 finding 4 — the round-5
+        finding-11 sibling): a fresh-digest sentinel proves a
+        matching-generation ``SWEEP_START`` was once appended, so its total
+        absence is a TAIL-lossy / wrong-backup-restored audit and the resume
+        refuses (zero false positives — a legitimate moved snapshot or
+        crash-resume leaves no sentinel at those exact paths). An
         unreadable audit, a malformed/inconsistent matching generation, or a
         readable audit recording NO ``SWEEP_START`` at all (a truncated /
         copytruncate-rotated file — review round-4 finding 10) abstains ONLY
@@ -626,6 +658,29 @@ def stale_roll_schedule_refusal(
             reason="the audit log records no SWEEP_START context",
         )
     if not matching:
+        # Review round-6 finding 4 (the round-5 finding-11 sibling): the audit
+        # is readable and holds SWEEP_STARTs — but NONE under THIS launch's
+        # snapshot generation. A legitimate moved snapshot abstains here (its
+        # foreign-generation sentinels re-address, so none sits at a fresh
+        # expected path) — but an audit that LOST its fresh-generation tail at
+        # a line boundary (or a pre-launch backup restore) looks identical
+        # from the entries alone. Probe THIS launch's expected sentinel paths:
+        # a fresh-digest sentinel's SWEEP_START is always appended BEFORE its
+        # tuple runs, so its existence with ZERO matching-generation entries
+        # is proof of audit loss, never a moved-snapshot / crash-resume state.
+        for instrument in sorted(roll_schedule_by_instrument):
+            fresh_sentinel = _existing_fresh_sentinel(fresh_sentinel_paths, instrument)
+            if fresh_sentinel is not None:
+                return (
+                    f"results tree holds a completed futures tuple for {instrument!r} "
+                    f"minted under THIS launch's exact identity (completion sentinel: "
+                    f"{fresh_sentinel}) but the audit records NO SWEEP_START under this "
+                    f"snapshot generation at all ({audit_path}) — a tail-lossy/restored "
+                    "audit: the roll_schedule those rows were minted under cannot be "
+                    "verified, so a resume could pair them with a drifted schedule — "
+                    "re-sweep into a fresh --results-root (or restore the tree's "
+                    "audit log)"
+                )
         return None
     for instrument, fresh_schedule in sorted(roll_schedule_by_instrument.items()):
         recorded_schedule = recorded.get(instrument)
@@ -637,12 +692,7 @@ def stale_roll_schedule_refusal(
             # provably pairable with this grid, so its rows' minted schedule
             # being unverifiable refuses; a foreign-generation sentinel can
             # never pair (its digest folded another snapshot) — abstain.
-            if fresh_sentinel_paths is None:
-                continue
-            fresh_sentinel = next(
-                (path for path in fresh_sentinel_paths.get(instrument, ()) if path.exists()),
-                None,
-            )
+            fresh_sentinel = _existing_fresh_sentinel(fresh_sentinel_paths, instrument)
             if fresh_sentinel is None:
                 continue
             return (

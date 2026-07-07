@@ -927,6 +927,83 @@ class TestStaleRollScheduleRefusal:
             is None
         )
 
+    # ── round-6 finding 4: the ZERO-matching-entries arm probes too ──
+
+    def test_generation_lost_audit_with_fresh_digest_sentinel_refuses(self, tmp_path: Path) -> None:
+        # The round-5 finding-11 sibling: the audit lost its ENTIRE fresh-
+        # generation tail (line-boundary truncation, or a pre-launch backup
+        # restore — the gate's own remediation text invites one), leaving only
+        # an OLDER generation's SWEEP_STARTs. `matching` is empty, so pre-fix
+        # the gate returned None BEFORE the digest-aware probe — yet the tree
+        # holds a sentinel at one of THIS launch's exact expected paths, whose
+        # SWEEP_START was provably appended before the tuple ran: its total
+        # absence is audit loss, and the resume would pair its rows' LOST
+        # recorded schedule with the freshly resolved one.
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0000", schedule=self._S1)  # older gen only
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+            fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
+        )
+        assert message is not None
+        assert str(sentinel) in message  # the evidence named
+        assert "NO SWEEP_START under this snapshot generation" in message
+        assert "tail-lossy" in message
+        assert "--results-root" in message  # the remediation
+
+    @pytest.mark.parametrize("mapping", [{}, {"NSE-NIFTY-FUT": []}])
+    def test_moved_snapshot_with_no_fresh_digest_sentinel_still_abstains(
+        self, tmp_path: Path, mapping: dict[str, list[Path]]
+    ) -> None:
+        # The zero-false-positive law on the new arm: a LEGITIMATE moved
+        # snapshot (the monthly grown-lake re-launch) holds only foreign-
+        # generation sentinels — none at a fresh expected path — and must
+        # keep resuming.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)  # a foreign-digest sentinel IS on disk
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0000", schedule=self._S1)
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths=mapping,
+            )
+            is None
+        )
+
+    def test_moved_snapshot_fresh_path_not_on_disk_abstains(self, tmp_path: Path) -> None:
+        # An expected fresh path that does NOT exist is no evidence on the
+        # zero-matching-entries arm either — existence is probed, never the
+        # mapping alone.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0000", schedule=self._S1)
+        missing = (
+            root / "NSE-NIFTY-FUT" / "1minute" / "bull_k3_feedfacefeedface.parquet.complete.json"
+        )
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths={"NSE-NIFTY-FUT": [missing]},
+            )
+            is None
+        )
+
     def test_recorded_schedule_present_never_probes_sentinels(self, tmp_path: Path) -> None:
         # A matching-generation RECORDED schedule owns the verdict: identical
         # → pass (no probe fires even with a fresh sentinel mapped).
