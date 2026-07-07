@@ -57,9 +57,12 @@ remaining sandbox-safe ROADMAP stubs to live Hypothesis properties in
 the two spec-named-but-absent invariants **P-25** (no VIX leak in the
 vocabulary) and **P-26** (audit→dedup replay oracle). **P-08** points at the
 existing golden associativity test. **P-20** (audit→Parquet byte-equality)
-is now REAL in ``tests/integration/test_replay_audit_log.py`` — a fixture pull
-through the real spine + writers, replayed FROM the verified audit log into a
-fresh lake and asserted byte-identical (DEC-INGEST-AUDIT-WIRING-001).
+is LIVE per DEC-AUDIT-LAKE-REPLAY-ORACLE-001: the Hypothesis suite in
+``test_replay_lake_properties.py`` captures bounded append schedules through
+the real ``AuditCaptureSink`` → hash-chained audit log and replays them
+through the REAL sink/writer stack into a fresh lake, asserting per-event
+``raw_hash`` anchors + full byte equality (the end-to-end fixture pull lives
+in ``tests/integration/test_replay_audit_log.py``).
 
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
@@ -224,10 +227,13 @@ def test_p_19_parquet_writer_deterministic() -> None:
 
 def test_p_20_replay_byte_equals_original() -> None:
     """P-20: ``replay(audit_log) → Parquet`` byte-equals the original Parquet."""
-    # DEC-INGEST-AUDIT-WIRING-001: the replay harness is REAL — a fixture pull
-    # through the real spine + Parquet writer, replayed FROM the verified audit
-    # log alone into a fresh lake, byte-equality asserted file-for-file.
-    pytest.skip("implemented in tests/integration/test_replay_audit_log.py")
+    # DEC-AUDIT-LAKE-REPLAY-ORACLE-001: the capture→replay oracle is LIVE —
+    # `AuditCaptureSink` records every non-empty sink append onto the
+    # hash-chained audit log and `replay_lake_from_audit` re-drives the REAL
+    # ParquetBarSink→ParquetWriter stack from the verified log alone into a
+    # fresh lake, per-event raw_hash anchors + full byte equality asserted
+    # (property suite below; end-to-end fixture pull in the integration file).
+    pytest.skip("implemented in tests/property/test_replay_lake_properties.py")
 
 
 # ────────────────────────────────────────────────────────────────────
