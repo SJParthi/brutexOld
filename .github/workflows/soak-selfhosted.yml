@@ -9,7 +9,11 @@
 # This workflow is the tier where a genuine hours-long soak actually RUNS: on
 # the operator's registered self-hosted Apple M4-Pro (CLAUDE.md §8), with a job
 # timeout DERIVED from the requested duration so it can never outrun its own
-# clock. It drives `tests/stress/test_soak_sustained.py::test_soak_sustained`
+# clock — bounded to 4 days (5760 min), because GitHub terminates ANY job,
+# self-hosted included, after 5 days (7200 min) of execution (SOAK-R8-1/SEC8-2:
+# the documented platform job-execution limit is the binding outer bound; a
+# larger dispatch would burn days then be platform-killed mid-soak, the exact
+# un-completable-tier trap this workflow exists to close). It drives `tests/stress/test_soak_sustained.py::test_soak_sustained`
 # (the `soak` marker) for the full `STRESS_DURATION_S`, feeding each time window
 # to the pure `brutex.observability.soak_drift.SoakDriftMonitor` (RSS ceiling /
 # fd growth / p99 latency drift). The failure signal is AUTOMATIC (CLAUDE.md §11):
@@ -48,9 +52,14 @@
 # --------------------------------------------------------------
 # `runs-on: [self-hosted, macos, m4pro]`, NO `pull_request` trigger — a runner
 # that is offline (the Mac asleep) would otherwise hang a PR's mergeable state.
-# It runs on a weekly cron + manual dispatch, where a perpetually-queued run is
-# harmless. A queue-age watchdog for an unregistered runner is a named follow-up
-# in ADR-0017 (NOT built here).
+# It runs on a weekly cron + manual dispatch, so a queued run blocks no PR —
+# but it is NOT harmless (SOAK-R8-2): GitHub AUTO-CANCELS a job that has been
+# queued for 24 hours (documented self-hosted job-queue limit), WITHOUT any
+# step ever executing — so the in-job issue watchdog below structurally cannot
+# fire for a never-started run, and a weekly cron soak on an offline Mac dies
+# SILENTLY, week after week. A queue-age watchdog (an out-of-job check on the
+# last run's conclusion) is the named ADR-0017 follow-up that covers this gap
+# (NOT built here).
 #
 # HONEST ENVELOPE (Golden Rule #10)
 # ---------------------------------
@@ -63,8 +72,11 @@
 # process_probe.py). A garbage `soak_minutes` dispatch fails the `plan` job
 # (operator-watched — a dispatch is interactive) and the soak job is SKIPPED —
 # including the numeric-but-degenerate shapes: a leading-zero value is
-# base-10-coerced (never silently octal-shortened, SOAK-R7-3) and an
-# above-2-weeks / int64-wrapping value is REFUSED (SEC7-2), so a zero or
+# base-10-coerced (never silently octal-shortened, SOAK-R7-3), a literal zero
+# ('0'/'00'/'0_0') is REFUSED (SOAK-R8-3/SEC8-1 — it would fake-green a ~1 s
+# 'Real multi-hour soak' that soaked nothing; SEC7-2 had closed only the
+# int64-WRAP route to zero, not the literal-zero input), and an above-4-day /
+# int64-wrapping value is REFUSED (SEC7-2 + SOAK-R8-1), so a zero or
 # negative timeout/duration can never reach the soak job;
 # the issue watchdog covers the SOAK job's failure/cancellation, which is the
 # unattended (cron) risk the watchdog exists for.
@@ -78,7 +90,7 @@ on:
   workflow_dispatch:
     inputs:
       soak_minutes:
-        description: "Soak wall-clock minutes, max 20160 (job timeout is this + 30 + this/6)"
+        description: "Soak wall-clock minutes, 1..5760 (4 days; job timeout is this + 30 + this/6 — GitHub terminates any self-hosted job at 5 days = 7200 min, so 5760 + 30 + 960 = 6750 is the largest derived timeout that fits)"
         required: false
         default: "360"
 
@@ -131,9 +143,9 @@ jobs:
           # degenerate job timeout plus a negative STRESS_DURATION_S that the
           # soak's deadline loop treats as "one window" (a fake-green ~1 s
           # 'multi-hour' soak). Refuse on LENGTH first (never parsing the
-          # oversized number), then bound to 2 weeks.
+          # oversized number), then bound to the platform-feasible ceiling.
           if [ "${#m}" -gt 5 ]; then
-            echo "::error::soak_minutes='$SOAK_MINUTES' is absurdly large (max 20160 = 2 weeks)." >&2
+            echo "::error::soak_minutes='$SOAK_MINUTES' is absurdly large (max 5760 = 4 days; GitHub terminates self-hosted jobs at 5 days)." >&2
             exit 1
           fi
           # Force DECIMAL (SOAK-R7-3): the digits fence admits a leading zero,
@@ -141,8 +153,23 @@ jobs:
           # soak ('090' would instead abort with a raw bash base error). The
           # fence guarantees non-empty digits, so base-10 coercion is safe.
           m=$((10#$m))
-          if [ "$m" -gt 20160 ]; then
-            echo "::error::soak_minutes=$m exceeds the 2-week ceiling (20160)." >&2
+          # Lower bound (SOAK-R8-3/SEC8-1): a literal '0' (also '00', '0_0')
+          # passed every earlier fence and reached the soak job as
+          # STRESS_DURATION_S=0 — one ~0.15 s window, green — a fake 'Real
+          # multi-hour soak' that soaked nothing. SEC7-2 closed only the
+          # int64-WRAP route to zero; this closes the literal-zero route.
+          if [ "$m" -lt 1 ]; then
+            echo "::error::soak_minutes must be >= 1 — a zero-minute dispatch would report a fake-green ~1 s 'multi-hour' soak." >&2
+            exit 1
+          fi
+          # Upper bound (SOAK-R8-1/SEC8-2): GitHub terminates ANY self-hosted
+          # job after 5 days (7200 min) of execution — the documented platform
+          # job-execution limit — so the derived timeout (m + 30 + m/6) must
+          # fit under 7200: 5760 + 30 + 960 = 6750 does; the previous 20160
+          # (2-week) ceiling advertised dispatches the platform GUARANTEES to
+          # kill mid-soak (the exact #208 un-completable-tier trap).
+          if [ "$m" -gt 5760 ]; then
+            echo "::error::soak_minutes=$m exceeds the 4-day ceiling (5760): GitHub kills any self-hosted job at 5 days (7200 min), so a larger soak cannot complete." >&2
             exit 1
           fi
           # Slack SCALES with duration (SOAK-R7-4): the end-of-run cost is
@@ -161,8 +188,12 @@ jobs:
     name: Real multi-hour soak (drift-gated)
     needs: plan
     # Gated to the registered self-hosted M4-Pro. If no runner with this label
-    # set is online the job sits "queued" indefinitely — harmless (no PR to
-    # block). Same precedent as verify-m4pro.yml / bench-m4pro.yml.
+    # set is online the job queues, blocks no PR, and GitHub AUTO-CANCELS it
+    # after 24 h (documented job-queue limit) with NO step ever running — the
+    # in-job issue watchdog below cannot fire for a never-started run, so an
+    # offline-runner cron soak dies silently (SOAK-R8-2; the ADR-0017
+    # queue-age watchdog follow-up covers this gap). Same runner precedent as
+    # verify-m4pro.yml / bench-m4pro.yml.
     runs-on: [self-hosted, macos, m4pro]
     # SELF-KILL FIX (DEC-SOAK-REAL-TIER-001): the job timeout is DERIVED from the
     # requested duration (+30 min fixed install/rebuild slack + m/6 for the

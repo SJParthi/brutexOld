@@ -63,6 +63,7 @@ drift LOGIC's 100% line+branch claim stands only on the pure module.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -138,11 +139,18 @@ _CODE_COMMIT_SHA: str = "f" * 40
 
 @dataclass(frozen=True, slots=True)
 class _SoakResult:
-    """The driver's outcome — window count, appended entries, and any drift edges."""
+    """The driver's outcome — window count, appended entries, drift edges, wall-clock."""
 
     windows: int
     appended: int
     breaches: tuple[str, ...]
+    #: Measured wall-clock of the soak loop (perf_counter start→end). The tests
+    #: assert ``elapsed_s >= duration_s`` — the oracle that ties the run's real
+    #: length to the requested budget (SOAK-R8-3): a deadline-arithmetic
+    #: regression in the loop, or an env-key drift that silently fell back to
+    #: the 2 s default on a multi-hour tier, can no longer report a fake-green
+    #: "multi-hour" soak that actually ran seconds.
+    elapsed_s: float
 
 
 def _run_soak(*, duration_s: float, monitor: SoakDriftMonitor, audit_path: Path) -> _SoakResult:
@@ -150,14 +158,18 @@ def _run_soak(*, duration_s: float, monitor: SoakDriftMonitor, audit_path: Path)
 
     Runs at least ONE window (the outer loop body always executes once), so even
     a sub-window duration yields a real observation. Returns the window count,
-    the appended-entry count (for the chain-integrity check), and every rule that
-    edged into BREACH.
+    the appended-entry count (for the chain-integrity check), every rule that
+    edged into BREACH, and the measured wall-clock ``elapsed_s`` (which the loop
+    guarantees is ``>= duration_s`` — the exit condition is
+    ``perf_counter() >= deadline`` — so the callers can assert the run really
+    lasted its budget, SOAK-R8-3).
     """
     breaches: list[str] = []
     appended = 0
     windows = 0
     with AuditWriter.open(audit_path) as log:
-        deadline = perf_counter() + duration_s
+        start = perf_counter()
+        deadline = start + duration_s
         while True:
             window_start = perf_counter()
             latencies: list[float] = []
@@ -194,7 +206,10 @@ def _run_soak(*, duration_s: float, monitor: SoakDriftMonitor, audit_path: Path)
             breaches.extend(e.rule_name for e in events if e.new_state.value == "breach")
             if perf_counter() >= deadline:
                 break
-    return _SoakResult(windows=windows, appended=appended, breaches=tuple(breaches))
+        elapsed_s = perf_counter() - start
+    return _SoakResult(
+        windows=windows, appended=appended, breaches=tuple(breaches), elapsed_s=elapsed_s
+    )
 
 
 def _drive(tmp_path: Path, duration_s: float) -> _SoakResult:
@@ -273,6 +288,30 @@ def _assert_healthy(result: _SoakResult, audit_path: Path) -> None:
     )
 
 
+def _sustained_duration_s() -> float:
+    """Resolve the sustained budget from ``STRESS_DURATION_S``, refusing non-finite values.
+
+    A bare ``float()`` of the env knob admits ``"nan"`` / ``"inf"`` — and the
+    driver's ONLY exit is ``perf_counter() >= deadline``, which is ALWAYS False
+    against a NaN deadline (every comparison with NaN is False) and never True
+    before an infinite one, so the loop runs FOREVER until the job timeout
+    kills it (SOAK-R8-4, reproduced live). Refuse loudly instead — the same
+    fail-loud contract the workflow's ``plan`` fence applies to
+    ``soak_minutes`` (a non-numeric string already raises ``ValueError`` from
+    ``float()`` itself).
+    """
+    raw = os.environ.get("STRESS_DURATION_S", str(_DEFAULT_SUSTAINED_S))
+    duration_s = float(raw)
+    if not math.isfinite(duration_s):
+        msg = (
+            f"STRESS_DURATION_S={raw!r} must be finite — a NaN/inf deadline never "
+            f"expires and the soak loop would run until the job timeout kills it "
+            f"(SOAK-R8-4)"
+        )
+        raise ValueError(msg)
+    return duration_s
+
+
 @pytest.mark.stress
 @pytest.mark.parametrize("duration_s", [0.4, 0.8])
 def test_soak_short(tmp_path: Path, duration_s: float) -> None:
@@ -283,6 +322,9 @@ def test_soak_short(tmp_path: Path, duration_s: float) -> None:
     driver + drift detector the multi-hour tier uses.
     """
     result = _drive(tmp_path, duration_s)
+    # The run must really last its budget (SOAK-R8-3) — pins the driver's
+    # deadline arithmetic on the nightly tier, at more than one duration.
+    assert result.elapsed_s >= duration_s
     _assert_healthy(result, tmp_path / "soak_audit.jsonl")
 
 
@@ -294,9 +336,42 @@ def test_soak_sustained(tmp_path: Path) -> None:
     ``soak-selfhosted.yml`` job; a plain dev run defaults to a couple of seconds.
     This is the live wiring of the previously-dead ``STRESS_DURATION_S`` knob.
     """
-    duration_s = float(os.environ.get("STRESS_DURATION_S", str(_DEFAULT_SUSTAINED_S)))
+    duration_s = _sustained_duration_s()
     result = _drive(tmp_path, duration_s)
+    # The oracle that ties the run's REAL length to the requested budget
+    # (SOAK-R8-3): a deadline-arithmetic regression in ``_run_soak`` — the
+    # exact fake-green "~1 s multi-hour soak" shape SEC7-2 fenced on the PLAN
+    # side — now fails HERE too, instead of relying on someone eyeballing a
+    # suspiciously fast job (§11). (An env-KEY drift falling back to the 2 s
+    # default would still satisfy this assert against its own fallback value;
+    # the workflow-side zero/garbage fences plus the plan-log line remain that
+    # half's guard — honestly NOT claimed covered here.)
+    assert result.elapsed_s >= duration_s
     _assert_healthy(result, tmp_path / "soak_audit.jsonl")
+
+
+@pytest.mark.stress
+def test_sustained_duration_rejects_non_finite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``STRESS_DURATION_S=nan``/``inf`` must fail LOUDLY, never loop forever.
+
+    Regression pin for SOAK-R8-4: ``float("nan")`` parses cleanly, and
+    ``perf_counter() >= nan`` is always False, so an unfenced NaN duration hung
+    the driver until the job timeout killed it (verified live). ``inf`` is the
+    same hang via a never-reached deadline; ``-inf`` is fenced for symmetry.
+    """
+    for bad in ("nan", "inf", "-inf", "NaN", "Infinity"):
+        monkeypatch.setenv("STRESS_DURATION_S", bad)
+        with pytest.raises(ValueError, match="must be finite"):
+            _sustained_duration_s()
+    # A garbage string stays loud too (float() itself raises).
+    monkeypatch.setenv("STRESS_DURATION_S", "six hours")
+    with pytest.raises(ValueError):
+        _sustained_duration_s()
+    # The happy paths are unchanged: explicit value and the unset default.
+    monkeypatch.setenv("STRESS_DURATION_S", "21600")
+    assert _sustained_duration_s() == 21600.0
+    monkeypatch.delenv("STRESS_DURATION_S")
+    assert _sustained_duration_s() == _DEFAULT_SUSTAINED_S
 
 
 @pytest.mark.stress

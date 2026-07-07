@@ -56,8 +56,15 @@ wall-clock runner:
 3. **self-hosted soak tier** — NEW `.github/workflows/soak-selfhosted.yml` on the
    registered M4-Pro (`runs-on: [self-hosted, macos, m4pro]`), weekly cron +
    `workflow_dispatch(soak_minutes)`, with **`timeout-minutes` DERIVED from the
-   requested duration** (`soak_minutes + 30`, applied at BOTH the job level and
-   the pytest step) so it can never outrun its own clock. The derivation runs as
+   requested duration** (`soak_minutes + 30 + soak_minutes/6` — fixed
+   install/rebuild slack plus the duration-LINEAR teardown cost, per SOAK-R7-4;
+   default 360 → 450; applied at BOTH the job level and the pytest step) so it
+   can never outrun its own clock. `soak_minutes` is fenced to `1..5760` (4
+   days): a zero dispatch would fake-green a ~1 s "multi-hour" soak
+   (SOAK-R8-3), and GitHub terminates ANY self-hosted job after 5 days
+   (7200 min) of execution — the documented platform job-execution limit is the
+   binding outer bound, so the largest derived timeout that fits is
+   `5760 + 30 + 960 = 6750` (SOAK-R8-1/SEC8-2). The derivation runs as
    SHELL arithmetic in a tiny GitHub-hosted `plan` job whose digits-validated
    outputs feed `fromJSON(needs.plan.outputs.…)` — NOT as expression arithmetic,
    because GitHub Actions expressions have NO arithmetic operators (an
@@ -120,9 +127,17 @@ named follow-up.
 **Operational dependency (accepted)**
 
 * The real soak requires the operator's registered self-hosted M4-Pro to be
-  online. Like `verify-m4pro.yml` / `bench-m4pro.yml`, the job queues (does not
-  fail) when the runner is offline, and there is NO `pull_request` trigger, so an
-  offline runner never blocks a PR's mergeable state.
+  online. There is NO `pull_request` trigger, so an offline runner never blocks
+  a PR's mergeable state — but an offline runner is NOT benign (SOAK-R8-2):
+  GitHub AUTO-CANCELS a job that has been queued for 24 hours (the documented
+  self-hosted job-queue limit) WITHOUT any step executing, so the in-job issue
+  watchdog structurally cannot fire for a never-started run and a weekly cron
+  soak on an asleep Mac dies SILENTLY, week after week — the exact §11
+  silent-death pathology, on a path no in-job step can cover. The queue-age
+  watchdog named below is the follow-up that closes this gap.
+* GitHub also terminates ANY self-hosted job after 5 days (7200 min) of
+  execution, which is why the `soak_minutes` fence caps at 5760 (4 days) — a
+  larger dispatch is structurally un-completable (SOAK-R8-1/SEC8-2).
 
 **Honest limits (Golden Rule #10)**
 
@@ -145,8 +160,12 @@ named follow-up.
 
 **Named follow-ups (NOT built here)**
 
-* A queue-age watchdog that alerts when the self-hosted soak sits queued too long
-  (an unregistered/offline runner) — so a silently-never-running soak is visible.
+* A queue-age watchdog that alerts when the self-hosted soak sits queued /
+  never ran (an unregistered/offline runner) — REQUIRED for full §11 coverage,
+  because GitHub auto-cancels a >24h-queued job with no step executing, so the
+  in-job watchdog cannot see it (SOAK-R8-2); e.g. a cheap GitHub-hosted cron
+  that checks the last `soak-selfhosted` run's conclusion and opens an issue on
+  cancelled/never-ran.
 * A Linux self-hosted soak variant (so `/proc` VmRSS current-slope RSS gating is
   available on a dedicated box, not just the macOS PEAK backstop).
 
