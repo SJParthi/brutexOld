@@ -3842,14 +3842,28 @@ def build_app(
         semantics docstring): the launch body is shared with the boot-time
         intent resume (DEC-PULL-INTENT-RESUME-001), so the operator's POST and
         a resumed pull can never drift onto two different launch paths.
+
+        Offloaded via ``run_in_threadpool`` (the app.py offload doctrine — the
+        round-1 review fold on DEC-ACCOUNT-LEASE-CROSSHOST-001): the launch
+        acquires the cross-process pull guards synchronously
+        (``BackgroundPullJob.start`` → ``_acquire_singleflight`` — two flock
+        opens, the lease read and an fsync'd lease write, ALL on the lake
+        volume), so running it on the event loop would freeze the WHOLE
+        dashboard at launch time on a wedged/stalled external volume — the
+        exact event-loop-freeze class DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001
+        (#1522) removed for ``/pull/rate``. ``HTTPException``s raised inside
+        the offloaded body propagate unchanged (the 400/503 contracts are
+        byte-identical).
         """
         return JSONResponse(
-            _launch_pipeline(
-                symbols=symbols,
-                symbol=symbol,
-                from_date=from_date,
-                to_date=to_date,
-                dry_run=dry_run,
+            await run_in_threadpool(
+                lambda: _launch_pipeline(
+                    symbols=symbols,
+                    symbol=symbol,
+                    from_date=from_date,
+                    to_date=to_date,
+                    dry_run=dry_run,
+                )
             )
         )
 

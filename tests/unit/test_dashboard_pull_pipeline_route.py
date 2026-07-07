@@ -242,6 +242,42 @@ def test_pull_pipeline_single_symbol_scopes_to_one(
     assert _wait_for_job(client)["state"] == "done"
 
 
+def test_pull_pipeline_launch_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Round-1 review fold (the #1522 event-loop-freeze class): the launch body
+    # acquires the cross-process pull guards SYNCHRONOUSLY (two flock opens +
+    # the lease read + an fsync'd lease write, all lake-volume I/O), so it must
+    # run on an AnyIO worker via run_in_threadpool — never on the uvicorn event
+    # loop, where a wedged external volume would freeze the WHOLE dashboard.
+    # FAILS BEFORE the fix: the route called _launch_pipeline inline in the
+    # coroutine, so get_running_loop() succeeded inside start().
+    import asyncio
+
+    from brutex.dashboard.pull_jobs import BackgroundPullJob
+
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    on_loop: list[bool] = []
+
+    def _recording_start(self: BackgroundPullJob, *args: Any, **kwargs: Any) -> bool:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)  # executing ON the event loop — the freeze hazard
+        except RuntimeError:
+            on_loop.append(False)  # a threadpool worker — offloaded correctly
+        return True
+
+    monkeypatch.setattr(BackgroundPullJob, "start", _recording_start)
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert on_loop == [False], (
+        "the pull launch (singleflight flock + lease lake I/O) must be offloaded "
+        "via run_in_threadpool, never executed on the event loop"
+    )
+
+
 def test_pull_pipeline_unknown_selection_fails_closed_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
