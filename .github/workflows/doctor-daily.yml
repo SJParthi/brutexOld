@@ -1,5 +1,5 @@
 # doctor-daily.yml — the 07:30 IST daily `brutex doctor` cron
-# (DEC-DOCTOR-DAILY-CRON-001, MIGRATION.md #1524). Closes the
+# (DEC-DOCTOR-DAILY-CRON-001, MIGRATION.md #1525). Closes the
 # STANDARDS_100PCT.md §11 P2 row "Wire .github/workflows/doctor-daily.yml
 # 07:30 IST cron" (DEC-DOCTOR-001 #209 built the CLI; this wires the cron).
 #
@@ -21,7 +21,7 @@
 # TRIGGERS: cron + dispatch + push-of-owned-paths only. NO pull_request —
 # a scheduled observability contract must never gate PRs or join ci-ok.
 # "Alert if missed" (detecting a cron GitHub silently skipped) is a NAMED
-# NON-GOAL — see MIGRATION.md #1524.
+# NON-GOAL — see MIGRATION.md #1525.
 
 name: doctor-daily
 

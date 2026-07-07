@@ -1,5 +1,5 @@
 """Red-team contract pins for the doctor-daily cron workflow
-(DEC-DOCTOR-DAILY-CRON-001, MIGRATION.md #1524).
+(DEC-DOCTOR-DAILY-CRON-001, MIGRATION.md #1525).
 
 ``.github/workflows/doctor-daily.yml`` runs the plain ``brutex doctor``
 daily at 02:00 UTC (= 07:30 IST) on a hosted runner in a hermetic empty
@@ -292,7 +292,7 @@ def test_job_unconditional_and_step_if_set_pinned_exactly() -> None:
     doctor + assert steps) is worse: the job completes GREEN,
     ``success()`` is true, and the closer would actively CLOSE a genuine
     open 'critical' alarm every day. With 'alert if missed' an honest
-    NON-goal (MIGRATION #1524), nothing else detects this class, so the
+    NON-goal (MIGRATION #1525), nothing else detects this class, so the
     whole ``if:`` surface is equality-pinned.
     """
     data = _load()
