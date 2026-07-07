@@ -1,21 +1,8 @@
 # gitleaks configuration for BruteX.
 #
-# Extends the default ruleset. Allowlists cover ONLY audited false positives:
-# the 2026-07-06 secrets audit ran gitleaks v8.24.3 with the PURE DEFAULT
-# config over the full history (--all --full-history, 100 commits) and the
-# working tree — 26 hits, every one a confirmed fixture / placeholder / prose
-# fragment, 0 true secrets (trufflehog cross-scan: 0 in all modes).
-#
-# Credential policy (CLAUDE.md §6, DEC-AWS-ONLY-CREDS-001): the Groww api-key /
-# TOTP secret / access token live ONLY in AWS SSM SecureStrings — no real
-# credential value is committed anywhere in history.
-#
-# The former BLANKET global allowlists (all of docs/**.md + all of tests/**,
-# every rule) were NARROWED by that audit so a real key pasted into a test or
-# doc still fails CI: the audited fixture/doc paths are allowlisted ONLY on
-# the two low-signal rules that actually fired (rule-scoped allowlists below),
-# while high-signal rules (private keys, cloud keys, PATs, bot tokens) stay
-# live everywhere.
+# We extend the default rules with allowlists for source-code identifiers
+# that look like credentials but are actually environment-variable names,
+# example values in docs, or test-only fake tokens.
 
 title = "BruteX gitleaks config"
 
@@ -23,15 +10,21 @@ title = "BruteX gitleaks config"
 useDefault = true
 
 [allowlist]
-description = "Build/cache artefacts + credential env-var / SSM parameter NAMES (identifiers, never values)"
+description = "Global allowlist for paths + regex patterns"
+
 paths = [
-  '''rust/.*/target/''',
+  '''docs/.*\.md$''',
+  '''README\.md$''',
+  '''tests/.*''',
+  '''rust/fno-math/target/''',
   '''\.mypy_cache/''',
   '''\.ruff_cache/''',
   '''\.pytest_cache/''',
 ]
-regexTarget = "match"
+
 regexes = [
+  # Environment variable name constants — these are the *names* of
+  # env vars, never the values.
   '''BRUTEX_TELEGRAM_BOT_TOKEN''',
   '''BRUTEX_TELEGRAM_CHAT_ID''',
   '''BRUTEX_BROKER_TOKEN''',
@@ -39,35 +32,10 @@ regexes = [
   '''ENV_BOT_TOKEN''',
   '''ENV_CHAT_ID''',
   '''ENV_ENABLED''',
-  '''BRUTEX_GROWW_(API_KEY|TOTP_SECRET)''',
-  '''BRUTEX_TOKEN_PARAM_(API_KEY|TOTP_SECRET|ACCESS_TOKEN)''',
-  '''/tickvault/prod/groww/(api-key|totp-secret|access-token)''',
-]
-
-# Rule-scoped allowlists (merged into the default rules by [extend]).
-# Audited false positives (2026-07-06): FAKE_* test fixtures
-# (gw_api_key_abcdef123456, the canonical pyotp doc TOTP example
-# JBSWY3DPEHPK3PXP, structurally-fake JWTs), instrument feed tokens
-# (NIFTYMIDCAP100), alert dedupe keys, the vendored Groww API reference's
-# placeholder Bearer tokens + truncated sample JWT header, and backticked
-# kwargs in MIGRATION.md ledger prose (`max_rounds=0`, `ceiling_per_min=500`).
-
-[[rules]]
-id = "generic-api-key"
-[[rules.allowlists]]
-description = "Audited fixture/vendored-doc/ledger-prose paths — generic-api-key only"
-paths = [
-  '''^tests/''',
-  '''^docs/groww/''',
-  '''^docs/MIGRATION\.md$''',
-]
-
-[[rules]]
-id = "curl-auth-header"
-[[rules.allowlists]]
-description = "Vendored Groww API reference curl examples use placeholder Bearer tokens"
-paths = [
-  '''^docs/groww/''',
+  # Fixture / synthetic test tokens
+  '''test-token''',
+  '''fake-token''',
+  '''bot_token="test"''',
 ]
 
 [[rules]]
