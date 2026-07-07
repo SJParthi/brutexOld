@@ -195,6 +195,54 @@ def test_latest_movers_minute_none_on_corrupt_lake(tmp_path: Path) -> None:
     assert latest_movers_minute(tmp_path, date(2024, 6, 13)) is None
 
 
+def test_latest_movers_minute_reads_only_the_requested_days_month(tmp_path: Path) -> None:
+    """Month-prune regression: a sibling month's file is NEVER read.
+
+    The day's `<yyyy>/<mm>` partition fully determines where its bars live, so
+    the resolver globs ONLY that month's spot 1minute files. Teeth: the OTHER
+    month's file is corrupt — the pre-prune `1minute/**/*.parquet` glob would
+    hand it to DuckDB and the corrupt-lake guard would degrade the whole resolve
+    to None (proven by `test_latest_movers_minute_none_on_corrupt_lake`); the
+    month-bounded read never touches it and still resolves the real minute.
+    """
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[
+            _minute_bar(date(2024, 6, 13), 9, 15, "20000"),
+            _minute_bar(date(2024, 6, 13), 15, 29, "20100"),
+        ],
+    )
+    poisoned = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "05.parquet"
+    poisoned.write_bytes(b"this is not a parquet file at all")
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) == "15:29"
+
+
+def test_latest_movers_minute_multi_month_lake_matches_single_month_result(
+    tmp_path: Path,
+) -> None:
+    # Byte-identical pin: pruning the glob to the day's month resolves the SAME
+    # minute a multi-month lake holds for that day (the WHERE date filter always
+    # selected it; the prune only removes I/O, never changes the answer).
+    writer = ParquetWriter(lake_root=tmp_path)
+    for bar in (
+        _minute_bar(date(2024, 5, 20), 15, 29, "19900"),
+        _minute_bar(date(2024, 6, 13), 13, 5, "20000"),
+        _minute_bar(date(2024, 7, 1), 15, 29, "20200"),
+    ):
+        writer.write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[bar],
+        )
+    assert latest_movers_minute(tmp_path, date(2024, 6, 13)) == "13:05"
+    assert latest_movers_minute(tmp_path, date(2024, 5, 20)) == "15:29"
+
+
 def test_latest_movers_minute_key_is_date_scoped_and_distinct() -> None:
     # The memo key carries the ISO date (O(1) repeat poll per day) and never collides
     # with the sibling latest-DATE key.
