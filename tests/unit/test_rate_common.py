@@ -1930,7 +1930,7 @@ class TestLogEmissionOutsideLock:
         assert ctl.smooth_pacing_active is True
 
 
-# ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533) — mutmut survivor kills ────────
+# ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1535) — mutmut survivor kills ────────
 # Boundary + literal pins for the survivors of the rate_common mutation probe
 # (read_rate.md §3; mutant ids cite that probe — matched by DIFF CONTENT on the
 # current tree, since DEC-RATE-LOG-OUTSIDE-LOCK-001 renumbered mutants). Every
@@ -2268,7 +2268,7 @@ class TestMutationLiteralPins:
 
 
 class TestPendingLogLevelSlotPins:
-    """T8 re-probe kills (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1533).
+    """T8 re-probe kills (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1535).
 
     The scoped mutmut re-run on THIS base enumerated never-probed #1202
     deferred-log mutants. The level SLOT of a pending tuple is invisible to a

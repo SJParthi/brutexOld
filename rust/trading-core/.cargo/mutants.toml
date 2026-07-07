@@ -1,4 +1,4 @@
-# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533) — the ONE cargo-mutants scope for
+# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1535) — the ONE cargo-mutants scope for
 # trading-core, resolved by BOTH the CI matrix jobs (.github/workflows/mutation.yml)
 # and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
 # COMMON; the empirically-INERT repo-root .cargo/mutants.toml was deleted —
