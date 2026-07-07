@@ -229,6 +229,99 @@ def passes_gates(m: ResultMetrics) -> bool:
     return m.max_consecutive_losses <= _MAX_CONSECUTIVE_LOSSES
 
 
+# ── Gate-door reason vocabulary (DEC-SWEEP-RESULTS-DEPTH-001 · gap-register
+# ruling 12 / R28) — the STABLE wire tokens :func:`gate_reasons` emits. P2
+# folds per-door kill COUNTERS from these tokens at its orchestrator seam into
+# the run manifest (``per_door_kills``); the tokens are a wire vocabulary, so
+# renaming one is a breaking contract change (pinned by test). ──
+#: The fail-closed guard tripped: a float-valued gate input was present but
+#: non-finite (``NaN``/±``inf``) — the metrics are malformed, so NO other door
+#: is judged (judging garbage would fabricate door verdicts, Golden Rule #1).
+GATE_NON_FINITE_INPUT: Final[str] = "non_finite_input"
+#: Door 1 — ``total_trades < MIN_TRADES`` (statistical noise).
+GATE_MIN_TRADES: Final[str] = "min_trades"
+#: Door 2 — ``profit_factor`` ``None`` or ``< 1.2`` (no edge).
+GATE_PROFIT_FACTOR: Final[str] = "profit_factor"
+#: Door 3 — ``max_drawdown_pct > 30%`` (uninvestable).
+GATE_MAX_DRAWDOWN: Final[str] = "max_drawdown"
+#: Door 4 — ``win_rate < 25%`` AND ``win_loss_ratio < 2.0`` (``None`` ratio
+#: counts as ``0.0``, exactly like :func:`passes_gates`).
+GATE_WIN_RATE_WLR: Final[str] = "win_rate_wlr"
+#: Door 5 — ``max_consecutive_losses > 10`` (account-blower).
+GATE_CONSECUTIVE_LOSSES: Final[str] = "consecutive_losses"
+
+#: The COMPLETE reason vocabulary in EVALUATION order — the exact order
+#: :func:`passes_gates` checks its doors, so ``gate_reasons(m)[0]`` is always
+#: the door ``passes_gates`` short-circuits on. Consumers (P2's manifest
+#: counter fold) may rely on this order being stable.
+GATE_REASON_ORDER: Final[tuple[str, ...]] = (
+    GATE_NON_FINITE_INPUT,
+    GATE_MIN_TRADES,
+    GATE_PROFIT_FACTOR,
+    GATE_MAX_DRAWDOWN,
+    GATE_WIN_RATE_WLR,
+    GATE_CONSECUTIVE_LOSSES,
+)
+
+
+def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
+    """The reason-returning twin of :func:`passes_gates` — every failed door, named.
+
+    DEC-SWEEP-RESULTS-DEPTH-001 (gap-register ruling 12 / R28 per-door kill
+    counts): same input as :func:`passes_gates`, returns the ordered tuple of
+    failed-door reason tokens from the STABLE :data:`GATE_REASON_ORDER`
+    vocabulary — empty tuple ⇔ the result passes every gate. The two functions
+    can never disagree: ``bool(passes_gates(m)) == (gate_reasons(m) == ())``
+    holds for EVERY input (property-pinned, hypothesis-randomized), and both
+    read the SAME threshold constants in the SAME order (CLAUDE.md §11 COMMON —
+    this twin lives beside the predicate precisely so a threshold change moves
+    both at once).
+
+    Semantics, mirroring :func:`passes_gates` exactly:
+
+    * **Fail-closed short-circuit** — a present-but-non-finite float gate input
+      (``NaN``/±``inf`` in ``profit_factor`` / ``max_drawdown_pct`` /
+      ``win_rate`` / ``win_loss_ratio``) returns
+      ``(``:data:`GATE_NON_FINITE_INPUT```,)`` ALONE: the metrics are
+      malformed, and judging the remaining doors on garbage would fabricate
+      per-door verdicts (a ``NaN`` silently passes any ``<``/``>``), so no
+      other token is emitted (Golden Rule #1).
+    * **All doors judged** — on finite inputs every one of the 5 hard doors is
+      evaluated INDEPENDENTLY (no short-circuit), so a combo failing three
+      doors reports all three, in evaluation order. ``gate_reasons(m)[0]`` is
+      therefore exactly the door ``passes_gates`` would short-circuit on;
+      counter folds may count first-door-only or every-door as they choose.
+    * **Scope** — the 5 hard gates + the fail-closed guard ONLY. The opt-in
+      6th (overfit / Deflated-Sharpe) gate is deliberately OUT of this
+      vocabulary: it runs pool-relatively inside :func:`rank_combos`
+      (``N = len(candidates)`` — not a per-result predicate) and is counted at
+      its own rank seam, never fabricated per-row here.
+
+    O(1) per call (a handful of comparisons + one small tuple allocation);
+    holds no state, so it is safe from any fold/counter thread.
+    """
+    if any(
+        _non_finite_gate_input(value)
+        for value in (m.profit_factor, m.max_drawdown_pct, m.win_rate, m.win_loss_ratio)
+    ):
+        return (GATE_NON_FINITE_INPUT,)
+    reasons: list[str] = []
+    if m.total_trades < MIN_TRADES:
+        reasons.append(GATE_MIN_TRADES)
+    if m.profit_factor is None or m.profit_factor < _MIN_PROFIT_FACTOR:
+        reasons.append(GATE_PROFIT_FACTOR)
+    if m.max_drawdown_pct > _MAX_DRAWDOWN_PCT:
+        reasons.append(GATE_MAX_DRAWDOWN)
+    # The SAME ``None`` → 0.0 projection passes_gates applies (a low hit-rate is
+    # only acceptable if the winners are much bigger than the losers).
+    wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0
+    if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
+        reasons.append(GATE_WIN_RATE_WLR)
+    if m.max_consecutive_losses > _MAX_CONSECUTIVE_LOSSES:
+        reasons.append(GATE_CONSECUTIVE_LOSSES)
+    return tuple(reasons)
+
+
 def _f(value: float | None) -> float:
     """A ``None`` composite term contributes 0 (survivors have real metrics)."""
     return value if value is not None else 0.0
@@ -580,6 +673,13 @@ def rank_combos(
 
 
 __all__ = [
+    "GATE_CONSECUTIVE_LOSSES",
+    "GATE_MAX_DRAWDOWN",
+    "GATE_MIN_TRADES",
+    "GATE_NON_FINITE_INPUT",
+    "GATE_PROFIT_FACTOR",
+    "GATE_REASON_ORDER",
+    "GATE_WIN_RATE_WLR",
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",
     "OverfitGateConfig",
@@ -588,6 +688,7 @@ __all__ = [
     "composite_term_inputs",
     "dsr_z_contributions",
     "ensure_unique_survivor_masks",
+    "gate_reasons",
     "overfit_gate_positions",
     "passes_gates",
     "rank_combos",
