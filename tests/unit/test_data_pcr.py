@@ -186,6 +186,15 @@ class TestFoldSideRatio:
         with pytest.raises(ValueError, match="negative metric -7"):
             _fold([(PUT_SIDE, -7, None)])
 
+    def test_negative_one_boundary_raises_loudly(self) -> None:
+        # The tripwire is `value < 0`, whose exact fail-side boundary is -1:
+        # the deterministic fixtures elsewhere use -7/-3 and the Hypothesis
+        # metric strategy floors at 0, so without this pin a hand-written
+        # `< -1` boundary shift would slip the whole net (hostile-review NIT,
+        # DEC-MOVERS-OPTIONS-PCR-001 round 11).
+        with pytest.raises(PcrCorruptionError, match="negative metric -1"):
+            _fold([(CALL_SIDE, -1, None)])
+
     def test_negative_metric_is_the_typed_corruption_error(self) -> None:
         # Round-1 hostile-review fold: the negative-metric trip carries the
         # DISTINCT PcrCorruptionError type — a ValueError SUBCLASS (the §1.1
