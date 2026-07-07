@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
-MIGRATION.md #1493–#1494 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
+MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
 `bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
 CLIENT-clock "updated Xs ago" readout on a ~1 s ticker (amber → LOUD RED explicit
@@ -416,7 +416,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
-  MIGRATION.md #1493–#1494** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
+  MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
   widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
   LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
   exponential backoff, never gives up — the 38-minute frozen-tab incident fix; a non-ok poll can no longer settle
