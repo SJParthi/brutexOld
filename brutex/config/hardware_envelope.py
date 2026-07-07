@@ -874,11 +874,16 @@ def cpu_model_string(
 class HardwareFingerprint:
     """The bench-baseline hardware identity (DEC-BENCH-ABS-BASELINE-001).
 
-    ALL fields are KEY-DEFINING — any difference yields a different
+    Six fields are KEY-DEFINING — ``model_slug`` / ``arch`` /
+    ``physical_cores`` / ``performance_cores`` / ``efficiency_cores`` /
+    ``total_ram_gib``: any difference in those yields a different
     :func:`hardware_key`, hence a different committed baseline file;
-    absolute numbers are never compared across fingerprints. Built from
-    RAW detection only — the ``BRUTEX_*`` worker/thread env overrides
-    provably cannot move it (test-pinned).
+    absolute numbers are never compared across fingerprints.
+    ``os_family`` is fingerprint METADATA only — recorded (and governed)
+    in the committed baseline document but NOT rendered into the key by
+    ``format_hardware_key``. Built from RAW detection only — the
+    ``BRUTEX_*`` worker/thread env overrides provably cannot move it
+    (test-pinned).
     """
 
     model_slug: str

@@ -2,7 +2,9 @@
 
 Covers the :mod:`brutex.config.hardware_envelope` additions: the CPU-model
 probe (macOS ``sysctl -n hw.model`` / Linux ``/proc/cpuinfo``, every failure
-→ the honest ``"unknown"``), the KEY-DEFINING :class:`HardwareFingerprint`,
+→ the honest ``"unknown"``), the :class:`HardwareFingerprint` (six
+KEY-DEFINING fields; ``os_family`` is fingerprint metadata only, never in
+the key),
 the ONE key-format law shared with the bench-baseline schema, the env
 override fail-loud contract, and the env-cannot-move-the-key pin.
 """

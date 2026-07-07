@@ -32,7 +32,9 @@ Contract (CLAUDE.md §11 COMMON · DYNAMIC · AUTOMATED):
 Honest envelope (Golden Rule #10): the gate is dormant until the m4pro
 runner is online AND the first bless PR merges; until then compare ABSTAINS
 green-but-loud (never a fake pass, never a false red). This gate catches
->= ``tolerance_pct`` drift ONLY: sub-tolerance drift passes and can
+STRICTLY-greater-than-``tolerance_pct`` drift ONLY (the boundary law is a
+strict ``>`` — a regression landing EXACTLY at the tolerance threshold
+passes; boundary-pinned): at-or-below-tolerance drift passes and can
 ACCUMULATE across merges until a ledgered re-bless tightens the number —
 the complementary gates do NOT plug that hole (the 1.1x ratio tiers guard
 complexity shape, not constant factors, and the 50 M ops/s floor covers

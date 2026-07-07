@@ -49,7 +49,9 @@ auto-blessed via a bot PR the operator nudges + merges (GITHUB_TOKEN PRs do not
 trigger CI; NO PAT). HONEST: bench-m4pro stays NON-required (a regression is
 caught post-merge as a red run + issue, not a merge blocker); the gate is
 dormant until the runner is online AND the first bless merges; the gate catches
-≥-tolerance drift ONLY — sub-tolerance drift accumulates until a ledgered
+strictly-GREATER-than-tolerance drift ONLY (strict `>` boundary law — a
+regression exactly AT tolerance passes, test-pinned) — at-or-below-tolerance
+drift accumulates until a ledgered
 re-bless (the 1.1x ratio tiers + the single-canary-op 50 M/s floor are
 complements, NOT a sub-tolerance net); a STANDING red — numeric
 SUSPICIOUS_SPEEDUP or STRUCTURAL alike — dies at compare before a dispatch
