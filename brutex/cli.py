@@ -4845,6 +4845,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # in the per-tuple completion sentinel + tuple digest, not this sink; the
     # LMDB-backed TUPLE tier (``SweepCache``) stays, now operator-tunable.
     audit_path = out_root / "audit" / "sweep-all.jsonl"
+    # ADR-0012 resume-honesty gate (review round-2 finding 11): a SCHEDULE-ONLY
+    # lake drift (a sessionless-span successor contract appeared — snapshot
+    # byte-identical, roll_schedule grew) would let every completed tuple
+    # short-circuit at its sentinel (rows minted under the RECORDED schedule)
+    # while Stage-3/cascade recovery re-derives identities under the FRESH
+    # schedule → an uncaught grid-mismatch crash blaming the wrong cause.
+    # Compare the tree's recorded schedule against the fresh one UP FRONT and
+    # refuse with the evidence named (the 100%-tested helper owns the logic).
+    if roll_schedule_by_instrument is not None:
+        from brutex.engine.sweep_verify import stale_roll_schedule_refusal
+
+        schedule_refusal = stale_roll_schedule_refusal(
+            audit_path,
+            fresh_snapshot=snapshot,
+            roll_schedule_by_instrument=roll_schedule_by_instrument,
+        )
+        if schedule_refusal is not None:
+            print(f"[brutex] sweep-all REFUSED: {schedule_refusal}", file=sys.stderr)
+            return EXIT_USER_ERROR
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     # G&A layer (DEC-SWEEP-WIRE-GA-001): one BLAKE3 supervisor audit chain, a
     # crash-safe resume checkpoint keyed on the grid identity, a Bloom→LMDB
@@ -5433,9 +5452,14 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
     the sweep wrote under ``--results-root`` (default ``<lake>/sweeps``), re-reads
     the SAME bars from the lake, and re-runs the cascade through the identical
     pure core — so the regenerated ``cascade-report.json`` is byte-identical to the
-    one the sweep produced. A missing/invalid manifest, or a ``run_id`` that does
-    not match the manifest's, surfaces as a clear user error, never a traceback.
+    one the sweep produced. A missing/invalid manifest, a ``run_id`` that does
+    not match the manifest's, a futures lake whose contract set CHANGED since
+    the sweep (the replay's frozen-vs-re-derived roll-schedule cross-check,
+    review round-2 findings 1/4/9), or a futures-series resolution refusal
+    (interior hole / empty owned window) surfaces as a clear user error,
+    never a traceback (DEC-CLI-USER-ERROR-HYGIENE-001).
     """
+    from brutex.data.futures_series import FuturesSeriesError
     from brutex.engine.cascade_wire import (
         CascadeWireError,
         load_bars_for_manifest,
@@ -5460,8 +5484,19 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         )
         return EXIT_USER_ERROR
 
-    bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
-    report = run_and_write_from_manifest(root, bars_for=bars_for)
+    # The replay's schedule cross-check (CascadeWireError) + a futures-series
+    # resolution refusal from the CURRENT lake (FuturesSeriesError — e.g. an
+    # interior hole that appeared since the launch) are OPERATOR-remediable
+    # lake states, not code bugs — clean one-liners, never a traceback
+    # (review round-2 findings 10/12). A raw ValueError is deliberately NOT
+    # caught: with the loader and the frozen schedule cross-checked above, a
+    # Stage-1A desync raise is a genuine bug again and must stay loud.
+    try:
+        bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
+        report = run_and_write_from_manifest(root, bars_for=bars_for)
+    except (CascadeWireError, FuturesSeriesError) as exc:
+        print(f"[brutex] cascade error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     print(
         f"[brutex] cascade done — sweep={manifest.sweep_id[:16]} pools={len(report.groups)} "
         f"candidates={report.n_input} survivors={report.n_survived}"

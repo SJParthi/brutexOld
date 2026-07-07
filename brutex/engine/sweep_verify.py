@@ -327,6 +327,74 @@ def recorded_roll_schedules_from_audit(audit_path: Path) -> dict[str, tuple[int,
     return schedules
 
 
+def stale_roll_schedule_refusal(
+    audit_path: Path,
+    *,
+    fresh_snapshot: str,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]],
+) -> str | None:
+    """Detect a SCHEDULE-ONLY lake drift against a resumed results tree.
+
+    ADR-0012 resume-honesty gate (review round-2 finding 11): the futures
+    ``roll_schedule`` enters the run identity (``canonical_trade_params``) but
+    NOT the tuple store address / completion-sentinel digest — and the
+    schedule can change while ``data_snapshot_hash`` stays byte-identical (a
+    successor contract whose in-window owned span is SESSIONLESS — expiry
+    Thursday + holiday Friday + weekend — is selected into the schedule yet
+    contributes zero bars). Re-launching ``sweep-all`` into the SAME results
+    root then short-circuits every tuple at its sentinel (rows minted under
+    the RECORDED schedule) while Stage-3/cascade recovery re-derives
+    identities under the FRESH schedule — an uncaught grid-mismatch crash
+    blaming the wrong cause. This helper compares the tree's RECORDED
+    schedule against the freshly resolved one and returns the refusal
+    evidence UP FRONT.
+
+    Parameters
+    ----------
+    audit_path
+        The tree's ``audit/sweep-all.jsonl`` (absent → ``None``: a fresh
+        tree has nothing to drift from).
+    fresh_snapshot
+        The launch's freshly computed ``data_snapshot_hash``.
+    roll_schedule_by_instrument
+        The launch's freshly resolved per-instrument schedules.
+
+    Returns
+    -------
+    str | None
+        A refusal message naming BOTH schedules when the recorded snapshot
+        matches *fresh_snapshot* but a recorded schedule differs from the
+        fresh one; ``None`` otherwise. A snapshot that MOVED re-keys every
+        tuple digest (the stores/sentinels re-address), so no sentinel can
+        pair stale rows with the fresh schedule — abstain. An unreadable /
+        inconsistent audit also abstains (``sweep-verify`` owns that
+        diagnosis; a best-effort gate must never block a launch on it).
+    """
+    if not audit_path.exists():
+        return None
+    try:
+        recorded_ctx = recorded_context_from_audit(audit_path)
+        recorded = recorded_roll_schedules_from_audit(audit_path)
+    except SweepVerifyError:
+        return None
+    if recorded_ctx is None or recorded_ctx.data_snapshot_hash != fresh_snapshot:
+        return None
+    for instrument, fresh_schedule in sorted(roll_schedule_by_instrument.items()):
+        recorded_schedule = recorded.get(instrument)
+        if recorded_schedule is not None and recorded_schedule != fresh_schedule:
+            return (
+                f"recorded roll_schedule[{instrument}] {list(recorded_schedule)} "
+                f"(audit: {audit_path}) does not match the freshly resolved schedule "
+                f"{list(fresh_schedule)} while the data snapshot is UNCHANGED — the "
+                "lake's futures contract set changed since the recorded run "
+                "(schedule-only drift: every completed tuple would resume at its "
+                "sentinel with rows minted under the RECORDED schedule while this "
+                "launch re-derives identities under the FRESH one) — re-sweep into "
+                "a fresh --results-root or restore the lake's contract set"
+            )
+    return None
+
+
 # ── Tier 1 — STRUCTURAL ──────────────────────────────────────────────────────
 
 #: ``<direction>_k<K>_<16-hex>.parquet`` — the orchestrator's store filename.
@@ -1140,6 +1208,7 @@ __all__ = [
     "recorded_context_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
+    "stale_roll_schedule_refusal",
     "verify_identity",
     "verify_structural",
 ]

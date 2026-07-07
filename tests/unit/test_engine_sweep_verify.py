@@ -40,6 +40,7 @@ from brutex.engine.sweep_verify import (
     recorded_context_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
+    stale_roll_schedule_refusal,
     verify_identity,
     verify_structural,
 )
@@ -326,6 +327,138 @@ class TestRecordedRollSchedules:
         path.write_text("{not jsonl\n", encoding="utf-8")
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_roll_schedules_from_audit(path)
+
+
+# ── The resume-honesty gate (ADR-0012, review round-2 finding 11) ────────────
+
+
+class TestStaleRollScheduleRefusal:
+    """`stale_roll_schedule_refusal` — schedule-only drift against a resumed tree.
+
+    The crack it closes: `roll_schedule` enters the run identity but NOT the
+    tuple-store/sentinel digest, and the schedule can grow while the snapshot
+    stays byte-identical (a sessionless-span successor contract). A re-launch
+    would then resume S1-minted rows at the sentinels while Stage-3/cascade
+    recovery re-derives under S2 → a misattributed grid-mismatch crash. The
+    gate compares recorded-vs-fresh UP FRONT, refusing only on a PROVEN
+    snapshot-identical mismatch.
+    """
+
+    _S1: tuple[int, ...] = (739428,)
+    _S2: tuple[int, ...] = (739428, 739463)
+
+    def _write_audit(
+        self,
+        path: Path,
+        *,
+        snapshot: str = "snap0001",
+        schedule: tuple[int, ...] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "data_snapshot_hash": snapshot,
+            "indicator_version": "ind-v1",
+            "code_commit_sha": "deadbeef",
+            "instrument": "NSE-NIFTY-FUT",
+        }
+        if schedule is not None:
+            payload["params"] = {"roll_schedule": list(schedule)}
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload=payload)
+
+    def test_absent_audit_abstains(self, tmp_path: Path) -> None:
+        # A fresh results root has nothing to drift from.
+        assert (
+            stale_roll_schedule_refusal(
+                tmp_path / "nope.jsonl",
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            )
+            is None
+        )
+
+    def test_snapshot_identical_schedule_drift_refuses_with_evidence(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        self._write_audit(path, schedule=self._S1)
+        message = stale_roll_schedule_refusal(
+            path,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+        )
+        assert message is not None
+        assert str(list(self._S1)) in message  # the RECORDED schedule named
+        assert str(list(self._S2)) in message  # the FRESH schedule named
+        assert "UNCHANGED" in message
+        assert "contract set changed" in message
+        assert "--results-root" in message  # the remediation
+
+    def test_matching_schedule_passes(self, tmp_path: Path) -> None:
+        # The normal crash-resume: same lake, same schedule — never refused.
+        path = tmp_path / "a.jsonl"
+        self._write_audit(path, schedule=self._S2)
+        assert (
+            stale_roll_schedule_refusal(
+                path,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            )
+            is None
+        )
+
+    def test_moved_snapshot_abstains(self, tmp_path: Path) -> None:
+        # A CHANGED snapshot re-keys every tuple digest (stores/sentinels
+        # re-address), so the legit monthly grown-lake re-launch never refuses.
+        path = tmp_path / "a.jsonl"
+        self._write_audit(path, schedule=self._S1)
+        assert (
+            stale_roll_schedule_refusal(
+                path,
+                fresh_snapshot="snap0002",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            )
+            is None
+        )
+
+    def test_tree_without_recorded_schedule_abstains(self, tmp_path: Path) -> None:
+        # A rotated audit / spot-era tree records no schedule: nothing to
+        # compare — the sentinel pairing is sweep-verify's diagnosis, not a
+        # launch blocker.
+        path = tmp_path / "a.jsonl"
+        self._write_audit(path, schedule=None)
+        assert (
+            stale_roll_schedule_refusal(
+                path,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            )
+            is None
+        )
+
+    def test_tree_without_sweep_start_abstains(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="OTHER", subject="s", payload={})
+        assert (
+            stale_roll_schedule_refusal(
+                path,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            )
+            is None
+        )
+
+    def test_unreadable_audit_abstains_never_blocks(self, tmp_path: Path) -> None:
+        # A best-effort gate: an inconsistent/corrupt audit is sweep-verify's
+        # territory — the launch is never blocked on a diagnostic failure.
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        assert (
+            stale_roll_schedule_refusal(
+                path,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            )
+            is None
+        )
 
 
 # ── Tier 1 — verify_structural ───────────────────────────────────────────────
