@@ -25,6 +25,8 @@ pytest.importorskip("pyarrow")
 
 from brutex.dashboard.movers_futures import (
     FuturesMover,
+    PrevOiBaseline,
+    _futures_row,
     _prev_day_oi,
     build_futures_payload,
     compute_futures_candidates,
@@ -40,10 +42,12 @@ from brutex.dashboard.movers_futures import (
     rank_price_losers,
     rank_value,
     rank_volume,
+    resolve_prev_oi,
     select_expiry_tier,
     select_near_month,
 )
 from brutex.data.models import CandleBar
+from structlog.testing import capture_logs
 
 # ── parse_future_symbol ───────────────────────────────────────────────────
 
@@ -807,3 +811,175 @@ class TestFuturesMinVolume:
             min_volume=-3,
         )
         assert payload["min_volume"] == 0
+
+
+# ── resolve_prev_oi: the enriched OI baseline (value + found session date) ──
+# DEC-MOVERS-PREVCLOSE-CONTIGUITY-001.
+
+
+def _ist_min_bar(*, day: date, hh: int, mm: int, close: str, oi: int | None) -> CandleBar:
+    """A flat 1-minute bar at IST ``hh:mm`` on *day* (IST = UTC + 05:30, no DST)."""
+    c = Decimal(close)
+    total = hh * 60 + mm - (5 * 60 + 30)
+    return CandleBar(
+        timestamp=datetime(day.year, day.month, day.day, total // 60, total % 60, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=10,
+        open_interest=oi,
+    )
+
+
+_RPO_FUT = "NSE-NIFTY-30Sep25-FUT"
+
+
+def _rpo_write(tmp_path: Path, *, interval: str, bars: list[CandleBar]) -> None:
+    from brutex.data.parquet_writer import ParquetWriter
+
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE", segment="FNO", symbol=_RPO_FUT, interval=interval, bars=bars
+    )
+
+
+class TestResolvePrevOi:
+    def test_1day_arm_carries_the_prior_bars_ist_date(self, tmp_path: Path) -> None:
+        _rpo_write(
+            tmp_path,
+            interval="1day",
+            bars=[
+                _day_bar(day=date(2025, 8, 28), close="100", oi=900),
+                _day_bar(day=date(2025, 8, 29), close="101", oi=1234),
+            ],
+        )
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=1234, found_date=date(2025, 8, 29))
+
+    def test_minute_fallback_arm_carries_the_recovered_date(self, tmp_path: Path) -> None:
+        _rpo_write(
+            tmp_path,
+            interval="1minute",
+            bars=[_ist_min_bar(day=date(2025, 8, 29), hh=15, mm=29, close="99.00", oi=4321)],
+        )
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=4321, found_date=date(2025, 8, 29))
+
+    def test_neither_source_is_none_none(self, tmp_path: Path) -> None:
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=None, found_date=None)
+
+    def test_noncontiguous_1day_arm_judged_false(self, tmp_path: Path) -> None:
+        """1day arm: the prior OI bar sits on Wed 09-24 while the calendar expects
+        Fri 09-26 (the lake hole) — provenance judges strictly False."""
+        from brutex.dashboard.movers_snapshot import prev_baseline_provenance
+
+        _rpo_write(
+            tmp_path,
+            interval="1day",
+            bars=[_day_bar(day=date(2025, 9, 24), close="100", oi=777)],
+        )
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 29)
+        )
+        assert got == PrevOiBaseline(value=777, found_date=date(2025, 9, 24))
+        assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
+            "2025-09-24",
+            False,
+        )
+
+    def test_noncontiguous_minute_arm_judged_false(self, tmp_path: Path) -> None:
+        """Minute-fallback arm: the recovered OI day (Thu 09-25) is not the
+        immediately-preceding session (Fri 09-26 exists on the calendar)."""
+        from brutex.dashboard.movers_snapshot import prev_baseline_provenance
+
+        _rpo_write(
+            tmp_path,
+            interval="1minute",
+            bars=[_ist_min_bar(day=date(2025, 9, 25), hh=15, mm=29, close="99.00", oi=555)],
+        )
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 29)
+        )
+        assert got == PrevOiBaseline(value=555, found_date=date(2025, 9, 25))
+        assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
+            "2025-09-25",
+            False,
+        )
+
+    def test_wrapper_value_seam_is_byte_identical(self, tmp_path: Path) -> None:
+        """_prev_day_oi(...) == resolve_prev_oi(...).value (the value-seam law)."""
+        assert (
+            _prev_day_oi(
+                tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 1)
+            )
+            is None
+        )
+        _rpo_write(
+            tmp_path,
+            interval="1day",
+            bars=[_day_bar(day=date(2025, 8, 29), close="101", oi=1234)],
+        )
+        assert (
+            _prev_day_oi(
+                tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 1)
+            )
+            == 1234
+            == resolve_prev_oi(
+                tmp_path, exchange="NSE", segment="FNO", symbol=_RPO_FUT, day=date(2025, 9, 1)
+            ).value
+        )
+
+    def test_null_oi_1day_divergence_close_true_oi_false(self, tmp_path: Path) -> None:
+        """The null-OI-1day edge (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001): a prior
+        1-day bar with a REAL close but NULL open_interest makes the CLOSE
+        baseline contiguous (Fri 09-26, the true previous session) while the OI
+        baseline falls to the minute fallback on Thu 09-25 — the two flags MUST
+        diverge, and only the OI kind warns."""
+        # Prior 1-day: Fri 2025-09-26, real close, NULL OI.
+        _rpo_write(
+            tmp_path,
+            interval="1day",
+            bars=[_day_bar(day=date(2025, 9, 26), close="100.00", oi=None)],
+        )
+        # 1-minute: OI only on Thu 2025-09-25 (nothing on Fri) + the snapshot
+        # session bars on Mon 2025-09-29.
+        _rpo_write(
+            tmp_path,
+            interval="1minute",
+            bars=[
+                _ist_min_bar(day=date(2025, 9, 25), hh=15, mm=29, close="99.00", oi=8765),
+                _ist_min_bar(day=date(2025, 9, 29), hh=9, mm=15, close="101.00", oi=9000),
+            ],
+        )
+        with capture_logs() as logs:
+            cands = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2025-09-29", time=None
+            )
+        assert len(cands.movers) == 1
+        mover = cands.movers[0]
+        # Served values untouched: % change baselines on the 1-day close 100.00.
+        assert mover.pct_change == Decimal("1")
+        assert mover.oi == 9000
+        # The DIVERGENT flags: close contiguous, OI provably not.
+        assert mover.prev_close_session == "2025-09-26"
+        assert mover.prev_close_contiguous is True
+        assert mover.oi_baseline_session == "2025-09-25"
+        assert mover.oi_baseline_contiguous is False
+        # Exactly ONE warn — the OI kind; the contiguous close never warns.
+        warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert [(e["kind"], e["symbol"]) for e in warns] == [("oi", _RPO_FUT)]
+        assert warns[0]["found_session"] == "2025-09-25"
+        assert warns[0]["expected_session"] == "2025-09-26"
+        # EMIT-ON-FALSE row projection: only the OI pair appears.
+        row = _futures_row(mover)
+        assert row["oi_baseline_session"] == "2025-09-25"
+        assert row["oi_baseline_contiguous"] is False
+        assert "prev_close_session" not in row
+        assert "prev_close_contiguous" not in row

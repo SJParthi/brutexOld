@@ -58,8 +58,10 @@ def test_movers_note_uses_static_label_and_textcontent() -> None:
     html = _render_movers_html()
     # The static "<b>Note:</b>" label + the dynamic #noteText span live in the DOM.
     assert '<b>Note:</b> <span id="noteText"></span>' in html
-    # The dynamic (possibly-reflected) note is set via textContent on that span.
-    assert '$("noteText").textContent = (j.note||"")' in html
+    # The dynamic (possibly-reflected) note is set via textContent on that span —
+    # every real-payload path routes it through the ONE legend helper
+    # (refreshBaselineLegend), which is itself a textContent-only write.
+    assert '$("noteText").textContent = (note||"")' in html
     # The vulnerable innerHTML note assignments are GONE (no server text → innerHTML).
     assert '$("note").innerHTML = "<b>Note:</b> "+(j.note||"")' not in html
     assert '$("note").innerHTML' not in html, (
@@ -196,3 +198,92 @@ def test_movers_pcr_rendered_on_both_success_paths() -> None:
         "showPcr must be CALLED on both the full render and the unchanged-skip "
         f"path (call sites found: {len(call_sites)})"
     )
+
+
+# ── baseline-contiguity marker + legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) ──
+#
+# Substring-PRESENCE pins over the rendered template — the honest envelope: no
+# headless JS runner executes the page, so these pin that the marker/legend JS
+# SHIPS (and its strict `=== false` gates), not that a browser ran it (the
+# same envelope as the staleness-pack pins, DEC-PULL-UI-STALENESS-001).
+
+
+def test_movers_prevclose_marker_appends_star_on_strictly_false() -> None:
+    """Both ' *' appends ship, each gated STRICTLY `=== false` (an abstained
+    null contiguity must NEVER mark), placed BEFORE the esc(v) return so the
+    marker rides the same escape as the cell value."""
+    html = _render_movers_html()
+    assert (
+        'if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false'
+        ' && v!=="—" && v!=="?") v += " *";'
+    ) in html
+    assert (
+        'if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false'
+        ' && v!=="—" && v!=="?") v += " *";'
+    ) in html
+    # STRICT-equality gates only — a truthy check would mark null (abstain).
+    assert "row.prev_close_contiguous === false" in html
+    assert "row.oi_baseline_contiguous === false" in html
+
+
+def test_movers_prevclose_marker_is_appended_before_the_escaped_cell_write() -> None:
+    """Pre-esc placement: both marker appends occur BEFORE the single escaped
+    cell interpolation (the ' ~' moneyness-marker precedent) — the marker text
+    passes through esc(v), never a second unescaped write."""
+    html = _render_movers_html()
+    cell_write = '<td class="${cls}">${esc(v)}</td>'
+    assert html.index("row.prev_close_contiguous === false") < html.index(cell_write)
+    assert html.index("row.oi_baseline_contiguous === false") < html.index(cell_write)
+
+
+def test_movers_note_legend_ships_and_stays_textcontent() -> None:
+    """The note legend string ships, appended to the stored server note via
+    textContent only (never innerHTML for server strings)."""
+    html = _render_movers_html()
+    assert (
+        " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)"
+    ) in html
+    # The legend rides the ONE noteText textContent write, gated on a rendered
+    # row carrying a strictly-false flag.
+    assert "r.prev_close_contiguous === false || r.oi_baseline_contiguous === false" in html
+
+
+def test_movers_legend_helper_recomputes_from_current_rows() -> None:
+    """The legend lives in ONE helper that recomputes staleBaseline from the
+    CURRENT rowsData (both strictly-false flags) and writes via textContent —
+    the category-switch desync fix (hostile-review MINOR): previously computed
+    only inside load(), so a cached pill switch re-rendered rows carrying
+    ``prev_close_contiguous === false`` with NO legend (and the inverse left a
+    stale legend)."""
+    html = _render_movers_html()
+    assert "function refreshBaselineLegend(note)" in html
+    # Recomputed from the LIVE rowsData, strict `=== false` on BOTH flags.
+    assert (
+        "const staleBaseline = rowsData.some(r => r && "
+        "(r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));"
+    ) in html
+    # textContent-only write inside the helper (never innerHTML for server strings).
+    assert '$("noteText").textContent = (note||"")' in html
+    # No stray innerHTML write of the note anywhere (re-pinned defensively).
+    assert '$("noteText").innerHTML' not in html
+
+
+def test_movers_legend_helper_called_from_both_load_and_applycategory() -> None:
+    """BOTH render paths call the helper — the cached pill switch
+    (applyCategory) AND load() (main render path + the skip-unchanged
+    restore) — so the legend can never desync from the rendered rows; the base
+    server note is stored (baseNote) so the pill switch rebuilds the note
+    WITHOUT a refetch."""
+    html = _render_movers_html()
+    # The stored base note ships.
+    assert 'let baseNote = "";' in html
+    # applyCategory: cached re-render THEN the legend refresh, same statement.
+    assert (
+        "if (lastPayload) { rowsData = lastPayload[state.category] || "
+        "lastPayload.gainers || []; renderRows(); refreshBaselineLegend(baseNote); }"
+    ) in html
+    # load() stores the server note then refreshes through the SAME helper on
+    # BOTH its real-payload paths (main render + skip-unchanged restore).
+    assert html.count('baseNote = j.note || "";') == 2
+    # Three call sites total: applyCategory + the two load() paths.
+    assert html.count("refreshBaselineLegend(baseNote);") == 3

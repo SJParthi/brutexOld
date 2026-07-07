@@ -19,7 +19,7 @@ not fail for a PCR regression):
    ``compute_options_candidates`` spy in the integration suite cannot see).
 3. **Zero new I/O on the cold scan:** the candidate scan performs exactly ONE
    read per tier contract through EACH of the four movers readers
-   (``_read_future_session`` / ``_prev_day_close`` / ``_prev_day_oi`` /
+   (``_read_future_session`` / ``resolve_prev_close`` / ``resolve_prev_oi`` /
    ``_underlying_spot_ltp``) — the PCR fold adds NO Parquet read through ANY
    of them (all four spied; a PCR edit adding a read through any reader trips).
 

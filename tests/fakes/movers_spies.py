@@ -17,10 +17,14 @@ import pytest
 #: The FOUR per-contract movers reader seams the options scan goes through
 #: (movers_options.py read loop) — ALL spied, so "PCR adds NO Parquet read"
 #: is pinned as stated, not for one reader (round-1 hostile-review widen).
+#: The prev-close/OI seams are the enriched resolvers of
+#: DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 (``resolve_prev_close`` /
+#: ``resolve_prev_oi`` — the renamed ``_prev_day_close`` / ``_prev_day_oi``
+#: value seams; same one-read-per-contract law).
 MOVERS_READER_NAMES: tuple[str, ...] = (
     "_read_future_session",
-    "_prev_day_close",
-    "_prev_day_oi",
+    "resolve_prev_close",
+    "resolve_prev_oi",
     "_underlying_spot_ltp",
 )
 

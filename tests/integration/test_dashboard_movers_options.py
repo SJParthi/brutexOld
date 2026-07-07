@@ -1855,7 +1855,7 @@ class TestOptionsPcr:
     ) -> None:
         # Zero-new-I/O pin across ALL FOUR per-contract reader seams (round-1
         # hostile-review widen — a single-reader spy would miss a PCR edit that
-        # added a read through _prev_day_close / _prev_day_oi /
+        # added a read through resolve_prev_close / resolve_prev_oi /
         # _underlying_spot_ltp): the candidate scan performs EXACTLY one read
         # per tier contract through EACH reader — the PCR fold adds none.
         from brutex.dashboard import movers_options as mo_module
@@ -1870,8 +1870,8 @@ class TestOptionsPcr:
         # One read per contract (CE + PE) per reader — none for PCR.
         assert counts == {
             "_read_future_session": 2,
-            "_prev_day_close": 2,
-            "_prev_day_oi": 2,
+            "resolve_prev_close": 2,
+            "resolve_prev_oi": 2,
             "_underlying_spot_ltp": 2,
         }
         assert len(candidates.pcr) == 1
@@ -1978,3 +1978,132 @@ class TestOptionsPcr:
         assert (row["put_oi"], row["call_oi"]) == (300, 400)
         assert (row["put_volume"], row["call_volume"]) == (30, 40)
         assert (row["legs_read"], row["legs_total"]) == (2, 2)
+
+
+# ── prev-close/OI calendar-contiguity goldens (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) ──
+
+from brutex.data.moneyness import Moneyness  # noqa: E402
+from structlog.testing import capture_logs  # noqa: E402
+
+#: The FROZEN additive-key vocabulary this decision may ever add to a row.
+_CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+    }
+)
+
+#: The pre-fix options row key set (the byte-identity vocabulary).
+_OPTION_ROW_KEYS = frozenset(
+    {
+        "name",
+        "symbol",
+        "exchange",
+        "segment",
+        "spot",
+        "ltp",
+        "pct_change",
+        "oi",
+        "oi_chg",
+        "oi_chg_pct",
+        "volume",
+        "moneyness",
+        "moneyness_bucket",
+        "atm_offset",
+        "strike_step_confidence",
+        "iv",
+        "delta",
+    }
+)
+
+_G_DAY = date(2025, 9, 29)  # Mon — the repro snapshot day
+_G_CE = "NSE-NIFTY-30Sep25-24000-CE"  # expiry 2025-09-30 ≥ snapshot → near tier
+
+
+def _seed_contiguity_option(tmp_path: Path, *, prior_day: date) -> None:
+    """One CE contract: session bars on Mon 2025-09-29 + ONE prior 1-day bar on
+    *prior_day* (close 100, OI 1000). NO underlying spot (an honest None spot —
+    keeps the golden fully deterministic)."""
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_G_CE,
+        interval="1minute",
+        bars=[
+            _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=_G_DAY),
+            _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=_G_DAY),
+        ],
+    )
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_G_CE,
+        interval="1day",
+        bars=[_day_bar(day=prior_day, close="100", oi=1000)],
+    )
+
+
+class TestOptionsContiguityGoldens:
+    def test_contiguous_row_is_byte_identical_no_warn(self, tmp_path: Path) -> None:
+        # Prior 1-day on Fri 2025-09-26 = the immediately-preceding session of
+        # Mon 2025-09-29 (weekend spanned) → NO additive key, no WARN.
+        _seed_contiguity_option(tmp_path, prior_day=date(2025, 9, 26))
+        with capture_logs() as logs:
+            payload = run_options_snapshot(
+                lake_root=tmp_path, interval="1day", date=_G_DAY.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # FULL-row byte identity: the exact pre-fix wire, computed independently
+        # (the moneyness triple is the honest no-spot NA — DEC-FNO-MONEYNESS-001).
+        assert row == {
+            "name": "NIFTY 30-Sep-2025 24000 CE",
+            "symbol": _G_CE,
+            "exchange": "NSE",
+            "segment": "FNO",
+            "spot": None,
+            "ltp": "₹164.00",
+            "pct_change": str((Decimal("164.00") - Decimal("100.00")) / Decimal("100.00") * 100),
+            "oi": 1100,
+            "oi_chg": 100,
+            "oi_chg_pct": str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100),
+            "volume": 500,
+            "moneyness": "?",
+            "moneyness_bucket": Moneyness.UNKNOWN.value,
+            "atm_offset": None,
+            "strike_step_confidence": None,
+            "iv": None,
+            "delta": None,
+        }
+        assert set(row) == _OPTION_ROW_KEYS
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_noncontiguous_close_and_oi_both_stamped_two_warns(self, tmp_path: Path) -> None:
+        # The lake-hole arm: the ONLY prior 1-day bar sits on Thu 2025-09-25
+        # while Fri 2025-09-26 is a hole — BOTH baselines flagged, one WARN per
+        # kind, served values UNCHANGED vs the contiguous golden.
+        _seed_contiguity_option(tmp_path, prior_day=date(2025, 9, 25))
+        with capture_logs() as logs:
+            payload = run_options_snapshot(
+                lake_root=tmp_path, interval="1day", date=_G_DAY.isoformat(), time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: identical served numbers — the fix stamps, never edits.
+        assert row["ltp"] == "₹164.00"
+        assert row["pct_change"] == str(
+            (Decimal("164.00") - Decimal("100.00")) / Decimal("100.00") * 100
+        )
+        assert row["oi_chg"] == 100
+        # The four additive keys, both baselines independently False.
+        assert row["prev_close_session"] == "2025-09-25"
+        assert row["prev_close_contiguous"] is False
+        assert row["oi_baseline_session"] == "2025-09-25"
+        assert row["oi_baseline_contiguous"] is False
+        assert set(row) - _OPTION_ROW_KEYS == _CONTIGUITY_KEYS
+        warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert sorted((e["kind"], e["symbol"]) for e in warns) == [
+            ("oi", _G_CE),
+            ("prev_close", _G_CE),
+        ]
