@@ -396,13 +396,14 @@ class TestAggregation:
 # POLICY (justified from the codebase, not invented): ``resample_bars``
 # already RAISES :class:`ResampleError` for every other input-contract
 # violation (unknown interval, up-sampling, non-multiple, naive tz). The
-# guard adds the ordering violation to that SAME error style — and the
-# sibling feed-integrity guard in
-# :meth:`brutex.execution.driver.BacktestDriver.run` likewise RAISES
-# (``NonMonotonicBarError``) rather than silently de-duplicating. So the
-# established feed convention is *raise on non-monotonic*, never silent
-# dedup (a silent dedup would itself hide corrupt vendor data the
-# aggregate exists to faithfully reflect).
+# guard adds the ordering violation to that SAME error style — the typed
+# ``NonMonotonicBarError`` (brutex.execution.errors) exists for exactly
+# this violation and the historical driver guard likewise RAISED rather
+# than silently de-duplicating (trio deleted per
+# DEC-EXECUTION-TRIO-DELETE-001). So the established feed convention is
+# *raise on non-monotonic*, never silent dedup (a silent dedup would
+# itself hide corrupt vendor data the aggregate exists to faithfully
+# reflect).
 # ════════════════════════════════════════════════════════════════════════
 
 

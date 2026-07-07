@@ -1,22 +1,25 @@
 """Generate the frozen twin-state golden fixture (`twin_state_golden_vectors.json`).
 
-R2-RC-F2 (twin-parity goldens for the STATEFUL indicator twins): the frozen
-400-case `vocab_golden_vectors.json` answer-key pins the EVALUATOR bits, not the
+R2-RC-F2 (goldens for the STATEFUL indicator states): the frozen 400-case
+`vocab_golden_vectors.json` answer-key pins the EVALUATOR bits, not the
 per-bar `.update()` derivation of the two stateful indicator machines —
 `VwapState` (session-anchored VWAP, bits 52/53) and `MarketStructureState`
-(BOS/CHoCH, bits 56-59). Production (`brutex/engine/stage1a.py`) drives ONLY the
-Rust `trading_core` classes; the Python twins in `brutex/indicators/` exist as
-the documented bit-for-bit mirrors (DEC-SHARED-CORE-001 / ADR-0012 D7) but had
-no cross-language parity test. This fixture is that contract.
+(BOS/CHoCH, bits 56-59). Production (`brutex/engine/stage1a.py`) drives ONLY
+the Rust `trading_core` classes. This fixture froze the two machines'
+per-bar contract while hand-synced Python twins still mirrored them in
+`brutex/indicators/` (DEC-SHARED-CORE-001 / ADR-0012 D7); the twins were
+deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 and the SAME frozen
+fixture (never regenerated) now pins the single Rust source.
 
 HOW THE EXPECTED VALUES ARE COMPUTED (Golden Rule #1):
 
-Every per-bar `expected_*` value is produced by the **Rust production twin**
+Every per-bar `expected_*` value is produced by the **Rust production state**
 (the installed `trading_core` PyO3 wheel — the code path `stage1a` actually
-runs), never hand-authored and never taken from the Python twin. The consuming
-test (`tests/unit/test_twin_state_golden_parity.py`) then replays the SAME bar
-streams through BOTH twins and asserts every per-bar output is bit-identical to
-the frozen expectation — so a drift in EITHER twin (or a stale wheel) fails CI.
+runs), never hand-authored. The consuming test
+(`tests/unit/test_twin_state_golden_parity.py`) replays the SAME bar streams
+through the production pyclasses and asserts every per-bar output is
+bit-identical to the frozen expectation — so a drift in the Rust core, the
+PyO3 boundary, or a stale wheel fails CI.
 
 The bar streams are a fixed-seed (`random.Random(SEED)`) mix of scripted edge
 sequences + seeded random streams covering:
@@ -28,13 +31,13 @@ sequences + seeded random streams covering:
   FFI ceiling `MAX_BAR_PAISA = i64::MAX / 65536` whose running `cum_pv` far
   exceeds i64 (the i128-accumulator / unbounded-int truncating-division seam).
   Every stream keeps `typical_paisa >= 0` BY CONTRACT, not by accident: a
-  negative typical is REJECTED with `ValueError` at BOTH twins' boundaries
-  (the PyO3 `VwapState.update` guard and `brutex.indicators.vwap.VwapState.
-  update`) because the trunc-vs-floor division semantics genuinely diverge
-  there (Rust i128 `/` truncates toward zero, Python `//` floors — e.g. bars
-  (-7, 1) then (0, 1) gave -3 vs -4 pre-guard). The rejection itself is
-  pinned by `tests/unit/test_trading_core_ffi_guards.py`, so the closed
-  domain hole cannot silently reopen.
+  negative typical is REJECTED with `ValueError` at the PyO3
+  `VwapState.update` boundary (historically also by the deleted Python
+  twin's mirror guard) because the trunc-vs-floor division semantics
+  genuinely diverged there (Rust i128 `/` truncates toward zero, Python `//`
+  floors — e.g. bars (-7, 1) then (0, 1) gave -3 vs -4 pre-guard). The
+  rejection itself is pinned by `tests/unit/test_trading_core_ffi_guards.py`,
+  so the closed domain hole cannot silently reopen.
 * Market structure: k ∈ {1, 2, 3}, the k-bar fractal confirmation delay, a
   break landing on the exact confirming bar, tied-extreme windows that confirm
   nothing (strict-inequality seam), flat windows, engulfing both-side breaks,
