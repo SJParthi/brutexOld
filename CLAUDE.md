@@ -18,7 +18,42 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
+_Last updated: 2026-07-07 (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001, MIGRATION.md
+#1534 — sweep-oneclick Phase 1: every production sweep surface now
+refuses-whole BEFORE any compute unless every requested (symbol, TF) pair is
+DISK-verified against the real NSE calendar over the clamped range
+(session-date tolerance-0; exact missing spans + "pull on /universe first";
+Muhurat-excluded / special-weekend-expected; bimodal SKIPPED split;
+unreadable ledger/partition = fail-closed; derived TFs presence-checked
+pre-load — the shipped #1492 freshness gate untouched post-load), a live
+PROVISIONAL trials/GB/hours estimate (Σ_k C(60,k) × 7 axes — parity-pinned
+to `bloom_capacity_hint`/`count_sweep_tuples`; medians-over-qualifying
+calibration store self-corrects estimated-vs-actual every run) is confirmed
+past a fail-CLOSED results-volume disk gate (extracted `volume_free_bytes`;
+NO escape flag, NO env kill switch), and a sweep-vs-pull exclusion flock
+(`.locks/sweep.lock` LOCK_SH held for the run + write-free O_RDONLY probes
+both ways, both-check-both re-probe — a race means both sides refuse) makes
+"lock wins" race-free; ONE composed gate
+(`engine/sweep_gate.py::run_sweep_data_preflight`) serves the CLI
+pre-`Catalog.open` block AND the NEW synchronous
+`POST /api/v1/sweep/preflight` + blake3 `confirm_token` on `/sweep/run`
+(refusal = payload, never an exit code); a refusal writes NOTHING (R42 —
+tree-snapshot-pinned); `allow_missing_slices` dashboard pin flipped False
+(O-a); defaults k≤3 (O-f) / all-21 TFs / all-3-indices fan-out
+(`resolve_sweep_launches`, NIFTY-first) / 16-cell SL/TP grid derived from
+the locked Mode-A axes (O-g — surfaced for operator confirmation, revert =
+two constants). HONEST: the coverage scan is O(symbols × window-months)
+probes + timestamp-column reads, NOT O(1) (bench-pinned flat vs UNRELATED
+lake depth); the estimator IS O(axes) (bench-pinned); fallback byte/time
+constants are UNMEASURED projections until the calibration store observes
+real runs; a present-but-STALE derived TF refuses post-load (named split);
+the clamp excludes an explicitly-pulled post-close TODAY (one-session
+conservatism); `cmd_sweep`/`cmd_sweep_verify --recount`/`cmd_cascade` stay
+ungated (P2). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the sweep still
+never pulls (R3); no scope/vocab/rate change; touched modules 100%
+line+branch; ruff/ruff-format clean, `mypy --strict` + pyright at the
+pre-change baseline).
+Earlier: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
 mid-pull ledger-read O(page) discipline restored: (a) the /coverage/windows +
 pull-progress DuckDB fast paths now FOLD pending window-ledger deltas
 latest-wins IN SQL — NEW `lake_read.dedup_qualify_latest_sql`/
@@ -659,7 +694,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
+- **Active branch:** `claude/tender-gauss-csjzph` (**DEC-SWEEP-PREFLIGHT-ESTIMATOR-001, MIGRATION.md
+  #1534** — sweep-oneclick Phase 1: every production sweep surface now refuses-whole BEFORE any
+  compute unless every requested (symbol, TF) pair is DISK-verified against the real NSE calendar
+  over the clamped range (session-date tolerance-0; exact missing spans + "pull on /universe
+  first"; Muhurat-excluded/special-weekend-expected; bimodal SKIPPED split; unreadable
+  ledger/partition = fail-closed; derived TFs presence-checked pre-load, the shipped #1492
+  freshness gate untouched post-load), a live PROVISIONAL trials/GB/hours estimate (Σ_k C(60,k) ×
+  7 axes — parity-pinned to `bloom_capacity_hint`/`count_sweep_tuples`; medians-over-qualifying
+  calibration store self-corrects estimated-vs-actual every run) is confirmed past a fail-CLOSED
+  results-volume disk gate (extracted `volume_free_bytes`; no escape), and a sweep-vs-pull
+  exclusion flock (`.locks/sweep.lock` SH held for the run + write-free probes both ways,
+  both-check-both re-probe) makes "lock wins" race-free; ONE composed gate
+  (`engine/sweep_gate.py`) serves the CLI pre-`Catalog.open` block AND the new synchronous
+  `POST /api/v1/sweep/preflight` + blake3 confirm_token on `/sweep/run` (refusal = payload,
+  never an exit code); refusal writes NOTHING (R42 — tree-snapshot-pinned);
+  `allow_missing_slices` dashboard pin flipped False (O-a); defaults k≤3 / all-21 TFs / all-3
+  symbols fan-out / 16-cell SL/TP grid from the locked Mode-A axes (surfaced for operator
+  confirmation). HONEST: coverage scan O(symbols × window-months) NOT O(1) (bench-pinned);
+  estimator O(axes) bench-pinned incl. flat-vs-10k-stored-winners; fallback constants UNMEASURED
+  until calibrated; stale-derived-TF refusal stays post-load. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; the sweep still never pulls; touched modules 100% line+branch;
+  ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
   ledger-read O(page) discipline restored across (a)-(f): (a) the /coverage/windows + pull-progress DuckDB fast paths
   fold pending window-ledger deltas latest-wins IN SQL via NEW `lake_read.dedup_qualify_latest_sql`/
   `dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql` — `ORDER BY (filename = <bound base path>) ASC,
@@ -2267,7 +2324,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/peaceful-planck-dnsjg9`
+- **Active feature branch:** `claude/tender-gauss-csjzph`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
