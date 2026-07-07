@@ -152,7 +152,7 @@ stages). Status quoted verbatim from those files.
 | Performance / O(1) | p99 ratio bench gate | ✅ |
 | Build + deps | editable build + CycloneDX SBOM + audit | ✅ |
 | Unit/integration/property/golden | pytest + hypothesis | ✅/🟡 |
-| Load/stress/soak/chaos/race | nightly soak partial; rest roadmap | 📋 |
+| Load/stress/soak/chaos/race | ~~nightly soak partial; rest roadmap~~ **CORRECTED (DEC-SOAK-REAL-TIER-001 #1535): the nightly is a ~5-min stress regression gate, never a soak; the real multi-hour soak runs weekly on `soak-selfhosted.yml`; chaos/race stay roadmap** | 📋 |
 | DB/API/frontend validation | dashboard + integration tests | 🟡 |
 | Runtime / prod monitoring | activates when a service is deployed | 🚫→📋 |
 | Docstrings/typos/complexity/dead-code | interrogate + codespell + radon + vulture | ✅/🟡 |

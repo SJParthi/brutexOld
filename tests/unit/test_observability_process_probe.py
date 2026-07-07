@@ -137,4 +137,5 @@ class TestReadFdCount:
         count = process_probe.read_fd_count()
         if count is None:
             pytest.skip("no /proc/self/fd or /dev/fd on this platform")
-        assert count > 0
+        else:
+            assert count > 0
