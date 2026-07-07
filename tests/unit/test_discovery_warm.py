@@ -22,10 +22,12 @@ from brutex.dashboard.discovery_warm import (
     DB_DATASETS_KEY,
     FNO_CASCADE_KEY,
     LATEST_MOVERS_DATE_KEY,
+    LATEST_MOVERS_MINUTE_KEY_PREFIX,
     MOVERS_DATASETS_KEY,
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    latest_movers_minute_key,
     preopen_datasets_key,
     warm_discovery_memos,
 )
@@ -201,6 +203,14 @@ class TestPreopenMemos:
         # Key-constant drift pin: the |-joined per-basis memo keys.
         assert preopen_datasets_key("day") == "preopen_datasets|day"
         assert preopen_datasets_key("minute") == "preopen_datasets|minute"
+
+    def test_latest_movers_minute_key_format(self) -> None:
+        # Key-constant drift pin (DEC-MOVERS-ASOF-LATEST-DEFAULT-001): the
+        # |-joined date-scoped latest-MINUTE memo key — distinct per date and
+        # never colliding with the sibling latest-DATE key.
+        assert latest_movers_minute_key("2024-06-13") == "latest_movers_minute|2024-06-13"
+        assert latest_movers_minute_key("2024-06-13") != latest_movers_minute_key("2024-06-14")
+        assert not LATEST_MOVERS_DATE_KEY.startswith(f"{LATEST_MOVERS_MINUTE_KEY_PREFIX}|")
 
     def test_preopen_memos_seeded_per_basis(self, lake: Path) -> None:
         # DEC-O1-CLAIMS-HONESTY-001: the warm seeds one preopen memo per basis
