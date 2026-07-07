@@ -2278,7 +2278,10 @@ def build_app(
     # CoverageCounters that back the O(1) coverage headline
     # (DEC-DASHBOARD-FASTREAD-001). ``on_run_end`` clears the session's registered
     # CallMeter in the worker's identity-gated finally (DEC-RATE-METER-LIFECYCLE-001 —
-    # the C0 cross-pull leak fix); together with ``pull_candles``' own paired
+    # the C0 cross-pull leak fix; the clear is UNCONDITIONAL, so a job finish CAN
+    # evict a concurrent off-job direct pull's live meter — the widget degrades to
+    # meter_present=False, never fabricates; blast radius disclosed at the
+    # ``on_run_end`` param doc); together with ``pull_candles``' own paired
     # identity-gated clear (the direct ``/universe/pull`` route runs OFF-job — the
     # spine compare-and-clears the exact handle it registered, rounds 2/4),
     # "no in-process

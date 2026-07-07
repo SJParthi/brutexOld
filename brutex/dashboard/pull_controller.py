@@ -1095,12 +1095,21 @@ class SessionRateController:
         pull's meter when the direct pull 400'd BEFORE it ever registered) nor a LATER
         one that overwrote its own. ``expected=None`` (the default) keeps the
         unconditional clear for the two callers that hold no handle — the job-end hook
-        and the dry-run gate — whose wider blast radius is disclosed at their own sites.
+        and the dry-run gate — each of which CAN evict a concurrent OFF-job direct live
+        pull's registered meter (the widget then degrades to the honest
+        ``meter_present=False`` admission fallback, never a fabricated rate); that wider
+        blast radius is disclosed at their own sites: :func:`register_pull_meter`'s
+        HONEST-BLAST-RADIUS paragraph (the dry-run gate) and the ``on_run_end`` param
+        doc on :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` (the job-end
+        hook).
 
         This method is a LEAF and must stay so: one lock, one compare, one write, NO
-        callbacks — it is
-        invoked while ``BackgroundPullJob._lock`` is HELD (lock order: job ``_lock`` →
-        controller ``_lock``, never the reverse). Distinct from ``register_meter(None)``,
+        callbacks. It takes ONLY the controller ``_lock`` itself; of its three callers,
+        ONLY the ``on_run_end`` job-finish hook invokes it while
+        ``BackgroundPullJob._lock`` is HELD (lock order: job ``_lock`` → controller
+        ``_lock``, never the reverse — the LEAF rule keeps that nesting safe), while the
+        :func:`register_pull_meter` dry-run gate and :func:`_pull_meter_scope`'s exit
+        hold no job lock at all. Distinct from ``register_meter(None)``,
         whose ignore-guard stays byte-identical so a transient meterless factory MID-pull
         never blanks a live meter. Idempotent (clearing an empty holder is a no-op).
         Observe-only: it clears a READ handle; it changes NO pacing decision.

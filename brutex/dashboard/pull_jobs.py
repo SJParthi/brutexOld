@@ -341,7 +341,17 @@ class BackgroundPullJob:
         and a raising ``on_finally`` never skips this hook). The production wiring is
         ``SessionRateController.clear_meter`` (a controller-lock LEAF; lock order
         job → controller, pinned) — the JOB-RUN arm of the meter-lifecycle law: for
-        pulls run ON this job, run end clears the registered meter. The direct
+        pulls run ON this job, run end clears the registered meter. HONEST BLAST
+        RADIUS (DEC-RATE-METER-LIFECYCLE-001 round-4 leftover, Golden Rule #10): the
+        wired clear is UNCONDITIONAL — this hook holds no handle to compare — so a
+        job run of ANY kind (a sweep or a job dry-run included) finishing while a
+        concurrent OFF-job direct ``POST /api/v1/universe/pull`` REAL pull is in
+        flight EVICTS that pull's registered meter for the remainder of its run: the
+        rate widget degrades to the honest ``meter_present=False`` admission fallback
+        (never a fabricated rate) and the direct pull's own identity-gated clear
+        later no-ops on the already-evicted handle — the job-end MIRROR of the
+        dry-run-gate eviction disclosed at
+        :func:`~brutex.dashboard.pull_controller.register_pull_meter`. The direct
         (off-job) ``POST /api/v1/universe/pull`` route never fires this hook and is
         covered by ``pull_candles``' OWN paired identity-gated clear (the spine
         compare-and-clears the exact handle it registered — rounds 2/4 — plus a
