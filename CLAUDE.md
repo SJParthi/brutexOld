@@ -558,7 +558,10 @@ hostile-review pass._
   2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
   23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
   `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
-  ladder ordering pin. Byte-identity + NO indicator_version bump — the recorded decision:
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
   `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
   bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
   the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
