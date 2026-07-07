@@ -51,7 +51,7 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -346,6 +346,18 @@ def _schedules_from_entries(
                 f"instrument={instrument!r} roll_schedule={raw!r}"
             )
         schedule = tuple(raw)
+        # The SHAPE law of the manifest twin `_roll_schedules_from_payload`
+        # (review round-5 finding 1): a recorded schedule must be a non-empty
+        # strictly increasing tuple of non-negative day ordinals — a
+        # hand-edited type-valid-but-shape-invalid line (e.g. a DESCENDING
+        # pair) refuses HERE, at the parse boundary, exactly like the
+        # cascade-manifest reader, instead of degrading downstream.
+        if not schedule or list(schedule) != sorted(set(schedule)) or schedule[0] < 0:
+            raise SweepVerifyError(
+                f"malformed recorded roll_schedule in {audit_path} (seq {entry.seq}): "
+                f"schedule for {instrument!r} must be a non-empty strictly increasing "
+                f"list of non-negative day ordinals, got {raw!r}"
+            )
         prior = schedules.get(instrument)
         if prior is None:
             schedules[instrument] = schedule
@@ -358,32 +370,84 @@ def _schedules_from_entries(
 
 
 def recorded_audit_facts(
-    audit_path: Path,
-) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]]]:
-    """Read the audit ONCE and derive BOTH the recorded context and schedules.
+    audit_path: Path, *, snapshot: str | None = None
+) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
+    """Read the audit ONCE and derive ONE generation's context + schedules.
 
-    The ``cmd_sweep_verify`` seam (review round-4 finding 5 — the CLI twin of
-    the round-3 gate fix): a production futures tree's audit holds one
-    ``SWEEP_START`` line per grid tuple (thousands of lines), and calling
-    :func:`recorded_context_from_audit` + :func:`recorded_roll_schedules_from_audit`
-    separately parsed the whole JSONL twice per invocation. This helper is the
-    ONE shared parse both derivations ride.
+    The ``cmd_sweep_verify`` seam (review round-4 finding 5 — ONE shared parse
+    replacing the prior double read; review round-5 finding 6 — GENERATION
+    scoping): the sanctioned sweep-daemon root reuses ONE results root across
+    cycles, so its audit legitimately accretes ``SWEEP_START`` entries under a
+    NEW ``data_snapshot_hash`` every moved-snapshot cycle (and the futures
+    ``roll_schedule`` legitimately grows with each new front-month contract).
+    Deriving facts from the WHOLE file condemned every such multi-generation
+    root as "inconsistent recorded context" — permanently locking ALL
+    sweep-verify tiers (including the Tier-3 recount, the only metric-
+    corruption oracle) out of the flagship production tree, and the explicit
+    context flags could not rescue it because the parse raise preceded them.
 
-    Returns ``(None, {})`` when the audit file is absent.
+    Facts are therefore SCOPED to ONE generation: the explicit *snapshot*
+    (``--data-snapshot-hash``) when given, else the LATEST recorded generation
+    (the last ``SWEEP_START``'s ``data_snapshot_hash`` — the audit is
+    append-only, so the last entry belongs to the newest launch). The OTHER
+    generations' snapshots are returned (first-appearance order) for the
+    caller's honest note — a warn-grade observation, no longer a usage
+    refusal. WITHIN the scoped generation, a context or schedule disagreement
+    still raises: one launch records ONE context — a disagreement there is
+    real corruption, not the daemon cadence.
+
+    Returns ``(None, {}, ())`` when the audit file is absent, and
+    ``(None, {}, other_generations)`` when *snapshot* matches no recorded
+    entry (the explicit-flags path — the caller supplies the full context).
 
     Raises
     ------
     SweepVerifyError
-        Under the union of both single-fact readers' contracts (unreadable
-        audit, malformed payload, inconsistent context/schedule).
+        If the audit log is unreadable/corrupt, a ``SWEEP_START`` payload is
+        malformed, or the SCOPED generation's context/schedules disagree.
     """
     if not audit_path.exists():
-        return None, {}
+        return None, {}, ()
     entries = _entries_from_audit(audit_path)
+    pairs = _sweep_start_snapshots(entries, audit_path)
+    if not pairs:
+        return None, {}, ()
+    target = snapshot if snapshot is not None else pairs[-1][1]
+    matching = [entry for entry, snap in pairs if snap == target]
+    others = tuple(dict.fromkeys(snap for _entry, snap in pairs if snap != target))
     return (
-        _context_from_entries(entries, audit_path),
-        _schedules_from_entries(entries, audit_path),
+        _context_from_entries(matching, audit_path),
+        _schedules_from_entries(matching, audit_path),
+        others,
     )
+
+
+def _sweep_start_snapshots(
+    entries: list[AuditEntry], audit_path: Path
+) -> list[tuple[AuditEntry, str]]:
+    """Return every ``SWEEP_START`` entry paired with its recorded snapshot.
+
+    The ONE context-key validation both generation-scoped readers ride
+    (:func:`recorded_audit_facts` + :func:`_matching_snapshot_entries`).
+
+    Raises
+    ------
+    SweepVerifyError
+        If a ``SWEEP_START`` payload is missing a context key (a malformed
+        entry makes the recorded snapshot underivable — fail closed).
+    """
+    pairs: list[tuple[AuditEntry, str]] = []
+    for entry in entries:
+        if entry.action != "SWEEP_START":
+            continue
+        payload = entry.payload
+        missing = [key for key in _CONTEXT_KEYS if key not in payload]
+        if missing:
+            raise SweepVerifyError(
+                f"SWEEP_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+            )
+        pairs.append((entry, str(payload["data_snapshot_hash"])))
+    return pairs
 
 
 def _matching_snapshot_entries(
@@ -407,20 +471,9 @@ def _matching_snapshot_entries(
         If a ``SWEEP_START`` payload is missing a context key (a malformed
         entry makes the recorded snapshot underivable — fail closed).
     """
-    sweep_starts: list[AuditEntry] = []
-    matching: list[AuditEntry] = []
-    for entry in entries:
-        if entry.action != "SWEEP_START":
-            continue
-        sweep_starts.append(entry)
-        payload = entry.payload
-        missing = [key for key in _CONTEXT_KEYS if key not in payload]
-        if missing:
-            raise SweepVerifyError(
-                f"SWEEP_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
-            )
-        if str(payload["data_snapshot_hash"]) == fresh_snapshot:
-            matching.append(entry)
+    pairs = _sweep_start_snapshots(entries, audit_path)
+    sweep_starts = [entry for entry, _snap in pairs]
+    matching = [entry for entry, snap in pairs if snap == fresh_snapshot]
     return sweep_starts, matching
 
 
@@ -467,6 +520,7 @@ def stale_roll_schedule_refusal(
     fresh_snapshot: str,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]],
     results_root: Path | None = None,
+    fresh_sentinel_paths: Mapping[str, Sequence[Path]] | None = None,
 ) -> str | None:
     """Detect a SCHEDULE-ONLY lake drift against a resumed results tree.
 
@@ -501,6 +555,21 @@ def stale_roll_schedule_refusal(
         refused — the recorded schedule those sentinels' rows were minted
         under cannot be verified (review round-3 finding 8). ``None``
         preserves the prior always-abstain behaviour.
+    fresh_sentinel_paths
+        THIS launch's expected per-instrument completion-sentinel paths
+        (optional — the digest-aware probe of review round-5 finding 11). A
+        MID-FILE-lossy audit that kept a matching-generation SPOT
+        ``SWEEP_START`` while losing the futures ones records NO schedule for
+        a scheduled instrument, yet the tree may hold sentinels minted under
+        THIS generation whose recorded schedule is exactly as unverifiable as
+        with the audit absent. The generation-BLIND sentinel glob cannot
+        refuse there without false-refusing the legitimate crash-resume over
+        FOREIGN-generation sentinels — but the tuple digest folds the fresh
+        ``data_snapshot_hash``, so only a sentinel at one of THESE exact
+        paths can short-circuit this grid's tuples: an EXISTING fresh-digest
+        sentinel with no matching-generation recorded schedule refuses with
+        zero false positives. ``None`` (or an instrument absent from the
+        mapping) abstains as before.
 
     Returns
     -------
@@ -560,7 +629,32 @@ def stale_roll_schedule_refusal(
         return None
     for instrument, fresh_schedule in sorted(roll_schedule_by_instrument.items()):
         recorded_schedule = recorded.get(instrument)
-        if recorded_schedule is not None and recorded_schedule != fresh_schedule:
+        if recorded_schedule is None:
+            # Review round-5 finding 11: the matching generation recorded NO
+            # schedule for this instrument (a mid-file-lossy audit — the SPOT
+            # SWEEP_STARTs survived, the futures ones were lost). Probe THIS
+            # launch's own expected sentinel paths: a fresh-digest sentinel is
+            # provably pairable with this grid, so its rows' minted schedule
+            # being unverifiable refuses; a foreign-generation sentinel can
+            # never pair (its digest folded another snapshot) — abstain.
+            if fresh_sentinel_paths is None:
+                continue
+            fresh_sentinel = next(
+                (path for path in fresh_sentinel_paths.get(instrument, ()) if path.exists()),
+                None,
+            )
+            if fresh_sentinel is None:
+                continue
+            return (
+                f"results tree holds a completed futures tuple for {instrument!r} minted "
+                f"under THIS launch's exact identity (completion sentinel: "
+                f"{fresh_sentinel}) but the audit's matching-generation SWEEP_START "
+                f"entries record NO roll_schedule for it ({audit_path}) — a mid-file-"
+                "lossy audit: the schedule those rows were minted under cannot be "
+                "verified, so a resume could pair them with a drifted schedule — "
+                "re-sweep into a fresh --results-root (or restore the tree's audit log)"
+            )
+        if recorded_schedule != fresh_schedule:
             return (
                 f"recorded roll_schedule[{instrument}] {list(recorded_schedule)} "
                 f"(audit: {audit_path}) does not match the freshly resolved schedule "

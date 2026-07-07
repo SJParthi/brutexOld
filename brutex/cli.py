@@ -4858,8 +4858,24 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # Compare the tree's recorded schedule against the fresh one UP FRONT and
     # refuse with the evidence named (the 100%-tested helper owns the logic).
     if roll_schedule_by_instrument is not None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
         from brutex.engine.sweep_verify import stale_roll_schedule_refusal
+        from brutex.engine.tuple_complete import completion_sentinel_path
 
+        # Round-5 finding 11: the digest-aware fresh-sentinel probe — the only
+        # evidence that separates a MID-FILE-lossy audit (a matching-generation
+        # SPOT start survived; the futures ones were lost) from the legitimate
+        # crash-resume over FOREIGN-generation sentinels. The tuple digest folds
+        # this launch's data_snapshot_hash, so only a sentinel at one of THESE
+        # exact paths can short-circuit this grid's tuples. O(grid) path
+        # derivations once per futures launch (a few ms of BLAKE3 over small
+        # descriptors); existence is probed lazily by the gate, and only on the
+        # missing-recorded-schedule arm.
+        fresh_sentinel_paths: dict[str, list[Path]] = {}
+        for grid_tuple in iter_sweep_tuples(grid):
+            fresh_sentinel_paths.setdefault(grid_tuple.instrument, []).append(
+                completion_sentinel_path(tuple_store_path(out_root, grid_tuple, grid))
+            )
         schedule_refusal = stale_roll_schedule_refusal(
             audit_path,
             fresh_snapshot=snapshot,
@@ -4868,6 +4884,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # hold futures completion sentinels refuses too (the recorded
             # schedule those rows were minted under cannot be verified).
             results_root=out_root,
+            fresh_sentinel_paths=fresh_sentinel_paths,
         )
         if schedule_refusal is not None:
             print(f"[brutex] sweep-all REFUSED: {schedule_refusal}", file=sys.stderr)
@@ -5683,20 +5700,49 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # memory. ONE shared audit parse derives BOTH the context and the F16
     # recorded roll schedules (review round-4 finding 5 — a production
     # futures audit holds one SWEEP_START per grid tuple, so the prior
-    # two-reader shape parsed thousands of lines twice per invocation).
+    # two-reader shape parsed thousands of lines twice per invocation),
+    # SCOPED to ONE generation (review round-5 finding 6): the sanctioned
+    # sweep-daemon root accretes a NEW context + a GROWN futures schedule
+    # every moved-snapshot cycle, so the whole-file derivation permanently
+    # refused the flagship production tree as 'inconsistent recorded
+    # context' — facts now come from the --data-snapshot-hash generation
+    # when given, else the LATEST recorded one, and the other generations
+    # are an honest warn-grade note below, never a usage refusal.
     try:
-        recorded, recorded_schedules = recorded_audit_facts(out_root / "audit" / "sweep-all.jsonl")
+        recorded, recorded_schedules, other_generations = recorded_audit_facts(
+            out_root / "audit" / "sweep-all.jsonl", snapshot=data_snapshot_hash
+        )
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
+    if other_generations:
+        scoped_to = (
+            "the --data-snapshot-hash generation"
+            if data_snapshot_hash
+            else "the LATEST recorded generation"
+        )
+        # repr(): audit-sourced strings may embed \n/ESC — never let a
+        # tampered line forge output lines (#907/#919 repr-naming convention).
+        shown = ", ".join(repr(snap) for snap in other_generations[:5])
+        more = len(other_generations) - 5
+        if more > 0:
+            shown += f" (+{more} more)"
+        print(
+            f"[brutex] sweep-verify: the audit records {len(other_generations)} other "
+            f"generation(s) (data_snapshot_hash: {shown}) — the sanctioned multi-launch "
+            f"daemon root; recorded facts scoped to {scoped_to} (other generations' "
+            "stores verify as unattributed; pass --data-snapshot-hash to scope another)"
+        )
     snapshot = data_snapshot_hash or (recorded.data_snapshot_hash if recorded else None)
     indicator = indicator_version or (recorded.indicator_version if recorded else None)
     code_sha = code_commit_sha or (recorded.code_commit_sha if recorded else None)
     if snapshot is None or indicator is None or code_sha is None:
         print(
-            "[brutex] sweep-verify: no recorded context (no audit log under the tree) "
-            "and no --data-snapshot-hash/--indicator-version/--code-commit-sha "
-            "overrides — identity/recount tiers skipped (structural-only verdict)"
+            "[brutex] sweep-verify: no recorded context for this generation (audit "
+            "log absent, SWEEP_START-less, or no entry under the --data-snapshot-hash "
+            "generation) and no --data-snapshot-hash/--indicator-version/"
+            "--code-commit-sha overrides — identity/recount tiers skipped "
+            "(structural-only verdict)"
         )
         return EXIT_OK if structural.clean else EXIT_VERIFY_FINDINGS
 

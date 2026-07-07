@@ -400,10 +400,12 @@ def test_manual_cascade_interior_hole_is_a_clean_user_error(
 
 # ────── the resume-honesty gate (review round-2 finding 11) ──────
 
-#: Good-Friday adjacency (real 2026 NSE calendar): expiry Thu 2026-04-02, then
-#: Fri 2026-04-03 (Good Friday) + the weekend — a SESSIONLESS overhang.
-_APR26 = ("NSE-NIFTY-02Apr26-FUT", date(2026, 4, 2))
-_MAY26 = "NSE-NIFTY-30Apr26-FUT"
+#: Holiday adjacency (real 2026 NSE calendar, calendar-real expiries — the
+#: prior 02Apr26/30Apr26 pair was a vendor-IMPOSSIBLE same-month duplicate the
+#: round-5 finding-10 gate now refuses): the March contract expires Mon
+#: 2026-03-30 and Tue 2026-03-31 is a trading holiday — a SESSIONLESS overhang.
+_MAR26 = ("NSE-NIFTY-30Mar26-FUT", date(2026, 3, 30))
+_APR26_SUCC = ("NSE-NIFTY-28Apr26-FUT", date(2026, 4, 28))
 
 
 def test_schedule_only_lake_drift_refuses_the_resume_up_front(
@@ -418,31 +420,31 @@ def test_schedule_only_lake_drift_refuses_the_resume_up_front(
     catalog_path = tmp_path / "catalog.duckdb"
     writer = ParquetWriter(lake_root=lake_root)
     sink = ParquetBarSink(writer=writer)
-    bars = [b for day in (date(2026, 4, 1), _APR26[1]) for b in _day_bars(day, 100.0)]
-    sink.append(exchange="NSE", segment="FNO", symbol=_APR26[0], interval="1minute", bars=bars)
+    bars = [b for day in (date(2026, 3, 27), _MAR26[1]) for b in _day_bars(day, 100.0)]
+    sink.append(exchange="NSE", segment="FNO", symbol=_MAR26[0], interval="1minute", bars=bars)
     results_root = tmp_path / "sweeps"
     kwargs = _kwargs(
         lake_root,
         catalog_path,
         results_root,
         intervals="1minute",
-        start="2026-04-01",
-        end="2026-04-05",  # 3-day tail overhang past the Apr-2 expiry
+        start="2026-03-27",
+        end="2026-03-31",  # 1-day tail overhang past the Mar-30 expiry (a holiday)
     )
     rc = cmd_sweep_all(**kwargs)
     assert rc == EXIT_OK
 
     # The successor contract is pulled between launches. Its in-window owned
-    # span (Apr 3 → Apr 5) holds ZERO sessions, so it joins the roll schedule
-    # while contributing ZERO bars — the snapshot hash stays byte-identical.
-    (lake_root / "bars" / "NSE" / "FNO" / _MAY26).mkdir()
+    # span (exactly 2026-03-31) holds ZERO sessions, so it joins the roll
+    # schedule while contributing ZERO bars — the snapshot stays byte-identical.
+    (lake_root / "bars" / "NSE" / "FNO" / _APR26_SUCC[0]).mkdir()
     capsys.readouterr()
     rc = cmd_sweep_all(**kwargs)
     err = capsys.readouterr().err
     assert rc == EXIT_USER_ERROR
     assert "sweep-all REFUSED" in err
-    assert str([_APR26[1].toordinal()]) in err  # the RECORDED schedule
-    assert str([_APR26[1].toordinal(), date(2026, 4, 30).toordinal()]) in err  # the FRESH one
+    assert str([_MAR26[1].toordinal()]) in err  # the RECORDED schedule
+    assert str([_MAR26[1].toordinal(), _APR26_SUCC[1].toordinal()]) in err  # the FRESH one
     assert "UNCHANGED" in err
     assert "contract set changed" in err
 
@@ -541,6 +543,156 @@ def test_recount_without_audit_refuses_verdict_grade_and_names_the_absent_schedu
     assert "recorded context does NOT match" in out
     assert "recount REFUSED" in out
     assert rc == EXIT_VERIFY_INCONCLUSIVE
+
+
+# ────── round-5 finding 6: the doctor on the sanctioned multi-generation daemon root ──────
+
+
+def test_sweep_verify_scopes_facts_to_one_generation_on_a_daemon_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-5 finding 6: the sweep daemon reuses ONE results root across
+    cycles, so its audit accretes a NEW context + a GROWN futures schedule
+    every moved-snapshot cycle. Pre-fix `cmd_sweep_verify` derived facts from
+    the WHOLE audit and exited EXIT_USER_ERROR ('inconsistent recorded
+    context') from the second cycle onward — every tier (incl. the Tier-3
+    recount oracle) permanently locked out of the production tree. Now the
+    facts scope to the LATEST generation with an honest note naming the
+    others."""
+    from brutex.cli import cmd_sweep_verify
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+
+    # Cycle 2 of the daemon cadence: the lake GROWS a front-month contract
+    # (schedule grows too) and the window advances — snapshot + schedule both
+    # move, appended to the SAME resume=True audit in the SAME root.
+    sep = "NSE-NIFTY-25Sep25-FUT"
+    writer = ParquetWriter(lake_root=lake_root)
+    sink = ParquetBarSink(writer=writer)
+    sep_bars = [b for day in (date(2025, 9, 1), date(2025, 9, 2)) for b in _day_bars(day, 220.0)]
+    sink.append(exchange="NSE", segment="FNO", symbol=sep, interval="1minute", bars=sep_bars)
+    rc = cmd_sweep_all(
+        **_kwargs(lake_root, catalog_path, results_root, intervals="1minute", end="2025-09-03")
+    )
+    assert rc == EXIT_OK
+    capsys.readouterr()
+
+    verify_kwargs = _verify_kwargs(lake_root, catalog_path, results_root, tmp_path / "scratch")
+    verify_kwargs["recount"] = False  # Tier 1/2 — the recount context gate has its own pins
+    rc = cmd_sweep_verify(**verify_kwargs)
+    captured = capsys.readouterr()
+    # Pre-fix: EXIT_USER_ERROR + 'inconsistent recorded context' on stderr.
+    assert rc != EXIT_USER_ERROR
+    assert "inconsistent recorded context" not in captured.err
+    assert "1 other generation(s)" in captured.out  # the honest note
+    assert "LATEST recorded generation" in captured.out
+    assert "--data-snapshot-hash" in captured.out  # how to scope another
+
+
+# ────── round-5 finding 11: the digest-aware fresh-sentinel resume probe ──────
+
+
+def _replace_audit_with_one_spot_start(
+    audit_path: Path, *, snapshot: str, indicator: str, code_sha: str
+) -> None:
+    """Simulate the MID-FILE-lossy audit: only a schedule-less SPOT
+    ``SWEEP_START`` of the named generation survives (the futures ones lost)."""
+    from brutex.orchestrator.audit import AuditWriter
+
+    audit_path.unlink()
+    with AuditWriter.open(audit_path) as audit:
+        audit.append(
+            action="SWEEP_START",
+            subject="s",
+            payload={
+                "data_snapshot_hash": snapshot,
+                "indicator_version": indicator,
+                "code_commit_sha": code_sha,
+                "instrument": "NIFTY",
+            },
+        )
+
+
+def test_lossy_audit_over_fresh_generation_sentinels_refuses_the_resume(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-5 finding 11: a mid-file-lossy audit that kept a matching-
+    generation SPOT start while losing the futures SWEEP_STARTs abstained
+    (`recorded.get(instrument)` is None → fall-through), even though the
+    tree's sentinels were minted under THIS generation — rows whose schedule
+    is exactly as unverifiable as with the audit absent. The digest-aware
+    probe now refuses: the sentinel sits at one of THIS launch's expected
+    paths, so it provably pairs with this grid."""
+    from brutex.engine.sweep_verify import recorded_context_from_audit
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    audit_path = results_root / "audit" / "sweep-all.jsonl"
+    recorded = recorded_context_from_audit(audit_path)
+    assert recorded is not None
+    _replace_audit_with_one_spot_start(
+        audit_path,
+        snapshot=recorded.data_snapshot_hash,
+        indicator=recorded.indicator_version,
+        code_sha=recorded.code_commit_sha,
+    )
+    capsys.readouterr()
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    err = capsys.readouterr().err
+    # Pre-fix: EXIT_OK — the resume proceeded, pairing sentinel rows minted
+    # under an UNVERIFIABLE schedule with the freshly resolved one.
+    assert rc == EXIT_USER_ERROR
+    assert "sweep-all REFUSED" in err
+    assert "record NO roll_schedule" in err
+    assert ".complete.json" in err  # the fresh-digest sentinel named
+    assert "mid-file-lossy" in err
+    assert "--results-root" in err  # the remediation
+
+
+def test_lossy_audit_over_foreign_generation_sentinels_still_resumes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-5 finding 11 (the zero-false-positive law): generation-A futures
+    sentinels under a generation-B lossy audit can NEVER pair with the fresh
+    launch (their digests folded generation A's snapshot), so the probe
+    abstains and the legitimate resume proceeds — the naive generation-blind
+    glob would have false-refused exactly this."""
+    from brutex.engine.sweep_verify import recorded_context_from_audit
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK  # generation A: futures sentinels now on disk
+
+    # The lake moves (one extra in-window bar) → generation B's snapshot differs.
+    writer = ParquetWriter(lake_root=lake_root)
+    sink = ParquetBarSink(writer=writer)
+    extra = _day_bars(_DAYS[_AUG[0]][-1], _BASE[_AUG[0]], n=121)[-1:]
+    sink.append(exchange="NSE", segment="FNO", symbol=_AUG[0], interval="1minute", bars=extra)
+    # Learn generation B's recorded context from a throwaway launch.
+    rc = cmd_sweep_all(
+        **_kwargs(lake_root, catalog_path, tmp_path / "sweeps_b", intervals="1minute")
+    )
+    assert rc == EXIT_OK
+    gen_b = recorded_context_from_audit(tmp_path / "sweeps_b" / "audit" / "sweep-all.jsonl")
+    assert gen_b is not None
+
+    _replace_audit_with_one_spot_start(
+        results_root / "audit" / "sweep-all.jsonl",
+        snapshot=gen_b.data_snapshot_hash,
+        indicator=gen_b.indicator_version,
+        code_sha=gen_b.code_commit_sha,
+    )
+    capsys.readouterr()
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    err = capsys.readouterr().err
+    assert "sweep-all REFUSED" not in err
+    assert rc == EXIT_OK  # the crash-resume guarantee stands
 
 
 # ────── failure-mode matrix rows ──────

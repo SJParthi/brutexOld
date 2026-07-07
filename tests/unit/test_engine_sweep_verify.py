@@ -314,6 +314,14 @@ class TestRecordedRollSchedules:
             {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": "739428"}},
             # Non-int items (bool is an int subclass — explicitly rejected).
             {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": [True]}},
+            # SHAPE law (round-5 finding 1 — the `_roll_schedules_from_payload`
+            # manifest twin): non-empty, strictly increasing, non-negative.
+            # Pre-fix a type-valid-but-shape-invalid hand-edit passed this
+            # reader (the manifest boundary refused the same bytes).
+            {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": []}},
+            {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": [739463, 739428]}},
+            {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": [739428, 739428]}},
+            {"instrument": "NSE-NIFTY-FUT", "params": {"roll_schedule": [-1, 739428]}},
         ],
     )
     def test_malformed_schedule_raises(self, tmp_path: Path, payload: dict[str, object]) -> None:
@@ -340,36 +348,53 @@ class TestRecordedAuditFacts:
     per grid tuple (thousands), and cmd_sweep_verify parsed the whole JSONL
     once for the context and AGAIN for the F16 schedules — the exact double
     parse the round-3 gate fix eliminated at the launch mouth.
+
+    Round-5 finding 6: the facts are SCOPED to ONE generation. The sanctioned
+    sweep-daemon root accretes a NEW context (and a GROWN futures schedule)
+    every moved-snapshot cycle, so the pre-fix whole-file derivation raised
+    'inconsistent recorded context' on the flagship production tree — locking
+    every sweep-verify tier (incl. the Tier-3 recount oracle) out of it, with
+    the explicit context flags unable to rescue (the raise preceded them).
     """
 
     _SCHEDULE: tuple[int, ...] = (739428, 739463)
 
-    def _write(self, path: Path) -> None:
-        with AuditWriter.open(path) as audit:
+    def _write(
+        self,
+        path: Path,
+        *,
+        snapshot: str = "snap0001",
+        code_sha: str = "deadbeef",
+        schedule: tuple[int, ...] | None = None,
+    ) -> None:
+        with AuditWriter.open(path, resume=path.exists()) as audit:
             audit.append(
                 action="SWEEP_START",
                 subject="s",
                 payload={
-                    "data_snapshot_hash": "snap0001",
+                    "data_snapshot_hash": snapshot,
                     "indicator_version": "ind-v1",
-                    "code_commit_sha": "deadbeef",
+                    "code_commit_sha": code_sha,
                     "instrument": "NSE-NIFTY-FUT",
-                    "params": {"roll_schedule": list(self._SCHEDULE)},
+                    "params": {
+                        "roll_schedule": list(schedule if schedule is not None else self._SCHEDULE)
+                    },
                 },
             )
 
     def test_absent_audit_returns_none_and_empty(self, tmp_path: Path) -> None:
-        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {})
+        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, ())
 
     def test_derives_both_facts_matching_the_single_fact_readers(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         self._write(path)
-        context, schedules = recorded_audit_facts(path)
+        context, schedules, others = recorded_audit_facts(path)
         assert context == recorded_context_from_audit(path)
         assert schedules == recorded_roll_schedules_from_audit(path)
         assert context is not None
         assert context.data_snapshot_hash == "snap0001"
         assert schedules == {"NSE-NIFTY-FUT": self._SCHEDULE}
+        assert others == ()  # a single-generation audit names no other generation
 
     def test_reads_the_audit_exactly_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -388,7 +413,7 @@ class TestRecordedAuditFacts:
             return real_read(p)
 
         monkeypatch.setattr(audit_mod, "read_entries", counting_read)
-        context, schedules = recorded_audit_facts(path)
+        context, schedules, _others = recorded_audit_facts(path)
         assert context is not None
         assert schedules
         assert calls == [path]  # ONE parse for BOTH derivations
@@ -398,6 +423,71 @@ class TestRecordedAuditFacts:
         path.write_text("{not jsonl\n", encoding="utf-8")
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_audit_facts(path)
+
+    # ── round-5 finding 6: ONE-generation scoping of the daemon-root audit ──
+
+    def _daemon_audit(self, path: Path) -> None:
+        """Two moved-snapshot daemon cycles APPENDED to one audit — cycle 2's
+        futures schedule legitimately GREW with the new front-month contract."""
+        self._write(path, snapshot="snap0001", code_sha="deadbeef", schedule=(739428,))
+        self._write(path, snapshot="snap0002", code_sha="cafef00d", schedule=self._SCHEDULE)
+
+    def test_daemon_root_scopes_to_the_latest_generation(self, tmp_path: Path) -> None:
+        # Pre-fix teeth: the whole-file derivation raised 'inconsistent
+        # recorded context' (and 'inconsistent recorded roll_schedule') on
+        # this exact sanctioned shape.
+        path = tmp_path / "a.jsonl"
+        self._daemon_audit(path)
+        context, schedules, others = recorded_audit_facts(path)
+        assert context == RecordedContext(
+            data_snapshot_hash="snap0002",
+            indicator_version="ind-v1",
+            code_commit_sha="cafef00d",
+        )
+        assert schedules == {"NSE-NIFTY-FUT": self._SCHEDULE}
+        assert others == ("snap0001",)  # the other generation NAMED, not condemned
+
+    def test_explicit_snapshot_scopes_that_generation(self, tmp_path: Path) -> None:
+        # --data-snapshot-hash picks the OLDER generation: its own context +
+        # its own (shorter) schedule come back, the newer one is the 'other'.
+        path = tmp_path / "a.jsonl"
+        self._daemon_audit(path)
+        context, schedules, others = recorded_audit_facts(path, snapshot="snap0001")
+        assert context == RecordedContext(
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+        )
+        assert schedules == {"NSE-NIFTY-FUT": (739428,)}
+        assert others == ("snap0002",)
+
+    def test_explicit_unrecorded_snapshot_returns_no_facts(self, tmp_path: Path) -> None:
+        # The explicit-flags path: an unrecorded generation derives NOTHING
+        # from the audit (never a mixed-generation context) — the caller's
+        # flags must supply the full context.
+        path = tmp_path / "a.jsonl"
+        self._daemon_audit(path)
+        context, schedules, others = recorded_audit_facts(path, snapshot="snap9999")
+        assert context is None
+        assert schedules == {}
+        assert others == ("snap0001", "snap0002")  # first-appearance order
+
+    def test_within_generation_inconsistency_still_raises(self, tmp_path: Path) -> None:
+        # One launch records ONE context: a same-snapshot code_sha
+        # disagreement is real corruption, not the daemon cadence.
+        path = tmp_path / "a.jsonl"
+        self._write(path, snapshot="snap0001", code_sha="deadbeef")
+        self._write(path, snapshot="snap0001", code_sha="cafef00d")
+        with pytest.raises(SweepVerifyError, match="inconsistent recorded context"):
+            recorded_audit_facts(path)
+
+    def test_sweep_start_less_audit_returns_no_facts(self, tmp_path: Path) -> None:
+        # Readable but SWEEP_START-less (a copytruncate rotation): no
+        # generation exists to scope to — honest empties, never a raise.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="OTHER", subject="s", payload={})
+        assert recorded_audit_facts(path) == (None, {}, ())
 
 
 # ── The resume-honesty gate (ADR-0012, review round-2 finding 11) ────────────
@@ -753,6 +843,108 @@ class TestStaleRollScheduleRefusal:
         )
         assert message is not None
         assert "UNREADABLE/inconsistent" in message
+
+    # ── round-5 finding 11: the digest-aware fresh-sentinel probe ──
+
+    def test_lossy_audit_with_fresh_digest_sentinel_refuses(self, tmp_path: Path) -> None:
+        # The mid-file-lossy shape: a matching-generation SPOT SWEEP_START
+        # survived (schedule-less), the futures SWEEP_STARTs were lost, and
+        # the tree holds a sentinel at one of THIS launch's expected paths —
+        # its rows' minted schedule is exactly as unverifiable as with the
+        # audit absent. Pre-fix the per-instrument loop silently fell through
+        # to the abstain (proven by execution in the round-5 review).
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        with AuditWriter.open(audit) as writer:
+            writer.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={
+                    "data_snapshot_hash": "snap0001",
+                    "indicator_version": "ind-v1",
+                    "code_commit_sha": "deadbeef",
+                    "instrument": "NIFTY",  # the surviving SPOT start — no schedule
+                },
+            )
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+            fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
+        )
+        assert message is not None
+        assert str(sentinel) in message  # the evidence named
+        assert "record NO roll_schedule" in message
+        assert "mid-file-lossy" in message
+        assert "--results-root" in message  # the remediation
+
+    @pytest.mark.parametrize("mapping", [{}, {"NSE-NIFTY-FUT": []}])
+    def test_lossy_audit_without_a_fresh_digest_sentinel_abstains(
+        self, tmp_path: Path, mapping: dict[str, list[Path]]
+    ) -> None:
+        # The zero-false-positive law: FOREIGN-generation sentinels (their
+        # digests folded another snapshot, so none sits at a fresh expected
+        # path) must NOT refuse — the legitimate crash-resume of a launch that
+        # completed only spot tuples over an old futures tree proceeds.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)  # a foreign-digest sentinel IS on disk
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0001", schedule=None)
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths=mapping,
+            )
+            is None
+        )
+
+    def test_lossy_audit_fresh_path_not_on_disk_abstains(self, tmp_path: Path) -> None:
+        # An expected fresh path that does NOT exist is no evidence — the
+        # probe checks existence, never the mapping alone.
+        root = tmp_path / "results"
+        self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0001", schedule=None)
+        missing = (
+            root / "NSE-NIFTY-FUT" / "1minute" / "bull_k3_feedfacefeedface.parquet.complete.json"
+        )
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths={"NSE-NIFTY-FUT": [missing]},
+            )
+            is None
+        )
+
+    def test_recorded_schedule_present_never_probes_sentinels(self, tmp_path: Path) -> None:
+        # A matching-generation RECORDED schedule owns the verdict: identical
+        # → pass (no probe fires even with a fresh sentinel mapped).
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0001", schedule=self._S2)
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
+            )
+            is None
+        )
 
     # ── round-3 finding 4: ONE shared audit parse for both derivations ──
 
