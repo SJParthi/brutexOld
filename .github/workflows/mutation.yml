@@ -36,8 +36,10 @@
 #   - push to main (paths-filtered) — python-mutation ONLY: push-time
 #     Rust mutation signal was measured ZERO (fno-math baseline-broken in
 #     ~14 s since #1258; trading-core burned 120 min to a verdict-less
-#     kill) while costing ~2.4 runner-hours per push. ci.yml still runs
-#     cargo test on every push.
+#     kill) while the workflow burned ~2.4 runner-hours per push, ~2.0 h
+#     of it on the zero-signal Rust legs (the rest is the python job,
+#     which keeps running on push). ci.yml still runs cargo test on
+#     every push.
 
 name: Mutation testing
 
@@ -555,9 +557,11 @@ jobs:
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
     # push-time Rust mutation signal was ZERO (fno-math baseline-broken in ~14 s
-    # since #1258; trading-core burned 120 min to a verdict-less kill) while
-    # costing ~2.4 runner-hours/push. The deep Rust gate = the weekly schedule
-    # + workflow_dispatch. ci.yml still runs cargo test on every push.
+    # since #1258; trading-core burned 120 min to a verdict-less kill) while the
+    # workflow burned ~2.4 runner-hours/push, ~2.0 h of it on these zero-signal
+    # Rust legs (the rest is the python job, which keeps running on push). The
+    # deep Rust gate = the weekly schedule + workflow_dispatch. ci.yml still
+    # runs cargo test on every push.
     if: github.event_name != 'push'
     strategy:
       fail-fast: false
