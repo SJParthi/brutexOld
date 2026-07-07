@@ -85,7 +85,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -97,8 +99,10 @@ from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_orchestrator import (
+    StoreQuarantine,
     SweepGridConfig,
     SweepTuple,
+    TupleDiffCheck,
     count_sweep_tuples,
     iter_sweep_tuples,
     run_one_tuple,
@@ -490,6 +494,8 @@ def run_supervised_grid(
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     watchdog_poll_seconds: float | None = None,
     reuse_bar_bits: bool = True,
+    diffcheck: TupleDiffCheck | None = None,
+    store_quarantine: StoreQuarantine | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -583,6 +589,14 @@ def run_supervised_grid(
         :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
         (DEC-SWEEP-RESIDENT-KERNEL-001) — byte-identical results, only the
         redundant rebuild is skipped; ``False`` rebuilds per tuple.
+    diffcheck, store_quarantine
+        The optional DEC-SWEEP-UNKILLABLE-CORE-001 per-tuple seams, forwarded
+        verbatim to :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`
+        (R45 spot-check + G1 corrupt-store quarantine-retry). ``None``
+        defaults are byte-identical to before. A flagged additive extension
+        of the WP-5 supervisor edit scope: the sequential spine is the only
+        caller of ``run_one_tuple`` on the CLI path, so the seams MUST thread
+        through here to reach it.
 
     Returns
     -------
@@ -746,6 +760,8 @@ def run_supervised_grid(
                     audit=ingest_audit,
                     skip_empty=skip_empty,
                     kernel_cache=kernel_cache,
+                    diffcheck=diffcheck,
+                    store_quarantine=store_quarantine,
                 )
             except SweepComboError as exc:
                 tuples_failed += 1
@@ -876,7 +892,28 @@ def run_supervised_grid(
     )
 
 
-def publish_progress(path: Path, snapshot: SweepProgressSnapshot) -> None:
+#: G11 warn-once latch — one WARN per progress path per process, so a dead disk
+#: never spams a log line per tuple. Module-level BY DESIGN (the same bounded
+#: warn-once idiom as the parser's per-pull epoch guard, #1294), with a public
+#: reset seam for tests.
+_PROGRESS_WARN_LATCH: set[str] = set()
+_PROGRESS_WARN_LOCK = threading.Lock()
+
+
+def reset_progress_write_warnings() -> None:
+    """Re-arm the G11 warn-once latch (test seam — mirrors the #1294 idiom)."""
+    with _PROGRESS_WARN_LOCK:
+        _PROGRESS_WARN_LATCH.clear()
+
+
+def publish_progress(
+    path: Path,
+    snapshot: SweepProgressSnapshot,
+    *,
+    run_id: str | None = None,
+    suspect: bool | None = None,
+    stage: str | None = None,
+) -> None:
     """Atomically write *snapshot* to *path* as JSON — the dashboard file bridge.
 
     The cross-process seam: a CLI-launched ``brutex sweep-all`` wires this as its
@@ -886,18 +923,61 @@ def publish_progress(path: Path, snapshot: SweepProgressSnapshot) -> None:
     :func:`brutex.engine.sweep_checkpoint._atomic_write`) so the reader never sees
     a half-written file.
 
+    DEC-SWEEP-UNKILLABLE-CORE-001 additions — every pre-existing key is
+    byte-unchanged:
+
+    * **G4 honesty keys, ALWAYS added:** ``wall_time_utc`` (epoch seconds) +
+      ``pid`` — the wall-clock/pid evidence
+      :func:`brutex.engine.sweep_liveness.progress_verdict` judges (the
+      snapshot's own ``updated_at`` is MONOTONIC and must never be compared to
+      ``time.time()`` — the exact defect this fixes).
+    * **Run-core keys, added when given:** ``run_id`` / ``suspect`` / ``stage``.
+    * **G11 fail-soft:** ANY write failure is ONE
+      ``sweep_supervisor.progress_write_failed`` WARN per path per process
+      (latched; :func:`reset_progress_write_warnings` re-arms) — a full disk /
+      read-only progress dir can never kill the sweep (the progress file is
+      observability-only).
+
     Parameters
     ----------
     path
         Destination JSON file (parents created).
     snapshot
         The progress snapshot to publish.
+    run_id
+        The run identity (D-1) to stamp, or ``None`` (key omitted).
+    suspect
+        The run-level SUSPECT latch to stamp, or ``None`` (key omitted).
+    stage
+        The run-core stage cursor to stamp, or ``None`` (key omitted).
     """
     from brutex.engine.sweep_checkpoint import _atomic_write
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(snapshot.to_dict(), sort_keys=True).encode("utf-8")
-    _atomic_write(path, content)
+    try:
+        payload = snapshot.to_dict()
+        payload["wall_time_utc"] = time.time()
+        payload["pid"] = os.getpid()
+        if run_id is not None:
+            payload["run_id"] = run_id
+        if suspect is not None:
+            payload["suspect"] = suspect
+        if stage is not None:
+            payload["stage"] = stage
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(payload, sort_keys=True).encode("utf-8")
+        _atomic_write(path, content)
+    except Exception as exc:  # G11 — the progress file must never kill the run
+        key = str(path)
+        with _PROGRESS_WARN_LOCK:
+            if key in _PROGRESS_WARN_LATCH:
+                return
+            _PROGRESS_WARN_LATCH.add(key)
+        _LOG.warning(
+            "sweep_supervisor.progress_write_failed",
+            path=key,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
 
 def read_progress(path: Path) -> dict[str, Any]:
@@ -908,6 +988,16 @@ def read_progress(path: Path) -> dict[str, Any]:
     truncated leftover is still defended) all fall back to the idle snapshot so a
     dashboard poll never raises.
 
+    G5 (DEC-SWEEP-UNKILLABLE-CORE-001): a successfully-parsed payload is
+    ADDITIVELY enriched via
+    :func:`brutex.engine.sweep_exit_status.enrich_progress_payload` — the
+    ``exit_status`` artifact (looked up under ``<progress dir>/../runs/<run_id>/``,
+    the production layout ``<root>/progress/sweep-progress.json`` implies) plus a
+    defaulted ``suspect`` flag — so the EXISTING ``/api/v1/sweep-progress`` route
+    serves exit codes / refusals / SUSPECT with ZERO route edits. Every
+    pre-existing key is byte-unchanged; the missing/malformed idle fallback is
+    returned unenriched (no run ⇒ nothing to enrich).
+
     Parameters
     ----------
     path
@@ -916,13 +1006,15 @@ def read_progress(path: Path) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        The parsed snapshot dict, or a copy of the idle snapshot.
+        The parsed (enriched) snapshot dict, or a copy of the idle snapshot.
     """
+    from brutex.engine.sweep_exit_status import enrich_progress_payload
+
     try:
         parsed: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return dict(_IDLE_PROGRESS)
-    return parsed
+    return enrich_progress_payload(parsed, results_root=path.parent.parent)
 
 
 def idle_progress() -> dict[str, Any]:
@@ -946,6 +1038,7 @@ __all__ = [
     "idle_progress",
     "publish_progress",
     "read_progress",
+    "reset_progress_write_warnings",
     "run_supervised_grid",
     "tuple_cache_key",
     "tuple_cache_params",

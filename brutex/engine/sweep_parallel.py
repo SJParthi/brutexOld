@@ -154,6 +154,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.sweep_progress import SweepProgressSnapshot
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
@@ -713,6 +714,7 @@ class ParallelGridDriver:
         "_ingest_audit",
         "_monotonic",
         "_next_apply",
+        "_on_progress",
         "_root",
         "_stall_seconds",
         "_subject",
@@ -730,6 +732,7 @@ class ParallelGridDriver:
         workers: int,
         stall_seconds: float = DEFAULT_STALL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -757,6 +760,13 @@ class ParallelGridDriver:
             while work is in flight.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        on_progress
+            Optional hook fired with the fresh
+            :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot` after
+            every progress mutation (G3, DEC-SWEEP-UNKILLABLE-CORE-001) —
+            ticked from the single-threaded writer-actor apply path, so the
+            parallel run now streams live progress exactly like the sequential
+            driver. ``None`` (default) is byte-identical to before.
 
         Raises
         ------
@@ -777,6 +787,7 @@ class ParallelGridDriver:
         self._workers = workers
         self._stall_seconds = stall_seconds
         self._monotonic = monotonic
+        self._on_progress = on_progress
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
@@ -1158,8 +1169,16 @@ class ParallelGridDriver:
             )
 
     def _advance(self, *, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once (the parent-only progress mutation)."""
+        """Tick progress once + stream the fresh snapshot to ``on_progress`` (G3).
+
+        Runs ONLY on the single-threaded writer-actor apply path
+        (:meth:`_apply_ready_prefix` → :meth:`_apply`), mirroring the
+        sequential driver's ``_advance`` — the hook observes ordered state and
+        can never reorder a result byte.
+        """
         self._guards.progress.advance(current=current, survived=survived, skipped=skipped)
+        if self._on_progress is not None:
+            self._on_progress(self._guards.progress.snapshot())
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1259,6 +1278,7 @@ def run_parallel_grid(
     workers: int,
     stall_seconds: float = DEFAULT_STALL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -1289,6 +1309,7 @@ def run_parallel_grid(
         workers=workers,
         stall_seconds=stall_seconds,
         monotonic=monotonic,
+        on_progress=on_progress,
     )
     return driver.run()
 
