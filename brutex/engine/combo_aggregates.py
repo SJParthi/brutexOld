@@ -384,8 +384,22 @@ def _int_stats(values: Sequence[int]) -> tuple[int, int, int]:
 
 
 def _float_stats(values: Sequence[float]) -> tuple[float, float, float]:
-    """``(min, mean, max)`` over non-empty full-precision floats."""
-    return min(values), sum(values) / len(values), max(values)
+    """``(min, mean, max)`` over non-empty full-precision floats.
+
+    The mean is CLAMPED into the ``[min, max]`` bracket: IEEE-754 summation
+    can push the raw ``sum/n`` a few ULP outside it — e.g. three trades all
+    stamped at the same 2-dp India-VIX print ``6.15`` sum to
+    ``18.450000000000003`` whose third is ``6.150000000000001 > 6.15``
+    (six such trades land BELOW the min instead) — which would persist an
+    internally-inconsistent ``avg > max`` / ``avg < min`` on the combo card
+    and break the documented ``min ≤ mean ≤ max`` invariant. The band edges
+    are always REAL input values, so only the mean needs the clamp; a mean
+    already inside the bracket is returned untouched (full precision — this
+    is an ULP-artifact correction, never a rounding).
+    """
+    lo = min(values)
+    hi = max(values)
+    return lo, min(max(sum(values) / len(values), lo), hi), hi
 
 
 def _one_regime_dominates(pnls: Iterable[int]) -> bool:

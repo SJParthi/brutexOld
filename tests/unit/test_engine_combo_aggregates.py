@@ -27,6 +27,7 @@ from brutex.engine.combo_aggregates import (
     REGIME_WONDER_SHARE,
     ComboAggregate,
     ComboAggregateError,
+    _float_stats,
     aggregate_combo,
     nearest_rank,
 )
@@ -397,6 +398,41 @@ class TestVixStats:
         assert agg.vix_loss_min == 19.0
         assert agg.vix_win_min is None
         assert agg.vix_band_lo is None
+
+    def test_repeated_equal_vix_mean_never_exceeds_max(self) -> None:
+        """Regression: float summation must not push the stored avg past max.
+
+        Three winners sharing the SAME 2-dp VIX print (a very common real
+        pattern): ``sum([6.15]*3)/3 == 6.150000000000001 > 6.15`` pre-fix,
+        which persisted ``vix_win_avg`` STRICTLY GREATER than ``vix_win_max``
+        — an internally-inconsistent combo card. The clamp pins avg == the
+        (identical) min/max exactly.
+        """
+        trades = tuple(_trade(_DAY, slot, 50, vix_entry="6.15") for slot in range(3))
+        agg = _aggregate(_capture(trades), _row([50, 50, 50]))
+        assert agg.vix_win_min == agg.vix_win_avg == agg.vix_win_max == 6.15
+        assert agg.vix_band_hi is not None
+        assert agg.vix_win_max is not None
+        assert agg.vix_band_hi <= agg.vix_win_max
+
+    def test_repeated_equal_vix_mean_never_undercuts_min(self) -> None:
+        """Regression twin (the n=6 case violates the MIN side of the bracket).
+
+        ``sum([6.15]*6)/6 == 6.1499999999999995 < 6.15`` pre-fix — the same
+        invariant defect on the other edge; also pinned on the LOSS class so
+        both `_float_stats` call sites are covered.
+        """
+        trades = tuple(_trade(_DAY, slot, -50, vix_entry="6.15") for slot in range(6))
+        agg = _aggregate(_capture(trades), _row([-50] * 6))
+        assert agg.vix_loss_min == agg.vix_loss_avg == agg.vix_loss_max == 6.15
+
+    def test_float_stats_clamp_is_ulp_only_never_a_rounding(self) -> None:
+        """An interior mean is returned at FULL raw precision (no rounding)."""
+        values = [14.5, 18.25]
+        assert _float_stats(values) == (14.5, (14.5 + 18.25) / 2, 18.25)
+        # Both violation sides of the raw fold are corrected onto the bracket.
+        assert _float_stats([6.15] * 3) == (6.15, 6.15, 6.15)
+        assert _float_stats([6.15] * 6) == (6.15, 6.15, 6.15)
 
 
 # ── Regime wonder + lenses ───────────────────────────────────────────────────

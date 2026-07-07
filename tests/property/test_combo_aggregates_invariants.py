@@ -36,7 +36,7 @@ from brutex.engine.results_store import ResultRow
 from brutex.engine.session_lens import SessionLens, TrendRegime
 from brutex.engine.trade_capture import CapturedTrade, ComboCapture
 from brutex.strategies.types import Side
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 _RUN = "ab" * 32
@@ -199,7 +199,21 @@ def test_tallies_and_histograms_sum_to_n_trades(specs: list[dict[str, Any]]) -> 
     assert agg.vix_stamped_trades == sum(1 for t in capture.trades if t.vix_entry is not None)
 
 
+def _ulp_vix_specs(pnl: int, n: int) -> list[dict[str, Any]]:
+    """N same-class trades sharing one 2-dp VIX print — the float-summation
+    mean-outside-bracket regression (``sum([6.15]*3)/3 > 6.15``;
+    ``sum([6.15]*6)/6 < 6.15``), pinned as explicit Hypothesis examples so
+    the previously-flaky discovery is exercised deterministically every run.
+    """
+    return [
+        {"pnl": pnl, "mae": 1, "mfe": 1, "vix": Decimal("6.15"), "reason": "signal", "day_step": 0}
+        for _ in range(n)
+    ]
+
+
 @given(specs=_trade_specs())
+@example(specs=_ulp_vix_specs(50, 3))  # pre-fix: vix_win_avg > vix_win_max
+@example(specs=_ulp_vix_specs(-50, 6))  # pre-fix: vix_loss_avg < vix_loss_min
 @settings(max_examples=75, deadline=None)
 def test_fold_ordering_invariants(specs: list[dict[str, Any]]) -> None:
     capture, row = _build_capture(specs)
