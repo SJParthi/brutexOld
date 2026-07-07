@@ -50,7 +50,8 @@ class TestReadRssKibProc:
             text = process_probe._read_proc_status()
         except OSError:
             pytest.skip("no /proc/self/status on this platform")
-        assert "VmRSS:" in text
+        else:
+            assert "VmRSS:" in text
 
 
 class TestReadRssKibRusage:
