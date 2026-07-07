@@ -14,32 +14,21 @@ assumed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol
 
 import pytest
 from playwright.sync_api import expect
 
 from tests.browser._fixtures import build_db_app
 from tests.browser._registry import PAGE_REGISTRY, PageSpec
-from tests.browser.conftest import PageSession
+from tests.browser.conftest import NewPageFactory
 
 pytestmark = pytest.mark.browser
 
 
-class _NewPage(Protocol):
-    """The conftest ``new_page`` factory contract."""
-
-    def __call__(
-        self,
-        fixture: Any,
-        *,
-        stub_widgets: bool = True,
-        expect_console_clean: bool = True,
-    ) -> PageSession: ...
-
-
 @pytest.mark.parametrize("spec", PAGE_REGISTRY, ids=[spec.name for spec in PAGE_REGISTRY])
-def test_page_renders_console_clean(spec: PageSpec, new_page: _NewPage, tmp_path: Path) -> None:
+def test_page_renders_console_clean(
+    spec: PageSpec, new_page: NewPageFactory, tmp_path: Path
+) -> None:
     """Load the page, wait for its pinned data-ready DOM, stay ledger-clean."""
     session = new_page(spec.build(tmp_path))
     session.goto(spec.path)
@@ -53,7 +42,7 @@ def test_page_renders_console_clean(spec: PageSpec, new_page: _NewPage, tmp_path
     assert session.console == []
 
 
-def test_route_policy_blocks_external_egress(new_page: _NewPage, tmp_path: Path) -> None:
+def test_route_policy_blocks_external_egress(new_page: NewPageFactory, tmp_path: Path) -> None:
     """An in-page fetch to a non-loopback host REJECTS — the abort policy is live.
 
     ``expect_console_clean=False``: Chromium itself logs the blocked resource

@@ -33,14 +33,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Protocol
 
 import pytest
 from brutex.dashboard.prebuild_gate import PrebuildGate
 from playwright.sync_api import expect
 
 from tests.browser._fixtures import XSS_NAME, build_movers_app
-from tests.browser.conftest import PageSession
+from tests.browser.conftest import NewPageFactory
 
 pytestmark = pytest.mark.browser
 
@@ -68,19 +67,9 @@ _STAMP_PROBE = "() => { document.querySelector('#rows tr').__bx_probe = 1; }"
 _READ_PROBE = "() => document.querySelector('#rows tr').__bx_probe"
 
 
-class _NewPage(Protocol):
-    """The conftest ``new_page`` factory contract."""
-
-    def __call__(
-        self,
-        fixture: Any,
-        *,
-        stub_widgets: bool = True,
-        expect_console_clean: bool = True,
-    ) -> PageSession: ...
-
-
-def test_gate_paint_once_recovery_and_timer_disarm(new_page: _NewPage, tmp_path: Path) -> None:
+def test_gate_paint_once_recovery_and_timer_disarm(
+    new_page: NewPageFactory, tmp_path: Path
+) -> None:
     """Gated shell paints once, recovers by itself, then disarms its timer."""
     fixture = build_movers_app(tmp_path)
     session = new_page(fixture)
@@ -156,7 +145,7 @@ def test_gate_paint_once_recovery_and_timer_disarm(new_page: _NewPage, tmp_path:
     assert session.request_count(_MOVERS_KEY) == 4, "gateTimer still armed after recovery"
 
 
-def test_hostile_symbol_renders_inert(new_page: _NewPage, tmp_path: Path) -> None:
+def test_hostile_symbol_renders_inert(new_page: NewPageFactory, tmp_path: Path) -> None:
     """The hostile lake symbol round-trips into the name cell as inert text."""
     fixture = build_movers_app(tmp_path)
     session = new_page(fixture)

@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Final
 
 import pytest
 from playwright.sync_api import Route, expect
@@ -48,7 +48,7 @@ from tests.browser._fixtures import (
     build_results_app,
     build_universe_app,
 )
-from tests.browser.conftest import WIDGET_STUBS, PageSession
+from tests.browser.conftest import WIDGET_STUBS, NewPageFactory
 from tests.unit.test_surface_trial_results import _SPECS
 
 pytestmark = pytest.mark.browser
@@ -57,23 +57,11 @@ pytestmark = pytest.mark.browser
 _WIDGET_POLL_MS: Final[int] = 3000
 
 
-class _NewPage(Protocol):
-    """The conftest ``new_page`` factory contract."""
-
-    def __call__(
-        self,
-        fixture: Any,
-        *,
-        stub_widgets: bool = True,
-        expect_console_clean: bool = True,
-    ) -> PageSession: ...
-
-
 # ── /universe: real render + hostile display name stays inert text ────────
 
 
 def test_universe_renders_and_neutralizes_hostile_display_name(
-    new_page: _NewPage, tmp_path: Path
+    new_page: NewPageFactory, tmp_path: Path
 ) -> None:
     """Both seeded rows render; the ``<script>`` display name is inert text.
 
@@ -113,7 +101,7 @@ def test_universe_renders_and_neutralizes_hostile_display_name(
 
 
 def test_results_leaderboard_renders_deduped_seeded_rows(
-    new_page: _NewPage, tmp_path: Path
+    new_page: NewPageFactory, tmp_path: Path
 ) -> None:
     """The leaderboard shows EXACTLY the distinct seeded run_ids, cell-checked.
 
@@ -151,7 +139,7 @@ def test_results_leaderboard_renders_deduped_seeded_rows(
 
 
 def test_bx_fixed2_round_half_up_golden_in_real_chromium(
-    new_page: _NewPage, tmp_path: Path
+    new_page: NewPageFactory, tmp_path: Path
 ) -> None:
     """The shipped ``bx-format.js`` rounds half-up where ``toFixed`` does not.
 
@@ -207,7 +195,9 @@ def _fulfill_json(body: str) -> Callable[[Route], None]:
     return handle
 
 
-def test_rate_widget_flow_state_drives_dot_classes(new_page: _NewPage, tmp_path: Path) -> None:
+def test_rate_widget_flow_state_drives_dot_classes(
+    new_page: NewPageFactory, tmp_path: Path
+) -> None:
     """Every ``flow_state`` verdict paints the real ``#bxrmDot``/``#bxrmState``.
 
     The ONLY test where the widget endpoints are NOT stubbed inert

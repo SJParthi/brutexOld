@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
 import pytest
 from playwright.sync_api import expect
 
 from tests.browser._fixtures import build_db_app
-from tests.browser.conftest import PageSession
+from tests.browser.conftest import NewPageFactory, PageSession
 
 pytestmark = pytest.mark.browser
 
@@ -56,18 +56,6 @@ PIN_SELECTORS: Final[tuple[str, ...]] = ("#cstart", "#csym", GRID_TABLE)
 
 #: ``is-loading`` must be ABSENT once a paint settled (never waited FOR).
 _IS_LOADING: Final[re.Pattern[str]] = re.compile(r"\bis-loading\b")
-
-
-class _NewPage(Protocol):
-    """The conftest ``new_page`` factory contract."""
-
-    def __call__(
-        self,
-        fixture: Any,
-        *,
-        stub_widgets: bool = True,
-        expect_console_clean: bool = True,
-    ) -> PageSession: ...
 
 
 def _stamp_pins(page: Any) -> None:
@@ -93,7 +81,7 @@ def _candle_requests(session: PageSession) -> list[str]:
     return [url for url in session.requests if CANDLES_URL in url]
 
 
-def test_db_paging_patches_grid_in_place(new_page: _NewPage, tmp_path: Path) -> None:
+def test_db_paging_patches_grid_in_place(new_page: NewPageFactory, tmp_path: Path) -> None:
     """Next/Prev patch ONLY the tbody + pager — controls, table, datepicker survive."""
     fixture = build_db_app(tmp_path)
     session = new_page(fixture)

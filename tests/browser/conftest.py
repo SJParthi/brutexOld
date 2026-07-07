@@ -37,10 +37,10 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from urllib.parse import urlsplit
 
 import pytest
@@ -231,6 +231,25 @@ def browser_session() -> Iterator[Any]:
 # ── the new_page factory ──────────────────────────────────────────────────
 
 
+class NewPageFactory(Protocol):
+    """The ``new_page`` fixture's factory contract.
+
+    The ONE shared structural type every browser test module annotates its
+    ``new_page`` parameter with (COMMON — Golden Rule #11). The fixture's
+    return annotation is bound to this Protocol, so the contract is
+    type-checked against the REAL factory and the two can never drift.
+    """
+
+    def __call__(
+        self,
+        fixture: Any,
+        *,
+        stub_widgets: bool = True,
+        expect_console_clean: bool = True,
+    ) -> PageSession:
+        """Serve ``fixture`` on a fresh server+context; return its session."""
+
+
 def _arm_route_policy(context: Any, *, stub_widgets: bool) -> None:
     """Abort ALL non-loopback egress; stub the widget pollers inert."""
 
@@ -258,9 +277,7 @@ def _sanitize_nodeid(nodeid: str) -> str:
 
 
 @pytest.fixture
-def new_page(
-    browser_session: Any, request: pytest.FixtureRequest
-) -> Iterator[Callable[..., PageSession]]:
+def new_page(browser_session: Any, request: pytest.FixtureRequest) -> Iterator[NewPageFactory]:
     """Factory: fresh uvicorn server + browser context + page per call.
 
     Usage: ``session = new_page(build_db_app(tmp_path))`` then
