@@ -123,9 +123,15 @@ def test_js_running_branch_updates_and_finish_clears() -> None:
 
 
 def test_no_new_poll_loop_added() -> None:
-    """The chip rides the ONE existing pull-progress poll — no second fetch loop."""
+    """The chip rides the ONE existing pull-progress poll — no second fetch loop.
+
+    The pin counts the fetch-call PREFIX (not the full closed-paren literal) so the
+    ONE site may carry an options argument — the hung-fetch abort ``signal`` added by
+    DEC-PULL-UI-STALENESS-001 (the refuter-confirmed universe abort bound). This is
+    this repo's own one-fetch-site contract, not a vendor contract.
+    """
     html = _render_universe_html()
-    assert html.count("fetch('/api/v1/universe/pull-progress')") == 1, (
+    assert html.count("fetch('/api/v1/universe/pull-progress'") == 1, (
         "exactly ONE pull-progress fetch site may exist (the chip must reuse pollProgress)"
     )
 

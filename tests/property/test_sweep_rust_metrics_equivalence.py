@@ -118,10 +118,16 @@ _EXITS = st.lists(
 def test_metrics_from_trades_flag_arms_are_bit_identical(
     exits: list[tuple[int, int]], start_equity: int
 ) -> None:
-    """OFF vs ON: the FULL metrics row is bit-identical over adversarial trades."""
+    """OFF vs ON: the FULL metrics row is bit-identical over adversarial trades.
+
+    The OFF arm is the EXPLICIT "0" kill switch (not unset): under the
+    ADR-0017 default-ON constant an unset flag IS the kernel arm, so only
+    "0" pins the pure-Python oracle side of the equivalence.
+    """
     trades = _trades_from(exits)
     prior = os.environ.pop(SWEEP_RUST_METRICS_ENV, None)
     try:
+        os.environ[SWEEP_RUST_METRICS_ENV] = "0"
         off = metrics_from_trades(_BARS, trades, start_equity_paisa=start_equity, tf_minutes=1)
         os.environ[SWEEP_RUST_METRICS_ENV] = "1"
         on = metrics_from_trades(_BARS, trades, start_equity_paisa=start_equity, tf_minutes=1)
@@ -178,7 +184,7 @@ def test_near_envelope_boundary_stays_bit_identical(
     for raw, exceeds in ((at_bound, False), (over_bound, True)):
         trades = _trades_from(raw)
         assert exceeds_exact_equity_envelope(start, trades) is exceeds
-        monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+        monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
         off = metrics_from_trades(_BARS, trades, start_equity_paisa=start, tf_minutes=1)
         monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
         on = metrics_from_trades(_BARS, trades, start_equity_paisa=start, tf_minutes=1)
