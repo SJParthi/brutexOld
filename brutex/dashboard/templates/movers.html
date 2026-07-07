@@ -372,8 +372,11 @@ function fmtElapsed(s){
    ONLY — renderPcr never concatenates payload values into innerHTML
    (DEC-DASHBOARD-XSS-HARDENING-001). */
 function renderPcr(rows) {
+  /* 2dp via the SHARED half-up bxFixed2 — never IEEE Number#toFixed
+     (DEC-STORED-DATA-VALIDATION-001 display law; pinned by
+     test_dashboard_halfup_format's zero-IEEE-rounder sweep). */
   const two = (s) => { if (s == null) return "—";
-    const n = parseFloat(s); return isNaN(n) ? String(s) : n.toFixed(2); };
+    const n = parseFloat(s); return isNaN(n) ? String(s) : bxFixed2(n); };
   const grp = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN");
   const box = $("pcrRows");
   box.textContent = "";
