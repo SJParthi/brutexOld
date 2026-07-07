@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1543–#1553 —
+_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1551–#1561 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
 DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
@@ -99,7 +99,7 @@ AST-pinned) and the doubly-dead informational quota surface is DELETED
 (`GET /api/v1/quota` + panel fields + `/universe` gauge — all only ever
 served the constant sentinel), the vendor-neutral enforcement seam kept
 dormant logic-byte-identical; (11) the TWO daily-open-substitution surfaces
-now share ONE per-session predicate (MIGRATION.md #1553,
+now share ONE per-session predicate (MIGRATION.md #1561,
 DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up the #1267/#1232
 drift pin deferred to): NEW pure `spot_daily_resample.classify_daily_open`
 (substituted iff a NON-Muhurat session's first present 1-minute bar is NOT
@@ -113,18 +113,68 @@ same-lake same-verdict equivalence proven + pinned, the old divergence pin
 consciously rewritten to an alignment pin; the ONE remaining deliberate
 divergence is POPULATION not predicate (census = ALL stored sessions,
 detector = the forming-session cutoff), documented + pinned; also corrects
-#1543's earlier misattribution (this item was never closed-wontfix — it is
+#1551's earlier misattribution (this item was never closed-wontfix — it is
 closed by IMPLEMENTATION). ALL ELEVEN: ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch
 PACING/RATE byte-identical everywhere, with exactly THREE SANCTIONED
 behavior changes (each honestly scoped in its own ledger entry): the
-same-run post-close 1day derive (#1544 — previously deferred to the
-next run), the learned-floor-clamped CLI planning (#1548 — a persisted
+same-run post-close 1day derive (#1552 — previously deferred to the
+next run), the learned-floor-clamped CLI planning (#1556 — a persisted
 learned floor plans FEWER 1-minute windows by design; dry-run
-byte-identical), and the fresh-foreign-lease pull REFUSAL (#1549);
+byte-identical), and the fresh-foreign-lease pull REFUSAL (#1557);
 every other item's fetch behaviour is byte-identical (the counter
-split #1546 explicitly so); touched modules 100% line+branch).
-Earlier: 2026-07-06 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 —
+split #1554 explicitly so); touched modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
+MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541) — the 5-item engine cleanup pack (reapplied onto
+current main after the original 2026-07-06 lineage was wiped), ONE change set:
+(1) the combo `\x1f` reject-only guard is MIRRORED into both previously-
+unguarded run-identity joins (`refinement_run_id` + `_walk_forward_run_hash`)
+via ONE COMMON `strategies.combo.reject_unit_separator`, plus `allow_nan=False`
+at both engine canonical-JSON sites (+ the stage1a schedule-hash third mirror)
+— byte-frozen run-identity goldens (with an independent pip-blake3
+payload-byte oracle proving `fno_math.blake3_hash ≡ blake3`) landed FIRST and
+pass unchanged; LOW/defence-in-depth, NOT a live bug. (2) the option-dedup
+bloom-before-exact-confirm ordering VERIFIED already correct — ZERO executable
+change (AST-proven); no-phantom + bloom-negative-short-circuit pins added at
+both public probe entries (`add_if_new`/`unique_option_bars`) — the PRODUCTION
+consumer of the verified ordering is the engine sweep's
+`ComboDedup(OptionDedupIndex)` dedup tier (`sweep_launch.py`/`cli.py`); the
+original sink-path pin covered the since-deleted `OptionBarSink` orchestration
+(removed on main by DEC-INGEST-AUDIT-WIRING-001 #1500 — dropped in the rebase),
+with the mark-after-durable-write LAW recorded as history in #1547. (3) the
+hand-synced Python `VwapState` +
+`MarketStructureState`/`Trend` twins DELETED — the `rust/trading-core`
+pyclasses are the SINGLE SOURCE (additive `last_swing_high/low` getters
+delegating to the EXISTING core accessors, core untouched — TickVault-safe;
+crate 0.3.0→0.3.1, so the LIVE `_indicator_version()` string moves with the
+bump — NO math change, new runs re-key via `indicator_version` exactly as the
+§2-Rule-4 formula intends; the frozen twin fixture + SHA never regenerated,
+replayed Rust-only; P-06 preserved at strength; `MarketStructureSignal`
+stays). (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic
+`MaskWord` core (the existing Rust suite passed UNMODIFIED — the
+frozen-behaviour gate; native `Vec<u128>` FFI per the recorded pyo3-0.29-abi3
+probe transcript) — >64-bit masks/bar_bits are now Rust-served, parity-pinned
+vs the `simulate_trades` oracle, with lazy wide-kernel promotion (reasons
+re-scoped `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+`wide_kernel_promoted`); HONEST: future-proofing, production-UNREACHABLE at
+today's 60-bit vocabulary — every currently-legal u64 input byte-identical,
+the frozen u64 golden corpus untouched, u64 bench non-regression measured.
+(5) the deprecated `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver`
+trio DELETED with its 8 test surfaces + golden fixture + dead ci.yml gates
+(grep-proven zero production consumers; `types.py` kept whole —
+`InstrumentMeta` live — and `errors.py` semantics untouched, its five
+subclasses honestly ledgered as orphaned; landed as ONE atomic commit — the
+wiped first lineage's two-commit accident is recorded as history in #1550) —
+the pack's ONLY behaviour-visible item (import surface). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; run identity bit-identical for all currently-legal
+inputs (golden-proven); no scope/vocab/rate change; touched modules 100%
+line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline; cargo suites green (fno-math 565, trading-core 162);
+cargo-mutants evidence partial under the ledgered #1511 Rust timeout —
+stated, not papered over).
+Earlier: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 —
 the test-apparatus debt pack: nine long-ledgered apparatus gaps closed as ONE
 change set, each landed fix-the-violation or measured-green: (a) a repo-wide
 doctest gate (pkgutil walk, measured 55-example teeth floor; the 3 broken
@@ -929,7 +979,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1543–#1553** —
+- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1551–#1561** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
   DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
@@ -944,14 +994,44 @@ hostile-review pass._
   banner auto-clears on the next real pull launch that actually STARTS — started-gated
   `clear_banner_after_start`, a refused start clears nothing) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
   follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant) ·
-  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1553 — the two daily-open-substitution surfaces share the ONE
+  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1561 — the two daily-open-substitution surfaces share the ONE
   per-session predicate `spot_daily_resample.classify_daily_open`: Muhurat abstains on BOTH, `!=` 09:15 on
   BOTH — the /completeness census's strict-`>` flips to `<>` + a `MUHURAT_SESSIONS` NOT-IN exclusion, its SQL
   CTE mirror-pinned equivalent to the classifier; the remaining divergence is POPULATION (forming-session
   cutoff) not predicate, documented + pinned; closes the #1267/#1232 named follow-up BY IMPLEMENTATION and
-  corrects #1543's wontfix misattribution).
+  corrects #1551's wontfix misattribution).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch;
   ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+  DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541)** — the
+  5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
+  (1) the combo `\x1f` reject-only guard mirrored into BOTH
+  previously-unguarded run-identity joins via ONE COMMON `strategies.combo.reject_unit_separator`
+  (+ `allow_nan=False` at the engine canonical-JSON sites incl. the stage1a third mirror) —
+  byte-frozen run-identity goldens landed FIRST and pass unchanged (LOW hardening, no live bug);
+  (2) the option-dedup bloom-before-exact-confirm ordering VERIFIED already correct — pins +
+  docs only, ZERO executable change (AST-proven); the PRODUCTION consumer is the engine sweep's
+  `ComboDedup(OptionDedupIndex)` dedup tier (the `OptionBarSink` pin was dropped in the rebase —
+  main's #1500 deleted that dead orchestration; the mark-after-durable-write LAW recorded as
+  history in #1547);
+  (3) the hand-synced Python `VwapState` + `MarketStructureState`/`Trend` twins DELETED — the
+  `rust/trading-core` pyclasses are the single source (additive `last_swing_high/low` getters,
+  core untouched — TickVault-safe; crate 0.3.0→0.3.1 moves the live `_indicator_version()`
+  string with NO math change; twin fixture + SHA never regenerated; P-06 preserved);
+  (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic `MaskWord` core (existing
+  Rust suite passed UNMODIFIED; native `Vec<u128>` FFI per the recorded pyo3 probe; lazy
+  wide-kernel promotion; `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+  `wide_kernel_promoted` observability) — HONEST: future-proofing, production-unreachable at the
+  60-bit vocabulary, u64 golden corpus byte-untouched; (5) the deprecated
+  `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver` trio DELETED in full (8 test surfaces +
+  golden fixture + dead ci.yml gates; `types.py` whole + `errors.py` semantics untouched, five
+  subclasses honestly orphaned; ONE atomic commit — the wiped lineage's two-commit shape recorded
+  as history in #1550) — the
+  pack's ONLY behaviour-visible item. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
+  bit-identical for all currently-legal inputs (golden-proven); no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+  pre-change baseline; cargo-mutants partial under the ledgered #1511 timeout).
   Earlier: `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
   MIGRATION.md #1541** — the test-apparatus debt pack: repo-wide doctest gate (measured
   55-example floor; the 3 broken tf_resampler examples fixed — docstring-only, the sole
@@ -2698,6 +2778,42 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/blissful-curie-gp94rk`
+  Earlier: `claude/zen-meitner-8780fo`
+  (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
+  DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
+  DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
+  Earlier: `claude/ecstatic-cannon-o3zbbe`
+  (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 — the test-apparatus
+  debt pack: nine long-ledgered apparatus gaps closed as ONE change set;
+  apparatus/CI/docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes)
+  (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1539 — the `/movers`
+  prev-close/OI baselines gain an honest calendar-contiguity verdict: a
+  baseline anchored on a non-adjacent NSE session is stamped
+  (`prev_close_*`/`oi_baseline_*` EMIT-ON-FALSE keys), warned once (capped),
+  and marked " *" in the UI — the served number itself unchanged; READ-ONLY
+  dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier (same branch):
+  (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538 — the `/movers`
+  SPOT "Top Value" (turnover) is TIMEFRAME-INVARIANT: re-sourced from the RAW
+  1-minute session frame (post as-of cut, PRE-resample) via the NEW
+  `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options session value; READ-ONLY dashboard ranking, ENGINE UNCHANGED
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/intelligent-euler-dwf2ab`
+  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch` pull
+  path runs the SAME fenced Greeks-enrichment pass the dashboard runs + the NEW
+  `brutex enrich-greeks` bulk re-enrich subcommand; ENGINE UNCHANGED),
+  `claude/movers-asof-default-latest-minute`
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
+  default as-of TIME resolves to the SAME latest available minute across EVERY
+  timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX),
+  `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
+  MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
+  (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
+  ADR-0017, MIGRATION.md #1531–#1532)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -2733,14 +2849,17 @@ hostile-review pass._
 - **No look-ahead** — at bar N, the engine may only access bars 0..N.
   Enforced TODAY by TWO complementary runtime guards: (1) the
   feed-boundary guard (`ReplayFeed.ensure_no_lookahead`, raises
-  `LookAheadError`; wired into the strategy runner + execution driver,
-  integration-tested) — a *timestamp*-based check on emitted signals; and
+  `LookAheadError`; wired into the strategy runner — the deprecated
+  execution driver, the historical second wiring site, was DELETED with
+  the simulator/driver trio per DEC-EXECUTION-TRIO-DELETE-001
+  (MIGRATION.md #1550) — integration-tested) — a *timestamp*-based check
+  on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
   `LookAheadBarrier`): an *index*-based accessor that raises `LookAheadError`
   the moment an `access(i)` reaches index `i > N`. Guard (1) is the real
   strategy-look-ahead defence — it catches a future *signal*. Guard (2), as
-  wired into the runner/driver event loop (a default `record=False`
+  wired into the runner event loop (a default `record=False`
   O(1)-memory barrier on every sweep eval), asserts the **advance/access
   cursor invariant**: both sites `advance_to(step)` then `guard(step, …)` at
   the SAME `step`, so it fires on a feed/barrier desync or a wiring regression
@@ -2756,7 +2875,7 @@ hostile-review pass._
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
   DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
-  runner/driver guards above never covered) now has its own three-layer
+  runner-wired guards above never covered) now has its own three-layer
   defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
   causality (audit-verified — Stage-1A updates prior-bar history AFTER
   evaluation; the trade sim enters at the next bar's open) + PERMANENT
@@ -2819,7 +2938,10 @@ bruteX/
 │   ├── dashboard/                  ← FastAPI UI
 │   ├── data/                       ← Parquet + DuckDB lake (generic)
 │   ├── engine/                     ← brute-force combo/mask sweep engine
-│   ├── execution/                  ← signal-only simulator (Track 1)
+│   ├── execution/                  ← shared execution types + typed errors
+│   │                                 for the lean instrument store (the
+│   │                                 deprecated costs/simulator/driver trio
+│   │                                 was DELETED — DEC-EXECUTION-TRIO-DELETE-001)
 │   ├── feed/                       ← replay + resampler
 │   ├── indicators/                 ← evaluate-time indicators (pivots/fib/EMA)
 │   ├── math/                       ← thin facade to Rust hot kernel
