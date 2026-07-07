@@ -18,7 +18,37 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+_Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
+MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+(1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
+ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
+production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
+`entry_open + tick` → `entry_open − tick` (byte-exact test 10_005 → 9_995; BUY-only
+DEC-EXEC-008 + intraday DEC-RISK-011 locks UNTOUCHED, `executor.py` not edited), the
+§4.2 expiry state machine honestly labelled a fail-loud STUB in-spec, and the two
+§4.2 pseudo-code drifts REGISTERED as §16 items 18/19 — never silently decided;
+(2) the broker (Groww) token/credential docs refreshed to the AWS-only / fail-fast /
+mid-run-re-read truth (#1065/#1072/#1092) — the stale `BRUTEX_TOKEN_BROKER_READONLY`
+instructions + REMOVED local-mint-fallback prose replaced across the two runbooks, the
+deploy guide, the minter runbook, `TOKEN_BROKER_CONTRACT.md` (TickVault claims left
+"per its own repo"), ADR-0013/0014 Status-line superseded-in-part notes, and the
+scoreboard's re-mint cell → re-read (`groww.token.reread`); DOCS-only, auth code CITED
+never edited, rate caps untouched; (3) ADR-0004 GPU gate reconciled — Status PROPOSED
+→ ACCEPTED (CPU-first arm EXECUTED + MEASURED #411/#413/#417), the never-run §6
+tri-platform benchmark RETIRED as scheduled work + RETAINED as a dormant FAIL-CLOSED
+precondition, mechanically pinned by NEW `tests/unit/test_gpu_gate_drift_pin.py`
+(no MLX/CuPy/`BRUTEX_GPU_OFFLOAD` in `brutex/`+`rust/`; #1492-G3 pattern);
+(4) the dormant cloud auto-fix snippet (claude_automation.md §3) RETIRED outright —
+DELETE, never wired, a #1180-class privileged-trigger hazard — and the fork-PR redteam
+sweep EXTENDED to comment-family triggers (`test_no_issue_comment_privileged_workflows`,
+GITHUB_TOKEN carve-out; revival needs a fresh DEC + the ledgered precondition checklist);
+(5) the Phase-1 sign-off checklist closed by SUPERSESSION — all 11 boxes ticked with
+per-item citations, the "10 boxes" count defect fixed, the env-var trailer superseded by
+#1065; NO operator ack pre-claimed (requested on the PR). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the ONE code delta lives inside the
+DEC-EXEC-008-stubbed short branch, `calculator.py` stays 100% line+branch.)
+Earlier: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
 DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
 DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
 MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541) — the 5-item engine cleanup pack (reapplied onto
@@ -873,7 +903,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+- **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
+  DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
+  pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
+  (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
+  "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
+  drifts registered as §16 items 18/19; BUY-only DEC-EXEC-008 + DEC-RISK-011 locks untouched); the
+  broker token/credential docs (runbooks + deploy guide + minter + `TOKEN_BROKER_CONTRACT.md` +
+  ADR-0013/0014 status notes + scoreboard cell) refreshed to the AWS-only / fail-fast /
+  mid-run-re-read truth (#1065/#1072/#1092 — docs-only, rate caps untouched); ADR-0004 GPU gate
+  reconciled (PROPOSED→ACCEPTED, §6 benchmark retired-as-scheduled + retained as a dormant
+  fail-closed precondition, NEW drift pin `tests/unit/test_gpu_gate_drift_pin.py`); the dormant
+  cloud auto-fix snippet RETIRED (DELETE) + the redteam sweep extended to comment-family triggers;
+  the Phase-1 sign-off checklist closed by supersession (11 boxes, honest no-backdate clause).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched costs module
+  stays 100% line+branch).
+  Earlier: `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
   DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
   DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541)** — the
   5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
@@ -1355,8 +1401,10 @@ hostile-review pass._
   non-member → trusted=false, allowlist/OWNER/MEMBER/COLLABORATOR → trusted=true). HONEST
   (Golden Rule #10): server-side branch protection (require PR + `CI OK (aggregate gate)`
   + up-to-date branch + restricted merge; Actions → "Require approval for all outside
-  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1176,
-  NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
+  own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
+  DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1555), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
@@ -2325,7 +2373,7 @@ hostile-review pass._
   OPTIONAL gated 4th phase `run_movers` + `PipelinePullReport.movers_warmed` that runs ONLY after a
   fully-successful fetch (`historical_phase_ok`) — the operator's "never run movers unless the fetch
   succeeded". The WARMER is NOT yet bound in the route (a today-coordinate warm would cache empty snapshots
-  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump). 
+  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump).
   `pipeline_pull.py` at 100% line+branch; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED. Prior merged:
   DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876 (PR #830: the `/movers` page defaults Top-N to 100 and offers ALL
   21 Track-1 timeframes (1m + 19 derived intraday + 1d), every one derived on-the-fly from the stored
@@ -2648,7 +2696,8 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zen-meitner-8780fo`
+- **Active feature branch:** `claude/stoic-davinci-7c7xp0`
+  Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
   DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
