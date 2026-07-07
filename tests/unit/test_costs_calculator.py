@@ -1017,6 +1017,30 @@ def test_slippage_short_fills_byte_exact_adverse() -> None:
     assert r.sell_fill_paisa == 9_995  # entry 10000 - 5 tick (adverse, lower)
 
 
+def test_short_entry_fill_floored_at_one_tick() -> None:
+    """The adverse re-pin's NEW floor case: a short ENTRY on a 1-tick bar.
+
+    Before DEC-TRACK2-COSTS-SPEC-RECONCILE-001 the short entry SELL filled
+    at ``entry_open + tick`` (favorable) and could never reach ₹0.00; the
+    adverse re-pin (``entry_open − tick``) makes ``5 − 5 = 0`` reachable on
+    the short ENTRY leg — the exact scenario the ``_apply_slippage``
+    docstring now claims the MINOR-3 one-tick floor covers. Pin it: the
+    sell fill floors at ``TICK_PAISA`` (5 paise, never a "free" ₹0.00
+    sale), the cover buy is untouched, and the realized slippage is
+    ``1 × tick × shares`` (only the buy leg truly moved — the floored sell
+    leg moved 0), mirroring ``test_realized_slippage_floored_exit_one_tick``
+    on the long side. Production-unreachable under DEC-EXEC-008 (BUY-only);
+    forward-compat teeth only.
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=5, exit_open_paisa=12_000, side="short_call")
+    )
+    assert r.sell_fill_paisa == constants.TICK_PAISA  # floored from 5 - 5 = 0
+    assert r.buy_fill_paisa == 12_005  # cover: exit 12000 + 5 tick (adverse, higher)
+    # Realized: only the cover buy moved (1 tick); the floored sell leg moved 0.
+    assert r.slippage_paisa == 1 * constants.TICK_PAISA * r.n_shares
+
+
 # ─────────────────────────────────────────────────────────────────
 # CHANGE 3 (NIT-1) — direct ROUND_HALF_UP rounding-helper tests
 # ─────────────────────────────────────────────────────────────────
