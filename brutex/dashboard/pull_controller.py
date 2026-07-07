@@ -53,7 +53,7 @@ expansion.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -1208,7 +1208,7 @@ GrowwClient` (its own ``.meter``) OR a :class:`~brutex.adapters.protocol.MarketA
 @contextmanager
 def _pull_meter_scope(
     session_rate: SessionRateController | None, source: object, *, dry_run: bool
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Pair a build-site meter registration with its identity-gated clear (round 4).
 
     The OFF-job single-symbol spine (:func:`pull_candles` — its ONLY production caller
