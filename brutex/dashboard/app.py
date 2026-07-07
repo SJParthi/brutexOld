@@ -189,6 +189,7 @@ from brutex.dashboard.pull_controller import (
 from brutex.dashboard.pull_intent import (
     PullIntent,
     PullIntentStore,
+    clear_banner_after_start,
     persist_intent_for_launch,
     run_auto_resume,
 )
@@ -3798,9 +3799,10 @@ def build_app(
             # Best-effort write (a failed write is logged, never blocks the
             # pull); the clear hook is wired for EVERY real pull regardless —
             # a completing real pull supersedes any lingering older intent.
-            # This call ALSO auto-clears any stale resume red banner
-            # (DEC-RESUME-BANNER-AUTOCLEAR-001): the banner told the operator
-            # to re-launch manually, and this IS that launch.
+            # NOTE: the resume red-banner auto-clear does NOT live here — it
+            # fires AFTER start() below, gated on `started`
+            # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
+            # a refused start launches nothing and must not drop the banner).
             persist_intent_for_launch(
                 pull_intent_store,
                 dry_run=dry_run,
@@ -3818,6 +3820,14 @@ def build_app(
             ledger_synced=True,
             on_finally=on_finally,
         )
+        if pull_intent_store is not None:
+            # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
+            # stale resume red banner ONLY when the real pull actually started
+            # — start() acquired the in-process + cross-process guards and
+            # spawned the worker. A refused start (contention / foreign-host
+            # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
+            # touches it (both gates live inside the helper).
+            clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
         return {
             "started": started,
             "targets": len(targets),

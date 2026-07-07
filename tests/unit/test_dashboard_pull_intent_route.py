@@ -9,7 +9,10 @@ replaced by OFFLINE fakes (the REAL report dataclasses — never a network call)
 * a ``dry_run`` NEVER writes an intent and NEVER clears a crashed real pull's
   intent (pinned — the dry-run-erases-the-crash-record trap);
 * ``GET /api/v1/liveproof`` carries the resume red-banner ``resume`` section
-  iff the banner holds a payload (absent ⇒ byte-identical payload);
+  iff the banner holds a payload (absent ⇒ byte-identical payload); the banner
+  auto-clear is STARTED-gated (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3
+  hostile-review fold) — a started manual pull retires it, a REFUSED start
+  (peer-held flock) keeps it;
 * ``app.state.brutex_resume_pipeline`` re-fires the SAME persisted quadruple
   through the SAME launch path, bumping the restart token; a stale selection
   clears the intent; an over-cap intent refuses with ONE CRITICAL alert + the
@@ -296,6 +299,29 @@ def test_manual_real_pull_autoclears_the_resume_banner_end_to_end(
     assert intent_store.banner.snapshot() is None, "the manual launch retires the banner"
     assert "resume" not in client.get("/api/v1/liveproof").json()
     assert _wait_for_job(client)["state"] == "done"
+
+
+def test_refused_manual_pull_keeps_the_resume_banner_end_to_end(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Round-3 hostile-review regression (DEC-RESUME-BANNER-AUTOCLEAR-001,
+    # started-gated): a peer-held account single-flight flock makes
+    # BackgroundPullJob.start refuse (started=False) — NO pull launches, so the
+    # CRITICAL crash-loop banner must survive the refused attempt (previously
+    # persist_intent_for_launch dropped it BEFORE start() ran, permanently
+    # losing the banner for the process lifetime).
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    with pull_singleflight_lock(intent_store.lake_root):
+        resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+        assert resp.status_code == 200
+        assert resp.json()["started"] is False, "the peer-held flock refuses the launch"
+    assert intent_store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }, "a refused launch resolves no crash loop — the banner stays up"
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
 
 
 def test_dry_run_route_never_clears_the_resume_banner(

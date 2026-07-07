@@ -88,8 +88,11 @@ reads `source="local_derive"` via the zero-I/O
 `derive_lock_held_by_this_process` registry probe consulted FIRST, never a
 fabricated "another process" claim (probe OSError fails OPEN, one WARN per
 outage; closes the #1288 follow-up); (9) the intent-resume `ResumeBanner` auto-clears
-on the next REAL pull launch (it had NO production clear path — a stale
-CRITICAL banner survived its own remediation); (10) the #889 verdict-driven
+on the next REAL pull launch that actually STARTS (it had NO production clear
+path — a stale CRITICAL banner survived its own remediation; round-3 review
+fold: the clear is STARTED-gated via the NEW `clear_banner_after_start` AFTER
+`BackgroundPullJob.start` — a REFUSED start (contention / foreign-host lease)
+launches nothing and clears nothing); (10) the #889 verdict-driven
 quota phone-alert follow-up is CLOSED AS MOOT (Groww backtesting has NO
 daily quota + ZERO production `DailyQuotaTracker` constructions,
 AST-pinned) and the doubly-dead informational quota surface is DELETED
@@ -632,7 +635,8 @@ hostile-review pass._
   DEC-ACCOUNT-LEASE-CROSSHOST-001 (advisory cross-host heartbeat pull lease on shared lake storage — detection,
   NOT mutual exclusion; `BRUTEX_PULL_LEASE=off`) · DEC-DERIVE-LOCK-VISIBILITY-001 (movers PrebuildGate honors
   the cross-process derive lock, `source="cross_process"`) · DEC-RESUME-BANNER-AUTOCLEAR-001 (the resume red
-  banner auto-clears on the next real pull launch) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
+  banner auto-clears on the next real pull launch that actually STARTS — started-gated
+  `clear_banner_after_start`, a refused start clears nothing) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
   follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant) ·
   DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1537 — the two daily-open-substitution surfaces share the ONE
   per-session predicate `spot_daily_resample.classify_daily_open`: Muhurat abstains on BOTH, `!=` 09:15 on
