@@ -1,6 +1,6 @@
 {
   "_comment": "Wheel-source freshness fingerprint (R2-CC-G1). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose. Read by `brutex doctor`'s wheel_freshness stage and pinned equal to trading_core._EXPECTED_COMPILED_SYMBOLS by tests. Update this file in the SAME commit as any rust/trading-core surface or version change. HONEST residual gap (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; they do NOT catch same-version symbol-compatible behavioral drift — closing that needs a build.rs source-content digest (named follow-up, out of this scope).",
-  "crate_version": "0.3.0",
+  "crate_version": "0.3.1",
   "symbols": [
     "FIB_LEVELS_LEN",
     "GREEKS_DELTA_ADMISSION_FLOOR",

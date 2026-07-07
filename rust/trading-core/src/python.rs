@@ -1394,6 +1394,31 @@ impl PyMarketStructureState {
             sig.choch_bearish,
         )
     }
+
+    /// The most recent CONFIRMED swing high (int64 paisa), or `None` before any
+    /// swing high has been confirmed.
+    ///
+    /// Read-only introspection delegating to the EXISTING core accessor
+    /// [`CoreMarketStructureState::last_swing_high`] (the core is untouched —
+    /// TickVault-safe). Exposed so the Python side (the P-06 look-ahead property
+    /// suite + the frozen twin-state golden replay) can assert the confirmed
+    /// swing levels directly on the PRODUCTION state now that the hand-synced
+    /// Python twin is deleted (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001).
+    #[getter]
+    fn last_swing_high(&self) -> Option<i64> {
+        self.inner.last_swing_high()
+    }
+
+    /// The most recent CONFIRMED swing low (int64 paisa), or `None` before any
+    /// swing low has been confirmed.
+    ///
+    /// Read-only introspection delegating to the EXISTING core accessor
+    /// [`CoreMarketStructureState::last_swing_low`] — see
+    /// [`PyMarketStructureState::last_swing_high`] for the rationale.
+    #[getter]
+    fn last_swing_low(&self) -> Option<i64> {
+        self.inner.last_swing_low()
+    }
 }
 
 /// Flat FFI shape of one Greeks tuple:
@@ -2526,6 +2551,51 @@ mod tests {
         assert!(vwap_update_guard(0, -5).is_ok());
         assert!(vwap_update_guard(MAX_BAR_PAISA, MAX_BAR_PAISA).is_ok());
         assert!(vwap_update_guard(24_000_00, 100).is_ok());
+    }
+
+    // ── PyMarketStructureState swing-level getters ─────────────────────
+    // (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — the additive read-only
+    // introspection the Python-side P-06 + golden-replay suites consume.)
+
+    #[test]
+    fn ms_getters_are_none_before_any_confirmed_swing() {
+        // The `None` arm of both getters: a fresh detector (and one fed fewer
+        // than 2k+1 bars) has confirmed nothing, so both levels read `None`.
+        let mut state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        assert_eq!(state.last_swing_high(), None);
+        assert_eq!(state.last_swing_low(), None);
+        for (h, l, c) in [(100, 90, 95), (110, 100, 105), (130, 80, 125)] {
+            state.update(h, l, c);
+        }
+        // 3 bars < 2k+1 = 5 — still nothing confirmable.
+        assert_eq!(state.last_swing_high(), None);
+        assert_eq!(state.last_swing_low(), None);
+    }
+
+    #[test]
+    fn ms_getters_expose_confirmed_swing_levels() {
+        // The `Some` arm: bar 2 is BOTH a strict local-max high (130) and a
+        // strict local-min low (80) over its 2k=4 neighbours, confirmed once
+        // the 5th bar lands. The getters must expose EXACTLY the core levels.
+        let mut state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        for (h, l, c) in [
+            (100, 90, 95),
+            (110, 100, 105),
+            (130, 80, 125),
+            (115, 105, 110),
+            (112, 102, 108),
+        ] {
+            state.update(h, l, c);
+        }
+        assert_eq!(state.last_swing_high(), Some(130));
+        assert_eq!(state.last_swing_low(), Some(80));
+        // Delegation is verbatim: getter == the existing core accessor.
+        assert_eq!(state.last_swing_high(), state.inner.last_swing_high());
+        assert_eq!(state.last_swing_low(), state.inner.last_swing_low());
     }
 
     // ── property layer ─────────────────────────────────────────────────────
