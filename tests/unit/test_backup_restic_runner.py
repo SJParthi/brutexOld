@@ -126,7 +126,7 @@ class TestArgvGoldens:
                     "--tag",
                     "brutex",
                     "--group-by",
-                    "host,tags",
+                    "host",
                 ),
             ),
             (
@@ -144,7 +144,7 @@ class TestArgvGoldens:
                     "--tag",
                     "brutex",
                     "--group-by",
-                    "host,tags",
+                    "host",
                     "--prune",
                 ),
             ),

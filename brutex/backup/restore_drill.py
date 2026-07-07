@@ -348,10 +348,28 @@ def run_restore_drill(
             return EXIT_CONFIG
 
     try:
+        lake = lake_root if lake_root is not None else resolve_lake_root()
+    except (KeyError, RuntimeError) as exc:
+        # ``Path.expanduser()`` on a ``~nosuchuser`` BRUTEX_LAKE_ROOT typo
+        # raises RuntimeError — which the OSError guard below cannot catch.
+        # Map to the deterministic config triple, never a raw monthly
+        # traceback (the run_backup twin of this guard).
+        _LOG.error(
+            "backup.config.malformed_path",
+            env_var="BRUTEX_LAKE_ROOT",
+            error=str(exc),
+            context="restore-drill",
+        )
+        active_alerter.backup_failed(
+            reason="config", detail=f"BRUTEX_LAKE_ROOT unresolvable: {exc}"
+        )
+        return EXIT_CONFIG
+
+    try:
         return _drill_flow(
             cfg,
             snapshot_id=snapshot_id,
-            lake_root=lake_root,
+            lake_root=lake,
             sample=sample,
             target_dir=target_dir,
             keep=keep,
@@ -372,7 +390,7 @@ def _drill_flow(
     cfg: BackupEnvConfig,
     *,
     snapshot_id: str,
-    lake_root: Path | None,
+    lake_root: Path,
     sample: int | None,
     target_dir: Path | None,
     keep: bool,
@@ -381,11 +399,13 @@ def _drill_flow(
 ) -> int:
     """The §8 drill body (canary → ls → sample restore → verify).
 
-    Every ``OSError`` raised here is mapped by :func:`run_restore_drill` to
-    ``EXIT_RESTIC`` + ``backup_failed(reason="drill_io")``.
+    *lake_root* arrives RESOLVED (the caller owns the total lake-root
+    resolution). Every ``OSError`` raised here is mapped by
+    :func:`run_restore_drill` to ``EXIT_RESTIC`` +
+    ``backup_failed(reason="drill_io")``.
     """
     active_alerter = alerter
-    lake = lake_root if lake_root is not None else resolve_lake_root()
+    lake = lake_root
     home_audit = brutex_home() / "audit"
     sample_count = sample if sample is not None else cfg.drill_sample
     explicit_target = target_dir is not None

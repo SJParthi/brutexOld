@@ -42,6 +42,22 @@ _KEYCHAIN_ROUTE_NOTE: Final[str] = (
     "         ambiguous-source EXIT_CONFIG refusal (F6). -->"
 )
 
+#: Inline note above the healthcheck-URL env key (dead-man plist): the ping
+#: URL does not exist until the healthchecks.io check is created (runbook
+#: step 10 / ADR-0017 M6) — AFTER the step-7 plist fill — and launchd env
+#: OVERRIDES ``~/.brutex/.env`` (``bootstrap_env`` never overrides an
+#: already-set var), so a stale value here silently wins over a later .env
+#: edit.
+_HEALTHCHECK_URL_NOTE: Final[str] = (
+    "    <!-- fill AFTER the healthchecks.io check exists (runbook step 10 / M6); until\n"
+    "         then set the value below to an EMPTY string (blank reads as unset) — never\n"
+    "         leave the literal placeholder (any non-http(s) value is refused with a WARN\n"
+    "         every tick while `backup status` reads SET). The hourly checker reads THIS\n"
+    "         value: launchd env OVERRIDES ~/.brutex/.env, so set the URL here and\n"
+    "         bootout+bootstrap the agent (a .env-only URL works only if this key stays\n"
+    "         blank/deleted). -->"
+)
+
 
 def render_backup_plist() -> str:
     """Render the nightly backup LaunchAgent template (03:35 IST, one-shot)."""
@@ -87,6 +103,7 @@ def render_deadman_plist() -> str:
   <key>RunAtLoad</key><true/>
   <key>ThrottleInterval</key><integer>300</integer>
   <key>EnvironmentVariables</key><dict>
+{_HEALTHCHECK_URL_NOTE}
     <key>BRUTEX_BACKUP_HEALTHCHECK_URL</key><string>{{{{BRUTEX_BACKUP_HEALTHCHECK_URL}}}}</string>
     <key>PATH</key><string>{{{{BRUTEX_VENV_BIN}}}}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

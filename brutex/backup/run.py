@@ -317,7 +317,18 @@ def run_backup(
         The deterministic §1 exit code (0/2/3/4/5/6/7).
     """
     active_alerter = alerter if alerter is not None else SweepAlerter()
-    lake = lake_root if lake_root is not None else resolve_lake_root()
+    try:
+        lake = lake_root if lake_root is not None else resolve_lake_root()
+    except (KeyError, RuntimeError) as exc:
+        # ``Path.expanduser()`` on a ``~nosuchuser`` BRUTEX_LAKE_ROOT typo
+        # raises RuntimeError — the same non-total surface _expand_user_path
+        # guards for the BRUTEX_BACKUP_* paths. Map to the deterministic
+        # config triple, never a raw nightly traceback.
+        _LOG.error("backup.config.malformed_path", env_var="BRUTEX_LAKE_ROOT", error=str(exc))
+        active_alerter.backup_failed(
+            reason="config", detail=f"BRUTEX_LAKE_ROOT unresolvable: {exc}"
+        )
+        return EXIT_CONFIG
     _LOG.info("backup.run.start", lake_root=str(lake), dry_run=dry_run)
 
     config_exit = _check_config(cfg, active_alerter)
@@ -333,21 +344,32 @@ def run_backup(
         _LOG.warning("backup.run.state_corrupt_reset", error=str(exc))
         prior = None
 
-    verdict = _preflight_or_refuse(
-        cfg,
-        lake,
-        allow_empty=allow_empty,
-        alerter=active_alerter,
-        preflight_fn=preflight_fn,
-        prior=prior,
-    )
-    if isinstance(verdict, int):
-        return verdict
-
-    if dry_run:
-        plan = plan_fn(cfg, lake)
-        _log_would_run_plan(cfg, plan)
-        return EXIT_OK
+    try:
+        gate: PreflightVerdict | int = _preflight_or_refuse(
+            cfg,
+            lake,
+            allow_empty=allow_empty,
+            alerter=active_alerter,
+            preflight_fn=preflight_fn,
+            prior=prior,
+        )
+        if not isinstance(gate, int) and dry_run:
+            plan = plan_fn(cfg, lake)
+            _log_would_run_plan(cfg, plan)
+            return EXIT_OK
+    except OSError as exc:
+        # The preflight probes (lake_root_identity + the member exists()
+        # loop) and the dry-run plan build do real disk I/O BEFORE the lock
+        # scope's guard — pathlib re-raises EACCES/EIO-class OSErrors, so a
+        # permission-broken or wedged volume must map to the deterministic
+        # triple, not a raw traceback (the "raises nothing" law). Nothing
+        # was stamped yet — no running-marker concern on this path.
+        _LOG.error("backup.preflight.io_failed", lake_root=str(lake), error=str(exc))
+        active_alerter.backup_failed(reason="preflight_io", detail=str(exc))
+        return EXIT_PREFLIGHT
+    if isinstance(gate, int):
+        return gate
+    verdict = gate
 
     try:
         with backup_singleflight_lock(cfg.state_dir):
@@ -390,16 +412,26 @@ def _probe_and_init_repo(shell: _RunShell, runner: ResticRunner) -> int | None:
         if init.timed_out:
             return shell.fail("timeout", detail="restic init timed out.")
         if not init.ok:
-            # Wrong password vs corrupt repo config is indistinguishable
-            # on-box without parsing localized stderr — deliberately not
-            # attempted (F7: no fragile string matching for control flow).
+            # An UNREACHABLE remote (S3/B2 down, DNS, offline — the outage
+            # present from the start), a wrong password and a corrupt repo
+            # config are indistinguishable on-box without parsing localized
+            # stderr — deliberately not attempted (F7: no fragile string
+            # matching for control flow). The reason token names all three
+            # co-equal causes so a whole-night outage never misdirects the
+            # operator at the password/keychain alone.
             _LOG.error(
                 "backup.restic.failed",
                 op="init",
                 rc=init.returncode,
                 stderr_tail=init.stderr_tail,
             )
-            return shell.fail("auth_or_repo", detail="restic init/cat-config failed.")
+            return shell.fail(
+                "repo_unreachable_or_auth",
+                detail=(
+                    "restic init/cat-config failed — unreachable remote "
+                    "(network/DNS/outage), wrong password, or corrupt repo config."
+                ),
+            )
         _LOG.info("backup.repo.initialized")
     unlock = runner.unlock()
     if not unlock.ok:
@@ -467,6 +499,11 @@ def _verify_repo(shell: _RunShell, runner: ResticRunner) -> tuple[bool, str] | i
     data_check = runner.check(read_data_subset=subset)
     if data_check.timed_out:
         return shell.fail("timeout", detail=f"restic check --read-data-subset={subset} timed out.")
+    if data_check.binary_missing:
+        # An exec failure HOURS into the run (binary swapped by an upgrade,
+        # transient fork ENOMEM) is an invocation problem, NEVER repo
+        # corruption — mirrors the structure-check arm above (F3, not F11).
+        return shell.fail("restic_missing", detail="restic binary not found — install it (M1).")
     if not data_check.ok:
         _LOG.error(
             "backup.check.failed",

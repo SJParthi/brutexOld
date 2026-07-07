@@ -2094,13 +2094,15 @@ def _redact_backup_repo(repo: str | None) -> str:
 
     ``s3:s3.ap-south-1.amazonaws.com/bucket/brutex`` → ``s3:s3.ap-south-1.amazonaws.com``;
     a scheme-less local-path repo reads as ``local``; unset reads ``unset``.
+    Any userinfo is stripped (``sftp://user:pass@host//srv`` → ``sftp:host``)
+    so a mis-configured embedded credential is never echoed by ``status``.
     """
     if repo is None:
         return "unset"
     scheme, sep, rest = repo.partition(":")
     if not sep:
         return "local"
-    host = rest.lstrip("/").split("/", 1)[0]
+    host = rest.lstrip("/").split("/", 1)[0].rsplit("@", 1)[-1]
     return f"{scheme}:{host}"
 
 

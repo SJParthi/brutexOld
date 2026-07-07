@@ -15,6 +15,13 @@
   <key>RunAtLoad</key><true/>
   <key>ThrottleInterval</key><integer>300</integer>
   <key>EnvironmentVariables</key><dict>
+    <!-- fill AFTER the healthchecks.io check exists (runbook step 10 / M6); until
+         then set the value below to an EMPTY string (blank reads as unset) — never
+         leave the literal placeholder (any non-http(s) value is refused with a WARN
+         every tick while `backup status` reads SET). The hourly checker reads THIS
+         value: launchd env OVERRIDES ~/.brutex/.env, so set the URL here and
+         bootout+bootstrap the agent (a .env-only URL works only if this key stays
+         blank/deleted). -->
     <key>BRUTEX_BACKUP_HEALTHCHECK_URL</key><string>{{BRUTEX_BACKUP_HEALTHCHECK_URL}}</string>
     <key>PATH</key><string>{{BRUTEX_VENV_BIN}}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

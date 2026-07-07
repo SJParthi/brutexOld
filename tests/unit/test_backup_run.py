@@ -418,6 +418,40 @@ class TestPreflightGate:
         assert state.consecutive_failures == 0
 
 
+class TestPreLockIOGuard:
+    """Round-2 findings 1/4/6: the PRE-lock surface (preflight probes +
+    dry-run plan render) must map an escaping OSError to the deterministic
+    triple — exit 3 + ``backup.preflight.io_failed`` + ``preflight_io``
+    alert — never a raw traceback out of the nightly launchd job."""
+
+    def test_preflight_oserror_exit_3_preflight_io_alert(self, tmp_path: Path) -> None:
+        harness = Harness(tmp_path)
+
+        def _eacces(lake: Path, *, allow_empty: bool = False) -> PreflightVerdict:
+            del lake, allow_empty
+            raise PermissionError(13, "Permission denied")
+
+        with structlog.testing.capture_logs() as logs:
+            assert harness.run(preflight_fn=_eacces) == EXIT_PREFLIGHT
+        assert harness.dedupe_keys() == ["backup-failed:preflight_io"]
+        assert harness.ops() == []  # no restic verb ever ran
+        assert harness.state() is None  # nothing stamped — no marker concern
+        assert any(entry["event"] == "backup.preflight.io_failed" for entry in logs)
+
+    def test_dry_run_plan_oserror_exit_3_preflight_io_alert(self, tmp_path: Path) -> None:
+        harness = Harness(tmp_path)
+
+        def _boom_plan(cfg: BackupEnvConfig, lake: Path, **_kwargs: Any) -> BackupPlan:
+            del cfg, lake
+            raise PermissionError(13, "Permission denied")
+
+        with structlog.testing.capture_logs() as logs:
+            assert harness.run(dry_run=True, plan_fn=_boom_plan) == EXIT_PREFLIGHT
+        assert harness.dedupe_keys() == ["backup-failed:preflight_io"]
+        assert harness.ops() == []
+        assert any(entry["event"] == "backup.preflight.io_failed" for entry in logs)
+
+
 class TestBusyAndLockErrors:
     def test_busy_exit_5_no_alert_no_state_touch(self, tmp_path: Path) -> None:
         """F15: a held single-flight lock → exit 5, NO alert (benign overlap)."""
@@ -557,15 +591,20 @@ class TestRepoProbe:
         assert any(entry["event"] == "backup.repo.initialized" for entry in logs)
 
     def test_init_failure_exit_4(self, tmp_path: Path) -> None:
+        """A failed probe+init names ALL co-equal causes — a whole-night outage
+        (unreachable remote from the start) must never misdirect the operator
+        at the password/keychain alone (round-2 finding 8)."""
         harness = Harness(tmp_path)
         harness.runner.script["cat-config"] = _inv("cat-config", rc=1)
         harness.runner.script["init"] = _inv("init", rc=1)
         assert harness.run() == EXIT_RESTIC
-        assert harness.dedupe_keys() == ["backup-failed:auth_or_repo"]
+        assert harness.dedupe_keys() == ["backup-failed:repo_unreachable_or_auth"]
         state = harness.state()
         assert state is not None
-        assert state.last_failure_reason == "auth_or_repo"
+        assert state.last_failure_reason == "repo_unreachable_or_auth"
         assert state.running_since is None  # cleared on the FAIL path too
+        message = harness.notifier.published[0].message
+        assert "unreachable remote" in message  # network named as a co-equal cause
 
     def test_probe_binary_missing_exit_4(self, tmp_path: Path) -> None:
         harness = Harness(tmp_path)
@@ -770,6 +809,20 @@ class TestVerify:
         assert harness.run() == EXIT_RESTIC
         assert harness.dedupe_keys() == ["backup-failed:timeout"]
 
+    def test_subset_binary_missing_exit_4_not_corruption(self, tmp_path: Path) -> None:
+        """Round-2 finding 5: an exec failure on the read-data-subset call
+        (binary swapped mid-run, fork ENOMEM) is restic_missing (F3, exit 4)
+        — NEVER the backup_repo_corrupt triple (F11, exit 6) whose runbook
+        remediation is restore-from-older."""
+        harness = Harness(tmp_path)
+        harness.runner.script["check-data"] = _inv("check", binary_missing=True)
+        assert harness.run() == EXIT_RESTIC
+        assert harness.dedupe_keys() == ["backup-failed:restic_missing"]
+        state = harness.state()
+        assert state is not None
+        assert state.last_failure_reason == "restic_missing"
+        assert state.last_success_at is None  # verify is inside the success contract
+
 
 class TestMaintenance:
     def test_maintenance_failure_exit_7_stamp_stands_warn(self, tmp_path: Path) -> None:
@@ -946,3 +999,19 @@ class TestLakeRootDefault:
 
         assert harness.run(lake_root=None, preflight_fn=_spy) == EXIT_OK
         assert seen == [lake]
+
+    def test_lake_root_tilde_typo_exit_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-2 finding 2: a '~nosuchuser' BRUTEX_LAKE_ROOT typo raises
+        RuntimeError from Path.expanduser — mapped to the deterministic
+        config triple, never a raw traceback out of the nightly job."""
+        monkeypatch.setenv("BRUTEX_LAKE_ROOT", "~nosuchuser123/lake")
+        harness = Harness(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            assert harness.run(lake_root=None) == EXIT_CONFIG
+        assert harness.dedupe_keys() == ["backup-failed:config"]
+        assert harness.ops() == []  # no restic verb ever ran
+        events = [e for e in logs if e["event"] == "backup.config.malformed_path"]
+        assert len(events) == 1
+        assert events[0]["env_var"] == "BRUTEX_LAKE_ROOT"

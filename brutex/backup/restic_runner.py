@@ -325,7 +325,16 @@ class ResticRunner:
     def forget(
         self, *, keep_daily: int, keep_weekly: int, keep_monthly: int, prune: bool
     ) -> ResticInvocation:
-        """Apply the retention policy to the ``--tag brutex`` universe (F23)."""
+        """Apply the retention policy to the ``--tag brutex`` universe (F23).
+
+        ``--group-by host`` (NOT ``host,tags``): the nightly tag SET varies
+        with the F16 pull-active/pull-quiet probe, so grouping by tags would
+        split retention into TWO independent groups — each keeping its own
+        14/8/12 (~2× the documented policy) and retaining a dormant tag
+        group's last snapshots FOREVER (restic keep-N has no age cutoff).
+        One host group = the documented global policy. The drill's canary
+        never enters this universe (it lacks the ``brutex`` tag).
+        """
         argv: tuple[str, ...] = (
             self._binary,
             "forget",
@@ -338,7 +347,7 @@ class ResticRunner:
             "--tag",
             BACKUP_TAG,
             "--group-by",
-            "host,tags",
+            "host",
         )
         if prune:
             argv = (*argv, "--prune")

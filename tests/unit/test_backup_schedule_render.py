@@ -64,6 +64,17 @@ class TestTemplateLaw:
         assert "<key>BRUTEX_BACKUP_PASSWORD_FILE</key>" not in plist
         assert "{{BRUTEX_BACKUP_HEALTHCHECK_URL}}" in plist
 
+    def test_deadman_plist_healthcheck_note(self) -> None:
+        """Round-2 finding 11 (NIT): the healthcheck-URL key carries the inline
+        fill-after-M6 note — blank-reads-as-unset + the launchd-env-overrides-
+        .env fact — so the M6 keystone lane cannot stay silently dead behind a
+        stale/unfillable placeholder."""
+        plist = render_deadman_plist()
+        note = plist.split("<key>BRUTEX_BACKUP_HEALTHCHECK_URL</key>")[0]
+        assert "fill AFTER the healthchecks.io check exists (runbook step 10 / M6)" in note
+        assert "blank reads as unset" in note
+        assert "launchd env OVERRIDES ~/.brutex/.env" in note
+
     def test_drill_plist_monthly(self) -> None:
         plist = render_drill_plist()
         assert "<string>backup</string><string>restore-drill</string>" in plist

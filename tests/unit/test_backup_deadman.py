@@ -203,6 +203,23 @@ class TestRealertBound:
         report = _evaluate(_state(last_success_at=NOW - timedelta(hours=40)), sidecar)
         assert report.should_alert is True
 
+    def test_realert_future_stamp_alerts_fail_toward_alarm(self) -> None:
+        """Round-2 finding 7: a FUTURE last_overdue_alert_at (botched restore /
+        backward NTP step — the F14 vectors, one file over) reads as "no prior
+        alert" — the Telegram lane must never be muted until the wall clock
+        catches up with a poisoned stamp."""
+        sidecar = DeadmanState(last_overdue_alert_at=NOW + timedelta(days=365))
+        report = _evaluate(_state(last_success_at=NOW - timedelta(hours=100)), sidecar)
+        assert report.verdict is DeadmanVerdict.OVERDUE
+        assert report.should_alert is True
+
+    def test_realert_marginally_future_stamp_alerts(self) -> None:
+        """Even a slightly-future stamp alerts — the safe direction is one
+        extra page (a successful publish restamps with the current clock)."""
+        sidecar = DeadmanState(last_overdue_alert_at=NOW + timedelta(seconds=1))
+        report = _evaluate(_state(last_success_at=NOW - timedelta(hours=40)), sidecar)
+        assert report.should_alert is True
+
     def test_fresh_never_should_alert(self) -> None:
         sidecar = DeadmanState(last_overdue_alert_at=NOW - timedelta(days=30))
         assert _evaluate(_state(), sidecar).should_alert is False

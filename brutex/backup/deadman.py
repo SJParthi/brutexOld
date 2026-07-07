@@ -160,6 +160,14 @@ def _should_alert(
     last = sidecar.last_overdue_alert_at
     if last is None:
         return True
+    if last > now:
+        # A FUTURE re-alert stamp (a botched ~/.brutex restore, a backward
+        # NTP step — the F14 vectors, one file over) would otherwise mute
+        # the Telegram lane until the wall clock catches up. Treat it as
+        # "no prior alert": alert now, and a successful publish restamps
+        # with the CURRENT clock — fail-toward-alarm, worst case one extra
+        # page (the sidecar's own "extra alert, never a missed one" law).
+        return True
     return (now - last).total_seconds() >= realert_hours * _SECONDS_PER_HOUR
 
 

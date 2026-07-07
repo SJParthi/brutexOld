@@ -468,6 +468,25 @@ class TestTargetTree:
         assert len(sample_includes) == 2
 
 
+class TestLakeRootTotality:
+    def test_lake_root_tilde_typo_exit_config(
+        self, world: DrillWorld, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-2 finding 2: a '~nosuchuser' BRUTEX_LAKE_ROOT typo raises
+        RuntimeError from Path.expanduser — which the drill's OSError guard
+        cannot catch — mapped to the deterministic config triple, never a
+        raw traceback out of the monthly launchd job."""
+        monkeypatch.setenv("BRUTEX_LAKE_ROOT", "~nosuchuser123/lake")
+        with structlog.testing.capture_logs() as logs:
+            assert world.drill(lake_root=None) == EXIT_CONFIG
+        assert world.dedupe_keys() == ["backup-failed:config"]
+        events = [e for e in logs if e["event"] == "backup.config.malformed_path"]
+        assert len(events) == 1
+        assert events[0]["env_var"] == "BRUTEX_LAKE_ROOT"
+        assert events[0]["context"] == "restore-drill"
+        assert world.fake.calls() == []  # no restic invocation ever ran
+
+
 class TestDrillIOResilience:
     """Round-1 review pins: the drill "returns an exit code, raises nothing" —
     an OSError in canary/tmp setup maps to EXIT_RESTIC + drill_io, and a live

@@ -76,7 +76,12 @@ heals via the ledger-reconcile design of
    plists to an EMPTY string (blank reads as unset) or delete that key —
    any non-blank value (including the literal placeholder) combines with
    the `.env` `_COMMAND` into the ambiguous-source `EXIT_CONFIG` refusal
-   every night. Then `cp` them to
+   every night. **Dead-man plist healthcheck key:** the
+   `{{BRUTEX_BACKUP_HEALTHCHECK_URL}}` value does not exist yet (step 10
+   creates the healthchecks.io check) — set it to an EMPTY string for now
+   (blank reads as unset; any non-URL value, including the literal
+   placeholder, is refused with a WARN every hourly tick while
+   `backup status` reads SET) and fill it at step 10. Then `cp` them to
    `~/Library/LaunchAgents/`; then
    `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.brutex.backup*.plist`;
    verify with `launchctl print gui/$(id -u)/com.brutex.backup`.
@@ -100,7 +105,14 @@ heals via the ledger-reconcile design of
    drill costs at most one page; the next normal hourly tick reads FRESH
    again with the real threshold.
 10. **[MANUAL M6]** Create the healthchecks.io check (period 1 h, grace
-    ≥ 2 h) and set `BRUTEX_BACKUP_HEALTHCHECK_URL=<ping url>`; watch one
+    ≥ 2 h) and set `BRUTEX_BACKUP_HEALTHCHECK_URL=<ping url>` **in the
+    dead-man plist** (`com.brutex.backup-deadman.plist` — the hourly
+    launchd checker reads THAT value: launchd env OVERRIDES
+    `~/.brutex/.env` because `bootstrap_env` never overrides an
+    already-set var), then re-install the agent
+    (`launchctl bootout gui/$(id -u)/com.brutex.backup-deadman` +
+    `launchctl bootstrap …`); a `.env`-only URL takes effect only if the
+    plist key stays blank/deleted. Watch one
     hourly ping arrive. The checker pings EVERY tick — plain URL when
     FRESH/RUNNING, `<url>/fail` on any breach — so the EXTERNAL service
     alarms when pings STOP: the one lane that catches checker-dead,
