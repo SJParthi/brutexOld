@@ -4,9 +4,10 @@ Covers: the parity-tooth pass/fail branches (mismatch ⇒ loud WARN + empty
 capture, never a wrong trade list), VIX stamped / missing / no-stamper honesty
 counting, zero-trade combos as first-class, the exit-fill belt + alignment
 belt, the 1m-path attachment (incl. the tf==1m walker-equality law), the
-honest signal-only ``lots=1`` / ``costs=0`` constants, and the O-e baked
-decision — the walker's AS-FOUND re-entry semantics pinned by test (next fresh
-signal after an exit re-enters, no cooldown, until the 15:20 wall).
+NULL-BY-DESIGN ``lots`` / ``costs_paisa`` (honest ``None`` until P5's futures
+translation — gap-register Ruling 18, never a fabricated 1/0), and the O-e
+baked decision — the walker's AS-FOUND re-entry semantics pinned by test (next
+fresh signal after an exit re-enters, no cooldown, until the 15:20 wall).
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ from brutex.engine.minute_path import MinuteIndex, PathStatus
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.results_store import ResultRow
 from brutex.engine.trade_capture import (
-    SIGNAL_ONLY_COSTS_PAISA,
-    SIGNAL_ONLY_LOTS,
     CapturedTrade,
     TradeCaptureError,
     _check_detail_alignment,
@@ -148,15 +147,17 @@ class TestCaptureParityPass:
             "stop_loss",
             "forced_1520",
         ]
-        # Contract fields: real fill prices as 2dp Decimals; honest constants.
+        # Contract fields: real fill prices as 2dp Decimals; lots/costs are
+        # honest None — NULL-by-design until P5 (Ruling 18), never a
+        # fabricated 1/0.
         assert [t.entry_px for t in capture.trades] == [Decimal("100.00")] * 3
         assert [t.exit_px for t in capture.trades] == [
             Decimal("100.50"),
             Decimal("99.70"),
             Decimal("100.15"),
         ]
-        assert all(t.lots == SIGNAL_ONLY_LOTS for t in capture.trades)
-        assert all(t.costs_paisa == SIGNAL_ONLY_COSTS_PAISA for t in capture.trades)
+        assert all(t.lots is None for t in capture.trades)
+        assert all(t.costs_paisa is None for t in capture.trades)
         assert [t.pnl_paisa for t in capture.trades] == [50, -30, 15]
         # No minute index → honest NO_1M_DATA, None excursions.
         assert all(t.path_1m_status is PathStatus.NO_1M_DATA for t in capture.trades)
@@ -362,10 +363,10 @@ class TestCapturedTradeValidation:
             "exit_ts": _ts(9, 17),
             "exit_px": Decimal("100.50"),
             "direction": Side.BUY,
-            "lots": 1,
+            "lots": None,
             "exit_reason": "take_profit",
             "pnl_paisa": 50,
-            "costs_paisa": 0,
+            "costs_paisa": None,
             "mae_paisa": 10,
             "mfe_paisa": 60,
             "mae_1m_paisa": 10,
@@ -378,14 +379,25 @@ class TestCapturedTradeValidation:
     def test_valid_construction(self) -> None:
         trade = CapturedTrade(**self._kwargs())  # type: ignore[arg-type]
         assert trade.exit_reason == "take_profit"
+        assert trade.lots is None  # NULL-by-design until P5 (Ruling 18)
+        assert trade.costs_paisa is None
+
+    def test_future_real_execution_leg_values_stay_constructible(self) -> None:
+        # P5's translation sidecar will carry REAL lots/costs — the container
+        # accepts genuine values while refusing fabricated sub-1 lots.
+        kwargs = self._kwargs()
+        kwargs["lots"] = 2
+        kwargs["costs_paisa"] = 0
+        trade = CapturedTrade(**kwargs)  # type: ignore[arg-type]
+        assert (trade.lots, trade.costs_paisa) == (2, 0)
 
     @pytest.mark.parametrize(
         ("field", "value", "match"),
         [
             ("direction", Side.HOLD, "BUY or SELL"),
             ("exit_reason", "vibes", "is not one of"),
-            ("lots", 0, "lots must be >= 1"),
-            ("costs_paisa", -1, "costs_paisa must be >= 0"),
+            ("lots", 0, "lots must be None or >= 1"),
+            ("costs_paisa", -1, "costs_paisa must be None or >= 0"),
             ("mae_paisa", -1, "must be >= 0"),
             ("mfe_paisa", -5, "must be >= 0"),
             ("mae_1m_paisa", None, "None exactly when"),

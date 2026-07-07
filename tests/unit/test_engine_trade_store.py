@@ -25,6 +25,8 @@ from brutex.engine.trade_capture import CapturedTrade, ComboCapture
 from brutex.engine.trade_store import (
     AGG_COLUMNS,
     PAGE_LIMIT_MAX,
+    RESULTS_DEPTH_DIRNAME,
+    SWEEP_RUNS_DIRNAME,
     TRADES_SCHEMA_VERSION,
     SidecarPaths,
     TradeStoreError,
@@ -34,6 +36,7 @@ from brutex.engine.trade_store import (
     load_stamp,
     read_trade_page,
     sidecar_paths_for,
+    sweep_run_dir,
     write_tuple_sidecars,
 )
 from brutex.strategies.types import Side
@@ -42,6 +45,8 @@ _DAY = date(2024, 1, 2)
 _RUN_A = "aa" * 32
 _RUN_Z = "ff" * 32
 _STORE_HASH = "12" * 32
+#: The grid-level run id every sidecar path is keyed under (Ruling 4 layout).
+_GRID_RUN = "grid-0123456789abcdef"
 
 
 def _ts(hh: int, mm: int) -> datetime:
@@ -62,10 +67,10 @@ def _trade(
         exit_ts=_ts(9, 17 + 2 * seq),
         exit_px=Decimal("100.50") if pnl >= 0 else Decimal("99.70"),
         direction=Side.BUY,
-        lots=1,
+        lots=None,  # NULL-by-design until P5 (Ruling 18)
         exit_reason="take_profit",
         pnl_paisa=pnl,
-        costs_paisa=0,
+        costs_paisa=None,  # NULL-by-design until P5 (Ruling 18)
         mae_paisa=10 + seq,
         mfe_paisa=60 + seq,
         mae_1m_paisa=one_m,
@@ -164,7 +169,7 @@ def _agg_record(run_id: str, **overrides: object) -> dict[str, object]:
 @pytest.fixture
 def paths(tmp_path: Path) -> SidecarPaths:
     store = tmp_path / "sweeps" / "NIFTY" / "1minute" / "bull_k1_0123456789abcdef.parquet"
-    return sidecar_paths_for(store, tmp_path / "sweeps")
+    return sidecar_paths_for(store, tmp_path / "sweeps", run_id=_GRID_RUN)
 
 
 @pytest.fixture
@@ -178,12 +183,28 @@ def written(paths: SidecarPaths) -> SidecarPaths:
     return paths
 
 
+class TestSweepRunDir:
+    def test_sibling_root_beside_the_sweeps_tree(self, tmp_path: Path) -> None:
+        """Ruling 4: the run dir is `<sweeps parent>/sweep_runs/<run_id>` —
+        a SIBLING of the sweeps tree (the register's `<lake>/sweep_runs/`
+        example), never inside the `**/*.parquet`-globbed tree."""
+        sweeps = tmp_path / "sweeps"
+        run_dir = sweep_run_dir(sweeps, _GRID_RUN)
+        assert run_dir == tmp_path / SWEEP_RUNS_DIRNAME / _GRID_RUN
+        # Structurally OUTSIDE the sweeps tree.
+        assert not run_dir.is_relative_to(sweeps)
+
+    def test_rejects_empty_run_id(self, tmp_path: Path) -> None:
+        with pytest.raises(TradeStoreError, match="run_id must be non-empty"):
+            sweep_run_dir(tmp_path / "sweeps", "")
+
+
 class TestSidecarPathsFor:
     def test_mechanical_mapping(self, tmp_path: Path) -> None:
         root = tmp_path / "sweeps"
         store = root / "NIFTY" / "5minute" / "bull_k3_deadbeef00000000.parquet"
-        mapped = sidecar_paths_for(store, root)
-        base = root / "results-depth" / "NIFTY" / "5minute"
+        mapped = sidecar_paths_for(store, root, run_id=_GRID_RUN)
+        base = sweep_run_dir(root, _GRID_RUN) / RESULTS_DEPTH_DIRNAME / "NIFTY" / "5minute"
         assert mapped == SidecarPaths(
             trades=base / "bull_k3_deadbeef00000000.trades.parquet",
             aggs=base / "bull_k3_deadbeef00000000.aggs.parquet",
@@ -191,19 +212,35 @@ class TestSidecarPathsFor:
             stamp=base / "bull_k3_deadbeef00000000.stamp.json",
         )
 
+    def test_nothing_lands_inside_the_globbed_sweeps_tree(self, tmp_path: Path) -> None:
+        """Ruling 4 teeth: no sidecar path may sit under the sweeps root —
+        results_report + sweep_verify recursively glob `**/*.parquet` there."""
+        root = tmp_path / "sweeps"
+        store = root / "NIFTY" / "5minute" / "bull_k3_deadbeef00000000.parquet"
+        mapped = sidecar_paths_for(store, root, run_id=_GRID_RUN)
+        for path in (mapped.trades, mapped.aggs, mapped.equity, mapped.stamp):
+            assert not path.is_relative_to(root), path
+
     def test_rejects_store_outside_root(self, tmp_path: Path) -> None:
         with pytest.raises(TradeStoreError, match="not under the sweeps root"):
-            sidecar_paths_for(tmp_path / "elsewhere" / "x.parquet", tmp_path / "sweeps")
+            sidecar_paths_for(
+                tmp_path / "elsewhere" / "x.parquet", tmp_path / "sweeps", run_id=_GRID_RUN
+            )
 
     def test_rejects_wrong_depth(self, tmp_path: Path) -> None:
         root = tmp_path / "sweeps"
         with pytest.raises(TradeStoreError, match="3-level"):
-            sidecar_paths_for(root / "NIFTY" / "x.parquet", root)
+            sidecar_paths_for(root / "NIFTY" / "x.parquet", root, run_id=_GRID_RUN)
 
     def test_rejects_non_parquet(self, tmp_path: Path) -> None:
         root = tmp_path / "sweeps"
         with pytest.raises(TradeStoreError, match="3-level"):
-            sidecar_paths_for(root / "NIFTY" / "1minute" / "x.trials.json", root)
+            sidecar_paths_for(root / "NIFTY" / "1minute" / "x.trials.json", root, run_id=_GRID_RUN)
+
+    def test_rejects_empty_run_id(self, tmp_path: Path) -> None:
+        root = tmp_path / "sweeps"
+        with pytest.raises(TradeStoreError, match="run_id must be non-empty"):
+            sidecar_paths_for(root / "NIFTY" / "1minute" / "x.parquet", root, run_id="")
 
 
 class TestWriteAndStamp:
@@ -344,8 +381,8 @@ class TestReadTradePage:
         assert ok["entry_ts"] == _ts(9, 16).isoformat()
         assert ok["exit_ts"] == _ts(9, 17).isoformat()
         assert (ok["entry_px"], ok["exit_px"]) == (100.0, 100.5)
-        assert (ok["direction"], ok["lots"], ok["exit_reason"]) == ("BUY", 1, "take_profit")
-        assert (ok["pnl_paisa"], ok["costs_paisa"]) == (50, 0)
+        assert (ok["direction"], ok["lots"], ok["exit_reason"]) == ("BUY", None, "take_profit")
+        assert (ok["pnl_paisa"], ok["costs_paisa"]) == (50, None)  # costs NULL until P5
         assert (ok["vix_entry"], ok["vix_exit"]) == (15.25, 15.25)
         assert (partial["vix_entry"], partial["vix_exit"]) == (None, None)
         assert [row["trade_seq"] for row in rows] == [0, 1, 2]

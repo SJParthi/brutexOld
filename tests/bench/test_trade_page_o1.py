@@ -62,10 +62,10 @@ def _trades_frame_bytes(n_filler: int) -> bytes:
         "entry_px": [100.0] * total,
         "exit_px": [100.5] * total,
         "direction": ["BUY"] * total,
-        "lots": [1] * total,
+        "lots": [None] * total,  # NULL-by-design until P5 (Ruling 18)
         "exit_reason": ["take_profit"] * total,
         "pnl_paisa": [50] * total,
-        "costs_paisa": [0] * total,
+        "costs_paisa": [None] * total,
         "mae_paisa": [10] * total,
         "mfe_paisa": [60] * total,
         "mae_1m_paisa": [None] * total,
@@ -78,7 +78,11 @@ def _trades_frame_bytes(n_filler: int) -> bytes:
 
 
 def _build_sidecars(root: Path, n_filler: int) -> SidecarPaths:
-    paths = sidecar_paths_for(root / "NIFTY" / "1minute" / "bull_k1_bench0000000000.parquet", root)
+    paths = sidecar_paths_for(
+        root / "NIFTY" / "1minute" / "bull_k1_bench0000000000.parquet",
+        root,
+        run_id="grid-bench000000000000",
+    )
     paths.trades.parent.mkdir(parents=True, exist_ok=True)
     trades_bytes = _trades_frame_bytes(n_filler)
     aggs_bytes = _render_frame_bytes(AGG_COLUMNS, {name: [] for name, _ in AGG_COLUMNS})

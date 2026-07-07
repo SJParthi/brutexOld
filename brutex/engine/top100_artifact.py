@@ -2,14 +2,23 @@
 
 DEC-SWEEP-RESULTS-DEPTH-001 (WP5). R21/R26: SHIPPED = the ONE global
 "best of the best" leaderboard across every bucket of a grid, precomputed at
-run-end as ONE small artifact at the binding P3→P4 contract location::
+run-end as ONE small artifact at the binding P3→P4 contract location
+(gap-register Ruling 4, 2026-07-08 — run artifacts live under the
+``sweep_runs/`` SIBLING root beside the sweeps tree, never inside the
+``**/*.parquet``-globbed tree; the earlier ``<sweeps>/runs/<run_id>/``
+contract paths are SUPERSEDED)::
 
-    <sweeps>/runs/<run_id>/top100.json        # ordered entries (≤ 100)
-    <sweeps>/runs/<run_id>/top100.stamp.json  # {stage, run_id, content_hash, produced_at_utc}
+    <sweep_runs root>/<run_id>/top100.json        # ordered entries (≤ 100)
+    <sweep_runs root>/<run_id>/top100.stamp.json  # {stage, run_id, content_hash, produced_at_utc}
 
-``run_id`` here is the GRID identity
-(:func:`brutex.engine.sweep_supervisor.grid_identity` — the P2 ``runs/``
-convention); each ENTRY's ``run_id`` stays the per-mask 64-hex store row key.
+The ``<sweep_runs root>`` is built EXCLUSIVELY through the ONE
+:func:`brutex.engine.trade_store.sweep_run_dir` path-builder seam (the leaf
+P2's future ``run_layout.py`` rebinds at merge-integration) — this module
+takes the already-built runs root and never re-derives the layout. ``run_id``
+here is TODAY the ENGINE grid identity
+(:func:`brutex.engine.sweep_supervisor.grid_identity`); Ruling 9's logical
+run_id (one logical id wrapping N engine runs) rebinds at that same seam.
+Each ENTRY's ``run_id`` stays the per-mask 64-hex store row key.
 
 ## Contract shape (binding — sweep-parallel-integration-contracts)
 
@@ -112,7 +121,6 @@ __all__ = [
     "GATE_MIN_TRADES",
     "GATE_MIN_WIN_LOSS_RATIO",
     "GATE_MIN_WIN_RATE",
-    "RUNS_DIRNAME",
     "TOP100_FILENAME",
     "TOP100_LIMIT",
     "TOP100_PRESETS",
@@ -140,10 +148,8 @@ TOP100_SCHEMA_VERSION: Final[int] = 1
 #: The P2→P3 stage-stamp ``stage`` token, reused as the P3→P4 stamp shape.
 TOP100_STAGE: Final[str] = "top100"
 
-#: The run-level artifact directory under the sweeps root (contract path).
-RUNS_DIRNAME: Final[str] = "runs"
-
-#: The artifact + stamp filenames (contract path law).
+#: The artifact + stamp filenames (contract path law; the run directory
+#: itself comes from ``trade_store.sweep_run_dir`` — Ruling 4).
 TOP100_FILENAME: Final[str] = "top100.json"
 TOP100_STAMP_FILENAME: Final[str] = "top100.stamp.json"
 
@@ -295,8 +301,8 @@ class Top100Artifact:
 
     ``entries`` are the EXACT JSON payload maps (contract shape ⊇ the binding
     keys), in rank order; ``source`` is the honesty header; ``baselines`` maps
-    instrument → its baseline artifact filename under the same ``runs/<run_id>/``
-    directory (R27's comparison series).
+    instrument → its baseline artifact filename under the same
+    ``sweep_runs/<run_id>/`` directory (R27's comparison series).
     """
 
     schema_version: int
@@ -572,7 +578,7 @@ def build_top100(
     data_snapshot_hashes
         The grid's data identity hash(es) — the artifact's provenance.
     baselines
-        Instrument → baseline artifact filename (under ``runs/<run_id>/``).
+        Instrument → baseline artifact filename (under ``sweep_runs/<run_id>/``).
     reason_provider, margin_roi_provider
         The WP3 seams (module docstring) — ``None`` writes honest ``None``
         entries + ``*_wired=False`` header flags.
@@ -675,6 +681,9 @@ def build_top100(
 def write_top100(runs_dir: Path, artifact: Top100Artifact) -> Path:
     """Atomically write ``<runs_dir>/<run_id>/top100.json`` + its stage stamp.
 
+    *runs_dir* is the ``sweep_runs/`` SIBLING root from
+    :func:`brutex.engine.trade_store.sweep_run_dir`'s parent (Ruling 4) —
+    callers thread it from that ONE seam, never a hand-built path.
     The artifact bytes are deterministic (:meth:`Top100Artifact.rendered_bytes`
     — a rebuild from the same sources converges to identical bytes); ONLY the
     stamp carries ``produced_at_utc``. The stamp is written LAST so a crash

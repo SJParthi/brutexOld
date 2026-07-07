@@ -26,13 +26,16 @@ the capture returns ``parity_ok=False`` with an EMPTY trade list — a reason ca
 never be attached to a trade list that does not match the stored result
 (design F.3/F.4), and the pass counts + skips the combo, never silently.
 
-## Honest constants (Golden Rule #1)
+## NULL-by-design lots + costs (gap-register Ruling 18, 2026-07-08)
 
-``lots = 1`` and ``costs_paisa = 0`` are HONEST constants, not placeholders:
-Track 1 index spot is signal-only and COST-FREE by locked operator decision
-(DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001) — P&L is the per-unit directional move
-with no position sizing and no cost stack. The wire carries them explicitly so
-a consumer never guesses.
+``lots`` and ``costs_paisa`` are honest ``None``/NULL on every captured trade
+until P5's futures execution-translation sidecar lands: the signal-only index
+sweep has NO position sizing and NO cost stack, and the earlier fabricated
+``lots=1`` / ``costs_paisa=0`` constants are REMOVED by coordinator ruling —
+"never fabricated constants". The wire carries the ``None`` explicitly so a
+consumer never mistakes an unsized signal leg for a 1-lot execution; nothing
+downstream may multiply by a fabricated lot (the margin-ROI surface is
+independently all-UNVERIFIED).
 
 ## O() envelope
 
@@ -77,23 +80,11 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 _LOG = structlog.get_logger("brutex.engine.trade_capture")
 
 __all__ = [
-    "SIGNAL_ONLY_COSTS_PAISA",
-    "SIGNAL_ONLY_LOTS",
     "CapturedTrade",
     "ComboCapture",
     "TradeCaptureError",
     "capture_combo",
 ]
-
-#: The honest signal-only position size (R24 ``qty/lots``): Track 1 index spot
-#: has NO position sizing — P&L is the per-unit directional move
-#: (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001; ``trade_sim`` module doctrine).
-SIGNAL_ONLY_LOTS: Final[int] = 1
-
-#: The honest signal-only cost (R24 ``costs``): index spot is COST-FREE by
-#: locked operator decision (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001) — a KNOWN
-#: zero, stated on the wire, never an unpriced blank.
-SIGNAL_ONLY_COSTS_PAISA: Final[int] = 0
 
 #: Exit reasons whose EXIT bar the walker folds in full (level fills at
 #: ``AT_LEVEL`` + the end-of-data close happen WITHIN the exit bar's range);
@@ -125,6 +116,10 @@ class CapturedTrade:
     walker's paisa fills — never re-rounded floats); money int64 paisa; VIX
     full-precision Decimal or an honest ``None``. The 1-minute-path pair is
     ``None`` exactly when ``path_1m_status is PathStatus.NO_1M_DATA``.
+    ``lots`` / ``costs_paisa`` are NULL-BY-DESIGN ``None`` until P5's futures
+    translation sidecar lands (gap-register Ruling 18 — never a fabricated
+    ``1`` / ``0``); a future non-``None`` value must be a REAL execution-leg
+    figure (``lots >= 1``, ``costs_paisa >= 0``).
     """
 
     entry_ts: datetime
@@ -132,10 +127,10 @@ class CapturedTrade:
     exit_ts: datetime
     exit_px: Decimal
     direction: Side
-    lots: int
+    lots: int | None
     exit_reason: str
     pnl_paisa: int
-    costs_paisa: int
+    costs_paisa: int | None
     mae_paisa: int
     mfe_paisa: int
     mae_1m_paisa: int | None
@@ -151,11 +146,11 @@ class CapturedTrade:
             raise TradeCaptureError(
                 f"CapturedTrade.exit_reason {self.exit_reason!r} is not one of {EXIT_REASONS}"
             )
-        if self.lots < 1:
-            raise TradeCaptureError(f"CapturedTrade.lots must be >= 1, got {self.lots}")
-        if self.costs_paisa < 0:
+        if self.lots is not None and self.lots < 1:
+            raise TradeCaptureError(f"CapturedTrade.lots must be None or >= 1, got {self.lots}")
+        if self.costs_paisa is not None and self.costs_paisa < 0:
             raise TradeCaptureError(
-                f"CapturedTrade.costs_paisa must be >= 0, got {self.costs_paisa}"
+                f"CapturedTrade.costs_paisa must be None or >= 0, got {self.costs_paisa}"
             )
         if self.mae_paisa < 0 or self.mfe_paisa < 0:
             raise TradeCaptureError(
@@ -361,10 +356,10 @@ def capture_combo(
                 exit_ts=trade.exit_ts,
                 exit_px=paisa_to_rupees(detail.exit_fill_paisa),
                 direction=side,
-                lots=SIGNAL_ONLY_LOTS,
+                lots=None,  # NULL-by-design until P5 (Ruling 18 — never a fabricated 1)
                 exit_reason=detail.exit_reason,
                 pnl_paisa=trade.pnl_paisa,
-                costs_paisa=SIGNAL_ONLY_COSTS_PAISA,
+                costs_paisa=None,  # NULL-by-design until P5 (never a fabricated 0)
                 mae_paisa=trade.mae_paisa,
                 mfe_paisa=trade.mfe_paisa,
                 mae_1m_paisa=path.mae_paisa,

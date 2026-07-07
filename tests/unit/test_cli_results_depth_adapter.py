@@ -176,7 +176,8 @@ class TestDefaultRunnerArm:
         assert "results-depth — tuples=0" in out
         assert "missing_store=1" in out
         assert "top100=written entries=0" in out
-        artifact_path = out_root / "runs" / grid_identity(grid) / "top100.json"
+        # Ruling 4: the artifact lands in the sweep_runs SIBLING root.
+        artifact_path = tmp_path / "sweep_runs" / grid_identity(grid) / "top100.json"
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
         assert payload["entries"] == []
         assert payload["source"]["reasons_wired"] is True

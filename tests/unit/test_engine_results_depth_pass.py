@@ -22,8 +22,11 @@ from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.combo_aggregates import ComboAggregate
 from brutex.engine.results_depth_pass import (
     RESULTS_DEPTH_ENV,
+    VIX_MISS_WARN_CAP,
     ResultsDepthError,
     ResultsDepthReport,
+    _Tallies,
+    _warn_vix_miss,
     resolve_results_depth_enabled,
     run_results_depth_pass,
 )
@@ -37,12 +40,13 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run import ComboDedup, run_persisted_sweep
 from brutex.engine.sweep_supervisor import grid_identity
-from brutex.engine.top100_artifact import RUNS_DIRNAME, TOP100_FILENAME, load_top100
+from brutex.engine.top100_artifact import TOP100_FILENAME, load_top100
 from brutex.engine.trade_store import (
     SidecarPaths,
     load_stamp,
     read_trade_page,
     sidecar_paths_for,
+    sweep_run_dir,
     write_tuple_sidecars,
 )
 from brutex.orchestrator.audit import AuditWriter
@@ -187,7 +191,9 @@ def _run_pass(
 
 def _tuple_paths(out_root: Path, grid: SweepGridConfig) -> SidecarPaths:
     tuple_ = next(iter_sweep_tuples(grid))
-    return sidecar_paths_for(tuple_store_path(out_root, tuple_, grid), out_root)
+    return sidecar_paths_for(
+        tuple_store_path(out_root, tuple_, grid), out_root, run_id=grid_identity(grid)
+    )
 
 
 class TestResolveResultsDepthEnabled:
@@ -239,11 +245,22 @@ class TestFreshPass:
         for artifact in (paths.trades, paths.aggs, paths.equity, paths.stamp):
             assert artifact.exists()
         run_id = grid_identity(grid)
-        assert (out_root / RUNS_DIRNAME / run_id / TOP100_FILENAME).exists()
-        assert (out_root / RUNS_DIRNAME / run_id / "baseline-NIFTY.json").exists()
-        assert load_top100(out_root / RUNS_DIRNAME, run_id) is not None
+        run_dir = sweep_run_dir(out_root, run_id)
+        assert (run_dir / TOP100_FILENAME).exists()
+        assert (run_dir / "baseline-NIFTY.json").exists()
+        assert load_top100(run_dir.parent, run_id) is not None
+        # Ruling 4: NOTHING results-depth may sit inside the globbed sweeps
+        # tree — the run dir is a sibling root and the tree itself is clean.
+        assert not run_dir.is_relative_to(out_root)
+        depth_parquet = [
+            p
+            for p in out_root.rglob("*.parquet")
+            if p.name.endswith((".trades.parquet", ".aggs.parquet", ".equity.parquet"))
+        ]
+        assert depth_parquet == []
         events = [log["event"] for log in logs]
         assert "results_depth.vix_absent" in events
+        assert "results_depth.vix_miss" in events  # capped per-combo WARN (Ruling 7)
         assert "results_depth.tuple_done" in events
         assert "results_depth.pass_done" in events
 
@@ -274,8 +291,11 @@ class TestFreshPass:
         assert all(row["mae_granularity"] == "tf" for row in page.rows)
 
     def test_vix_feed_stamps_every_trade(self, out_root: Path) -> None:
-        report = _run_pass(out_root, vix=True)
+        with capture_logs() as logs:
+            report = _run_pass(out_root, vix=True)
         assert report.vix_missing_trades == 0
+        # A fully-stamped pass emits ZERO vix_miss warns (nothing missed).
+        assert all(log["event"] != "results_depth.vix_miss" for log in logs)
 
     def test_daily_lens_is_threaded(self, out_root: Path) -> None:
         report = _run_pass(out_root, daily=True)
@@ -299,7 +319,7 @@ class TestResumeAndRebuild:
         grid = _grid()
         _run_pass(out_root, grid)
         run_id = grid_identity(grid)
-        top100_path = out_root / RUNS_DIRNAME / run_id / TOP100_FILENAME
+        top100_path = sweep_run_dir(out_root, run_id) / TOP100_FILENAME
         first_bytes = top100_path.read_bytes()
         with capture_logs() as logs:
             second = _run_pass(out_root, grid)
@@ -384,7 +404,7 @@ class TestExclusionsAndParity:
         # Replace the sidecar trio with an EMPTY one stamped for the SAME
         # store bytes — a current stamp whose agg join misses every row.
         store_path = tuple_store_path(out_root, next(iter_sweep_tuples(grid)), grid)
-        paths = sidecar_paths_for(store_path, out_root)
+        paths = sidecar_paths_for(store_path, out_root, run_id=grid_identity(grid))
         stamp = load_stamp(paths)
         assert stamp is not None
         write_tuple_sidecars(paths, [], [], store_content_hash=stamp.store_content_hash)
@@ -481,14 +501,39 @@ class TestFences:
         assert report.top100_written is True
         assert any(log["event"] == "results_depth.baseline_error" for log in logs)
         run_id = grid_identity(_grid())
-        loaded = load_top100(out_root / RUNS_DIRNAME, run_id)
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
         assert loaded is not None
         assert loaded.baselines == {}
 
 
+class TestVixMissWarnCap:
+    """The Ruling-7 capped per-combo vix_miss WARN — all three branches."""
+
+    def test_warns_up_to_the_cap_then_one_capped_note_then_silence(self) -> None:
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(VIX_MISS_WARN_CAP + 5):
+                _warn_vix_miss(run_id_of(i + 1), 3, tallies)
+        misses = [log for log in logs if log["event"] == "results_depth.vix_miss"]
+        capped = [log for log in logs if log["event"] == "results_depth.vix_miss_capped"]
+        assert len(misses) == VIX_MISS_WARN_CAP
+        assert len(capped) == 1
+        assert capped[0]["cap"] == VIX_MISS_WARN_CAP
+        # Suppressed past the cap — but ALWAYS counted by the caller's tally.
+        assert tallies.vix_miss_combos == VIX_MISS_WARN_CAP + 5
+
+    def test_each_warn_names_the_combo_and_its_miss_count(self) -> None:
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            _warn_vix_miss(run_id_of(7), 4, tallies)
+        (entry,) = [log for log in logs if log["event"] == "results_depth.vix_miss"]
+        assert entry["run_id"] == run_id_of(7)
+        assert entry["missing_trades"] == 4
+
+
 class TestManifestProbe:
     def _runs_dir(self, out_root: Path) -> Path:
-        target = out_root / RUNS_DIRNAME / grid_identity(_grid())
+        target = sweep_run_dir(out_root, grid_identity(_grid()))
         target.mkdir(parents=True, exist_ok=True)
         return target
 

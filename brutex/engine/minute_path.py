@@ -469,8 +469,16 @@ def minute_path_max_drawdown(
     below the base is real drawdown); each session's trough is
     ``min(intraday_low, close)`` (a ``None`` low degrades to the close —
     close-only for that session, never fabricated). Returns
-    ``(max_dd_paisa, max_dd_pct)`` with the percentage at FULL precision
-    (``drop / peak``, never rounded — CLAUDE.md §4).
+    ``(max_dd_paisa, max_dd_pct)`` where the TWO maxima are tracked
+    INDEPENDENTLY: ``max_dd_paisa`` is the largest absolute drop and
+    ``max_dd_pct`` is the largest ``drop / peak`` ratio over ALL points —
+    a smaller absolute drop measured from a smaller earlier peak can be the
+    larger percentage, so the two maxima may occur at DIFFERENT points
+    (the pre-amendment behaviour reported the pct AT the absolute-max point,
+    understating the honest max-pct — DEC-SWEEP-RESULTS-DEPTH-001 review
+    NIT (a) fix). Full precision, never rounded (CLAUDE.md §4); a drop
+    against a non-positive peak contributes ``0.0`` to the pct fold (no
+    meaningful base to divide by).
 
     Honest envelope: intraday HIGHS are not tracked (the series carries
     adverse marks only), so a peak formed mid-session is sampled at that
@@ -489,8 +497,8 @@ def minute_path_max_drawdown(
             trough = min(trough, point.equity_intraday_low_paisa)
         if peak is not None:
             drop = peak - trough
-            if drop > max_dd:
-                max_dd = drop
-                max_dd_pct = drop / peak if peak > 0 else 0.0
+            max_dd = max(max_dd, drop)
+            if peak > 0 and drop > 0:
+                max_dd_pct = max(max_dd_pct, drop / peak)
         peak = point.equity_close_paisa if peak is None else max(peak, point.equity_close_paisa)
     return max_dd, max_dd_pct

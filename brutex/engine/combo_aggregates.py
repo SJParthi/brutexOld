@@ -169,7 +169,10 @@ class ComboAggregate:
     * ``max_dd_minute_path_paisa/pct`` — R22 intraday-path max drawdown via
       :func:`brutex.engine.minute_path.minute_path_max_drawdown` over the
       capture's per-session equity series (peak-anchored at the sim's
-      starting equity); ``pct`` full precision.
+      starting equity); ``pct`` full precision and tracked INDEPENDENTLY of
+      the paisa maximum — it is the honest MAX percentage drawdown, which
+      may occur at a DIFFERENT point than the absolute-paisa maximum (a
+      smaller drop from a smaller earlier peak can be the larger share).
     * ``equity_status`` — the equity series' minute-coverage honesty verdict
       (``ok`` / ``partial`` / ``no_1m_data``).
     * ``worst5_days_json`` — ``[[iso_date, pnl_paisa], …]`` (≤ 5): the

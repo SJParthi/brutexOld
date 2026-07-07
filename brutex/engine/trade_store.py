@@ -16,9 +16,15 @@ tuple store, a trio of Parquet sidecars plus ONE JSON stamp:
   spans). The stage-stamp idiom: consumers validate BEFORE reading; ANY damage
   ⇒ ``None`` ⇒ deterministic rebuild (R42's mid-chain break law).
 
-All artifacts live under ``<sweeps>/results-depth/<instrument>/<tf>/`` — a
-4-segment subtree the dashboard's 3-level ``*/*/*.parquet`` store glob
-structurally never matches (design D0b, the ``quarantine/`` trick).
+All run-end results-depth artifacts live under the per-run directory built by
+:func:`sweep_run_dir` — ``<sweep_runs root>/<run_id>/`` where the
+``sweep_runs/`` root is a SIBLING of the sweeps results tree (gap-register
+Ruling 4, 2026-07-08): the tuple sidecars at
+``sweep_run_dir(...)/results-depth/<instrument>/<tf>/…``. NOTHING results-depth
+may sit inside the sweeps tree itself, because ``results_report`` +
+``sweep_verify`` recursively glob ``**/*.parquet`` under it and a
+``*.trades.parquet`` there would crash/mislead them (the earlier
+``<sweeps>/results-depth/`` + ``<sweeps>/runs/`` layouts are SUPERSEDED).
 
 ## Byte-determinism (Golden Rule #4 / #7)
 
@@ -73,6 +79,7 @@ __all__ = [
     "EQUITY_COLUMNS",
     "PAGE_LIMIT_MAX",
     "RESULTS_DEPTH_DIRNAME",
+    "SWEEP_RUNS_DIRNAME",
     "TRADES_SCHEMA_VERSION",
     "TRADE_COLUMNS",
     "SidecarPaths",
@@ -84,6 +91,7 @@ __all__ = [
     "load_stamp",
     "read_trade_page",
     "sidecar_paths_for",
+    "sweep_run_dir",
     "write_tuple_sidecars",
 ]
 
@@ -91,8 +99,12 @@ __all__ = [
 #: (a reader seeing an unknown version treats the trio as absent → rebuild).
 TRADES_SCHEMA_VERSION: Final[int] = 1
 
-#: The dedicated 4-segment subtree (design D0b): structurally excluded from the
-#: dashboard's 3-level ``sweeps.glob("*/*/*.parquet")`` store discovery.
+#: The run-artifact root directory name — a SIBLING of the sweeps results
+#: tree, never inside it (gap-register Ruling 4; e.g. ``<lake>/sweep_runs/``
+#: beside ``<lake>/sweeps/``).
+SWEEP_RUNS_DIRNAME: Final[str] = "sweep_runs"
+
+#: The per-run results-depth subtree holding the tuple sidecar trios.
 RESULTS_DEPTH_DIRNAME: Final[str] = "results-depth"
 
 #: Page-size clamp ceiling — the db_view ``_LIMIT_MAX`` law, verbatim value.
@@ -112,7 +124,9 @@ _FLOAT64: Final[str] = "float64"
 _BOOL: Final[str] = "bool"
 
 #: ``<stem>.trades.parquet`` schema — the binding trade-row contract (B1),
-#: column order PINNED (byte-determinism law). ``mae_1m_paisa`` /
+#: column order PINNED (byte-determinism law). ``lots`` / ``costs_paisa`` are
+#: NULLABLE Int64 and NULL-BY-DESIGN until P5's futures translation lands
+#: (gap-register Ruling 18 — never a fabricated 1/0); ``mae_1m_paisa`` /
 #: ``mfe_1m_paisa`` / ``vix_entry`` / ``vix_exit`` are nullable; everything
 #: else concrete. Timestamps are UTC epoch microseconds (exact ints).
 TRADE_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
@@ -273,12 +287,13 @@ class TradeRowWire(TypedDict):
 
     Contract keys (verbatim): ``entry_ts, entry_px, exit_ts, exit_px,
     direction, lots, exit_reason, pnl_paisa, costs_paisa, mae, mfe, vix_entry,
-    vix_exit`` — timestamps ISO-8601 UTC; ``mae``/``mfe`` are the 1-MINUTE
-    values when the trade's minute path was fully covered
-    (``path_1m_status == "ok"``) else the sweep-TF values. Additive keys:
-    ``trade_seq``, ``path_1m_status``, ``mae_granularity`` (``"1m"`` | ``"tf"``
-    — says which granularity ``mae``/``mfe`` carry, so a consumer never
-    guesses).
+    vix_exit`` — timestamps ISO-8601 UTC; ``lots`` / ``costs_paisa`` are
+    honest ``None`` (NULL-by-design until P5, gap-register Ruling 18);
+    ``mae``/``mfe`` are the 1-MINUTE values when the trade's minute path was
+    fully covered (``path_1m_status == "ok"``) else the sweep-TF values.
+    Additive keys: ``trade_seq``, ``path_1m_status``, ``mae_granularity``
+    (``"1m"`` | ``"tf"`` — says which granularity ``mae``/``mfe`` carry, so a
+    consumer never guesses).
     """
 
     entry_ts: str
@@ -286,10 +301,10 @@ class TradeRowWire(TypedDict):
     exit_ts: str
     exit_px: float
     direction: str
-    lots: int
+    lots: int | None
     exit_reason: str
     pnl_paisa: int
-    costs_paisa: int
+    costs_paisa: int | None
     mae: int
     mfe: int
     vix_entry: float | None
@@ -309,18 +324,51 @@ class TradePage:
     limit: int
 
 
-def sidecar_paths_for(store_path: Path, sweeps_root: Path) -> SidecarPaths:
-    """Map a tuple store path to its results-depth sidecar trio + stamp paths.
+def sweep_run_dir(results_root: Path, run_id: str) -> Path:
+    """THE run-artifact path-builder seam (gap-register Ruling 4, 2026-07-08).
 
-    ``<sweeps>/<instr>/<tf>/<stem>.parquet`` →
-    ``<sweeps>/results-depth/<instr>/<tf>/<stem>.{trades,aggs,equity}.parquet``
-    + ``<stem>.stamp.json`` — path-mechanical, so the store↔sidecar mapping is
-    1:1 with zero bookkeeping.
+    ``<results_root>`` is the sweeps results tree itself (``<lake>/sweeps`` —
+    the ``--results-root`` the sweep flushed into); the returned per-run
+    directory is ``<results_root parent>/sweep_runs/<run_id>/`` — a SIBLING
+    root beside the sweeps tree (the register's ``<lake>/sweep_runs/``
+    example), NEVER inside the ``**/*.parquet``-globbed sweeps tree, so
+    /results discovery, the sweep-verify doctor and ``results_report`` are
+    structurally untouched by any artifact written here.
+
+    EVERY run-end results-depth artifact path flows through this ONE function
+    (tuple sidecars via :func:`sidecar_paths_for`, top100.json + stamp,
+    baseline series, the P2 manifest probe) — it is the documented SEAM P2's
+    future ``run_layout.py`` leaf rebinds at merge-integration. ``run_id``
+    today is the ENGINE grid identity (``grid_identity(grid)``); Ruling 9's
+    one-LOGICAL-run_id-wrapping-N-engine-runs lands by rebinding the *run_id*
+    argument at that same integration point — callers never mint their own
+    layout.
 
     Raises
     ------
     TradeStoreError
-        If *store_path* is not exactly ``<sweeps_root>/<instrument>/<tf>/<file>.parquet``.
+        On an empty *run_id* (an unkeyed run dir would collide every run).
+    """
+    if not run_id:
+        raise TradeStoreError("sweep_run_dir: run_id must be non-empty")
+    return results_root.parent / SWEEP_RUNS_DIRNAME / run_id
+
+
+def sidecar_paths_for(store_path: Path, sweeps_root: Path, *, run_id: str) -> SidecarPaths:
+    """Map a tuple store path to its results-depth sidecar trio + stamp paths.
+
+    ``<sweeps>/<instr>/<tf>/<stem>.parquet`` →
+    ``sweep_run_dir(sweeps_root, run_id)/results-depth/<instr>/<tf>/
+    <stem>.{trades,aggs,equity}.parquet`` + ``<stem>.stamp.json`` —
+    path-mechanical, so the store↔sidecar mapping is 1:1 with zero
+    bookkeeping, and every path rides the ONE :func:`sweep_run_dir` seam
+    (Ruling 4: never inside the globbed sweeps tree).
+
+    Raises
+    ------
+    TradeStoreError
+        If *store_path* is not exactly ``<sweeps_root>/<instrument>/<tf>/<file>.parquet``
+        or *run_id* is empty.
     """
     try:
         rel = store_path.relative_to(sweeps_root)
@@ -336,7 +384,7 @@ def sidecar_paths_for(store_path: Path, sweeps_root: Path) -> SidecarPaths:
         )
     instrument, tf, filename = parts
     stem = filename[: -len(".parquet")]
-    base = sweeps_root / RESULTS_DEPTH_DIRNAME / instrument / tf
+    base = sweep_run_dir(sweeps_root, run_id) / RESULTS_DEPTH_DIRNAME / instrument / tf
     return SidecarPaths(
         trades=base / f"{stem}.trades.parquet",
         aggs=base / f"{stem}.aggs.parquet",
@@ -749,10 +797,10 @@ def _wire_row(record: Mapping[str, Any], *, run_id: str) -> TradeRowWire:
         exit_ts=_us_to_iso(int(record["exit_ts_us"])),
         exit_px=float(record["exit_px"]),
         direction=str(record["direction"]),
-        lots=int(record["lots"]),
+        lots=None if record["lots"] is None else int(record["lots"]),
         exit_reason=str(record["exit_reason"]),
         pnl_paisa=int(record["pnl_paisa"]),
-        costs_paisa=int(record["costs_paisa"]),
+        costs_paisa=None if record["costs_paisa"] is None else int(record["costs_paisa"]),
         mae=mae,
         mfe=mfe,
         vix_entry=None if vix_entry is None else float(vix_entry),

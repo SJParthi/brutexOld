@@ -69,10 +69,10 @@ def _trade(
         exit_ts=entry + timedelta(minutes=1),
         exit_px=Decimal("100.00"),
         direction=Side.BUY,
-        lots=1,
+        lots=None,  # NULL-by-design until P5 (Ruling 18)
         exit_reason=reason,
         pnl_paisa=pnl,
-        costs_paisa=0,
+        costs_paisa=None,
         mae_paisa=mae,
         mfe_paisa=mfe,
         mae_1m_paisa=mae_1m,
@@ -616,7 +616,9 @@ class TestRecordShape:
     def test_write_tuple_sidecars_accepts_the_record(self, tmp_path: Path) -> None:
         root = tmp_path / "sweeps"
         paths = sidecar_paths_for(
-            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet", root
+            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet",
+            root,
+            run_id="grid-0123456789abcdef",
         )
         capture = _capture((_trade(_DAY, 0, 10),))
         agg = _aggregate(capture, _row([10]))

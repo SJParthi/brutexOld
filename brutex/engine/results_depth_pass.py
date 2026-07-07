@@ -28,11 +28,26 @@ precedent, touching ZERO hot-path code.
   read back from the sidecars) and rebuilds only the stale rest; the
   deterministic artifacts converge to identical bytes.
 
+## Artifact layout (gap-register Ruling 4, 2026-07-08)
+
+EVERY run-end artifact — the tuple sidecar trios, the baselines, top100.json
++ its stamp — lands under the per-run directory built by the ONE
+:func:`brutex.engine.trade_store.sweep_run_dir` seam:
+``<sweep_runs root>/<run_id>/…``, a SIBLING root beside the sweeps tree,
+NEVER inside the ``**/*.parquet``-globbed tree (so /results discovery, the
+sweep-verify doctor and ``results_report`` are structurally untouched).
+``run_id`` today = the ENGINE grid identity; Ruling 9's logical run_id
+rebinds at that seam.
+
 ## Honest degradation (Golden Rule #1)
 
 Missing reference data NEVER fails the pass: ``vix_bars=None`` ⇒ one
 ``results_depth.vix_absent`` WARN + every trade's VIX honestly ``None`` +
-counted; a ``None`` 1-minute feed ⇒ ``path_1m_status="no_1m_data"`` per trade;
+counted, and every affected combo additionally gets a CAPPED per-combo
+``results_depth.vix_miss`` WARN (first :data:`VIX_MISS_WARN_CAP` combos per
+pass — Ruling 7's "capped vix_miss warns"; the same capped WARN fires for a
+PARTIAL VIX feed that misses individual trades); a ``None`` 1-minute feed ⇒
+``path_1m_status="no_1m_data"`` per trade;
 a ``None`` daily feed ⇒ an EMPTY session lens (every trade's trend buckets
 ``"unknown"``, zero event flags). A parity-tooth mismatch (kernel⇄oracle
 drift) is counted + WARNed by the capture layer and the combo is excluded from
@@ -81,7 +96,6 @@ from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
 from brutex.engine.sweep_supervisor import grid_identity
 from brutex.engine.top100_artifact import (
     DEFAULT_TOP100_PRESET,
-    RUNS_DIRNAME,
     PoolCounts,
     Top100Candidate,
     build_top100,
@@ -93,6 +107,7 @@ from brutex.engine.trade_store import (
     SidecarPaths,
     load_stamp,
     sidecar_paths_for,
+    sweep_run_dir,
     write_tuple_sidecars,
 )
 from brutex.engine.twin_detect import TwinCandidate, group_twins, trade_fingerprint
@@ -113,6 +128,7 @@ _LOG = structlog.get_logger("brutex.engine.results_depth_pass")
 
 __all__ = [
     "RESULTS_DEPTH_ENV",
+    "VIX_MISS_WARN_CAP",
     "ResultsDepthError",
     "ResultsDepthReport",
     "resolve_results_depth_enabled",
@@ -131,6 +147,12 @@ _POLARS_HINT: Final[str] = (
 
 #: The composite term-column count (the COMMON ``N_COMPOSITE_TERMS`` shape).
 _N_TERMS: Final[int] = 7
+
+#: Per-combo ``results_depth.vix_miss`` WARN cap (gap-register Ruling 7 —
+#: "capped vix_miss warns"; the house capped-20 idiom, the
+#: ``_log_underlying_all_empty`` precedent). Misses past the cap stay COUNTED
+#: (``vix_missing_trades``) — only the per-combo log line is suppressed.
+VIX_MISS_WARN_CAP: Final[int] = 20
 
 
 class ResultsDepthError(BruteXError):
@@ -223,6 +245,7 @@ class _Tallies:
     combos_parity_failed: int = 0
     combos_zero_trades: int = 0
     vix_missing_trades: int = 0
+    vix_miss_combos: int = 0
     baselines_written: int = 0
     excluded_no_aggs: int = 0
     zero_trade_excluded: int = 0
@@ -235,15 +258,45 @@ def _store_sha256(store_path: Path) -> str:
     return hashlib.sha256(store_path.read_bytes()).hexdigest()
 
 
-def _probe_manifest(runs_dir: Path, run_id: str) -> None:
+def _warn_vix_miss(run_id: str, missing: int, tallies: _Tallies) -> None:
+    """Capped per-combo VIX-miss WARN (gap-register Ruling 7).
+
+    A combo whose capture has ≥1 trade missing a VIX stamp gets ONE
+    ``results_depth.vix_miss`` WARN naming it — for the first
+    :data:`VIX_MISS_WARN_CAP` such combos per pass. The cap boundary emits
+    ONE ``results_depth.vix_miss_capped`` note; later misses stay silent in
+    the log but ALWAYS counted (``vix_missing_trades`` on the report — NULL
+    honesty preserved, the log volume bounded).
+    """
+    tallies.vix_miss_combos += 1
+    if tallies.vix_miss_combos <= VIX_MISS_WARN_CAP:
+        _LOG.warning(
+            "results_depth.vix_miss",
+            run_id=run_id,
+            missing_trades=missing,
+            note="trade(s) without a VIX stamp carry an honest NULL, never a silent zero",
+        )
+    elif tallies.vix_miss_combos == VIX_MISS_WARN_CAP + 1:
+        _LOG.warning(
+            "results_depth.vix_miss_capped",
+            cap=VIX_MISS_WARN_CAP,
+            note=(
+                "further per-combo vix_miss warnings suppressed this pass — "
+                "misses stay counted in the report's vix_missing_trades"
+            ),
+        )
+
+
+def _probe_manifest(run_dir: Path) -> None:
     """Validate-before-read on P2's run manifest, if present (design C4).
 
     The pass consumes no manifest field today; the probe exists so a TORN
     manifest is surfaced loudly (``results_depth.manifest_invalid``) while an
     absent one degrades silently (the manifest is P2's artifact — may not
-    exist yet).
+    exist yet). *run_dir* is the Ruling-4 per-run directory from the ONE
+    :func:`brutex.engine.trade_store.sweep_run_dir` seam.
     """
-    manifest = runs_dir / run_id / "manifest.json"
+    manifest = run_dir / "manifest.json"
     if not manifest.exists():
         return
     try:
@@ -334,6 +387,8 @@ def _build_tuple_sidecars(
         if row.total_trades == 0:
             tallies.combos_zero_trades += 1
         tallies.vix_missing_trades += capture.vix_missing_trades
+        if capture.vix_missing_trades > 0:
+            _warn_vix_miss(row.run_id, capture.vix_missing_trades, tallies)
         captures.append(capture)
         aggs.append(
             aggregate_combo(
@@ -493,8 +548,13 @@ def run_results_depth_pass(
         The honest counters — loud failures included, never masked.
     """
     run_id = grid_identity(grid)
-    runs_dir = out_root / RUNS_DIRNAME
-    _probe_manifest(runs_dir, run_id)
+    # Ruling 4: EVERY run-end artifact path rides the ONE sweep_run_dir seam —
+    # a SIBLING sweep_runs/ root beside the sweeps tree, never inside the
+    # **/*.parquet-globbed tree (P2's run_layout.py rebinds this at
+    # merge-integration; Ruling 9's logical run_id rebinds the run_id there).
+    run_dir = sweep_run_dir(out_root, run_id)
+    runs_dir = run_dir.parent
+    _probe_manifest(run_dir)
     if vix_bars is None:
         stamper = None
         _LOG.warning(
@@ -544,7 +604,7 @@ def run_results_depth_pass(
             continue
         try:
             store_hash = _store_sha256(store_path)
-            paths = sidecar_paths_for(store_path, out_root)
+            paths = sidecar_paths_for(store_path, out_root, run_id=run_id)
             rows = ResultsStore.load(store_path).rows()
             stamp = load_stamp(paths)
             if stamp is not None and stamp.store_content_hash == store_hash:
@@ -601,7 +661,7 @@ def run_results_depth_pass(
         try:
             series = compute_baseline(_bars(instrument, first_tf), instrument=instrument)
             write_baseline(
-                runs_dir / run_id / baseline_filename(instrument),
+                run_dir / baseline_filename(instrument),
                 series,
                 data_snapshot_hash=grid.data_snapshot_hash,
             )

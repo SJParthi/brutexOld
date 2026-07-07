@@ -8,7 +8,8 @@ artifact against the BINDING P3→P4 contract shapes:
 * trade rows (paged via ``read_trade_page`` + streamed via
   ``iter_trades_for_export``) carry EXACTLY the contract keys + the
   documented additive keys, offsets partition, totals come from the stamp;
-* ``<sweeps>/runs/<run_id>/top100.json`` exists at the contract path with the
+* ``<sweep_runs root>/<run_id>/top100.json`` exists at the Ruling-4 contract
+  path (the ``sweep_runs/`` SIBLING root beside the sweeps tree) with the
   ordered ``{rank, mask_hex, conditions[], tf, direction, arm, metrics{},
   regime{}, vix_band{}, family_id}`` entry shape + the stage-stamp sidecar;
 * the baseline artifact loads;
@@ -40,7 +41,6 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, run_persisted_sweep
 from brutex.engine.sweep_supervisor import grid_identity
 from brutex.engine.top100_artifact import (
-    RUNS_DIRNAME,
     TOP100_FILENAME,
     TOP100_STAMP_FILENAME,
     load_top100,
@@ -50,6 +50,7 @@ from brutex.engine.trade_store import (
     load_stamp,
     read_trade_page,
     sidecar_paths_for,
+    sweep_run_dir,
 )
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
@@ -195,7 +196,9 @@ def chain(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, ResultsDepthR
 def _first_tuple_paths(out_root: Path) -> SidecarPaths:
     grid = _grid()
     return sidecar_paths_for(
-        tuple_store_path(out_root, next(iter_sweep_tuples(grid)), grid), out_root
+        tuple_store_path(out_root, next(iter_sweep_tuples(grid)), grid),
+        out_root,
+        run_id=grid_identity(grid),
     )
 
 
@@ -216,7 +219,9 @@ class TestReportAndSidecars:
         out_root, _report = chain
         grid = _grid()
         for tuple_ in iter_sweep_tuples(grid):
-            paths = sidecar_paths_for(tuple_store_path(out_root, tuple_, grid), out_root)
+            paths = sidecar_paths_for(
+                tuple_store_path(out_root, tuple_, grid), out_root, run_id=grid_identity(grid)
+            )
             stamp = load_stamp(paths)  # full-hash tier
             assert stamp is not None
             assert stamp.trade_rows == sum(count for _, count in stamp.trade_spans.values())
@@ -236,8 +241,9 @@ class TestTradeListContract:
         for row in page.rows:
             assert set(row.keys()) == _CONTRACT_TRADE_KEYS | _ADDITIVE_TRADE_KEYS
             assert row["direction"] == "BUY"
-            assert row["lots"] == 1
-            assert row["costs_paisa"] == 0
+            # NULL-by-design until P5 (Ruling 18) — never a fabricated 1/0.
+            assert row["lots"] is None
+            assert row["costs_paisa"] is None
             assert row["vix_entry"] is not None  # the full-coverage VIX feed
             assert row["mae_granularity"] == "1m"  # the 1-minute feed covered every trade
             assert row["path_1m_status"] == "ok"
@@ -271,9 +277,11 @@ class TestTop100Contract:
     ) -> None:
         out_root, report = chain
         run_id = grid_identity(_grid())
-        artifact_path = out_root / RUNS_DIRNAME / run_id / TOP100_FILENAME
+        run_dir = sweep_run_dir(out_root, run_id)
+        assert not run_dir.is_relative_to(out_root)  # Ruling 4: a SIBLING root
+        artifact_path = run_dir / TOP100_FILENAME
         assert artifact_path.exists()
-        assert (out_root / RUNS_DIRNAME / run_id / TOP100_STAMP_FILENAME).exists()
+        assert (run_dir / TOP100_STAMP_FILENAME).exists()
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
         entries = payload["entries"]
         assert isinstance(entries, list)
@@ -286,14 +294,14 @@ class TestTop100Contract:
             assert set(entry["arm"].keys()) == {"sl_paisa", "tp_paisa"}
             assert entry["vix_band"]["stamped"] > 0
         # The stamped-vs-validated reader agrees with the raw JSON.
-        loaded = load_top100(out_root / RUNS_DIRNAME, run_id)
+        loaded = load_top100(run_dir.parent, run_id)
         assert loaded is not None
         assert loaded.to_payload() == payload
 
     def test_baseline_artifact_loads(self, chain: tuple[Path, ResultsDepthReport]) -> None:
         out_root, _report = chain
         run_id = grid_identity(_grid())
-        baseline_path = out_root / RUNS_DIRNAME / run_id / "baseline-NIFTY.json"
+        baseline_path = sweep_run_dir(out_root, run_id) / "baseline-NIFTY.json"
         series = load_baseline(baseline_path)
         assert series is not None
         assert series.instrument == "NIFTY"
@@ -307,10 +315,11 @@ class TestCorruptionRecovery:
         out_root, _report = chain
         grid = _grid()
         run_id = grid_identity(grid)
-        artifact_path = out_root / RUNS_DIRNAME / run_id / TOP100_FILENAME
+        run_dir = sweep_run_dir(out_root, run_id)
+        artifact_path = run_dir / TOP100_FILENAME
         pristine = artifact_path.read_bytes()
         artifact_path.write_bytes(b'{"schema_version": 1, "tampered": true}')
-        assert load_top100(out_root / RUNS_DIRNAME, run_id) is None
+        assert load_top100(run_dir.parent, run_id) is None
         rerun = run_results_depth_pass(
             out_root=out_root,
             grid=grid,
@@ -322,4 +331,4 @@ class TestCorruptionRecovery:
         assert rerun.tuples_skipped_current == 2
         assert rerun.top100_written is True
         assert artifact_path.read_bytes() == pristine
-        assert load_top100(out_root / RUNS_DIRNAME, run_id) is not None
+        assert load_top100(run_dir.parent, run_id) is not None

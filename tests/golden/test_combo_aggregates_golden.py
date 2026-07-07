@@ -222,7 +222,11 @@ def test_aggregate_spot_values_hand_verified() -> None:
 
 def test_aggs_parquet_bytes_golden_and_write_twice_identical(tmp_path: Path) -> None:
     root = tmp_path / "sweeps"
-    paths = sidecar_paths_for(root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet", root)
+    paths = sidecar_paths_for(
+        root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet",
+        root,
+        run_id="grid-feedfacefeedface",
+    )
     fixture = _fixture()
     captures = [capture for _, capture in fixture]
     records = [agg.to_record() for agg, _ in fixture]
@@ -246,7 +250,9 @@ def print_digests() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "sweeps"
         paths = sidecar_paths_for(
-            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet", root
+            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet",
+            root,
+            run_id="grid-feedfacefeedface",
         )
         fixture = _fixture()
         write_tuple_sidecars(

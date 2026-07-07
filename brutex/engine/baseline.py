@@ -11,8 +11,12 @@ module owns that series:
   float precision (a statistical figure, never rounded — CLAUDE.md §4);
   prices stay exact 2-dp Decimal rupees (the lake's own tick grid).
 * :func:`write_baseline` / :func:`load_baseline` — the deterministic JSON
-  artifact at ``<sweeps>/runs/<run_id>/baseline-<instrument>.json`` (design
-  B8): sorted keys, compact separators, ASCII, trailing newline — the bytes
+  artifact at ``<sweep_runs root>/<run_id>/baseline-<instrument>.json``
+  (design B8 as amended by gap-register Ruling 4 — the per-run directory
+  comes from the ONE :func:`brutex.engine.trade_store.sweep_run_dir` seam,
+  a SIBLING root beside the sweeps tree): sorted keys, compact separators,
+  ASCII, ``allow_nan=False`` (a non-finite figure is refused loudly, never
+  serialized as the non-JSON ``NaN`` token), trailing newline — the bytes
   are a pure function of the series + the stamped ``data_snapshot_hash``
   (traceability: the artifact names the exact data identity it was computed
   from). ANY damage on load — missing file, torn JSON, wrong schema version,
@@ -240,7 +244,12 @@ def write_baseline(path: Path, series: BaselineSeries, *, data_snapshot_hash: st
         "data_snapshot_hash": data_snapshot_hash,
         "source_note": series.source_note,
     }
-    rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    rendered = (
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+        + "\n"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_simple(path, lambda tmp: tmp.write_text(rendered, encoding="utf-8"))
     _LOG.info(

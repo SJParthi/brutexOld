@@ -25,6 +25,7 @@ from brutex.engine.top100_artifact import (
     load_top100,
     write_top100,
 )
+from brutex.engine.trade_store import sweep_run_dir
 from brutex.engine.twin_detect import TwinFamilies
 
 from tests.bench._o1_tiers import cache_tier_ceiling
@@ -58,7 +59,8 @@ def _pool(n: int) -> list[Top100Candidate]:
 
 
 def _build_runs_dir(root: Path, n_pool: int) -> Path:
-    runs_dir = root / "runs"
+    # The sweep_runs SIBLING root (Ruling 4) — built via the ONE seam.
+    runs_dir = sweep_run_dir(root / "sweeps", _run_id(n_pool)).parent
     artifact = build_top100(
         _pool(n_pool),
         run_id=_run_id(n_pool),

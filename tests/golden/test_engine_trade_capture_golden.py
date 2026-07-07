@@ -81,10 +81,14 @@ _VIX_BARS = [
 _RUN_TRADES = "ab" * 32
 _RUN_ZERO = "cd" * 32
 _STORE_HASH = "12" * 32
+_GRID_RUN = "grid-feedfacefeedface"
 
 #: Locked digests (sha256 hex). Regeneration is a deliberate, ledgered act.
-_GOLDEN_CANONICAL_SHA256 = "5e473bb7ea7f030aad714857c51f58615a3fd2170b5f290804ceb480f1ef0d37"
-_GOLDEN_TRADES_SHA256 = "e1ebe8fa1f1f5808410a20ec0887c723cc9a9f023a0417cd535e4abdbc2c93c1"
+#: Re-locked 2026-07-08 for gap-register Ruling 18 (lots/costs_paisa became
+#: honest NULL-by-design None — the only diff vs the prior lock is exactly
+#: those two fields; aggs/equity digests unchanged).
+_GOLDEN_CANONICAL_SHA256 = "8cc59fde89b641dffa6f34756e03fb6a2ea4fbcbb848a582097448995c89a2d3"
+_GOLDEN_TRADES_SHA256 = "aa75371589cbd59493fdf844ff26be9792e79455a498e3c42fa7309494257183"
 _GOLDEN_AGGS_SHA256 = "774d0804435d5cda46012ec8fc2acb1b21610418f88eb9e663a493cea86ecf23"
 _GOLDEN_EQUITY_SHA256 = "ed44220996f6f23167b23db37e551da038faf0e1e1d859ba8b71965b782961c2"
 
@@ -195,7 +199,11 @@ def test_capture_canonical_serialization_golden() -> None:
 
 def test_sidecar_bytes_golden_and_write_twice_identical(tmp_path: Path) -> None:
     root = tmp_path / "sweeps"
-    paths = sidecar_paths_for(root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet", root)
+    paths = sidecar_paths_for(
+        root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet",
+        root,
+        run_id=_GRID_RUN,
+    )
     captures = _capture_fixture()
     write_tuple_sidecars(paths, captures, [], store_content_hash=_STORE_HASH)
     first = (
@@ -227,7 +235,9 @@ def print_digests() -> None:  # pragma: no cover - regeneration helper, not a te
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "sweeps"
         paths = sidecar_paths_for(
-            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet", root
+            root / "NIFTY" / "1minute" / "bull_k1_feedfacefeedface.parquet",
+            root,
+            run_id=_GRID_RUN,
         )
         write_tuple_sidecars(paths, captures, [], store_content_hash=_STORE_HASH)
         for name, path in (

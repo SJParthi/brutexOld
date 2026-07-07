@@ -31,6 +31,7 @@ from brutex.strategies.types import Side
 
 _DAY = date(2024, 1, 2)  # a regular NSE Tuesday
 _DAY2 = date(2024, 1, 3)
+_DAY3 = date(2024, 1, 4)
 
 
 def _ts(hh: int, mm: int, *, day: date = _DAY) -> datetime:
@@ -441,6 +442,23 @@ class TestMinutePathMaxDrawdown:
         dd, pct = minute_path_max_drawdown(points)
         assert dd == 400
         assert pct == 0.0
+
+    def test_max_pct_is_the_honest_max_not_the_pct_at_the_max_drop(self) -> None:
+        """Review NIT (a) regression: the two maxima are INDEPENDENT.
+
+        An early 20% dip from the 100k base (drop 20,000) is a LARGER share
+        than the later 150,000 drop from the 1,000,000 peak (15%). The
+        pre-fix code returned the pct AT the absolute-max point (0.15),
+        understating the honest max-pct (0.20).
+        """
+        points = [
+            SessionEquityPoint(_DAY, 100_000, 80_000, 1),  # 20% dip from the base
+            SessionEquityPoint(_DAY2, 1_000_000, None, 1),  # new peak
+            SessionEquityPoint(_DAY3, 900_000, 850_000, 1),  # 150k drop = 15%
+        ]
+        dd, pct = minute_path_max_drawdown(points, start_equity_paisa=100_000)
+        assert dd == 150_000  # the absolute maximum
+        assert pct == 20_000 / 100_000  # the honest MAX percentage — a different point
 
     def test_monotonic_rise_zero_drawdown(self) -> None:
         points = [
