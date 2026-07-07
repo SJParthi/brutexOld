@@ -55,7 +55,9 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: (``rate.429``), a step DOWN under sustained pressure (``rate.stepdown``), and
 #: the recovery back up (``rate.stepup``) into the ``/logs`` stream so the
 #: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
-_LOG = structlog.get_logger("brutex.adapters.rate_common")
+#: (Mutation-equivalent line: the logger NAME is a cosmetic namespace pinned by no
+#: behaviour — pragma per DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528.)
+_LOG = structlog.get_logger("brutex.adapters.rate_common")  # pragma: no mutate
 
 # ── Deferred rate.* emission (DEC-RATE-LOG-OUTSIDE-LOCK-001) ────────────────
 # structlog routes through stdlib handlers (a stderr StreamHandler + a rotating
@@ -442,7 +444,9 @@ class RateController:
         #: Per-minute governor (DEC-GROWW-RATE-PERMIN-001): the injected HARD cap +
         #: the rolling deque of issue instants. ``None`` cap ⇒ governor disabled, the
         #: deque stays empty + ``pace`` skips both governor phases entirely.
-        self._ceiling_per_min: int | None = ceiling_per_min
+        #: (Pragma: the only mutant is the annotation's ``|`` — never evaluated under
+        #: PEP 563 ``from __future__ import annotations``; DEC-MUTATION-RUNTIME-003.)
+        self._ceiling_per_min: int | None = ceiling_per_min  # pragma: no mutate
         self._issues: deque[float] = deque()
         #: OBSERVE-ONLY trailing-hour issue COUNTER (DEC-RATE-MONITOR-EXPAND-001). A
         #: FIXED-SIZE ring of :data:`TRAILING_LOG_BUCKETS` (3600) per-second COUNT buckets —
@@ -463,10 +467,14 @@ class RateController:
         #: a windowed count is O(window-seconds) (a bounded sum over the last W buckets).
         self._issue_buckets: list[int] = [0] * TRAILING_LOG_BUCKETS
         #: Ring index of the bucket holding :attr:`_issue_newest_sec` (the current second).
-        self._issue_head: int = 0
+        #: (Pragma: the circular ring's head START is arbitrary while every bucket is
+        #: still zero — behaviourally equivalent; DEC-MUTATION-RUNTIME-003.)
+        self._issue_head: int = 0  # pragma: no mutate
         #: The integer second (``floor(clock())``) the head bucket currently counts. ``None``
         #: until the FIRST issue is recorded (an all-zero ring reads 0 in every window).
-        self._issue_newest_sec: int | None = None
+        #: (Pragma: annotation-only ``|`` mutant, never evaluated under PEP 563;
+        #: DEC-MUTATION-RUNTIME-003.)
+        self._issue_newest_sec: int | None = None  # pragma: no mutate
         #: Resolved smooth-pacing MODE (DEC-SMOOTH-PACING-AUTOLATCH-001): the explicit
         #: *smooth_pacing_mode* wins; ``None`` derives it from the legacy boolean
         #: (``True`` → ON, ``False`` → OFF — byte-identical for every existing caller).
@@ -534,7 +542,9 @@ class RateController:
         """
         return AdaptiveTokenBucket(
             initial_rps=self._rps,
-            downshift_rps=self._rps / 2.0,  # unused (we never feed the bucket hits); just < initial
+            # unused (we never feed the bucket hits); just < initial — equivalent
+            # BY DESIGN, so a value mutant is unobservable (DEC-MUTATION-RUNTIME-003).
+            downshift_rps=self._rps / 2.0,  # pragma: no mutate
             burst=BURST,
             # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): the bucket starts EMPTY, so
             # the opening call cannot release a free burst token — it waits a full
@@ -615,7 +625,9 @@ class RateController:
             # only — no pacing effect (the ring is never read by a gate).
             for i in range(TRAILING_LOG_BUCKETS):
                 self._issue_buckets[i] = 0
-            self._issue_head = 0
+            # (Pragma: the gap-reset twin of the constructor's head start — arbitrary
+            # while the ring is all-zero, equivalent; DEC-MUTATION-RUNTIME-003.)
+            self._issue_head = 0  # pragma: no mutate
             self._issue_newest_sec = None
             self._hits.clear()
             self._timeouts.clear()
@@ -677,7 +689,11 @@ class RateController:
         """
         interval = 1.0 / self._rps
         wait = (self._last_issue_ts + interval) - now
-        return wait if wait > 0.0 else 0.0
+        # ``max(wait, 0.0)`` — identical to ``wait if wait > 0.0 else 0.0`` (an
+        # overdue/at-boundary wait clamps to exactly 0.0) but rephrased so the ONLY
+        # generated mutant on this line is boundary-observable, never a silent
+        # tie-equivalent (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528).
+        return max(wait, 0.0)
 
     def _advance_issue_ring_locked(self, sec: int) -> None:
         """Advance the per-second issue ring's head to integer second *sec* (caller holds lock).
@@ -695,7 +711,11 @@ class RateController:
         if newest is None:
             return  # ring unseeded — nothing to advance (both callers guard, defensive)
         steps = sec - newest
-        if steps <= 0:
+        # ``steps < 1`` — int-identical to ``steps <= 0`` but rephrased so EVERY
+        # generated mutant of this guard is boundary-observable (the ``<= 0 → < 0``
+        # tie-equivalent disappears; DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528).
+        # NEVER pragma this line: it also carries the REAL off-by-one boundary mutant.
+        if steps < 1:
             return  # same second (or a tiny backward skew already gap-handled): no advance
         # Zero at most a full ring: beyond 3600 elapsed seconds every old bucket has aged out.
         for _ in range(min(steps, TRAILING_LOG_BUCKETS)):
@@ -753,7 +773,14 @@ class RateController:
         # ``floor`` (not ``ceil``): the bucket holding ``now - window`` also holds the sub-range
         # ``(now - window, …)`` inside the window, so ``ceil`` would drop that boundary second.
         oldest_sec = math.floor(now - window)
-        span = min(max(head_sec - oldest_sec + 1, 0), TRAILING_LOG_BUCKETS)
+        # The raw bucket span for ``(now - window, now]``: the ``+ 1`` closes the
+        # inclusive ``floor(now - window) .. floor(now)`` range (split onto its own
+        # line so its off-by-one mutants stay observable; DEC-MUTATION-RUNTIME-003,
+        # MIGRATION.md #1528).
+        raw_span = head_sec - oldest_sec + 1
+        # (Pragma: the ``max(…, 0)`` guard is unreachable for real windows ≥ 1 s —
+        # ``head_sec >= oldest_sec`` always, so ``raw_span >= 1``; defensive only.)
+        span = min(max(raw_span, 0), TRAILING_LOG_BUCKETS)  # pragma: no mutate
         count = 0
         for offset in range(span):
             count += self._issue_buckets[(self._issue_head - offset) % TRAILING_LOG_BUCKETS]
