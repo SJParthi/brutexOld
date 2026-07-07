@@ -38,10 +38,12 @@ stamp-driven `already_current` gate makes re-runs cheap by skipping writes
 main as DEC-CLI-LAKE-HEAL-L2-001 (#1493) and the merged fetch path runs it
 BEFORE this enrich seam — the dashboard heal-L2-before-Greeks-enrich
 ordering law holds on the CLI too; the six-step strict gate
-(DEC-PULL-SIX-STEP-ORDER-001 #1527, merged in flight) sits BETWEEN that heal
-and the dashboard enrich delegator — `_GREEKS_STRICT_WITHHELD` is a distinct
-instance of the COMMON `GreeksEnrichOutcome`, and the CLI (`prior_steps=None`)
-is untouched by it. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+(DEC-PULL-SIX-STEP-ORDER-001 #1527, merged in flight) sits BETWEEN the
+dashboard's own F&O L2 heal (`_heal_lake_after_pull`) and the enrich
+delegator inside `pull_contract_candles` — `_GREEKS_STRICT_WITHHELD` is a
+distinct instance of the COMMON `GreeksEnrichOutcome`; the CLI never calls
+that seam — its Seam A enrich invokes the COMMON fence directly, so the
+strict gate cannot touch it. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 F&O lake REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100%
 line+branch).
 Earlier: 2026-07-06 (DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527 —
@@ -630,8 +632,10 @@ hostile-review pass._
   `_mark_complete` → `_heal_lake_after_pull` (integrity, ALWAYS runs) → the opt-in `BRUTEX_PIPELINE_STRICT_GATE=1`
   barrier (an unclean prior step / F&O phase WITHHOLDS the pass, `_GREEKS_STRICT_WITHHELD` — now a distinct instance of
   the COMMON `GreeksEnrichOutcome`, identity-keyed so it never collides with `GREEKS_NOT_RUN`) →
-  `_enrich_greeks_from_minute` (still the thin delegator into the COMMON fence); the CLI is a `prior_steps=None`
-  legacy caller of that seam and its own Seam A enrich is untouched by the strict gate (the CLI spot six-step path is
+  `_enrich_greeks_from_minute` (still the thin delegator into the COMMON fence); the CLI never calls that seam
+  (`pull_contract_candles` — `prior_steps=None` covers the OTHER non-pipeline callers: the /db selection route,
+  tests) — its Seam A enrich invokes the COMMON fence directly, so the strict gate cannot touch it (the CLI spot
+  six-step path is
   main's NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, not this change's); `futures_skipped` reads 0 on CLI passes (FUT filtered at discovery —
   documented asymmetry); the bulk lever is manual (no cron). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
   REFERENCE_ONLY, no scope/vocab/rate change, zero vendor calls added; touched modules 100% line+branch;
