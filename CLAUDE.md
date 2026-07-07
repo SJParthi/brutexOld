@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
+_Last updated: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
+source change; tests + docs excepted): both poll surfaces (the site-wide
+`bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
+CLIENT-clock "updated Xs ago" readout on a ~1 s ticker (amber → LOUD RED explicit
+"STALE" past justified thresholds — widget warn 10 s / red 30 s = 10× cadence =
+backoff cap; universe warn 5 s past the retained 600 ms quick-retry envelope /
+red 15 s) + a SELF-RECOVERING poll (fetch rejection AND non-ok AND malformed body
+all counted failures; quick retries then 3 s→30 s capped exponential backoff,
+NEVER gives up — the 2026-07-06 38-minute frozen-tab incident fix; the bounded
+give-up that painted "live progress feed dropped" via innerHTML and stopped
+polling forever is REMOVED, its pinned tokens kept with genuine semantics; a
+non-ok poll can no longer settle the header as "— nothing to pull"; the stale
+state clears automatically on the next successful poll), and the `/universe`
+header + a new `#subunit` counter show per-expiry sub-unit progress ("expiry
+30Sep25 · sub-unit N this unit") derived ENTIRELY client-side from
+`s.current`/`s.completed` transitions (distinct-label count per completed/total
+anchor, Set-capped 4096; the `data/fno_symbol.py` grammar mirrored right-anchored
+so hyphenated underlyings never confuse the parse; spot/empty labels degrade to
+omission, never garbage). textContent-only DOM; substring tests pin PRESENCE of
+the JS, not execution (honest envelope — no headless JS runner); ZERO backend
+change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX).
+Earlier: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
 preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
 cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
 interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
@@ -569,7 +591,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
-  MIGRATION.md #1529** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
+  MIGRATION.md #1531** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
   gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
   `brutex/observability/bench_baseline.py` (schema/comparator/capture/govern + the ONE
   hardware-key format law) + `hardware_envelope.py` gains `cpu_model_string`/`HardwareFingerprint`/
@@ -590,6 +612,15 @@ hostile-review pass._
   compare ABSTAINS green-but-loud. Ratio tiers + the 50 M/s floor UNTOUCHED (complements). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; new brutex modules 100%
   line+branch; ruff/ruff-format/mypy --strict/pyright clean).
+  Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+  MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
+  widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
+  LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
+  exponential backoff, never gives up — the 38-minute frozen-tab incident fix; a non-ok poll can no longer settle
+  the header), and the `/universe` header + `#subunit` counter show per-expiry sub-unit progress derived entirely
+  client-side from `s.current` transitions (fno_symbol grammar mirrored right-anchored; spot/empty → omission).
+  textContent-only; substring tests pin presence not execution (honest envelope); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
   Earlier: `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528** —
   the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
   COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by

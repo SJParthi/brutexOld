@@ -1,6 +1,6 @@
 # Absolute benchmark baselines — per-hardware, measured-only
 
-**DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1529).**
+**DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1531).**
 
 This directory holds the committed ABSOLUTE hot-path benchmark baselines the
 `bench-m4pro.yml` compare gate enforces. One file per machine:
