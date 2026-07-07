@@ -52,7 +52,8 @@ import structlog
 if TYPE_CHECKING:
     from brutex.adapters.groww.spot_bounds import SpotWindows
     from brutex.adapters.ingest_common import RetryOutcome
-    from brutex.orchestrator.audit import AuditWriter
+    from brutex.data.audit_capture import AuditCaptureSink
+    from brutex.orchestrator.audit import AuditWriter, BufferedAuditRecord
 
 from brutex.adapters.empty_circuit_breaker import (
     EmptySettleBreaker,
@@ -344,6 +345,7 @@ def run_groww_spot_ingest(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    capture: AuditCaptureSink | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -467,6 +469,22 @@ def run_groww_spot_ingest(
         default — dry-run / synthetic / unit-test callers) never probes; ONLY the
         real-vendor production sites arm it
         (:func:`~brutex.adapters.groww.vendor_floor.make_vendor_floor_learner`).
+    capture
+        Optional :class:`~brutex.data.audit_capture.AuditCaptureSink`
+        (DEC-AUDIT-LAKE-REPLAY-ORACLE-001). When wired (the caller has ALREADY
+        wrapped *sink* — or the write pool's base sink — in it via
+        :func:`~brutex.data.audit_capture.resolve_audit_capture`), its buffered
+        replay records are drained onto the SAME hash-chained *audit* writer on
+        the CONTROLLER thread at three seams: after each pair's
+        ``INGEST_PAIR_DONE``, after each ``INGEST_PAIR_FAILED`` (a quarantined
+        pair's already-durable windows MUST still be audited or replay is
+        structurally incomplete), and once more before ``INGEST_RUN_COMPLETE``.
+        The chain stays literally single-writer (Golden Rule #8) — no worker
+        thread ever touches the :class:`~brutex.orchestrator.audit.AuditWriter`.
+        ``capture`` wired with ``audit is None`` discards the records and logs
+        ONE loud ``audit_capture.no_chain`` WARN per run (capture without a
+        chain is useless, never silent). ``None`` (the default) is
+        byte-identical to today.
 
     Returns
     -------
@@ -563,6 +581,30 @@ def run_groww_spot_ingest(
                 floor_learner=floor_learner,
             )
 
+    # Replay-capture drain (DEC-AUDIT-LAKE-REPLAY-ORACLE-001): records buffered by
+    # the capture sink on worker/shard threads are appended to the real chain ONLY
+    # here on the controller thread — the AuditWriter stays literally single-writer
+    # (Golden Rule #8; the sanctioned BufferedAuditRecord replay pattern).
+    capture_no_chain_warned = False
+
+    def _drain_capture(records: tuple[BufferedAuditRecord, ...]) -> None:
+        """Append drained capture records to the chain (controller thread only)."""
+        nonlocal capture_no_chain_warned
+        if not records:
+            return
+        if audit is None:
+            # Capture without a chain is useless — never silent (one WARN per run).
+            if not capture_no_chain_warned:
+                capture_no_chain_warned = True
+                _LOG.warning(
+                    "audit_capture.no_chain",
+                    pull_id=pull_id,
+                    discarded=len(records),
+                )
+            return
+        for record in records:
+            audit.append(action=record.action, subject=record.subject, payload=record.payload)
+
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
     maybe_audit(
@@ -597,6 +639,8 @@ def run_groww_spot_ingest(
                     "still_failed_windows": report.still_failed_windows,
                 },
             )
+            if capture is not None:
+                _drain_capture(capture.drain_pair(instrument.symbol_name, interval))
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
             continue
@@ -651,6 +695,10 @@ def run_groww_spot_ingest(
             f"{instrument.symbol_name}:{interval}",
             {"error": str(exc), "auth_failure": auth_failed},
         )
+        # A quarantined pair's ALREADY-DURABLE windows must still be audited or
+        # the replay is structurally incomplete (DEC-AUDIT-LAKE-REPLAY-ORACLE-001).
+        if capture is not None:
+            _drain_capture(capture.drain_pair(instrument.symbol_name, interval))
         # Quarantine-cause nook: WHY this pair was dropped (the bare failed=N count
         # otherwise hides the terminal Groww error).
         _LOG.warning(
@@ -692,6 +740,11 @@ def run_groww_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
+    # Final replay-capture drain: any records not claimed by a pair drain (e.g. a
+    # pair whose fan-out outcome never arrived) land on the chain before the run
+    # closes — capture memory never outlives the run.
+    if capture is not None:
+        _drain_capture(capture.drain_remaining())
     maybe_audit(
         audit,
         "INGEST_RUN_COMPLETE",
@@ -772,6 +825,7 @@ def run_groww_spot_ingest_with_retry(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    capture: AuditCaptureSink | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -831,6 +885,13 @@ def run_groww_spot_ingest_with_retry(
     boundary-empty window never re-probes). ``None`` (the default) keeps every
     dry-run / synthetic / test caller un-armed.
 
+    *capture* (DEC-AUDIT-LAKE-REPLAY-ORACLE-001) is forwarded verbatim to every
+    pass: ONE capture sink (and ONE attached
+    :class:`~brutex.data.audit_capture.DedupJournal`) spans all retry rounds, so a
+    retry pass's idempotent re-appends admit zero new ``add`` rows and every
+    pass's replay records drain onto the same chain at the controller seams.
+    ``None`` (the default) is byte-identical to today.
+
     Returns
     -------
     SpotIngestWithRetry
@@ -870,6 +931,7 @@ def run_groww_spot_ingest_with_retry(
             storm_breaker=storm_breaker,
             write_breaker=write_breaker,
             floor_learner=floor_learner,
+            capture=capture,
         )
 
     report = _one_pass()

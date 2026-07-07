@@ -3935,6 +3935,24 @@ def cmd_fetch(
         # path. The pull OWNS their lifetime + MUST drain them in the `finally` below BEFORE
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
+        # Audit→lake replay capture (DEC-AUDIT-LAKE-REPLAY-ORACLE-001): env-gated
+        # (BRUTEX_AUDIT_REPLAY_CAPTURE), default OFF → `resolve_audit_capture`
+        # returns the sink object UN-wrapped (identity) and `capture` stays None,
+        # so the default live pull is byte- and event-identical. Resolved HERE —
+        # immediately BEFORE build_write_consumer — so pool-routed shard-worker
+        # appends route THROUGH the wrapper (the pool owns the base sink; wrapping
+        # any later would let pooled writes bypass capture). `--dry-run`/`--inspect`
+        # (`_no_persist`) never consult the resolver: they wire no ingest audit
+        # chain, so capture would have nothing to drain into.
+        from brutex.data.audit_capture import AuditCaptureSink, resolve_audit_capture
+
+        capture: AuditCaptureSink | None = None
+        if not _no_persist:  # pragma: no cover — live path (resolver + sink unit-covered)
+            sink, capture = resolve_audit_capture(
+                sink,
+                lake_root=sink_lake_root,
+                lmdb_dir=sink_lake_root / "audit" / "dedup-live.lmdb",
+            )
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
         # Vendor-down error-storm breaker + dead-credential StillStale escalation
@@ -3981,6 +3999,10 @@ def cmd_fetch(
                     detect_completeness_gaps=not dry_run,
                     observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
+                    # Replay-capture drains ride the SAME `audit=ingest_audit`
+                    # chain at the controller seams (None when the env gate is
+                    # OFF — the byte-identical default).
+                    capture=capture,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
