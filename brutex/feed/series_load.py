@@ -73,14 +73,24 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
     weekend sessions included): an intraday interval labels its bars on the
     resampler's fixed-arithmetic TF bucket grid ``session open + k·tf`` inside
     ``[session open, session close)`` (DEC-RESAMPLE-ANCHOR-002), while the
-    derived FNO ``1day`` bar is stamped at its session date's midnight IST. A
-    window that holds NO such instant (a pre-open / post-close boundary
-    sliver, a weekend/holiday run, a sub-bucket fragment of a coarse TF — a
-    4hour day carries ONLY the 09:15 + 13:15 labels, so a 13:30→midnight
-    expiry-day fragment overlaps the session yet cannot hold a bar) genuinely
-    cannot hold bars, so an empty read there is NOT a data defect (review
-    round-1 findings 2/16/22 + round-3 finding 7 — the false "re-pull"
-    refusal on a legitimate roll-boundary window).
+    derived FNO ``1day`` bar is stamped at its session date's midnight IST —
+    but that bar SUMMARISES the whole session and is written by the
+    POST-session pipeline prebuild, so its midnight stamp counts as an
+    expectable instant only when the window ALSO reaches the day's session
+    CLOSE (``seg_end >= close``): a window ending before the close (the
+    morning-after-expiry pre-open sliver of a bare-date ``--end`` —
+    ``[00:00 → 05:30 IST]`` on the successor contract's FIRST owned day)
+    demands a bar the prebuild structurally cannot have derived yet, and the
+    "re-pull / run the prebuild" remediation would be impossible until the
+    session completes (review round-6 finding 3 — the 1day residual of the
+    round-1/round-3 boundary class). A window that holds NO such instant (a
+    pre-open / post-close boundary sliver, a weekend/holiday run, a
+    sub-bucket fragment of a coarse TF — a 4hour day carries ONLY the 09:15 +
+    13:15 labels, so a 13:30→midnight expiry-day fragment overlaps the
+    session yet cannot hold a bar) genuinely cannot hold bars, so an empty
+    read there is NOT a data defect (review round-1 findings 2/16/22 +
+    round-3 finding 7 — the false "re-pull" refusal on a legitimate
+    roll-boundary window).
 
     HONEST abstain: an out-of-coverage date (2027+ weekday) raises
     ``HolidayDataUnavailableError`` — this helper then returns ``True`` so the
@@ -110,7 +120,14 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
         if session is not None:
             if step is None:  # the derived FNO 1day bar — midnight-IST stamp
                 stamp = datetime.combine(day, time.min, tzinfo=IST)
-                if seg_start <= stamp <= seg_end:
+                close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
+                # Expectable only when the window holds the stamp AND reaches
+                # the session close the bar summarises (``stamp < close`` so
+                # ``seg_end >= close`` implies ``stamp <= seg_end``): a
+                # window ending pre-close cannot demand a 1day bar the
+                # post-session prebuild cannot yet have derived (round-6
+                # finding 3 — the live-edge morning-after-expiry sliver).
+                if seg_start <= stamp and seg_end >= close_dt:
                     return True
             else:
                 open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
@@ -249,7 +266,9 @@ def load_sweep_slice(
         the requested interval is empty — distinct message from a missing
         contract; a bar-less boundary sliver — pre-open/post-close edges,
         a holiday/weekend run after an expiry, a degenerate intersection, a
-        sub-bucket coarse-TF fragment holding no grid label — is SKIPPED with
+        sub-bucket coarse-TF fragment holding no grid label, a ``1day``
+        fragment ending before its only owned session's CLOSE (the bar the
+        post-session prebuild cannot yet have derived) — is SKIPPED with
         one ``series_load.boundary_segment_no_session`` WARN instead of a
         false refusal), or a boundary monotonicity break (never silent).
     """
@@ -333,13 +352,16 @@ def load_sweep_slice(
                 # expectable bar instant (a pre-open/post-close boundary
                 # sliver — e.g. a day-only `--end` the morning after an
                 # expiry — a holiday/weekend run right after a roll, a
-                # degenerate intersection, or a sub-bucket coarse-TF fragment
-                # straddling no grid label): an empty read is EXPECTED, not a
-                # data defect. Skip the boundary segment with ONE WARN
-                # instead of a false "re-pull" whole-sweep refusal (review
-                # round-1 findings 2/16/22 + round-3 finding 7); the loud
-                # refusal below stands for any span the calendar says SHOULD
-                # hold bars.
+                # degenerate intersection, a sub-bucket coarse-TF fragment
+                # straddling no grid label, or a 1day fragment ending before
+                # its only owned session's close — the derived bar the
+                # post-session prebuild cannot yet have written): an empty
+                # read is EXPECTED, not a data defect. Skip the boundary
+                # segment with ONE WARN instead of a false "re-pull"
+                # whole-sweep refusal (review round-1 findings 2/16/22 +
+                # round-3 finding 7 + round-6 finding 3); the loud refusal
+                # below stands for any span the calendar says SHOULD hold
+                # bars.
                 _LOG.warning(
                     "series_load.boundary_segment_no_session",
                     contract=seg.contract_symbol,

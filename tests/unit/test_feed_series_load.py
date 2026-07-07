@@ -604,10 +604,12 @@ class TestBoundarySegmentSessionSkip:
                     resolution=crafted,
                 )
 
-    def test_1day_midnight_stamp_in_window_still_refuses(self, lake: Path, tmp_path: Path) -> None:
-        # The derived FNO 1day bar is stamped midnight IST: a pre-open sliver
-        # [00:00 → 05:30] DOES hold the expectable 1day instant, so a missing
-        # 1day partition there is a REAL prebuild gap → refusal stands.
+    def test_1day_window_covering_the_session_close_still_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # A window reaching PAST the day's 15:30 close: the session the 1day
+        # bar summarises has completed within the window, so a missing 1day
+        # partition is a REAL prebuild gap → refusal stands.
         with Catalog.open(tmp_path / "cat.duckdb") as cat:
             _futures_lake(lake, cat)  # 1minute only — no 1day partitions
             with pytest.raises(FuturesSeriesError, match="'1day' is EMPTY"):
@@ -616,8 +618,72 @@ class TestBoundarySegmentSessionSkip:
                     lake,
                     interval="1day",
                     start=_ist(2025, 6, 27, 0, 0),
+                    end=_ist(2025, 6, 27, 23, 59),
+                )
+
+    def test_1day_window_ending_exactly_at_the_close_still_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # Boundary pin: seg_end == the 15:30 session close is ENOUGH — the
+        # session is complete, the prebuild owes the bar → refusal stands.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with pytest.raises(FuturesSeriesError, match="'1day' is EMPTY"):
+                _load_alias(
+                    cat,
+                    lake,
+                    interval="1day",
+                    start=_ist(2025, 6, 27, 0, 0),
+                    end=_ist(2025, 6, 27, 15, 30),
+                )
+
+    def test_1day_live_edge_morning_after_expiry_skips_not_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # Review round-6 finding 3 (MAJOR): a bare-date `--end` the morning
+        # after an expiry puts the successor contract's FIRST owned day into a
+        # pre-open sliver [00:00 → 05:30 IST]. The midnight-IST 1day stamp
+        # sits inside it, but the bar SUMMARISES the 09:15–15:30 session and
+        # is written by the POST-session prebuild — it structurally cannot
+        # exist yet, and the "re-pull / run the prebuild" remediation is
+        # impossible until ~15:30 IST. Pre-fix this EMPTY-refused (aborting
+        # the whole multi-interval futures launch every morning after every
+        # expiry); now it SKIPS with one WARN like every other boundary
+        # sliver — the intraday variant was already fixed in round 1.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)  # 1minute only — no 1day partitions
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    interval="1day",
+                    start=_ist(2025, 6, 27, 0, 0),
                     end=_ist(2025, 6, 27, 5, 30),
                 )
+        assert out == []
+        warned = _skip_warns(logs)
+        assert len(warned) == 1
+        assert warned[0]["contract"] == _JUL
+        assert warned[0]["interval"] == "1day"
+
+    def test_1day_window_ending_one_minute_before_the_close_skips(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # The close boundary's other side: seg_end 15:29 < close 15:30 — the
+        # session has NOT completed within the window, the bar cannot be
+        # demanded → skip, never a false refusal.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    interval="1day",
+                    start=_ist(2025, 6, 27, 0, 0),
+                    end=_ist(2025, 6, 27, 15, 29),
+                )
+        assert out == []
+        assert len(_skip_warns(logs)) == 1
 
     def test_1day_midnight_stamp_outside_window_skips(self, lake: Path, tmp_path: Path) -> None:
         # The same trading date but an intersection strictly AFTER midnight:
