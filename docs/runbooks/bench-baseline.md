@@ -1,6 +1,6 @@
 # Runbook — absolute benchmark baseline gate (bench-m4pro)
 
-**DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1531).** Operator procedures for
+**DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1533).** Operator procedures for
 the committed per-hardware absolute-benchmark compare gate.
 
 ## Reading a RED absolute gate

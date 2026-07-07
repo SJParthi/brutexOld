@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bench_baseline_gate.py — the absolute-benchmark baseline CI gate CLI.
 
-DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1531). A THIN stdlib-only wrapper
+DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1533). A THIN stdlib-only wrapper
 over the ONE core :mod:`brutex.observability.bench_baseline` (itself pure
 stdlib), loaded standalone via ``importlib.util.spec_from_file_location``
 (the ``scripts/ci/_textscan.py`` sibling-contract idiom) so the shared-CI
