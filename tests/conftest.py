@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,39 @@ from typing import Any
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from hypothesis import HealthCheck
+from hypothesis import settings as _hyp_settings
+
+# DEC-TEST-APPARATUS-DEBTS-001(b): EXPLICIT CI determinism. Honesty note
+# (Golden Rule #1): hypothesis >=6.113 ALREADY auto-loads its own built-in
+# "ci" profile (derandomize=True) whenever a CI env var (CI /
+# GITHUB_ACTIONS / ...) is set, so GHA property runs were implicitly
+# derandomized even before this block existed. This block's real job is to
+# make the selection EXPLICIT and env-driven, and to pin the profile's
+# fields IN-REPO independent of upstream's built-in: every field is set
+# explicitly (never inherited from the ambient default at import time), so
+# the profile is environment-invariant — a local `HYPOTHESIS_PROFILE=ci`
+# run is field-identical to CI. Per-test @settings decorators inherit
+# UNSPECIFIED fields from the loaded profile, so derandomize=True
+# propagates through every hypothesis test with zero per-file edits.
+# Selected via HYPOTHESIS_PROFILE=ci (ci.yml / verify-m4pro.yml /
+# mutation.yml). SANCTIONED FLIP: a CI-env run that does NOT set
+# HYPOTHESIS_PROFILE (stress-nightly + the other scheduled arms) loads
+# "default" here, OVERRIDING hypothesis's auto-loaded built-in ci profile —
+# those arms are deliberately RANDOM (exploration off the PR path; before
+# this block they were implicitly derandomized by the auto-load). Currently
+# vacuous — no @given tests live in those suites — but stated honestly.
+# Pinned by tests/unit/test_hypothesis_ci_profile.py (fields + source pin +
+# CI-env-stripped subprocess selection pin + run-twice draw identity).
+_hyp_settings.register_profile(
+    "ci",
+    derandomize=True,
+    print_blob=True,
+    deadline=None,
+    database=None,
+    suppress_health_check=(HealthCheck.too_slow,),
+)
+_hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 
 @pytest.fixture(autouse=True)
