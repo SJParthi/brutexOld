@@ -5,10 +5,15 @@ Exhaustive over :mod:`brutex.data.pcr` — the fold law (each numbered clause of
 ``compute_pcr`` composition, the coverage-label/-note honesty vocabulary, and
 Hypothesis property-style invariants: ``OK ⟺ ratio is not None``, non-negative
 ratios, side-swap reciprocity, sums conservation, and orientation duality (the
-DYNAMIC claim, executable). Sums are independently cross-checked with
-:class:`fractions.Fraction` (the DEC-SURFACE-TRIAL-001 independent-recompute
-idiom). Legs are plain tuples — the duck-typed input contract proven by
-construction (no adapter class needed).
+DYNAMIC claim, executable). The ratio-value cross-check against an INDEPENDENT
+:class:`fractions.Fraction` recompute (the DEC-SURFACE-TRIAL-001 idiom) is the
+deterministic ``test_happy_path_matches_independent_fraction_recompute``
+(hand-built 117/134 legs — the test that kills an inverted den/num fold); the
+two ratio-valued properties additionally pin the PRODUCED Decimals — each
+OK-arm ratio against the exact ``Fraction`` of its outcome sums and each
+mirrored/dual PAIR's ratio product against 1 — so they are no longer algebraic
+identities over the sums alone. Legs are plain tuples — the duck-typed input
+contract proven by construction (no adapter class needed).
 """
 
 from __future__ import annotations
@@ -283,6 +288,30 @@ _legs_st = st.lists(
     max_size=40,
 )
 
+# The fold divides under the DEFAULT 28-significant-digit Decimal context
+# (ROUND_HALF_EVEN), so the produced Decimal sits within half an ulp of the
+# exact quotient — a RELATIVE error ≤ 5×10⁻²⁸. 10⁻²⁶ relative is a 20×
+# safety margin that still fails on any real defect (e.g. an inverted
+# den/num fold, off-by-one sums, a truncating division).
+_RATIO_REL_TOL = Fraction(1, 10**26)
+# A product of two such Decimals compounds to ≤ ~2×10⁻²⁶ relative; 10⁻²⁵
+# absolute (the exact product is 1) keeps the same margin discipline.
+_PRODUCT_TOL = Fraction(1, 10**25)
+
+
+def _assert_ratio_tracks_sums(outcome: RatioOutcome) -> None:
+    """Pin the PRODUCED ``outcome.ratio`` Decimal against its exact quotient.
+
+    The sum-equality asserts in the ratio-valued properties are algebraic
+    identities over the outcome's OWN sums — they can never fail once the
+    sums match, and never inspect ``outcome.ratio``. This helper closes that
+    tautology: a fold mutated to return the INVERTED ratio (denominator /
+    numerator) fails here for every numerator ≠ denominator draw.
+    """
+    assert outcome.ratio is not None
+    exact = Fraction(outcome.numerator_sum, outcome.denominator_sum)
+    assert abs(Fraction(str(outcome.ratio)) - exact) <= exact * _RATIO_REL_TOL
+
 
 class TestFoldProperties:
     @given(legs=_legs_st)
@@ -312,6 +341,12 @@ class TestFoldProperties:
                 mirrored.numerator_sum, mirrored.denominator_sum
             )
             assert product == 1
+            # The promise on the PRODUCED Decimals, not just the sums: each
+            # ratio tracks its exact quotient, and ratio × mirrored-ratio ≈ 1.
+            _assert_ratio_tracks_sums(original)
+            _assert_ratio_tracks_sums(mirrored)
+            produced = Fraction(str(original.ratio)) * Fraction(str(mirrored.ratio))
+            assert abs(produced - 1) <= _PRODUCT_TOL
 
     @given(legs=_legs_st)
     def test_orientation_duality(self, legs: list[Leg]) -> None:
@@ -332,3 +367,9 @@ class TestFoldProperties:
             assert Fraction(put_call.numerator_sum, put_call.denominator_sum) == 1 / Fraction(
                 call_put.numerator_sum, call_put.denominator_sum
             )
+            # Duality on the PRODUCED Decimals: each orientation's ratio
+            # tracks its exact quotient, and their product ≈ 1.
+            _assert_ratio_tracks_sums(put_call)
+            _assert_ratio_tracks_sums(call_put)
+            produced = Fraction(str(put_call.ratio)) * Fraction(str(call_put.ratio))
+            assert abs(produced - 1) <= _PRODUCT_TOL
