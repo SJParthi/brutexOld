@@ -16,6 +16,7 @@ import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import ModuleType
+from typing import cast
 
 import pytest
 from brutex.calendars.nse import IST
@@ -28,6 +29,7 @@ from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
 # OHLC invariant (see TestEnvelopeGuardSeamPerColumn).
 from brutex.engine.rust_trade_sim import (
     _MAX_KERNEL_PRICE_PAISA,  # pyright: ignore[reportPrivateUsage]
+    _U128_MASK,  # pyright: ignore[reportPrivateUsage]
     ResidentTradeSim,
     _construction_fallback_reason,  # pyright: ignore[reportPrivateUsage]
 )
@@ -521,13 +523,15 @@ class TestCrossSessionPendingEntryParity:
         assert got[0][0].entry_ts == bars[2].timestamp  # 09:16 day-2, NOT 09:15
 
 
-# ── kernel-envelope guards (DEC-SWEEP-RUST-TRADESIM-WIRE-001) ─────────────────
+# ── kernel-envelope guards (DEC-SWEEP-RUST-TRADESIM-WIRE-001 + U128-KERNEL-001) ─
 #
-# The compiled kernel is u64-native (bar_bits / masks) and #1090-validates every
-# paisa input against MAX_PRICE_PAISA = i64::MAX / 8. An out-of-envelope input
-# must route to the bit-exact Python oracle — LOUDLY (one structlog WARNING) —
-# never surface as a PyO3 OverflowError / kernel ValueError the pure-Python
-# engine would not have raised (wheel state must never change behaviour).
+# TWO compiled kernels (u64 + u128, one shared MaskWord core) #1090-validate
+# every paisa input against MAX_PRICE_PAISA = i64::MAX / 8. Wide (>64-bit,
+# ≤ u128) bar_bits/masks are Rust-SERVED (DEC-TRADE-SIM-U128-KERNEL-001); an
+# input beyond even the u128 envelope must route to the bit-exact Python
+# oracle — LOUDLY (one structlog WARNING) — never surface as a PyO3
+# OverflowError / kernel ValueError the pure-Python engine would not have
+# raised (wheel state must never change behaviour).
 
 
 def _fallback_events(logs: list[EventDict]) -> list[EventDict]:
@@ -564,17 +568,50 @@ class TestConstructionEnvelopeGuards:
         assert events[0]["reason"] == "wheel_missing"
         assert events[0]["n_bars"] == len(bars)
 
-    def test_bar_bits_u128_falls_back_and_matches_oracle(self) -> None:
+    def test_bar_bits_wide_window_served_by_u128_kernel(self) -> None:
+        # DEC-TRADE-SIM-U128-KERNEL-001: a bar_bits value in (U64_MASK,
+        # _U128_MASK] is NO LONGER a fallback — the constructor builds the
+        # u128 kernel and the window is Rust-served (rust_active True), with
+        # trades bit-identical to the oracle for u64-fit AND wide masks.
         bars = _feed()
         bits = build_bar_bits(bars)
-        bits[0] |= 1 << 100  # the documented u128 headroom (MAX_VOCAB_BITS = 128)
+        bits[0] |= 1 << 100  # inside the u128 headroom (MAX_VOCAB_BITS = 128)
+        masks = [0, 1, 1 << 100]
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        assert _fallback_events(logs) == []
+        with capture_logs() as call_logs:
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert _call_fallback_events(call_logs) == []  # the wide kernel served it
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+        # Anti-vacuity: the wide mask actually produced a trade through Rust.
+        assert len(got[2]) >= 1
+
+    def test_bar_bits_beyond_u128_falls_back_and_matches_oracle(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] |= 1 << 130  # beyond even the u128 headroom (MAX_VOCAB_BITS = 128)
         masks = [0, 1]
         with capture_logs() as logs:
             sim = ResidentTradeSim(bars, bits, tf_minutes=1)
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
-        assert events[0]["reason"] == "bar_bits_u128"
+        assert events[0]["reason"] == "bar_bits_beyond_u128"
         got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         expected = [
             _oracle(
@@ -590,6 +627,41 @@ class TestConstructionEnvelopeGuards:
             for m in masks
         ]
         assert got == expected
+
+    def test_bar_bits_wide_window_on_stale_wheel_falls_back_wheel_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Old-shim+old-.so posture (monkeypatched attribute): a wheel exposing
+        # ResidentSweepSim but NOT ResidentSweepSimU128 — the wide-window
+        # construction lands in the SAME except (ImportError, AttributeError)
+        # arm -> graceful whole-object oracle with reason "wheel_missing".
+        import fno_math as real_fno_math
+
+        fake = ModuleType("fno_math")
+        fake.ResidentSweepSim = real_fno_math.ResidentSweepSim  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] |= 1 << 100
+        with capture_logs() as logs:
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is False
+        events = _fallback_events(logs)
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing"
+        got = sim.simulate_masks([1 << 100], direction=Side.BUY)
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                1 << 100,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
 
     @pytest.mark.parametrize("rupees", ["200000000000000000", "-200000000000000000"])
     def test_price_out_of_envelope_falls_back_and_matches_oracle(self, rupees: str) -> None:
@@ -683,10 +755,11 @@ class TestConstructionEnvelopeGuards:
         """A NEGATIVE bar_bits value (API misuse only) routes to the oracle too.
 
         `build_bar_bits` emits only non-negative ints, but a hand-rolled
-        negative int would raise PyO3 ``OverflowError`` at the ``Vec<u64>``
-        edge where the wheel-absent Python arm happily simulates (Python's
-        infinite-precision ``&``) — the exact wheel-present-vs-absent
-        asymmetry class the guard closes, in BOTH directions.
+        negative int would raise PyO3 ``OverflowError`` at EITHER ``Vec``
+        edge (u64 or u128) where the wheel-absent Python arm happily simulates
+        (Python's infinite-precision ``&``) — the exact
+        wheel-present-vs-absent asymmetry class the guard closes, in BOTH
+        directions.
         """
         bars = _feed()
         bits = build_bar_bits(bars)
@@ -697,7 +770,7 @@ class TestConstructionEnvelopeGuards:
         assert sim.rust_active is False
         events = _fallback_events(logs)
         assert len(events) == 1
-        assert events[0]["reason"] == "bar_bits_u128"
+        assert events[0]["reason"] == "bar_bits_beyond_u128"
         got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         assert got == [
             _oracle(
@@ -764,17 +837,24 @@ class TestEnvelopeGuardSeamPerColumn:
         columns[column][1] = sign * (_MAX_KERNEL_PRICE_PAISA + 1)
         assert self._reason(columns) == "price_out_of_envelope"
 
-    @pytest.mark.parametrize("bad", [U64_MASK + 1, 1 << 100, -1])
-    def test_bar_bits_outside_u64_range_is_detected(self, bad: int) -> None:
+    @pytest.mark.parametrize("bad", [_U128_MASK + 1, 1 << 200, -1])
+    def test_bar_bits_outside_u128_range_is_detected(self, bad: int) -> None:
         columns = self._clean_columns()
         columns["bar_bits"][3] = bad
-        assert self._reason(columns) == "bar_bits_u128"
+        assert self._reason(columns) == "bar_bits_beyond_u128"
 
-    def test_bar_bits_u64_boundary_is_in_envelope(self) -> None:
-        """0 and U64_MASK exactly are kernel-valid (inclusive range)."""
+    def test_bar_bits_width_boundaries_are_in_envelope(self) -> None:
+        """0, U64_MASK and _U128_MASK exactly are kernel-valid (inclusive range).
+
+        U64_MASK + 1 is ALSO in envelope now — it selects the u128 kernel
+        instead of a fallback (DEC-TRADE-SIM-U128-KERNEL-001 boundary
+        inclusivity: the guard trips strictly ABOVE _U128_MASK).
+        """
         columns = self._clean_columns()
         columns["bar_bits"][0] = 0
         columns["bar_bits"][1] = U64_MASK
+        columns["bar_bits"][2] = U64_MASK + 1
+        columns["bar_bits"][3] = _U128_MASK
         assert self._reason(columns) is None
 
     def test_bar_bits_checked_before_prices(self) -> None:
@@ -782,21 +862,21 @@ class TestEnvelopeGuardSeamPerColumn:
         columns = self._clean_columns()
         columns["bar_bits"][0] = -1
         columns["open_p"][0] = _MAX_KERNEL_PRICE_PAISA + 1
-        assert self._reason(columns) == "bar_bits_u128"
+        assert self._reason(columns) == "bar_bits_beyond_u128"
 
 
 class TestPerCallEnvelopeGuards:
-    def test_mask_u128_falls_back_for_that_call_only(self) -> None:
+    def test_mask_beyond_u128_falls_back_for_that_call_only(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)  # u64-clean (bits 0-59)
         sim = ResidentTradeSim(bars, bits, tf_minutes=1)
         assert sim.rust_active is True
-        masks = [(1 << 64) | 1, 1]  # a u128 mask + a real firing mask
+        masks = [(1 << 128) | 1, 1]  # a beyond-u128 mask + a real firing mask
         with capture_logs() as logs:
             got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         events = _call_fallback_events(logs)
         assert len(events) == 1
-        assert events[0]["reason"] == "mask_u128"
+        assert events[0]["reason"] == "mask_beyond_u128"
         assert events[0]["n_masks"] == 2
         expected = [
             _oracle(
@@ -824,10 +904,10 @@ class TestPerCallEnvelopeGuards:
         """A NEGATIVE mask (API misuse only) routes to the oracle, not PyO3.
 
         `iter_masks_k_of_bits` emits only non-negative ints; a hand-rolled
-        negative mask would raise PyO3 ``OverflowError`` at the ``Vec<u64>``
-        edge where the wheel-absent arm simulates (Python's infinite-precision
-        ``&``) — guarded in BOTH directions so wheel state never changes
-        behaviour.
+        negative mask would raise PyO3 ``OverflowError`` at EITHER ``Vec``
+        edge (u64 or u128) where the wheel-absent arm simulates (Python's
+        infinite-precision ``&``) — guarded in BOTH directions so wheel state
+        never changes behaviour.
         """
         bars = _feed()
         bits = build_bar_bits(bars)
@@ -838,7 +918,7 @@ class TestPerCallEnvelopeGuards:
             got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
         events = _call_fallback_events(logs)
         assert len(events) == 1
-        assert events[0]["reason"] == "mask_u128"
+        assert events[0]["reason"] == "mask_beyond_u128"
         assert got == [
             _oracle(
                 bars,
@@ -859,26 +939,26 @@ class TestPerCallEnvelopeGuards:
         """A repeated same-reason fallback does NOT re-warn (log-flood guard).
 
         The production sweep chunks kept masks into up to thousands of
-        `simulate_masks` calls per tuple; once the vocabulary crosses 64 bits
-        EVERY chunk would trip the guard, so a per-CALL warning would flood a
-        u128-era sweep with millions of WARNING lines. The fallback itself
-        stays per-call and bit-exact — only the WARNING is memoised.
+        `simulate_masks` calls per tuple; a sticky beyond-envelope reason on
+        EVERY chunk would flood the sweep with millions of WARNING lines. The
+        fallback itself stays per-call and bit-exact — only the WARNING is
+        memoised.
         """
         bars = _feed()
         bits = build_bar_bits(bars)
         sim = ResidentTradeSim(bars, bits, tf_minutes=1)
-        u128_masks = [(1 << 64) | 1]
+        beyond_masks = [(1 << 128) | 1]
         with capture_logs() as logs1:
-            first = sim.simulate_masks(u128_masks, direction=Side.BUY, stop_loss_paisa=300)
+            first = sim.simulate_masks(beyond_masks, direction=Side.BUY, stop_loss_paisa=300)
         assert len(_call_fallback_events(logs1)) == 1
         with capture_logs() as logs2:
-            second = sim.simulate_masks(u128_masks, direction=Side.BUY, stop_loss_paisa=300)
+            second = sim.simulate_masks(beyond_masks, direction=Side.BUY, stop_loss_paisa=300)
         assert _call_fallback_events(logs2) == []  # memoised — no re-warn
         expected = [
             _oracle(
                 bars,
                 bits,
-                (1 << 64) | 1,
+                (1 << 128) | 1,
                 direction=Side.BUY,
                 tf_minutes=1,
                 stop_loss_paisa=300,
@@ -895,9 +975,9 @@ class TestPerCallEnvelopeGuards:
         bits = build_bar_bits(bars)
         sim = ResidentTradeSim(bars, bits, tf_minutes=1)
         with capture_logs() as logs1:
-            sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)
+            sim.simulate_masks([(1 << 130) | 1], direction=Side.BUY)
         events1 = _call_fallback_events(logs1)
-        assert [e["reason"] for e in events1] == ["mask_u128"]
+        assert [e["reason"] for e in events1] == ["mask_beyond_u128"]
         with capture_logs() as logs2:
             sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=_MAX_KERNEL_PRICE_PAISA + 1)
         events2 = _call_fallback_events(logs2)
@@ -985,30 +1065,279 @@ class TestPerCallEnvelopeGuards:
             sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=sl, take_profit_paisa=tp)
 
 
+# ── wide-mask promotion to the u128 sibling (DEC-TRADE-SIM-U128-KERNEL-001) ──
+
+
+def _promoted_events(logs: list[EventDict]) -> list[EventDict]:
+    return [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
+
+
+class TestWideMaskPromotion:
+    """A >64-bit (≤ u128) mask over a u64-resident window is Rust-served.
+
+    DEC-TRADE-SIM-U128-KERNEL-001: the u128 sibling kernel is built LAZILY (at
+    most once per instance, one ``wide_kernel_promoted`` INFO) and the WHOLE
+    batch routes wide — the old mixed-batch whole-chunk oracle degrade is
+    dissolved. u64-fit batches keep the resident u64 kernel byte-identically;
+    only a stale wheel lacking the class falls back (warn-once
+    ``wheel_missing_u128``).
+    """
+
+    def test_wide_mask_promotes_and_matches_oracle(self) -> None:
+        bars = _feed()
+        bits = build_bar_bits(bars)  # u64-fit → the u64 kernel is resident
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        masks = [(1 << 64) | 1, 1]  # a wide mask + a u64-fit firing mask
+        with capture_logs() as logs:
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        assert _call_fallback_events(logs) == []  # NOT a fallback any more
+        assert len(_promoted_events(logs)) == 1
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+        assert sim.rust_active is True  # the u64 kernel stays resident
+
+    def test_wide_kernel_built_once_and_memoised(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        wide = [(1 << 64) | 1]
+        with capture_logs() as logs1:
+            first = sim.simulate_masks(wide, direction=Side.BUY)
+        with capture_logs() as logs2:
+            second = sim.simulate_masks(wide, direction=Side.BUY)
+        assert len(_promoted_events(logs1)) == 1  # announced exactly once …
+        assert _promoted_events(logs2) == []  # … the memoised reuse is silent
+        assert first == second
+        assert sim._rust_wide is not None  # built exactly once, memoised
+
+    def test_whole_batch_routes_wide_and_u64_batches_keep_the_u64_kernel(self) -> None:
+        """Routing pin via a recording proxy on the promoted sibling.
+
+        A batch containing ONE wide mask goes WHOLLY to the u128 kernel (the
+        mixed-batch whole-chunk degrade is dissolved); a u64-fit batch after
+        promotion still takes the resident u64 kernel — never the sibling.
+        """
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)  # trigger promotion
+        real_wide = sim._rust_wide
+        assert real_wide is not None
+        calls: list[list[int]] = []
+
+        class _RecordingWide:
+            def simulate_masks(
+                self, masks: list[int], *args: object
+            ) -> list[list[tuple[int, int, int, int, int, int]]]:
+                calls.append(list(masks))
+                result = real_wide.simulate_masks(masks, *args)  # type: ignore[attr-defined]
+                return cast("list[list[tuple[int, int, int, int, int, int]]]", result)
+
+        sim._rust_wide = _RecordingWide()
+        mixed = [1, (1 << 64) | 1]
+        got = sim.simulate_masks(mixed, direction=Side.BUY)
+        assert calls == [mixed]  # the WHOLE batch went wide, positionally intact
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in mixed
+        ]
+        assert got == expected
+        calls.clear()
+        u64_only = sim.simulate_masks([1], direction=Side.BUY)
+        assert calls == []  # the u64 batch never touched the wide sibling
+        assert u64_only == [expected[0]]
+
+    def test_u64_mask_boundary_does_not_promote(self) -> None:
+        """mask == U64_MASK stays on the u64 kernel (promotion is strictly greater)."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        with capture_logs() as logs:
+            got = sim.simulate_masks([U64_MASK], direction=Side.BUY)
+        assert _promoted_events(logs) == []
+        assert _call_fallback_events(logs) == []
+        assert sim._rust_wide is None
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                U64_MASK,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+
+    def test_u64_mask_plus_one_promotes_and_u128_mask_is_served(self) -> None:
+        """Boundary inclusivity: U64_MASK+1 promotes; _U128_MASK crosses the FFI."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        with capture_logs() as logs:
+            got = sim.simulate_masks([U64_MASK + 1, _U128_MASK], direction=Side.BUY)
+        assert len(_promoted_events(logs)) == 1
+        assert _call_fallback_events(logs) == []  # _U128_MASK is IN envelope
+        # Neither mask can fire on ≤60-bit bar_bits — the pin is that the wide
+        # kernel SERVED them (no fallback, no OverflowError) with the oracle's
+        # exact (empty) verdicts.
+        assert got == [[], []]
+        with capture_logs() as logs2:
+            beyond = sim.simulate_masks([_U128_MASK + 1], direction=Side.BUY)
+        events = _call_fallback_events(logs2)
+        assert [e["reason"] for e in events] == ["mask_beyond_u128"]
+        assert beyond == [[]]
+
+    def test_wide_resident_window_serves_all_widths_without_promotion(self) -> None:
+        """A window built WIDE (bar_bits > u64) never promotes — it already is."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] |= 1 << 100
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        masks = [1, (1 << 100) | 1]
+        with capture_logs() as logs:
+            got = sim.simulate_masks(masks, direction=Side.BUY)
+        assert _promoted_events(logs) == []
+        assert _call_fallback_events(logs) == []
+        assert sim._rust_wide is None
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in masks
+        ]
+        assert got == expected
+
+    def test_wide_mask_on_stale_wheel_warns_once_and_uses_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Old-shim+old-.so posture (monkeypatched attribute) → graceful oracle.
+
+        The u64 kernel was built from the REAL wheel; the promotion then sees
+        a module lacking ResidentSweepSimU128 → warn-once ``wheel_missing_u128``,
+        oracle-served bit-exactly, verdict memoised (no per-chunk re-import).
+        The LOUD new-shim+old-.so mode — ``import fno_math`` ImportError naming
+        the symbol — is pinned in test_doctor_wheel_freshness_fno_math.py.
+        """
+        import fno_math as real_fno_math
+
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        fake = ModuleType("fno_math")
+        fake.ResidentSweepSim = real_fno_math.ResidentSweepSim  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "fno_math", fake)
+        wide = [(1 << 64) | 1, 1]
+        with capture_logs() as logs1:
+            got = sim.simulate_masks(wide, direction=Side.BUY, stop_loss_paisa=300)
+        events = _call_fallback_events(logs1)
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing_u128"
+        assert "offending_value" not in events[0]  # not a width reason
+        expected = [
+            _oracle(
+                bars,
+                bits,
+                m,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=300,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+            for m in wide
+        ]
+        assert got == expected
+        with capture_logs() as logs2:
+            again = sim.simulate_masks(wide, direction=Side.BUY, stop_loss_paisa=300)
+        assert _call_fallback_events(logs2) == []  # warn-once memo
+        assert again == expected
+        assert sim._wide_unavailable is True  # stale verdict memoised
+        assert sim._rust_wide is None
+        assert sim.rust_active is True  # u64 batches stay Rust-served
+
+    def test_wide_mask_import_error_posture_also_wheel_missing_u128(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ImportError arm of the promotion (module vanished) → same reason."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        monkeypatch.setitem(sys.modules, "fno_math", None)  # import → ImportError
+        with capture_logs() as logs:
+            got = sim.simulate_masks([(1 << 64) | 1], direction=Side.BUY)
+        events = _call_fallback_events(logs)
+        assert [e["reason"] for e in events] == ["wheel_missing_u128"]
+        assert got == [
+            _oracle(
+                bars,
+                bits,
+                (1 << 64) | 1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+                policy=FillPolicy(),
+            )
+        ]
+
+
 # ── width-fallback WARNINGs NAME the offending word (DEC-SWEEP-RUST-WIRE-001 p1) ─
 #
-# The engine-scale spec's PR-1 gate: the u64 width-guard WARNING must name the
+# The engine-scale spec's PR-1 gate: the width-guard WARNING must name the
 # offending value + bit, not just a reason string, so the operator sees exactly
-# which word could not cross the `Vec<u64>` FFI edge. These tests pin the
+# which word could not cross even the `Vec<u128>` FFI edge. These tests pin the
 # `offending_value` (hex) / `offending_bit` fields on BOTH width reasons
-# (`bar_bits_u128` at construction, `mask_u128` at call time), the None-bit for
-# the negative API-misuse direction, first-offender determinism, and that
-# NON-width reasons carry NO offender fields.
+# (`bar_bits_beyond_u128` at construction, `mask_beyond_u128` at call time),
+# the None-bit for the negative API-misuse direction, first-offender
+# determinism, and that NON-width reasons carry NO offender fields.
 
 
 class TestWidthOffenderNamedInWarning:
     def test_construction_oversize_bar_word_names_value_and_bit(self) -> None:
         bars = _feed()
         bits = build_bar_bits(bars)
-        bits[1] |= 1 << 100  # first offender positionally
-        bits[3] |= 1 << 64  # a second offender — must NOT be the one named
+        bits[1] |= 1 << 130  # first offender positionally (beyond u128)
+        bits[3] |= 1 << 128  # a second offender — must NOT be the one named
         with capture_logs() as logs:
             ResidentTradeSim(bars, bits, tf_minutes=1)
         events = _fallback_events(logs)
         assert len(events) == 1
-        assert events[0]["reason"] == "bar_bits_u128"
+        assert events[0]["reason"] == "bar_bits_beyond_u128"
         assert events[0]["offending_value"] == hex(bits[1])  # the FIRST offender
-        assert events[0]["offending_bit"] == 100
+        assert events[0]["offending_bit"] == 130
 
     def test_construction_negative_bar_word_names_value_with_none_bit(self) -> None:
         bars = _feed()
@@ -1040,12 +1369,12 @@ class TestWidthOffenderNamedInWarning:
         sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
         assert sim.rust_active is True
         with capture_logs() as logs:
-            sim.simulate_masks([1, (1 << 64) | 1], direction=Side.BUY)
+            sim.simulate_masks([1, (1 << 128) | 1], direction=Side.BUY)
         events = _call_fallback_events(logs)
         assert len(events) == 1
-        assert events[0]["reason"] == "mask_u128"
-        assert events[0]["offending_value"] == hex((1 << 64) | 1)
-        assert events[0]["offending_bit"] == 64  # the FIRST width u64 cannot hold
+        assert events[0]["reason"] == "mask_beyond_u128"
+        assert events[0]["offending_value"] == hex((1 << 128) | 1)
+        assert events[0]["offending_bit"] == 128  # the FIRST width u128 cannot hold
 
     def test_call_negative_mask_names_value_with_none_bit(self) -> None:
         bars = _feed()
