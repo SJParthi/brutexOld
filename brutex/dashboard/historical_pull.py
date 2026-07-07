@@ -142,10 +142,12 @@ from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): pipeline_pull imports composite_pull
-    # → this module at runtime, so the verdict import must stay TYPE_CHECKING-only
-    # (the seam only reads attributes — no runtime import needed, no cycle).
-    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): the seam only reads attributes
+    # (annotations, never construction), and the dataclass lives in the LEAF
+    # pipeline_verdict module — never import it from pipeline_pull here (that
+    # re-export edge is a module-level import cycle: pipeline_pull imports
+    # composite_pull → this module at runtime).
+    from brutex.dashboard.pipeline_verdict import PriorStepsVerdict
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.orchestrator.audit import AuditWriter
 
@@ -2147,7 +2149,7 @@ def pull_contract_candles(
         counted, never raised; tests inject ``raise_on_violation=True`` as the
         hard ordering oracle.
     prior_steps
-        Optional :class:`~brutex.dashboard.pipeline_pull.PriorStepsVerdict`
+        Optional :class:`~brutex.dashboard.pipeline_verdict.PriorStepsVerdict`
         (DEC-PULL-SIX-STEP-ORDER-001) — the sequencer's spot + metadata
         cleanliness + the resolved strict flag, threaded through the
         composite so the Greeks seam here can enforce the literal strict

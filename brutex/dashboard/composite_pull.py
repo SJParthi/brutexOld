@@ -106,10 +106,12 @@ if TYPE_CHECKING:
 
     from brutex.adapters.groww.option_ingest import ProgressHook
 
-    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): pipeline_pull imports this module
-    # at runtime, so the verdict import must stay TYPE_CHECKING-only (no cycle —
-    # the composite only forwards the object, it never constructs one).
-    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): the composite only FORWARDS the
+    # sequencer's verdict (annotations, never construction), and the dataclass
+    # lives in the LEAF pipeline_verdict module — never import it from
+    # pipeline_pull here (that re-export edge is a module-level import cycle:
+    # pipeline_pull imports this module at runtime).
+    from brutex.dashboard.pipeline_verdict import PriorStepsVerdict
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.models import Instrument
 
@@ -355,7 +357,7 @@ def pull_historical_for_underlyings(
         throttled, F&O-scope-filtered absolute ledger counts (the honest
         denominator). ``None`` (defaults) is byte-identical.
     prior_steps
-        Optional :class:`~brutex.dashboard.pipeline_pull.PriorStepsVerdict`
+        Optional :class:`~brutex.dashboard.pipeline_verdict.PriorStepsVerdict`
         (DEC-PULL-SIX-STEP-ORDER-001) forwarded to phase (b)'s Greeks seam —
         the sequencer's spot + metadata cleanliness + the strict flag, so the
         strict barrier can withhold the enrichment on a prior-step

@@ -572,17 +572,19 @@ class TestUnknownSelectionFailsClosed:
         fastapi_testclient = pytest.importorskip(
             "fastapi.testclient", reason="the route gate needs the [ui] extra"
         )
+        # ONE import style for the app module (CodeQL py/import-and-import-from):
+        # the module object is what the monkeypatch needs, so every name rides it.
         import brutex.dashboard.app as app_module
         from brutex.config.credentials import ENV_CREDENTIALS_FILE
-        from brutex.dashboard.app import DashboardState, build_app
         from brutex.data.instrument_store import InstrumentStore
 
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
         # Pin the credential gate OPEN (its own suite owns the 503 refusal) so
         # the SELECTION validation is what this test reaches.
         monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
-        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        try:
+        # The store is a context manager — `with` over try/finally-close
+        # (CodeQL py/should-use-with; __exit__ closes, idempotent).
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
             store.upsert_many(
                 [_nifty()],
                 snapshot_date=date(2024, 1, 2),
@@ -591,7 +593,7 @@ class TestUnknownSelectionFailsClosed:
             )
             with (
                 fastapi_testclient.TestClient(
-                    build_app(DashboardState(), instrument_store=store)
+                    app_module.build_app(app_module.DashboardState(), instrument_store=store)
                 ) as client,
                 capture_logs() as logs,
             ):
@@ -601,5 +603,3 @@ class TestUnknownSelectionFailsClosed:
             # ZERO step events: the sequencer never launched (fail-CLOSED).
             assert _events(logs, "pull.step.started") == []
             assert _events(logs, "pull.step.settled") == []
-        finally:
-            store.close()

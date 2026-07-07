@@ -83,6 +83,14 @@ from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
+
+# The verdict dataclass lives in the LEAF brutex.dashboard.pipeline_verdict
+# (DEC-PULL-SIX-STEP-ORDER-001): its consumers (composite_pull/historical_pull)
+# sit BELOW this sequencer in the module import graph, so housing it here made
+# every edge of that chain a module-level import cycle. Imported — and thereby
+# RE-EXPORTED — here so existing ``from brutex.dashboard.pipeline_pull import
+# PriorStepsVerdict`` callers (the route wiring + the suites) stay byte-valid.
+from brutex.dashboard.pipeline_verdict import PriorStepsVerdict
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
@@ -336,39 +344,6 @@ def step_settle_verdict(
     return StepSettleVerdict(
         settled=settled, clean=settled and not quarantined, blocking=tuple(blocking)
     )
-
-
-@dataclass(frozen=True, slots=True)
-class PriorStepsVerdict:
-    """Spot + metadata cleanliness threaded INTO the historical phase.
-
-    DEC-PULL-SIX-STEP-ORDER-001: the Greeks seam lives at the historical
-    tail (:mod:`brutex.dashboard.historical_pull`), which alone cannot see a
-    SPOT-side quarantine — under the strict barrier the sequencer computes
-    this verdict AFTER the spot + metadata gates pass and threads it
-    ``run_historical`` → composite → ``pull_contract_candles`` so the seam
-    can withhold the enrichment on ANY prior-step uncleanliness. A
-    non-pipeline caller passes ``None`` (today's behavior, byte-identical).
-
-    Attributes
-    ----------
-    spot_clean
-        The spot phase gate passed AND zero spot symbols were quarantined.
-    metadata_clean
-        The metadata phase gate passed.
-    strict
-        The resolved :func:`strict_gate_enabled` flag — ``False`` keeps the
-        Greeks seam's cleanset behavior byte-identical.
-    """
-
-    spot_clean: bool
-    metadata_clean: bool
-    strict: bool
-
-    @property
-    def prior_clean(self) -> bool:
-        """``True`` iff every step BEFORE the F&O phase settled clean."""
-        return self.spot_clean and self.metadata_clean
 
 
 #: How many quarantined symbol NAMES :attr:`PipelinePullReport.quarantined_symbols`
