@@ -18,8 +18,9 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
-DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1521–#1523 — the ADR-0012 NIFTY-futures sweep LAUNCH
+_Last updated: 2026-07-07 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+DEC-STAGE1A-ROLL-RESET-001 + the round-1 review-fix pack DEC-FUTURES-LAUNCH-REVIEW-FIXES-001,
+MIGRATION.md #1521–#1524 — the ADR-0012 NIFTY-futures sweep LAUNCH
 capstone (PR-5): the futures track is addressed by ONE frozen series alias **`NSE-NIFTY-FUT`**
 (symbol_id 4 in the append-only `_SYMBOL_ID_TABLE`; the two pre-launch shapes
 `NIFTY-FUT-YYYY-MM-DD` + `NSE-NIFTY-<DDMmmYY>-FUT` are RETIRED with a did-you-mean refusal —
@@ -27,12 +28,16 @@ supersedes the #1178 dual-acceptance envelope, satisfies ADR-0016 §6 + the #113
 reservation in one PR). NEW `brutex/data/futures_series.py` resolves the alias from the VENDOR
 lake dirs (scan + `parse_fno_symbol`, never `strftime`) into disjoint IST-date ownership windows
 (`(E_{k-1}, E_k]` — expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=`
-law); interior holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp +
-WARN, the calendar is an OBSERVE-ONLY cross-check (drift WARNed with evidence, 2027+ coverage
-abstains — never load-bearing). NEW `brutex/feed/series_load.py` is the ONE alias-aware
-sweep-slice loader every sweep mouth now uses (spot path = the old inline reconcile+ReplayFeed
-block moved verbatim; the alias is stitched per contract with the exact
-`astimezone(IST).date()` ownership cut stage1a keys on). Stage-1A B2 CLOSED
+law); interior holes REFUSE loudly naming the missing month(s) — INCLUDING a window that STARTS
+inside a hole (the first-selected-segment predecessor gap gate, review-round-1 #1524) — a head
+span stays UNOWNED (WARNed; never a backward ownership extension serving far-month bars), ANY
+positive tail overhang WARNs, the calendar is an OBSERVE-ONLY cross-check (drift WARNed with
+evidence, 2027+ coverage abstains — never load-bearing). NEW `brutex/feed/series_load.py` is the
+ONE alias-aware sweep-slice loader every sweep mouth now uses (spot path = the old inline
+reconcile+ReplayFeed block moved verbatim; the alias is stitched per contract with the exact
+`astimezone(IST).date()` ownership cut stage1a keys on; a zero-bar boundary sliver holding NO
+expectable session instant SKIPS with one WARN — the loud EMPTY refusal stands for spans the
+NSE calendar says should hold bars, review-round-1 #1524). Stage-1A B2 CLOSED
 (DEC-STAGE1A-ROLL-RESET-001): a `roll_schedule` of owning-expiry day-ordinals keys the VWAP
 session per contract and a key change triggers a TOTAL hard reset of EVERY stateful member
 (VWAP, MarketStructureState, EMA20/200, prior-history, day extremes, pivots/daily-history/
@@ -46,8 +51,11 @@ unmodified golden suite is the proof); recount compares recorded-vs-re-derived s
 evidence. ENGINE surface now EXACTLY {NIFTY/BANKNIFTY/SENSEX spot} ∪ {NSE/FNO/NSE-NIFTY-FUT};
 all else REFERENCE_ONLY; no vocab/rate/lake-schema change. Honest: resolution is O(FNO dirs)
 once per launch, NOT O(1); D6 map, D14's DSR effective-N half (only MIN_TRADES=30 gates at
-launch), the #1013 D8-stamping consumption, futures→options translation (PR-6), the spot 1day
-mask audit and cascade manifest schedule-carriage are NAMED follow-ups).
+launch), the #1013 D8-stamping consumption, futures→options translation (PR-6), and the spot
+1day mask audit are NAMED follow-ups. Cascade manifest schedule-carriage is CLOSED by the
+round-1 review-fix pack (#1524): the automatic Stage-4 cascade threads
+`roll_schedule_by_instrument`, the manifest carries `roll_schedules` for the MANUAL replay, and
+a schedule-less futures pool SKIPS loudly — never a schedule-blind re-score).
 Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
 adversarial audit's confirmed defects fixed as ONE change set: (a) price
