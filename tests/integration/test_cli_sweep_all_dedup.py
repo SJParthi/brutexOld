@@ -107,8 +107,12 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path, **overri
         "segment": _SEGMENT,
         "symbols": _SYMBOL,
         "intervals": _INTERVAL,
+        # end is an inclusive SESSION date since DEC-SWEEP-PREFLIGHT-ESTIMATOR-001
+        # (the pre-preload coverage gate refuses any expected session absent on
+        # disk; the shim rebinds the preload window to clamp.end + 1 day, so the
+        # loaded bars are byte-identical to the pre-gate end="2024-01-03" run).
         "start": "2024-01-02",
-        "end": "2024-01-03",
+        "end": "2024-01-02",
         "directions": "BUY",
         "k": "2",
         "conditions": "0,1,2,3",  # C(4,2) = 6 combos > 1 → a real multi-combo sweep

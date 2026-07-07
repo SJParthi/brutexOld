@@ -47,7 +47,15 @@ _SEGMENT = "INDEX"
 _SYMBOL = "NIFTY"
 _INTERVAL = "1minute"
 _START = "2024-01-02"
-_END = "2024-01-03"
+# cmd_sweep_all's end is an inclusive SESSION date since
+# DEC-SWEEP-PREFLIGHT-ESTIMATOR-001 (the pre-preload coverage gate refuses any
+# expected session absent on disk; the shim rebinds the preload window to
+# clamp.end + 1 day, so the run records the SAME exclusive window label as the
+# pre-gate end="2024-01-03" run).
+_END = "2024-01-02"
+# The recorded run window's exclusive end label (= clamp.end + 1 day) — what the
+# UNGATED, label-verbatim sweep-verify must be given to address the same window.
+_WINDOW_END = "2024-01-03"
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +188,7 @@ def test_recount_on_interior_edited_lake_is_refused(
             "--start",
             _START,
             "--end",
-            _END,
+            _WINDOW_END,
             "--directions",
             "BUY",
             "--k",
@@ -232,7 +240,7 @@ def test_recount_names_a_legacy_v1_recorded_tree(
         exchange=_EXCHANGE,
         segment=_SEGMENT,
         start=_START,
-        end=_END,
+        end=_WINDOW_END,
         slices={(_SYMBOL, _INTERVAL): loaded},
     )
     kwargs = _sweep_all_kwargs(lake_root, catalog_path, tmp_path)
@@ -250,7 +258,7 @@ def test_recount_names_a_legacy_v1_recorded_tree(
             "--start",
             _START,
             "--end",
-            _END,
+            _WINDOW_END,
             "--directions",
             "BUY",
             "--k",

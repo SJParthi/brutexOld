@@ -71,7 +71,9 @@ def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> N
     """
     dead_bit = TOTAL_CONDITIONS - 1
     layout_only = IMPLEMENTED_MASK & ~(1 << dead_bit)
-    monkeypatch.setattr(cli, "IMPLEMENTED_MASK", layout_only)
+    # The derivation seam MOVED to the engine (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001
+    # — cli.default_condition_bits delegates to brutex.engine.sweep_estimate).
+    monkeypatch.setattr("brutex.engine.sweep_estimate.IMPLEMENTED_MASK", layout_only)
     bits = cli.default_condition_bits()
     assert dead_bit not in bits
     assert bits == [bit for bit in range(TOTAL_CONDITIONS) if layout_only & (1 << bit)]

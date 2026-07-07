@@ -105,8 +105,11 @@ def _sweep_all_kwargs(lake_root: Path, catalog_path: Path, tmp_path: Path) -> di
         "exchange": _EXCHANGE,
         "segment": _SEGMENT,
         "intervals": _INTERVAL,
+        # end is an inclusive SESSION date since DEC-SWEEP-PREFLIGHT-ESTIMATOR-001
+        # (the coverage gate refuses any expected session absent on disk; the
+        # loaded window is unchanged — the shim rebinds end to clamp.end + 1 day).
         "start": "2024-01-02",
-        "end": "2024-01-03",
+        "end": "2024-01-02",
         "directions": "BUY",
         "k": "1",
         "conditions": "0,1",

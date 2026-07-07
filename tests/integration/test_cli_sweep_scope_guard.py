@@ -158,10 +158,12 @@ class TestOverrideEmitsTheHazardWarning:
                     "INDIAVIX",
                     "--intervals",
                     "1minute",
+                    # end = inclusive SESSION date (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001:
+                    # the coverage gate refuses sessions absent on disk).
                     "--start",
                     "2024-01-02",
                     "--end",
-                    "2024-01-03",
+                    "2024-01-02",
                     "--directions",
                     "BUY",
                     "--k",
