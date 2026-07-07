@@ -21,24 +21,24 @@ that the valid domain is byte-unchanged. The Rust ``#[cfg(test)]`` suite
 covers the pure ``*_impl`` cores; this file is the complementary Python-level
 oracle — mirroring ``tests/unit/test_fno_math_overflow_guard.py``.
 
-Also pinned here: the VWAP twins' NEGATIVE-TYPICAL rejection. Feeding bars
-``(typical=-7, vol=1)`` then ``(0, 1)`` gave Rust ``-3`` (i128 ``/`` truncates
-toward zero) vs Python ``-4`` (``//`` floors) pre-guard — a silent one-paisa
-twin divergence on garbage input. BOTH twins now reject ``typical_paisa < 0``
-with ``ValueError`` (a negative typical is not a real price — HLC3 of
-positive prices), so the floor-vs-trunc seam has teeth and the bit-for-bit
-twin contract (DEC-SHARED-CORE-001 / ADR-0012 D7) holds over the ENTIRE
-mutually-accepted domain.
+Also pinned here: the VWAP NEGATIVE-TYPICAL rejection. Historical note (the
+trunc-vs-floor seam this guard closed): while the hand-synced Python twin
+still existed, feeding bars ``(typical=-7, vol=1)`` then ``(0, 1)`` gave Rust
+``-3`` (i128 ``/`` truncates toward zero) vs Python ``-4`` (``//`` floors)
+pre-guard — a silent one-paisa twin divergence on garbage input. Both twins
+then rejected ``typical_paisa < 0`` with ``ValueError`` (a negative typical is
+not a real price — HLC3 of positive prices). The Python twin was deleted by
+DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (``trading_core.VwapState`` is the
+single source), and the Rust-boundary rejection stays pinned here so the
+closed domain hole cannot silently reopen.
 """
 
 from __future__ import annotations
 
 from datetime import date
-from typing import ClassVar
 
 import pytest
 import trading_core
-from brutex.indicators.vwap import VwapState as PyVwapState
 
 I64_MAX = 2**63 - 1
 I64_MIN = -(2**63)
@@ -138,71 +138,41 @@ class TestDeriveBarMetadataGuard:
         assert bool(on_expiry) is True
 
 
-class TestVwapNegativeTypicalRejectedByBothTwins:
-    """The floor-vs-trunc domain hole is CLOSED: negative typical raises in
-    BOTH twins instead of silently diverging (Rust -3 vs Python -4 pre-guard
-    on the (-7,1),(0,1) stream)."""
+class TestVwapNegativeTypicalRejected:
+    """The floor-vs-trunc domain hole stays CLOSED at the PyO3 boundary:
+    negative typical raises instead of silently entering the accumulator.
 
-    _DIVERGENCE_STREAM: ClassVar[list[tuple[int, int]]] = [(-7, 1), (0, 1)]
+    Historical teeth (kept so the closed hole cannot silently reopen): the
+    (-7,1),(0,1) stream is the exact empirical input on which the Rust i128
+    truncating ``/`` (-3) and the deleted Python twin's flooring ``//`` (-4)
+    diverged pre-guard."""
 
-    def test_rust_twin_rejects_negative_typical(self) -> None:
+    def test_rust_state_rejects_negative_typical(self) -> None:
         state = trading_core.VwapState()
         with pytest.raises(ValueError, match="non-negative"):
             state.update(-7, 1, False, 1, 739_621, OPEN_0915)
         # Guard-first ordering: the rejected bar left NO state behind.
         assert state.current() is None
 
-    def test_python_twin_rejects_negative_typical(self) -> None:
-        state = PyVwapState()
-        with pytest.raises(ValueError, match="non-negative"):
-            state.update(
-                -7,
-                1,
-                is_pre_open=False,
-                session_key=1,
-                session_day=date.fromordinal(739_621),
-                tod_seconds=OPEN_0915,
-            )
-        assert state.current() is None
-
-    def test_divergence_stream_now_impossible_on_both_twins(self) -> None:
-        """The exact empirical divergence input is rejected up front by each
-        twin — neither can reach the bar where the answers differed."""
+    def test_divergence_stream_rejected_at_first_bar(self) -> None:
+        """The exact empirical divergence input is rejected up front — the
+        state can never reach the bar where the trunc-vs-floor answers
+        differed."""
         rs = trading_core.VwapState()
-        py = PyVwapState()
-        first_typical, first_volume = self._DIVERGENCE_STREAM[0]
         with pytest.raises(ValueError, match="non-negative"):
-            rs.update(first_typical, first_volume, False, 1, 739_621, OPEN_0915)
-        with pytest.raises(ValueError, match="non-negative"):
-            py.update(
-                first_typical,
-                first_volume,
-                is_pre_open=False,
-                session_key=1,
-                session_day=date.fromordinal(739_621),
-                tod_seconds=OPEN_0915,
-            )
+            rs.update(-7, 1, False, 1, 739_621, OPEN_0915)
 
-    def test_zero_typical_still_valid_on_both_twins(self) -> None:
+    def test_zero_typical_still_valid(self) -> None:
         """The guard is strictly ``< 0`` — the golden fixture's zero-typical
-        bar (a valid drag-to-zero print) stays accepted and bit-identical."""
+        bar (a valid drag-to-zero print) stays accepted and bit-identical to
+        the independently-derived volume-weighted answer."""
         rs = trading_core.VwapState()
-        py = PyVwapState()
-        day = date.fromordinal(739_621)
         for typical, volume in [(24_000_00, 100), (0, 50)]:
             rs_out = rs.update(typical, volume, False, 1, 739_621, OPEN_0915)
-            py_out = py.update(
-                typical,
-                volume,
-                is_pre_open=False,
-                session_key=1,
-                session_day=day,
-                tod_seconds=OPEN_0915,
-            )
-            assert rs_out == py_out
-        assert rs.current() == py.current() == (24_000_00 * 100) // 150
+            assert rs_out == rs.current()
+        assert rs.current() == (24_000_00 * 100) // 150
 
-    def test_rust_twin_magnitude_ceiling_still_enforced(self) -> None:
+    def test_rust_state_magnitude_ceiling_still_enforced(self) -> None:
         """The pre-existing i128-overflow ceiling guard is unchanged."""
         state = trading_core.VwapState()
         with pytest.raises(ValueError, match="typical_paisa"):

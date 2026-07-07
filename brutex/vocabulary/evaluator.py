@@ -71,14 +71,16 @@ class IndicatorSnapshot:
 
     # Session-anchored intraday futures VWAP (None during warm-up AND on the 1day
     # timeframe — ADR-0012 D12; the Group-10 close_above/below_vwap bits then do
-    # not fire). Computed by brutex.indicators.vwap.VwapState (DEC-NIFTY-INDICATORS-001).
+    # not fire). Computed by the shared Rust trading_core.VwapState — the single
+    # source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (DEC-NIFTY-INDICATORS-001).
     # Defaulted to None so every existing snapshot caller (which predates PR-2 and
     # has no futures VWAP) keeps working unchanged — only the NIFTY-futures track
     # populates it.
     vwap_paisa: int | None = None
 
     # Resolved BOS/CHoCH market-structure flags (Group 12, bits 56-59), produced by
-    # the look-ahead-clean brutex.indicators.market_structure.MarketStructureState
+    # the look-ahead-clean shared Rust trading_core.MarketStructureState — the
+    # single source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001
     # (DEC-NIFTY-BOS-CHOCH-001) — threaded in like the resolved PriorBarHistory
     # flags. Defaulted to an all-false signal so every pre-existing snapshot caller
     # keeps working unchanged (the Group-12 bits then simply do not fire).

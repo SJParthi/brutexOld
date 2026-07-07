@@ -41,8 +41,8 @@ These tests need only ``duckdb`` (for a real on-disk store) plus light fakes
 is simulated by hiding ``duckdb`` from ``sys.modules``.
 """
 
-# Whitebox edge file (DEC-P0-017 convention, mirroring test_execution_simulator
-# / test_config_runtime): it deliberately imports the module-private reference
+# Whitebox edge file (DEC-P0-017 convention, mirroring test_config_runtime):
+# it deliberately imports the module-private reference
 # helpers ``_INSTR_COLUMNS`` + ``_build_insert_sql`` to pin them at 100%, so the
 # project-wide ``reportPrivateUsage = "warning"`` is silenced file-wide here.
 # pyright: reportPrivateUsage=none
