@@ -606,6 +606,7 @@ def build_options_payload(
     min_volume: int | None = None,
     calendar_only_expiry: bool = False,
     pcr: Sequence[UnderlyingPcr] = (),
+    latest_time: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -651,6 +652,11 @@ def build_options_payload(
         chain — a panel, not a row cell — so the rank-time ``top_n`` /
         ``min_volume`` never touch it. Defaulted ``()`` so every existing
         caller stays valid (``"pcr": []``).
+    latest_time
+        The ADDITIVE display-only echo of the resolved latest intraday minute
+        (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
+        ``latest (HH:MM)`` while the default cut stays whole-day; ``None`` for an
+        explicit *time* / daily interval / empty lake. Never affects a number.
 
     Returns
     -------
@@ -713,6 +719,7 @@ def build_options_payload(
         "min_volume": floor,
         "instrument_count": instrument_count,
         "skipped_count": skipped,
+        "latest_time": latest_time,
         "note": note,
         "pcr": [pcr_row_json(row) for row in pcr],
         **ranked,

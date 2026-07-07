@@ -648,6 +648,32 @@ class TestOptionsApi:
         assert len(body["volume"]) == 2
         assert "Min volume" not in body["note"]
 
+    def test_default_intraday_echoes_latest_time_from_spot(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-MOVERS-ASOF-LATEST-DEFAULT-001: the additive `latest_time` echo rides the
+        # Options payload too, resolved from the SPOT 1-minute (INDEX NIFTY → 09:16);
+        # `time` stays null (whole-day cut, identical latest close across every TF).
+        _seed_options_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "3minute", "date": "2024-06-13"},
+        ).json()
+        assert body["latest_time"] == "09:16"
+        assert body["time"] is None
+
+    def test_daily_options_latest_time_is_none(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _seed_options_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": "2024-06-13"},
+        ).json()
+        assert body["latest_time"] is None
+
     def test_negative_min_volume_is_422(self, store: InstrumentStore) -> None:
         # The route caps min_volume >= 0 — a negative value is rejected at validation.
         client = TestClient(build_app(DashboardState(), instrument_store=store))
