@@ -101,6 +101,7 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
@@ -770,11 +771,15 @@ def ranked_combo_to_result_row(
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
         (DEC-VIX-STAMP-WIRE-001): the FINALIST projection is the OBSERVABLE
         re-simulation feeding the persisted row, so the run's stamper is bound
-        HERE — the finalist's trades carry ``vix_at_entry`` / ``vix_at_exit``
-        for the per-combo VIX aggregation. REFERENCE ONLY: no persisted column
-        or price anchor derives from the stamp today, so the projected row's
-        bytes are IDENTICAL with or without it (the stamped-vs-unstamped
-        store-hash regression pins that). ``None`` (default) = unstamped.
+        HERE — the finalist's trades carry ``vix_at_entry`` / ``vix_at_exit``,
+        which the ONE COMMON
+        :func:`~brutex.engine.reference_wire.aggregate_trade_vix` folds into
+        the row's nullable ``vix_mean`` / ``vix_min`` / ``vix_max`` trio.
+        REFERENCE ONLY (CLAUDE.md §2 Rule 3): the trio is never rankable and
+        never in the run identity — the row's ``run_id`` is byte-identical
+        with or without stamping (regression-pinned); ONLY the three nullable
+        VIX columns differ. ``None`` (default) = unstamped → the honest
+        ``(None, None, None)`` trio, never a fabricated level.
 
     Returns
     -------
@@ -811,6 +816,11 @@ def ranked_combo_to_result_row(
         avg_entry = round_money(Decimal("0"))
         avg_exit = round_money(Decimal("0"))
 
+    # The per-combo VIX summary (DEC-VIX-STAMP-WIRE-001): the ONE COMMON fold
+    # over the finalist's stamped trades. Unstamped / all-miss / zero trades →
+    # the honest (None, None, None) — never fabricated (Golden Rule #1).
+    vix_mean, vix_min, vix_max = aggregate_trade_vix(trades)
+
     return ResultRow(
         run_id=run_id,
         instrument=instrument,
@@ -835,6 +845,9 @@ def ranked_combo_to_result_row(
         max_drawdown_pct=m.max_drawdown_pct,
         avg_entry_price=avg_entry,
         avg_exit_price=avg_exit,
+        vix_mean=vix_mean,
+        vix_min=vix_min,
+        vix_max=vix_max,
     )
 
 
@@ -1304,9 +1317,14 @@ def run_persisted_sweep(
         finalist projection (:func:`ranked_combo_to_result_row`), whose
         re-simulated trades feed the persisted rows. The K-of-N inner mask
         stream stays deliberately UNSTAMPED (see the explicit literal at the
-        ``_build_trade_sim`` call). REFERENCE ONLY: VIX is never a signal,
-        never ranked on, never in the run identity, and the persisted store
-        bytes are IDENTICAL with or without the stamper (regression-pinned).
+        ``_build_trade_sim`` call). Each persisted finalist row carries the
+        stamps' :func:`~brutex.engine.reference_wire.aggregate_trade_vix`
+        summary in its nullable ``vix_mean`` / ``vix_min`` / ``vix_max``
+        columns (unstamped → the honest ``None`` trio). REFERENCE ONLY: VIX
+        is never a signal, never ranked on, never in the run identity — every
+        persisted ``run_id`` and every non-VIX column is byte-identical with
+        or without the stamper (regression-pinned); ONLY the three nullable
+        VIX columns differ.
 
     Returns
     -------
@@ -1573,9 +1591,12 @@ def run_persisted_sweep(
         # sanctioned literal-None seam bindings, AST-pinned with exact counts
         # by tests/unit/test_vix_stamper_binding_pin.py — never a silent
         # omission). REVERT LEVER: pass ``reference_stamper=reference_stamper``
-        # here to stamp the inner stream too (one kwarg; the persisted bytes
-        # are pinned identical either way, and trade_sim_path logs
-        # vix_stamped=False so the unstamped stream is a stated fact).
+        # here to stamp the inner stream too (one kwarg; its stamps are
+        # discarded WITH the trades so the persisted bytes are identical
+        # either way — the finalist row's VIX trio derives from the
+        # projector's OWN re-simulation, never this stream — and
+        # trade_sim_path logs vix_stamped=False so the unstamped stream is a
+        # stated fact).
         sim = _build_trade_sim(bars, bar_bits, cfg, direction_label, reference_stamper=None)
         for mask, metrics in _iter_mask_metrics(
             sim, kept, bars, bar_bits, cfg, direction_label, run_id_of

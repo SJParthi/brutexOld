@@ -10,8 +10,12 @@ run whose trades carry the stamps — so no bind can silently regress.
 
 Companion suite: ``tests/unit/test_vix_stamper_binding_pin.py`` (the AST pin
 enumerating the exactly-two sanctioned literal-``None`` discarded-stream
-sites). Persisted-bytes honesty: the stamped-vs-unstamped store regression in
-:class:`TestSweepRunSeam` pins that Stage B changes ZERO persisted bytes.
+sites). Persisted-bytes honesty (updated for Stage C — the nullable
+``vix_mean``/``vix_min``/``vix_max`` columns now land on the persisted rows):
+the stamped-vs-unstamped store regression in :class:`TestSweepRunSeam` pins
+that stamping changes ONLY the three nullable VIX columns — every ``run_id``
+(the BLAKE3 run identity) and every non-VIX column is byte-identical with or
+without the stamper.
 """
 
 # pyright: reportPrivateUsage=false
@@ -22,6 +26,7 @@ import hashlib
 import pickle
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace as dc_replace
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -44,6 +49,7 @@ from brutex.engine import trade_sim as trade_sim_mod
 from brutex.engine import validation as validation_mod
 from brutex.engine.candidate import validate_candidate
 from brutex.engine.reference_series import TradeReferenceStamper
+from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
@@ -649,13 +655,70 @@ class TestSweepRunSeam:
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths == [paths[0]] and paths[0]["vix_stamped"] is True
 
-    def test_persisted_bytes_identical_stamped_vs_unstamped(self, tmp_path: Path) -> None:
-        """THE Stage-B regression pin: stamping changes ZERO persisted bytes."""
+    def test_persisted_rows_differ_only_in_the_vix_trio_stamped_vs_unstamped(
+        self, tmp_path: Path
+    ) -> None:
+        """THE persisted-honesty pin, consciously updated for Stage C.
+
+        Stage B pinned stamping to ZERO persisted-byte change; Stage C
+        (DEC-VIX-STAMP-WIRE-001 ResultRow columns) deliberately moves the
+        bytes — the finalist rows now CARRY the aggregated stamps — so the
+        pin becomes: stamping changes the three nullable VIX columns and
+        NOTHING else. Run identity stays byte-invariant (the spec's
+        run-identity invariance regression: VIX is never a run-identity
+        input, CLAUDE.md §2 Rule 3).
+        """
         stamped_summary, stamped_bytes = _run_sweep(tmp_path / "a", "s", _STAMPER_BIG)
         plain_summary, plain_bytes = _run_sweep(tmp_path / "b", "s", None)
         assert stamped_summary.persisted == plain_summary.persisted > 0
-        assert stamped_summary.store_content_hash == plain_summary.store_content_hash
-        assert hashlib.sha256(stamped_bytes).hexdigest() == hashlib.sha256(plain_bytes).hexdigest()
+        # The trio now lands on the stamped rows — the bytes MUST differ …
+        assert stamped_summary.store_content_hash != plain_summary.store_content_hash
+        assert hashlib.sha256(stamped_bytes).hexdigest() != hashlib.sha256(plain_bytes).hexdigest()
+        # … but ONLY in the VIX trio: run_ids identical (identity invariance),
+        # every other column identical, unstamped rows honestly all-None.
+        stamped_rows = ResultsStore.load(tmp_path / "a" / "s.parquet").rows()
+        plain_rows = ResultsStore.load(tmp_path / "b" / "s.parquet").rows()
+        assert [r.run_id for r in stamped_rows] == [r.run_id for r in plain_rows]
+        for stamped, plain in zip(stamped_rows, plain_rows, strict=True):
+            assert (plain.vix_mean, plain.vix_min, plain.vix_max) == (None, None, None)
+            assert stamped.vix_mean is not None  # _STAMPER_BIG covers every bar ts
+            assert stamped.vix_min is not None
+            assert stamped.vix_max is not None
+            assert stamped.vix_min <= stamped.vix_mean <= stamped.vix_max
+            assert dc_replace(stamped, vix_mean=None, vix_min=None, vix_max=None) == plain
+
+    def test_finalist_row_trio_equals_aggregate_trade_vix_over_its_own_trades(
+        self,
+    ) -> None:
+        """The attached trio IS the ONE COMMON fold over the projector's trades."""
+        bar_bits = build_bar_bits(_BARS)
+        rc = _ranked_combo()
+        row = ranked_combo_to_result_row(
+            rc,
+            run_id="0" * 64,
+            instrument="NIFTY",
+            tf="1m",
+            direction="bull",
+            mode="A",
+            bars=_BARS,
+            bar_bits=bar_bits,
+            tf_minutes=1,
+            sl_paisa=None,
+            tp_paisa=50,
+            reference_stamper=_STAMPER,
+        )
+        trades = trade_sim_mod.simulate_trades(
+            _BARS,
+            run_mod.mask_to_entry_signals(bar_bits, rc.mask),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=None,
+            take_profit_paisa=50,
+            reference_stamper=_STAMPER,
+        )
+        _assert_trades_stamped(trades)
+        assert (row.vix_mean, row.vix_min, row.vix_max) == aggregate_trade_vix(trades)
+        assert row.vix_mean is not None
 
 
 # ────────────────────────── orchestrator / supervisor / parallel ──────────────────────────
@@ -799,10 +862,14 @@ class TestParallelSeam:
             parallel_mod._run_tuple_in_worker(0, tuple_, _BARS)
         assert captured == [_STAMPER]
 
-    def test_two_worker_stamped_tree_equals_unstamped_sequential_tree(self, tmp_path: Path) -> None:
-        """THE parity pin: a 2-spawn-worker STAMPED parallel run writes the
-        byte-identical per-tuple Parquet tree an UNSTAMPED sequential run
-        writes — the stamp never leaks into a persisted byte, on any worker.
+    def test_two_worker_stamped_tree_equals_stamped_sequential_tree(self, tmp_path: Path) -> None:
+        """THE spawn-parity pin (consciously updated for Stage C): a
+        2-spawn-worker STAMPED parallel run writes the byte-identical
+        per-tuple Parquet tree a STAMPED sequential run writes — the stamper
+        pickles into spawn workers and stamps deterministically on every one.
+        (Stage B compared stamped-vs-UNstamped trees, valid only while the
+        stamp touched zero persisted bytes; the ResultRow VIX columns now
+        carry it, so the honest cross-arm baseline is stamped-vs-stamped.)
         """
         grid = _grid(k_values=[1, 2])
         seq_tmp = tmp_path / "seq"
@@ -818,6 +885,7 @@ class TestParallelSeam:
                 dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
                 ingest_audit=ingest,
                 guards=guards,
+                reference_stamper=_STAMPER,
             )
         par_tmp = tmp_path / "par"
         par_tmp.mkdir()

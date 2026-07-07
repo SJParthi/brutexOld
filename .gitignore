@@ -63,6 +63,9 @@ cache/
 runs/
 *.lmdb
 *.parquet
+# … but the byte-frozen golden fixtures ARE committed (optional-column
+# back-compat corpora, DEC-VIX-STAMP-WIRE-001 — see tests/golden/fixtures/README.md)
+!tests/golden/fixtures/*.parquet
 *.arrow
 *.zst
 *.zstd

@@ -41,6 +41,25 @@ DEC-SPOT-PRICE-2DP-001, DEC-MONEY-2DP-001)
   the spot/option lakes use, so a result price is never vendor float-noise like
   ``14020.7999`` (DEC-SPOT-PRICE-2DP-001). Snapped at construction so the
   in-memory row is already canonical and the Parquet round-trip is exact.
+* **REFERENCE-ONLY India-VIX summary → nullable Float64, appended LAST**
+  (DEC-VIX-STAMP-WIRE-001). ``vix_mean`` / ``vix_min`` / ``vix_max`` carry the
+  combo's per-trade VIX-stamp aggregate
+  (:func:`brutex.engine.reference_wire.aggregate_trade_vix`) at full precision
+  (never rounded). ``None`` is the honest "unknown" (an unstamped run, no VIX
+  bar at any trade instant, or a store written before the columns existed) —
+  NEVER a fabricated ``0.0``. REFERENCE ONLY (CLAUDE.md §2 Rule 3): the trio is
+  deliberately NOT rankable (:data:`_RANKABLE_FIELDS` excludes it) and NEVER
+  part of the BLAKE3 run identity.
+
+Optional-column back-compat (the ``WindowLedger.bars_net_new`` template)
+------------------------------------------------------------------------
+Columns added AFTER a store format ships are **appended LAST** in the Parquet
+column order and read back via :func:`_optional_float`: a store written before
+the column existed loads that field as ``None`` — the honest unknown, never a
+fabricated value. Two such generations exist today: ``deflated_sharpe``
+(DEC-SWEEP-WINNERS-BY-NAME-001 era) and the ``vix_mean``/``vix_min``/``vix_max``
+trio (DEC-VIX-STAMP-WIRE-001), each pinned by a committed pre-column fixture in
+``tests/golden/fixtures/``.
 
 Idempotence + byte-determinism (Golden Rule #4 / #7, mirrors
 ``brutex/data/parquet_writer.py``)
@@ -56,7 +75,10 @@ O(1): a never-seen id is added, an identical re-append is a silent no-op, and a
 **same run-identity with different metrics raises** :class:`ResultsStoreError`
 — that conflict *is* the reproducibility guarantee (one identity can only ever
 map to one result; a clash means upstream non-determinism, never a silent
-overwrite).
+overwrite). The ONE sanctioned exception is DIRECTIONAL (DEC-VIX-STAMP-WIRE-001):
+the nullable REFERENCE-ONLY VIX trio may be backfilled ``None → value`` by a
+stamped redo of the same run (``None`` means *unknown*, not a conflicting fact);
+two DIFFERENT known VIX values for one identity still raise.
 """
 
 from __future__ import annotations
@@ -65,7 +87,7 @@ import hashlib
 import io
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -155,8 +177,21 @@ _METRIC_FIELDS: Final[tuple[str, ...]] = (
 _NULLABLE_METRIC_FIELDS: Final[tuple[str, ...]] = ("deflated_sharpe",)
 #: Float64 price columns — Decimal rupees snapped to the 2dp tick grid at write.
 _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
+#: Float64 **nullable** REFERENCE-ONLY India-VIX columns (DEC-VIX-STAMP-WIRE-001):
+#: the combo's ``(mean, min, max)`` over every non-``None`` ``vix_at_entry`` /
+#: ``vix_at_exit`` stamp of its finalist trades, produced by the ONE COMMON
+#: :func:`brutex.engine.reference_wire.aggregate_trade_vix` fold. Full precision,
+#: NEVER rounded; ``None`` = honestly unknown (unstamped run / no VIX bar at any
+#: trade instant / a pre-VIX store), NEVER a fabricated ``0.0``. Appended LAST in
+#: the on-disk column order (the optional-column back-compat template). VIX stays
+#: REFERENCE ONLY (CLAUDE.md §2 Rule 3): these are deliberately excluded from
+#: :data:`_RANKABLE_FIELDS` and are never an input to the BLAKE3 run identity.
+_VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
 
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
+#: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
+#: deliberately NOT rankable — VIX must never drive strategy ranking
+#: (CLAUDE.md §2 Rule 3) and a nullable column has no total order.
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
 )
@@ -238,13 +273,26 @@ class ResultRow:
         Price-family representatives as :class:`~decimal.Decimal` rupees. Must be
         finite and ``>= 0``; normalised to two decimals via
         :func:`brutex.money.round_money` (``ROUND_HALF_UP``) at construction.
+    vix_mean, vix_min, vix_max
+        The REFERENCE-ONLY India-VIX summary trio (DEC-VIX-STAMP-WIRE-001): the
+        combo's mean / min / max over every non-``None`` per-trade VIX stamp
+        (``vix_at_entry`` + ``vix_at_exit``), from the ONE COMMON
+        :func:`brutex.engine.reference_wire.aggregate_trade_vix` fold. Full
+        precision, NEVER rounded. ``None`` (the default) is the honest unknown
+        — an unstamped run, a trade set with no VIX bar at any instant, or a
+        store written before the columns existed — NEVER a fabricated ``0.0``.
+        Each present value must be finite; any present pair must respect the
+        order law ``vix_min <= vix_mean <= vix_max``. Round-trips as a Parquet
+        null when ``None``. NEVER rankable, NEVER in the run identity
+        (CLAUDE.md §2 Rule 3).
 
     Raises
     ------
     ResultsStoreError
         On a malformed ``run_id``, an empty context label, an out-of-range or
         negative-where-absolute money field, a negative or inconsistent trade
-        count, a non-finite metric, or a non-finite / negative price.
+        count, a non-finite metric, a non-finite / negative price, or a VIX
+        trio violating the ``min <= mean <= max`` order law.
     """
 
     run_id: str
@@ -270,6 +318,9 @@ class ResultRow:
     avg_entry_price: Decimal
     avg_exit_price: Decimal
     deflated_sharpe: float | None = None
+    vix_mean: float | None = None
+    vix_min: float | None = None
+    vix_max: float | None = None
     #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
     condition_names: str = field(init=False, default="")
 
@@ -326,7 +377,7 @@ class ResultRow:
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
 
-        for name in _NULLABLE_METRIC_FIELDS:
+        for name in (*_NULLABLE_METRIC_FIELDS, *_VIX_FIELDS):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -336,6 +387,21 @@ class ResultRow:
                     f"determinism + ranking integrity), got {value!r}"
                 )
             object.__setattr__(self, name, value + 0.0)  # -0.0 → +0.0 (byte-determinism)
+
+        # VIX order law: every PRESENT pair respects min <= mean <= max. Pairwise
+        # (not all-three-present-only) so a part-null trio — legal, e.g. a
+        # hand-degraded or legacy-merged row — is still checked where it can be.
+        for lo_name, hi_name in (
+            ("vix_min", "vix_mean"),
+            ("vix_mean", "vix_max"),
+            ("vix_min", "vix_max"),
+        ):
+            lo, hi = getattr(self, lo_name), getattr(self, hi_name)
+            if lo is not None and hi is not None and lo > hi:
+                raise ResultsStoreError(
+                    f"ResultRow: {lo_name} ({lo}) exceeds {hi_name} ({hi}) — the VIX "
+                    f"summary trio must respect vix_min <= vix_mean <= vix_max"
+                )
 
         for name in _PRICE_FIELDS:
             price = getattr(self, name)
@@ -404,6 +470,20 @@ class ResultsStore:
     def append(self, row: ResultRow) -> bool:
         """Insert *row* keyed by its ``run_id``, idempotently (O(1)).
 
+        A re-append under an already-stored ``run_id`` follows the DIRECTIONAL
+        three-branch rule (DEC-VIX-STAMP-WIRE-001) on the nullable
+        REFERENCE-ONLY VIX trio (:data:`_VIX_FIELDS`), per field:
+
+        1. **Identical value** (including both-``None``) → OK, a silent no-op.
+        2. **Backfill ``None`` → value** → OK, the stored row is UPGRADED to
+           the union (a stamped redo may fill in what an unstamped run
+           honestly didn't know; the reverse direction ``value → None`` never
+           erases — an unstamped redo is *less* informed, not conflicting).
+        3. **Two different known values** → :class:`ResultsStoreError` (a
+           genuine run-identity conflict, exactly like any other field).
+
+        Every NON-VIX field keeps the strict rule: any difference raises.
+
         Parameters
         ----------
         row
@@ -412,37 +492,60 @@ class ResultsStore:
         Returns
         -------
         bool
-            ``True`` if the row was newly added; ``False`` if an identical row
-            for the same ``run_id`` was already present (a silent no-op — the
-            idempotence guarantee).
+            ``True`` if the store content changed — the row was newly added OR
+            an existing row was VIX-backfill-upgraded; ``False`` if the stored
+            row already carried everything *row* knows (the idempotent no-op).
 
         Raises
         ------
         ResultsStoreError
             If a *different* row is already stored under the same ``run_id`` —
             a run-identity collision means upstream non-determinism and is never
-            silently overwritten (Golden Rule #4).
+            silently overwritten (Golden Rule #4). The VIX backfill branch is
+            the ONE sanctioned, directional exception described above.
         """
         existing = self._rows.get(row.run_id)
         if existing is not None:
             if existing == row:
                 return False
-            differing = tuple(
-                f.name
-                for f in fields(ResultRow)
-                if getattr(existing, f.name) != getattr(row, f.name)
+            merged = _merge_vix_backfill(existing, row)
+            if merged is None:
+                differing = tuple(
+                    f.name
+                    for f in fields(ResultRow)
+                    if getattr(existing, f.name) != getattr(row, f.name)
+                )
+                _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
+                raise ResultsStoreError(
+                    f"run-identity conflict for {row.run_id}: a different result is already "
+                    f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
+                    f"map to one result (Golden Rule #4) — refusing to overwrite."
+                )
+            if merged == existing:
+                # Directional no-op: the incoming row is strictly LESS informed
+                # (it only turns known VIX values into None) — the stored row
+                # already carries the union, nothing changes.
+                return False
+            _LOG.info(
+                "results_store.vix_backfill",
+                run_id=row.run_id,
+                backfilled_fields=tuple(
+                    name
+                    for name in _VIX_FIELDS
+                    if getattr(existing, name) is None and getattr(merged, name) is not None
+                ),
             )
-            _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
-            raise ResultsStoreError(
-                f"run-identity conflict for {row.run_id}: a different result is already "
-                f"stored (differing fields: {', '.join(differing)}). Same run-identity must "
-                f"map to one result (Golden Rule #4) — refusing to overwrite."
-            )
+            self._rows[row.run_id] = merged
+            return True
         self._rows[row.run_id] = row
         return True
 
     def extend(self, rows: Iterable[ResultRow]) -> int:
-        """Append every row in *rows*; return how many were newly added."""
+        """Append every row in *rows*; return how many changed the store.
+
+        The count follows :meth:`append`'s return contract: newly added rows
+        plus VIX-backfill-upgraded rows (idempotent no-ops are not counted).
+        """
         return sum(1 for row in rows if self.append(row))
 
     def get(self, run_id: str) -> ResultRow | None:
@@ -582,11 +685,16 @@ class ResultsStore:
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
+        for name in _VIX_FIELDS:
+            # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
+            # optional-column back-compat template); None → Parquet null.
+            columns[name] = [getattr(row, name) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
         # fixed insertion order above (identity → mask limbs → money → counts →
-        # metrics → deflated → prices) for a reproducible byte stream.
+        # metrics → deflated → prices → the VIX trio LAST for legacy-file
+        # back-compat) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={
@@ -595,7 +703,8 @@ class ResultsStore:
                     (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
                 ),
                 **dict.fromkeys(
-                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS), pl.Float64
+                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *_VIX_FIELDS),
+                    pl.Float64,
                 ),
             },
         )
@@ -639,6 +748,44 @@ def _validate_run_id(run_id: str) -> None:
         raise ResultsStoreError(f"run_id {run_id!r} is not valid hex") from exc
 
 
+def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow | None:
+    """Merge two same-``run_id`` rows differing ONLY in the nullable VIX trio.
+
+    The resolution is a per-field UNION under the directional law of
+    :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
+    :data:`_VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
+    *honestly unknown*, never a conflicting fact — so a stamped redo backfills
+    an unstamped row and an unstamped redo never erases a stamp.
+
+    Returns
+    -------
+    ResultRow | None
+        The merged row, or ``None`` when the pair is a GENUINE run-identity
+        conflict: any non-VIX field differs, or one VIX field carries two
+        DIFFERENT known values. (A mutually-inconsistent backfill — e.g. a
+        merged trio violating ``min <= mean <= max`` — raises
+        :class:`ResultsStoreError` from the merged row's own construction.)
+    """
+    for f in fields(ResultRow):
+        if f.name in _VIX_FIELDS:
+            continue
+        if getattr(existing, f.name) != getattr(incoming, f.name):
+            return None
+    resolved: dict[str, float | None] = {}
+    for name in _VIX_FIELDS:
+        ours, theirs = getattr(existing, name), getattr(incoming, name)
+        if ours is not None and theirs is not None and ours != theirs:
+            return None
+        resolved[name] = ours if ours is not None else theirs
+    # Explicit keywords (not a **splat) so mypy checks each against its field type.
+    return replace(
+        existing,
+        vix_mean=resolved["vix_mean"],
+        vix_min=resolved["vix_min"],
+        vix_max=resolved["vix_max"],
+    )
+
+
 def _field_getter(name: str) -> Callable[[ResultRow], float]:
     """Return a typed accessor for a rankable numeric column.
 
@@ -676,6 +823,20 @@ def _decode_mask(lo_signed: int, hi_signed: int) -> int:
     return (hi << 64) | lo
 
 
+def _optional_float(record: dict[str, object], name: str) -> float | None:
+    """Read a nullable Float64 column with optional-column back-compat.
+
+    The ONE read law for every column added after a store format shipped (the
+    :class:`brutex.data.window_ledger.WindowLedgerRecord` ``bars_net_new``
+    template): a column ABSENT from the file — a store written before the
+    column existed — reads ``None`` exactly like a stored Parquet null. The
+    honest unknown, never a fabricated value (Golden Rule #1). Pinned by the
+    committed pre-column fixtures in ``tests/golden/fixtures/``.
+    """
+    value = record.get(name)
+    return None if value is None else float(value)  # type: ignore[arg-type]
+
+
 def _row_from_record(record: dict[str, object]) -> ResultRow:
     """Rebuild a :class:`ResultRow` from one polars ``iter_rows(named=True)`` record.
 
@@ -684,10 +845,11 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
     ``condition_names`` is NOT read back — it is re-derived from ``mask_bits`` at
     construction (single source of truth), so the stored string can never desync.
     The u128 mask is reassembled from the two signed-Int64 limb columns
-    (``mask_bits_lo`` / ``mask_bits_hi``). ``deflated_sharpe`` is nullable: a
-    Parquet null reads back as ``None``.
+    (``mask_bits_lo`` / ``mask_bits_hi``). ``deflated_sharpe`` and the
+    REFERENCE-ONLY ``vix_mean`` / ``vix_min`` / ``vix_max`` trio are nullable
+    AND optional (:func:`_optional_float`): a Parquet null — or the column's
+    absence from a store written before it existed — reads back as ``None``.
     """
-    deflated = record["deflated_sharpe"]
     return ResultRow(
         run_id=str(record["run_id"]),
         instrument=str(record["instrument"]),
@@ -698,7 +860,10 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
             int(record["mask_bits_lo"]),  # type: ignore[call-overload]
             int(record["mask_bits_hi"]),  # type: ignore[call-overload]
         ),
-        deflated_sharpe=None if deflated is None else float(deflated),  # type: ignore[arg-type]
+        deflated_sharpe=_optional_float(record, "deflated_sharpe"),
+        vix_mean=_optional_float(record, "vix_mean"),
+        vix_min=_optional_float(record, "vix_min"),
+        vix_max=_optional_float(record, "vix_max"),
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
