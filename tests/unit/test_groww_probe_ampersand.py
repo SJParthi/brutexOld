@@ -3,7 +3,9 @@
 Fakes only — no network. Pins the probe's evidence discipline (BOTH forms
 ALWAYS called; one canonical transcript event per physical call BEFORE any
 verdict interpretation; budget spent BEFORE each call), every per-underlying
-verdict branch (PLAIN_OK / ENCODED_ONLY / BOTH_OK / NEITHER / ERROR), the
+verdict branch (PLAIN_OK / ENCODED_ONLY / BOTH_OK / the error-contaminated
+*_UNCONFIRMED pair — data beside a RAISED sibling seeds a winner but can never
+be decisive / NEITHER / ERROR), the
 aggregate/decisive fold (incl. the MIXED family), the DYNAMIC family
 derivation from the instrument master (a novel ``X&Y`` listing auto-probes),
 and the bounded budget abort. Together with the stage-14 suite in
@@ -23,10 +25,12 @@ from brutex.adapters.groww.errors import GrowwServerError
 from brutex.adapters.groww.probe import (
     AMP_VERDICT_BOTH_OK,
     AMP_VERDICT_ENCODED_ONLY,
+    AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED,
     AMP_VERDICT_ERROR,
     AMP_VERDICT_MIXED,
     AMP_VERDICT_NEITHER,
     AMP_VERDICT_PLAIN_OK,
+    AMP_VERDICT_PLAIN_OK_UNCONFIRMED,
     AmpersandProbeReport,
     ampersand_family,
     probe_ampersand_forms,
@@ -186,14 +190,53 @@ class TestAmpersandVerdicts:
         errors = [c.error for c in report.results]
         assert all(e is not None and e.startswith("GrowwServerError") for e in errors)
 
-    def test_data_trumps_a_sibling_error(self) -> None:
-        """Plain data + encoded error → PLAIN_OK (data is decisive evidence)."""
+    def test_plain_data_with_encoded_error_is_unconfirmed_never_decisive(self) -> None:
+        """Review-fix regression (MAJOR): a throttled side is NOT a refuted side.
+
+        Plain data + encoded RAISED (429/5xx) previously read PLAIN_OK — a CLEAR,
+        decisive-capable verdict minting a stamp whose docstring claims the other
+        form "cannot" return data, though that side was never cleanly observed.
+        Now: the winner still seeds (data is real evidence for the ORDER), but
+        the verdict is *_UNCONFIRMED — non-clear, never decisive, never stamped.
+        """
         sdk = _AmpSDK(
             expiries={"M&M": "data", "M%26M": "raise"},
             contracts={"M&M": "data", "M%26M": "raise"},
         )
         report, _t = _probe(sdk, ["M&M"])
-        assert report.per_underlying == {"M&M": AMP_VERDICT_PLAIN_OK}
+        assert report.per_underlying == {"M&M": AMP_VERDICT_PLAIN_OK_UNCONFIRMED}
+        assert report.decisive is False
+        assert report.winners == {"M&M": "M&M"}  # the winner STILL seeds
+
+    def test_encoded_data_with_plain_error_is_unconfirmed_never_decisive(self) -> None:
+        """The symmetric arm: the REFUTED-direction claim needs a clean plain side."""
+        sdk = _AmpSDK(
+            expiries={"M%26M": "data", "M&M": "raise"},
+            contracts={"M%26M": "data", "M&M": "raise"},
+        )
+        report, _t = _probe(sdk, ["M&M"])
+        assert report.per_underlying == {"M&M": AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED}
+        assert report.decisive is False
+        assert report.winners == {"M&M": "M%26M"}  # the winner STILL seeds
+
+    def test_no_data_side_error_on_the_contracts_leg_alone_contaminates(self) -> None:
+        """A clean-empty expiries call does NOT launder a raised contracts call."""
+        sdk = _AmpSDK(
+            expiries={"M%26M": "data"},  # plain expiries: clean empty
+            contracts={"M%26M": "data", "M&M": "raise"},  # plain contracts: RAISED
+        )
+        report, _t = _probe(sdk, ["M&M"])
+        assert report.per_underlying == {"M&M": AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED}
+        assert report.decisive is False
+
+    def test_both_ok_is_undisturbed_by_an_incidental_error(self) -> None:
+        """BOTH_OK makes two POSITIVE claims — each proven by its own data."""
+        sdk = _AmpSDK(
+            expiries={"M&M": "data", "M%26M": "data"},
+            contracts={"M&M": "raise", "M%26M": "raise"},  # incidental errors
+        )
+        report, _t = _probe(sdk, ["M&M"])
+        assert report.per_underlying == {"M&M": AMP_VERDICT_BOTH_OK}
         assert report.decisive is True
 
     def test_non_groww_exception_propagates(self) -> None:

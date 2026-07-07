@@ -4113,7 +4113,9 @@ def test_durable_preference_persists_the_candle_phase_winner(tmp_path: Path) -> 
     )
     assert report.contracts_completed == 1
     # First fetch tried plain (empty) then the %26 form (bars) — and the win was
-    # PERSISTED under the underlying key for the next pull/process.
+    # PERSISTED under the underlying key AS THE KEY-LEVEL ROLE FORM (never the
+    # per-contract spelling), so the row seeds the metadata phase and every other
+    # contract of the underlying in the next pull/process.
     assert sdk.candle_symbols == ["NSE-M&M-25Jan24-2400-CE", "NSE-M%26M-25Jan24-2400-CE"]
-    assert meta.rows == {form_winner_key("M&M"): "NSE-M%26M-25Jan24-2400-CE"}
+    assert meta.rows == {form_winner_key("M&M"): "M%26M"}
     store.close()

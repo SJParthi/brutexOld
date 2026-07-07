@@ -478,23 +478,50 @@ def probe_depth(
 # ────────────────────────────────────────────────────────────────────────
 
 #: Per-underlying probe verdicts (the ``&``-form evidence vocabulary). PLAIN_OK =
-#: only the plain ``&`` form returned data; ENCODED_ONLY = only the ``%26`` form
-#: did (the #898 hypothesis demonstrated for that name); BOTH_OK = both forms
-#: returned data; NEITHER = every call was a clean empty; ERROR = no data and at
-#: least one call raised. MIXED is an AGGREGATE-only verdict — a family whose
-#: per-underlying verdicts disagree (never assigned to a single underlying).
+#: only the plain ``&`` form returned data AND every encoded call was a CLEAN
+#: empty (the no-data claim about the encoded side is uncontaminated); ENCODED_ONLY
+#: = only the ``%26`` form did, with every plain call a clean empty (the #898
+#: hypothesis demonstrated for that name); BOTH_OK = both forms returned data (a
+#: positive claim about each side — an incidental sibling error cannot undermine
+#: it); PLAIN_OK_UNCONFIRMED / ENCODED_ONLY_UNCONFIRMED = one side returned data
+#: but the OTHER side RAISED (throttle/5xx), so "the other form CANNOT return
+#: data" was NOT cleanly observed — the winner still seeds (order optimisation is
+#: harmless) but the verdict is NON-clear and can never stamp (Golden Rule #1: a
+#: throttled side is not a refuted side); NEITHER = every call was a clean empty;
+#: ERROR = no data and at least one call raised. MIXED is an AGGREGATE-only
+#: verdict — a family whose per-underlying verdicts disagree (never assigned to a
+#: single underlying).
 AMP_VERDICT_PLAIN_OK: Final[str] = "PLAIN_OK"
 AMP_VERDICT_ENCODED_ONLY: Final[str] = "ENCODED_ONLY"
 AMP_VERDICT_BOTH_OK: Final[str] = "BOTH_OK"
+AMP_VERDICT_PLAIN_OK_UNCONFIRMED: Final[str] = "PLAIN_OK_UNCONFIRMED"
+AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED: Final[str] = "ENCODED_ONLY_UNCONFIRMED"
 AMP_VERDICT_NEITHER: Final[str] = "NEITHER"
 AMP_VERDICT_ERROR: Final[str] = "ERROR"
 AMP_VERDICT_MIXED: Final[str] = "MIXED"
 
 #: The clear (decisive-capable) per-underlying verdicts — BOTH_OK counts
-#: decisive-for-plain (the vendor handles the raw ``&`` for that name).
-_AMP_CLEAR_VERDICTS: Final[frozenset[str]] = frozenset(
+#: decisive-for-plain (the vendor handles the raw ``&`` for that name). The
+#: *_UNCONFIRMED pair is deliberately EXCLUDED: a verdict whose no-data side was
+#: error-contaminated may seed a winner but may never contribute to a DECISIVE
+#: report (and therefore never to the machine-readable stamp) — re-run the probe
+#: when the vendor is healthy instead.
+AMP_CLEAR_VERDICTS: Final[frozenset[str]] = frozenset(
     {AMP_VERDICT_PLAIN_OK, AMP_VERDICT_ENCODED_ONLY, AMP_VERDICT_BOTH_OK}
 )
+
+#: Verdicts whose evidence names a WINNING form (used for durable-map seeding):
+#: verdict → the winner's index in the canonical forms tuple (plain=0, encoded=1).
+#: The *_UNCONFIRMED pair seeds too — data on one side is real evidence for the
+#: ORDER optimisation even when the sibling side errored (a wrong seed costs one
+#: extra empty fetch, never data) — it just never counts CLEAR above.
+_AMP_WINNER_INDEX: Final[Mapping[str, int]] = {
+    AMP_VERDICT_PLAIN_OK: 0,
+    AMP_VERDICT_BOTH_OK: 0,
+    AMP_VERDICT_PLAIN_OK_UNCONFIRMED: 0,
+    AMP_VERDICT_ENCODED_ONLY: 1,
+    AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED: 1,
+}
 
 #: Form roles, positionally aligned with the CANONICAL
 #: :func:`~brutex.adapters.groww.contracts.underlying_symbol_forms` tuple.
@@ -560,10 +587,14 @@ class AmpersandProbeReport:
     per_underlying
         ``underlying → verdict`` (:data:`AMP_VERDICT_PLAIN_OK` /
         :data:`AMP_VERDICT_ENCODED_ONLY` / :data:`AMP_VERDICT_BOTH_OK` /
+        :data:`AMP_VERDICT_PLAIN_OK_UNCONFIRMED` /
+        :data:`AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED` /
         :data:`AMP_VERDICT_NEITHER` / :data:`AMP_VERDICT_ERROR`).
     winners
-        ``underlying → the winning FORM string`` for every underlying with a
-        CLEAR verdict (the rows the durable form-winner map is seeded with);
+        ``underlying → the winning FORM string`` for every underlying whose
+        evidence names a winner — the CLEAR verdicts AND the *_UNCONFIRMED pair
+        (data on one side seeds the ORDER optimisation even when the sibling
+        side errored — a wrong seed costs one extra empty fetch, never data);
         a NEITHER/ERROR underlying has no entry (nothing is fabricated).
     overall
         The family aggregate: the single shared verdict when every underlying
@@ -571,8 +602,11 @@ class AmpersandProbeReport:
         and unclear mix, :data:`AMP_VERDICT_NEITHER` for an empty family.
     decisive
         ``True`` iff the family is non-empty and EVERY underlying's verdict is
-        CLEAR (:data:`_AMP_CLEAR_VERDICTS` — BOTH_OK counts decisive-for-plain).
-        Only a decisive report may write the machine-readable verdict stamp
+        CLEAR (:data:`AMP_CLEAR_VERDICTS` — BOTH_OK counts decisive-for-plain;
+        an *_UNCONFIRMED verdict — data on one side, a RAISED error on the other
+        — is deliberately NON-clear: the losing side was never cleanly observed,
+        so nothing may be stamped from it). Only a decisive report may write the
+        machine-readable verdict stamp
         (:data:`~brutex.adapters.groww.symbol_form_preference.FORM_PROBE_VERDICT_KEY`).
     """
 
@@ -665,16 +699,29 @@ def _emit_call(
 
 
 def _amp_verdict(calls: Sequence[AmpersandFormCall]) -> str:
-    """Fold one underlying's calls into its verdict — data trumps errors."""
+    """Fold one underlying's calls into its verdict.
+
+    Data on a side is POSITIVE evidence for that side and always wins over a
+    sibling error (the winner can seed). But the one-sided CLEAR verdicts
+    (PLAIN_OK / ENCODED_ONLY) additionally assert the NEGATIVE — "the other form
+    returns NO data" — which is demonstrated only when every call on that other
+    side was a CLEAN empty: a raised throttle/5xx on the no-data side leaves the
+    negative claim UNOBSERVED, so the verdict demotes to the matching
+    *_UNCONFIRMED (non-clear → never decisive → never stamped; Golden Rule #1 —
+    a 429 is not a refutation). BOTH_OK needs no such guard: it makes two
+    positive claims, each proven by its own returned data.
+    """
     plain_data = any(c.role == "plain" and (c.count or 0) > 0 for c in calls)
     encoded_data = any(c.role == "encoded" and (c.count or 0) > 0 for c in calls)
+    plain_errored = any(c.role == "plain" and c.error is not None for c in calls)
+    encoded_errored = any(c.role == "encoded" and c.error is not None for c in calls)
     if plain_data and encoded_data:
         return AMP_VERDICT_BOTH_OK
     if plain_data:
-        return AMP_VERDICT_PLAIN_OK
+        return AMP_VERDICT_PLAIN_OK_UNCONFIRMED if encoded_errored else AMP_VERDICT_PLAIN_OK
     if encoded_data:
-        return AMP_VERDICT_ENCODED_ONLY
-    if any(c.error is not None for c in calls):
+        return AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED if plain_errored else AMP_VERDICT_ENCODED_ONLY
+    if plain_errored or encoded_errored:
         return AMP_VERDICT_ERROR
     return AMP_VERDICT_NEITHER
 
@@ -768,10 +815,9 @@ def probe_ampersand_forms(
                 _emit_call(transcript, results, calls, call)
         verdict = _amp_verdict(calls)
         per_underlying[underlying] = verdict
-        if verdict in (AMP_VERDICT_PLAIN_OK, AMP_VERDICT_BOTH_OK):
-            winners[underlying] = forms[0]
-        elif verdict == AMP_VERDICT_ENCODED_ONLY:
-            winners[underlying] = forms[1]
+        winner_index = _AMP_WINNER_INDEX.get(verdict)
+        if winner_index is not None:
+            winners[underlying] = forms[winner_index]
         transcript.event("amp.verdict", underlying=underlying, verdict=verdict)
     distinct = set(per_underlying.values())
     if not distinct:
@@ -780,7 +826,7 @@ def probe_ampersand_forms(
         overall = next(iter(distinct))
     else:
         overall = AMP_VERDICT_MIXED
-    decisive = bool(per_underlying) and distinct <= _AMP_CLEAR_VERDICTS
+    decisive = bool(per_underlying) and distinct <= AMP_CLEAR_VERDICTS
     return AmpersandProbeReport(
         results=tuple(results),
         per_underlying=per_underlying,
@@ -803,10 +849,12 @@ def run_probe(client: GrowwClient) -> list[ProbeResult]:
 __all__ = [
     "AMP_VERDICT_BOTH_OK",
     "AMP_VERDICT_ENCODED_ONLY",
+    "AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED",
     "AMP_VERDICT_ERROR",
     "AMP_VERDICT_MIXED",
     "AMP_VERDICT_NEITHER",
     "AMP_VERDICT_PLAIN_OK",
+    "AMP_VERDICT_PLAIN_OK_UNCONFIRMED",
     "DEPTH_PROBE_MAX_CALLS",
     "VERDICT_ABSENT",
     "VERDICT_ERROR",

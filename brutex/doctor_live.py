@@ -86,6 +86,7 @@ from brutex.adapters.groww.live import (
 )
 from brutex.adapters.groww.parser import CandleParseError, parse_candle_rows
 from brutex.adapters.groww.probe import (
+    AMP_CLEAR_VERDICTS,
     AMP_VERDICT_BOTH_OK,
     AMP_VERDICT_ENCODED_ONLY,
     AMP_VERDICT_PLAIN_OK,
@@ -100,6 +101,8 @@ from brutex.adapters.groww.probe import (
 from brutex.adapters.groww.symbol_form_preference import (
     FORM_PROBE_VERDICT_KEY,
     PersistentSymbolFormPreference,
+    form_winner_key,
+    form_winner_persist_enabled,
 )
 from brutex.adapters.groww.token_cache import CachedToken, current_session
 from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
@@ -584,7 +587,7 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     ),
     "amp.partial": (
         "WARN ampersand[R3]: probe NON-decisive — overall {verdict}, {clear}/{families} "
-        "underlyings clear ({summary}); {seeded} clear winner(s) still seeded per-underlying, "
+        "underlyings clear ({summary}); {seeded} winner row(s) verified seeded per-underlying, "
         "NO verdict stamp written (the #898 UNVERIFIED wording stands). Fix: re-run "
         "--ampersand-probe when the vendor is healthy · evidence {verdict_file}"
     ),
@@ -594,9 +597,15 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "Fix: load the instrument master (dashboard 'Load instruments') then re-run "
         "--ampersand-probe."
     ),
+    "amp.seed_shortfall": (
+        "WARN ampersand[R3]: only {seeded}/{winners} winner row(s) VERIFIED in the durable "
+        "form-winner map — {reason}. The probe evidence (transcript + verdict file) is "
+        "unaffected; unseeded names keep the canonical plain-first order until a row lands."
+    ),
     "amp.stamp_write_failed": (
-        "WARN ampersand[R3]: verdict stamp write failed ({error}) — winner rows seeded, stamp "
-        "NOT written; re-run --ampersand-probe once the instrument store is writable."
+        "WARN ampersand[R3]: verdict stamp write failed ({error}) — {seeded} winner row(s) "
+        "verified in the durable map, stamp NOT written; re-run --ampersand-probe once the "
+        "instrument store is writable."
     ),
     "amp.verdict_write_failed": (
         "FAIL ampersand[R3]: could not write the verdict evidence file {verdict_file} "
@@ -2392,6 +2401,22 @@ def _amp_decision_id(report: AmpersandProbeReport) -> str:
     return _AMP_DECISION_REFUTED
 
 
+def _amp_row_landed(store: MetaKV, underlying: str, winner: str) -> bool:
+    """``True`` iff *underlying*'s durable winner row reads back as *winner*.
+
+    The HONESTY read-back for the stage's ``seeded`` count (Golden Rule #1):
+    ``record_winner`` is deliberately best-effort — the ``BRUTEX_FORM_WINNER_PERSIST``
+    kill switch silently skips the write and a ``set_meta`` failure is
+    WARN-swallowed — so a per-call increment would CLAIM rows that never landed.
+    Only a row that actually reads back counts; an unreadable row can never be
+    claimed seeded.
+    """
+    try:
+        return store.get_meta(form_winner_key(underlying)) == winner
+    except Exception:  # pylint: disable=broad-exception-caught — an unreadable row is NOT a seeded row
+        return False
+
+
 def _amp_seed_and_stamp(
     deps: KitDeps,
     ctx: KitContext,
@@ -2404,9 +2429,18 @@ def _amp_seed_and_stamp(
     Returns ``(seeded_count, stamp_written, warn_lines)``. Every store
     interaction is best-effort: an unavailable/unwritable store degrades to an
     honest WARN line — the probe EVIDENCE (transcript + verdict file) already
-    exists either way. The ``set_meta(FORM_PROBE_VERDICT_KEY, …)`` here is the
-    ONLY stamp writer in the repo (test-pinned) and fires ONLY on a DECISIVE
-    report — production pull code can never mint "verified".
+    exists either way. ``seeded_count`` counts only rows VERIFIED by read-back
+    (:func:`_amp_row_landed`) — never ``record_winner`` attempts — and a
+    shortfall renders its own WARN naming the cause (the
+    ``BRUTEX_FORM_WINNER_PERSIST`` kill switch, or swallowed write failures).
+    The ``set_meta(FORM_PROBE_VERDICT_KEY, …)`` here is the ONLY stamp writer in
+    the repo (test-pinned) and fires ONLY on a DECISIVE report — production pull
+    code can never mint "verified". The stamp deliberately BYPASSES the
+    ``BRUTEX_FORM_WINNER_PERSIST`` kill switch: that switch is scoped to the
+    winner MAP rows (the ``groww.form_winner.*`` prefix the production pull
+    writes), while the stamp is operator-initiated probe EVIDENCE on its own
+    key — suppressing evidence a human explicitly ran the probe to mint would
+    be the dishonest outcome.
     """
     if deps.open_meta_store is None:
         return (
@@ -2428,11 +2462,31 @@ def _amp_seed_and_stamp(
     with store_cm as store:
         # ONE COMMON write path (CLAUDE.md §11): the probe seeds THROUGH the same
         # PersistentSymbolFormPreference.record_winner the production pulls learn
-        # through — per-underlying, so a mixed family still persists each CLEAR name.
+        # through — per-underlying, so a mixed family still persists each name whose
+        # evidence names a winner — then VERIFIES each row by read-back so the
+        # operator-facing count is what actually landed, never what was attempted.
         preference = PersistentSymbolFormPreference(store)
         for underlying, winner in sorted(report.winners.items()):
             preference.record_winner(underlying, underlying_symbol_forms(underlying), winner)
-            seeded += 1
+            if _amp_row_landed(store, underlying, winner):
+                seeded += 1
+        if seeded < len(report.winners):
+            reason = (
+                "winner-row persistence is disabled by BRUTEX_FORM_WINNER_PERSIST"
+                if not form_winner_persist_enabled()
+                else (
+                    "winner-row write(s) failed or could not be read back "
+                    "(see the form_winner.persist_failed warnings)"
+                )
+            )
+            lines.append(
+                render_diagnostic(
+                    "amp.seed_shortfall",
+                    seeded=seeded,
+                    winners=len(report.winners),
+                    reason=reason,
+                )
+            )
         if report.decisive:
             stamp = json.dumps(
                 {
@@ -2447,11 +2501,16 @@ def _amp_seed_and_stamp(
                 sort_keys=True,
             )
             try:
+                # Deliberately NOT gated on form_winner_persist_enabled(): the stamp
+                # is probe EVIDENCE (its key sits OUTSIDE the winner-map prefix), not
+                # a winner row — see the docstring.
                 store.set_meta(FORM_PROBE_VERDICT_KEY, stamp)
             except Exception as exc:  # pylint: disable=broad-exception-caught — a failed stamp degrades honestly
                 lines.append(
                     render_diagnostic(
-                        "amp.stamp_write_failed", error=f"{type(exc).__name__}: {exc}"
+                        "amp.stamp_write_failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                        seeded=seeded,
                     )
                 )
             else:
@@ -2467,14 +2526,17 @@ def stage_ampersand(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     read-only client (every call budget-spent + transcript-lined), writes the
     canonical ``ampersand_verdict.json`` evidence sidecar under the quarantined
     ``_liveproof/<run_id>/`` tree, SEEDS the durable form-winner map
-    per-underlying through the ONE COMMON ``record_winner`` write path, and —
+    per-underlying through the ONE COMMON ``record_winner`` write path (the
+    reported ``seeded`` count is READ-BACK-VERIFIED — a kill-switched or failed
+    write is never claimed, and a shortfall WARNs with its cause), and —
     iff the report is DECISIVE — writes the machine-readable
     ``groww.form_probe.verdict`` stamp (this stage is its ONLY writer; a
-    non-decisive family seeds its clear names but NEVER stamps — no blanket
-    claim from partial evidence, Golden Rule #10). The ``schema_meta`` winner
-    rows are the deliberate, documented exception to the kit's
-    quarantined-writes rule: they ARE the product (the durable map production
-    pulls read), written through the production write path itself.
+    non-decisive family seeds its winner-carrying names but NEVER stamps — no
+    blanket claim from partial evidence, and a data-beside-a-sibling-ERROR name
+    reads *_UNCONFIRMED, blocking decisiveness, Golden Rule #10). The
+    ``schema_meta`` winner rows are the deliberate, documented exception to the
+    kit's quarantined-writes rule: they ARE the product (the durable map
+    production pulls read), written through the production write path itself.
     """
     if not ctx.options.ampersand_probe:
         return _skip(14, "ampersand", "opt-in probe not enabled (pass --ampersand-probe to run it)")
@@ -2553,7 +2615,10 @@ def stage_ampersand(deps: KitDeps, ctx: KitContext) -> StageOutcome:
         stamped=stamped,
         verdict_file=str(verdict_path),
     )
-    clear = len(report.winners)
+    # "Clear" counts CLEAR-verdict names ONLY — an *_UNCONFIRMED name carries a
+    # winner (it seeds) but its no-data side was error-contaminated, so it must
+    # not inflate the clear tally (Golden Rule #1).
+    clear = sum(1 for verdict in report.per_underlying.values() if verdict in AMP_CLEAR_VERDICTS)
     if report.decisive and stamped:
         lines = [
             render_diagnostic(

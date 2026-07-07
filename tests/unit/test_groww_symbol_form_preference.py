@@ -528,6 +528,33 @@ class TestPersistentSymbolFormPreference:
         assert pref.order("NIFTY", ("NIFTY",)) == ("NIFTY",)
         assert store.get_calls == []
 
+    def test_record_winner_single_form_key_never_touches_the_store(self) -> None:
+        """Review-fix regression (MAJOR): a plain single-form key must NEVER persist.
+
+        The production record sites fire for EVERY underlying (candles.py records
+        any non-empty first fetch; contracts.py records every non-empty result),
+        so without the ``len(forms) > 1`` persist gate every plain F&O underlying
+        wrote one junk ``schema_meta`` row per pull process (~212 rows/pull,
+        never read back — order() only consults the store for multi-form keys).
+        """
+        store = _MemMetaStore()
+        pref = PersistentSymbolFormPreference(store)
+        for name in ("NIFTY", "RELIANCE", "TCS", "HDFCBANK"):
+            # The in-memory record still happens (changed=True on first win)…
+            assert pref.record_winner(name, (name,), name) is True
+        # …but the durable store sees ZERO I/O — no junk rows, no hot-path writes.
+        assert store.set_calls == []
+        assert store.get_calls == []
+        assert store.rows == {}
+
+    def test_record_winner_single_form_contract_symbol_never_persists(self) -> None:
+        """The candle path's self-keyed plain contract (no ``&``) also never writes."""
+        store = _MemMetaStore()
+        pref = PersistentSymbolFormPreference(store)
+        symbol = "NSE-TCS-25Sep25-3000-CE"
+        assert pref.record_winner(symbol, (symbol,), symbol) is True
+        assert store.set_calls == []
+
     def test_get_meta_error_warns_and_degrades_without_a_reread_storm(self) -> None:
         class _RaisingStore(_MemMetaStore):
             def get_meta(self, key: str) -> str | None:
@@ -558,6 +585,66 @@ class TestPersistentSymbolFormPreference:
         assert pref.record_winner("M&M", _FORMS, "M&M") is True
         assert store.set_calls[-1] == (form_winner_key("M&M"), "M&M")
         assert store.rows[form_winner_key("M&M")] == "M&M"
+
+    def test_candle_phase_win_persists_the_key_level_role_form(self) -> None:
+        """Review-fix regression (MAJOR): the persisted VALUE is role-normalised.
+
+        The candle phase records a per-CONTRACT canonical tuple under the
+        UNDERLYING key; persisting the raw contract string fragmented the value
+        space (the next process's metadata seed — and every OTHER contract's —
+        discarded it as stale). The durable value is now the winner's ROLE
+        applied to the KEY's own forms tuple, so one row serves every phase.
+        """
+        store = _MemMetaStore()
+        pref = PersistentSymbolFormPreference(store)
+        contract_forms = ("NSE-M&M-25Sep25-3000-CE", "NSE-M%26M-25Sep25-3000-CE")
+        assert pref.record_winner("M&M", contract_forms, contract_forms[1]) is True
+        # The KEY-level encoded form is persisted — NEVER the contract spelling.
+        assert store.rows == {form_winner_key("M&M"): "M%26M"}
+
+    def test_candle_written_row_seeds_every_phase_in_a_fresh_process(self) -> None:
+        """Cross-domain durability: one row serves metadata AND other contracts."""
+        store = _MemMetaStore()
+        p1 = PersistentSymbolFormPreference(store)
+        contract_a = ("NSE-M&M-25Sep25-3000-CE", "NSE-M%26M-25Sep25-3000-CE")
+        p1.record_winner("M&M", contract_a, contract_a[1])  # candle-phase win
+        # Fresh process, METADATA tuple: the learned encoded role leads.
+        p2 = PersistentSymbolFormPreference(store)
+        assert p2.order("M&M", _FORMS) == ("M%26M", "M&M")
+        # Fresh process, a DIFFERENT contract's tuple: same role, translated.
+        contract_b = ("NSE-M&M-01Feb24-2400-CE", "NSE-M%26M-01Feb24-2400-CE")
+        p3 = PersistentSymbolFormPreference(store)
+        assert p3.order("M&M", contract_b) == (contract_b[1], contract_b[0])
+
+    def test_metadata_written_row_seeds_a_candle_first_fresh_process(self) -> None:
+        """The reverse direction: an underlying-level row seeds a contract tuple."""
+        store = _MemMetaStore(rows={form_winner_key("M&M"): "M%26M"})
+        pref = PersistentSymbolFormPreference(store)
+        contract = ("NSE-M&M-25Sep25-3000-CE", "NSE-M%26M-25Sep25-3000-CE")
+        assert pref.order("M&M", contract) == (contract[1], contract[0])
+
+    def test_legacy_raw_contract_string_row_still_seeds_by_membership(self) -> None:
+        """A pre-normalisation row (the raw contract spelling) seeds its OWN tuple."""
+        contract = ("NSE-M&M-25Sep25-3000-CE", "NSE-M%26M-25Sep25-3000-CE")
+        store = _MemMetaStore(rows={form_winner_key("M&M"): contract[1]})
+        pref = PersistentSymbolFormPreference(store)
+        assert pref.order("M&M", contract) == (contract[1], contract[0])
+
+    def test_plain_key_with_multiform_tuple_persists_raw_and_seeds_back(self) -> None:
+        """Defensive fallback: a key whose OWN tuple cannot express the role.
+
+        A no-``&`` key recorded against a multi-form tuple (a caller mismatch —
+        never wired in production) persists the raw winning form; the seed's
+        membership arm reads it back for the same tuple. Reorder-never-narrow
+        holds throughout.
+        """
+        store = _MemMetaStore()
+        pref = PersistentSymbolFormPreference(store)
+        forms = ("M&M", "M%26M")
+        assert pref.record_winner("PLAINKEY", forms, "M%26M") is True
+        assert store.rows == {form_winner_key("PLAINKEY"): "M%26M"}  # raw fallback
+        fresh = PersistentSymbolFormPreference(store)
+        assert fresh.order("PLAINKEY", forms) == ("M%26M", "M&M")
 
     def test_unknown_winning_form_is_a_defensive_noop_with_no_io(self) -> None:
         store = _MemMetaStore()
@@ -638,6 +725,75 @@ class TestPersistentSymbolFormPreference:
         worker.join(timeout=10.0)
         assert not worker.is_alive()  # a deadlock would leave the worker hung
         assert store.rows[form_winner_key("M&M")] == "M%26M"
+
+    def test_wedged_seed_read_never_stalls_other_keys_or_a_same_key_racer(self) -> None:
+        """Review-fix regression (MAJOR): the map lock is NEVER held across the seed READ.
+
+        The pre-fix code executed ``get_meta`` INSIDE the map lock, so ONE
+        slow/wedged ``instruments.duckdb`` read on the first ``&``-key order
+        serialised EVERY worker's ``order``/``record_winner`` behind it
+        (empirically: a plain ``order("NIFTY")`` blocked the full wedge). Now the
+        key is claimed under the lock, the read runs OUTSIDE it, and every other
+        caller — plain keys, other ``&`` keys, and same-key racers (which serve
+        the canonical order for that one call) — proceeds immediately.
+        """
+
+        class _WedgedStore(_MemMetaStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release = threading.Event()
+                self.read_started = threading.Event()
+
+            def get_meta(self, key: str) -> str | None:
+                if "M&M" in key:
+                    self.read_started.set()
+                    self.release.wait(timeout=10.0)
+                return super().get_meta(key)
+
+        store = _WedgedStore()
+        pref = PersistentSymbolFormPreference(store)
+        reader = threading.Thread(target=lambda: pref.order("M&M", _FORMS), daemon=True)
+        reader.start()
+        assert store.read_started.wait(timeout=10.0)  # the wedged read IS in flight
+        started = time.monotonic()
+        assert pref.order("NIFTY", ("NIFTY",)) == ("NIFTY",)  # plain key: instant
+        other = ("L&TFH", "L%26TFH")
+        assert sorted(pref.order("L&TFH", other)) == sorted(other)  # other & key: instant
+        assert pref.order("M&M", _FORMS) == _FORMS  # same-key racer: canonical, instant
+        assert pref.record_winner("L&TFH", other, "L%26TFH") is True  # record: instant
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, f"fan-out stalled {elapsed:.2f}s behind the wedged read"
+        store.release.set()
+        reader.join(timeout=10.0)
+        assert not reader.is_alive()
+
+    def test_wedged_seed_read_is_deadline_bounded_and_degrades_canonical(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read that NEVER returns costs the reading worker one bounded deadline.
+
+        The COMMON ``run_with_deadline`` freeze guard bounds the seed ``get_meta``
+        (env ``BRUTEX_FORM_WINNER_READ_DEADLINE_S``): on expiry the order degrades
+        to the canonical tuple (never a crash, never a narrowed search) and the
+        key stays claimed — no re-read storm against the wedged volume.
+        """
+        monkeypatch.setenv("BRUTEX_FORM_WINNER_READ_DEADLINE_S", "0.05")
+        release = threading.Event()
+
+        class _HangingStore(_MemMetaStore):
+            def get_meta(self, key: str) -> str | None:
+                super().get_meta(key)
+                release.wait(timeout=10.0)  # hangs past the 0.05 s deadline
+                return None
+
+        store = _HangingStore()
+        pref = PersistentSymbolFormPreference(store)
+        started = time.monotonic()
+        assert pref.order("M&M", _FORMS) == _FORMS  # canonical — never a crash
+        assert time.monotonic() - started < 5.0
+        assert pref.order("M&M", _FORMS) == _FORMS  # loaded memo: no re-read storm
+        assert len(store.get_calls) == 1
+        release.set()  # let the abandoned daemon finish
 
     def test_sixteen_thread_hammer_single_flight_and_one_write(self) -> None:
         """Concurrency: mixed order/record under a Barrier — one read, one write."""
@@ -813,8 +969,9 @@ def test_resolve_expiries_preference_key_records_under_the_primary_key() -> None
         form_preference=pref,
         preference_key="PRIMARY&KEY",
     )
-    # The durable row lands under the PRIMARY key — not the queried spelling.
-    assert store.rows == {form_winner_key("PRIMARY&KEY"): "M%26M"}
+    # The durable row lands under the PRIMARY key — not the queried spelling —
+    # and the VALUE is role-normalised to the KEY's own forms (encoded role 1).
+    assert store.rows == {form_winner_key("PRIMARY&KEY"): "PRIMARY%26KEY"}
     assert pref.order("PRIMARY&KEY", _FORMS) == ("M%26M", "M&M")
     assert pref.order("M&M", _FORMS) == _FORMS  # the spelling key carries NO memory
     # And the SECOND call under the same primary key issues the winner first.
@@ -964,9 +1121,11 @@ def test_cross_pull_durability_second_pull_first_call_is_the_learned_winner() ->
         return sdk
 
     sdk1 = _one_pull()
-    # Pull 1 learned the hard way: plain (empty) then encoded (bars) — and persisted.
+    # Pull 1 learned the hard way: plain (empty) then encoded (bars) — and persisted
+    # the KEY-level role form (never the per-contract spelling, so the row serves
+    # the metadata phase and every OTHER contract too).
     assert sdk1.symbols == ["NSE-M&M-02Jan25-2400-CE", "NSE-M%26M-02Jan25-2400-CE"]
-    assert store.rows[form_winner_key("M&M")] == "NSE-M%26M-02Jan25-2400-CE"
+    assert store.rows[form_winner_key("M&M")] == "M%26M"
     sdk2 = _one_pull()
     # Pull 2 (fresh preference, same store): the FIRST vendor call is the winner.
     assert sdk2.symbols[0] == "NSE-M%26M-02Jan25-2400-CE"

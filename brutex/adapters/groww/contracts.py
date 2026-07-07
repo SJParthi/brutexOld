@@ -32,7 +32,10 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from brutex.adapters.groww.client import GrowwClientProtocol
-from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
+from brutex.adapters.groww.symbol_form_preference import (
+    SymbolFormPreference,
+    underlying_symbol_forms,
+)
 from brutex.adapters.ingest_common import DEFAULT_EMPTY_RETRY_ATTEMPTS, fetch_until_nonempty
 from brutex.adapters.protocol import DerivativeContract
 
@@ -134,31 +137,13 @@ def _expiries_array(payload: Mapping[str, object]) -> list[object]:
     return list(raw)
 
 
-def underlying_symbol_forms(underlying_symbol: str) -> tuple[str, ...]:
-    """The underlying-symbol forms to try, in order, for the F&O expiries/contracts fetch.
-
-    DEC-GROWW-AMPERSAND-FALLBACK-001. An ``&`` in the NSE trading symbol (``M&M``,
-    ``M&MFIN``, ``L&TFH``, ``GVT&D``, ``J&KBANK``, ``ARE&M``, ``GMRP&UI``) is the
-    HTTP query-string separator; the ``growwapi`` SDK's request builder sends it
-    UN-ENCODED, so ``get_expiries`` / ``get_contracts`` return a clean-but-EMPTY ``200`` and
-    the WHOLE underlying's expiry/contract chain is silently missed (the operator's "M&M
-    fails for entire expiries and contracts" — root-caused in MIGRATION.md #870). We try the
-    PLAIN symbol FIRST — zero behaviour change for the common no-``&`` case AND for any vendor
-    that already handles ``&`` correctly — then the percent-encoded ``%26`` variant as the
-    fallback (the standard encoding of ``&``).
-
-    **Honest envelope (Golden Rule #1/#10):** the EXACT correct encoding is an UNVERIFIED
-    vendor/SDK behaviour (the SDK's internal URL construction needs a live Groww probe —
-    CLAUDE.md §6 Phase-0 probe discipline). Try-both is the no-worse-than-before approach: a
-    non-``&`` symbol yields ONE form (no extra call); an ``&`` symbol yields two and uses the
-    FIRST non-empty — so if the vendor handles plain ``&`` we never regress, and if neither
-    form yields data we record the same empty as today (never a fabricated chain). If the SDK
-    double-encodes (``%26`` → ``%2526``) the ``%26`` form simply also returns empty and we are
-    no worse off; a confirmed encoding can replace this hypothesis once the probe lands.
-    """
-    if "&" not in underlying_symbol:
-        return (underlying_symbol,)
-    return (underlying_symbol, underlying_symbol.replace("&", "%26"))
+# `underlying_symbol_forms` (DEC-GROWW-AMPERSAND-FALLBACK-001) now LIVES in
+# `symbol_form_preference.py` (imported above, re-exported below byte-compatibly —
+# every existing `from brutex.adapters.groww.contracts import underlying_symbol_forms`
+# caller is unchanged): the durable winner map role-normalises its persisted value
+# against the KEY's own canonical tuple, and this module already imports that one,
+# so the shared form derivation moved DOWN to the leaf both need (no import cycle,
+# CLAUDE.md §11 COMMON — one source of truth).
 
 
 def _fetch_first_nonempty_form[T](

@@ -20,9 +20,19 @@
 
 _Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1528 —
 the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
-one `schema_meta` row per underlying (`groww.form_winner.<key>` → the winning
-form STRING) written through the NEW `PersistentSymbolFormPreference`
-(write-on-change, read-once-per-process single-flight, store errors WARN-only —
+one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
+winning form STRING — the winner's ROLE applied to the key's own
+`underlying_symbol_forms` tuple (moved into `symbol_form_preference.py`,
+re-exported from `contracts.py`), so a candle-phase win and a metadata win
+share ONE value space — review-fixed from the raw phase-local string) written
+through the NEW `PersistentSymbolFormPreference`
+(write-on-change, read-once-per-process single-flight, MULTI-form keys only on
+BOTH paths — the ~750 plain underlyings pay ZERO store I/O on order AND record
+(review-fixed: the ungated persist wrote ~212 junk rows per pull process); the
+seed `get_meta` runs OUTSIDE the map lock, bounded by the COMMON
+`run_with_deadline` (2 s, `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged
+sidecar read can never stall the fan-out (review-fixed: it ran INSIDE the map
+lock); store errors WARN-only —
 a pull is never crashed; `BRUTEX_FORM_WINNER_PERSIST=off` is the write-side
 kill switch; SUPERSEDES the "cross-pull persistence is a NAMED follow-up"
 clause of DEC-SYMBOL-FORM-PREFERENCE-001), keyed by the PRIMARY F&O underlying
@@ -42,10 +52,15 @@ budget) probes BOTH symbol forms of every master-DERIVED `&`-underlying
 against BOTH F&O APIs through the kit's read-only client, writes the
 `ampersand_verdict.json` evidence sidecar + per-call transcript lines, SEEDS
 the durable map per-underlying through the ONE COMMON `record_winner` write
-path, and — iff DECISIVE — writes the machine-readable
+path (the `seeded` count READ-BACK-VERIFIED — a kill-switched/failed write is
+never claimed, `amp.seed_shortfall` names the cause), and — iff DECISIVE —
+writes the machine-readable
 `groww.form_probe.verdict` stamp, whose ONLY writer in the repo is that stage
 (test-pinned; `form_probe_status()` reads it back — missing/corrupt =
-honestly UNVERIFIED, "verified" is DATA not prose). HONEST (Golden Rule
+honestly UNVERIFIED, "verified" is DATA not prose; a data-beside-a-RAISED-
+sibling name reads `*_UNCONFIRMED` — it seeds its winner but NEVER counts
+CLEAR/decisive, so throttle-contaminated evidence cannot stamp). HONEST
+(Golden Rule
 #1/#10): the probe was NOT run for this change — no Groww credentials in the
 build environment — so ZERO transcript exists, ZERO stamp was written, and
 the #898 `%26`-encoding hypothesis stays vendor-UNVERIFIED byte-INTACT until
@@ -593,14 +608,25 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
   MIGRATION.md #1528** — the durable `&`-form winner map: `schema_meta` rows
-  (`groww.form_winner.<key>` → the winning form STRING) via the NEW
-  `PersistentSymbolFormPreference` over the shared `brutex/data/meta_kv.py` `MetaKV`
-  Protocol (the `vendor_floor` durable-learned-value pattern; `VendorFloorMetaStore`
-  aliased); the `preference_key` PRIMARY-underlying normalization on
+  (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
+  ROLE applied to the key's own `underlying_symbol_forms` tuple, so the metadata
+  and candle phases share ONE value space; `underlying_symbol_forms` moved into
+  `symbol_form_preference.py`, `contracts.py` re-exports byte-compatibly) via the
+  NEW `PersistentSymbolFormPreference` over the shared `brutex/data/meta_kv.py`
+  `MetaKV` Protocol (the `vendor_floor` durable-learned-value pattern;
+  `VendorFloorMetaStore` aliased); MULTI-form keys only on BOTH paths (the ~750
+  plain underlyings pay ZERO store I/O — order AND record); the seed `get_meta`
+  runs OUTSIDE the map lock under the COMMON `run_with_deadline` bound (2 s,
+  `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged sidecar read can never stall
+  the fan-out; the `preference_key` PRIMARY-underlying normalization on
   `resolve_expiries`/`resolve_contracts`; ONE shared instance wired per pipeline run
   across the metadata + historical phases (the spine's fresh-per-pass default stands
   down); the `brutex doctor --live --ampersand-probe` stage-14 probe TOOLING whose
-  decisive run is the ONLY writer of the `groww.form_probe.verdict` stamp. HONEST:
+  decisive run is the ONLY writer of the `groww.form_probe.verdict` stamp — the
+  stage's `seeded` count is READ-BACK-VERIFIED (a kill-switched or failed winner
+  write is never claimed; `amp.seed_shortfall` names the cause) and a
+  data-beside-a-RAISED-sibling name reads `*_UNCONFIRMED` (seeds its winner, never
+  counts CLEAR/decisive — a throttled side is not a refuted side). HONEST:
   the live probe was NOT run here (no creds in the build environment) — the #898
   `%26` UNVERIFIED wording stands byte-intact; the stamp flips it only with a real
   transcript. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;

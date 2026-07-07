@@ -1939,8 +1939,146 @@ class TestStageAmpersand:
         outcome = dl.stage_ampersand(deps, ctx)
         assert outcome.status == dl.STATUS_WARN
         assert outcome.lines[0].startswith("WARN ampersand[R3]: verdict stamp write failed")
+        # The line reports the VERIFIED winner-row count beside the failed stamp.
+        assert "1 winner row(s) verified in the durable map" in outcome.lines[0]
         assert store.rows[form_winner_key("M&M")] == "M%26M"  # winners seeded
         assert FORM_PROBE_VERDICT_KEY not in store.rows
+
+    def test_kill_switch_reports_zero_seeded_but_still_stamps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review-fix regression (MINOR): the seeded count never lies under the switch.
+
+        With ``BRUTEX_FORM_WINNER_PERSIST=off``, ``record_winner`` silently skips
+        every durable winner write — the stage previously still claimed "1 winner
+        row(s) seeded". Now the count is READ-BACK-VERIFIED (0), a shortfall WARN
+        names the kill switch, and the verdict STAMP is still written — the stamp
+        is operator-initiated probe EVIDENCE on its own key, deliberately outside
+        the winner-map switch's scope (documented in ``_amp_seed_and_stamp``).
+        """
+        from brutex.adapters.groww.symbol_form_preference import (
+            FORM_PROBE_VERDICT_KEY,
+            form_probe_status,
+        )
+
+        monkeypatch.setenv("BRUTEX_FORM_WINNER_PERSIST", "off")
+        store = _AmpMetaStore()
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),
+            contract_data=frozenset({"M%26M"}),
+            store=store,
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS  # decisive + stamped
+        assert "0 winner row(s) seeded" in outcome.lines[0]  # NEVER a fabricated count
+        shortfall = [line for line in outcome.lines if "0/1 winner row(s) VERIFIED" in line]
+        assert len(shortfall) == 1
+        assert "BRUTEX_FORM_WINNER_PERSIST" in shortfall[0]
+        # The stamp landed; the winner map holds NOTHING (the switch held).
+        assert set(store.rows) == {FORM_PROBE_VERDICT_KEY}
+        assert form_probe_status(store).verified is True
+
+    def test_winner_row_write_failure_is_never_counted_seeded(self, tmp_path: Path) -> None:
+        """Review-fix regression (MINOR): a WARN-swallowed set_meta is not 'seeded'."""
+        from brutex.adapters.groww.symbol_form_preference import (
+            FORM_PROBE_VERDICT_KEY,
+            form_winner_key,
+        )
+
+        store = _AmpMetaStore(raise_on=frozenset({form_winner_key("M&M")}))
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),
+            contract_data=frozenset({"M%26M"}),
+            store=store,
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS  # decisive + stamped
+        assert "0 winner row(s) seeded" in outcome.lines[0]  # the write NEVER landed
+        shortfall = [line for line in outcome.lines if "0/1 winner row(s) VERIFIED" in line]
+        assert len(shortfall) == 1
+        assert "winner-row write(s) failed" in shortfall[0]
+        assert form_winner_key("M&M") not in store.rows
+        assert FORM_PROBE_VERDICT_KEY in store.rows  # the stamp write still landed
+
+    def test_unreadable_winner_row_is_never_counted_seeded(self, tmp_path: Path) -> None:
+        """An unreadable row can never be CLAIMED seeded (the read-back except arm)."""
+        from brutex.adapters.groww.symbol_form_preference import FORM_WINNER_META_PREFIX
+
+        class _UnreadableWinnerStore(_AmpMetaStore):
+            def get_meta(self, key: str) -> str | None:
+                if key.startswith(FORM_WINNER_META_PREFIX):
+                    raise RuntimeError("read wedged")
+                return super().get_meta(key)
+
+        store = _UnreadableWinnerStore()
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),
+            contract_data=frozenset({"M%26M"}),
+            store=store,
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS  # decisive + stamped
+        assert "0 winner row(s) seeded" in outcome.lines[0]
+        shortfall = [line for line in outcome.lines if "could not be read back" in line]
+        assert len(shortfall) == 1
+
+    def test_unconfirmed_verdict_seeds_but_never_stamps(self, tmp_path: Path) -> None:
+        """Review-fix regression (MAJOR): a data-vs-ERROR family is NON-decisive.
+
+        The encoded side returns data while the plain side RAISES (a throttle
+        shape): the winner still seeds the durable map, but the verdict reads
+        ENCODED_ONLY_UNCONFIRMED — 0 clear — and NO stamp is minted from the
+        contaminated evidence (re-run when the vendor is healthy).
+        """
+        from brutex.adapters.groww.symbol_form_preference import (
+            FORM_PROBE_VERDICT_KEY,
+            form_probe_status,
+            form_winner_key,
+        )
+
+        # The kit client maps SDK errors by CLASS NAME; a bad-request shape maps
+        # TERMINAL (no retry ladder), so the probe records the error evidence
+        # immediately — the same trick the candles fallback tests use.
+        class GrowwAPIBadRequestException(Exception):
+            """Fake SDK 400 (mapped terminal by class name)."""
+
+        class _ThrottledPlainSDK(_AmpKitSDK):
+            def get_expiries(self, **kwargs: object) -> Mapping[str, object]:
+                if "%26" not in str(kwargs["underlying_symbol"]):
+                    raise GrowwAPIBadRequestException("vendor rejected the plain form")
+                return super().get_expiries(**kwargs)
+
+        store = _AmpMetaStore()
+        box: dict[str, Handler] = {"handler": default_handler}
+        sdk = _ThrottledPlainSDK(
+            box, expiry_data=frozenset({"M%26M"}), contract_data=frozenset({"M%26M"})
+        )
+        from contextlib import nullcontext
+
+        from brutex.adapters.groww.instruments import load_index_from_csv
+
+        deps, _box = make_deps(
+            tmp_path,
+            sdk_factory=lambda _token: sdk,
+            open_meta_store=lambda _root: nullcontext(store),
+        )
+        ctx, _events = make_ctx(tmp_path, deps, ampersand_probe=True)
+        assert dl.stage_creds(deps, ctx).status == dl.STATUS_PASS
+        assert dl.stage_token(deps, ctx).status == dl.STATUS_PASS
+        ctx.master = load_index_from_csv(_amp_master_rows(("M&M",)))
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert outcome.lines[0].startswith("WARN ampersand[R3]: probe NON-decisive")
+        assert "0/1 underlyings clear" in outcome.lines[0]  # UNCONFIRMED is NOT clear
+        assert "ENCODED_ONLY_UNCONFIRMED" in outcome.lines[0]
+        # The winner still seeded (order optimisation is harmless)…
+        assert store.rows[form_winner_key("M&M")] == "M%26M"
+        # …but NO stamp from error-contaminated evidence (Golden Rule #1).
+        assert FORM_PROBE_VERDICT_KEY not in store.rows
+        assert form_probe_status(store).verified is False
 
     def test_budget_exhaustion_is_the_runner_bounded_fail(self, tmp_path: Path) -> None:
         """CallBudgetExceeded propagates to the runner's SAFE-bound FAIL handling."""
