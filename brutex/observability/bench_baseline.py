@@ -1,6 +1,6 @@
 """Committed per-hardware ABSOLUTE benchmark baseline — the ONE source of truth.
 
-DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1528). Every perf gate before this
+DEC-BENCH-ABS-BASELINE-001 (MIGRATION.md #1529). Every perf gate before this
 was a RATIO gate (``tests/bench/_o1_tiers.py``, Golden Rule #5) plus one
 env-gated 50 M ops/s floor (``tests/bench/test_throughput_absolute.py``) — a
 constant-factor 2-10x slowdown of a hot path passed every ratio gate. This
@@ -65,7 +65,7 @@ UNIT: Final = "ns_per_op"
 #: All raw round samples are recorded so any other stat is re-derivable.
 STAT: Final = "min"
 
-#: The standing first-capture-per-cell authorization (ledger #1528). It can
+#: The standing first-capture-per-cell authorization (ledger #1529). It can
 #: bless an ADDED cell; it can NEVER authorize modifying an existing one.
 BOOTSTRAP_DECISION_ID: Final = "DEC-BENCH-ABS-BASELINE-001"
 

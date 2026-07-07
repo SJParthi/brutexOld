@@ -84,7 +84,7 @@ def scratch(tmp_path: Path) -> Scratch:
     repo.git("config", "user.email", "redteam@test")
     repo.git("config", "user.name", "redteam")
     repo.baselines.joinpath(FILENAME).write_text(json.dumps(make_baseline_doc()), encoding="utf-8")
-    repo.migration.write_text("1528. **DEC-BENCH-ABS-BASELINE-001 — bootstrap**\n", "utf-8")
+    repo.migration.write_text("1529. **DEC-BENCH-ABS-BASELINE-001 — bootstrap**\n", "utf-8")
     repo.commit_all("base")
     repo.git("tag", "base")
     return repo
