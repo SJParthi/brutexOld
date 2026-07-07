@@ -645,7 +645,7 @@ def test_tailread_spans_multiple_chunks(
     """A tiny reverse-read chunk forces the backwards walk to loop — parity holds.
 
     Shrinking ``_TAIL_CHUNK_BYTES`` to a few bytes makes the reader step back
-    through many chunks (the ``newline_idx == -1: continue`` arm and the loop
+    through many chunks (the no-newline-yet ``continue`` arm and the loop
     that isolates the last committed line), proving the multi-chunk walk is
     correct, not just the single-read fast case.
     """

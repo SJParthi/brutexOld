@@ -842,10 +842,13 @@ def _has_torn_tail(path: Path) -> bool:
         if size == 0:
             return False
         f.seek(size - 1)
-        # Equivalent-mutant pragma: exactly 1 byte remains at offset size-1, so a
-        # widened read(n>1) returns the identical byte; the `!=` / b"\n" semantics
-        # of this line are behaviour-pinned by TestHasTornTailPins.
-        return f.read(1) != b"\n"  # pragma: no mutate
+        # Argument-free read(): after seek(size - 1) exactly 1 byte remains, so
+        # read() returns that identical byte — no size literal means NO
+        # equivalent read-width mutant on this line, so the `!=` / b"\n"
+        # mutants stay IN the mutation gate (suite-killed by
+        # TestHasTornTailPins; the -003 fixer round 2 measured the prior
+        # line-scoped pragma hiding exactly those killable mutants).
+        return f.read() != b"\n"
 
 
 def _read_entries_with_torn_tail(path: Path) -> tuple[list[AuditEntry], bool]:
@@ -966,10 +969,13 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
         # torn_tail == the file does not end in "\n" (an unterminated final
         # line == an interrupted append). Read the final byte to decide.
         f.seek(size - 1)
-        # Equivalent-mutant pragma: exactly 1 byte remains at offset size-1, so a
-        # widened read(n>1) returns the identical byte; the `!=` / b"\n" semantics
-        # of this line are behaviour-pinned by TestReadTailEntryPins.
-        torn_tail = f.read(1) != b"\n"  # pragma: no mutate
+        # Argument-free read(): after seek(size - 1) exactly 1 byte remains, so
+        # read() returns that identical byte — no size literal means NO
+        # equivalent read-width mutant on this line, so the `!=` / b"\n"
+        # mutants stay IN the mutation gate (suite-killed by
+        # TestReadTailEntryPins; the -003 fixer round 2 measured the prior
+        # line-scoped pragma hiding exactly those killable mutants).
+        torn_tail = f.read() != b"\n"
 
         # Walk backwards in chunks, accumulating the tail bytes, until we have
         # isolated the last committed (newline-terminated) NON-BLANK line. The
@@ -992,18 +998,20 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
             # Split into physical lines. Because we always prepend, only the
             # FIRST fragment can be incomplete (more bytes may precede it), so
             # we only consider lines AFTER the first newline as fully-known.
-            newline_idx = buf.find(b"\n")
-            # Equivalent-mutant pragma: comparison flips here are output-equivalent
-            # — a newline-free chunk scans to None anyway, and an early continue
-            # only defers to the for-else whole-buffer scan (same answer); the
-            # O(1) consumption contract is separately pinned by
-            # test_tail_read_consumes_only_the_final_chunk.
-            if newline_idx == -1:  # pragma: no mutate
+            # partition() carries no -1 sentinel, so the find()-shape's
+            # equivalent `-1 → -2` numeric-mutant class disappears
+            # STRUCTURALLY and NO pragma is needed: every remaining mutant on
+            # these lines degrades the early exit into extra reverse-chunk
+            # reads, which test_tail_read_consumes_only_the_final_chunk pins
+            # (the -003 fixer round 2 measured the prior line-scoped pragma
+            # hiding exactly that suite-killable comparison flip).
+            _incomplete_head, sep, complete = buf.partition(b"\n")
+            if not sep:
                 # No newline yet in the accumulated buffer — keep reading back.
                 continue
             # Everything after the first newline is complete; scan its lines
             # from the end for the last non-blank committed line.
-            candidate = _last_nonblank_committed_line(buf[newline_idx + 1 :])
+            candidate = _last_nonblank_committed_line(complete)
             if candidate is not None:
                 last_committed_line = candidate
                 break
@@ -1107,12 +1115,15 @@ def _truncate_torn_tail(path: Path) -> None:
             f.seek(0, os.SEEK_END)  # pragma: no mutate
             size = f.tell()
             cut = _find_last_newline_offset(f, size)
-            # cut == -1 → no committed newline at all → keep nothing.
-            # Equivalent-mutant pragma: the else-arm is arithmetically redundant
-            # (cut + 1 == 0 exactly when cut == -1), so the sentinel-comparison
-            # mutants are equivalent; the keep boundary itself is byte-pinned by
+            # cut == -1 (no committed newline at all) folds in arithmetically:
+            # cut + 1 == 0 → keep nothing. The redundant `if cut != -1 else 0`
+            # arm is DELETED outright (the #624 dead-clamp idiom) instead of
+            # pragma'd: the -003 fixer round 2 measured that line-scoped
+            # pragma ALSO hiding the suite-killable `!=`→`==` flip — an
+            # always-truncate-to-0 audit-log wipe. The `+ 1` keep boundary
+            # stays IN the mutation gate, byte-pinned by
             # TestTruncateTornTailPins.
-            keep = cut + 1 if cut != -1 else 0  # pragma: no mutate
+            keep = cut + 1
             os.truncate(f.fileno(), keep)
             f.flush()
             with contextlib.suppress(OSError):
