@@ -133,7 +133,7 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,data]"
 
       - name: Build fno_math (Rust kernel)
         # Belt-and-suspenders crates.io flake guard (on top of the
