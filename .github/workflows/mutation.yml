@@ -76,6 +76,13 @@ env:
   # nothing about what is built or run.
   CARGO_NET_RETRY: "10"
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # DEC-TEST-APPARATUS-DEBTS-001(b): deterministic hypothesis — every mutmut
+  # pytest runner loads the `ci` profile registered in tests/conftest.py
+  # (derandomize=True), so a mutant's kill/survive verdict is a pure function
+  # of the mutant, never of seed luck. The scheduled stress-nightly arm
+  # deliberately does NOT set this — the conftest then loads the random
+  # default, overriding hypothesis's built-in auto-CI derandomization.
+  HYPOTHESIS_PROFILE: "ci"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
