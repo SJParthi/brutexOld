@@ -255,7 +255,7 @@ combo_hash = sha256(
 )
 ```
 
-⚠️ **Phase 1 fix needed:** current `brutex/strategies/combo.py:60-106` uses only 4 inputs (subsumes 5 into `strategy_id`). See §6 Phase 1 priorities.
+✅ **RESOLVED** by DEC-P0-060 (MIGRATION.md entry #197) + DEC-COMBO-HASH-UNIQUENESS-001: `brutex/strategies/combo.py:123-145` now hashes the full 9-field identity (`strategy_id` ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical params ‖ `data_snapshot_hash` ‖ `indicator_version` ‖ `code_commit_sha`). The fenced `sha256(...)` block above is the HISTORICAL spec §14 form preserved for the audit trail — the live digest is **blake3** per C-05 (DEC-CALIBRATE-001; CLAUDE.md Golden Rule #4).
 
 ---
 
@@ -569,7 +569,7 @@ Cross-task coordination = single `flock` on `~/.brutex/groww.lock`
 | Audit chain `prev_hash`/`entry_hash` ↔ verifier | ✅ COHERENT |
 | Audit event kinds ↔ design doc | ✅ COHERENT |
 | `partition.VALID_INTERVALS` (12 names) ↔ Track 1 21 TFs | 🔴 INCOHERENT (Phase 2) |
-| `combo_hash` (code 4 inputs) ↔ spec §14 (9 inputs) | 🟡 PARTIAL DRIFT |
+| `combo_hash` (code 9 inputs) ↔ spec §14 (9 inputs) | ✅ COHERENT (was 🟡 PARTIAL DRIFT at the 2026-05-15 audit; resolved by DEC-P0-060, MIGRATION.md entry #197 — see §3.8) |
 | `IngestPhase` enum (4 legacy F&O) ↔ Track 1 FSM | 🔴 INCOHERENT (Phase 2) |
 
 ## 9. Phase 1 Priorities (Cheap Fixes Worth Doing Early)
@@ -578,7 +578,7 @@ These three are cheap NOW but expensive later. Should land in Phase 1 alongside 
 
 | # | Item | Why now? |
 |---|---|---|
-| 1 | Widen `combo_hash` signature to match spec §14 (9 inputs) | Cheap to widen now; expensive to migrate cached results once Phase 3 lands. Drift caught by Agent C audit (gap G6). |
+| 1 | Widen `combo_hash` signature to match spec §14 (9 inputs) — ✅ DONE (DEC-P0-060, MIGRATION.md entry #197) | Cheap to widen now; expensive to migrate cached results once Phase 3 lands. Drift caught by Agent C audit (gap G6). |
 | 2 | Codify Result Parquet `dataclass` in `brutex/strategies/result.py` | Even before engine code lands; prevents the same kind of drift `combo_hash` is now showing. Gap G2. |
 | 3 | Property test asserting `WorkItem.content_hash == sha256(canonical(params))` for every stored item | Catches a silent-corruption class. Concern flagged by Agent C duplications table. |
 | 4 | Session-start hook + `brutex doctor` CLI | Operational quality-of-life; turns "what's the state?" into a single command. Per Agent A. |
@@ -604,7 +604,7 @@ These three are cheap NOW but expensive later. Should land in Phase 1 alongside 
 | 89 | **`brutex doctor` CLI** (Phase 1) runs all 10 C1-C10 invariants → single status table; exit 0/1; designed as the first command of any workday. |
 | 90 | **MCP servers**: filesystem + github + duckdb + lmdb + prometheus. Filesystem and prometheus are community servers; duckdb + lmdb are thin Python wrappers (Phase 1 deliverable). |
 | 91 | **Cowork per-task isolation**: git worktree per task + per-run LMDB sub-dir + per-run audit JSONL + global flock on `~/.brutex/groww.lock` for Groww rate budget. |
-| 92 | **`combo_hash` signature widening** (Phase 1, gap G6 from runtime audit) — extend `brutex/strategies/combo.py` from 4 inputs to 9 inputs matching spec §14. Cheap now, expensive later. |
+| 92 | **`combo_hash` signature widening** (Phase 1, gap G6 from runtime audit) — extend `brutex/strategies/combo.py` from 4 inputs to 9 inputs matching spec §14. Cheap now, expensive later. *(Executed: DEC-P0-060, MIGRATION.md entry #197.)* |
 | 93 | **Result Parquet `dataclass`** codified in `brutex/strategies/result.py` (Phase 1, gap G2) — even before engine code lands. Prevents drift like #92. |
 | 94 | **`WorkItem.content_hash` invariant property test** (Phase 1) — asserts `content_hash == sha256(canonical(params))` for every stored item. Catches silent dedup-corruption class. |
 | 95 | **Institutional verdict locked**: 5 BEATS / 7 MATCHES / 0 institutional FALLS-SHORT on the 12-pattern audit. Honest gaps (GPU underuse, no distributed, heuristic clustering, no regime stratification) tracked for future. Source: 3-agent runtime audit 2026-05-15 evening. |
