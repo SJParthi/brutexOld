@@ -1,6 +1,6 @@
 """Cross-platform process-resource probe — the ONE source of truth for RSS + fd reads.
 
-DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1537). A real multi-hour soak must
+DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1540). A real multi-hour soak must
 watch two whole-process signals a single-point unit test cannot see: resident
 memory (RSS) growth and open-file-descriptor (fd) growth. Both were read
 ad-hoc before (``tests/stress/test_memory_growth.py`` parsed ``/proc/self/status``

@@ -2689,7 +2689,7 @@ bruteX/
 │   ├── property/                   ← hypothesis + proptest (24 invariants)
 │   ├── golden/                     ← byte-equality fixtures
 │   ├── bench/                      ← O(1) ratio tests
-│   ├── stress/                     ← nightly ~5-min gate + weekly soak (#1537)
+│   ├── stress/                     ← nightly ~5-min gate + weekly soak (#1540)
 │   ├── smoke/                      ← <30s pre-push
 │   └── fakes/                      ← test doubles
 └── .github/workflows/
