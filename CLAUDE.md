@@ -112,8 +112,15 @@ divergence is POPULATION not predicate (census = ALL stored sessions,
 detector = the forming-session cutoff), documented + pinned; also corrects
 #1527's earlier misattribution (this item was never closed-wontfix — it is
 closed by IMPLEMENTATION). ALL ELEVEN: ENGINE UNCHANGED —
-NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch behaviour
-byte-identical; touched modules 100% line+branch).
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch
+PACING/RATE byte-identical everywhere, with exactly THREE SANCTIONED
+behavior changes (each honestly scoped in its own ledger entry): the
+same-run post-close 1day derive (#1528 — previously deferred to the
+next run), the learned-floor-clamped CLI planning (#1532 — a persisted
+learned floor plans FEWER 1-minute windows by design; dry-run
+byte-identical), and the fresh-foreign-lease pull REFUSAL (#1533);
+every other item's fetch behaviour is byte-identical (the counter
+split #1530 explicitly so); touched modules 100% line+branch).
 Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
