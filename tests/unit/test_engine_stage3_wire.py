@@ -773,6 +773,40 @@ class TestVixConflictCellSkip:
         assert report_2.rows_appended == 0
         assert report_2.cells == report_1.cells
 
+    def test_load_time_trio_conflict_in_a_cell_store_skips_that_cell(self, tmp_path: Path) -> None:
+        """Round-4 panel: a LOAD-time ``VixTrioConflictError`` cell-skips too.
+
+        ``ResultsStore.load`` re-appends each stored record, so a cell parquet
+        holding TWO physical rows with the SAME run_id differing in non-None
+        VIX values raises at LOAD time — tamper-grade only (the dict-keyed
+        flush writes one row per run_id, so no legitimate writer produces
+        this), but the grid drivers tuple-skip the very same file, and before
+        this fix the pass's load sat OUTSIDE the per-cell try and the one
+        tampered file aborted the WHOLE launch.
+        """
+        import polars as pl
+
+        bars = _trending_bars(_N_DAYS)
+        stamper = _const_stamper(bars, "14.5")
+        report_1 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+        assert report_1.rows_appended > 0
+        victim = report_1.cells[0].path
+        # The tamper: duplicate the first physical row with a CONFLICTING
+        # non-None vix_max (a foreign write — never a flush product).
+        frame = pl.read_parquet(victim)
+        dup = frame.head(1).with_columns(pl.lit(99.0).alias("vix_max"))
+        pl.concat([frame, dup]).write_parquet(victim)
+
+        with capture_logs() as logs:
+            report_2 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+
+        # The tampered cell is skipped + counted; the pass completes.
+        assert report_2.cells_conflicted == 1
+        assert victim not in {cell.path for cell in report_2.cells}
+        warns = [e for e in logs if e["event"] == "stage3_wire.cell_vix_conflict"]
+        assert len(warns) == 1
+        assert warns[0]["cell_path"] == str(victim)
+
 
 # ────── cascade_specs_for_refined_cells (reviews F3 + F8) ──────
 

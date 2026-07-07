@@ -80,10 +80,12 @@ def _vix_stamper(n: int) -> TradeReferenceStamper:
 def _per_stamp_ns(stamper: TradeReferenceStamper, n_series: int) -> float:
     """Best-of-N minimum mean ns per ``stamp`` call (always-hit instants).
 
-    The probe instants stride across the WHOLE series so the big tier
-    genuinely touches its full dict footprint (the honest cross-cache-tier
-    shape), and every probe HITS — the miss path carries memo bookkeeping
-    that is deliberately not part of this gate's hot-path claim.
+    The probe instants stride evenly across the WHOLE series key range,
+    sampling ``_N_STAMPS`` distinct keys (1 in ``stride`` entries — 20% at
+    the big tier, NOT every entry) so the strided sample spans the big
+    tier's full hash table and the cross-cache-tier shape is honest; every
+    probe HITS — the miss path carries memo bookkeeping that is
+    deliberately not part of this gate's hot-path claim.
     """
     stride = max(n_series // _N_STAMPS, 1)
     pairs = [

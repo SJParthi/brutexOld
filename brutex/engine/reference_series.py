@@ -61,6 +61,7 @@ lookups. There is no scan over the series per trade.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -174,7 +175,16 @@ class ReferenceSeries:
         close_by_ts: dict[datetime, Decimal] = {}
         non_finite: list[datetime] = []
         for ts, bar in first_by_ts.items():
-            if bar.close.is_finite():
+            # TWO screens (round-4 panel): Decimal.is_finite() kills
+            # NaN/Infinity closes, but it is magnitude-blind — a FINITE
+            # Decimal like 1E+400 saturates float() to inf, which would
+            # sail through here and abort the whole grid downstream as
+            # aggregate_trade_vix's float(stamp) hits the plain
+            # finite-validation ResultsStoreError (the misdirection class).
+            # Production-unreachable via the Float64 lake (max ~1.797e308
+            # round-trips finite); this guards library embedders feeding
+            # hand-built CandleBars. The instant stamps an honest None.
+            if bar.close.is_finite() and math.isfinite(float(bar.close)):
                 close_by_ts[ts] = bar.close
             else:
                 non_finite.append(ts)

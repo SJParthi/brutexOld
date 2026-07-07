@@ -819,9 +819,16 @@ def run_stage3_pass(
     cells: list[Stage3RefinedCell] = []
     for cell in sorted(cell_rows, key=_cell_sort_key):
         cell_path = tuple_store_path(results_root, cell, train_grid)
-        store = load_or_create_store(cell_path)
         cell_appended = 0
         try:
+            # The LOAD sits inside the same try as the appends (round-4 panel
+            # consistency fold): ``ResultsStore.load`` re-appends each stored
+            # record, so a cell parquet holding duplicate-run_id rows that
+            # differ ONLY in non-None VIX values (tamper-grade — the dict-keyed
+            # flush can never write one) raises ``VixTrioConflictError`` at
+            # LOAD time; the grid drivers tuple-skip the same file, so the
+            # pass must cell-skip it too, never abort the launch.
+            store = load_or_create_store(cell_path)
             for refined_row in cell_rows[cell]:
                 # Identical re-derived rows (re-runs; the same refined cell reached
                 # from two survivors of the same mask) are idempotent no-ops.

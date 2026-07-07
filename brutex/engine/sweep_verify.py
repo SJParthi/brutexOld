@@ -809,27 +809,42 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
     )
 
 
-def _stores_differ_only_in_vix(original: Path, scratch: Path) -> bool:
-    """``True`` iff the two stores' ONLY row-level difference is the VIX trio.
+def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
+    """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
     The attribution test behind the ``recount_vix_divergence`` finding family
     (DEC-VIX-STAMP-WIRE-001): both stores must LOAD cleanly, hold the SAME
     ``run_id`` set, agree on EVERY non-VIX field of every row, and disagree on
     at least one ``vix_mean``/``vix_min``/``vix_max`` value. Anything less
-    provable returns ``False`` — an unreadable Parquet, a run_id-set drift, a
+    provable returns ``None`` — an unreadable Parquet, a run_id-set drift, a
     non-VIX field difference, or rows that are fully EQUAL (the byte diff then
     has an unknown non-row cause) all fall back to the caller's normal
     corrupt/inconclusive ladder. Honest attribution only, never a guess
     (Golden Rule #1).
+
+    A confirmed VIX-only diff is one of TWO cheaply-distinguishable shapes —
+    the round-4 panel caught the old single "the lake moved" wording claiming
+    a cause it had not established for the first shape:
+
+    * ``"backfill"`` — every differing trio field is ``None`` on the ORIGINAL
+      side (a store written BEFORE the VIX columns landed, or a VIX lake that
+      has since GAINED coverage): nothing recorded was contradicted, and a
+      plain redo appends the trio as the sanctioned directional None→value
+      backfill — no quarantine needed.
+    * ``"moved"`` — some recorded trio VALUE disagrees with the recount's
+      (value-vs-value, or a recorded value the recount can no longer
+      reproduce): the India-VIX lake genuinely moved between the run and the
+      recount.
     """
     try:
         original_rows = {row.run_id: row for row in ResultsStore.load(original).rows()}
         scratch_rows = {row.run_id: row for row in ResultsStore.load(scratch).rows()}
     except ResultsStoreError:
-        return False  # unreadable/corrupt bytes are never VIX-attributable
+        return None  # unreadable/corrupt bytes are never VIX-attributable
     if set(original_rows) != set(scratch_rows):
-        return False
+        return None
     vix_differs = False
+    recorded_value_differs = False
     for run_id, ours in original_rows.items():
         theirs = scratch_rows[run_id]
         if ours == theirs:
@@ -837,9 +852,18 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> bool:
         if replace(ours, vix_mean=None, vix_min=None, vix_max=None) != replace(
             theirs, vix_mean=None, vix_min=None, vix_max=None
         ):
-            return False  # a non-VIX field differs — not VIX-attributable
+            return None  # a non-VIX field differs — not VIX-attributable
         vix_differs = True
-    return vix_differs
+        for mine, recount in (
+            (ours.vix_mean, theirs.vix_mean),
+            (ours.vix_min, theirs.vix_min),
+            (ours.vix_max, theirs.vix_max),
+        ):
+            if mine != recount and mine is not None:
+                recorded_value_differs = True
+    if not vix_differs:
+        return None
+    return "moved" if recorded_value_differs else "backfill"
 
 
 def _hashes_pair_with_stores(
@@ -1031,27 +1055,44 @@ def compare_recount(
         )
         scratch_store = scratch_root / store_path.relative_to(original_root)
         # Memoised store-pair VIX verdict (one load per tuple; all three
-        # artifacts of a VIX-moved tuple consult it).
-        vix_only_memo: bool | None = None
+        # artifacts of a VIX-diverged tuple consult it). The memo holds the
+        # shape string — moved or backfill — or the not-VIX-attributable
+        # None; the separate computed flag distinguishes a memo that has not
+        # run yet from one that ran and honestly abstained.
+        vix_only_memo: str | None = None
+        vix_memo_computed = False
 
-        def _vix_only_store_pair() -> bool:
-            nonlocal vix_only_memo
-            if vix_only_memo is None:
+        def _vix_only_store_pair() -> str | None:
+            nonlocal vix_only_memo, vix_memo_computed
+            if not vix_memo_computed:
                 vix_only_memo = _stores_differ_only_in_vix(store_path, scratch_store)
+                vix_memo_computed = True
             return vix_only_memo
 
-        def _artifact_is_vix_attributable(original: Path, scratch: Path) -> bool:
+        def _artifact_vix_shape(original: Path, scratch: Path) -> str | None:
+            """The VIX-divergence SHAPE for this artifact, or None (not attributable)."""
             if original == store_path:
                 return _vix_only_store_pair()
             # A pairing artifact (sidecar/sentinel) is attributable only when
             # BOTH stores exist AND the store pair itself proved VIX-only.
-            if not (store_path.exists() and scratch_store.exists() and _vix_only_store_pair()):
-                return False
+            if not (store_path.exists() and scratch_store.exists()):
+                return None
+            shape = _vix_only_store_pair()
+            if shape is None:
+                return None
             if original == sentinel_path:
-                return _sentinel_diff_is_the_vix_repair(
-                    original, scratch, store_path, scratch_store
+                return (
+                    shape
+                    if _sentinel_diff_is_the_vix_repair(
+                        original, scratch, store_path, scratch_store
+                    )
+                    else None
                 )
-            return _sidecar_diff_is_the_vix_repair(original, scratch, store_path, scratch_store)
+            return (
+                shape
+                if _sidecar_diff_is_the_vix_repair(original, scratch, store_path, scratch_store)
+                else None
+            )
 
         for original in artifacts:
             scratch = scratch_root / original.relative_to(original_root)
@@ -1099,7 +1140,36 @@ def compare_recount(
             # attributed ONLY when it reads valid, agrees on every non-hash
             # field, and re-pairs its OWN store's actual bytes; anything less
             # provable stays on the normal ladder.
-            if _artifact_is_vix_attributable(original, scratch):
+            vix_shape = _artifact_vix_shape(original, scratch)
+            if vix_shape is not None:
+                # Two honestly-distinguished variants (round-4 panel): the
+                # old single detail definitively claimed "the lake moved",
+                # which is FALSE for the reachable backfill shape (a
+                # pre-VIX-column store recounted under any VIX-carrying
+                # lake) — and its quarantine remedy is over-heavy there.
+                if vix_shape == "moved":
+                    cause_and_remedy = (
+                        "The India-VIX lake moved between the recorded run and "
+                        "this recount (a VIX re-pull or a derived-1day "
+                        "re-derivation); VIX is deliberately OUTSIDE the "
+                        "recorded context and the run identity (CLAUDE.md §2 "
+                        "Rule 3), so this is NOT evidence of corruption and "
+                        "never heal-grade. Remedy: quarantine + redo the tuple "
+                        "to re-stamp against the current VIX series, or keep "
+                        "the older stamps"
+                    )
+                else:
+                    cause_and_remedy = (
+                        "The original rows carry NO trio values — a store "
+                        "written before the VIX columns landed, or a VIX lake "
+                        "that has since GAINED coverage; nothing recorded was "
+                        "contradicted. VIX is deliberately OUTSIDE the recorded "
+                        "context and the run identity (CLAUDE.md §2 Rule 3), so "
+                        "this is NOT evidence of corruption and never "
+                        "heal-grade. Remedy: a plain redo appends the trio as "
+                        "the sanctioned directional None→value backfill — no "
+                        "quarantine needed"
+                    )
                 findings.append(
                     VerifyFinding(
                         path=rel,
@@ -1113,14 +1183,7 @@ def compare_recount(
                             "ONLY the REFERENCE-ONLY vix_mean/vix_min/vix_max trio "
                             "diverges (the pairing sidecar/sentinel re-pair that "
                             "store's hash) — every run_id and every non-VIX column "
-                            "reproduced exactly. The India-VIX lake moved between "
-                            "the recorded run and this recount (a VIX re-pull or a "
-                            "derived-1day re-derivation); VIX is deliberately "
-                            "OUTSIDE the recorded context and the run identity "
-                            "(CLAUDE.md §2 Rule 3), so this is NOT evidence of "
-                            "corruption and never heal-grade. Remedy: quarantine + "
-                            "redo the tuple to re-stamp against the current VIX "
-                            "series, or keep the older stamps"
+                            f"reproduced exactly. {cause_and_remedy}"
                         ),
                     )
                 )

@@ -121,6 +121,83 @@ def _plant_vix_partition(lake_root: Path, base: float) -> None:
     pq.write_table(table, dest)
 
 
+def _long_bars() -> list[CandleBar]:
+    """A window LONGER than the 182-day lockbox — the stage-3 train slice is real.
+
+    ``run_stage3_pass`` refines over the lockbox-EXCLUDED train slice
+    (ADR-0007 condition 7): a window spanning no more than
+    ``LOCKBOX_DEFAULT_WINDOW_DAYS`` yields an EMPTY train slice and the pass
+    honestly skips every cell (``skipped_empty_train``) — so the
+    cells-conflicted relaunch test needs this longer fixture. 30 bars/day
+    keeps the two-launch runtime bounded.
+    """
+    from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
+
+    bars: list[CandleBar] = []
+    for day in range(LOCKBOX_DEFAULT_WINDOW_DAYS + 8):
+        price = 100.0
+        for minute in range(30):
+            close = price + 0.6 if minute % 3 else price - 0.3
+            ts = (
+                datetime(2024, 1, 2, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+            ).astimezone(UTC)
+            hi, lo = max(price, close) + 0.5, min(price, close) - 0.5
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(price, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=1000,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+def _plant_vix_months(lake_root: Path, bars: list[CandleBar], base: float) -> None:
+    """RAW-plant NSE/INDEX/INDIAVIX month partitions covering EVERY bar instant.
+
+    The multi-month twin of :func:`_plant_vix_partition` (same level law
+    ``base + (i % 7)/100``, same raw-pyarrow overwrite semantics) for the
+    long stage-3 fixture, whose window spans several UTC months.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from brutex.data.partition import build_partition_path
+
+    by_month: dict[tuple[int, int], list[tuple[Any, float]]] = {}
+    for i, bar in enumerate(bars):
+        key = (bar.timestamp.year, bar.timestamp.month)
+        by_month.setdefault(key, []).append((bar.timestamp, base + (i % 7) / 100))
+    for (year, month), rows in by_month.items():
+        dest = build_partition_path(
+            lake_root=lake_root,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="INDIAVIX",
+            interval="1minute",
+            year=year,
+            month=month,
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        prices = [price for _, price in rows]
+        table = pa.table(
+            {
+                "timestamp": pa.array([ts for ts, _ in rows], type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array(prices, type=pa.float64()),
+                "high": pa.array(prices, type=pa.float64()),
+                "low": pa.array(prices, type=pa.float64()),
+                "close": pa.array(prices, type=pa.float64()),
+                "volume": pa.array([0] * len(prices), type=pa.int64()),
+                "open_interest": pa.array([None] * len(prices), type=pa.int64()),
+            }
+        )
+        pq.write_table(table, dest)
+
+
 def _persist(tmp_path: Path) -> tuple[Path, Path]:
     """Write the NIFTY bars + the VIX partition; return (lake_root, catalog)."""
     lake_root = tmp_path / "lake"
@@ -139,7 +216,7 @@ def _persist(tmp_path: Path) -> tuple[Path, Path]:
     return lake_root, catalog_path
 
 
-def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
+def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path, **extra: Any) -> int:
     kwargs: dict[str, Any] = {
         "lake_root": lake_root,
         "catalog_path": catalog_path,
@@ -161,6 +238,7 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
         "max_combos": None,
         "data_snapshot_hash": None,
         "options_sim": False,
+        **extra,
     }
     return cli.cmd_sweep_all(**kwargs)
 
@@ -278,3 +356,95 @@ def test_recount_after_a_vix_lake_move_warns_precisely_never_condemns(
     assert "recount_vix_divergence" in out
     assert "India-VIX lake moved" in out
     assert "CORRUPT" not in out
+
+
+def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The cells_conflicted CLI-verdict fold executes for REAL (round-4 panel).
+
+    The engine-level cell skip (``TestVixConflictCellSkip``) and the pure
+    ``sweep_all_exit_code`` mapping are unit-tested, but their COMPOSITION in
+    the ``# pragma: no cover`` ``cmd_sweep_all`` shim — the ``cells_conflicted=``
+    summary field, the stderr WARNING block, and folding ``cells_conflicted``
+    into the exit verdict — shipped with zero executing test (the exact
+    honesty-surface-riding-a-pragma class the ETC precedent lifted). This
+    drives the REAL command twice around a VIX-lake move:
+
+    launch 1 (stage-3 enabled) persists stamped refined cells → the VIX
+    partition is re-planted at new levels → launch 2's stage-3 re-derivation
+    conflicts on every refined cell's trio → the relaunch must exit NON-zero
+    (``EXIT_SWEEP_TUPLE_FAILED``), print the operator WARNING naming the
+    quarantine remediation, and leave every launch-1 store byte untouched.
+    A regression to ``sweep_all_exit_code(result.tuples_failed)`` alone — or
+    a dropped WARNING block — fails here and nowhere else.
+    """
+    import hashlib
+    import re
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # cma emits a matplotlib UserWarning at import
+        pytest.importorskip("cma")
+
+    # The LONG fixture: the stage-3 train slice must be non-empty (the 15-day
+    # default window sits entirely inside the 182-day lockbox → the pass
+    # would honestly refine NOTHING and this test would be vacuous).
+    long_bars = _long_bars()
+    lake_root = tmp_path / "lake"
+    catalog_path = tmp_path / "catalog.duckdb"
+    writer = ParquetWriter(lake_root=lake_root)
+    with Catalog.open(catalog_path) as cat:
+        sink = ParquetBarSink(writer=writer, catalog=cat)
+        sink.append(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            interval=_INTERVAL,
+            bars=long_bars,
+        )
+    _plant_vix_months(lake_root, long_bars, base=14.0)
+    results_root = tmp_path / "sweeps"
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    window = {"start": "2024-01-02", "end": "2024-08-01"}
+    stage3_kwargs: dict[str, Any] = {
+        "stage3_enable": True,
+        "stage3_top_k": 1,
+        "stage3_fevals": 4,
+        "stage3_restarts": 1,
+        **window,
+    }
+    assert _sweep_all(lake_root, catalog_path, results_root, **stage3_kwargs) == 0
+    out_1 = capsys.readouterr().out  # the pins below are launch-2's
+    refined_1 = re.search(r"masks_refined=(\d+)", out_1)
+    assert refined_1 is not None and int(refined_1.group(1)) > 0, (
+        "launch 1 must genuinely refine stage-3 cells or the conflict pin is vacuous"
+    )
+
+    def _tree_hashes() -> dict[Path, str]:
+        return {
+            p: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(results_root.rglob("*.parquet"))
+        }
+
+    before = _tree_hashes()
+    assert before, "launch 1 must persist stores for the byte pin to bite"
+
+    # The sanctioned VIX-lake movement between launches: launch 2's stage-3
+    # re-derivation re-produces the SAME refined run_ids with a DIFFERENT
+    # REFERENCE-ONLY trio → VixTrioConflictError → per-cell skip-and-count.
+    _plant_vix_months(lake_root, long_bars, base=20.0)
+
+    rc = _sweep_all(lake_root, catalog_path, results_root, **stage3_kwargs)
+
+    captured = capsys.readouterr()
+    assert rc == cli.EXIT_SWEEP_TUPLE_FAILED  # cells_conflicted folded into the verdict
+    # The stage-3 summary line carries a REAL non-zero cells_conflicted tally.
+    assert "cells_conflicted=0" not in captured.out
+    assert "cells_conflicted=" in captured.out
+    # The operator WARNING block (stderr) names the skip + the remediation.
+    assert "stage-3 cell(s) hold a REFERENCE-ONLY VIX trio" in captured.err
+    assert "quarantine/delete those cell stores" in captured.err
+    # Launch-1 bytes are UNTOUCHED — the conflicted flush was skipped, the
+    # resume-skipped sweep tuples never re-appended (Golden Rule #7).
+    assert _tree_hashes() == before

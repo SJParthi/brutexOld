@@ -732,12 +732,48 @@ class TestRecountVixDivergence:
             assert "India-VIX lake moved" in finding.detail
 
     def test_stamped_vs_unstamped_recount_is_vix_warn(self, tmp_path: Path) -> None:
-        # value-vs-None is a VIX-only divergence too (the backfill direction).
+        # A RECORDED value the recount can no longer reproduce (value-vs-None)
+        # is a VIX-only divergence of the MOVED shape — the recorded stamps
+        # contradict the current lake, so the lake-moved wording is earned.
         original, scratch, grid = self._two_trees(tmp_path, _verify_stamper("14.00"), None)
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
         assert _codes(report) == {"recount_vix_divergence"}
         assert report.clean is True
+        for finding in report.findings:
+            assert "India-VIX lake moved" in finding.detail
+
+    def test_pre_vix_tree_recount_is_the_backfill_variant_not_lake_moved(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-4 panel MINOR: the all-None-original shape must NOT claim a lake move.
+
+        A results tree whose rows carry NO trio (a store written before the
+        VIX columns landed — the committed pre-VIX fixtures prove such trees
+        exist — or a VIX lake that has since GAINED coverage) recounted under
+        a VIX-carrying lake diverges ONLY as None→value. Nothing recorded was
+        contradicted, so the detail must state the backfill shape and the
+        plain-redo remedy — the old detail definitively (and falsely) claimed
+        "the India-VIX lake moved" and prescribed an over-heavy quarantine.
+        """
+        original, scratch, grid = self._two_trees(tmp_path, None, _verify_stamper("14.00"))
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence"}
+        assert report.clean is True  # same family, same warn grade
+        for finding in report.findings:
+            assert finding.severity == "warn"
+            assert "India-VIX lake moved" not in finding.detail
+            assert "original rows carry NO trio values" in finding.detail
+            assert "None→value backfill" in finding.detail
+            assert "no quarantine needed" in finding.detail
+
+    def test_helper_names_the_backfill_shape_for_an_all_none_original(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(tmp_path, None, _verify_stamper("14.00"))
+        assert (
+            _stores_differ_only_in_vix(_store_path(original, grid), _store_path(scratch, grid))
+            == "backfill"
+        )
 
     def test_vix_divergence_under_context_mismatch_keeps_the_precise_code(
         self, tmp_path: Path
@@ -790,7 +826,7 @@ class TestRecountVixDivergence:
         )
         assert (
             _stores_differ_only_in_vix(_store_path(original, grid), _store_path(scratch, grid))
-            is False
+            is None
         )
 
     def test_helper_attributes_a_mixed_equal_and_vix_diff_row_set(self, tmp_path: Path) -> None:
@@ -807,7 +843,8 @@ class TestRecountVixDivergence:
             scratch_store_path,
             (dataclasses.replace(scratch_rows[0], vix_max=99.0), *scratch_rows[1:]),
         )
-        assert _stores_differ_only_in_vix(store_path, scratch_store_path) is True
+        # value-vs-value on vix_max → the MOVED shape (a recorded value differs).
+        assert _stores_differ_only_in_vix(store_path, scratch_store_path) == "moved"
 
     def test_tampered_sentinel_in_a_vix_moved_pair_stays_on_the_ladder(
         self, tmp_path: Path

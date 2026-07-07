@@ -146,6 +146,36 @@ class TestReferenceSeries:
         assert exit_ is None
         assert stamper.miss_count == 1
 
+    def test_finite_decimal_that_overflows_float_is_skipped_too(self) -> None:
+        """Round-4 panel: ``Decimal("1E+400")`` passes ``is_finite()`` yet
+        ``float()``-saturates to ``inf`` — the residual hole in the round-3
+        Infinity fix. Unreachable via the Float64 lake (max ~1.797e308
+        round-trips finite); a library embedder's hand-built bar must still
+        skip + warn + stamp an honest ``None``, never flow ``inf`` into
+        ``aggregate_trade_vix`` (whose ``float(stamp)`` would abort the grid
+        as the misdirecting plain finite-validation ``ResultsStoreError``)."""
+        overflow = Decimal("1E+400")
+        assert overflow.is_finite()  # the magnitude-blind screen alone keeps it
+        bar = CandleBar(
+            timestamp=_T0 + timedelta(minutes=1),
+            open=overflow,
+            high=overflow,
+            low=overflow,
+            close=overflow,
+            volume=0,
+            open_interest=None,
+        )
+        with _capture_logs() as logs:
+            series = ReferenceSeries.from_bars(VIX_SERIES_NAME, [_vix_bar(0, "15.10"), bar])
+        assert series.level_at(_T0) == Decimal("15.10")
+        assert series.level_at(bar.timestamp) is None  # honest miss, never inf
+        warns = [e for e in logs if e["event"] == "reference_series.non_finite_level"]
+        assert len(warns) == 1
+        assert warns[0]["skipped"] == 1
+        stamper = TradeReferenceStamper.from_vix_bars([_vix_bar(0, "15.10"), bar])
+        assert stamper.stamp(_T0, bar.timestamp) == (Decimal("15.10"), None)
+        assert stamper.miss_count == 1
+
 
 # ────────────────────────────────────────────────────────────────────────
 # TradeReferenceStamper
