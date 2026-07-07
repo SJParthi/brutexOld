@@ -254,11 +254,14 @@ function renderSpot(rows) {
   // operator sees in ONE view which dimension is partial AND its actual date range.
   const rng = (s, e) =>
     (s || e) ? '<span class="rng">' + esc(s || "?") + " → " + esc(e || "?") + "</span>" : "—";
-  // Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
-  // "Open substituted: N/M" — N of the M stored sessions have their FIRST present
-  // 1-minute bar after the 09:15 IST canonical open, so those sessions' DERIVED
-  // 1-day open is the earliest-present-minute substitute, not the canonical open
-  // price. INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
+  // Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001,
+  // predicate aligned by DEC-DAILY-OPEN-PREDICATE-ALIGN-001): "Open substituted:
+  // N/M" — N of the M stored sessions are NON-Muhurat with a FIRST present
+  // 1-minute bar NOT exactly at the 09:15 IST canonical open, so those sessions'
+  // DERIVED 1-day open is the earliest-present-minute substitute, not the
+  // canonical open price (same rule as the prebuild headline; the census counts
+  // ALL stored sessions — no forming-session cutoff). INFORMATIONAL only — the
+  // verdict is never downgraded; muted "—" when 0.
   // Both operands are coerced via Number() BEFORE interpolation so the fragment
   // can only ever carry digits/NaN, never markup (XSS guard).
   const osub = (n, m) => {

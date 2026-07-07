@@ -980,11 +980,13 @@ function spotSeg(label, dim) {
   return '<span class="seg"><span class="k">' + label + '</span> <span class="' + cls + '">'
     + span + " " + flag + "</span></span>";
 }
-/* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
-   "open subst N/M" — N of the symbol's M stored 1-minute sessions have their FIRST
-   present minute after the 09:15 IST canonical open, so those sessions' DERIVED
-   1-day open is the earliest-present-minute substitute, not the canonical open
-   price. INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
+/* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001,
+   predicate aligned by DEC-DAILY-OPEN-PREDICATE-ALIGN-001): "open subst N/M" —
+   N of the symbol's M stored 1-minute sessions are NON-Muhurat with a FIRST
+   present minute NOT exactly at the 09:15 IST canonical open, so those sessions'
+   DERIVED 1-day open is the earliest-present-minute substitute, not the canonical
+   open price (same rule as the prebuild headline; the census counts ALL stored
+   sessions). INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
    Both operands are coerced via Number() BEFORE interpolation so the fragment can
    only ever carry digits/NaN, never markup (XSS guard). */
 function openSubSeg(dim) {
