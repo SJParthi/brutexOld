@@ -51,12 +51,12 @@ from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
-from brutex.orchestrator.audit import AuditWriter, BufferedAuditRecord
+from brutex.orchestrator.audit import AuditError, AuditWriter, BufferedAuditRecord
 from brutex.orchestrator.lake_replay import (
     assert_lake_byte_equal,
     replay_lake_from_audit,
 )
-from brutex.orchestrator.replay import AuditError, assert_dedup_consistent
+from brutex.orchestrator.replay import assert_dedup_consistent
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
