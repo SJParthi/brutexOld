@@ -80,7 +80,15 @@ round 2 widened this list to the REAL envelope):
 * a LATE mass event spanning 3-9 series inside a LARGE pull whose whole-pull
   all-filtered fraction stays below :data:`ALLFILTERED_BREAKER_FRACTION`
   escapes both rules (the fraction is pull-CUMULATIVE, never windowed) —
-  broader than the ≤ 2-series hole above (test-pinned).
+  broader than the ≤ 2-series hole above (test-pinned);
+* evidence never pools ACROSS the pipeline's SPOT and F&O phases (each phase's
+  passes resolve their own breaker — deliberate, no cross-phase plumbing), so a
+  vendor-day event split e.g. 5 spot series + 5 F&O underlyings trips NEITHER
+  phase's SPREAD rule. WITHIN the F&O phase the futures + options market
+  buckets DO share ONE per-pass breaker — ``historical_pull._one_pass`` injects
+  it into every ``run_groww_option_ingest`` bucket call (review round 3: the
+  original per-invocation resolve fragmented even that intra-phase evidence;
+  test-pinned by the cross-bucket trip test in ``test_pull_historical.py``).
 
 In every blind-spot shape the per-window WARNs + the streak-provenance
 column (DEC-STREAK-PROVENANCE-001) keep any such settle visible + reversible
@@ -334,9 +342,14 @@ class AllFilteredBreaker:
 def resolve_all_filtered_breaker() -> AllFilteredBreaker:
     """Build a FRESH per-pass breaker from env config (or the documented defaults).
 
-    The single construction seam both run-ingest layers call once per pass
-    (CLAUDE.md §11 COMMON) — a new instance every time, so breaker state can
-    never leak across pulls or retry passes (Golden Rule #7). Every knob is
+    The single construction seam (CLAUDE.md §11 COMMON), called once per pass:
+    the spot spine inside :func:`~brutex.adapters.groww.run_ingest.
+    run_groww_spot_ingest` (one invocation per pass), the production F&O pass
+    loop in ``historical_pull._one_pass`` (ONE instance injected into every
+    market bucket's ``run_groww_option_ingest`` call — review round 3, so the
+    futures + options buckets pool evidence), and the F&O driver's ``None``
+    fallback for direct callers — a new instance every time, so breaker state
+    can never leak across pulls or retry passes (Golden Rule #7). Every knob is
     env-overridable (DYNAMIC); a bad value fails safe to its default via the
     SHARED :func:`~brutex.adapters.empty_circuit_breaker.resolve_int_env` /
     :func:`~brutex.adapters.empty_circuit_breaker.resolve_fraction_env`

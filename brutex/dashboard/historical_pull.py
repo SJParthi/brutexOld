@@ -74,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
@@ -1214,6 +1215,18 @@ def _run_phase(
         pass_max_delta: Decimal | None = None
         pass_auth = False
         clean: set[str] = set()
+        # ONE mass ALL-FILTERED breaker per PASS, shared across EVERY market bucket
+        # (DEC-ALLFILTERED-MASS-BREAKER-001, review round 3): resolved HERE — not
+        # once per run_groww_option_ingest invocation — so the futures + options
+        # buckets of one pass POOL their all-filtered evidence into ONE counter (a
+        # vendor-day bug empties BOTH at once; the prior per-bucket breakers
+        # fragmented the evidence — a 10-underlying event split 5/5 across the
+        # buckets tripped NEITHER SPREAD rule — and could alarm once per bucket).
+        # A fresh pass still starts clean (Golden Rule #7 — the per-pass freshness
+        # law is unchanged; a persisting bug re-alarms each pass, by design), and a
+        # dry-run stays ineligible by construction (empty payloads → raw_bars == 0),
+        # exactly as under the prior per-invocation resolve.
+        af_breaker = resolve_all_filtered_breaker()
         # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
         # a STABLE, deterministic order independent of dict insertion order.
         for market, bucket in sorted(
@@ -1242,6 +1255,7 @@ def _run_phase(
                     write_pool=write_pool,
                     fetch_pipeline=fetch_pipeline,
                     observed_holidays=observed_holidays,
+                    all_filtered_breaker=af_breaker,
                     breaker_health_probe=breaker_canary,
                     storm_breaker=storm_breaker,
                     audit=audit,

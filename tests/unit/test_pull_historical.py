@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -4020,3 +4021,171 @@ def test_live_pull_overlay_hoisted_above_the_fno_reconcile(
     assert "reconcile" in order
     assert order.index("load") < order.index("reconcile")
     assert seed_observed and all(observed == expected for observed in seed_observed)
+
+
+# ── mass ALL-FILTERED breaker wiring: ONE per pass, shared across buckets ─────
+# DEC-ALLFILTERED-MASS-BREAKER-001 review round 3: the production F&O pass loop
+# (``_one_pass``) resolves ONE breaker per pass and injects the SAME instance
+# into every market bucket's ``run_groww_option_ingest`` call, so a vendor-day
+# event's all-filtered evidence POOLS across the futures + options buckets
+# instead of fragmenting into per-bucket counters (fail-before: each bucket's
+# driver invocation resolved its OWN fresh breaker — split evidence, and up to
+# one alarm per bucket).
+
+
+def test_all_filtered_breaker_one_per_pass_shared_across_market_buckets(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ONE ``AllFilteredBreaker`` per pass, injected into EVERY market bucket.
+
+    A NIFTY selection spans BOTH buckets (FUT → groww-future, CE/PE →
+    groww-option). A spy captures the ``all_filtered_breaker`` kwarg of every
+    ``run_groww_option_ingest`` call: both calls MUST receive the SAME real
+    instance (fail-before: the kwarg was never passed — the spy saw ``None``
+    twice and each driver invocation resolved its own breaker).
+    """
+    breakers: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, all_filtered_breaker: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        breakers.append(all_filtered_breaker)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert len(breakers) == 2  # the futures bucket + the options bucket
+    assert all(isinstance(b, AllFilteredBreaker) for b in breakers)
+    assert breakers[0] is breakers[1]  # the ONE shared per-pass instance
+
+
+def test_all_filtered_breaker_fresh_per_pass(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each until-clean PASS gets a FRESH shared breaker (Golden Rule #7).
+
+    The cross-bucket sharing (review round 3) must NOT leak breaker state
+    across retry passes: two rounds → two DISTINCT instances, each shared by
+    both market buckets of its OWN pass (the per-pass freshness law of
+    MIGRATION.md #1513 is unchanged — a persisting bug re-alarms each pass).
+    """
+    breakers: list[object] = []
+    still_failed_report = GrowwOptionIngestReport(
+        pairs={
+            ("NSE-NIFTY-25Jan24-21000-CE", "1day"): IngestReport(
+                windows=1, bars_appended=0, transient_failures=1, still_failed_windows=1
+            )
+        },
+        failures=(),
+    )
+
+    def _spy_ingest(
+        *_args: object, all_filtered_breaker: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        breakers.append(all_filtered_breaker)
+        return still_failed_report
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        until_clean=True,
+        until_clean_rounds=2,
+        now=_NOW,
+    )
+    # Round 1 (still-failed 1, no baseline → progress) + round 2 (no shrink →
+    # stuck-stop) = 2 passes × 2 buckets = 4 calls.
+    assert len(breakers) == 4
+    assert breakers[0] is breakers[1]  # pass 1: shared across both buckets
+    assert breakers[2] is breakers[3]  # pass 2: shared across both buckets
+    assert breakers[0] is not breakers[2]  # but FRESH per pass — no state leak
+
+
+class _SaturdayMinuteSDK(_FakeSDK):
+    """A fake SDK whose EVERY candle is a Saturday 1-minute bar (all-filtered shape).
+
+    2024-01-06 is a plain non-trading Saturday (the calendar-aware boundary
+    filter drops the bar), so every fetched window reads raw_bars=1, kept=0 —
+    the vendor-day mass all-filtered signature.
+    """
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        super().get_historical_candles(**kw)  # keep the call accounting
+        return {"candles": [["2024-01-06T10:00:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
+
+
+def test_vendor_day_split_across_market_buckets_trips_shared_breaker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vendor-day event SPLIT across the futures + options buckets still trips.
+
+    Fail-before (review round 3): per-bucket breakers fragmented the evidence —
+    ONE all-filtered FUTURES underlying (AAA) + ONE all-filtered OPTIONS
+    underlying (BBB) at SPREAD floor 2 tripped NEITHER bucket (each saw one
+    series) and NO alarm fired. With the shared per-pass breaker the SAME shape
+    pools to 2 distinct series → exactly ONE trip + count-naming alarm.
+    """
+    monkeypatch.setenv("BRUTEX_ALLFILTERED_BREAKER_SPREAD_SERIES", "2")
+    store = RegistryStore.open(tmp_path / "registry.duckdb")
+    expiry = date(2024, 1, 25)
+    store.upsert_contract(
+        "NSE",
+        "AAA",
+        expiry,
+        "NSE-AAA-25Jan24-FUT",
+        side="FUT",
+        strike=None,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    store.upsert_contract(
+        "NSE",
+        "BBB",
+        expiry,
+        "NSE-BBB-25Jan24-100-CE",
+        side="CE",
+        strike=100.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    sdk = _SaturdayMinuteSDK()
+    sink = _RecordingSink()
+    selected = store.list_contracts()
+    with capture_logs() as logs:
+        pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=store,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+    trips = [e for e in logs if e["event"] == "allfiltered_breaker.tripped"]
+    assert len(trips) == 1  # exactly ONE alarm — never one per bucket
+    assert trips[0]["trip_rule"] == "spread"
+    assert trips[0]["distinct_series"] == 2  # AAA (futures) + BBB (options) pooled

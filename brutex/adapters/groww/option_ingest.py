@@ -2050,10 +2050,14 @@ def run_groww_option_ingest(
     whole-chain empty burst (the proven M&M-``&`` shape) still trips (Golden
     Rule #10: the residual false-positive budget on genuinely-illiquid in-band
     chains rides on the env-tunable thresholds, not a silent exclusion).
-    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001): ``None`` (the
-    default — every production caller) resolves a FRESH env-configured
-    :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker` for THIS
-    pass, shared by every contract's window tails, so a vendor-day mass
+    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001): the PRODUCTION
+    F&O pull (``historical_pull._one_pass``) INJECTS ONE per-PASS
+    :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker` shared
+    across its futures + options market buckets (one driver call each), so a
+    vendor-day event's evidence POOLS pass-wide (review round 3 — the prior
+    per-invocation resolve fragmented it per bucket); ``None`` (direct callers /
+    tests) resolves a FRESH env-configured instance for THIS invocation. Either
+    way the breaker is shared by every contract's window tails, and a mass
     all-filtered event SUPPRESSES further ``ALL_FILTERED`` SKIPPED-settles +
     auto-rescinds the same-pull pre-trip ones + emits ONE count-naming alarm —
     deliberately NOT a pull stop (the fetch/storage lanes stay unpoisoned; the
@@ -2126,11 +2130,17 @@ def run_groww_option_ingest(
         )
     )
     # One mass ALL-FILTERED breaker per PASS (DEC-ALLFILTERED-MASS-BREAKER-001),
-    # mirroring the mass-EMPTY breaker above: all contracts of this pass share ONE
+    # mirroring the mass-EMPTY breaker above: all contracts of one pass share ONE
     # counter (a vendor-day timestamp bug empties every chain's boundary at once)
-    # and a fresh pass/pull always starts clean (Golden Rule #7). A mixed spot+F&O
-    # pipeline run gets one breaker PER PHASE — up to one alarm per phase
-    # (documented, deliberate: no cross-phase plumbing).
+    # and a fresh pass/pull always starts clean (Golden Rule #7). The PRODUCTION
+    # F&O pull (`historical_pull._one_pass`) INJECTS its per-pass instance here —
+    # one driver call per market bucket, so the futures + options buckets of a
+    # pass pool their evidence into that ONE breaker (review round 3: the prior
+    # per-invocation resolve fragmented the evidence per bucket and could alarm
+    # once per bucket); the `None` fallback resolve serves DIRECT callers (one
+    # breaker per driver invocation). The pipeline's SPOT phase keeps its own
+    # per-pass breaker (deliberate: no cross-phase plumbing) — up to one alarm
+    # per pass per phase.
     af_breaker = (
         all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
     )

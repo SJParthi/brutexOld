@@ -577,12 +577,17 @@ hostile-review pass._
   ledger lock, serialized with the rescind, so a settle in flight at the trip instant never leaks
   (review round 1 closed the tail-computed-bool TOCTOU) — + auto-rescind same-pull pre-trip settles +
   ONE count-naming CRITICAL alarm (once-per-pass = the breaker latch; the pull-scoped dedupe key is
-  defence-in-depth only); deliberately NOT a global stop; below-threshold bounded-terminal
+  defence-in-depth only; review round 3: the F&O phase's futures + options market buckets share ONE
+  per-pass breaker — `historical_pull._one_pass` resolves it once and injects it into every
+  `run_groww_option_ingest` bucket call, so a vendor-day event's evidence POOLS across the buckets
+  instead of fragmenting per driver invocation — the SPOT and F&O phases keep separate breakers, a
+  now-NAMED blind spot); deliberately NOT a global stop; below-threshold bounded-terminal
   byte-unchanged); and the observed-overlay threading into the cold-start seed gate (one hoisted load per
   pull = one consistent snapshot; the tolerance+1 refusal flip closed; the session filter deliberately
   overlay-blind). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
-  ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact 37-error/426-warning pre-change
-  baseline, 0 new).
+  ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact 37-error/433-warning pre-change
+  baseline (origin/main 83baab8df — the restore-replay rebase target; the earlier 426-warning figure
+  was the pre-rebase d1f9c3e base), 0 new).
   Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
