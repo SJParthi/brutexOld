@@ -109,6 +109,16 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+# STRICTLY one-direction (CodeQL py/cyclic-import 670/671): the bench-baseline
+# core is a pure-stdlib LEAF with ZERO brutex imports (its runtime-key lookup
+# lives in the gate CLI, not the core), so this module-scope import of the ONE
+# hardware-key law can never re-enter brutex.config.
+from brutex.observability.bench_baseline import (
+    KEY_SLUG_RE,
+    format_hardware_key,
+    slugify,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, MutableMapping
 
@@ -606,7 +616,7 @@ def detect_total_ram_bytes() -> int:
 
 
 def reset_hardware_envelope_cache() -> None:
-    """Reset the RAM-detection cache + log-once registry (test seam).
+    """Reset the RAM-detection + CPU-model caches + log-once registry (test seam).
 
     Production code never calls this — budgets are computed once per process
     by design. Tests use it to simulate different machines (48 GiB parity
@@ -614,9 +624,10 @@ def reset_hardware_envelope_cache() -> None:
     DEC-RAM-BUDGETS-001, ported verbatim — it deliberately does NOT clear the
     separate :func:`cached_envelope` memo (:func:`reset_envelope_cache` does).
     """
-    global _DETECTED_RAM_BYTES  # noqa: PLW0603 — the documented process-global memo
+    global _DETECTED_RAM_BYTES, _CPU_MODEL_CACHE  # noqa: PLW0603 — documented process memos
     with _LOCK:
         _DETECTED_RAM_BYTES = None
+        _CPU_MODEL_CACHE = None
         _LOGGED_BUDGETS.clear()
 
 
@@ -752,6 +763,207 @@ def memory_budget_bytes(
             derived_bytes=derived,
         )
     return derived
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Hardware fingerprint + bench-baseline key (DEC-BENCH-ABS-BASELINE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+#: Env override for the bench-baseline hardware key. A valid slug wins
+#: verbatim (testing + renamed-runner escape); an INVALID value raises
+#: fail-LOUD (Golden Rule #1 — a broken knob must never silently fall back).
+BENCH_BASELINE_KEY_ENV: Final[str] = "BRUTEX_BENCH_BASELINE_KEY"
+
+#: The macOS ``sysctl`` key naming the machine model (e.g. ``Mac16,8``).
+_SYSCTL_MODEL_KEY: Final[str] = "hw.model"
+
+#: The Linux CPU-model source read by :func:`cpu_model_string`.
+_PROC_CPUINFO: Final[str] = "/proc/cpuinfo"
+
+# Process-global CPU-model cache (the hardware is fixed for a process);
+# cleared by :func:`reset_hardware_envelope_cache` (the test seam).
+_CPU_MODEL_CACHE: str | None = None
+
+
+def _run_sysctl_str(
+    key: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> str | None:
+    """Return the nonempty string ``sysctl -n <key>`` prints, or ``None``.
+
+    The string twin of :func:`_run_sysctl_int` — fixed argv, bounded
+    timeout, EVERY failure (spawn error, non-zero exit, empty output) maps
+    to ``None``. *runner* is injected in tests.
+    """
+    run = subprocess.run if runner is None else runner
+    try:
+        proc = run(
+            ["sysctl", "-n", key],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = proc.stdout.strip()
+    return value if value else None
+
+
+def _read_proc_cpuinfo() -> str:
+    """Best-effort ``/proc/cpuinfo`` text (Linux); any failure → ``""``."""
+    try:
+        with open(_PROC_CPUINFO, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _cpuinfo_model_name(text: str) -> str | None:
+    """The first ``model name`` value in a ``/proc/cpuinfo`` dump, or ``None``."""
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "model name" and value.strip():
+            return value.strip()
+    return None
+
+
+def cpu_model_string(
+    *,
+    platform_system: str | None = None,
+    sysctl_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    cpuinfo_reader: Callable[[], str] | None = None,
+) -> str:
+    """The machine's CPU/model identity string — cached once per process.
+
+    macOS: ``sysctl -n hw.model`` (e.g. ``Mac16,8``). Linux: the first
+    ``model name`` from ``/proc/cpuinfo``. ANY failure or empty probe
+    degrades to the honest ``"unknown"`` — never a guess (Golden Rule #10).
+    Cached in the process-global registry
+    :func:`reset_hardware_envelope_cache` clears (the test seam). Probe
+    overrides are injected in tests only; an injected probe bypasses the
+    cache write so tests never poison the process value.
+    """
+    global _CPU_MODEL_CACHE  # noqa: PLW0603 — documented process cache (reset seam)
+    injected = (
+        platform_system is not None or sysctl_runner is not None or cpuinfo_reader is not None
+    )
+    if not injected and _CPU_MODEL_CACHE is not None:
+        return _CPU_MODEL_CACHE
+    system = platform.system() if platform_system is None else platform_system
+    model: str | None = None
+    if system == _DARWIN:
+        model = _run_sysctl_str(_SYSCTL_MODEL_KEY, runner=sysctl_runner)
+    elif system == _LINUX:
+        reader = _read_proc_cpuinfo if cpuinfo_reader is None else cpuinfo_reader
+        model = _cpuinfo_model_name(reader())
+    resolved = model if model else "unknown"
+    if injected:
+        return resolved
+    # Store-then-serve THROUGH the global so the cache write is provably
+    # live dataflow (the read below + the fast path above), mirroring the
+    # `_DETECTED_RAM_BYTES` memo idiom — CodeQL py/unused-global-variable 672.
+    _CPU_MODEL_CACHE = resolved
+    return _CPU_MODEL_CACHE
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareFingerprint:
+    """The bench-baseline hardware identity (DEC-BENCH-ABS-BASELINE-001).
+
+    Six fields are KEY-DEFINING — ``model_slug`` / ``arch`` /
+    ``physical_cores`` / ``performance_cores`` / ``efficiency_cores`` /
+    ``total_ram_gib``: any difference in those yields a different
+    :func:`hardware_key`, hence a different committed baseline file;
+    absolute numbers are never compared across fingerprints.
+    ``os_family`` is fingerprint METADATA only — recorded (and governed)
+    in the committed baseline document but NOT rendered into the key by
+    ``format_hardware_key``. Built from RAW detection only — the
+    ``BRUTEX_*`` worker/thread env overrides provably cannot move it
+    (test-pinned).
+    """
+
+    model_slug: str
+    arch: str
+    os_family: str
+    physical_cores: int
+    performance_cores: int
+    efficiency_cores: int
+    total_ram_gib: int
+
+
+def hardware_fingerprint(
+    *,
+    envelope: HardwareEnvelope | None = None,
+    total_ram_bytes: int | None = None,
+    machine: str | None = None,
+    os_family: str | None = None,
+    model: str | None = None,
+) -> HardwareFingerprint:
+    """Detect the :class:`HardwareFingerprint` from RAW probes (injectable).
+
+    Deliberately reads :func:`detect_envelope` /
+    :func:`detect_total_ram_bytes` / :func:`platform.machine` /
+    :data:`sys.platform` / :func:`cpu_model_string` and NEVER any
+    ``BRUTEX_*`` sizing override — the fingerprint answers "what machine
+    is this", not "how is it configured". An undetected RAM total keeps
+    the honest ``0`` sentinel (rendered ``unk`` in the key).
+    """
+    hw = detect_envelope() if envelope is None else envelope
+    ram = detect_total_ram_bytes() if total_ram_bytes is None else total_ram_bytes
+    ram_gib = round(ram / 2**30) if ram != UNDETECTED_RAM else 0
+    raw_machine = platform.machine() if machine is None else machine
+    raw_family = sys.platform if os_family is None else os_family
+    raw_model = cpu_model_string() if model is None else model
+    return HardwareFingerprint(
+        model_slug=slugify(raw_model),
+        arch=slugify(raw_machine),
+        os_family=slugify(raw_family),
+        physical_cores=hw.physical_cores,
+        performance_cores=hw.performance_cores,
+        efficiency_cores=hw.efficiency_cores,
+        total_ram_gib=ram_gib,
+    )
+
+
+def hardware_key(
+    env: Mapping[str, str] | None = None,
+    *,
+    fingerprint: HardwareFingerprint | None = None,
+) -> str:
+    """This machine's bench-baseline key, e.g. ``mac16-8-14c10p4e-48g-arm64``.
+
+    A :data:`BENCH_BASELINE_KEY_ENV` override wins IFF it satisfies the
+    slug law (else a fail-loud :class:`ValueError`); otherwise the key is
+    rendered from the detected fingerprint by the ONE format law
+    (:func:`brutex.observability.bench_baseline.format_hardware_key`).
+
+    Raises
+    ------
+    ValueError
+        When the env override is set but violates the key slug law.
+    """
+    source = os.environ if env is None else env
+    override = source.get(BENCH_BASELINE_KEY_ENV, "").strip()
+    if override:
+        if KEY_SLUG_RE.fullmatch(override) is None:
+            raise ValueError(
+                f"{BENCH_BASELINE_KEY_ENV}={override!r} violates the hardware-key slug "
+                f"law {KEY_SLUG_RE.pattern!r}"
+            )
+        return override
+    fp = hardware_fingerprint() if fingerprint is None else fingerprint
+    return format_hardware_key(
+        model_slug=fp.model_slug,
+        physical_cores=fp.physical_cores,
+        performance_cores=fp.performance_cores,
+        efficiency_cores=fp.efficiency_cores,
+        total_ram_gib=fp.total_ram_gib,
+        arch=fp.arch,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -957,6 +1169,7 @@ def apply_duckdb_thread_bound(
 
 
 __all__ = [
+    "BENCH_BASELINE_KEY_ENV",
     "CPU_WORKERS_ENV",
     "DEFAULT_EXPECTED_LIBRARY_POOLS",
     "DEFAULT_RESERVE_CPUS",
@@ -965,15 +1178,19 @@ __all__ = [
     "POLARS_THREADS_ENV",
     "UNDETECTED_RAM",
     "HardwareEnvelope",
+    "HardwareFingerprint",
     "SupportsExecute",
     "apply_duckdb_thread_bound",
     "apply_polars_thread_bound",
     "cached_envelope",
+    "cpu_model_string",
     "cpu_pool_workers",
     "detect_envelope",
     "detect_total_ram_bytes",
     "duckdb_thread_budget",
     "envelope_from",
+    "hardware_fingerprint",
+    "hardware_key",
     "library_thread_budget",
     "memory_budget_bytes",
     "polars_thread_budget",
