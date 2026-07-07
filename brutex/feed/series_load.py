@@ -70,24 +70,36 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
 
     Judged per IST date against the REAL NSE session calendar
     (:func:`brutex.calendars.nse.get_session_checked` — muhurat + special
-    weekend sessions included): an intraday interval labels its bars inside
-    ``[session open, session close)``, while the derived FNO ``1day`` bar is
-    stamped at its session date's midnight IST. A window that holds NO such
-    instant (a pre-open / post-close boundary sliver, a weekend/holiday run)
-    genuinely cannot hold bars, so an empty read there is NOT a data defect
-    (review round-1 findings 2/16/22 — the false "re-pull" refusal on a
-    legitimate roll-boundary window).
+    weekend sessions included): an intraday interval labels its bars on the
+    resampler's fixed-arithmetic TF bucket grid ``session open + k·tf`` inside
+    ``[session open, session close)`` (DEC-RESAMPLE-ANCHOR-002), while the
+    derived FNO ``1day`` bar is stamped at its session date's midnight IST. A
+    window that holds NO such instant (a pre-open / post-close boundary
+    sliver, a weekend/holiday run, a sub-bucket fragment of a coarse TF — a
+    4hour day carries ONLY the 09:15 + 13:15 labels, so a 13:30→midnight
+    expiry-day fragment overlaps the session yet cannot hold a bar) genuinely
+    cannot hold bars, so an empty read there is NOT a data defect (review
+    round-1 findings 2/16/22 + round-3 finding 7 — the false "re-pull"
+    refusal on a legitimate roll-boundary window).
 
     HONEST abstain: an out-of-coverage date (2027+ weekday) raises
     ``HolidayDataUnavailableError`` — this helper then returns ``True`` so the
     caller KEEPS its loud empty-partition refusal rather than silently
-    skipping a window the calendar cannot vouch for. O(days in the window
-    intersection), bounded by one contract's ownership span.
+    skipping a window the calendar cannot vouch for; likewise an *interval*
+    that is not a known lake TF label (its grid cannot be modelled). O(days in
+    the window intersection), bounded by one contract's ownership span.
     """
     from brutex.calendars.nse import HolidayDataUnavailableError, get_session_checked
+    from brutex.data.timeframes import trading_minutes_for_lake_interval
 
     if seg_end < seg_start:  # a degenerate intersection holds no instants
         return False
+    step: timedelta | None = None
+    if interval != "1day":
+        try:
+            step = timedelta(minutes=trading_minutes_for_lake_interval(interval))
+        except ValueError:
+            return True  # unknown TF label → cannot model its grid → keep the loud refusal
     day = seg_start.astimezone(IST).date()
     last_day = seg_end.astimezone(IST).date()
     while day <= last_day:
@@ -96,17 +108,29 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
         except HolidayDataUnavailableError:
             return True  # cannot prove bar-less → keep the loud refusal
         if session is not None:
-            if interval == "1day":
+            if step is None:  # the derived FNO 1day bar — midnight-IST stamp
                 stamp = datetime.combine(day, time.min, tzinfo=IST)
                 if seg_start <= stamp <= seg_end:
                     return True
             else:
                 open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
                 close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
-                # Bar labels live in [open, close): the last 1-minute bar is
-                # close − 1 min, so a window starting AT the close holds none.
-                if seg_start < close_dt and seg_end >= open_dt:
-                    return True
+                # Bar labels live on the TF bucket grid ``open + k·tf`` inside
+                # [open, close) — bare session OVERLAP over-claims for coarse
+                # TFs and for a sub-minute start (15:29:30 sits past the last
+                # 1minute label 15:29; review round-3 finding 7): find the
+                # FIRST grid label at/after seg_start and require it inside
+                # both the fragment and the session.
+                if seg_end >= open_dt and seg_start < close_dt:
+                    if seg_start <= open_dt:
+                        first_label = open_dt
+                    else:
+                        # Exact ceil-division on timedeltas (no float drift):
+                        # floor((open − seg_start)/step) is −ceil((seg_start −
+                        # open)/step) for the negative numerator.
+                        first_label = open_dt + -((open_dt - seg_start) // step) * step
+                    if first_label <= seg_end and first_label < close_dt:
+                        return True
         day += timedelta(days=1)
     return False
 
@@ -224,10 +248,10 @@ def load_sweep_slice(
         span holds at least one expectable session instant (dir exists but
         the requested interval is empty — distinct message from a missing
         contract; a bar-less boundary sliver — pre-open/post-close edges,
-        a holiday/weekend run after an expiry, a degenerate intersection —
-        is SKIPPED with one ``series_load.boundary_segment_no_session`` WARN
-        instead of a false refusal), or a boundary monotonicity break (never
-        silent).
+        a holiday/weekend run after an expiry, a degenerate intersection, a
+        sub-bucket coarse-TF fragment holding no grid label — is SKIPPED with
+        one ``series_load.boundary_segment_no_session`` WARN instead of a
+        false refusal), or a boundary monotonicity break (never silent).
     """
     if not is_futures_series_symbol(symbol):
         # Spot / verbatim-dir path: EXACTLY the inline optional-reconcile +
@@ -308,12 +332,14 @@ def load_sweep_slice(
                 # The in-window slice of this segment's owned span holds NO
                 # expectable bar instant (a pre-open/post-close boundary
                 # sliver — e.g. a day-only `--end` the morning after an
-                # expiry — a holiday/weekend run right after a roll, or a
-                # degenerate intersection): an empty read is EXPECTED, not a
+                # expiry — a holiday/weekend run right after a roll, a
+                # degenerate intersection, or a sub-bucket coarse-TF fragment
+                # straddling no grid label): an empty read is EXPECTED, not a
                 # data defect. Skip the boundary segment with ONE WARN
                 # instead of a false "re-pull" whole-sweep refusal (review
-                # round-1 findings 2/16/22); the loud refusal below stands
-                # for any span the calendar says SHOULD hold bars.
+                # round-1 findings 2/16/22 + round-3 finding 7); the loud
+                # refusal below stands for any span the calendar says SHOULD
+                # hold bars.
                 _LOG.warning(
                     "series_load.boundary_segment_no_session",
                     contract=seg.contract_symbol,

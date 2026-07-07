@@ -654,6 +654,110 @@ class TestBoundarySegmentSessionSkip:
                 )
 
 
+class TestCoarseTfBucketGridGate:
+    """Round-3 finding 7: the sliver gate is TF-BUCKET-GRID-aware, not overlap-only.
+
+    Bar labels live on the resampler's fixed grid ``09:15 + k·tf`` inside
+    ``[open, close)`` (DEC-RESAMPLE-ANCHOR-002). Bare session OVERLAP
+    over-claimed for coarse TFs (a 4hour day carries ONLY the 09:15 + 13:15
+    labels) and for a sub-minute start — a complete lake was refused with a
+    wrong "re-pull" remediation on a window fragment that cannot hold a bar.
+    """
+
+    def test_coarse_tf_post_label_fragment_on_expiry_day_skips_not_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # The finding's repro: expiry-day 4hour data is COMPLETE (labels
+        # 09:15 + 13:15 stored) but the expiring contract's in-window slice
+        # is [13:30 → midnight] — trading minutes, NO 4hour label. Pre-fix:
+        # FuturesSeriesError "EMPTY … re-pull the contract" (exit 1) for
+        # complete data; post-fix: one boundary WARN, empty result.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            _seed(
+                lake,
+                cat,
+                symbol=_JUN,
+                interval="4hour",
+                bars=[
+                    _bar(_ist(2025, 6, 26, 9, 15), 100.0),
+                    _bar(_ist(2025, 6, 26, 13, 15), 101.0),
+                ],
+            )
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    interval="4hour",
+                    start=_ist(2025, 6, 26, 13, 30),
+                    end=_ist(2025, 6, 26, 23, 59),
+                )
+        assert out == []
+        warned = _skip_warns(logs)
+        assert len(warned) == 1
+        assert warned[0]["contract"] == _JUN
+        assert warned[0]["interval"] == "4hour"
+
+    def test_coarse_tf_fragment_holding_a_grid_label_still_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # Fail-closed control: [13:00 → 23:59] DOES hold the 13:15 4hour
+        # label, so a missing 4hour partition there is a REAL prebuild gap.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)  # 1minute only — no 4hour partitions
+            with pytest.raises(FuturesSeriesError, match="'4hour' is EMPTY"):
+                _load_alias(
+                    cat,
+                    lake,
+                    interval="4hour",
+                    start=_ist(2025, 6, 26, 13, 0),
+                    end=_ist(2025, 6, 26, 23, 59),
+                )
+
+    def test_sub_minute_start_past_the_last_1minute_label_skips(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # A sub-minute --start: [15:29:30 → 23:59] overlaps the session but
+        # sits past the last 1minute label (15:29) — zero bars is EXPECTED.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    start=datetime(2025, 6, 26, 15, 29, 30, tzinfo=IST),
+                    end=_ist(2025, 6, 26, 23, 59),
+                )
+        assert out == []
+        assert len(_skip_warns(logs)) == 1
+
+    def test_intra_bucket_sliver_between_grid_labels_holds_no_bar(self) -> None:
+        # [09:30 → 10:00] on a 4hour grid: the next label (13:15) is past the
+        # fragment end — no stored bar timestamp can fall inside.
+        assert not series_load._expected_bar_time_in_window(
+            interval="4hour",
+            seg_start=_ist(2025, 6, 26, 9, 30),
+            seg_end=_ist(2025, 6, 26, 10, 0),
+        )
+
+    def test_grid_label_at_the_fragment_start_counts(self) -> None:
+        # A fragment STARTING exactly on a grid label holds that label.
+        assert series_load._expected_bar_time_in_window(
+            interval="4hour",
+            seg_start=_ist(2025, 6, 26, 13, 15),
+            seg_end=_ist(2025, 6, 26, 13, 15),
+        )
+
+    def test_unknown_interval_label_abstains_to_the_loud_refusal(self) -> None:
+        # HONEST abstain: a non-lake TF label has no modellable grid — the
+        # helper claims a bar is expectable so the caller KEEPS its refusal.
+        assert series_load._expected_bar_time_in_window(
+            interval="42minute",
+            seg_start=_ist(2025, 6, 26, 0, 0),
+            seg_end=_ist(2025, 6, 26, 23, 59),
+        )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # F12 — snapshot sensitivity (Golden Rule #4)
 # ────────────────────────────────────────────────────────────────────────
