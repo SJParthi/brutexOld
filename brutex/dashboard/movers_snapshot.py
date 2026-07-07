@@ -70,6 +70,7 @@ __all__ = [
     "compute_spot_candidates",
     "filter_to_ist_minute",
     "interval_minutes",
+    "minute_to_hhmm",
     "normalize_min_volume",
     "parse_snapshot_date",
     "pending_asset_payload",
@@ -116,6 +117,21 @@ def interval_minutes(interval: str) -> int | None:
     ``None`` for any label outside the 21-timeframe set.
     """
     return _INTERVAL_MINUTES.get(interval)
+
+
+def minute_to_hhmm(minute_of_day: int) -> str:
+    """Return the IST ``"HH:MM"`` string for a minute-of-day (the inverse of :func:`_cutoff_minute`).
+
+    ``minute_to_hhmm(929) == "15:29"`` · ``minute_to_hhmm(555) == "09:15"``. The
+    output matches the :func:`session_bar_times` grid string EXACTLY (zero-padded
+    ``HH:MM``), so a resolved latest minute is always a selectable ``#time`` option
+    on the frontend and round-trips through :func:`_cutoff_minute`
+    (``_cutoff_minute(minute_to_hhmm(m)) == m``). Pure + O(1)
+    (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 — the displayed-minute formatter that lets
+    the default as-of dropdown SHOW the real latest minute while the cut stays
+    whole-day; CLAUDE.md §11 COMMON: the single minute↔label formatter).
+    """
+    return f"{minute_of_day // 60:02d}:{minute_of_day % 60:02d}"
 
 
 def session_bar_times(interval: str) -> list[str]:

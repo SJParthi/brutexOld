@@ -24,6 +24,7 @@ from brutex.dashboard.movers_snapshot import (
     build_snapshot_payload,
     compute_snapshot,
     interval_minutes,
+    minute_to_hhmm,
     normalize_min_volume,
     parse_snapshot_date,
     pending_asset_payload,
@@ -282,6 +283,34 @@ def test_cutoff_minute_wrong_arity_raises() -> None:
 def test_cutoff_minute_non_integer_raises() -> None:
     with pytest.raises(ValueError, match="malformed time"):
         _cutoff_minute("09:ab")
+
+
+# ── minute_to_hhmm (DEC-MOVERS-ASOF-LATEST-DEFAULT-001) ────────────────────
+
+
+def test_minute_to_hhmm_session_endpoints() -> None:
+    assert minute_to_hhmm(929) == "15:29"
+    assert minute_to_hhmm(555) == "09:15"
+    assert minute_to_hhmm(925) == "15:25"
+
+
+def test_minute_to_hhmm_zero_pads_both_fields() -> None:
+    # Single-digit hour AND minute both zero-pad → a valid two-field HH:MM.
+    assert minute_to_hhmm(9 * 60 + 5) == "09:05"
+
+
+def test_minute_to_hhmm_round_trips_through_cutoff_minute() -> None:
+    # The formatter output is always a valid `#time` option and its inverse
+    # `_cutoff_minute` recovers the original minute exactly (echo == cut in value).
+    for minute in (555, 556, 600, 925, 929):
+        assert _cutoff_minute(minute_to_hhmm(minute)) == minute
+
+
+def test_minute_to_hhmm_matches_session_bar_times_grid_strings() -> None:
+    # Every string the frontend grid would generate is `minute_to_hhmm` of its
+    # minute, so an injected latest minute is always a selectable option.
+    for offset, hhmm in enumerate(session_bar_times("1minute")):
+        assert hhmm == minute_to_hhmm(555 + offset)
 
 
 # ── _row_to_bar (both tz branches) ────────────────────────────────────────
