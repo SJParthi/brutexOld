@@ -241,6 +241,10 @@ def is_pull_halt(exc: BaseException) -> bool:
         exc,
         (
             LakeWriteHalt,
+            # The two quota classes are DORMANT under Groww (no daily quota, no
+            # tracker constructed anywhere — DEC-QUOTA-VERDICT-MOOT-001) but
+            # deliberately KEPT: they are the raise-path phone-alert net that
+            # covers a future capped vendor's re-wired tracker with zero new code.
             DailyQuotaExceeded,
             QuotaInvariantError,
             MassEmptySettleHalt,

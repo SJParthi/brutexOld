@@ -352,14 +352,6 @@ class RateLimitPanel:
     latency_ms_p95: float = 0.0
     rps_1s: int = 0
     rps_1s_max: int = 0
-    #: The mandatory daily vendor quota gauge (DEC-AUTO-RESUME-QUOTA-001): calls spent
-    #: today, calls remaining, and the 100,000/day ceiling — straight from the
-    #: shared persisted ``DailyQuotaTracker`` via the controller snapshot. ``-1``
-    #: ``quota_limit`` means "no tracker wired" (dry-run / no live pull) so the panel
-    #: hides the gauge rather than showing a false 0.
-    quota_used: int = 0
-    quota_remaining: int = 0
-    quota_limit: int = -1
     #: The controller's MEASURED rolling-60s ISSUE count (``recent_minute``) and the HARD
     #: per-minute governor cap (``ceiling_per_min``) — straight from the controller
     #: snapshot (DEC-GROWW-RATE-PERMIN-001). Feed the live-pull-rate monitor's req/min
@@ -620,9 +612,6 @@ class DashboardState:
         current_rps: float,
         available_tokens: float,
         recent_429_count: int,
-        quota_used: int = 0,
-        quota_remaining: int = 0,
-        quota_limit: int = -1,
         recent_minute: int = 0,
         ceiling_per_min: int = -1,
         recent_1s: int = 0,
@@ -631,10 +620,11 @@ class DashboardState:
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
-        ``quota_used`` / ``quota_remaining`` / ``quota_limit`` are the daily vendor
-        quota gauge (DEC-AUTO-RESUME-QUOTA-001), defaulting to the "no tracker
-        wired" sentinel (``quota_limit=-1``) so a caller that has no quota snapshot
-        leaves the gauge hidden rather than showing a false 0.
+        The daily-quota gauge fields the panel once carried are GONE
+        (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no daily quota
+        (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6) and no
+        production controller wires a ``DailyQuotaTracker``, so the snapshot never
+        carried ``quota_*`` keys — the fields were a constant ``(0, 0, -1)``.
 
         ``recent_minute`` / ``ceiling_per_min`` are the controller's rolling-60s issue
         count + the HARD per-minute governor cap (DEC-GROWW-RATE-PERMIN-001), feeding the
@@ -652,9 +642,6 @@ class DashboardState:
             self.rate_limit.current_rps = current_rps
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
-            self.rate_limit.quota_used = quota_used
-            self.rate_limit.quota_remaining = quota_remaining
-            self.rate_limit.quota_limit = quota_limit
             self.rate_limit.recent_minute = recent_minute
             self.rate_limit.ceiling_per_min = ceiling_per_min
             self.rate_limit.recent_1s = recent_1s
@@ -869,9 +856,10 @@ def make_rate_observer(
 
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
         """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
-        # Quota gauge (DEC-AUTO-RESUME-QUOTA-001): the controller snapshot carries
-        # ``quota_*`` only when a DailyQuotaTracker is wired (the live path); absent
-        # → ``quota_limit=-1`` sentinel so the panel hides the gauge, not a false 0.
+        # The controller snapshot's conditional ``quota_*`` keys (a wired
+        # DailyQuotaTracker only) are deliberately NOT mapped: no production
+        # controller wires one (DEC-QUOTA-VERDICT-MOOT-001 — Groww has no daily
+        # quota) and the panel's gauge fields are deleted with the /universe gauge.
         # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired
         # (DEC-GROWW-RATE-PERMIN-001) — map that to the ``-1`` "no cap" panel sentinel so
         # the live-rate monitor shows no per-minute limit rather than a false 0.
@@ -880,9 +868,6 @@ def make_rate_observer(
             current_rps=float(rate.get("current_rps", 0.0)),
             available_tokens=float(rate.get("available_tokens", 0.0)),
             recent_429_count=int(rate.get("recent_hits", 0)),
-            quota_used=int(rate.get("quota_used", 0)),
-            quota_remaining=int(rate.get("quota_remaining", 0)),
-            quota_limit=int(rate.get("quota_limit", -1)),
             recent_minute=int(rate.get("recent_minute", 0)),
             ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
             # OBSERVE-ONLY trailing-window real issue counts (DEC-RATE-MONITOR-EXPAND-001):
@@ -1097,7 +1082,6 @@ def build_app(
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
     prebuild_gate: PrebuildGate | None = None,
-    quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
@@ -1165,17 +1149,6 @@ def build_app(
         route gates; a ``dry_run`` pipeline does not. Injected so tests drive
         the gated/released transitions deterministically; ``None`` (the
         default) builds a fresh production gate.
-    quota_tracker
-        Optional read-only daily-quota source for the ``/api/v1/quota``
-        endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
-        ``current_count() -> int``, ``remaining() -> int`` and a
-        ``daily_limit`` int satisfies it (the live
-        :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`). When
-        ``None`` (the default) a real tracker is built lazily on first poll,
-        reading the IST-midnight LMDB counter the pulls write — so the
-        ``/universe`` gauge shows today's PERSISTED usage on page-load, before
-        any pull in this session reports onto the live rate panel. Injected so
-        tests drive a deterministic fake (no LMDB).
     pull_active_probe
         Optional pull-run signal for the ``/api/v1/pull/rate`` stall gate
         (DEC-RATE-STALL-PULL-GATE-001). A zero-arg callable returning ``True``
@@ -1777,29 +1750,13 @@ def build_app(
         stamp_bridge_freshness(payload, bridge_result)
         return JSONResponse(payload)
 
-    @app.get("/api/v1/quota")
-    async def api_quota() -> JSONResponse:
-        """GET /api/v1/quota — today's PERSISTED vendor daily-quota usage (read-only).
-
-        The live vendor (Groww) has **no daily quota** for backtesting
-        (``GROWW_DAILY_QUOTA_UNVERIFIED=None``; the binding limit is the 500 req/min
-        governor — CLAUDE.md §6 / DEC-GROWW-RATE-PERMIN-001). So when no daily-quota
-        tracker is injected this returns the ``quota_limit=-1`` "no daily quota"
-        sentinel and the ``/universe`` gauge stays hidden — never a fabricated
-        ``X / 100,000`` (Golden Rule #1), and the route never constructs an LMDB
-        tracker. When a tracker IS wired (a vendor that genuinely caps calls/day) it
-        serves that tracker's IST-midnight ``used / limit / remaining`` (one O(1)
-        LMDB read; DEC-DASHBOARD-QUOTA-PERSISTED-001). Never touches the lake/store.
-        """
-        if quota_tracker is None:
-            return JSONResponse({"quota_used": 0, "quota_limit": -1, "quota_remaining": 0})
-        return JSONResponse(
-            {
-                "quota_used": quota_tracker.current_count(),
-                "quota_limit": quota_tracker.daily_limit,
-                "quota_remaining": quota_tracker.remaining(),
-            }
-        )
+    # The former ``GET /api/v1/quota`` route (DEC-DASHBOARD-QUOTA-PERSISTED-001)
+    # is DELETED (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no
+    # daily quota (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6),
+    # no production caller ever injected a tracker (``brutex serve`` passes
+    # none), so the route only ever returned the constant ``quota_limit=-1``
+    # sentinel — a second, divergent quota surface with no consumer beyond the
+    # /universe gauge deleted alongside it.
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
@@ -2494,8 +2451,8 @@ def build_app(
             pass the leftover failed windows are re-pulled in bounded rounds (over
             the SHARED coverage ledger — only the still-failed windows hit the vendor
             again, rate-safe) until ONE terminal state is reached: ``stop_clean``
-            (every window fetched — the normal exit), ``stop_quota`` (the day's
-            100,000-call vendor quota is spent — resume after the IST-midnight reset),
+            (every window fetched — the normal exit), ``stop_quota`` (dormant under
+            Groww — no daily quota, no tracker wired; DEC-QUOTA-VERDICT-MOOT-001),
             ``stop_dead`` (the token died — re-auth), or ``stop_no_progress`` /
             budget backstop. So the one-click pull DRIVES ITSELF to a clean lake with
             zero manual "Re-pull to finish" clicks (CLAUDE.md §11 AUTOMATED), bounded

@@ -141,48 +141,47 @@ class TestRefCountedClose:
 
 
 class TestDashboardGaugeWithLivePull:
-    """The production failure replayed end-to-end through the real route."""
+    """The production failure replayed end-to-end through the real app.
 
-    def test_quota_route_200_with_pull_tracker_already_open(
+    CONSCIOUSLY REWRITTEN for DEC-QUOTA-VERDICT-MOOT-001: the original test
+    asserted ``GET /api/v1/quota`` returned the ``quota_limit=-1`` sentinel
+    without constructing a second tracker (the double-open-500 regression,
+    repurposed by DEC-GROWW-NO-DAILY-QUOTA-UI-001 #718). The route is now
+    DELETED, which makes the historical failure mode STRUCTURALLY impossible
+    at a stronger level — there is no gauge endpoint left that could ever
+    construct a tracker. This rewrite pins that: the app builds and serves
+    while a pull-side tracker already holds the default-path env, and the
+    removed route answers 404 without touching LMDB.
+    """
+
+    def test_removed_quota_route_never_touches_lmdb(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``GET /api/v1/quota`` returns the "no daily quota" sentinel and NEVER
-        opens an LMDB tracker, even while a pull-side tracker already holds the same
-        (default-path) env in this process.
-
-        Pre-fix this was the live 500: the route's lazy ``DailyQuotaTracker()``
-        (DEC-DASHBOARD-QUOTA-PERSISTED-001) hit LMDB's already-open-in-this-process
-        rule against the pull controller's tracker (DEC-AUTO-RESUME-QUOTA-001). The
-        live vendor (Groww) has NO daily quota (DEC-GROWW-RATE-PERMIN-001), so an
-        uninjected route now returns ``quota_limit=-1`` WITHOUT constructing a second
-        tracker — the double-open 500 is structurally impossible, and the gauge hides
-        instead of showing a fabricated ``X / 100,000``.
-        """
+        """The app 404s the removed route while a pull tracker holds the env."""
         pytest.importorskip("fastapi")
         from brutex.dashboard.app import DashboardState, build_app
         from fastapi.testclient import TestClient
 
         # Point the DEFAULT quota path (~/.brutex/quota/quota.lmdb) at a
-        # tmp home. Patching Path.home (not _default_quota_path) matters:
-        # the dataclass captured the factory at class definition, so only
-        # the home redirect reaches BOTH pure-default constructions below
-        # — the exact production shape on each side.
+        # tmp home, exactly as the original regression did, so the pull-side
+        # tracker below opens the SAME default env a second construction
+        # would have collided with.
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
         # The "pull controller" side: opened FIRST, counts some calls.
-        # Default (real IST) clock on BOTH sides — the lazy route tracker
-        # cannot be clock-injected, so the pull side must match it.
         pull_side = DailyQuotaTracker()
         for _ in range(3):
             pull_side.acquire_or_raise()
 
-        # The dashboard with NO injected tracker → the lazy default path.
-        app = build_app(DashboardState(), quota_tracker=None)
+        # The dashboard (no quota surface at all since DEC-QUOTA-VERDICT-MOOT-001).
+        app = build_app(DashboardState())
         with TestClient(app) as client:
             resp = client.get("/api/v1/quota")
 
-        assert resp.status_code == 200  # pre-fix: lazy DailyQuotaTracker → lmdb.Error → 500
-        # No injected tracker → honest "no daily quota" sentinel (Groww has none),
-        # and the route constructs NO tracker, so the double-open 500 cannot recur.
-        assert resp.json() == {"quota_used": 0, "quota_limit": -1, "quota_remaining": 0}
+        # The route is GONE — a stale poller gets a plain 404, and no code path
+        # exists that could construct a second tracker, so the historical
+        # double-open 500 is structurally impossible.
+        assert resp.status_code == 404
+        # The pull-side tracker is untouched by the app lifecycle.
+        assert pull_side.current_count() == 3
         pull_side.close()
