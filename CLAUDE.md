@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
-MIGRATION.md #1538 — the /movers prev-close calendar-contiguity honesty guard:
+MIGRATION.md #1539 — the /movers prev-close calendar-contiguity honesty guard:
 a previous-day close/OI baseline that provably skipped a nearer NSE session (a
 lake hole — the confirmed repro printed 2.2822% where the true Friday-based
 figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
@@ -37,7 +37,7 @@ the missing session does; `preopen_report._previous_trading_day` NOT refactored
 (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
-MIGRATION.md #1537 — the `/movers` SPOT "Top Value" (turnover) is now
+MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
 TIMEFRAME-INVARIANT: it is re-sourced from the RAW 1-minute session frame
 (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, exactly
 mirroring the already-TF-invariant futures/options `_read_future_session`,
@@ -787,7 +787,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes — folded from
   `claude/trusting-einstein-bobai2`, PR #1246) (**DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
-  MIGRATION.md #1538** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
+  MIGRATION.md #1539** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
   previous-day close + futures/options previous-day OI baselines (which silently served the NEAREST-prior lake bar
   with zero calendar check — the confirmed repro: a Fri-hole lake baselined Mon on Thu's close and printed 2.2822%
   where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
@@ -808,7 +808,7 @@ hostile-review pass._
   named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
-  Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1537**
+  Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538**
   — the `/movers` SPOT "Top Value" (turnover) is now TIMEFRAME-INVARIANT: re-sourced from the RAW 1-minute session
   frame (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, mirroring the already-TF-invariant
   futures/options `_read_future_session`, instead of the resampled display-timeframe bars — so the SAME (symbol, day,
@@ -2515,14 +2515,14 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes)
-  (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1538 — the `/movers`
+  (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1539 — the `/movers`
   prev-close/OI baselines gain an honest calendar-contiguity verdict: a
   baseline anchored on a non-adjacent NSE session is stamped
   (`prev_close_*`/`oi_baseline_*` EMIT-ON-FALSE keys), warned once (capped),
   and marked " *" in the UI — the served number itself unchanged; READ-ONLY
   dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
   Earlier (same branch):
-  (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1537 — the `/movers`
+  (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538 — the `/movers`
   SPOT "Top Value" (turnover) is TIMEFRAME-INVARIANT: re-sourced from the RAW
   1-minute session frame (post as-of cut, PRE-resample) via the NEW
   `spot_session_value_paisa`, mirroring the already-TF-invariant
