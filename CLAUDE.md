@@ -20,7 +20,7 @@
 
 _Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
 DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
-MIGRATION.md #1538–#1542 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+MIGRATION.md #1540–#1544 — the doc/spec/ops debt reconciliation pack, DOCS-first:
 (1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
 ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
 production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
@@ -48,16 +48,59 @@ per-item citations, the "10 boxes" count defect fixed, the env-var trailer super
 #1065; NO operator ack pre-claimed (requested on the PR). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the ONE code delta lives inside the
 DEC-EXEC-008-stubbed short branch, `calculator.py` stays 100% line+branch.)
-Earlier: 2026-07-07 (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 —
-the `/movers` Spot screen's DEFAULT as-of TIME now resolves to the SAME latest
-available minute across EVERY timeframe, so switching 1m ↔ 2m ↔ 3m ↔ 3hour ↔
-1day on a finalized day always shows the IDENTICAL latest close — the frontend
-per-TF grid-slot pin is dropped (default = blank → the already-tested
-`cutoff_min=None` whole-day stored-fast path), a NEW `latest_time` payload key
-echoes the resolved minute (`movers_warm.latest_movers_minute`, memoised per
-(generation, date)), and explicit as-of picks survive TF switches;
-READ-ONLY dashboard — ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX, no
-scope/vocab/rate change).
+Earlier: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+MIGRATION.md #1539 — the /movers prev-close calendar-contiguity honesty guard:
+a previous-day close/OI baseline that provably skipped a nearer NSE session (a
+lake hole — the confirmed repro printed 2.2822% where the true Friday-based
+figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
++ the INDEPENDENT `oi_baseline_*` twins), warned ONCE (capped 20/build, deduped
+per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
+untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
+(strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
+NON-session documented limit), enriched resolvers `resolve_prev_close`/
+`resolve_prev_oi` with byte-identical `.value` seams over the historical
+`_prev_day_close`/`_prev_day_oi`, ONE pure `prev_baseline_provenance`, and
+EMIT-ON-FALSE row projection (contiguous + abstained payloads byte-for-byte
+the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
+HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
+the missing session does; `preopen_report._previous_trading_day` NOT refactored
+(named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
+MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
+TIMEFRAME-INVARIANT: it is re-sourced from the RAW 1-minute session frame
+(post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, exactly
+mirroring the already-TF-invariant futures/options `_read_future_session`,
+instead of the resampled display-timeframe bars — so the SAME (symbol, day,
+as-of) turnover no longer CHANGES with the selected display timeframe
+(reproduced NSE-NIFTY 2024-01-02 whole-day: value 1m 19583300 ≠ 5m 19833500 ≠
+1day 20100000 paisa, now all byte-identical to the raw-1m answer). Three edits,
+ALL in `brutex/dashboard/movers_snapshot.py` (ZERO other source files): extract
+the shared raw-1m read+cut into `_read_cut_1m_frame` (§11 COMMON —
+`_read_session_bars` becomes a byte-identical wrapper, preserving the
+DEC-PIPELINE-AUTOPREBUILD-001 stored-vs-resample display-bar equality), the NEW
+no-`interval`-arg `spot_session_value_paisa` (HLC3 × volume via the ONE COMMON
+`session_traded_value_paisa`, per-bar `round_money` 2dp BEFORE × volume,
+`Decimal(str(...))` matching `_read_future_session`, `None` on missing 1-minute
+— never fabricates, Golden Rule #1), and a `value_paisa: int | None = None`
+injection into `compute_snapshot` (`None`/omitted falls back to the legacy
+display-bar reduction byte-identically, so the existing 320000/318660 goldens
+pass UNMODIFIED — the injection-gate mutant killer) wired from
+`compute_spot_candidates` inside the existing `skip_errors` try. HONEST
+envelope: a spot-ranking CORRECTNESS fix (Top Value becomes a genuine session
+property, mirroring futures/options) that CHANGES the displayed spot Top Value
+on coarse timeframes versus today — a SANCTIONED correction, not a silent
+break; value(1minute) byte-unchanged; a mid-session as-of legitimately keeps
+1day whole-day (the bar IS the day), so invariance is scoped PER shared
+effective as-of; disclosed I/O — one extra month-bounded raw-1m read on the
+daily/stored-first paths + a double-read on the resample-fallback path (bounded
+O(one month), candidate-cache-memoised per write-generation); futures/options
+value output BYTE-UNCHANGED (`session_traded_value_paisa` +
+`filter_to_ist_minute` + the `_read_future_session` 6-tuple untouched; diff-stat
+shows ONLY `movers_snapshot.py` in source; the F&O suites re-run UNMODIFIED
+green). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; READ-ONLY dashboard ranking;
+no lake/schema/scope/vocab/rate change; touched module 100% line+branch;
+ruff/ruff-format/`mypy --strict`/pyright clean.)
 Earlier: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 —
 the CLI `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment
 pass the dashboard runs — post-drain Seam A (fetch lane drained + window
@@ -86,6 +129,11 @@ that seam — its Seam A enrich invokes the COMMON fence directly, so the
 strict gate cannot touch it. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 F&O lake REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100%
 line+branch).
+Earlier: 2026-07-07 (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 —
+the `/movers` Spot default as-of TIME resolves to the SAME latest available
+minute across EVERY timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the
+identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX).
 Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
 the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
 on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
@@ -769,7 +817,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
-  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1538–#1542** — the doc/spec/ops debt reconciliation
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1540–#1544** — the doc/spec/ops debt reconciliation
   pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
   (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
   "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
@@ -783,18 +831,42 @@ hostile-review pass._
   the Phase-1 sign-off checklist closed by supersession (11 boxes, honest no-backdate clause).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched costs module
   stays 100% line+branch).
-  Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001,
-  MIGRATION.md #1535** — the `/movers` Spot screen's DEFAULT as-of TIME resolves to the SAME latest
-  available minute across EVERY timeframe (1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day on a finalized day always
-  show the IDENTICAL latest close, the Groww-consistent behaviour): the frontend `fillTimes()`
-  per-TF grid-slot pin is dropped in favour of a `Latest` (`value=""`) default riding the
-  already-tested `cutoff_min=None` whole-day stored-fast path (readers UNCHANGED); NEW
-  `movers_snapshot.minute_to_hhmm` + `movers_warm.latest_movers_minute` (bounded DuckDB
-  MAX-minute resolver, `(duckdb.Error, OSError) → None` — never a 500) back an ADDITIVE
-  `latest_time` payload echo memoised per (generation, date); explicit picks survive TF switches
-  via the §11-COMMON `static/bx-movers-time.js` (node-executed golden). READ-ONLY dashboard —
-  ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no lake/schema/scope/vocab/rate
-  change).
+  Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes — folded from
+  `claude/trusting-einstein-bobai2`, PR #1246) (**DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+  MIGRATION.md #1539** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
+  previous-day close + futures/options previous-day OI baselines (which silently served the NEAREST-prior lake bar
+  with zero calendar check — the confirmed repro: a Fri-hole lake baselined Mon on Thu's close and printed 2.2822%
+  where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
+  (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
+  ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
+  documented NON-session limit; NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
+  `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
+  `PrevOiBaseline(value, found_date)` keep byte-identical `.value` seams (`_prev_day_close`/`_prev_day_oi` wrappers —
+  every historical pin green unmodified; `_prior_session_last_from_minute` appends its found date, [0]/[1] stable);
+  ONE pure `prev_baseline_provenance` yields (session_iso, contiguous|null), stamped as defaulted additive fields on
+  MoverSnapshot/FuturesMover/OptionMover with close + OI judged INDEPENDENTLY (the null-OI-1day divergence pinned);
+  row projectors EMIT-ON-FALSE so contiguous AND abstained payloads are byte-for-byte the pre-fix wire (golden-pinned
+  both arms on all three tabs + a FROZEN additive-key-NAME set); one capped (20/build) per-(symbol,kind)-deduped
+  `movers.prev_baseline_noncontiguous` WARN + a single suppressed summary; `movers.html` appends a strict-`=== false`
+  " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
+  makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
+  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` deliberately NOT refactored — the
+  named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
+  line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538**
+  — the `/movers` SPOT "Top Value" (turnover) is now TIMEFRAME-INVARIANT: re-sourced from the RAW 1-minute session
+  frame (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options `_read_future_session`, instead of the resampled display-timeframe bars — so the SAME (symbol, day,
+  as-of) turnover no longer CHANGES with the selected display timeframe (reproduced NSE-NIFTY 2024-01-02 whole-day:
+  1m 19583300 ≠ 5m 19833500 ≠ 1day 20100000 paisa, now all byte-identical to the raw-1m answer). Three edits ALL in
+  `brutex/dashboard/movers_snapshot.py`: extract the shared raw-1m read+cut into `_read_cut_1m_frame` (§11 COMMON,
+  `_read_session_bars` a byte-identical wrapper), the NEW no-`interval`-arg `spot_session_value_paisa` (HLC3 × volume
+  via the ONE COMMON `session_traded_value_paisa`, `None` on missing 1-minute — never fabricates), and a
+  `value_paisa: int | None = None` injection into `compute_snapshot` (`None`/omitted falls back byte-identically, the
+  320000/318660 goldens pass UNMODIFIED). HONEST: a SANCTIONED display-value correction on coarse timeframes;
+  value(1minute) byte-unchanged; futures/options value BYTE-UNCHANGED; READ-ONLY dashboard ranking; ENGINE UNCHANGED
+  — NIFTY/BANKNIFTY/SENSEX; touched module 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
   Earlier: `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
   `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
   `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
@@ -850,6 +922,10 @@ hostile-review pass._
   documented asymmetry); the bulk lever is manual (no cron). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
   REFERENCE_ONLY, no scope/vocab/rate change, zero vendor calls added; touched modules 100% line+branch;
   ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535** —
+  the `/movers` Spot default as-of TIME resolves to the SAME latest available minute across EVERY timeframe, so
+  1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
   Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
   MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
   gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
@@ -1194,7 +1270,7 @@ hostile-review pass._
   collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
   own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
   DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
-  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1541), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1543), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)

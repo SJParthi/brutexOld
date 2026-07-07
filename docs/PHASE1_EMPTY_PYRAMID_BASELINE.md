@@ -220,7 +220,7 @@ regression. Open a follow-up PR with a 1-agent hostile review.
 ## 7. Phase 1 sign-off checklist (operator-facing)
 
 > **RECONCILED 2026-07-06 — closure by SUPERSESSION**
-> (DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1542). The formal
+> (DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1544). The formal
 > operator tick NEVER happened in 2026-05; the operator has since
 > directed and approved the entire Phase-2/3-era programme
 > (MIGRATION.md #254–#1520+), and every technical item below was
@@ -308,7 +308,7 @@ every box below is closed by supersession per the banner above.)*
 - [x] `docs/MIGRATION.md` has a fresh DEC entry citing this Phase 1
       sign-off
       — ✅ satisfied by DEC-PHASE1-SIGNOFF-RECONCILE-001 (MIGRATION.md
-      #1542) itself — the FIRST ledger entry ever to CLOSE this
+      #1544) itself — the FIRST ledger entry ever to CLOSE this
       sign-off (the checklist's own creating entry #253 already cites
       it; an exhaustive DEC-PHASE1 grep of MIGRATION.md confirms no
       earlier CLOSURE entry existed; this was the one genuinely-open

@@ -355,7 +355,7 @@ made without primary DEC-ID evidence.
 | P3 | M4 Pro absolute-throughput ≥ 50 M/s gate activation | ✅ DONE | runner registered + certified (MIGRATION #655); `bench-m4pro.yml` passes daily/push/dispatch (run #109, 2026-06-14) — DEC-M4PRO-DOC-RECONCILE-001 |
 | OPERATOR | GitHub server-side branch protection (only operator can configure) | 5 min | 📋 still tracked per `docs/runbooks/github-branch-protection-setup.md` |
 | OPERATOR | Subscribe to Groww (₹499/mo) + set env vars + run `scripts/groww_probe.py` | 30 min | 📋 HARD GATE blocking Phase 2 per DEC-VENDOR-PIVOT-001 entry #246 |
-| OPERATOR | Phase 1 sign-off (11-item checklist, reconciled) | — | ✅ closed by supersession (DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1542; see `docs/PHASE1_EMPTY_PYRAMID_BASELINE.md §7`) |
+| OPERATOR | Phase 1 sign-off (11-item checklist, reconciled) | — | ✅ closed by supersession (DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1544; see `docs/PHASE1_EMPTY_PYRAMID_BASELINE.md §7`) |
 
 ---
 
