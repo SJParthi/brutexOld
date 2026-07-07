@@ -1,0 +1,11 @@
+entry | blessed ns/op | measured ns/op | blessed ops/s | measured ops/s | ratio | verdict
+bar_lookup | 123.000 | 246.000 | 8,130,081 | 4,065,041 | 2.000 | REGRESSION
+dedup_bloom_probe | 123.000 | 123.000 | 8,130,081 | 8,130,081 | 1.000 | OK
+dedup_lmdb_contains | 123.000 | 123.000 | 8,130,081 | 8,130,081 | 1.000 | OK
+mask_and_vector_1m | 123.000 | 123.000 | 8,130,081 | 8,130,081 | 1.000 | OK
+mask_eval_scalar | 123.000 | 123.000 | 8,130,081 | 8,130,081 | 1.000 | OK
+result_append | 123.000 | 41.000 | 8,130,081 | 24,390,244 | 0.333 | OK_IMPROVEMENT_WARN
+::error::bench-abs bar_lookup: REGRESSION — measured 246.000 ns/op > threshold 184.500 ns/op (blessed 123.000 x (1 + 50.0/100))
+::warning::bench-abs: result_append: measured 41.000 ns/op is > 2.0x faster than blessed 123.000 — baseline stale, a ledgered ratchet re-bless is recommended
+remediation: see docs/runbooks/bench-baseline.md — a numeric red is re-measured once in a fresh process before failing; a re-bless is the workflow_dispatch capture (capture_candidate=true + decision_id + replace_entries) plus a human-written MIGRATION.md entry in the same PR
+BENCH-ABS GATE RAN: compared 6/6 entries against tests/bench/baselines/testos-x86-2c1p1e-1g-x86-64.json (captured 2026-07-06, decision ids DEC-BENCH-ABS-BASELINE-001, max blessed spread 1.5%)
