@@ -278,12 +278,13 @@ impl Walker {
                 high_paisa - pos.entry_price_paisa,
             )
         };
-        if favourable > pos.mfe_paisa {
-            pos.mfe_paisa = favourable;
-        }
-        if adverse > pos.mae_paisa {
-            pos.mae_paisa = adverse;
-        }
+        // `.max()` instead of `if new > acc` — behavior-identical for i64
+        // (a tie assigns the same value); removes the tie-equivalent `>`→`>=`
+        // cargo-mutants class structurally (DEC-MUTATION-RUNTIME-003; the
+        // exact-value excursion tests below + the Python↔Rust parity suites
+        // are the net).
+        pos.mfe_paisa = pos.mfe_paisa.max(favourable);
+        pos.mae_paisa = pos.mae_paisa.max(adverse);
     }
 
     /// Decide which of SL/TP a bar's `[low, high]` touched (same-bar tie applied)
@@ -645,17 +646,22 @@ impl ResidentSweepSim {
         check_level_distance("tp_paisa", tp_paisa)?;
         let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
         let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
-        Ok(if work < PARALLEL_WORK_THRESHOLD {
-            masks
-                .iter()
-                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
-                .collect()
-        } else {
-            masks
-                .par_iter()
-                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
-                .collect()
-        })
+        // Dispatch via the COMMON crate predicate (DEC-MUTATION-RUNTIME-003):
+        // both arms are output-identical by design, so the boundary is gated
+        // by `dispatch_tests::parallel_dispatch_boundary_is_exclusive`.
+        Ok(
+            if crate::below_parallel_threshold(work, PARALLEL_WORK_THRESHOLD) {
+                masks
+                    .iter()
+                    .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
+                    .collect()
+            } else {
+                masks
+                    .par_iter()
+                    .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
+                    .collect()
+            },
+        )
     }
 
     /// Pure core of [`Self::count_trades`] — same boundary validation + sweep
@@ -678,11 +684,15 @@ impl ResidentSweepSim {
             self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy)
                 .len() as u64
         };
-        Ok(if work < PARALLEL_WORK_THRESHOLD {
-            masks.iter().map(|&m| run(m)).collect()
-        } else {
-            masks.par_iter().map(|&m| run(m)).collect()
-        })
+        // Same COMMON-predicate dispatch as `simulate_masks_impl`
+        // (DEC-MUTATION-RUNTIME-003).
+        Ok(
+            if crate::below_parallel_threshold(work, PARALLEL_WORK_THRESHOLD) {
+                masks.iter().map(|&m| run(m)).collect()
+            } else {
+                masks.par_iter().map(|&m| run(m)).collect()
+            },
+        )
     }
 }
 
@@ -1414,6 +1424,15 @@ mod tests {
     }
 
     // ── parallel arm parity (crosses PARALLEL_WORK_THRESHOLD) ──
+
+    #[test]
+    fn parallel_work_threshold_is_pinned_to_one_mebi_ops() {
+        // DEC-MUTATION-RUNTIME-003: pins `1 << 20` against an INDEPENDENT
+        // literal — kills the `<<` → `>>` const mutant (`1 >> 20` == 0 would
+        // silently route EVERY batch to the rayon arm, breaking the small-N
+        // O(1)-canary protection this documented invariant exists for).
+        assert_eq!(PARALLEL_WORK_THRESHOLD, 1_048_576);
+    }
 
     #[test]
     fn parallel_arm_matches_serial() {

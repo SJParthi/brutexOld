@@ -85,6 +85,30 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// older source at the same crate version (same-version behavioural drift).
 pub const SOURCE_DIGEST: &str = env!("BRUTEX_SOURCE_DIGEST");
 
+/// Serial-vs-parallel dispatch predicate (DEC-RUST-RAYON-SUPERMASK-001):
+/// batches strictly below `threshold` mask·bar ops stay SERIAL (small-N
+/// O(1)-canary protection); at/above they fan out on rayon. Extracted so the
+/// boundary is directly unit-testable — the serial and parallel arms are
+/// output-identical by design, so no output test can kill a comparison flip
+/// at the call sites (DEC-MUTATION-RUNTIME-003).
+#[inline]
+pub(crate) fn below_parallel_threshold(work: u64, threshold: u64) -> bool {
+    work < threshold
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::below_parallel_threshold;
+
+    #[test]
+    fn parallel_dispatch_boundary_is_exclusive() {
+        assert!(below_parallel_threshold(0, 1 << 20));
+        assert!(below_parallel_threshold((1 << 20) - 1, 1 << 20)); // kills < -> == / >
+        assert!(!below_parallel_threshold(1 << 20, 1 << 20)); // kills < -> <=
+        assert!(!below_parallel_threshold(u64::MAX, 1 << 20)); // saturating arm
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // PyO3 module entry point (DEC-P0-050 / PR-K; DEC-P0-055 / PR-N+2)
 // ────────────────────────────────────────────────────────────────────────
