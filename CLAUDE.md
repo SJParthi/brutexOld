@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1531 —
+_Last updated: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1542 —
 the bulk Greeks v1→v2 re-enrichment BACKFILL closing the #1188 named follow-up:
 NEW `brutex/data/greeks_backfill.py` — a stamp-driven target-DISCOVERY +
 batching layer feeding the EXISTING `enrich_greeks_for_targets` driver
@@ -60,7 +60,7 @@ valid-JSON non-object payload as `SweepCheckpointError` (never a wedging
 `AttributeError`); a schema-poisoned stamp column + an out-of-range month
 filename fold into `probe_failed`/skip instead of crashing the scan; the
 `expired_only` expiry==today boundary regression-pinned.
-FIX ROUND 2 folded (refuter-majority-confirmed, MIGRATION.md #1531): BOTH
+FIX ROUND 2 folded (refuter-majority-confirmed, MIGRATION.md #1542): BOTH
 dashboard jobs' cross-process flock re-keyed onto the STORE-derived WRITE
 root (`app._job_lake_root_resolver` — a `--lake-root X`/env-divergent launch
 no longer yields disjoint lock files that let a CLI backfill race a dashboard
@@ -78,7 +78,7 @@ advisory contract); every bar-writing wet batch touches
 THIRD component, so a CLI backfill's Greeks reach a running dashboard's
 caches on the next poll; the wet report's scan-census carry gains killing
 tests.
-FIX ROUND 3 folded (refuter-majority-confirmed, MIGRATION.md #1531): the
+FIX ROUND 3 folded (refuter-majority-confirmed, MIGRATION.md #1542): the
 durable checkpoint FREEZES at the last fully-clean prefix boundary (`record`
 only while the run's CUMULATIVE `errored == 0` — an errored contract keeps its
 stale stamps, so an identical-plan crash-resume could silently SKIP it and
@@ -91,7 +91,7 @@ longer clobber/clear each other's liveness beat and resurrect the false
 CRITICAL stall-alert class this branch closed); a stray FILE at
 `.greeks_backfill` (ENOTDIR) reads the stable `absent` token instead of
 muting the ENTIRE composite `lake_revision` probe.
-FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1531): the
+FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1542): the
 `backfill_id` binds a rate-source VALUE fingerprint (exact fixed rate / sha256
 of the loaded CSV curve), so a crashed FORCE run's surviving checkpoint
 self-ignores across a rate-value change instead of exempting the recorded
@@ -116,6 +116,39 @@ UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
 + `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
 every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
+Earlier: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
+`SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
+deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
+per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
+`sweep_lookahead`, consumed via its public `env_flag_tristate`, never
+copied), licensed by TWO safety layers —
+ORIGINALLY authored + proven fully green under the prior default-OFF before
+the flip, though the pushed branch is ONE reconstructed post-wipe commit so
+no shipped-first commit boundary exists (see ADR-0017 Status / #1532): (a) the
+exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
+simulators return each mask's certified exit-bar indices
+(`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
+over the NEW stdlib-only COMMON `brutex/engine/exit_index.py`:
+`build_ts_index` consolidating the three inline dict copies +
+`bars_strictly_increasing` producer certificate + `exit_indices_consistent`
+consumer belt) so the kernel arm consumes them O(trades) with NO per-mask
+O(N_bars) `exit_ts`→index dict build (an inconsistent stream DEMOTES to the
+dict, never to the Python oracle — results byte-identical; measured 6.1×
+sandbox tail ratio, bench-gated ≥1.15×; the sweep spine threads the pairs
+through the ONE `_iter_mask_metrics`; `_reattribute_chunk_failure` stays on
+the oracle); and (b) a per-process BURN-IN SELF-CHECK — the first 16
+kernel-served masks are bit-compared (`struct.pack` floats, signed zeros
+included) against the Python `_drawdown_stats` oracle; a mismatch SHIPS THE
+ORACLE VALUE and AUTOREVERTS the kernel for the process
+(`kernel_autoreverted` ERROR + latch; `kernel_disabled` short-circuit). The
+frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the default
+(no-env) arm reproduces them byte-for-byte with exactly ONE engaged event
+(golden-pinned; a burn-in-poisoned kernel lands on the pinned bytes with one
+autorevert event). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline).
 Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
@@ -688,7 +721,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1531** — the bulk
+- **Active branch:** `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1542** — the bulk
   Greeks v1→v2 re-enrichment BACKFILL closing the two #1188 named gaps: EXPIRED option contracts frozen at formula v1 +
   CLI-`brutex fetch`-only lakes that never enriched. NEW `brutex/data/greeks_backfill.py` — a stamp-driven
   target-DISCOVERY + batching layer feeding the EXISTING `enrich_greeks_for_targets` driver UNMODIFIED (value-checked
@@ -708,17 +741,17 @@ hostile-review pass._
   Telegram completion summary (`greeks_backfill_complete` ✅/⚠️ + `emit_greeks_backfill_complete_alert`). HONEST: the
   scan is O(files) NEVER O(1); no wall-clock SLA; the stamp prefilter is blind to rate/spot VALUE drift under
   unchanged source kinds — `--force` routes everything through the driver's value-checked gate. ADVERSARIAL-REVIEW FIX
-  ROUND folded (same branch, pre-merge; details in #1531): CLI wet run HOLDS the lake-root single-flight (refusal on
+  ROUND folded (same branch, pre-merge; details in #1542): CLI wet run HOLDS the lake-root single-flight (refusal on
   contention; `--dry-run` lock-free); scan/probe per-contract/per-file watchdog liveness beats + honest scanning label
   (the DEC-PIPELINE-STALL-HEARTBEAT-001 false-CRITICAL class closed on the new phase); `force`+`limit` REFUSED at
   scanner/CLI/route (chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects non-object JSON with
   `SweepCheckpointError`; schema-poisoned stamp columns + out-of-range month filenames fold into `probe_failed`/skip
   instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). FIX ROUND 3 folded
-  (refuter-majority-confirmed, #1531): the checkpoint freezes at the last fully-clean prefix boundary (an errored
+  (refuter-majority-confirmed, #1542): the checkpoint freezes at the last fully-clean prefix boundary (an errored
   contract is always re-fed on resume — never a false-clean `errored=0` skip); `progress_beat` is a multi-registrant
   handle-keyed registry (two concurrent jobs keep independent watchdog liveness); a stray file at `.greeks_backfill`
   reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
-  (refuter-majority-confirmed, #1531): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
+  (refuter-majority-confirmed, #1542): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
   checkpoint self-ignores across a rate-value change, so the recorded prefix is always re-routed through the driver's
   value-checked gate (spot-heal-in-crash-window = documented residue); progress beats are JOB-SCOPED on the emitting
   thread (a concurrent backfill scan no longer masks a wedged pull's HUNG→WEDGED chain; the round-3 broadcast's
@@ -728,6 +761,24 @@ hostile-review pass._
   (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/
   `sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
+  Earlier: `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
+  ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
+  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
+  authored + proven fully green under the prior default-OFF before the flip, though the pushed branch is ONE
+  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1532): the
+  exit_idx-native FAST PATH — both trade simulators return each
+  mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
+  consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
+  `exit_indices_consistent` consumer belt) so the kernel arm consumes them O(trades) with NO per-mask O(N_bars)
+  `exit_ts`→index dict build (inconsistent stream DEMOTES to the dict, never to the Python oracle — results
+  byte-identical; measured 6.1× sandbox tail ratio, bench-gated ≥1.15×) — and a per-process BURN-IN SELF-CHECK: the
+  first 16 kernel-served masks are bit-compared (`struct.pack` floats, signed zeros) against the Python
+  `_drawdown_stats` oracle; a mismatch SHIPS THE ORACLE VALUE and AUTOREVERTS the kernel for the process (ERROR +
+  latch + `kernel_disabled` short-circuit). The frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the
+  default (no-env) arm reproduces them byte-for-byte with exactly ONE engaged event (golden-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+  tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the pre-change baseline).
   Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
   MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
   widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
