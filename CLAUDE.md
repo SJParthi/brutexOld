@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
+_Last updated: 2026-07-07 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
 #1482 — the automatic lake healer is COMPLETED for the
 `options/<series>/<YYYY>-<MM>.parquet` expired-options table: foreign-month-row
 + overlapping-partition detection+heal on the SAME proven quarantine →
@@ -90,7 +90,24 @@ in-span NON-target bars poison that must stay unfound/unhealed/uncounted
 docstring's THIRD copy of the round-2-refuted "zero reads out of scope"
 claim reworded to the honest lake_heal wording; this blurb's "ONE …
 sibling read" singular corrected (one per affected month per series).
-HONEST: no production
+ROUND 4 (refuter-confirmed MINOR): the options scan followed a SYMLINKED
+partition FILE out of the lake — only the root + series-DIR probes existed,
+and `read_partition_frame` had NO containment check (the round-2 rail
+guarded only the write/unlink boundaries) — so the healer's consistent
+read followed the link and the copy-forward leg IMPORTED outside rows into
+an in-lake canonical file (that dest passed containment — its parent is a
+REAL series dir; probe-reproduced: outside close=666.0 landed in-lake,
+findings=1 healed=0 errors=1 on every sweep, permanently non-converging).
+Fixed at BOTH ends: per-file `is_symlink()` scan skip (same loud
+`symlink_skipped` event, counted `option_files_skipped`) + the source READ
+now runs `_assert_options_containment` under its locks (joins the two
+mutation legs under the round-2 rail); 3 regressions all verified failing
+pre-fix. Round-4 NITs: the "(O(1) fast path)" min/max shorthand (really
+two vectorized O(rows) scans) + the two remaining in-module singular
+sibling-read docstring copies reworded honestly; the reassignment months
+`sorted()` order was pinned only by fixture-order luck — a descending
+fixture now kills the surviving `sorted→list` mutant; the ledger #1482 F5
+new-event miscount corrected. HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
 deterministically (canonical/path-ordered-first wins, originals in
@@ -487,10 +504,35 @@ hostile-review pass._
   out-of-scope never read; a FLAGGED in-scope file costs sibling reads + auto-mode reassignment writes in its
   foreign rows' HOME months, possibly outside the span); this blurb's "ONE memoised per-series canonical-sibling
   read" singular was literally false for a multi-month stray — corrected to ONE read per affected month per series
-  (the ledger already said it right). Remaining
+  (the ledger already said it right). HOSTILE-REVIEW FOLDS (round 4, refuter-confirmed; the fix pre-fix-verified, the
+  NIT mutant re-applied + verified killed): (R4-1·MINOR) the options scanner followed a SYMLINKED PARTITION FILE out
+  of the lake — the round-1/round-2 probes checked only the `options/` ROOT + the series DIRS, never the
+  `<YYYY-MM>.parquet` itself, and `read_partition_frame` had NO containment check (the round-2 rail guarded only the
+  WRITE/unlink boundaries) — so a linked file was scanned, classified `OptionForeignMonthRows`, and healed: the
+  consistent read followed the link OUTSIDE the lake and the copy-forward leg IMPORTED the outside rows into an
+  in-lake canonical file (that dest PASSED containment — its parent is a REAL in-lake series dir) while the
+  source-removal leg was refused — probe-reproduced (outside `close=666.0` created in-lake; outside file
+  byte-identical; three consecutive sweeps each findings=1 healed=0 errors=1 — permanently non-converging, the L3
+  sentinel never stamps). Impact bounded (nothing outside the lake mutated; planting the symlink needs lake-write
+  access which equally permits planting a real parquet) — hence MINOR. FIXED at BOTH ends: the scan loop mirrors the
+  dir probes with a per-file `is_symlink()` skip (same loud `lake.invariant.symlink_skipped` event, counted
+  `option_files_skipped` — never scanned ⇒ never healed) + defense-in-depth, `read_partition_frame` runs
+  `_assert_options_containment` under its locks (the source READ joins the two mutation legs under the rail; refusal
+  = the same isolated counted `OptionWriterError`). Regressions (all 3 verified FAILING pre-fix):
+  `test_symlinked_partition_file_skipped` (scanner) + `TestMutationContainment.test_read_refuses_symlinked_partition_file`
+  (writer) + `TestOptionSymlinkContainment.test_symlinked_source_file_read_refused_never_imports_outside_rows` (the
+  probe verbatim as a file-level scan→heal TOCTOU — one isolated error, nothing imported, outside untouched, no
+  quarantine). (R4-2·NITs) the `_count_foreign_rows` "(O(1) fast path)" shorthand reworded (two VECTORIZED O(rows)
+  min/max scans — the win is skipping the O(rows) PYTHON loop, never O(1)); the round-3 singular-sibling-read honesty
+  fix propagated to the two remaining in-module `lake_invariants.py` docstring copies (module header +
+  `scan_lake_invariants`); the reassignment months `sorted(rows_by_month)` was pinned only by fixture-order luck (the
+  F3 test plants May before July — a `sorted→list` mutant SURVIVED it): NEW
+  `test_option_reassign_months_sorted_not_insertion_order` plants July physically FIRST and pins the ascending
+  audit/log `months` list (mutant re-applied + verified KILLED while the F3 test still passed under it); the ledger
+  #1482 F5 clause's new-log-event miscount corrected in place. Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (439/148) + `option_parquet_writer.py`
-  (155/30) + `lake_heal.py` (589/164) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (443/150) + `option_parquet_writer.py`
+  (156/30) + `lake_heal.py` (589/164) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

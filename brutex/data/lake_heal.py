@@ -915,12 +915,15 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     column routes as-if-UTC instead of crashing the batch —
     ``PartitionError`` is NOT in ``_PER_FINDING_HEAL_ERRORS``); removal keys
     are the RAW stored tuples. A wholly-foreign file is quarantine-MOVED by
-    the writer. Both mutation legs run under the writer's symlink-containment
-    rail (``OptionParquetWriter._assert_options_containment``, the round-2
-    TOCTOU fold): a series dir swapped to a symlink between scan and heal is
-    REFUSED with :class:`OptionWriterError` — a member of
-    ``_PER_FINDING_HEAL_ERRORS``, so the refusal is an isolated counted error
-    and nothing outside the lake is ever mutated. No catalog (the options
+    the writer. The source consistent read AND both mutation legs run under
+    the writer's symlink-containment rail
+    (``OptionParquetWriter._assert_options_containment``, the round-2 TOCTOU
+    fold + the round-4 read fold): a series dir OR partition file swapped to
+    a symlink between scan and heal is REFUSED with
+    :class:`OptionWriterError` — a member of ``_PER_FINDING_HEAL_ERRORS``, so
+    the refusal is an isolated counted error, nothing outside the lake is
+    ever mutated, and (round-4) outside rows are never IMPORTED into an
+    in-lake canonical file through a followed source read. No catalog (the options
     tree is uncatalogued), no ``state.touch`` (NOTHING derives from
     ``options/`` — recall stays ``None``), ``conflicts=0`` honestly (option
     vendor-drift detection is the writer's own deferred follow-up — no
@@ -945,6 +948,9 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     for idx, ts in enumerate(stamps):
         rows_by_month.setdefault(partition_for_timestamp(utc_aware(ts)), []).append(idx)
     added = 0
+    # ASCENDING month order — deterministic merge order + audit/log `months`
+    # list regardless of physical row order (round-4 NIT: pinned by a
+    # descending-fixture regression, not fixture-order luck).
     target_months = sorted(rows_by_month)
     for target in target_months:
         group = foreign[rows_by_month[target]]

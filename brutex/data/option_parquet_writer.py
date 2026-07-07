@@ -33,14 +33,16 @@ RAW keyed removal + the wholly-removed quarantine-MOVE),
 :meth:`OptionParquetWriter.read_partition_frame` (the healer's truthful raw
 consistent read) and :meth:`OptionParquetWriter.merge_partition_frame` (the
 reassignment's keep-first write-home entry) — all through the SAME lock stack
-as :meth:`OptionParquetWriter.write`. BOTH heal-side mutation entries enforce
-the symlink-containment rail (:meth:`OptionParquetWriter._assert_options_containment`,
-hostile-review round-2 MAJOR fold): the RESOLVED destination must stay inside
-``<lake_root>/options/`` or the mutation is REFUSED with
+as :meth:`OptionParquetWriter.write`. ALL THREE heal-side entries — the
+source read (:meth:`read_partition_frame`, round-4 fold) and both mutations —
+enforce the symlink-containment rail
+(:meth:`OptionParquetWriter._assert_options_containment`, hostile-review
+round-2 MAJOR fold): the RESOLVED path must stay inside
+``<lake_root>/options/`` or the call is REFUSED with
 :class:`OptionWriterError` — the scan-time symlink skip alone is bypassable
-(a symlinked ``options/`` root, or a series dir swapped to a symlink between
-scan and heal), and only a heal-time check on the resolved path closes that
-window.
+(a symlinked ``options/`` root, a series dir OR partition file swapped to a
+symlink between scan and heal), and only a heal-time check on the resolved
+path closes that window.
 """
 
 from __future__ import annotations
@@ -287,7 +289,12 @@ class OptionParquetWriter:
         return self._merge_frame_locked(dest, lambda: frame, containment=True)
 
     def _assert_options_containment(self, dest: Path) -> None:
-        """Refuse a heal-side mutation whose RESOLVED *dest* escapes ``<lake_root>/options/``.
+        """Refuse a heal-side call whose RESOLVED *dest* escapes ``<lake_root>/options/``.
+
+        Guards BOTH the two heal-side mutation entries AND the healer's source
+        consistent read (:meth:`read_partition_frame`, round-4 fold — a
+        followed read imports outside rows into the lake via the copy-forward
+        leg even when every WRITE stays contained).
 
         The mutation-boundary symlink rail (hostile-review round-2 MAJOR,
         DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): the scanner's ``is_symlink()``
@@ -442,6 +449,13 @@ class OptionParquetWriter:
         read-modify-write; a vanished/corrupt file raises the quarantinable
         :class:`OptionWriterError`. Deliberately NO keep-first collapse here —
         the healer dedups explicitly, keeping this method a truthful raw read.
+        Enforces the symlink-containment rail too (round-4 fold): a read is
+        not a mutation, but it is the reassignment heal's INPUT — pre-fix a
+        symlinked source partition FILE was followed OUTSIDE the lake and the
+        copy-forward leg IMPORTED the outside rows into an in-lake canonical
+        file (``dest.parent`` is a REAL series dir, so the write-leg rail
+        passed); refusing at the read (:class:`OptionWriterError`, isolated
+        counted error) keeps outside bytes out of the lake entirely.
         """
         import io
 
@@ -451,6 +465,7 @@ class OptionParquetWriter:
             _PARTITION_LOCKS.acquire(dest),
             partition_write_lock(self._lake_root, dest),
         ):
+            self._assert_options_containment(dest)
             try:
                 return pl.read_parquet(io.BytesIO(dest.read_bytes()))
             except parquet_read_skip_errors() as exc:

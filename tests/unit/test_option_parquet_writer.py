@@ -1087,6 +1087,25 @@ class TestMutationContainment:
         stored = pl.read_parquet(real / "options" / "SERIES" / "2021-01.parquet")
         assert stored["side"].to_list() == ["CE", "PE"]
 
+    def test_read_refuses_symlinked_partition_file(self, tmp_path: Path) -> None:
+        """Round-4 MINOR (refuter-confirmed): the healer's source READ must not
+        follow a symlinked partition file out of the lake — pre-fix
+        ``read_partition_frame`` had NO containment check, so the reassignment
+        heal read the OUTSIDE rows and its copy-forward leg imported them into
+        an in-lake canonical file (that dest's parent is a REAL series dir, so
+        the write-leg rail passed). Refused at the read instead; the outside
+        file is byte-untouched."""
+        outside_series = self._outside_series(tmp_path)
+        outside_file = outside_series / "2021-01.parquet"
+        outside_bytes = outside_file.read_bytes()
+        lake = tmp_path / "lake"
+        (lake / "options" / "SERIES").mkdir(parents=True)
+        src = lake / "options" / "SERIES" / "2021-01.parquet"
+        src.symlink_to(outside_file)
+        with pytest.raises(OptionWriterError, match="outside the options tree"):
+            OptionParquetWriter(lake_root=lake).read_partition_frame(src)
+        assert outside_file.read_bytes() == outside_bytes
+
     def test_heal_refuses_symlinked_partition_file(self, tmp_path: Path) -> None:
         """A file-level symlink resolves to its target's parent — refused too
         (``heal_partition`` unlinks/rewrites ``dest`` itself)."""

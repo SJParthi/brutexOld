@@ -949,6 +949,32 @@ class TestOptionForeignScan:
         assert len(skips) == 1
         assert skips[0]["path"] == str(lake / "options")
 
+    def test_symlinked_partition_file_skipped(self, tmp_path: Path) -> None:
+        """Round-4 MINOR regression (refuter-confirmed, empirically probed):
+        the root + series-dir probes never checked the PARTITION FILE — a
+        symlinked ``<YYYY-MM>.parquet`` pointing OUTSIDE the lake was scanned,
+        classified ``OptionForeignMonthRows``, and handed to the healer, whose
+        source read followed the link and IMPORTED the outside rows into an
+        in-lake canonical file (the write-leg containment passed because
+        ``dest.parent`` is a REAL in-lake series dir) while the source removal
+        was refused — findings=1 healed=0 errors=1 on every sweep, permanently
+        non-converging. Never scanned ⇒ never healed; skipped loudly, the
+        sibling REAL file still scanned."""
+        outside = tmp_path / "outside"
+        # Outside bytes: a Feb-2021 row under a Jan-2021 name (foreign pre-fix).
+        _plant_option_raw(outside / "2021-01.parquet", [("CE", _ts(1, year=2021, month=2, day=2))])
+        lake = tmp_path / "lake"
+        series = lake / "options" / "SERIES"
+        _plant_option_raw(series / "2021-03.parquet", [("CE", _ts(0, year=2021, month=3))])
+        (series / "2021-01.parquet").symlink_to(outside / "2021-01.parquet")
+        with capture_logs() as logs:
+            report = scan_lake_invariants(lake)
+        assert report.findings == ()  # the linked file is never classified
+        assert report.option_files_scanned == 1  # the REAL sibling only
+        assert report.option_files_skipped == 1  # counted, mass-rail honest
+        skips = _events(logs, "lake.invariant.symlink_skipped")
+        assert [s["path"] for s in skips] == [str(series / "2021-01.parquet")]
+
     def test_no_scope_unparsable_name_still_dup_scanned(self, tmp_path: Path) -> None:
         # Today's behaviour pinned: without a months scope an unparsable-name
         # file is still dup-scanned (home=None → foreign abstains).

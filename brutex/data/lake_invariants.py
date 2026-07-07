@@ -26,7 +26,9 @@ never does.
 file O(footer + ONE key-column read) — the column read scales with the file's
 ROW COUNT, so this is NOT O(1). L2 bounds it by coordinates × months; L3 pays
 the full O(files) once per lake content token. A file with foreign rows costs
-one extra targeted read of its canonical sibling to split ``overlap_rows``.
+one extra targeted read PER AFFECTED canonical month sibling (memoised per
+series — a multi-month stray pays one read per home month, the round-3
+honesty wording) to split ``overlap_rows``.
 
 This module must NOT import ``catalog_reconcile`` (which imports THIS module
 for its free L1 piggyback) or ``lake_heal`` (which imports this module) —
@@ -271,11 +273,13 @@ def is_foreign_timestamp(home: tuple[int, int], ts: object) -> bool:
 
 
 def _count_foreign_rows(home: tuple[int, int], timestamps: pl.Series) -> int:
-    """Count ROWS whose UTC month differs from the *home* month (O(1) fast path).
+    """Count ROWS whose UTC month differs from the *home* month (clean-file fast path).
 
     Months are contiguous time intervals, so when the column's min AND max both
-    route to *home* every row between them does too — a clean file never pays
-    the O(rows) Python loop. A null timestamp (only plantable by hand)
+    route to *home* every row between them does too — a clean file pays only
+    the two VECTORIZED columnar min/max scans (O(rows), NOT O(1) — the win is
+    skipping the O(rows) PYTHON loop below, honest shorthand per Golden Rule
+    #10). A null timestamp (only plantable by hand)
     abstains: it carries no month to route. Shared by the bars AND options
     classifiers (the ONLY coordinate fields either ever used are the
     ``(year, month)`` pair — DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
@@ -785,7 +789,9 @@ def scan_lake_invariants(
     ROW COUNT, so this is NOT O(1); L2 bounds it by coordinates × *months*, L3
     pays the full O(files) once per lake content token. At most ONE read call
     per file in the clean case (spy-pinned); a file with foreign rows costs one
-    extra targeted read of its canonical sibling to split ``overlap_rows``.
+    extra targeted read per AFFECTED canonical month sibling (memoised per
+    series — a multi-month stray pays one read per home month) to split
+    ``overlap_rows``.
     *per_file_pause* runs after every file read — including a failed/skipped
     read and the targeted canonical read (the L3 throttle seam). An unreadable
     file → :func:`~brutex.data.errors.parquet_read_skip_errors` skip + a
@@ -927,12 +933,13 @@ def scan_lake_invariants(
             # unrecognized series dir is still checked (Golden Rule #1). A
             # SYMLINKED series dir is skipped LOUDLY (hostile-review fold):
             # the healer's primitives unlink/rmdir/create INSIDE a series
-            # dir. HONEST (round-2): this scan-time probe is best-effort
-            # only — it is defeated by a symlinked options ROOT (guarded
-            # above) and by a dir swapped to a symlink AFTER the scan
-            # (TOCTOU). The ENFORCEMENT lives at the writer's mutation
-            # boundary: ``OptionParquetWriter._assert_options_containment``
-            # refuses any heal-side write/unlink whose RESOLVED destination
+            # dir; a SYMLINKED partition FILE is skipped loudly too (round-4
+            # fold — see the per-file probe below). HONEST (round-2): these
+            # scan-time probes are best-effort only — defeated by a symlinked
+            # options ROOT (guarded above) and by a path swapped to a symlink
+            # AFTER the scan (TOCTOU). The ENFORCEMENT lives at the writer's
+            # heal-side boundary: ``OptionParquetWriter._assert_options_containment``
+            # refuses any heal-side read/write/unlink whose RESOLVED path
             # escapes ``<lake_root>/options/``, at heal time.
             for series_dir in sorted(p for p in options_root.iterdir() if p.is_dir()):
                 if series_dir.is_symlink():
@@ -943,6 +950,23 @@ def scan_lake_invariants(
                 ] = {}
                 pending_option_overlap: list[tuple[int, set[tuple[str | None, datetime]]]] = []
                 for path in sorted(series_dir.glob("*.parquet")):
+                    if path.is_symlink():
+                        # Round-4 MINOR fold (refuter-confirmed): the root +
+                        # series-dir probes above never check the PARTITION
+                        # FILE itself — a symlinked <YYYY-MM>.parquet was
+                        # scanned, classified OptionForeignMonthRows, and
+                        # handed to the healer, whose consistent read followed
+                        # the link OUTSIDE the lake; the copy-forward leg then
+                        # IMPORTED the outside rows into an in-lake canonical
+                        # file (dest.parent is a REAL series dir, so the
+                        # write-leg containment passed) while the source
+                        # removal was refused — a permanently non-converging
+                        # finding. Never scanned ⇒ never healed; skipped
+                        # loudly like the dir probes (the writer's
+                        # read/mutation containment is the TOCTOU-safe rail).
+                        _LOG.warning("lake.invariant.symlink_skipped", path=str(path))
+                        option_files_skipped += 1
+                        continue
                     home = _option_file_month(path)
                     if month_scope is not None and (home is None or home not in month_scope):
                         continue  # the L2 scope bound — never read (bars precedent)

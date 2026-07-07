@@ -1496,6 +1496,61 @@ class TestOptionForeignHeal:
         assert reassigned[0]["moved"] == 2
         assert scan_lake_invariants(lake).findings == ()  # nothing lost, nothing left
 
+    def test_option_reassign_months_sorted_not_insertion_order(self, tmp_path: Path) -> None:
+        """Round-4 NIT (surviving-mutant kill): the two-destination-month test
+        above plants May physically BEFORE July, so the ``rows_by_month`` dict
+        insertion order already equals sorted order and a
+        ``sorted(rows_by_month)`` → ``list(rows_by_month)`` mutant survived on
+        fixture-order luck. Here the July stray comes physically FIRST — the
+        audit + log ``months`` list must still be ASCENDING (deterministic,
+        order-independent; CLAUDE.md §2 Rule 7)."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        series_dir = _opt_series_dir(lake)
+        june = series_dir / "2024-06.parquet"
+        june_df = pl.read_parquet(june)
+        july_stray = june_df[0:1].with_columns(
+            pl.lit(_ts(2, month=7, day=2)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit(77.0).alias("close"),
+        )
+        may_stray = june_df[0:1].with_columns(
+            pl.lit(_ts(1, month=5, day=2)).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit(66.0).alias("close"),
+        )
+        pl.concat([june_df, july_stray, may_stray]).write_parquet(june)  # July FIRST
+        audit = _FakeAudit()
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                audit=audit,
+                recall=False,
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.errors == 0
+        (line,) = audit.lines
+        payload = line[2]
+        assert payload is not None
+        assert payload["months"] == ["2024-05", "2024-07"]  # SORTED, not insertion order
+        reassigned = _events(logs, "lake_heal.rows_reassigned")
+        assert reassigned[0]["months"] == ["2024-05", "2024-07"]
+        assert pl.read_parquet(series_dir / "2024-05.parquet")["close"].to_list() == [66.0]
+        assert pl.read_parquet(series_dir / "2024-07.parquet")["close"].to_list() == [77.0]
+        assert scan_lake_invariants(lake).findings == ()
+
     def test_option_wholly_foreign_file_quarantine_moved(self, tmp_path: Path) -> None:
         """Every row foreign ⇒ source unlinked, rows home, kept=0; the series
         dir is NOT pruned — the destination lives in it (the writer-level
@@ -1987,6 +2042,64 @@ class TestOptionSymlinkContainment:
         errors = _events(logs, "lake_heal.partition_error")
         assert len(errors) == 2
         assert all("outside the options tree" in str(e["error"]) for e in errors)
+
+    def test_symlinked_source_file_read_refused_never_imports_outside_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-4 MINOR (refuter-confirmed, empirically probed): the FILE-level
+        TOCTOU twin of the series-dir swap above (at scan time the scanner's
+        per-file ``is_symlink()`` probe now skips a linked file outright).
+        Pre-fix ``read_partition_frame`` had NO containment rail: the healer
+        read the OUTSIDE file through the link, routed ITS foreign rows, and
+        the copy-forward leg CREATED an in-lake canonical file carrying the
+        outside rows — that dest PASSED the write-leg rail because its parent
+        is the REAL in-lake series dir — while the source-removal leg was
+        refused: outside ``close=666.0`` landed INSIDE the lake and the
+        finding never converged (findings=1 healed=0 errors=1 on every sweep).
+        Now the READ itself is refused — one isolated counted error, nothing
+        imported, outside bytes untouched, no quarantine dir."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, _july = _poison_option_foreign(lake)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        # The TOCTOU swap: AFTER the scan the June FILE becomes a symlink to an
+        # outside file whose row routes to August (a month with no in-lake file).
+        outside = tmp_path / "outside-lake"
+        aug_ts = _ts(3, month=8, day=1)
+        OptionParquetWriter(lake_root=outside).merge_partition_frame(
+            outside / "options" / "SERIES" / "2024-06.parquet",
+            pl.DataFrame(
+                {
+                    "side": pl.Series(["CE"], dtype=pl.Utf8),
+                    "timestamp": pl.Series([aug_ts], dtype=pl.Datetime("us", "UTC")),
+                    "close": pl.Series([666.0], dtype=pl.Float64),
+                }
+            ),
+        )
+        outside_file = outside / "options" / "SERIES" / "2024-06.parquet"
+        outside_bytes = outside_file.read_bytes()
+        june.unlink()
+        june.symlink_to(outside_file)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 1  # refused at the READ — isolated, counted
+        assert report.healed == 0
+        assert not (june.parent / "2024-08.parquet").exists()  # nothing imported
+        assert outside_file.read_bytes() == outside_bytes  # outside byte-untouched
+        assert not (lake / ".quarantine").exists()
+        errors = _events(logs, "lake_heal.partition_error")
+        assert len(errors) == 1
+        assert "outside the options tree" in str(errors[0]["error"])
 
 
 # ── heal order + idempotent re-run + failure envelopes ─────────────────────
