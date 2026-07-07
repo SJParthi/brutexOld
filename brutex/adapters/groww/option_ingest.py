@@ -58,6 +58,7 @@ validation needs real expiries.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -67,6 +68,10 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import (
+    AllFilteredBreaker,
+    resolve_all_filtered_breaker,
+)
 from brutex.adapters.empty_circuit_breaker import (
     EmptySettleBreaker,
     MassEmptySettleHalt,
@@ -408,6 +413,7 @@ def ingest_option_contract(
     fetch_pipeline: FetchPipeline | None = None,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
@@ -581,6 +587,7 @@ def ingest_option_contract(
                         bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
+                        pull_id=pull_id,
                     )
                 _LOG.warning(
                     "option.ingest.window.transient",
@@ -707,6 +714,7 @@ def ingest_option_contract(
             fields=fields,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             write_breaker=write_breaker,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
@@ -732,6 +740,7 @@ def ingest_option_contract(
             fields=fields,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             write_breaker=write_breaker,
         )
         if result_report.still_failed_windows:
@@ -795,6 +804,7 @@ def _process_option_window_tail(
     fields: dict[str, str],
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
 ) -> IngestReport:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
@@ -893,6 +903,40 @@ def _process_option_window_tail(
         },
     )
     all_filtered = interval != _DAILY and all_boundary_filtered
+    # Mass ALL-FILTERED breaker feed (DEC-ALLFILTERED-MASS-BREAKER-001 — the spot-tail
+    # twin): observe every ELIGIBLE window's boundary verdict. Eligibility matches the
+    # F&O demotion's own gate — ``interval != _DAILY`` + raw-bars>0 (deliberately
+    # UNgated on ``detect_completeness_gaps``, exactly like the :``all_filtered``
+    # demotion below: the F&O dry-run client returns EMPTY payloads, so
+    # ``raw_bars == 0`` makes a dry-run window ineligible by construction). Observe
+    # BEFORE the record below — the trip-crossing window suppresses ITSELF through
+    # the record-time ``allow_degraded_settle`` re-check (evaluated inside
+    # ``record()`` UNDER the ledger lock, serialized with the trip's rescind —
+    # review round 1 TOCTOU closure). The series is keyed on the UNDERLYING, not
+    # the contract (review round 2 — the ``health_key`` grouping precedent above):
+    # one weird underlying's CE/PE chain spans dozens-to-hundreds of contract
+    # symbols, so a per-CONTRACT key crossed the SPREAD floor at the 10th strike
+    # and fired the vendor-wide alarm off a single-underlying event; keyed per
+    # underlying the whole chain is ONE series — structurally below the floor,
+    # the selectivity the breaker documents for BOTH spines. A blank underlying
+    # falls back to the contract symbol so the key is never empty.
+    af_eligible = interval != _DAILY and len(raw_bars) > 0
+    if all_filtered_breaker is not None and af_eligible:
+        af_series = f"{contract.underlying_symbol or contract.symbol}:{interval}"
+        if all_filtered_breaker.observe(
+            af_series,
+            all_filtered=all_boundary_filtered,
+            window_start=key.start.isoformat(),
+            window_end=key.end.isoformat(),
+        ):
+            # The trip TRANSITION (exactly once per pull): rescind + ONE loud alarm
+            # via the COMMON emit both spines share (lazy import at trip time).
+            from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+            rescinded = ledger.rescind_all_filtered_settles() if ledger is not None else 0
+            emit_mass_all_filtered_alert(
+                all_filtered_breaker.trip_snapshot(), rescinded=rescinded, pull_id=pull_id
+            )
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -932,6 +976,7 @@ def _process_option_window_tail(
                 bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
+                pull_id=pull_id,
             )
         # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
         # ledger row is durably FAILED (so the deferred window is never lost even if the
@@ -969,6 +1014,20 @@ def _process_option_window_tail(
             settled=settle_empty,
             **fields,
         )
+    # Mass ALL-FILTERED suppression seam (DEC-ALLFILTERED-MASS-BREAKER-001): the
+    # breaker is handed to ``record()`` as its ``allow_degraded_settle`` callable
+    # and consulted INSIDE the ledger lock — NEVER pre-computed in this tail (the
+    # review-round-1 TOCTOU fix, sharpest on THIS spine: the old tail-time boolean
+    # was computed BEFORE the 90 s-bounded durable write above, so a sibling
+    # trip + one-shot rescind landing during the write let this window settle
+    # SKIPPED un-rescinded; the record-time re-check is serialized with the
+    # rescind on the ledger lock, so the settle is now suppressed or rescinded,
+    # never leaked).
+    af_allow_settle: Callable[[], bool] | None = (
+        all_filtered_breaker.allow_settle
+        if all_filtered and all_filtered_breaker is not None
+        else None
+    )
     if ledger is not None:
         ledger.record(
             key,
@@ -999,6 +1058,11 @@ def _process_option_window_tail(
             degraded_reason=ALL_FILTERED if all_filtered else None,
             old_window=raw.old_window,
             suppress_settle=suppress_settle,
+            # Mass ALL-FILTERED suppression (DEC-ALLFILTERED-MASS-BREAKER-001): while
+            # the per-pull breaker is tripped an ALL_FILTERED record neither bumps
+            # the streak nor settles — FAILED + re-pullable, never quietly absorbed.
+            allow_degraded_settle=af_allow_settle,
+            pull_id=pull_id,
         )
     # Observe-only (DEC-PARTIAL-WINDOW-DETECT-001): for a FUTURES window only (options are
     # excluded — sparsity near expiry is indistinguishable from truncation), WARN if its
@@ -1631,6 +1695,7 @@ def reconcile_fno_ledger_windows(
     contract_windows: ContractWindows | None = None,
     now: datetime | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for every F&O window the lake already ENCLOSES — **pure** cold-start.
 
@@ -1664,6 +1729,14 @@ def reconcile_fno_ledger_windows(
     *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans` shape (spot
     AND FNO partitions in one read). *now* stamps the seeded rows; *now_ist* injects the
     current-day clamp clock so the reconcile key equals the plan/fetch key deterministically.
+
+    *observed* (DEC-SEED-OBSERVED-OVERLAY-001) is the per-pull observed-sessions
+    drift overlay, threaded for SYMMETRY with the spot reconcile — **documented
+    INERT today**: the F&O cold-start reads its spans WITHOUT ``session_dates``
+    (``load_lake_spans(lake_root)`` — no ``session_date_segments``), so the
+    seed's interior-gap continuity gate never fires on this path and a non-empty
+    overlay is byte-identical (test-pinned). The pre-wiring exists so a future
+    F&O density-gate enablement cannot silently diverge from the spot seed.
     """
     stamp = now if now is not None else datetime.now(UTC)
     now_for_clamp = (now_ist or _now_ist)()
@@ -1680,7 +1753,7 @@ def reconcile_fno_ledger_windows(
     # The live-edge guard's "today" is the SAME injected IST clamp clock the key
     # derivation uses, so reconcile == plan == fetch stays deterministic offline.
     return seed_enclosed_windows(
-        ledger, span_index, candidates, now=stamp, today_ist=now_for_clamp.date()
+        ledger, span_index, candidates, now=stamp, today_ist=now_for_clamp.date(), observed=observed
     )
 
 
@@ -1696,6 +1769,7 @@ def reconcile_fno_ledger_with_lake(
     contract_windows: ContractWindows | None = None,
     now: datetime | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Load the lake spans + seed the F&O ledger cold-start (the wired entry point).
 
@@ -1721,6 +1795,7 @@ def reconcile_fno_ledger_with_lake(
         contract_windows=contract_windows,
         now=now,
         now_ist=now_ist,
+        observed=observed,
     )
 
 
@@ -1848,6 +1923,7 @@ def run_groww_option_ingest(
     fetch_pipeline: FetchPipeline | None = None,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     breaker_health_probe: Callable[[], bool] | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
@@ -1974,6 +2050,16 @@ def run_groww_option_ingest(
     whole-chain empty burst (the proven M&M-``&`` shape) still trips (Golden
     Rule #10: the residual false-positive budget on genuinely-illiquid in-band
     chains rides on the env-tunable thresholds, not a silent exclusion).
+    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001): ``None`` (the
+    default — every production caller) resolves a FRESH env-configured
+    :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker` for THIS
+    pass, shared by every contract's window tails, so a vendor-day mass
+    all-filtered event SUPPRESSES further ``ALL_FILTERED`` SKIPPED-settles +
+    auto-rescinds the same-pull pre-trip ones + emits ONE count-naming alarm —
+    deliberately NOT a pull stop (the fetch/storage lanes stay unpoisoned; the
+    windows stay FAILED + re-pullable). Per-pass construction means breaker
+    state can never leak across pulls. Tests inject a configured instance.
+
     *breaker_health_probe* (DEC-EMPTY-BREAKER-CANARY-001) threads the resolved
     breaker's vendor-health canary: consulted ONCE, single-flight, when a trip
     rule first fires — a HEALTHY canary (data returned) means the mass empties
@@ -2038,6 +2124,15 @@ def run_groww_option_ingest(
             # trip-halts-immediately behaviour byte-identical.
             health_probe=breaker_health_probe,
         )
+    )
+    # One mass ALL-FILTERED breaker per PASS (DEC-ALLFILTERED-MASS-BREAKER-001),
+    # mirroring the mass-EMPTY breaker above: all contracts of this pass share ONE
+    # counter (a vendor-day timestamp bug empties every chain's boundary at once)
+    # and a fresh pass/pull always starts clean (Golden Rule #7). A mixed spot+F&O
+    # pipeline run gets one breaker PER PHASE — up to one alarm per phase
+    # (documented, deliberate: no cross-phase plumbing).
+    af_breaker = (
+        all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
     )
     # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
     # empty breaker above: all contracts share ONE per-partition defer accounting (a
@@ -2140,6 +2235,7 @@ def run_groww_option_ingest(
                 fetch_pipeline=fetch_pipeline,
                 observed_holidays=observed_holidays,
                 empty_breaker=breaker,
+                all_filtered_breaker=af_breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
                 form_preference=preference,

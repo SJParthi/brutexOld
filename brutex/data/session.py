@@ -32,6 +32,16 @@ Applied at the **pull/ingest boundary** (before the lake write) so bad
 bars never enter the lake — and reused by every write path (CLAUDE.md §11
 COMMON). The resamplers derive every timeframe from the stored (already
 boundary-filtered) 1-minute, so this single choke point covers all 21 TFs.
+
+**Observed-overlay stance (DEC-SEED-OBSERVED-OVERLAY-001, deliberate
+non-change):** :func:`filter_to_trading_session` stays overlay-BLIND — it
+judges via the plain derived calendar, never the
+DEC-CALENDAR-OBSERVED-SESSIONS-001 drift overlay. The overlay is remove-only,
+date-granular, evidence-gated on ZERO-bar days, and SELF-HEALING: a vendor bar
+arriving on an overlaid day is exactly the evidence that heals the stale
+entry, so an overlay-aware filter would drop the very bars that prove the
+entry stale and wedge the healer. The overlay reaches ONLY the completeness
+detectors + the cold-start seed continuity gate.
 """
 
 from __future__ import annotations
@@ -257,6 +267,11 @@ def filter_to_trading_session(bars: Sequence[CandleBar]) -> SessionFilterResult:
                 off_session += 1
             continue
         if ist_date not in session_by_date:
+            # Deliberately the PLAIN get_session — never the observed overlay
+            # (DEC-SEED-OBSERVED-OVERLAY-001 stance pin, module docstring): the
+            # remove-only self-healing overlay is healed BY bars arriving on an
+            # overlaid day, so an overlay-aware filter would drop the healing
+            # evidence itself.
             session_by_date[ist_date] = get_session(ist_date)
         session = session_by_date[ist_date]
         if session is None:

@@ -25,6 +25,7 @@ from brutex.data.errors import LakeWriteHalt
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.partition_lock import partition_lock_path
 from brutex.data.window_ledger import (
+    ALL_FILTERED_MASS_RESCINDED,
     EMPTY_TERMINAL_THRESHOLD,
     FAILED,
     PLANNED,
@@ -1583,8 +1584,9 @@ def _row(
     bars: int = 5,
     bars_net_new: int | None = None,
     last_error: str | None = None,
+    streak_provenance: str | None = None,
 ) -> LedgerRow:
-    """One serialised ledger row (the exact 14-field ``to_rows`` shape)."""
+    """One serialised ledger row (the exact 15-field ``to_rows`` shape)."""
     return (
         "dhan",
         security,
@@ -1600,6 +1602,7 @@ def _row(
         0,
         1,
         bars_net_new,
+        streak_provenance,
     )
 
 
@@ -2714,8 +2717,9 @@ class TestBarsNetNewBackwardCompat:
         assert by_symbol["SENSEX"].bars_net_new is None
 
     def test_schema_pin_column_order_and_names(self, tmp_path: Path) -> None:
-        # The on-disk schema is FIXED: bars_net_new is the LAST column, after
-        # in_pull_fetches (the append-LAST back-compat contract).
+        # The on-disk schema is FIXED: streak_provenance is the LAST column
+        # (DEC-STREAK-PROVENANCE-001 — the sanctioned pin evolution), after
+        # bars_net_new at index 13 (each optional column append-LAST in turn).
         import pyarrow.parquet as pq
 
         ledger = WindowLedger()
@@ -2739,7 +2743,9 @@ class TestBarsNetNewBackwardCompat:
             "empty_streak",
             "in_pull_fetches",
             "bars_net_new",
+            "streak_provenance",
         ]
+        assert names.index("bars_net_new") == 13
 
     def test_merge_rows_prefer_by_leading_fields_regardless_of_net_new(self) -> None:
         # merge_ledger_rows is arity-safe with the 14th field: same-key conflict
@@ -2749,3 +2755,271 @@ class TestBarsNetNewBackwardCompat:
         newer = _row(last_attempt="2026-06-08T13:00:00+00:00", bars_net_new=9)
         assert merge_ledger_rows([older], [newer]) == [newer]
         assert merge_ledger_rows([newer], [older]) == [newer]
+
+
+class TestStreakProvenanceBackwardCompat:
+    """DEC-STREAK-PROVENANCE-001: ``streak_provenance`` follows the exact
+    optional-column template — appended LAST, absent column loads as an honest
+    ``None`` (NEVER a fabricated ``""``), new files round-trip the string."""
+
+    def test_derive_streak_provenance_is_always_none(self) -> None:
+        from brutex.data import window_ledger_store as store_module
+
+        derive = (
+            store_module._derive_streak_provenance  # pyright: ignore[reportPrivateUsage] — friend seam
+        )
+        assert derive() is None
+
+    def test_core_11_column_parquet_loads_provenance_none(self, tmp_path: Path) -> None:
+        # A PRE-R1 file (core 11 columns only) loads every optional column
+        # derived — the lineage is honestly UNKNOWN, never a fabricated "".
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["NIFTY"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SUCCESS],
+                "bars": [5],
+                "attempts": [1],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+            },
+        )
+        ledger = load_window_ledger(tmp_path)
+        assert ledger.count == 1
+        assert ledger.records()[0].streak_provenance is None
+
+    def test_14_column_parquet_loads_provenance_none(self, tmp_path: Path) -> None:
+        # A #1294-era file (14 columns — bars_net_new present, NO provenance).
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["NIFTY"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SKIPPED],
+                "bars": [0],
+                "attempts": [3],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                "empty_streak": [3],
+                "in_pull_fetches": [1],
+                "bars_net_new": [None],
+            },
+        )
+        ledger = load_window_ledger(tmp_path)
+        rec = ledger.records()[0]
+        assert rec.streak_provenance is None
+        assert rec.bars_net_new is None
+        assert rec.empty_streak == 3  # every other column intact
+
+    def test_new_round_trip_carries_the_lineage_string(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1")
+        ledger.record(_key("SENSEX"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()
+        by_sym = {r.security_id: r for r in restored.records()}
+        assert by_sym["NIFTY"].streak_provenance == "EMPTY@p1"
+        assert by_sym["SENSEX"].streak_provenance == ""  # "" round-trips, not None
+
+    def test_new_round_trip_preserves_a_null_provenance_cell(self, tmp_path: Path) -> None:
+        # A NEW file can carry a NULL provenance (a settle_known_gap on an absent
+        # prior) — it round-trips as None, never a fabricated "".
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.records()[0].streak_provenance is None
+        assert restored.to_rows() == ledger.to_rows()
+
+    def test_mixed_old_and_new_rows_merge_on_save(self, tmp_path: Path) -> None:
+        # An OLD-format file on disk (no provenance column) merges with a NEW
+        # in-memory ledger: the disk row keeps its honest None, the new row its
+        # lineage — the full-row tiebreak tolerates the nullable trailing cell.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["SENSEX"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SUCCESS],
+                "bars": [7],
+                "attempts": [1],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+            },
+        )
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="p1"
+        )
+        save_window_ledger(ledger, tmp_path)
+        by_symbol = {r.security_id: r for r in load_window_ledger(tmp_path).records()}
+        assert by_symbol["NIFTY"].streak_provenance == "EMPTY@p1"
+        assert by_symbol["SENSEX"].streak_provenance is None
+
+    def test_migrated_legacy_sidecar_rows_read_none(self, tmp_path: Path) -> None:
+        # The one-shot window_status.json migration derives the honest None too.
+        log = WindowStatusLog()
+        log.record(_key("NIFTY"), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        save_window_status(log, tmp_path)
+        ledger = load_or_migrate_window_ledger(tmp_path)
+        assert ledger.records()[0].streak_provenance is None
+
+    def test_delta_append_and_fold_carry_the_column(self, tmp_path: Path) -> None:
+        # The O(dirty) mid-pull delta rides the SAME 15-col schema + fold.
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="d1")
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        restored = load_window_ledger(tmp_path)  # base-less delta-only fold
+        assert restored.records()[0].streak_provenance == "EMPTY@d1"
+
+
+class TestRescindSurvivesMidPullFlush:
+    """DEC-ALLFILTERED-MASS-BREAKER-001 edge 7: a pre-trip SKIPPED settle flushed
+    to disk MID-pull must not resurrect over the rescinded FAILED on the pull-end
+    merge-on-save (the `_reopened` + `_degraded` tombstones carry the rescind)."""
+
+    def test_rescind_beats_a_flushed_skipped_on_the_merge(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        for i in range(EMPTY_TERMINAL_THRESHOLD):
+            ledger.record(
+                _key(),
+                raw_bars=3,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="ALL_FILTERED",
+                pull_id=f"p{i}",
+            )
+        assert ledger.records()[0].status == SKIPPED
+        # Mid-pull checkpoint flushes the SKIPPED row durably (the make_locked_flush
+        # shape — a delta append of the dirty row).
+        assert append_ledger_delta(ledger, tmp_path) == 1
+        assert load_window_ledger(tmp_path).records()[0].status == SKIPPED
+        # The breaker trips → the same-pull settle is rescinded in memory…
+        assert ledger.rescind_all_filtered_settles() == 1
+        # …and the pull-end merge-save keeps the rescinded FAILED outright (the
+        # more-settled disk SKIPPED would otherwise win rank 3 > rank 1).
+        save_window_ledger(ledger, tmp_path)
+        rec = load_window_ledger(tmp_path).records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == ALL_FILTERED_MASS_RESCINDED
+        assert rec.empty_streak == 0
+        assert rec.streak_provenance == ""
+
+
+class TestSeedObservedOverlay:
+    """DEC-SEED-OBSERVED-OVERLAY-001 — the observed overlay reaches the seed's
+    interior-gap continuity gate (the exactly-tolerance-straddling refusal flip)."""
+
+    @staticmethod
+    def _march_sessions() -> list[date]:
+        from brutex.calendars.nse import is_trading_day
+
+        return [
+            date(2024, 3, 1) + timedelta(days=i)
+            for i in range(28)
+            if is_trading_day(date(2024, 3, 1) + timedelta(days=i))
+        ]
+
+    def _seed_with_overlay(self, observed: frozenset) -> int:
+        """Seed ONE enclosed 2024-03 window whose span has a 6-trading-day hole."""
+        from brutex.data.interior_gap_detect import INTERIOR_GAP_TOLERANCE_SESSIONS
+
+        sessions = self._march_sessions()
+        # Remove a run of EXACTLY tolerance+1 (6) consecutive trading days from
+        # the interior — the fetch-time classifier with the overlay says
+        # continuous (5 <= tolerance), the overlay-blind seed said 6 > 5.
+        hole = sessions[5 : 5 + INTERIOR_GAP_TOLERANCE_SESSIONS + 1]
+        assert len(hole) == INTERIOR_GAP_TOLERANCE_SESSIONS + 1
+        covered = frozenset(set(sessions) - set(hole))
+        self.hole = hole
+        ledger = WindowLedger()
+        span_index = index_lake_spans(
+            [
+                _span(
+                    interval="1minute",
+                    segment="INDEX",
+                    first="2024-03-01",
+                    last="2024-03-28",
+                    session_dates=covered,
+                )
+            ]
+        )
+        key = WindowKey(
+            market="spot",
+            security_id="NIFTY",
+            interval="1minute",
+            start=date(2024, 3, 1),
+            end=date(2024, 3, 29),
+        )
+        return seed_enclosed_windows(
+            ledger,
+            span_index,
+            [(key, ("NSE", "INDEX", "NIFTY", "1minute"))],
+            now=_NOW,
+            today_ist=date(2026, 6, 8),
+            observed=observed,
+        )
+
+    def test_overlay_day_inside_a_tolerance_plus_one_run_flips_the_refusal(self) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: without the overlay the 6-session hole is
+        # a confirmed run → the seed REFUSES; with ONE overlaid day inside the
+        # run it shortens to exactly the tolerance → the seed FIRES.
+        assert self._seed_with_overlay(frozenset()) == 0  # the pre-change verdict
+        assert self._seed_with_overlay(frozenset({self.hole[2]})) == 1
+
+    def test_overlay_day_outside_every_run_changes_nothing(self) -> None:
+        sessions = self._march_sessions()
+        # An overlaid day that is COVERED (bars exist) sits outside every
+        # bar-less run — the refusal verdict is unchanged (monotonicity edge).
+        assert self._seed_with_overlay(frozenset({sessions[0]})) == 0
+
+    def test_default_empty_overlay_is_byte_identical(self) -> None:
+        # The keyword's default keeps the exact pre-threading behaviour.
+        assert self._seed_with_overlay(frozenset()) == 0
+
+    def test_reconcile_ledger_windows_threads_observed(self) -> None:
+        # The pure reconcile chokepoint forwards observed= into the seed gate:
+        # the SAME tolerance+1 hole seeds iff the overlay shortens it.
+        from brutex.data.interior_gap_detect import INTERIOR_GAP_TOLERANCE_SESSIONS
+
+        sessions = self._march_sessions()
+        hole = sessions[5 : 5 + INTERIOR_GAP_TOLERANCE_SESSIONS + 1]
+        covered = frozenset(set(sessions) - set(hole))
+        span = _span(
+            interval="1minute",
+            segment="INDEX",
+            first="2024-03-01",
+            last="2024-03-28",
+            session_dates=covered,
+        )
+
+        def _run(observed: frozenset) -> int:
+            return reconcile_ledger_windows(
+                WindowLedger(),
+                [span],
+                instruments=[_inst(segment="INDEX")],
+                intervals=["1minute"],
+                start=date(2024, 3, 1),
+                end=date(2024, 3, 29),
+                now=_NOW,
+                observed=observed,
+            )
+
+        assert _run(frozenset()) == 0
+        assert _run(frozenset({hole[2]})) == 1

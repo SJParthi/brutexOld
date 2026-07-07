@@ -59,6 +59,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -153,13 +154,20 @@ _CORE_COLUMNS: tuple[str, ...] = (
 
 #: The full on-disk column order — fixed so the Parquet schema is stable + the row
 #: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` then
-#: ``in_pull_fetches`` then ``bars_net_new`` were each appended LAST
-#: (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
-#: DEC-INGEST-BOUNDARY-INTEGRITY-001), so a legacy file written before any of the
-#: optional columns existed loads cleanly: the core columns are read and each
-#: optional column is filled per-row (see :func:`_rows_to_records`; an absent
-#: ``bars_net_new`` is an honest ``None``). Backward-compatible, never a re-pull.
-_COLUMNS: tuple[str, ...] = (*_CORE_COLUMNS, "empty_streak", "in_pull_fetches", "bars_net_new")
+#: ``in_pull_fetches`` then ``bars_net_new`` then ``streak_provenance`` were each
+#: appended LAST (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
+#: DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-STREAK-PROVENANCE-001), so a legacy
+#: file written before any of the optional columns existed loads cleanly: the
+#: core columns are read and each optional column is filled per-row (see
+#: :func:`_rows_to_records`; an absent ``bars_net_new`` / ``streak_provenance``
+#: is an honest ``None``). Backward-compatible, never a re-pull.
+_COLUMNS: tuple[str, ...] = (
+    *_CORE_COLUMNS,
+    "empty_streak",
+    "in_pull_fetches",
+    "bars_net_new",
+    "streak_provenance",
+)
 
 
 def ledger_dir(lake_root: Path) -> Path:
@@ -240,17 +248,39 @@ def _derive_bars_net_new() -> int | None:
     return None
 
 
+def _derive_streak_provenance() -> str | None:
+    """Honest ``streak_provenance`` for a LEGACY row that predates the column: ``None``.
+
+    DEC-STREAK-PROVENANCE-001, the :func:`_derive_bars_net_new` twin of the
+    optional-column template: a legacy pull's contributing (channel, pull_id)
+    bumps are genuinely UNRECORDED — any reconstruction from
+    ``(status, streak, last_error)`` would be a fabrication (Golden Rule #1),
+    and ``""`` in particular would falsely claim "a KNOWN zero contributing
+    bumps" (the tri-state's honest reset value, reserved for a real
+    SUCCESS/reopen/plan reset). The absent column therefore ALWAYS loads as
+    ``None`` (unknown lineage — every provenance consumer then takes its
+    byte-identical legacy fallback); the ``str`` side of the annotation is the
+    field's domain, deliberately never produced here. The helper exists so the
+    optional-column template stays uniform and the honest-unknown rule has ONE
+    documented home for this column.
+    """
+    return None
+
+
 def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 14-field tuple :meth:`WindowLedger.from_rows` expects.
+    """Coerce raw rows to the exact 15-field tuple :meth:`WindowLedger.from_rows` expects.
 
     Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
     plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) plus ``bars_net_new``
-    (DEC-INGEST-BOUNDARY-INTEGRITY-001). A ``None`` optional column (a legacy file
+    (DEC-INGEST-BOUNDARY-INTEGRITY-001) plus ``streak_provenance``
+    (DEC-STREAK-PROVENANCE-001). A ``None`` optional column (a legacy file
     written before that column) is derived: ``empty_streak`` from
     ``(status, attempts)`` via :func:`_derive_empty_streak`; ``in_pull_fetches`` from
     ``status`` via :func:`_derive_in_pull_fetches`; ``bars_net_new`` stays an honest
     ``None`` via :func:`_derive_bars_net_new` (a NULL cell in a NEW file — e.g. a
-    lake cold-start seed — reads ``None`` the same way). A wrong arity /
+    lake cold-start seed — reads ``None`` the same way); ``streak_provenance``
+    stays an honest ``None`` via :func:`_derive_streak_provenance` (unknown
+    lineage, never a fabricated ``""``). A wrong arity /
     non-coercible element raises here (``ValueError`` / ``TypeError``) and is
     caught by the caller, degrading to an empty ledger.
     """
@@ -270,6 +300,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         empty_streak,
         in_pull_fetches,
         bars_net_new,
+        streak_provenance,
     ) in rows:
         status_s = str(status)
         attempts_i = int(attempts)
@@ -282,6 +313,9 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
             _derive_in_pull_fetches(status_s) if in_pull_fetches is None else int(in_pull_fetches)
         )
         net_new = _derive_bars_net_new() if bars_net_new is None else int(bars_net_new)
+        provenance = (
+            _derive_streak_provenance() if streak_provenance is None else str(streak_provenance)
+        )
         coerced.append(
             (
                 str(market),
@@ -298,6 +332,7 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 streak,
                 fetches,
                 net_new,
+                provenance,
             )
         )
     return coerced
@@ -316,15 +351,16 @@ _LEDGER_READ_ERRORS: tuple[type[BaseException], ...] = (
 
 
 def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
-    """Read ONE ledger-shaped Parquet into the coerced 14-field row tuples.
+    """Read ONE ledger-shaped Parquet into the coerced 15-field row tuples.
 
     The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
     the per-DELTA fold. The core 11 columns are REQUIRED — a missing one raises
     ``KeyError`` (the wrong-shape guard the caller degrades on). ``empty_streak``
-    + ``in_pull_fetches`` + ``bars_net_new`` are OPTIONAL (a legacy file lacks
-    one or more) and derived per-row by :func:`_rows_to_records` (an absent
-    ``bars_net_new`` stays an honest ``None`` —
-    DEC-INGEST-BOUNDARY-INTEGRITY-001). Raises any of
+    + ``in_pull_fetches`` + ``bars_net_new`` + ``streak_provenance`` are OPTIONAL
+    (a legacy file lacks one or more) and derived per-row by
+    :func:`_rows_to_records` (an absent ``bars_net_new`` /
+    ``streak_provenance`` stays an honest ``None`` —
+    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-STREAK-PROVENANCE-001). Raises any of
     :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
     decides the degrade (base → empty + ``load_failed``; delta → skip that one
     file).
@@ -340,7 +376,19 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
         table.column("in_pull_fetches").to_pylist() if "in_pull_fetches" in present else [None] * n
     )
     net_new = table.column("bars_net_new").to_pylist() if "bars_net_new" in present else [None] * n
-    rows = zip(*(columns[name] for name in _CORE_COLUMNS), streaks, fetches, net_new, strict=True)
+    provenance = (
+        table.column("streak_provenance").to_pylist()
+        if "streak_provenance" in present
+        else [None] * n
+    )
+    rows = zip(
+        *(columns[name] for name in _CORE_COLUMNS),
+        streaks,
+        fetches,
+        net_new,
+        provenance,
+        strict=True,
+    )
     return _rows_to_records(rows)
 
 
@@ -406,12 +454,27 @@ def load_window_ledger(
     return ledger
 
 
-#: One serialised ledger row — EXACTLY the 14-field tuple :meth:`WindowLedger.to_rows`
+#: One serialised ledger row — EXACTLY the 15-field tuple :meth:`WindowLedger.to_rows`
 #: emits (and :meth:`WindowLedger.from_rows` restores). The merge-on-save operates on
 #: this shape directly so the conflict rule below is pure + unit-testable. The trailing
-#: ``bars_net_new`` is ``int | None`` (``None`` = honest unknown for a legacy row).
+#: ``bars_net_new`` (``int | None``) and ``streak_provenance`` (``str | None``) are
+#: nullable (``None`` = honest unknown for a legacy row).
 LedgerRow = tuple[
-    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    int,
+    str | None,
+    str,
+    str | None,
+    int,
+    int,
+    int | None,
+    str | None,
 ]
 
 #: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
@@ -557,6 +620,10 @@ def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
             # Nullable by design: a legacy/seeded row's net-new is an honest
             # unknown ``None`` (DEC-INGEST-BOUNDARY-INTEGRITY-001).
             ("bars_net_new", pa.int64()),
+            # Nullable by design: a legacy row's streak lineage is an honest
+            # unknown ``None`` (DEC-STREAK-PROVENANCE-001 — never a fabricated
+            # ``""`` known-zero).
+            ("streak_provenance", pa.string()),
         ]
     )
     return pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
@@ -871,6 +938,9 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # The legacy status log never recorded a deduped net-new count —
                 # honest unknown (DEC-INGEST-BOUNDARY-INTEGRITY-001).
                 bars_net_new=_derive_bars_net_new(),
+                # …nor the streak's per-bump lineage — honest unknown
+                # (DEC-STREAK-PROVENANCE-001).
+                streak_provenance=_derive_streak_provenance(),
             )
         )
 
@@ -891,6 +961,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.empty_streak,
                 r.in_pull_fetches,
                 r.bars_net_new,
+                r.streak_provenance,
             )
             for r in by_window.values()
         ),
@@ -1123,6 +1194,7 @@ def seed_enclosed_windows(
     *,
     now: datetime,
     today_ist: date | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for each candidate window the lake ENCLOSES — the COMMON core.
 
@@ -1194,17 +1266,20 @@ def seed_enclosed_windows(
     detector; note the abstain now keys on the DATASET's first/last covered
     dates, so a span reaching past holiday coverage abstains for ALL its
     windows — conservative in the seed direction, byte-identical to the
-    span-only path); the seed calls :func:`interior_gap_runs` WITHOUT the
-    DEC-CALENDAR-OBSERVED-SESSIONS-001 ``observed=`` drift overlay the
-    fetch-time detector threads (``ingest.observe_interior_gap`` passes
-    ``observed=observed_holidays``; the reconcile chokepoints have no overlay
-    plumbed), so on a vendor-observed holiday the seed counts one more bar-less
-    "session" than the classifier would — the overlay is REMOVE-only, so the
-    omission can only EXTEND a run: at worst ONE conservative refusal → one
-    idempotent re-fetch, after which the recorded row trips ``has_window`` and
-    the gate is permanently silent (a single drift day can never mint a
-    >tolerance run alone; threading the overlay to the reconcile callers is a
-    named follow-up, NOT claimed — wiring-review fold, PR #1158);
+    span-only path); the seed threads the DEC-CALENDAR-OBSERVED-SESSIONS-001
+    *observed* drift overlay into :func:`interior_gap_runs` — CLOSED by
+    DEC-SEED-OBSERVED-OVERLAY-001 (previously the reconcile chokepoints had no
+    overlay plumbed, so on a vendor-observed holiday the seed counted one more
+    bar-less "session" than the fetch-time classifier and refused a window the
+    classifier called continuous — one redundant vendor re-fetch per cold
+    start); the caller HOISTS its ONE per-pull ``load_observed_holidays`` read
+    above the reconcile so the seed and the fetch-time detectors share ONE
+    consistent snapshot (single source of truth; the overlay is REMOVE-only, so
+    threading it can only SHORTEN runs — the seed becomes strictly MORE
+    permissive, never newly refusing, for the PRODUCTION overlay shape —
+    entries are evidence-gated on ZERO-bar days and self-heal when bars appear,
+    so ``observed ∩ covered == ∅`` by construction; the property-pinned
+    monotonicity law);
     sub-tolerance holes still seed; and CONVERGENCE after a
     refusal is fetch-verdict-dependent — a run CONTAINED in one window is
     demoted at fetch time (``INTERIOR_GAP``, bounded → SKIPPED), while a
@@ -1282,7 +1357,12 @@ def seed_enclosed_windows(
                     continue
                 if span_key not in runs_by_span:
                     try:
-                        runs_by_span[span_key] = interior_gap_runs(covered_dates=sessions)
+                        # SAME per-pull *observed* snapshot the fetch-time detectors
+                        # read (DEC-SEED-OBSERVED-OVERLAY-001) — the memo stays valid
+                        # because *observed* is constant per call.
+                        runs_by_span[span_key] = interior_gap_runs(
+                            covered_dates=sessions, observed=observed
+                        )
                     except Exception as exc:  # fail-CLOSED — a re-pull is always data-safe
                         runs_by_span[span_key] = exc
                 runs = runs_by_span[span_key]
@@ -1333,6 +1413,7 @@ def reconcile_ledger_windows(
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
     symbol_windows: Mapping[str, tuple[date, date]] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Seed ``SUCCESS`` for every lake-enclosed window with no ledger row — **pure** (cold-start).
 
@@ -1356,6 +1437,12 @@ def reconcile_ledger_windows(
     would land a SUCCESS row at a window boundary the bounded plan never created — an
     ORPHAN row the completeness page would miscount. ``None`` (the default) tiles the
     global range, byte-identical to the pre-feature behaviour.
+
+    *observed* (DEC-SEED-OBSERVED-OVERLAY-001): the per-pull observed-sessions
+    drift overlay (``load_observed_holidays``), threaded into the seed's
+    interior-gap continuity gate so the seed and the fetch-time detectors judge
+    the SAME calendar (see :func:`seed_enclosed_windows`). ``frozenset()`` (the
+    default) is byte-identical to the pre-threading behaviour.
     """
     # Shared vendor-neutral tiler + the (relocated-to-neutral) width policy +
     # coverage market namespace, all in ingest_common (CLAUDE.md §11 COMMON; moved
@@ -1413,7 +1500,7 @@ def reconcile_ledger_windows(
                         span_key,
                     )
 
-    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp)
+    return seed_enclosed_windows(ledger, span_index, _candidates(), now=stamp, observed=observed)
 
 
 def reconcile_ledger_with_lake(
@@ -1428,6 +1515,7 @@ def reconcile_ledger_with_lake(
     market: str | None = None,
     window_days_for: Callable[[str], int | None] | None = None,
     symbol_windows: Mapping[str, tuple[date, date]] | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> int:
     """Load the lake spans + seed the ledger cold-start (the wired entry point).
 
@@ -1460,6 +1548,7 @@ def reconcile_ledger_with_lake(
         market=market,
         window_days_for=window_days_for,
         symbol_windows=symbol_windows,
+        observed=observed,
     )
 
 

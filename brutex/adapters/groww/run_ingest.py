@@ -54,6 +54,10 @@ if TYPE_CHECKING:
     from brutex.adapters.ingest_common import RetryOutcome
     from brutex.orchestrator.audit import AuditWriter
 
+from brutex.adapters.all_filtered_breaker import (
+    AllFilteredBreaker,
+    resolve_all_filtered_breaker,
+)
 from brutex.adapters.empty_circuit_breaker import (
     EmptySettleBreaker,
     MassEmptySettleHalt,
@@ -341,6 +345,7 @@ def run_groww_spot_ingest(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
@@ -436,6 +441,18 @@ def run_groww_spot_ingest(
         :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`, a
         :data:`_GLOBAL_STOP_ERRORS` member — the whole pull halts loudly. Tests inject
         a configured instance.
+    all_filtered_breaker
+        Optional :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker`
+        (DEC-ALLFILTERED-MASS-BREAKER-001). ``None`` (the default — every
+        production caller) constructs a FRESH env-configured breaker for THIS pass
+        via :func:`~brutex.adapters.all_filtered_breaker.resolve_all_filtered_breaker`,
+        so the mass ALL-FILTERED guard is ON by default and its state can never
+        leak across pulls/passes. The ONE breaker is threaded into every pair's
+        window tails (pull-wide counting — a vendor-day timestamp bug spans
+        symbols); a trip SUPPRESSES further ``ALL_FILTERED`` SKIPPED-settles +
+        auto-rescinds the same-pull pre-trip ones + emits ONE count-naming alarm
+        — deliberately NOT a pull stop (fetching/storage stay unpoisoned). Tests
+        inject a configured instance.
     storm_breaker
         Optional per-pull :class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`
         (DEC-VENDOR-DOWN-BREAKER-001), threaded verbatim into every pair's window
@@ -478,6 +495,15 @@ def run_groww_spot_ingest(
     # inside ingest_spot — so ALL pairs of this pass share ONE counter (a vendor
     # soft-throttle hits every symbol) and a fresh pass/pull always starts clean.
     breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
+    # One mass ALL-FILTERED breaker per PASS (DEC-ALLFILTERED-MASS-BREAKER-001),
+    # mirroring the mass-EMPTY breaker above: all pairs share ONE counter (a
+    # vendor-day timestamp bug empties every symbol's boundary at once) and a
+    # fresh pass/pull always starts clean (Golden Rule #7). The explicit param is
+    # the test seam; BRUTEX_ALLFILTERED_BREAKER=off resolves a disabled instance
+    # (observe no-ops — byte-identical settle behaviour).
+    af_breaker = (
+        all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
+    )
     # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
     # empty breaker above: all pairs share ONE per-partition defer accounting (a wedged
     # volume fails every partition) and a fresh pass/pull always starts clean. The
@@ -558,6 +584,7 @@ def run_groww_spot_ingest(
                 detect_completeness_gaps=detect_completeness_gaps,
                 observed_holidays=observed_holidays,
                 empty_breaker=breaker,
+                all_filtered_breaker=af_breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
                 floor_learner=floor_learner,
@@ -769,6 +796,7 @@ def run_groww_spot_ingest_with_retry(
     detect_completeness_gaps: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
@@ -806,6 +834,9 @@ def run_groww_spot_ingest_with_retry(
     caller drains it ONCE at pull end (after the LAST pass), so every queued window is
     processed + ledger-recorded before the final ledger flush.
 
+    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001) is forwarded verbatim
+    to every pass (a ``None`` lets each pass resolve its own fresh instance — the
+    per-pass state law, so a retry round can trip on its own evidence only).
     *empty_breaker* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) is forwarded verbatim to
     every pass. The production ``None`` makes EACH pass resolve its own fresh
     env-configured breaker (per-pass counting; no state leak across passes or pulls);
@@ -867,6 +898,7 @@ def run_groww_spot_ingest_with_retry(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=all_filtered_breaker,
             storm_breaker=storm_breaker,
             write_breaker=write_breaker,
             floor_learner=floor_learner,

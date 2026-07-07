@@ -3977,3 +3977,46 @@ class TestMarkCompleteStoreWriteDefer:
         assert deferred[0]["contracts"] == 2
         assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
         assert deferred[0]["defer_seconds"] == 0.2
+
+
+def test_live_pull_overlay_hoisted_above_the_fno_reconcile(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-SEED-OBSERVED-OVERLAY-001 ordering spy (the F&O site): ONE overlay load,
+    strictly BEFORE the F&O cold-start reconcile, whose ``observed=`` receives the
+    SAME snapshot (documented-INERT today — the symmetry pre-wiring pin)."""
+    expected = _write_overlay_sidecar(tmp_lake)
+    order: list[str] = []
+    seed_observed: list[object] = []
+    real_load = hp.load_observed_holidays
+    real_reconcile = hp.reconcile_fno_ledger_windows
+
+    def _load_spy(root: Path) -> frozenset[date]:
+        order.append("load")
+        return real_load(root)
+
+    def _reconcile_spy(*args: object, **kwargs: object) -> int:
+        order.append("reconcile")
+        seed_observed.append(kwargs.get("observed"))
+        return real_reconcile(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hp, "load_observed_holidays", _load_spy)
+    monkeypatch.setattr(hp, "reconcile_fno_ledger_windows", _reconcile_spy)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert order.count("load") == 1
+    assert "reconcile" in order
+    assert order.index("load") < order.index("reconcile")
+    assert seed_observed and all(observed == expected for observed in seed_observed)

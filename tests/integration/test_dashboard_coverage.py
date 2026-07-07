@@ -1196,6 +1196,7 @@ _LEDGER_COLS = [
     "empty_streak",
     "in_pull_fetches",
     "bars_net_new",
+    "streak_provenance",
 ]
 
 
@@ -1252,9 +1253,12 @@ class TestWindowLedgerApi:
         # in_pull_fetches (idx 12, DEC-WINDOW-INPULL-FETCHES-001): 1 for this
         # first-try SUCCESS — the /db grid surfaces the in-pull retry too.
         assert row[12] == 1
-        # bars_net_new (idx 13, DEC-INGEST-BOUNDARY-INTEGRITY-001): the last column —
-        # the sink's keep-first-DEDUPED net-new count, persisted + surfaced on /db.
+        # bars_net_new (idx 13, DEC-INGEST-BOUNDARY-INTEGRITY-001): the sink's
+        # keep-first-DEDUPED net-new count, persisted + surfaced on /db.
         assert row[13] == 4
+        # streak_provenance (idx 14, DEC-STREAK-PROVENANCE-001): the LAST column —
+        # a SUCCESS resets the lineage to the KNOWN-zero "".
+        assert row[14] == ""
         # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
         assert row[9] == "2026-06-09 05:30:00"
         assert "+00:00" not in str(row[9])  # the raw UTC offset is gone

@@ -323,13 +323,15 @@ def interior_gap_runs(
     (:func:`_interior_barless_runs`), the tolerance (same
     ``BRUTEX_INTERIOR_GAP_TOLERANCE_SESSIONS`` knob — ONE tunable for fetch-time
     and seed-time, CLAUDE.md §11 COMMON) and the abstain rules with the
-    classifier, so those THREE dimensions can never drift. HONEST (Golden Rule
-    #10): the *observed* drift overlay is NOT one of them — it is a per-call
-    argument, and the seed chokepoint currently calls without it while the
-    fetch-time detector passes ``observed=observed_holidays``
-    (DEC-CALENDAR-OBSERVED-SESSIONS-001); the overlay is remove-only, so that
-    divergence is conservative-only for the seed (a run can only read LONGER —
-    see ``seed_enclosed_windows``'s honest-residuals note).
+    classifier, so those THREE dimensions can never drift. The *observed* drift
+    overlay is a per-call argument and — since DEC-SEED-OBSERVED-OVERLAY-001
+    CLOSED the named follow-up — the seed chokepoint
+    (``seed_enclosed_windows``) threads the SAME per-pull
+    ``observed=observed_holidays`` snapshot the fetch-time detector passes
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001), so seed-time and fetch-time verdicts
+    share ONE calendar (production overlay entries are evidence-gated on
+    ZERO-bar days, so threading them only ever SHORTENS runs — the seed became
+    strictly MORE permissive, property-pinned for that shape).
 
     Returns
     -------

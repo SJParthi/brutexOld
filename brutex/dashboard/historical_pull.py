@@ -1083,6 +1083,16 @@ def _run_phase(
     # spent only on a real pull.
     census_spans: Sequence[dict[str, Any]] = []
     census_rows: list[tuple[Any, ...]] = []
+    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+    # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per phase — HOISTED ABOVE the F&O
+    # cold-start reconcile so the seed and the FUTURES partial-window observe judge
+    # ONE consistent overlay snapshot; threaded into the detectors' margin
+    # arithmetic + the (documented-INERT, symmetry-pinned) F&O seed gate ONLY — an
+    # observed holiday is not a data hole — NEVER into window planning / the
+    # 30d/60d window law. A dry-run threads the empty overlay (the
+    # ``capture_hook_factory`` gating pattern); the loader never raises
+    # (missing/corrupt -> empty).
+    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
     if ledger is not None:
         spans = load_lake_spans(lake_root)
         for reconcile_market, reconcile_bucket in by_market.items():
@@ -1095,6 +1105,7 @@ def _run_phase(
                 end=end,
                 market=reconcile_market,
                 contract_windows=contract_windows,
+                observed=observed_holidays,
             )
         # Written-vs-settled census snapshot (DEC-WRITTEN-SETTLED-CENSUS-001):
         # capture BOTH sides pre-plan — the SAME already-loaded spans + the
@@ -1148,12 +1159,9 @@ def _run_phase(
     # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
     # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
     storm_breaker = None if dry_run else resolve_error_storm_breaker()
-    # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
-    # phase and threaded into the FUTURES partial-window observe margin ONLY (an
-    # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
-    # window law. A dry-run threads the empty overlay (the ``capture_hook_factory``
-    # gating pattern); the loader never raises (missing/corrupt -> empty).
-    observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+    # (The observed-sessions overlay was loaded ONCE above, before the F&O
+    # reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME snapshot feeds the
+    # FUTURES partial-window observe below.)
     # Mass-empty breaker CANARY (DEC-EMPTY-BREAKER-CANARY-001): armed ONLY for a
     # REAL live pull (a dry-run threads None — the same gating as the storm
     # breaker above). Before the mid-run EmptySettleBreaker halts the whole F&O

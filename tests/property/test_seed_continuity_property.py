@@ -135,3 +135,132 @@ def test_seed_refusal_never_touches_existing_rows(
         wk = (win.security_id, win.interval, win.start.isoformat(), win.end.isoformat())
         if wk not in before and wk not in after:
             assert not ledger.has_window(win)
+
+
+# ── DEC-SEED-OBSERVED-OVERLAY-001: seed/fetch parity + overlay monotonicity ──────────
+
+
+def _seed_verdicts(session_dates: frozenset, observed: frozenset) -> dict[str, bool]:
+    """Run the seed over the three windows; map ``window_start -> seeded?``."""
+    ledger = WindowLedger()
+    span_index = index_lake_spans(
+        [
+            {
+                "exchange": "NSE",
+                "segment": "INDEX",
+                "symbol": "NIFTY",
+                "interval": "1minute",
+                "bars": 1000,
+                "first_date": "2024-03-01",
+                "last_date": "2024-03-28",
+                "session_dates": session_dates,
+            }
+        ]
+    )
+    seed_enclosed_windows(
+        ledger,
+        span_index,
+        [(w, _SPAN_KEY) for w in _WINDOWS],
+        now=_NOW,
+        today_ist=date(2026, 6, 8),
+        observed=observed,
+    )
+    return {w.start.isoformat(): ledger.has_window(w) for w in _WINDOWS}
+
+
+@given(
+    covered_idx=st.sets(
+        st.integers(min_value=0, max_value=len(_SESSIONS) - 1), min_size=0, max_size=len(_SESSIONS)
+    ),
+    overlay_idx=st.sets(
+        st.integers(min_value=0, max_value=len(_SESSIONS) - 1), min_size=0, max_size=6
+    ),
+)
+def test_seed_gate_matches_fetch_classifier_and_overlay_is_monotone(
+    covered_idx: set[int], overlay_idx: set[int]
+) -> None:
+    """(1) SINGLE-ARITHMETIC-SOURCE parity: the seed's refusal verdict equals an
+    INDEPENDENT window-intersection over the fetch-time ``interior_gap_runs``
+    classification with the SAME overlay. (2) MONOTONICITY: the overlay only
+    REMOVES trading days, so ``refused(observed) ⊆ refused(∅)`` — threading it
+    can make the seed strictly MORE permissive, never newly refusing."""
+    from datetime import timedelta
+
+    from brutex.data.interior_gap_detect import interior_gap_runs
+
+    session_dates = frozenset(_SESSIONS[i] for i in covered_idx)
+    # PRODUCTION overlay shape (DEC-CALENDAR-OBSERVED-SESSIONS-001): an entry is
+    # evidence-gated on ZERO-bar days and SELF-HEALS the moment bars appear, so
+    # ``observed ∩ covered == ∅`` by construction — the monotonicity law below
+    # holds exactly for that shape (an overlaid COVERED day would instead MERGE
+    # its two flanking runs in the shared walker — unreachable in production).
+    observed = frozenset(_SESSIONS[i] for i in overlay_idx if i not in covered_idx)
+
+    with_overlay = _seed_verdicts(session_dates, observed)
+    without_overlay = _seed_verdicts(session_dates, frozenset())
+
+    # (2) Monotonicity: every window seeded WITHOUT the overlay also seeds WITH it.
+    for start_iso, seeded_plain in without_overlay.items():
+        if seeded_plain:
+            assert with_overlay[start_iso], "the overlay newly REFUSED a window"
+
+    # (1) Parity: refused iff a fetch-time confirmed run INTERSECTS the window
+    # (an abstain — None — never refuses; both sides share the abstain rule).
+    runs = interior_gap_runs(covered_dates=session_dates, observed=observed)
+    for window in _WINDOWS:
+        last_covered = window.end - timedelta(days=1)
+        expected_refusal = runs is not None and any(
+            run_first <= last_covered and window.start <= run_last for run_first, run_last in runs
+        )
+        assert with_overlay[window.start.isoformat()] == (not expected_refusal)
+
+
+# ── DEC-ALLFILTERED-MASS-BREAKER-001: no-trip ⇒ ledger outcomes byte-identical ───────
+
+
+@given(
+    outcomes=st.lists(
+        st.tuples(st.integers(min_value=0, max_value=1), st.booleans()),
+        max_size=20,
+    )
+)
+def test_below_conjunct_breaker_never_alters_ledger_outcomes(
+    outcomes: list[tuple[int, bool]],
+) -> None:
+    """For ANY window-outcome interleaving confined to ≤ 2 series (below the
+    SPREAD floor and the FRACTION series floor), the breaker never trips, so the
+    record-time ``allow_degraded_settle`` re-check (the production tail shape
+    since the review-round-1 TOCTOU fix) always allows and the ledger rows are
+    BYTE-IDENTICAL to a breaker-absent run."""
+    from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+    breaker = AllFilteredBreaker(
+        spread_series_limit=3, fraction_limit=0.5, min_observations=5, fraction_min_series=3
+    )
+    with_breaker = WindowLedger()
+    without_breaker = WindowLedger()
+    for i, (series_idx, all_filtered) in enumerate(outcomes):
+        key = WindowKey(
+            market="spot",
+            security_id=f"SYM{series_idx}",
+            interval="1minute",
+            start=date(2024, 3, 1) + timedelta(days=i),
+            end=date(2024, 3, 2) + timedelta(days=i),
+        )
+        breaker.observe(f"SYM{series_idx}:1minute", all_filtered=all_filtered)
+        # The EXACT tail wiring: the breaker's allow_settle is threaded as the
+        # record-time re-check for an all-filtered record, never a pre-computed bool.
+        allow = breaker.allow_settle if all_filtered else None
+        common = {
+            "raw_bars": 3,
+            "error_type": None,
+            "bars_appended": 0 if all_filtered else 3,
+            "now": _NOW,
+            "degraded": all_filtered,
+            "degraded_reason": "ALL_FILTERED" if all_filtered else None,
+            "pull_id": f"p{i}",
+        }
+        with_breaker.record(key, allow_degraded_settle=allow, **common)  # type: ignore[arg-type]
+        without_breaker.record(key, **common)  # type: ignore[arg-type]
+    assert not breaker.tripped
+    assert with_breaker.to_rows() == without_breaker.to_rows()

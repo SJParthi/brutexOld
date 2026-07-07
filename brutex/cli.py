@@ -3823,6 +3823,18 @@ def cmd_fetch(
         # so the ledger is None (no skip, no disk touch).
         _no_persist = dry_run or inspect
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE the
+        # cold-start reconcile below so the seed's continuity gate and the
+        # fetch-time completeness detectors judge ONE consistent overlay snapshot;
+        # threaded into the detectors' margin arithmetic + the seed gate ONLY (an
+        # observed holiday is not a data hole) — NEVER into window planning or the
+        # session filter. A ``--dry-run`` threads the empty overlay (the
+        # ``detect_completeness_gaps`` gating pattern); the loader never raises
+        # (missing/corrupt -> empty).
+        from brutex.calendars.observed_sessions import load_observed_holidays
+
+        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
         if ledger is not None:
             # Seed the durable ledger in the SAME (market, tile-width) namespace the
             # Groww spot spine fetches+records in (DEC-DASHBOARD-GROWW-SPOT-001 fixed
@@ -3852,6 +3864,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=observed_holidays,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
@@ -3944,14 +3957,9 @@ def cmd_fetch(
         # ``None`` so it can never observe synthetic outcomes (the same gating as
         # ``detect_completeness_gaps`` below).
         storm_breaker = None if dry_run else resolve_error_storm_breaker()
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A ``--dry-run`` threads the empty overlay (the ``detect_completeness_gaps``
-        # gating pattern); the loader never raises (missing/corrupt -> empty).
-        from brutex.calendars.observed_sessions import load_observed_holidays
-
-        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
+        # (The observed-sessions overlay was loaded ONCE above, before the
+        # cold-start reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME
+        # ``observed_holidays`` snapshot feeds the fetch-time detectors below.)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
