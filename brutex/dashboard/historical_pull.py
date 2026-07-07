@@ -1171,6 +1171,20 @@ def _run_phase(
     # healthy canary means the mass empties are genuine (a 2020-era dead chain
     # at the bucket head), so the phase continues instead of false-halting.
     breaker_canary = None if dry_run else make_breaker_canary_probe(client, pace=pace)
+    # ONE mass ALL-FILTERED breaker per PHASE (DEC-ALLFILTERED-MASS-BREAKER-001,
+    # review round 4 — supersedes the round-3 per-pass resolve): resolved HERE —
+    # not per until-clean round — so the trip LATCHES across EVERY round's market
+    # buckets of this pull's F&O phase. A per-pass fresh instance broke the
+    # alarm's pull-wide promise: a retry round re-attempts exactly the FAILED
+    # windows the tripped prior round suppressed, and when that re-attempt set
+    # sits below the observation/series floors its fresh breaker never tripped —
+    # a suppressed window bumped to threshold and settled SKIPPED post-alarm,
+    # un-rescinded (the spot spine's identical round-4 leak). Round 3's
+    # cross-bucket pooling is preserved (the SAME instance feeds every
+    # `run_groww_option_ingest` bucket call below); a fresh PHASE still starts
+    # clean (Golden Rule #7 — no state leak across pulls), and a dry-run stays
+    # ineligible by construction (empty payloads → raw_bars == 0).
+    af_breaker = resolve_all_filtered_breaker()
 
     def _progress(label: str, bars: int, failed: bool) -> None:
         """Forward to the caller's hook + flush the ledger (either side optional).
@@ -1215,18 +1229,10 @@ def _run_phase(
         pass_max_delta: Decimal | None = None
         pass_auth = False
         clean: set[str] = set()
-        # ONE mass ALL-FILTERED breaker per PASS, shared across EVERY market bucket
-        # (DEC-ALLFILTERED-MASS-BREAKER-001, review round 3): resolved HERE — not
-        # once per run_groww_option_ingest invocation — so the futures + options
-        # buckets of one pass POOL their all-filtered evidence into ONE counter (a
-        # vendor-day bug empties BOTH at once; the prior per-bucket breakers
-        # fragmented the evidence — a 10-underlying event split 5/5 across the
-        # buckets tripped NEITHER SPREAD rule — and could alarm once per bucket).
-        # A fresh pass still starts clean (Golden Rule #7 — the per-pass freshness
-        # law is unchanged; a persisting bug re-alarms each pass, by design), and a
-        # dry-run stays ineligible by construction (empty payloads → raw_bars == 0),
-        # exactly as under the prior per-invocation resolve.
-        af_breaker = resolve_all_filtered_breaker()
+        # (The ONE phase-scoped mass ALL-FILTERED breaker — `af_breaker`, resolved
+        # ABOVE the pass loop, review round 4 — is injected into every market
+        # bucket's call below, so the futures + options buckets of EVERY round
+        # POOL their evidence into ONE latched counter.)
         # FUTURES market BEFORE the OPTIONS market (futures-first), unknown markets LAST —
         # a STABLE, deterministic order independent of dict insertion order.
         for market, bucket in sorted(

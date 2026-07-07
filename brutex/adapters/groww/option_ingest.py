@@ -2051,17 +2051,21 @@ def run_groww_option_ingest(
     Rule #10: the residual false-positive budget on genuinely-illiquid in-band
     chains rides on the env-tunable thresholds, not a silent exclusion).
     *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001): the PRODUCTION
-    F&O pull (``historical_pull._one_pass``) INJECTS ONE per-PASS
+    F&O pull (``historical_pull._run_phase``) INJECTS ONE PHASE-scoped
     :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker` shared
-    across its futures + options market buckets (one driver call each), so a
-    vendor-day event's evidence POOLS pass-wide (review round 3 — the prior
-    per-invocation resolve fragmented it per bucket); ``None`` (direct callers /
-    tests) resolves a FRESH env-configured instance for THIS invocation. Either
+    across EVERY until-clean round's futures + options market buckets (one
+    driver call each) — review round 4, superseding the round-3 per-pass
+    resolve: the trip now LATCHES across the phase's retry rounds (a sub-floor
+    retry round can no longer settle windows the trip alarm promised were
+    halted), while a vendor-day event's evidence still POOLS across the buckets
+    (round 3 — the prior per-invocation resolve fragmented it per bucket);
+    ``None`` (direct callers / tests) resolves a FRESH env-configured instance
+    for THIS invocation. Either
     way the breaker is shared by every contract's window tails, and a mass
     all-filtered event SUPPRESSES further ``ALL_FILTERED`` SKIPPED-settles +
     auto-rescinds the same-pull pre-trip ones + emits ONE count-naming alarm —
     deliberately NOT a pull stop (the fetch/storage lanes stay unpoisoned; the
-    windows stay FAILED + re-pullable). Per-pass construction means breaker
+    windows stay FAILED + re-pullable). Per-phase construction means breaker
     state can never leak across pulls. Tests inject a configured instance.
 
     *breaker_health_probe* (DEC-EMPTY-BREAKER-CANARY-001) threads the resolved
@@ -2129,18 +2133,20 @@ def run_groww_option_ingest(
             health_probe=breaker_health_probe,
         )
     )
-    # One mass ALL-FILTERED breaker per PASS (DEC-ALLFILTERED-MASS-BREAKER-001),
-    # mirroring the mass-EMPTY breaker above: all contracts of one pass share ONE
-    # counter (a vendor-day timestamp bug empties every chain's boundary at once)
-    # and a fresh pass/pull always starts clean (Golden Rule #7). The PRODUCTION
-    # F&O pull (`historical_pull._one_pass`) INJECTS its per-pass instance here —
-    # one driver call per market bucket, so the futures + options buckets of a
-    # pass pool their evidence into that ONE breaker (review round 3: the prior
+    # One mass ALL-FILTERED breaker per PHASE (DEC-ALLFILTERED-MASS-BREAKER-001):
+    # all contracts — and all until-clean rounds — share ONE counter (a vendor-day
+    # timestamp bug empties every chain's boundary at once) and a fresh phase
+    # always starts clean (Golden Rule #7). The PRODUCTION F&O pull
+    # (`historical_pull._run_phase`) INJECTS its phase-scoped instance here —
+    # one driver call per market bucket per round, so the futures + options
+    # buckets pool their evidence into that ONE breaker (review round 3: the prior
     # per-invocation resolve fragmented the evidence per bucket and could alarm
-    # once per bucket); the `None` fallback resolve serves DIRECT callers (one
-    # breaker per driver invocation). The pipeline's SPOT phase keeps its own
-    # per-pass breaker (deliberate: no cross-phase plumbing) — up to one alarm
-    # per pass per phase.
+    # once per bucket) AND the trip latches across the rounds (review round 4:
+    # the round-3 per-pass resolve let a sub-floor retry round settle windows
+    # the trip alarm promised were halted); the `None` fallback resolve serves
+    # DIRECT callers (one breaker per driver invocation). The pipeline's SPOT
+    # phase keeps its own pull-scoped breaker (deliberate: no cross-phase
+    # plumbing) — up to one alarm per phase.
     af_breaker = (
         all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
     )

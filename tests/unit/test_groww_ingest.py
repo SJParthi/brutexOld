@@ -3246,3 +3246,167 @@ class TestMassAllFilteredBreaker:
         led = _SpyLedger()
         self._pull_symbol("AAA", led, breaker)
         assert calls == ["record_enter", "allow_settle"]
+
+    def test_with_retry_latches_one_breaker_across_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review round 4 (the v3-round-2 MAJOR): run_groww_spot_ingest_with_retry
+        # resolves the breaker ONCE (when None) and threads the SAME instance
+        # into EVERY pass, so a pass-1 trip stays latched through the retry
+        # rounds. Fail-before: it forwarded the None verbatim and each pass
+        # resolved its OWN fresh instance.
+        import brutex.adapters.groww.run_ingest as ri
+
+        breakers: list[object] = []
+        still_failed = ri.GrowwIngestReport(
+            pairs={
+                ("AAA", "1minute"): IngestReport(
+                    windows=1, bars_appended=0, transient_failures=1, still_failed_windows=1
+                )
+            },
+            failures=(),
+        )
+
+        def _spy(
+            *_args: object, all_filtered_breaker: object = None, **_kw: object
+        ) -> ri.GrowwIngestReport:
+            breakers.append(all_filtered_breaker)
+            return still_failed
+
+        monkeypatch.setattr(ri, "run_groww_spot_ingest", _spy)
+        ri.run_groww_spot_ingest_with_retry(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instruments=[_inst("AAA")],
+            intervals=["1minute"],
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            max_retry_rounds=2,
+            retry_backoff=lambda _i: None,
+        )
+        # The original pass + 2 retry rounds (still-failed never clears).
+        assert len(breakers) == 3
+        assert all(isinstance(b, AllFilteredBreaker) for b in breakers)
+        assert all(b is breakers[0] for b in breakers)  # ONE latched instance
+
+    def test_with_retry_forwards_an_injected_breaker_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other resolve arm: an injected instance (a pull entrypoint's
+        # pull-scoped breaker, or a test's) reaches every pass unwrapped.
+        import brutex.adapters.groww.run_ingest as ri
+
+        sentinel = self._tiny_breaker()
+        breakers: list[object] = []
+
+        def _spy(
+            *_args: object, all_filtered_breaker: object = None, **_kw: object
+        ) -> ri.GrowwIngestReport:
+            breakers.append(all_filtered_breaker)
+            return ri.GrowwIngestReport(pairs={}, failures=())
+
+        monkeypatch.setattr(ri, "run_groww_spot_ingest", _spy)
+        ri.run_groww_spot_ingest_with_retry(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instruments=[_inst("AAA")],
+            intervals=["1minute"],
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            all_filtered_breaker=sentinel,
+        )
+        assert breakers == [sentinel]  # clean pass — no retry; the sentinel, not a wrap
+
+    def test_trip_latch_holds_across_retry_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # FAILS-BEFORE / PASSES-AFTER (review round 4 — the demonstrated leak):
+        # pass 1 observes 6 eligible windows (3 all-filtered across 3 series →
+        # the FRACTION rule trips at AAA's own observation with the floor
+        # env-set to 6) and the CRITICAL alarm promises settles are halted for
+        # the pull; a transient-timeout symbol (GGG) leaves still_failed > 0,
+        # arming the auto-retry round. That round re-fetches every
+        # non-skippable window — the 3 suppressed AF FAILED ones included —
+        # but observes only 3 eligible windows, BELOW the 6-observation floor:
+        # pre-fix its FRESH per-pass breaker never tripped and AAA (prior
+        # streak 2, preserved by the pass-1 suppression) bumped to threshold
+        # and settled SKIPPED minutes AFTER the alarm, un-rescinded and
+        # un-alarmed. The latched pull-scoped breaker keeps every AF window
+        # FAILED + re-pullable.
+        import brutex.adapters.groww.ingest as ingest_mod
+        from brutex.adapters.all_filtered_breaker import (
+            ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV,
+        )
+        from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+        from brutex.data.session import ALL_FILTERED
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.notifications.sweep_alerts import SweepAlerter
+        from brutex.orchestrator.parallel import SerialRunParallel
+
+        pushes: list[dict] = []
+        monkeypatch.setattr(
+            SweepAlerter,
+            "mass_all_filtered",
+            lambda self, **kw: pushes.append(dict(kw)) or True,
+        )
+        # No real sleeps: neutralize the in-pull transient-retry backoff GGG burns.
+        monkeypatch.setattr(ingest_mod, "_time_sleep", lambda _s: None)
+        monkeypatch.setenv(ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV, "6")
+        led = WindowLedger()
+        # Pre-seed AAA at streak 2 (EMPTY_TERMINAL_THRESHOLD - 1) — two prior
+        # pulls' ALL_FILTERED demotions: ONE more allowed bump settles it.
+        for _ in range(2):
+            self._pull_symbol("AAA", led, None)
+        assert led.records()[0].empty_streak == 2
+        af_symbols = frozenset({"AAA", "BBB", "CCC"})
+        holiday_ts = self._HOLIDAY_TS
+
+        class _MixedAdapter:
+            """AF symbols → a holiday bar (all-filtered); GGG → a persistent
+            transient timeout (arms the auto-retry round without ever feeding
+            the breaker); others → a complete window (SUCCESS, never re-pulled)."""
+
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                del exchange, interval, start
+                if symbol == "GGG":
+                    raise GrowwTimeoutError("transient — arms the retry round")
+                if symbol in af_symbols:
+                    return [_bar(holiday_ts)]
+                last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+                return [_in_session_bar(last_session)]
+
+        with capture_logs() as logs:
+            run_groww_spot_ingest_with_retry(
+                _MixedAdapter(),  # type: ignore[arg-type]
+                _Sink(),
+                # AAA is the 6th ELIGIBLE observation — the trip-crossing one
+                # (GGG's raised fetch never reaches the tail, so it observes
+                # nothing in either pass).
+                instruments=[_inst(s) for s in ("BBB", "CCC", "DDD", "EEE", "FFF", "AAA", "GGG")],
+                intervals=["1minute"],
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+                ledger=led,
+                run_parallel=SerialRunParallel(),
+                detect_completeness_gaps=True,
+                max_retry_rounds=1,
+                retry_backoff=lambda _i: None,
+            )
+        by_symbol = {r.security_id: r for r in led.records()}
+        # THE LEAK PIN: AAA stays FAILED with its streak PRESERVED — pre-fix the
+        # retry pass settled it SKIPPED (streak 2 → 3) post-alarm.
+        assert by_symbol["AAA"].status == "FAILED"
+        assert by_symbol["AAA"].last_error == ALL_FILTERED
+        assert by_symbol["AAA"].empty_streak == 2
+        assert led.newly_settled_skipped == 0
+        # BBB/CCC recorded pre-trip in pass 1 (streak 1); the latched breaker
+        # suppresses their retry-pass records too (streaks preserved).
+        assert by_symbol["BBB"].empty_streak == 1
+        assert by_symbol["CCC"].empty_streak == 1
+        # The clean symbols settled SUCCESS in pass 1 and were never re-pulled;
+        # the transient symbol is still honestly FAILED (a NEXT pull's problem).
+        assert by_symbol["DDD"].status == "SUCCESS"
+        assert by_symbol["GGG"].status == "FAILED"
+        # EXACTLY ONE alarm for the whole pull — the pass-1 trip transition.
+        assert len(_events(logs, "allfiltered_breaker.tripped")) == 1
+        assert len(pushes) == 1

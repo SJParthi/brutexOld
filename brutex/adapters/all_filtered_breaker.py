@@ -43,8 +43,18 @@ different mass-event signature:
    incremental shape is BELOW the observation floor, see the honest envelope),
    while a 1-2-symbol targeted pull stays structurally below.
 
-A trip LATCHES once per pull and the tripping caller then (i) RESCINDS the
-same-pull pre-trip ``ALL_FILTERED`` settles
+A trip LATCHES once per pull: the production wiring resolves ONE instance per
+pull (spot — the dashboard bulk/single-symbol entrypoints + the CLI
+``cmd_fetch``; F&O — ``historical_pull._run_phase``) and threads the SAME
+instance through EVERY retry pass / until-clean round / market bucket of that
+pull's phase (review round 4 — a per-pass fresh resolve let a sub-floor retry
+pass, re-attempting exactly the FAILED windows a tripped prior pass had
+suppressed, bump one to threshold and settle it SKIPPED minutes AFTER the
+CRITICAL alarm promised settles were halted; the counters are therefore
+pull-CUMULATIVE across passes — a still-FAILED all-filtered window re-attempted
+by a later pass is re-observed, bounded below a trip by the bounded-terminal
+settle, and post-trip observations are telemetry only). The tripping caller
+then (i) RESCINDS the same-pull pre-trip ``ALL_FILTERED`` settles
 (:meth:`~brutex.data.window_ledger.WindowLedger.rescind_all_filtered_settles`),
 (ii) emits exactly ONE count-naming structlog ERROR + CRITICAL Telegram alarm
 (:func:`brutex.notifications.sweep_alerts.emit_mass_all_filtered_alert`), and
@@ -72,7 +82,9 @@ round 2 widened this list to the REAL envelope):
   eligible windows AND fewer than :data:`ALLFILTERED_BREAKER_SPREAD_SERIES`
   distinct series — can trip NEITHER rule. The ENGINE's own DAILY INCREMENTAL
   pull is in this hole (~3 eligible windows per pass: 3 indexes × ``1minute``
-  × one open window), so a persisting vendor-day bug settles those windows
+  × one open window — even pull-cumulatively across the bounded retry rounds
+  the re-observations stay below the 20-observation floor), so a persisting
+  vendor-day bug settles those windows
   ``SKIPPED`` after ``EMPTY_TERMINAL_THRESHOLD`` such pulls with NO trip — the
   "engine pull trippable" claim above holds for the BACKFILL shape only
   (test-pinned). Lowering the observation floor trades this hole for
@@ -81,14 +93,18 @@ round 2 widened this list to the REAL envelope):
   all-filtered fraction stays below :data:`ALLFILTERED_BREAKER_FRACTION`
   escapes both rules (the fraction is pull-CUMULATIVE, never windowed) —
   broader than the ≤ 2-series hole above (test-pinned);
-* evidence never pools ACROSS the pipeline's SPOT and F&O phases (each phase's
-  passes resolve their own breaker — deliberate, no cross-phase plumbing), so a
-  vendor-day event split e.g. 5 spot series + 5 F&O underlyings trips NEITHER
-  phase's SPREAD rule. WITHIN the F&O phase the futures + options market
-  buckets DO share ONE per-pass breaker — ``historical_pull._one_pass`` injects
-  it into every ``run_groww_option_ingest`` bucket call (review round 3: the
-  original per-invocation resolve fragmented even that intra-phase evidence;
-  test-pinned by the cross-bucket trip test in ``test_pull_historical.py``).
+* evidence never pools ACROSS the pipeline's SPOT and F&O phases (each phase
+  resolves its own pull-scoped breaker — deliberate, no cross-phase plumbing),
+  so a vendor-day event split e.g. 5 spot series + 5 F&O underlyings trips
+  NEITHER phase's SPREAD rule. WITHIN a phase the ONE instance spans EVERY
+  retry pass / until-clean round (review round 4 — superseding the round-3
+  per-pass resolve, whose fresh retry-pass instance leaked a post-alarm settle)
+  AND, on the F&O side, every market bucket — ``historical_pull._run_phase``
+  resolves it once and injects it into every ``run_groww_option_ingest`` bucket
+  call of every round (review round 3: the original per-invocation resolve
+  fragmented even that intra-phase evidence; test-pinned by the cross-bucket +
+  cross-pass trip tests in ``test_pull_historical.py`` and the cross-pass latch
+  test in ``test_groww_ingest.py``).
 
 In every blind-spot shape the per-window WARNs + the streak-provenance
 column (DEC-STREAK-PROVENANCE-001) keep any such settle visible + reversible
@@ -199,9 +215,11 @@ class AllFilteredTrip:
 class AllFilteredBreaker:
     """Per-pull, thread-safe mass all-filtered counter with two trip rules.
 
-    One instance per ingest pass (:func:`resolve_all_filtered_breaker` — fresh
-    every time, Golden Rule #7: state never leaks across pulls), shared by every
-    window worker/consumer of that pass. All counter ops run under ONE lock,
+    One instance per PULL (per phase — :func:`resolve_all_filtered_breaker`,
+    fresh every pull, Golden Rule #7: state never leaks across pulls), shared by
+    every window worker/consumer of EVERY retry pass / until-clean round of that
+    pull's phase (review round 4 — the latch must span the passes or a sub-floor
+    retry pass leaks a post-alarm settle). All counter ops run under ONE lock,
     each **O(1)**.
 
     Parameters
@@ -266,8 +284,13 @@ class AllFilteredBreaker:
         the ledger lock, a racing settle is either suppressed (record runs
         after the rescind) or captured in ``_af_settled_keys`` and reversed by
         the rescind (record ran first) — "stop settling" holds pull-wide from
-        the trip, with no leakable interleaving. A disabled breaker always
-        allows.
+        the trip, with no leakable interleaving, BECAUSE the production wiring
+        threads THIS one instance through every retry pass / until-clean round
+        / market bucket of the pull's phase AND every queued async-pipeline
+        tail's closure captures the same instance (review round 4 — under the
+        superseded per-pass resolve the guarantee was only per-instance: a
+        prior pass's queued tail rode its own untripped breaker). A disabled
+        breaker always allows.
         """
         if not self.enabled:
             return True
@@ -340,16 +363,20 @@ class AllFilteredBreaker:
 
 
 def resolve_all_filtered_breaker() -> AllFilteredBreaker:
-    """Build a FRESH per-pass breaker from env config (or the documented defaults).
+    """Build a FRESH per-pull breaker from env config (or the documented defaults).
 
-    The single construction seam (CLAUDE.md §11 COMMON), called once per pass:
-    the spot spine inside :func:`~brutex.adapters.groww.run_ingest.
-    run_groww_spot_ingest` (one invocation per pass), the production F&O pass
-    loop in ``historical_pull._one_pass`` (ONE instance injected into every
-    market bucket's ``run_groww_option_ingest`` call — review round 3, so the
-    futures + options buckets pool evidence), and the F&O driver's ``None``
-    fallback for direct callers — a new instance every time, so breaker state
-    can never leak across pulls or retry passes (Golden Rule #7). Every knob is
+    The single construction seam (CLAUDE.md §11 COMMON), called once per PULL
+    per phase (review round 4 — the trip must latch across retry passes):
+    the spot pull entrypoints (``pull_controller.pull_all_spot`` +
+    ``pull_controller.pull_candles`` + the CLI ``cmd_fetch``) each resolve ONE
+    instance threaded through every pass / until-clean round; the F&O phase
+    driver ``historical_pull._run_phase`` resolves ONE instance injected into
+    every until-clean round's market-bucket ``run_groww_option_ingest`` call
+    (review round 3, so the futures + options buckets pool evidence); and the
+    spine/driver ``None`` fallbacks (``run_groww_spot_ingest`` /
+    ``run_groww_spot_ingest_with_retry`` / ``run_groww_option_ingest``) serve
+    direct callers — a new instance every pull, so breaker state
+    can never leak across pulls (Golden Rule #7). Every knob is
     env-overridable (DYNAMIC); a bad value fails safe to its default via the
     SHARED :func:`~brutex.adapters.empty_circuit_breaker.resolve_int_env` /
     :func:`~brutex.adapters.empty_circuit_breaker.resolve_fraction_env`

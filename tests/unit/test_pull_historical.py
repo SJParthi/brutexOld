@@ -4023,26 +4023,28 @@ def test_live_pull_overlay_hoisted_above_the_fno_reconcile(
     assert seed_observed and all(observed == expected for observed in seed_observed)
 
 
-# ── mass ALL-FILTERED breaker wiring: ONE per pass, shared across buckets ─────
-# DEC-ALLFILTERED-MASS-BREAKER-001 review round 3: the production F&O pass loop
-# (``_one_pass``) resolves ONE breaker per pass and injects the SAME instance
-# into every market bucket's ``run_groww_option_ingest`` call, so a vendor-day
-# event's all-filtered evidence POOLS across the futures + options buckets
-# instead of fragmenting into per-bucket counters (fail-before: each bucket's
-# driver invocation resolved its OWN fresh breaker — split evidence, and up to
-# one alarm per bucket).
+# ── mass ALL-FILTERED breaker wiring: ONE per PHASE, shared across rounds ─────
+# DEC-ALLFILTERED-MASS-BREAKER-001 review rounds 3+4: the production F&O phase
+# driver (``_run_phase``) resolves ONE breaker per phase and injects the SAME
+# instance into every until-clean round's market-bucket
+# ``run_groww_option_ingest`` calls, so a vendor-day event's all-filtered
+# evidence POOLS across the futures + options buckets (round 3 fail-before:
+# each bucket's driver invocation resolved its OWN fresh breaker — split
+# evidence, and up to one alarm per bucket) AND the trip LATCHES across the
+# retry rounds (round 4 fail-before: each round's fresh breaker let a
+# sub-floor retry round settle windows the trip alarm promised were halted).
 
 
-def test_all_filtered_breaker_one_per_pass_shared_across_market_buckets(
+def test_all_filtered_breaker_one_per_phase_shared_across_market_buckets(
     registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ONE ``AllFilteredBreaker`` per pass, injected into EVERY market bucket.
+    """ONE ``AllFilteredBreaker`` per phase, injected into EVERY market bucket.
 
     A NIFTY selection spans BOTH buckets (FUT → groww-future, CE/PE →
     groww-option). A spy captures the ``all_filtered_breaker`` kwarg of every
     ``run_groww_option_ingest`` call: both calls MUST receive the SAME real
-    instance (fail-before: the kwarg was never passed — the spy saw ``None``
-    twice and each driver invocation resolved its own breaker).
+    instance (round-3 fail-before: the kwarg was never passed — the spy saw
+    ``None`` twice and each driver invocation resolved its own breaker).
     """
     breakers: list[object] = []
 
@@ -4072,15 +4074,18 @@ def test_all_filtered_breaker_one_per_pass_shared_across_market_buckets(
     assert breakers[0] is breakers[1]  # the ONE shared per-pass instance
 
 
-def test_all_filtered_breaker_fresh_per_pass(
+def test_all_filtered_breaker_one_per_phase_latched_across_passes(
     registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each until-clean PASS gets a FRESH shared breaker (Golden Rule #7).
+    """EVERY until-clean pass shares the ONE phase-scoped breaker (round 4).
 
-    The cross-bucket sharing (review round 3) must NOT leak breaker state
-    across retry passes: two rounds → two DISTINCT instances, each shared by
-    both market buckets of its OWN pass (the per-pass freshness law of
-    MIGRATION.md #1513 is unchanged — a persisting bug re-alarms each pass).
+    The trip must LATCH across retry rounds: two rounds → the SAME instance in
+    all four bucket calls (2 rounds × 2 buckets). Fail-before (the round-3
+    per-pass resolve): rounds 1 and 2 received DISTINCT instances, so a trip in
+    round 1 was forgotten by round 2's fresh breaker — a sub-floor retry round
+    could then settle a suppressed window SKIPPED minutes after the CRITICAL
+    alarm promised settles were halted for the pull. A fresh PHASE still starts
+    clean (Golden Rule #7 — no state leak across pulls).
     """
     breakers: list[object] = []
     still_failed_report = GrowwOptionIngestReport(
@@ -4118,9 +4123,10 @@ def test_all_filtered_breaker_fresh_per_pass(
     # Round 1 (still-failed 1, no baseline → progress) + round 2 (no shrink →
     # stuck-stop) = 2 passes × 2 buckets = 4 calls.
     assert len(breakers) == 4
-    assert breakers[0] is breakers[1]  # pass 1: shared across both buckets
-    assert breakers[2] is breakers[3]  # pass 2: shared across both buckets
-    assert breakers[0] is not breakers[2]  # but FRESH per pass — no state leak
+    assert all(isinstance(b, AllFilteredBreaker) for b in breakers)
+    # ONE phase-scoped instance in EVERY call — across buckets AND passes, so
+    # a round-1 trip stays latched through round 2 (review round 4).
+    assert all(b is breakers[0] for b in breakers[1:])
 
 
 class _SaturdayMinuteSDK(_FakeSDK):

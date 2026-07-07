@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
@@ -1675,6 +1676,15 @@ def pull_all_spot(
         # threads ``None`` so it can never observe synthetic outcomes (the same gating
         # as ``detect_completeness_gaps``).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4 — the storm-breaker precedent above): resolved HERE and
+        # threaded into EVERY phase / until-clean round / retry pass, so the trip
+        # LATCHES pull-wide — a per-pass fresh instance let a sub-floor retry
+        # round settle windows the trip alarm promised were halted. Resolved
+        # unconditionally (unlike the storm breaker): a dry-run's windows are
+        # ineligible by construction (`detect_completeness_gaps=False` → never
+        # observed), so the instance stays inert there — byte-identical settles.
+        _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
         # per-pull instance over the PACED replica of THIS pull's adapter. The live
         # pool factory hands every leaf a no-op pace (`build_live_pool` without a
@@ -1833,6 +1843,7 @@ def pull_all_spot(
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
                     observed_holidays=_observed_holidays,
+                    all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                 )
@@ -2607,6 +2618,12 @@ def pull_candles(
         # live pull (a dry-run threads ``None`` — the ``detect_completeness_gaps``
         # gating below).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4) — the single-symbol twin of the pull_all_spot wiring:
+        # resolved once and threaded into BOTH phase invocations so the latch is
+        # pull-scoped, never per driver invocation. Resolved unconditionally: a
+        # dry-run's windows are ineligible by construction (never observed).
+        _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner + learned-floor planning clamp
         # (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
         # pull_all_spot wiring: armed only for a real pull, probing through the
@@ -2700,6 +2717,7 @@ def pull_candles(
                     # false-red on the synthetic adapter's first-day-only bars.
                     detect_completeness_gaps=True,
                     observed_holidays=_observed_holidays,
+                    all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                 )

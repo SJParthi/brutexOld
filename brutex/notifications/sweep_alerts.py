@@ -641,22 +641,25 @@ class SweepAlerter:
     ) -> bool:
         """Alert that the mass ALL-FILTERED breaker TRIPPED — settles halted (CRITICAL).
 
-        DEC-ALLFILTERED-MASS-BREAKER-001. Fired at most once per breaker PASS by
+        DEC-ALLFILTERED-MASS-BREAKER-001. Fired at most once per breaker PULL
+        (per phase) by
         :func:`emit_mass_all_filtered_alert` at the breaker's trip transition: a
         suspected vendor-wide timestamp/session bug is emptying windows at the
         calendar boundary filter, so further ``ALL_FILTERED`` SKIPPED-settles are
         suppressed for the pull and the same-pull pre-trip settles were
         auto-rescinded. The counts are non-secret integers; *series_sample* rides
         the structlog line (the message stays bounded — the window samples name
-        the shape). HONEST (review round 1, Golden Rule #10): the once-per-pass
+        the shape). HONEST (review round 1, Golden Rule #10): the once-per-pull
         guarantee is the BREAKER'S LATCH (``observe`` reports the trip
-        transition exactly once), NOT notifier dedupe — ``PHASE_BLOCKED``'s
+        transition exactly once, and review round 4 threads ONE instance across
+        every retry pass / until-clean round of the pull's phase, so the latch
+        spans them), NOT notifier dedupe — ``PHASE_BLOCKED``'s
         window in :data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`
         is ``0.0`` s (never coalesced), so the pull-scoped ``dedupe_key``
         (``pull_id``, falling back to the rule for a caller with no id) is
-        defence-in-depth only and coalesces nothing today. A retry pass
-        resolves a FRESH breaker, so a persisting vendor bug re-alarms on each
-        pass/phase that trips — by design, never quietly.
+        defence-in-depth only and coalesces nothing today. A NEW pull resolves
+        a FRESH breaker, so a persisting vendor bug re-alarms on each pull /
+        phase that trips — by design, never quietly.
         """
         del series_sample  # carried on the structlog line; the push stays bounded
         samples = ", ".join(window_samples)

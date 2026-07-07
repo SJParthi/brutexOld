@@ -299,8 +299,10 @@ class _FakeIngestResult:
         return self.report.still_failed_windows
 
 
-def _wire_cli_fakes(monkeypatch: pytest.MonkeyPatch, captured: list[object]) -> None:
-    """Fake every network-shaped CLI seam + spy the spine's ``storm_breaker`` kwarg."""
+def _wire_cli_fakes(
+    monkeypatch: pytest.MonkeyPatch, captured: list[object], *, kwarg: str = "storm_breaker"
+) -> None:
+    """Fake every network-shaped CLI seam + spy the spine's *kwarg* breaker kwarg."""
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda _lake: [_index("NIFTY")])
     credentials = importlib.import_module("brutex.config.credentials")
     monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
@@ -310,7 +312,7 @@ def _wire_cli_fakes(monkeypatch: pytest.MonkeyPatch, captured: list[object]) -> 
     run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
 
     def fake_ingest(*_args: Any, **kwargs: Any) -> _FakeIngestResult:
-        captured.append(kwargs.get("storm_breaker"))
+        captured.append(kwargs.get(kwarg))
         return _FakeIngestResult()
 
     monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
@@ -421,3 +423,123 @@ class TestBreakerCanaryArming:
         _run_fno_phase(lake_root=tmp_path, dry_run=True)
         assert captured, "the spine was never reached"
         assert all(p is None for p in captured)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mass ALL-FILTERED breaker — the PULL-scope resolve law
+# (DEC-ALLFILTERED-MASS-BREAKER-001 review round 4: each production pull
+# entrypoint resolves ONE breaker and threads the SAME instance into every
+# pass / phase / until-clean round, so a trip stays LATCHED for the pull —
+# the superseded per-pass resolve let a sub-floor retry pass settle windows
+# the trip alarm promised were halted. Unlike the storm breaker there is NO
+# dry-run gate: the instance is resolved unconditionally and stays inert on
+# a dry-run because its windows are ineligible by construction.)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAllFilteredBreakerPullScope:
+    def test_pull_all_spot_resolves_once_and_threads_it_everywhere(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        resolves: list[object] = []
+
+        def _resolve_once() -> AllFilteredBreaker:
+            resolves.append(sentinel)
+            return sentinel
+
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("all_filtered_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", _resolve_once)
+
+        def _factory(
+            lake_root: Path, _insts: Sequence[Instrument]
+        ) -> tuple[MarketAdapter, BarSink]:
+            del lake_root
+            return SyntheticSpotAdapter(), NullBarSink()
+
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            adapter_factory=_factory,
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+        assert len(resolves) == 1, "ONE breaker per pull — the round-4 latch scope"
+
+    def test_pull_candles_resolves_once_and_threads_both_phases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        resolves: list[object] = []
+
+        def _resolve_once() -> AllFilteredBreaker:
+            resolves.append(sentinel)
+            return sentinel
+
+        captured: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("all_filtered_breaker"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", _resolve_once)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+        assert len(resolves) == 1, "ONE breaker per pull, shared by every phase"
+
+    def test_cli_cmd_fetch_resolves_and_threads_the_pull_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("polars")
+        pytest.importorskip("duckdb")
+        pytest.importorskip("pyarrow")
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        resolves: list[object] = []
+
+        def _resolve_once() -> AllFilteredBreaker:
+            resolves.append(sentinel)
+            return sentinel
+
+        captured: list[object] = []
+        _wire_cli_fakes(monkeypatch, captured, kwarg="all_filtered_breaker")
+        afb = importlib.import_module("brutex.adapters.all_filtered_breaker")
+        monkeypatch.setattr(afb, "resolve_all_filtered_breaker", _resolve_once)
+        rc = cli.cmd_fetch(
+            tmp_path,
+            "2024-01-02",
+            "2024-01-03",
+            "1m",
+            window_days=None,
+            dry_run=False,
+            inspect=True,  # persistence-free live wiring (NullBarSink, no ledger)
+            rows_per_chunk=5,
+        )
+        assert rc == cli.EXIT_OK
+        assert captured, "the spine was never reached"
+        assert all(b is sentinel for b in captured)
+        assert len(resolves) == 1, "ONE breaker per pull — the round-4 latch scope"

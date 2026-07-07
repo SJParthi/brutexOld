@@ -3548,6 +3548,7 @@ def cmd_fetch(
     # throttled mint / a stale read-only re-read) never alert — carved back out via
     # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
     # as they propagated before this tuple caught them).
+    from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import (
         VendorDownError,
@@ -3957,6 +3958,14 @@ def cmd_fetch(
         # ``None`` so it can never observe synthetic outcomes (the same gating as
         # ``detect_completeness_gaps`` below).
         storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4 — the CLI twin of pull_all_spot's wiring, the storm-breaker
+        # precedent above): resolved HERE and threaded into every pass / until-clean
+        # round so the trip LATCHES pull-wide — a per-pass fresh instance let a
+        # sub-floor retry round settle windows the trip alarm promised were halted.
+        # Resolved unconditionally: a ``--dry-run``'s windows are ineligible by
+        # construction (``detect_completeness_gaps=False`` → never observed).
+        af_breaker = resolve_all_filtered_breaker()
         # (The observed-sessions overlay was loaded ONCE above, before the
         # cold-start reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME
         # ``observed_holidays`` snapshot feeds the fetch-time detectors below.)
@@ -3988,6 +3997,7 @@ def cmd_fetch(
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
                     observed_holidays=observed_holidays,
+                    all_filtered_breaker=af_breaker,
                     storm_breaker=storm_breaker,
                 )
             except _pull_halt_errors as exc:

@@ -414,7 +414,9 @@ def ingest_spot(
     all_filtered_breaker
         Optional per-pull :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker`
         (DEC-ALLFILTERED-MASS-BREAKER-001) — the mass ALL-FILTERED counter shared by
-        every window worker of the pass (the run-ingest layer constructs one per pass).
+        every window worker of EVERY pass of the pull (the pull entrypoints resolve
+        ONE instance threaded through each retry pass — review round 4; the
+        run-ingest layer's ``None`` fallback serves direct callers).
         Each ELIGIBLE window's boundary verdict is observed at the consumer tail; a
         mass event (SPREAD/FRACTION rules) latches ONCE, auto-rescinds the same-pull
         pre-trip ``ALL_FILTERED`` settles, emits ONE count-naming alarm, and

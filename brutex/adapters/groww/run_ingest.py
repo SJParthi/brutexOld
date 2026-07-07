@@ -443,11 +443,17 @@ def run_groww_spot_ingest(
         a configured instance.
     all_filtered_breaker
         Optional :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker`
-        (DEC-ALLFILTERED-MASS-BREAKER-001). ``None`` (the default — every
-        production caller) constructs a FRESH env-configured breaker for THIS pass
-        via :func:`~brutex.adapters.all_filtered_breaker.resolve_all_filtered_breaker`,
+        (DEC-ALLFILTERED-MASS-BREAKER-001). Every PRODUCTION caller injects the
+        ONE pull-scoped instance resolved at its pull entrypoint (the dashboard
+        bulk + single-symbol pulls and the CLI ``cmd_fetch`` — review round 4;
+        :func:`run_groww_spot_ingest_with_retry` resolves one itself for a
+        direct ``None`` caller), so the trip latches ACROSS retry passes and
+        until-clean rounds, never just this invocation. ``None`` (direct
+        single-pass callers / tests) constructs a FRESH env-configured breaker
+        for THIS invocation via
+        :func:`~brutex.adapters.all_filtered_breaker.resolve_all_filtered_breaker`,
         so the mass ALL-FILTERED guard is ON by default and its state can never
-        leak across pulls/passes. The ONE breaker is threaded into every pair's
+        leak across pulls. The ONE breaker is threaded into every pair's
         window tails (pull-wide counting — a vendor-day timestamp bug spans
         symbols); a trip SUPPRESSES further ``ALL_FILTERED`` SKIPPED-settles +
         auto-rescinds the same-pull pre-trip ones + emits ONE count-naming alarm
@@ -495,12 +501,16 @@ def run_groww_spot_ingest(
     # inside ingest_spot — so ALL pairs of this pass share ONE counter (a vendor
     # soft-throttle hits every symbol) and a fresh pass/pull always starts clean.
     breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
-    # One mass ALL-FILTERED breaker per PASS (DEC-ALLFILTERED-MASS-BREAKER-001),
-    # mirroring the mass-EMPTY breaker above: all pairs share ONE counter (a
-    # vendor-day timestamp bug empties every symbol's boundary at once) and a
-    # fresh pass/pull always starts clean (Golden Rule #7). The explicit param is
-    # the test seam; BRUTEX_ALLFILTERED_BREAKER=off resolves a disabled instance
-    # (observe no-ops — byte-identical settle behaviour).
+    # One mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001):
+    # every production caller INJECTS the pull-scoped instance resolved at its
+    # entrypoint (review round 4 — the trip must latch across retry passes and
+    # until-clean rounds, or a sub-floor retry pass settles windows the pass-1
+    # alarm promised were halted), so all pairs — and all PASSES — share ONE
+    # counter (a vendor-day timestamp bug empties every symbol's boundary at
+    # once) and a fresh pull always starts clean (Golden Rule #7). The `None`
+    # fallback resolve serves direct single-pass callers; the explicit param is
+    # ALSO the test seam; BRUTEX_ALLFILTERED_BREAKER=off resolves a disabled
+    # instance (observe no-ops — byte-identical settle behaviour).
     af_breaker = (
         all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
     )
@@ -834,9 +844,17 @@ def run_groww_spot_ingest_with_retry(
     caller drains it ONCE at pull end (after the LAST pass), so every queued window is
     processed + ledger-recorded before the final ledger flush.
 
-    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001) is forwarded verbatim
-    to every pass (a ``None`` lets each pass resolve its own fresh instance — the
-    per-pass state law, so a retry round can trip on its own evidence only).
+    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001): ONE instance spans
+    the whole pull's retry rounds — a ``None`` resolves a single fresh
+    env-configured breaker HERE (review round 4; the storm_breaker/floor_learner
+    whole-pull precedent) and the SAME instance is threaded into every pass, so
+    the trip LATCHES across retry rounds and the "settles halted for this pull"
+    alarm promise holds through them. The superseded per-pass fresh resolve let a
+    sub-floor retry pass (fewer re-attempted windows than the observation floor)
+    bump a suppressed window's streak to threshold and settle it SKIPPED minutes
+    AFTER the CRITICAL alarm — un-rescinded and un-alarmed. Production callers
+    (the dashboard pull + the CLI) inject the pull-scoped instance they resolved,
+    so the latch ALSO spans their outer until-clean rounds.
     *empty_breaker* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) is forwarded verbatim to
     every pass. The production ``None`` makes EACH pass resolve its own fresh
     env-configured breaker (per-pass counting; no state leak across passes or pulls);
@@ -874,6 +892,18 @@ def run_groww_spot_ingest_with_retry(
     # per pull, never on the hot path.
     from brutex.adapters.ingest_common import retry_failed_windows
 
+    # ONE mass ALL-FILTERED breaker across EVERY pass of this call (review round 4,
+    # DEC-ALLFILTERED-MASS-BREAKER-001): resolved HERE — not per pass — so the trip
+    # LATCHES across the retry rounds. The per-pass fresh resolve broke the alarm's
+    # pull-wide promise: a retry pass re-attempts exactly the FAILED windows a
+    # tripped pass-1 breaker suppressed, and when that re-attempt set sits below
+    # the observation/series floors its FRESH breaker never tripped — the window
+    # bumped to threshold and settled SKIPPED post-alarm, un-rescinded. Fresh per
+    # CALL still holds (Golden Rule #7: no state leak across pulls).
+    af_breaker = (
+        all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
+    )
+
     def _one_pass() -> GrowwIngestReport:
         """Run ONE full spot-ingest pass with the original call's bindings."""
         return run_groww_spot_ingest(
@@ -898,7 +928,7 @@ def run_groww_spot_ingest_with_retry(
             detect_completeness_gaps=detect_completeness_gaps,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
-            all_filtered_breaker=all_filtered_breaker,
+            all_filtered_breaker=af_breaker,
             storm_breaker=storm_breaker,
             write_breaker=write_breaker,
             floor_learner=floor_learner,

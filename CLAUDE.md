@@ -51,7 +51,11 @@ stay FAILED + re-pullable), AUTO-RESCINDS same-pull pre-trip settles
 primitive, `ALL_FILTERED_MASS_RESCINDED`, double-tombstoned against mid-pull-flush merge
 resurrection, `newly_settled_skipped` decremented) and emits exactly ONE
 `allfiltered_breaker.tripped` ERROR + ONE CRITICAL count-naming Telegram
-(`SweepAlerter.mass_all_filtered`; once-per-pass = the breaker LATCH — the pull-scoped
+(`SweepAlerter.mass_all_filtered`; once-per-PULL = the breaker LATCH — review round 4
+resolves ONE pull-scoped instance at each pull entrypoint and threads it through every
+retry pass / until-clean round / F&O market bucket, superseding the round-3 per-pass
+resolve whose fresh retry-pass breaker demonstrably settled a suppressed window SKIPPED
+post-alarm; the pull-scoped
 dedupe key is defence-in-depth only, PHASE_BLOCKED is never notifier-coalesced) —
 deliberately NOT a global stop
 (settling is poisoned, never fetching/storage); genuine per-symbol bounded-terminal settles
@@ -576,12 +580,18 @@ hostile-review pass._
   ALL_FILTERED settles via the record-time `record(allow_degraded_settle=)` re-check — evaluated UNDER the
   ledger lock, serialized with the rescind, so a settle in flight at the trip instant never leaks
   (review round 1 closed the tail-computed-bool TOCTOU) — + auto-rescind same-pull pre-trip settles +
-  ONE count-naming CRITICAL alarm (once-per-pass = the breaker latch; the pull-scoped dedupe key is
+  ONE count-naming CRITICAL alarm (once-per-PULL = the breaker latch; the pull-scoped dedupe key is
   defence-in-depth only; review round 3: the F&O phase's futures + options market buckets share ONE
-  per-pass breaker — `historical_pull._one_pass` resolves it once and injects it into every
-  `run_groww_option_ingest` bucket call, so a vendor-day event's evidence POOLS across the buckets
-  instead of fragmenting per driver invocation — the SPOT and F&O phases keep separate breakers, a
-  now-NAMED blind spot); deliberately NOT a global stop; below-threshold bounded-terminal
+  breaker injected into every `run_groww_option_ingest` bucket call, so a vendor-day event's evidence
+  POOLS across the buckets instead of fragmenting per driver invocation — the SPOT and F&O phases keep
+  separate breakers, a now-NAMED blind spot; review round 4: the resolve is PULL-scoped — the spot pull
+  entrypoints (`pull_all_spot`/`pull_candles`/CLI `cmd_fetch`, the storm-breaker precedent) + the F&O
+  `historical_pull._run_phase` each resolve ONE instance threaded through EVERY retry pass /
+  until-clean round, superseding the round-3 per-pass resolve whose fresh retry-pass breaker was
+  REPRODUCED settling a suppressed streak-2 window SKIPPED post-alarm whenever the sub-floor retry
+  round's re-attempt set could not re-trip — the latch now spans passes, queued async-pipeline tails
+  included, and the counters are pull-CUMULATIVE across passes with a no-trip pull byte-unchanged);
+  deliberately NOT a global stop; below-threshold bounded-terminal
   byte-unchanged); and the observed-overlay threading into the cold-start seed gate (one hoisted load per
   pull = one consistent snapshot; the tolerance+1 refusal flip closed; the session filter deliberately
   overlay-blind). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
