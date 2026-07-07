@@ -1,6 +1,6 @@
 # ADR-0017 — Rust sweep-metrics tail ON by default (`SWEEP_RUST_METRICS_DEFAULT = True`)
 
-**Decision ID:** `DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001` (MIGRATION.md entry #1528)
+**Decision ID:** `DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001` (MIGRATION.md entry #1530)
 **Date:** 2026-07-06
 **Status:** **ACCEPTED** — the flip this ADR owns ships in the same PR. It was
 ORIGINALLY authored as the PR's LAST commit (every earlier commit fully green
@@ -15,7 +15,7 @@ entry #1186), whose flag section states verbatim: *"the flip to ON-by-default
 is a SEPARATE later ADR, explicitly NOT here"* — this is that ADR + that flip.
 **Builds on:** `DEC-SWEEP-RUST-METRICS-001` (#1186 — the fused
 `fno_math.sweep_drawdown_stats` kernel + its 2⁵² f64-exactness envelope proof
-+ the zero-trade O(1) shortcut), `DEC-SWEEP-EXIT-INDEX-FASTPATH-001` (#1527 —
++ the zero-trade O(1) shortcut), `DEC-SWEEP-EXIT-INDEX-FASTPATH-001` (#1529 —
 the exit-index fast path that removes the ON arm's residual per-mask
 O(N_bars) dict build, plus the burn-in self-check + autorevert latch this
 flip rides on), `DEC-SWEEP-RUST-TRADESIM-WIRE-001` (#1182 — the Phase-A
@@ -35,7 +35,7 @@ envelope (dual-arm golden byte-equality on the frozen
 bit-equality under hypothesis, 18 Rust-native tests). Measured (sandbox
 ratios, NOT the §8 M4 Pro): ~7.3× on the traded-mask tail, ~1683× on the
 zero-trade shortcut. The flip to ON was explicitly deferred to a separate
-ADR. `DEC-SWEEP-EXIT-INDEX-FASTPATH-001` (#1527, landing in the same
+ADR. `DEC-SWEEP-EXIT-INDEX-FASTPATH-001` (#1529, landing in the same
 reconstructed commit as this flip — see Status above)
 then removed the ON arm's last honest-envelope residual — the per-mask
 O(N_bars) `exit_ts`→index dict build — and added the burn-in self-check +
@@ -71,7 +71,7 @@ assert it — mechanical). No other code changes with the flip.
   byte-for-byte WITH exactly one `sweep_rust_metrics.engaged` event (the
   anti-vacuous-gate signal — a stale wheel silently serving Python cannot
   pass as parity).
-* **Burn-in self-check (#1527):** the first `SELF_CHECK_SAMPLES = 16`
+* **Burn-in self-check (#1529):** the first `SELF_CHECK_SAMPLES = 16`
   kernel-served masks per process are ALSO computed by the Python oracle and
   bit-compared (`struct.pack` on the floats — signed zeros included). A
   mismatch ships the ORACLE value (a wrong kernel number is never persisted,

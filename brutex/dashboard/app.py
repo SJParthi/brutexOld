@@ -70,6 +70,11 @@ from brutex.dashboard.completeness import (
 )
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
+    # The ONE index/stock classification-map builder the six-step F&O order keys on
+    # (DEC-PULL-SIX-STEP-ORDER-001; CLAUDE.md §11 COMMON — the friend import is the
+    # established convention, pyproject reportPrivateUsage="warning" + per-site ignore
+    # at deliberate cross-module reuse sites — DEC-P0-017).
+    _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
 from brutex.dashboard.coverage_view import (
@@ -108,6 +113,7 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    preopen_datasets_key,
     warm_discovery_memos,
 )
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
@@ -162,7 +168,11 @@ from brutex.dashboard.pipeline_prebuild import (
     PrebuildTarget,
     run_pipeline_prebuild_guarded,
 )
-from brutex.dashboard.pipeline_pull import run_full_pipeline
+from brutex.dashboard.pipeline_pull import (
+    PriorStepsVerdict,
+    run_full_pipeline,
+    strict_gate_enabled,
+)
 from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
 from brutex.dashboard.prebuild_parallel import resolve_prebuild_workers
 from brutex.dashboard.preopen_report import (
@@ -2959,6 +2969,18 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
+        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
+        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
+        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
+        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
+        # before index options) on a real vendor pull. Build the classification map over
+        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
+        # composite uses; a selection whose underlying is somehow absent orders
+        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
+        # time (request thread), captured by the job closure below.
+        underlying_kinds = _underlying_kind_map(
+            _select_bulk_targets("index") + _select_bulk_targets("stock")
+        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -3008,6 +3030,9 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
+                    # grammars run the SAME strict steps 3-6 order as the composite.
+                    underlying_kinds=underlying_kinds,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -3134,6 +3159,10 @@ def build_app(
         # window is recomputed inside the spot phase from the SAME strings — this
         # call is the fail-fast guard.
         try:
+            # The strict post-step gate (DEC-PULL-SIX-STEP-ORDER-001): resolved
+            # ONCE, EAGERLY, at launch — a garbage BRUTEX_PIPELINE_STRICT_GATE
+            # value is a clean 400 here, never a mid-pull 500 on the job thread.
+            strict_gate = strict_gate_enabled()
             resolve_candle_range(
                 from_date=from_date,
                 to_date=to_date,
@@ -3188,6 +3217,7 @@ def build_app(
             target_source=target_source,
             years=years,
             dry_run=dry_run,
+            strict_gate=strict_gate,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -3261,7 +3291,10 @@ def build_app(
                         on_progress=partial(_metadata_progress_sync, _pull_job),
                     )
 
-            def _run_historical() -> CompositePullReport:
+            def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
+                # DEC-PULL-SIX-STEP-ORDER-001: the sequencer's spot+metadata
+                # cleanliness verdict rides into the composite → the Greeks seam,
+                # so the strict barrier can withhold the enrichment there.
                 # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the historical F&O phase pulls
                 # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
                 # "historical" label is REFINED to futures-vs-options by the live ledger
@@ -3306,6 +3339,7 @@ def build_app(
                         scope_end=fno_scope_end,
                         on_bars=_pull_job.add_bars,
                         on_ledger_sync=_hist_ledger_sync,
+                        prior_steps=prior_steps,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3718,6 +3752,7 @@ def build_app(
                         warm_futures_movers=_warm_futures_movers,
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
+                        strict_gate=strict_gate,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -5265,15 +5300,34 @@ def build_app(
         READ-ONLY; empty when no lake.
 
         DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
-        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
-        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        (``resolve_report_datasets`` → ``list_candle_datasets``) + the
         store reads run on a threadpool worker, NEVER the event loop.
-        Forensically proven (2026-07-04 run): this route ran the walk
+        Forensically proven (2026-07-04 run — a PRE-DEC-O1-CLAIMS-HONESTY-001
+        measurement of the then-UNFILTERED full ``bars/`` tree walk, ~66k
+        dirs on a materialised options lake): this route ran that walk
         SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
         froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
         requests burst-flushed on release). The store connection is built +
         used inside the worker so its RLock stays on one thread
         (DEC-DASHBOARD-FASTREAD-001).
+
+        DEC-O1-CLAIMS-HONESTY-001: the cold-miss discovery is now STRICTLY
+        CHEAPER than that measured unfiltered walk — FNO-pruned at walk
+        DESCENT (``exclude_segments={FNO}``: the F&O contract tree, the bulk
+        of the ~66k dirs above, is never entered) + interval-bounded
+        (``intervals`` = the one partition the basis reads), and a
+        manifest-served lake pays an O(manifest-rows) read, no walk at all.
+        The discovery result (the triples ONLY) is additionally memoised in
+        the COMMON generation-keyed ``_db_datasets_cache`` (the #896 pattern,
+        key ``preopen_datasets_key(basis)`` — one memo per basis, seeded by
+        the post-pull ``warm_discovery_memos``), so a repeat open within one
+        write generation is an O(1) handoff and the pruned cold-miss walk is
+        paid at most once per generation per basis. The pullability tagging below
+        is DELIBERATELY NOT cached: it reads the instrument master, which
+        moves on a keyless ``load-instruments`` WITHOUT a generation bump
+        (the ``master_revision`` trap) — the three store SELECTs are bounded
+        + cheap and stay live. Mid-pull the adaptive floor may serve a
+        bounded-stale triple list (logged ``movers_cache.stale_served``).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
@@ -5281,10 +5335,15 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
+        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
-            """Walk the lake + tag pullability off the event loop (threadpool)."""
-            triples = resolve_report_datasets(lake, basis=report_basis)
+            """Tag pullability off the event loop; discovery is generation-memoised."""
+            triples = _db_datasets_cache.get_or_compute(
+                preopen_datasets_key(report_basis),
+                generation=gen,
+                compute=lambda: resolve_report_datasets(lake, basis=report_basis),
+            )
             # Tag each report symbol with option-pullability so /reports can badge
             # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
             # the SAME store calls + single-source predicate the /universe explorer
