@@ -992,16 +992,42 @@ def list_candle_datasets(
             manifest_rows, exclude_segments=exclude_segments, intervals=intervals
         )
     # Capture the freshness token BEFORE the walk: a vendor write landing
-    # DURING the (potentially long) walk must stale the rebuilt manifest on the
-    # very next read — a post-walk stamp could claim freshness the walk never
-    # had (Golden Rule #1).
+    # DURING the (potentially long) walk must never let the rebuilt manifest
+    # claim freshness the walk did not have (Golden Rule #1).
     pre_walk_token = ledger_stat_token(lake_root)
     found = _walk_candle_datasets(lake_root, exclude_segments=exclude_segments, intervals=intervals)
     if not exclude_segments and intervals is None and pre_walk_token is not None:
         # Only an UNFILTERED walk sees the whole dataset population, so only it
         # may (re)build the manifest — a filtered walk would persist a
-        # silently-partial row set. Best-effort: a rebuild failure leaves the
-        # walk result (already correct) untouched.
+        # silently-partial row set. The rebuild ALWAYS stamps the PRE-walk
+        # token (`rebuild_manifest`'s contract verbatim — a post-walk stamp
+        # could claim freshness the walk did not have and stays REJECTED). On
+        # a mid-walk ledger move the stamp is therefore STALE and the
+        # load-side token gate refuses to serve it as-is — yet the base is
+        # NOT a wasted write: it is the seed `record_dataset`'s write-side
+        # convergence layers onto (without a base every prebuild record
+        # no-ops — `record_skipped_no_base` — and a manifest-absent lake
+        # stays unconvergeable until the next quiescent unfiltered walk
+        # re-pays the O(files) discovery the manifest exists to kill).
+        # DEC-O1-CLAIMS-HONESTY-001 round-6 review fold: the interim
+        # SKIP-on-mismatch design is REVERTED — only the post-walk token
+        # RE-READ survives, OBSERVE-ONLY: a moved (or unreadable `None`)
+        # post-walk token emits one `db_view.manifest_rebuilt_stale` INFO
+        # carrying both tokens. HONEST bounded window (Golden Rule #10): a
+        # later `record_dataset` re-stamps the CURRENT token and serves the
+        # union of walk + recorded rows, so a dataset created mid-walk whose
+        # own record no-oped before this base landed can be UNDER-LISTED
+        # until the next ledger move + walk — the same bounded class as
+        # lake_manifest's documented cold-walk ∩ active-prebuild window.
+        # Best-effort: a rebuild failure leaves the walk result (already
+        # correct) untouched.
+        post_walk_token = ledger_stat_token(lake_root)
+        if post_walk_token != pre_walk_token:
+            _LOG.info(
+                "db_view.manifest_rebuilt_stale",
+                pre_walk_token=pre_walk_token,
+                post_walk_token=post_walk_token,
+            )
         rebuild_manifest(lake_root, found, ledger_token=pre_walk_token)
     return found
 
