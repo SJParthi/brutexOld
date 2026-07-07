@@ -41,7 +41,7 @@ _GOLDEN_INPUTS_PACK = 332034
 _GOLDEN_OK_STAMP = 1380610
 
 #: The frozen backfill_id of the fixed two-target plan below. RE-KEYED
-#: DELIBERATELY in DEC-GREEKS-BULK-REENRICH-001 fix round 4 (ledger #1531,
+#: DELIBERATELY in DEC-GREEKS-BULK-REENRICH-001 fix round 4 (ledger #1542,
 #: refuter-confirmed MAJOR): the id head now binds the rate-source VALUE
 #: fingerprint (here ``fixed=0.065``), so a rate VALUE change under an
 #: unchanged source kind re-keys the plan and a crashed force run's surviving
