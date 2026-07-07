@@ -5,7 +5,9 @@ The three db_view module dict caches (``_WINDOW_CACHE`` / ``_WINDOW_ROWS_CACHE``
 :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`
 (``db_view._LEDGER_READ_CACHE``), keyed per family at a generation digested from
 the composite ledger stamp token
-(:func:`~brutex.dashboard.lake_revision.revision_generation`). This suite pins:
+(:func:`~brutex.dashboard.movers_cache.revision_generation` — homed in the
+movers_cache LEAF, not lake_revision, so db_view carries no lake_revision
+import edge: CodeQL py/cyclic-import alert 690). This suite pins:
 
 * T-b1  8 concurrent cold-stamp pollers pay EXACTLY ONE ledger parse
         (per-key single-flight — the concurrent ~13.6 s duplicate-parse bug);
@@ -55,7 +57,7 @@ from brutex.dashboard.db_view import (
     spot_window_rollup,
     window_ledger_rows_cached,
 )
-from brutex.dashboard.lake_revision import revision_generation
+from brutex.dashboard.movers_cache import revision_generation
 from brutex.dashboard.summary_cache import effective_adaptive_floor
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger

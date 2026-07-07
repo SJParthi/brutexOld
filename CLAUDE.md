@@ -616,7 +616,9 @@ hostile-review pass._
   TIME bound never a stamp-count bound — ALWAYS logged `movers_cache.stale_served` on the key that served it; a
   derived rows/rollup family additionally ages under its OWN floor once the records floor passes, so its worst-case
   staleness COMPOSES records floor + derived floor, each ≤ 120 s; NEW
-  `lake_revision.revision_generation` digest bridge; the base-less delta-only /db grid inconsistency FIXED). (c)
+  `movers_cache.revision_generation` digest bridge (homed in the movers_cache LEAF — a db_view → lake_revision
+  edge closes a CodeQL py/cyclic-import cycle via lake_revision's lazy window_ledger_store →
+  coverage_reconcile → db_view imports; AST-pinned); the base-less delta-only /db grid inconsistency FIXED). (c)
   `api_sweep_leaderboard` keys on NEW `lake_revision.sweep_results_revision` (the sweeps dir-mtime digest + the audit
   chain's `(mtime_ns:size)` stat — a SWEEP_START append moves NO dir mtime, the stat closes that gap; a CLI `brutex
   sweep-all` + a store delete + an audit-only append ALL invalidate; a probe outage computes fresh UNCACHED;

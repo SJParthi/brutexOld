@@ -59,8 +59,14 @@ from brutex.adapters.groww.constants import (
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
-from brutex.dashboard.lake_revision import revision_generation
-from brutex.dashboard.movers_cache import MoversSnapshotCache
+
+# NO lake_revision import — module-level OR lazy (AST-pinned by
+# ``test_db_view_no_lake_revision_import``): lake_revision lazily imports
+# window_ledger_store → coverage_reconcile → db_view, so any db_view →
+# lake_revision edge closes an import cycle (CodeQL py/cyclic-import, alert
+# 690). The token→generation digest bridge this module needs is therefore
+# homed in the movers_cache LEAF (DEC-LEDGER-DELTA-O-PAGE-001).
+from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
 from brutex.data.fno_candle_lake import (
@@ -3608,7 +3614,7 @@ def _make_ledger_read_cache(
 #: hub hits the same endpoint; re-reading an 841k-row Parquet per poll measured
 #: ~13.6 s. Each consumer keys ``<family>|<ledger path>`` at a generation
 #: digested from the composite ledger stamp token (base mtime PLUS the pending
-#: delta name set — :func:`~brutex.dashboard.lake_revision.revision_generation`
+#: delta name set — :func:`~brutex.dashboard.movers_cache.revision_generation`
 #: over :func:`_ledger_stamp_token`), so any flush shape — full save, mid-pull
 #: delta append/prune, a cross-process CLI write — moves the generation.
 #: Concurrent stamp-miss pollers are SINGLE-FLIGHT (one thread pays the parse,

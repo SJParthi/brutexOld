@@ -31,7 +31,6 @@ from brutex.dashboard.lake_revision import (
     ABSENT_TOKEN,
     lake_revision,
     rate_bridge_revision,
-    revision_generation,
     sweep_results_revision,
     sweeps_revision,
 )
@@ -296,22 +295,6 @@ class TestLedgerDeltaComponent:
 
         monkeypatch.setattr(os, "stat", _denying_stat)
         assert lake_revision(tmp_path) is None
-
-
-class TestRevisionGeneration:
-    """The token→generation digest bridge (DEC-LEDGER-DELTA-O-PAGE-001).
-
-    Standalone twin of the wired pins in
-    ``test_dashboard_db_view_ledger_read_cache.py`` so this module's OWN
-    stem-matched suite proves the bridge (the discovery-gate contract).
-    """
-
-    def test_deterministic_64bit_and_token_sensitive(self) -> None:
-        """Same token → same generation; any token change moves it; fits u64."""
-        first = revision_generation("base:1|deltas:a.parquet")
-        assert first == revision_generation("base:1|deltas:a.parquet")
-        assert 0 <= first < 2**64
-        assert first != revision_generation("base:1|deltas:b.parquet")
 
 
 class TestSweepResultsRevisionNoSignal:

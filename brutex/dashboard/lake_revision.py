@@ -34,6 +34,13 @@ token with two components:
 via its ``revision_probe`` seam and bumps its generation when the token changes,
 invalidating every generation-keyed cache for free.
 
+The token→generation digest bridge (``revision_generation``) deliberately does
+NOT live here — it is homed in :mod:`brutex.dashboard.movers_cache` beside the
+cache whose generations it feeds, because a module-level
+``db_view → lake_revision`` import closes a real import cycle through this
+module's lazy ``window_ledger_store`` import (CodeQL ``py/cyclic-import``
+alert 690; see :func:`brutex.dashboard.movers_cache.revision_generation`).
+
 Honest envelope (Golden Rule #10 — stated, not hidden)
 ------------------------------------------------------
 * The ledger component moves ONLY when a writer touches the window ledger. **All
@@ -90,22 +97,6 @@ _SWEEPS_DIRNAME: Final[str] = "sweeps"
 #: test, not imported (the :data:`_SWEEPS_DIRNAME` precedent: this module stays
 #: a lean stdlib-only probe surface).
 _SWEEP_AUDIT_RELPATH: Final[tuple[str, str]] = ("audit", "sweep-all.jsonl")
-
-
-def revision_generation(token: str) -> int:
-    """Map a content token onto a ``MoversSnapshotCache`` generation int — one digest bridge.
-
-    DEC-LEDGER-DELTA-O-PAGE-001: the reused
-    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` keys freshness on
-    an ``int`` *generation*, while the lake content signals are opaque string
-    tokens (a ledger stamp token, a revision composite). This bridge digests the
-    token to the first 8 bytes of its SHA-256 — a 64-bit int, so ANY token
-    change moves the generation. HONEST envelope (Golden Rule #10): two distinct
-    tokens collide with probability ~2\\ :sup:`-64`; a collision would serve ONE
-    stale entry for that colliding pair and self-heals on the next token move —
-    documented, not hidden. Pure, O(len(token)).
-    """
-    return int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
 
 
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
@@ -348,7 +339,6 @@ __all__ = [
     "ABSENT_TOKEN",
     "lake_revision",
     "rate_bridge_revision",
-    "revision_generation",
     "sweep_results_revision",
     "sweeps_revision",
 ]

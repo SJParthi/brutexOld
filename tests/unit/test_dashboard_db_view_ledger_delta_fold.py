@@ -199,6 +199,42 @@ def test_db_view_no_window_ledger_store_import() -> None:
             ), "module-level db_view → window_ledger_store import edge"
 
 
+def test_db_view_no_lake_revision_import() -> None:
+    """The pinned module edge: db_view must NOT import lake_revision — AT ANY LEVEL.
+
+    CodeQL ``py/cyclic-import`` alert 690: the module-level
+    ``db_view → lake_revision`` import (this PR's original home for
+    ``revision_generation``) began a real 4-module cycle — ``lake_revision``
+    lazily imports ``window_ledger_store`` (``_ledger_revision``), whose
+    cold-start reconcile lazily imports ``coverage_reconcile``, which lazily
+    imports ``db_view`` back. The bridge was therefore homed in the
+    ``movers_cache`` LEAF (beside the cache whose generations it feeds).
+    Unlike the ``window_ledger_store`` pin above, function-local imports are
+    NOT exempted here: db_view has zero need for ANY ``lake_revision`` edge,
+    and every closing edge of the flagged cycle was itself function-level —
+    so a "lazy" re-add would re-enter the same cycle graph.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "db_view.py"
+    ).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "brutex.dashboard.lake_revision" or node.level != 0, (
+                "db_view → lake_revision import edge (CodeQL py/cyclic-import, alert 690)"
+            )
+            assert not (
+                node.level == 0
+                and node.module == "brutex.dashboard"
+                and any(alias.name == "lake_revision" for alias in node.names)
+            ), "db_view → lake_revision import edge via `from brutex.dashboard import …`"
+        if isinstance(node, ast.Import):
+            assert all(alias.name != "brutex.dashboard.lake_revision" for alias in node.names), (
+                "db_view → lake_revision import edge (plain `import`)"
+            )
+
+
 # ── scan-source assembly + stamp token ────────────────────────────────────────
 
 

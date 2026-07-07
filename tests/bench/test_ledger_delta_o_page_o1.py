@@ -551,8 +551,7 @@ def test_results_poll_flat_during_pull(tmp_path: Path, monkeypatch: pytest.Monke
         strike_price=None,
         asm_gsm_flag=False,
     )
-    instrument_store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as instrument_store:
         instrument_store.upsert_many(
             [nifty], snapshot_date=date(2024, 1, 2), run_id="r1", csv_source_sha256="0" * 64
         )
@@ -595,8 +594,6 @@ def test_results_poll_flat_during_pull(tmp_path: Path, monkeypatch: pytest.Monke
                 poll = client.get("/api/v1/sweep/leaderboard")
                 assert poll.status_code == 200
                 assert poll.json() == primed
-    finally:
-        instrument_store.close()
 
 
 def test_module_header_enumerates_the_real_ceiling_mechanisms() -> None:

@@ -50,6 +50,7 @@ CHANGE_SET_FILES: tuple[str, ...] = (
     "tests/unit/test_data_lake_read.py",
     "tests/unit/test_lake_revision.py",
     "tests/unit/test_migration_ledger_1528_files.py",
+    "tests/unit/test_movers_cache.py",
     "tests/unit/test_summary_cache.py",
     "tests/unit/test_sweep_results_scan_split.py",
     "tests/unit/test_sweep_results_view.py",
