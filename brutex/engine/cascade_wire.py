@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
+from brutex.data.futures_series import is_futures_series_symbol
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -112,7 +113,7 @@ from brutex.strategies.types import FibAnchorKind
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     import numpy as np
@@ -427,6 +428,17 @@ class CascadeManifest:
         (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1) — built once from
         the sidecars by the AUTOMATIC path; the slice-4 consumer reads ONLY
         these. ``None`` for pre-freeze manifests (backward-compatible parse).
+    roll_schedules
+        Optional ADR-0012 futures roll-schedule carriage
+        (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, review round-1): sorted
+        ``(instrument, (expiry_ordinal, ...))`` pairs recorded by the
+        AUTOMATIC path from the launch's resolved
+        ``roll_schedule_by_instrument``, so the MANUAL replay rebuilds a
+        futures winner's ``bar_bits`` with the SAME per-contract hard resets
+        the sweep ranked it under (D11 — never schedule-blind). ``None`` for
+        spot-only manifests AND for pre-carriage manifests
+        (backward-compatible parse; a futures pool replayed without a
+        schedule is loudly SKIPPED, see :func:`run_cascade_over_specs`).
     """
 
     version: int
@@ -436,6 +448,7 @@ class CascadeManifest:
     specs: tuple[CascadeTupleSpec, ...]
     stage3: Stage3ManifestRecord | None = None
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None
+    roll_schedules: tuple[tuple[str, tuple[int, ...]], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,10 +818,12 @@ def candidates_for_spec(
     projects each winning mask through :func:`build_candidate_input`. The lockbox
     window params are threaded through unchanged (see
     :func:`build_candidate_input` — they MUST match the cascade config's).
-    ``roll_schedule`` is the ADR-0012 futures pass-through seam (default
-    ``None`` — byte-identical for every spot spec; manifest carriage of a
-    futures winner's schedule is a NAMED follow-up of
-    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, not yet wired).
+    ``roll_schedule`` is the ADR-0012 futures pass-through (default ``None`` —
+    byte-identical for every spot spec); :func:`run_cascade_over_specs`
+    threads each pool's schedule in and the manifest carries it for the
+    MANUAL replay (``CascadeManifest.roll_schedules``), so a futures winner
+    is re-scored under the SAME per-contract hard resets the sweep ranked it
+    with (DEC-STAGE1A-ROLL-RESET-001 D11 — review round-1).
     """
     from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
     from brutex.vocabulary import ProximityParams
@@ -858,6 +873,7 @@ def run_cascade_over_specs(
     config: CascadeConfig,
     sweep_id: str,
     leaderboard_trials: Sequence[LeaderboardTrialsRecord] | None = None,
+    roll_schedules: Mapping[str, tuple[int, ...]] | None = None,
 ) -> CascadeWireReport:
     """Run the Stage-4 cascade per ``(instrument, tf)`` pool → one aggregate report.
 
@@ -876,6 +892,18 @@ def run_cascade_over_specs(
         The :class:`CascadeConfig` (shared across pools — same seed + thresholds).
     sweep_id
         The grid identity stamped on the report.
+    leaderboard_trials
+        Optional FROZEN per-leaderboard deflation inputs (ADR-0008 cond. 6).
+    roll_schedules
+        Optional per-instrument ADR-0012 futures roll schedules
+        (``instrument -> (expiry_ordinal, ...)``) — the launch's resolved
+        ``roll_schedule_by_instrument`` on the AUTOMATIC path, the manifest's
+        recorded ``roll_schedules`` on the MANUAL replay. A pool whose
+        instrument is the NIFTY-futures series alias with NO schedule
+        available (a pre-carriage manifest) is loudly SKIPPED — re-scoring
+        it schedule-blind would silently violate the D11 roll-reset law
+        (Golden Rule #1; review round-1). Spot pools ignore this (``None``
+        schedule is the byte-identical spot path).
 
     Returns
     -------
@@ -929,6 +957,23 @@ def run_cascade_over_specs(
         bars = bars_for(instrument, tf_label)
         if not bars:
             continue
+        roll_schedule = None if roll_schedules is None else roll_schedules.get(instrument)
+        if roll_schedule is None and is_futures_series_symbol(instrument):
+            # A futures pool with NO schedule (a pre-carriage manifest replay)
+            # must never be re-scored schedule-blind: the bar_bits would cross
+            # every roll basis gap (the exact D11 violation the sweep's hard
+            # resets prevent) and the report's verdicts would silently diverge
+            # from the sweep that minted the winners. Skip LOUDLY instead
+            # (honest degradation — Golden Rule #1; re-run `brutex sweep-all`
+            # to mint a schedule-carrying manifest).
+            _LOG.warning(
+                "cascade_wire.futures_pool_skipped_no_roll_schedule",
+                instrument=instrument,
+                tf=tf_label,
+                n_specs=len(grouped[(instrument, tf_label)]),
+                remedy="re-run `brutex sweep-all` to record roll_schedules in the manifest",
+            )
+            continue
         candidates: list[CandidateInput] = []
         for spec in grouped[(instrument, tf_label)]:
             candidates.extend(
@@ -941,6 +986,8 @@ def run_cascade_over_specs(
                     # config would otherwise silently mismatch them.
                     lockbox_default_window_days=config.lockbox_default_window_days,
                     lockbox_min_trades=config.lockbox_min_trades,
+                    # ADR-0012: the pool's OWN roll schedule (None = spot path).
+                    roll_schedule=roll_schedule,
                 )
             )
         if not candidates:
@@ -1393,6 +1440,27 @@ def _lbt_from_dict(data: dict[str, object]) -> LeaderboardTrialsRecord:
         raise CascadeWireError(f"invalid leaderboard_trials record in manifest: {exc}") from exc
 
 
+def _roll_schedules_from_payload(
+    raw: object,
+) -> tuple[tuple[str, tuple[int, ...]], ...] | None:
+    """Parse the additive ``roll_schedules`` manifest key (absent/None → None).
+
+    Raises
+    ------
+    CascadeWireError
+        On a malformed entry (non-pair rows, non-int ordinals, …).
+    """
+    if raw is None:
+        return None
+    try:
+        return tuple(
+            (str(instrument), tuple(int(ordinal) for ordinal in schedule))
+            for instrument, schedule in cast("Sequence[Any]", raw)
+        )
+    except (TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid roll_schedules in manifest: {exc}") from exc
+
+
 def manifest_to_json(manifest: CascadeManifest) -> bytes:
     """Return the deterministic JSON bytes of *manifest* (sorted keys)."""
     payload = {
@@ -1411,6 +1479,11 @@ def manifest_to_json(manifest: CascadeManifest) -> bytes:
             None
             if manifest.leaderboard_trials is None
             else [_lbt_to_dict(record) for record in manifest.leaderboard_trials]
+        ),
+        "roll_schedules": (
+            None
+            if manifest.roll_schedules is None
+            else [[instrument, list(schedule)] for instrument, schedule in manifest.roll_schedules]
         ),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
@@ -1462,6 +1535,9 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
             leaderboard_trials=(
                 None if lbt_raw is None else tuple(_lbt_from_dict(item) for item in lbt_raw)
             ),
+            # `roll_schedules` is absent from pre-carriage manifests → None
+            # (the same additive-at-version-1 pattern as stage3).
+            roll_schedules=_roll_schedules_from_payload(payload.get("roll_schedules")),
         )
     except (KeyError, TypeError) as exc:
         raise CascadeWireError(f"cascade manifest missing/invalid field: {exc}") from exc
@@ -1664,6 +1740,7 @@ def run_and_write_from_specs(
     cascade_config: CascadeConfig,
     stage3: Stage3ManifestRecord | None = None,
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None,
+    roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
 ) -> CascadeWireReport:
     """AUTOMATIC path: run the cascade + write the manifest AND the report.
 
@@ -1673,6 +1750,14 @@ def run_and_write_from_specs(
     *results_root*. When the sweep ran the Stage-3 refinement pass
     (DEC-STAGE3-WIRE-001), its :class:`Stage3ManifestRecord` is recorded in the
     manifest so refined-cell specs stay distinguishable from grid-cell specs.
+    ``roll_schedule_by_instrument`` is the launch's resolved ADR-0012 futures
+    roll-schedule map (the SAME object ``cmd_sweep_all`` threads into the
+    grid): it drives the futures pools' Stage-1A hard resets here AND is
+    recorded in the manifest (``roll_schedules``) so the MANUAL replay uses
+    the identical schedule (review round-1 — never a schedule-blind
+    re-score). Replay caveat: the manifest schedule is the FROZEN launch
+    truth; a lake whose contract set changed since the sweep re-keys the
+    snapshot hash rather than silently re-resolving.
 
     Returns
     -------
@@ -1687,6 +1772,16 @@ def run_and_write_from_specs(
         specs=tuple(specs),
         stage3=stage3,
         leaderboard_trials=leaderboard_trials,
+        roll_schedules=(
+            None
+            if roll_schedule_by_instrument is None
+            else tuple(
+                sorted(
+                    (instrument, tuple(schedule))
+                    for instrument, schedule in roll_schedule_by_instrument.items()
+                )
+            )
+        ),
     )
     report = run_cascade_over_specs(
         specs,
@@ -1694,6 +1789,7 @@ def run_and_write_from_specs(
         config=cascade_config,
         sweep_id=sweep_id,
         leaderboard_trials=leaderboard_trials,
+        roll_schedules=roll_schedule_by_instrument,
     )
     write_manifest(results_root, manifest)
     write_report(results_root, report)
@@ -1731,6 +1827,10 @@ def run_and_write_from_manifest(
         # The FROZEN numbers — the manifest is the only replay-time source
         # (ADR-0008 condition 1; sidecars are never re-read here).
         leaderboard_trials=manifest.leaderboard_trials,
+        # The FROZEN ADR-0012 futures roll schedules the launch recorded —
+        # a futures pool replays under the SAME per-contract hard resets
+        # (a pre-carriage manifest carries None → that pool skips loudly).
+        roll_schedules=(None if manifest.roll_schedules is None else dict(manifest.roll_schedules)),
     )
     write_report(results_root, report)
     return report
