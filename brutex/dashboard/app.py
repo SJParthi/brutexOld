@@ -113,6 +113,7 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    preopen_datasets_key,
     warm_discovery_memos,
 )
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
@@ -5299,15 +5300,34 @@ def build_app(
         READ-ONLY; empty when no lake.
 
         DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
-        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
-        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        (``resolve_report_datasets`` → ``list_candle_datasets``) + the
         store reads run on a threadpool worker, NEVER the event loop.
-        Forensically proven (2026-07-04 run): this route ran the walk
+        Forensically proven (2026-07-04 run — a PRE-DEC-O1-CLAIMS-HONESTY-001
+        measurement of the then-UNFILTERED full ``bars/`` tree walk, ~66k
+        dirs on a materialised options lake): this route ran that walk
         SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
         froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
         requests burst-flushed on release). The store connection is built +
         used inside the worker so its RLock stays on one thread
         (DEC-DASHBOARD-FASTREAD-001).
+
+        DEC-O1-CLAIMS-HONESTY-001: the cold-miss discovery is now STRICTLY
+        CHEAPER than that measured unfiltered walk — FNO-pruned at walk
+        DESCENT (``exclude_segments={FNO}``: the F&O contract tree, the bulk
+        of the ~66k dirs above, is never entered) + interval-bounded
+        (``intervals`` = the one partition the basis reads), and a
+        manifest-served lake pays an O(manifest-rows) read, no walk at all.
+        The discovery result (the triples ONLY) is additionally memoised in
+        the COMMON generation-keyed ``_db_datasets_cache`` (the #896 pattern,
+        key ``preopen_datasets_key(basis)`` — one memo per basis, seeded by
+        the post-pull ``warm_discovery_memos``), so a repeat open within one
+        write generation is an O(1) handoff and the pruned cold-miss walk is
+        paid at most once per generation per basis. The pullability tagging below
+        is DELIBERATELY NOT cached: it reads the instrument master, which
+        moves on a keyless ``load-instruments`` WITHOUT a generation bump
+        (the ``master_revision`` trap) — the three store SELECTs are bounded
+        + cheap and stay live. Mid-pull the adaptive floor may serve a
+        bounded-stale triple list (logged ``movers_cache.stale_served``).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
@@ -5315,10 +5335,15 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
+        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
-            """Walk the lake + tag pullability off the event loop (threadpool)."""
-            triples = resolve_report_datasets(lake, basis=report_basis)
+            """Tag pullability off the event loop; discovery is generation-memoised."""
+            triples = _db_datasets_cache.get_or_compute(
+                preopen_datasets_key(report_basis),
+                generation=gen,
+                compute=lambda: resolve_report_datasets(lake, basis=report_basis),
+            )
             # Tag each report symbol with option-pullability so /reports can badge
             # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
             # the SAME store calls + single-source predicate the /universe explorer
