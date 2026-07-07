@@ -154,6 +154,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
 
@@ -520,14 +521,20 @@ class TupleWorkResult:
 class _WorkerContext:
     """Immutable per-pool context handed to each worker via the pool initializer.
 
-    Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path``); the
-    worker rebuilds its ``store_for`` factory from ``(root, grid)`` via
-    :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the un-picklable
-    parent closure never crosses the process boundary.
+    Picklable (a frozen dataclass of a ``SweepGridConfig`` + a ``Path`` + an
+    optional :class:`~brutex.engine.reference_series.TradeReferenceStamper` —
+    itself a frozen slotted dataclass over plain ``datetime → Decimal`` dicts,
+    so it crosses the SPAWN boundary verbatim, pinned by test); the worker
+    rebuilds its ``store_for`` factory from ``(root, grid)`` via
+    :func:`~brutex.engine.sweep_orchestrator.make_store_for`, so the
+    un-picklable parent closure never crosses the process boundary.
+    ``reference_stamper`` is defaulted LAST (DEC-VIX-STAMP-WIRE-001) so a
+    pre-wiring construction stays valid.
     """
 
     grid: SweepGridConfig
     root: Path
+    reference_stamper: TradeReferenceStamper | None = None
 
 
 #: The per-worker-PROCESS context, set ONCE by :func:`_worker_init`. A module
@@ -591,6 +598,9 @@ def _run_tuple_in_worker(
             dedup=_NoDedup(),
             audit=collector,
             skip_empty=True,
+            # The pool-wide stamper (DEC-VIX-STAMP-WIRE-001): every worker
+            # binds the SAME pickled stamper, so parallel == sequential.
+            reference_stamper=ctx.reference_stamper,
         )
     except SweepComboError as exc:
         return TupleWorkResult(
@@ -713,6 +723,7 @@ class ParallelGridDriver:
         "_ingest_audit",
         "_monotonic",
         "_next_apply",
+        "_reference_stamper",
         "_root",
         "_stall_seconds",
         "_subject",
@@ -730,6 +741,7 @@ class ParallelGridDriver:
         workers: int,
         stall_seconds: float = DEFAULT_STALL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -757,6 +769,11 @@ class ParallelGridDriver:
             while work is in flight.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        reference_stamper
+            Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) carried into
+            the picklable :class:`_WorkerContext` so EVERY spawn worker binds
+            the same stamper — parallel output stays byte-identical to the
+            sequential run (regression-pinned).
 
         Raises
         ------
@@ -777,6 +794,7 @@ class ParallelGridDriver:
         self._workers = workers
         self._stall_seconds = stall_seconds
         self._monotonic = monotonic
+        self._reference_stamper = reference_stamper
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
@@ -822,7 +840,9 @@ class ParallelGridDriver:
         pool_size = self._workers - 1
         max_inflight = pool_size * _INFLIGHT_MULTIPLIER
         heap_cap = pool_size * _HEAP_CAP_MULTIPLIER
-        ctx = _WorkerContext(grid=self._grid, root=self._root)
+        ctx = _WorkerContext(
+            grid=self._grid, root=self._root, reference_stamper=self._reference_stamper
+        )
         try:
             with ProcessPoolExecutor(
                 max_workers=pool_size,
@@ -1259,6 +1279,7 @@ def run_parallel_grid(
     workers: int,
     stall_seconds: float = DEFAULT_STALL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -1289,6 +1310,7 @@ def run_parallel_grid(
         workers=workers,
         stall_seconds=stall_seconds,
         monotonic=monotonic,
+        reference_stamper=reference_stamper,
     )
     return driver.run()
 

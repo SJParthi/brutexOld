@@ -118,6 +118,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.results_store import ResultsStore
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_run import DedupSink, SweepRunSummary
@@ -490,6 +491,7 @@ def run_supervised_grid(
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     watchdog_poll_seconds: float | None = None,
     reuse_bar_bits: bool = True,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -583,6 +585,11 @@ def run_supervised_grid(
         :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
         (DEC-SWEEP-RESIDENT-KERNEL-001) — byte-identical results, only the
         redundant rebuild is skipped; ``False`` rebuilds per tuple.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
+        every tuple's :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`
+        — ONE stamper per supervised run; REFERENCE ONLY, byte-identical
+        persisted output either way.
 
     Returns
     -------
@@ -746,6 +753,7 @@ def run_supervised_grid(
                     audit=ingest_audit,
                     skip_empty=skip_empty,
                     kernel_cache=kernel_cache,
+                    reference_stamper=reference_stamper,
                 )
             except SweepComboError as exc:
                 tuples_failed += 1

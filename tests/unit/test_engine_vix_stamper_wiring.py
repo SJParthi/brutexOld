@@ -1,0 +1,1086 @@
+"""Wiring tests for the India-VIX ``reference_stamper`` seam (DEC-VIX-STAMP-WIRE-001).
+
+Stage B of the VIX-stamp wiring: the ``reference_stamper`` kwarg is threaded
+through EVERY production ``simulate_trades`` path and BOUND at every path whose
+trades are OBSERVABLE (persisted rows, the finalist projection, the WF/K-of-N
+oracle re-simulation, robustness/cascade reports, the CLI replay, the
+dashboard). Each test here proves ONE bind or thread is real — a monkeypatched
+capture on the exact seam the production call crosses, or a real end-to-end
+run whose trades carry the stamps — so no bind can silently regress.
+
+Companion suite: ``tests/unit/test_vix_stamper_binding_pin.py`` (the AST pin
+enumerating the exactly-two sanctioned literal-``None`` discarded-stream
+sites). Persisted-bytes honesty: the stamped-vs-unstamped store regression in
+:class:`TestSweepRunSeam` pins that Stage B changes ZERO persisted bytes.
+"""
+
+# pyright: reportPrivateUsage=false
+
+from __future__ import annotations
+
+import hashlib
+import pickle
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pytest
+from brutex.data.models import CandleBar
+from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine import cascade_wire as cw
+from brutex.engine import robustness as robustness_mod
+from brutex.engine import stage3_wire as stage3_mod
+from brutex.engine import sweep_driver as driver_mod
+from brutex.engine import sweep_orchestrator as orch_mod
+from brutex.engine import sweep_parallel as parallel_mod
+from brutex.engine import sweep_report as report_mod
+from brutex.engine import sweep_run as run_mod
+from brutex.engine import sweep_supervisor as supervisor_mod
+from brutex.engine import trade_sim as trade_sim_mod
+from brutex.engine import validation as validation_mod
+from brutex.engine.candidate import validate_candidate
+from brutex.engine.reference_series import TradeReferenceStamper
+from brutex.engine.results_store import ResultsStore
+from brutex.engine.rust_trade_sim import ResidentTradeSim
+from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.sweep_audit import SweepAuditWriter
+from brutex.engine.sweep_cache import SweepCache
+from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+from brutex.engine.sweep_progress import SweepProgress
+from brutex.engine.sweep_run import (
+    ComboDedup,
+    SweepComboError,
+    SweepRunConfig,
+    ranked_combo_to_result_row,
+    run_persisted_sweep,
+)
+from brutex.engine.sweep_supervisor import SweepGuards, grid_identity, run_supervised_grid
+from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.orchestrator.audit import AuditWriter
+from brutex.ranking import RankedCombo
+from brutex.strategies.types import Side
+from brutex.vocabulary.bits import BIT_BAR_BULLISH
+from structlog.testing import capture_logs
+
+if TYPE_CHECKING:  # pragma: no cover - typing only (lazy numpy, see rust_trade_sim)
+    from brutex.metrics.compute import ResultMetrics
+    from brutex.metrics.types import ClosedTrade
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+# ────────────────────────── shared fixtures ──────────────────────────
+
+
+def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
+    """Build one IST-session minute bar (stored UTC) with Decimal OHLC."""
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    hi = max(o, c) + 0.5
+    lo = min(o, c) - 0.5
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(hi, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
+def _trending_bars(n_days: int = 4, per_day: int = 60) -> list[CandleBar]:
+    """A multi-day upward-drifting session — BUY combos win via the TP leg."""
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 0.6 if m % 3 else price - 0.3
+            bars.append(_bar(d, m, price, close))
+            price = close
+    return bars
+
+
+_BARS = _trending_bars()
+
+#: The persisted-sweep fixture: big enough that BUY combos clear the hard rank
+#: gates (mirrors tests/unit/test_engine_sweep_run.py's fixture sizing).
+_BARS_BIG = _trending_bars(n_days=15, per_day=120)
+
+
+def _vix_stamper(bars: Sequence[CandleBar]) -> TradeReferenceStamper:
+    """A stamper whose VIX series covers EVERY bar timestamp of *bars*.
+
+    Each instant's VIX close is a deterministic function of its position, so a
+    stamp is checkable back against the expected level.
+    """
+    vix_bars = [
+        CandleBar(
+            timestamp=bar.timestamp,
+            open=Decimal("14.00"),
+            high=Decimal("15.00"),
+            low=Decimal("13.00"),
+            close=Decimal("14.00") + Decimal(i % 7) / Decimal(100),
+            volume=0,
+            open_interest=None,
+        )
+        for i, bar in enumerate(bars)
+    ]
+    return TradeReferenceStamper.from_vix_bars(vix_bars)
+
+
+_STAMPER = _vix_stamper(_BARS)
+_STAMPER_BIG = _vix_stamper(_BARS_BIG)
+
+
+def _assert_trades_stamped(trades: Sequence[ClosedTrade]) -> None:
+    """Every trade's stamps equal the _STAMPER series at its own instants."""
+    assert trades, "fixture must produce trades"
+    for trade in trades:
+        assert trade.vix_at_entry == _STAMPER.vix.level_at(trade.entry_ts)
+        assert trade.vix_at_exit == _STAMPER.vix.level_at(trade.exit_ts)
+        assert trade.vix_at_entry is not None
+        assert trade.vix_at_exit is not None
+
+
+@contextmanager
+def _capture_kwarg(
+    monkeypatch: pytest.MonkeyPatch, module: object, name: str
+) -> Generator[list[object], None, None]:
+    """Record the ``reference_stamper`` kwarg of every call to ``module.name``.
+
+    The wrapped original still runs, so the production chain stays real — only
+    the seam crossing is observed.
+    """
+    captured: list[object] = []
+    original = getattr(module, name)
+
+    def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs.get("reference_stamper", "OMITTED"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, _wrapper)
+    yield captured
+
+
+# ────────────────────────── ResidentTradeSim (the Rust seam) ──────────────────────────
+
+
+class TestResidentTradeSimStamping:
+    def test_default_reference_stamper_is_none(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        assert sim.reference_stamper is None
+
+    def test_property_returns_the_bound_stamper(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        assert sim.reference_stamper is _STAMPER
+
+    def test_rust_batch_trades_are_stamped(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        assert sim.rust_active  # the compiled kernel serves; the stamp is Python-side
+        (trades,) = sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        _assert_trades_stamped(trades)
+
+    def test_rust_batch_without_stamper_stamps_none(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        (trades,) = sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        assert trades
+        assert all(t.vix_at_entry is None and t.vix_at_exit is None for t in trades)
+
+    def test_fallback_arm_stamps_identically_to_rust_arm(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        rust_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        py_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        py_sim._rust = None  # force the pure-Python oracle arm
+        (rust_trades,) = rust_sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        (py_trades,) = py_sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        assert rust_trades == py_trades
+        _assert_trades_stamped(py_trades)
+
+    def test_stamped_output_otherwise_byte_identical(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        plain = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        stamped = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        (plain_trades,) = plain.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        (stamped_trades,) = stamped.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        assert len(plain_trades) == len(stamped_trades)
+        for p, s in zip(plain_trades, stamped_trades, strict=True):
+            assert (p.pnl_paisa, p.mfe_paisa, p.mae_paisa, p.holding_bars) == (
+                s.pnl_paisa,
+                s.mfe_paisa,
+                s.mae_paisa,
+                s.holding_bars,
+            )
+            assert (p.entry_ts, p.exit_ts, p.direction) == (s.entry_ts, s.exit_ts, s.direction)
+
+    def test_missing_vix_bar_stamps_none_never_fabricated(self) -> None:
+        # A stamper covering only the FIRST bar: every real trade's instants
+        # miss → both stamps None (Golden Rule #1 — never fabricated).
+        sparse = TradeReferenceStamper.from_vix_bars(
+            [
+                CandleBar(
+                    timestamp=_BARS[0].timestamp,
+                    open=Decimal("14"),
+                    high=Decimal("14"),
+                    low=Decimal("14"),
+                    close=Decimal("14"),
+                    volume=0,
+                    open_interest=None,
+                )
+            ]
+        )
+        bar_bits = build_bar_bits(_BARS)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=sparse)
+        with capture_logs() as logs:
+            (trades,) = sim.simulate_masks([0], direction=Side.BUY, take_profit_paisa=50)
+        assert trades
+        assert all(t.vix_at_entry is None and t.vix_at_exit is None for t in trades)
+        assert any(e["event"] == "reference_series.vix_miss" for e in logs)
+
+
+# ────────────────────────── structural oracle ≡ batch ──────────────────────────
+
+
+class TestOracleEqualsBatchStructural:
+    """The chunk-failure oracle replay reads the stamper FROM the sim itself."""
+
+    def _cfg(self) -> SweepRunConfig:
+        return SweepRunConfig(
+            instrument="NIFTY",
+            tf="1m",
+            direction=Side.BUY,
+            mode="A",
+            condition_bits=[0, 1, 2],
+            k=1,
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+            tf_minutes=1,
+            sl_paisa=80,
+            tp_paisa=50,
+        )
+
+    def test_iter_mask_metrics_hands_sim_stamper_to_reattribution(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        monkeypatch.setattr(
+            ResidentTradeSim,
+            "simulate_masks",
+            lambda self, *a, **kw: (_ for _ in ()).throw(ValueError("boom")),
+        )
+        captured: list[object] = []
+
+        def _fake_reattribute(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs["reference_stamper"])
+            raise SweepComboError("stop")
+
+        monkeypatch.setattr(run_mod, "_reattribute_chunk_failure", _fake_reattribute)
+        with pytest.raises(SweepComboError, match="stop"):
+            list(
+                run_mod._iter_mask_metrics(
+                    sim, [0], _BARS, bar_bits, self._cfg(), "bull", lambda mask: "0" * 64
+                )
+            )
+        assert captured == [_STAMPER]
+
+    def test_reattribution_oracle_replay_binds_the_handed_stamper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        with (
+            _capture_kwarg(monkeypatch, run_mod, "metrics_for_mask") as captured,
+            pytest.raises(SweepComboError, match="batch/kernel-level failure"),
+        ):
+            run_mod._reattribute_chunk_failure(
+                _BARS,
+                bar_bits,
+                [0, 1],
+                self._cfg(),
+                "bull",
+                ValueError("batch boom"),
+                lambda mask: "0" * 64,
+                reference_stamper=_STAMPER,
+            )
+        # Every oracle replay of the chunk carried the sim's stamper.
+        assert captured == [_STAMPER, _STAMPER]
+
+
+# ────────────────────────── sweep_driver seam ──────────────────────────
+
+
+class TestSweepDriverSeam:
+    def _metrics(self, **kwargs: Any) -> ResultMetrics:
+        bar_bits = build_bar_bits(_BARS)
+        return driver_mod.metrics_for_mask(
+            _BARS,
+            bar_bits,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
+            start_equity_paisa=10_000_000,
+            **kwargs,
+        )
+
+    def test_metrics_for_mask_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            self._metrics(reference_stamper=_STAMPER)
+        assert captured == [_STAMPER]
+
+    def test_metrics_for_mask_default_is_unstamped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            self._metrics()
+        assert captured == [None]
+
+    def test_evaluate_combo_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            driver_mod.evaluate_combo(
+                _BARS,
+                0,
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_sweep_masks_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            driver_mod.sweep_masks(
+                _BARS,
+                [0, 1 << BIT_BAR_BULLISH],
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER, _STAMPER]
+
+    def test_rank_sweep_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            driver_mod.rank_sweep(
+                _BARS,
+                [0],
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_rank_sweep_over_bits_is_a_pure_conduit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, driver_mod, "sweep_masks") as captured:
+            driver_mod.rank_sweep_over_bits(
+                _BARS,
+                [0, 1],
+                1,
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                min_hits=0,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_walk_forward_paths_thread_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bars = _trending_bars(n_days=6, per_day=40)
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            driver_mod.evaluate_combo_walk_forward(
+                bars,
+                0,
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                train_days=3,
+                test_days=1,
+                step_days=1,
+                reference_stamper=_STAMPER,
+            )
+        assert captured and all(c is _STAMPER for c in captured)
+
+    def test_walk_forward_sweep_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bars = _trending_bars(n_days=6, per_day=40)
+        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+            driver_mod.walk_forward_sweep(
+                bars,
+                [0],
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                train_days=3,
+                test_days=1,
+                step_days=1,
+                reference_stamper=_STAMPER,
+            )
+        assert captured and all(c is _STAMPER for c in captured)
+
+
+# ────────────────────────── validation / robustness / candidate ──────────────────────────
+
+
+class TestStage3ValidatorsSeam:
+    def test_validate_out_of_sample_threads_to_both_halves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with _capture_kwarg(monkeypatch, validation_mod, "metrics_for_mask") as captured:
+            validation_mod.validate_out_of_sample(
+                _BARS,
+                0,
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER, _STAMPER]  # train + test
+
+    def test_combo_returns_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, robustness_mod, "simulate_trades") as captured:
+            robustness_mod.combo_returns(
+                _BARS,
+                0,
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_validate_candidate_threads_to_oos_and_cpcv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.engine.candidate as candidate_mod
+
+        with (
+            _capture_kwarg(monkeypatch, candidate_mod, "validate_out_of_sample") as oos_captured,
+            _capture_kwarg(monkeypatch, candidate_mod, "combo_returns") as returns_captured,
+        ):
+            validate_candidate(
+                _BARS,
+                0,
+                [],
+                direction=Side.BUY,
+                tf_minutes=1,
+                take_profit_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert oos_captured == [_STAMPER]
+        assert returns_captured == [_STAMPER]
+
+
+def _ranked_combo() -> RankedCombo:
+    """A gates-independent ranked combo over the small fixture (mask 0)."""
+    metrics = driver_mod.evaluate_combo(
+        _BARS, 0, direction=Side.BUY, tf_minutes=1, take_profit_paisa=50
+    )
+    return RankedCombo(mask=0, metrics=metrics, composite_score=0.0, deflated_sharpe=None)
+
+
+# ────────────────────────── sweep_report seam ──────────────────────────
+
+
+class TestSweepReportSeam:
+    def test_sweep_report_threads_to_the_ranked_sweep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with _capture_kwarg(monkeypatch, report_mod, "rank_sweep_over_bits") as captured:
+            report_mod.sweep_report(
+                _BARS,
+                instrument="NIFTY",
+                tf_label="1m",
+                tf_minutes=1,
+                direction=Side.BUY,
+                condition_bits=[0, 1],
+                k=1,
+                take_profit_paisa=50,
+                min_hits=0,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_oos_section_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ranked = [_ranked_combo()]
+        with _capture_kwarg(monkeypatch, report_mod, "validate_out_of_sample") as captured:
+            report_mod.oos_section(
+                _BARS,
+                ranked,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=50,
+                start_equity_paisa=10_000_000,
+                proximity=None,
+                prior_n=3,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER] * len(ranked)
+
+    def test_filter_oos_held_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ranked = [_ranked_combo()]
+        with _capture_kwarg(monkeypatch, report_mod, "validate_out_of_sample") as captured:
+            report_mod.filter_oos_held(
+                _BARS,
+                ranked,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=50,
+                start_equity_paisa=10_000_000,
+                proximity=None,
+                prior_n=3,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER] * len(ranked)
+
+
+# ────────────────────────── sweep_run seam ──────────────────────────
+
+
+def _run_cfg(**overrides: object) -> SweepRunConfig:
+    base: dict[str, object] = {
+        "instrument": "NIFTY",
+        "tf": "1m",
+        "direction": Side.BUY,
+        "mode": "A",
+        "condition_bits": [0, 1, 2],
+        "k": 1,
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+        "tf_minutes": 1,
+        "sl_paisa": 80,
+        "tp_paisa": 50,
+    }
+    base.update(overrides)
+    return SweepRunConfig(**base)  # type: ignore[arg-type]
+
+
+def _run_sweep(
+    tmp: Path, name: str, reference_stamper: TradeReferenceStamper | None
+) -> tuple[Any, bytes]:
+    """One persisted sweep run over the BIG fixture → (summary, parquet bytes)."""
+    tmp.mkdir(parents=True, exist_ok=True)
+    store = ResultsStore(path=tmp / f"{name}.parquet")
+    with AuditWriter.open(tmp / f"{name}-audit.jsonl") as audit:
+        summary = run_persisted_sweep(
+            _BARS_BIG,
+            _run_cfg(),
+            store=store,
+            dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+            audit=audit,
+            reference_stamper=reference_stamper,
+        )
+    return summary, (tmp / f"{name}.parquet").read_bytes()
+
+
+class TestSweepRunSeam:
+    def test_ranked_combo_to_result_row_binds_the_stamper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        with _capture_kwarg(monkeypatch, run_mod, "simulate_trades") as captured:
+            ranked_combo_to_result_row(
+                _ranked_combo(),
+                run_id="0" * 64,
+                instrument="NIFTY",
+                tf="1m",
+                direction="bull",
+                mode="A",
+                bars=_BARS,
+                bar_bits=bar_bits,
+                tf_minutes=1,
+                sl_paisa=None,
+                tp_paisa=50,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_run_persisted_sweep_binds_stamper_at_finalist_projection_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        finalist_stampers: list[object] = []
+        inner_stampers: list[object] = []
+        real_row = run_mod.ranked_combo_to_result_row
+        real_build = run_mod._build_trade_sim
+
+        def _spy_row(*args: Any, **kwargs: Any) -> Any:
+            finalist_stampers.append(kwargs.get("reference_stamper", "OMITTED"))
+            return real_row(*args, **kwargs)
+
+        def _spy_build(*args: Any, **kwargs: Any) -> Any:
+            inner_stampers.append(kwargs["reference_stamper"])
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(run_mod, "ranked_combo_to_result_row", _spy_row)
+        monkeypatch.setattr(run_mod, "_build_trade_sim", _spy_build)
+        summary, _ = _run_sweep(tmp_path, "bind", _STAMPER_BIG)
+        assert summary.persisted > 0
+        # Every persisted finalist bound the RUN's stamper …
+        assert finalist_stampers == [_STAMPER_BIG] * summary.persisted
+        # … while the discarded K-of-N inner stream stayed EXPLICITLY unstamped.
+        assert inner_stampers == [None]
+
+    def test_trade_sim_path_logs_vix_stamped_false_for_the_inner_stream(
+        self, tmp_path: Path
+    ) -> None:
+        with capture_logs() as logs:
+            _run_sweep(tmp_path, "log", _STAMPER_BIG)
+        paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert paths and all(e["vix_stamped"] is False for e in paths)
+
+    def test_build_trade_sim_logs_vix_stamped_true_when_bound(self) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        with capture_logs() as logs:
+            sim = run_mod._build_trade_sim(
+                _BARS, bar_bits, _run_cfg(), "bull", reference_stamper=_STAMPER
+            )
+        assert sim.reference_stamper is _STAMPER
+        paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert paths == [paths[0]] and paths[0]["vix_stamped"] is True
+
+    def test_persisted_bytes_identical_stamped_vs_unstamped(self, tmp_path: Path) -> None:
+        """THE Stage-B regression pin: stamping changes ZERO persisted bytes."""
+        stamped_summary, stamped_bytes = _run_sweep(tmp_path / "a", "s", _STAMPER_BIG)
+        plain_summary, plain_bytes = _run_sweep(tmp_path / "b", "s", None)
+        assert stamped_summary.persisted == plain_summary.persisted > 0
+        assert stamped_summary.store_content_hash == plain_summary.store_content_hash
+        assert hashlib.sha256(stamped_bytes).hexdigest() == hashlib.sha256(plain_bytes).hexdigest()
+
+
+# ────────────────────────── orchestrator / supervisor / parallel ──────────────────────────
+
+
+def _grid(**overrides: object) -> orch_mod.SweepGridConfig:
+    base: dict[str, object] = {
+        "instruments": ["NIFTY"],
+        "timeframes": [orch_mod.Timeframe("1minute", 1)],
+        "directions": [Side.BUY],
+        "k_values": [1],
+        "condition_bits": [0, 1, 2],
+        "stop_losses": [80],
+        "take_profits": [50],
+        "proximities": [None],
+        "mode": "A",
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+    base.update(overrides)
+    return orch_mod.SweepGridConfig(**base)  # type: ignore[arg-type]
+
+
+def _bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+    return _BARS
+
+
+@contextmanager
+def _guards(tmp_path: Path, grid: orch_mod.SweepGridConfig) -> Generator[SweepGuards, None, None]:
+    audit = SweepAuditWriter.open(tmp_path / "sup.jsonl")
+    cache = SweepCache.open(tmp_path / "cache", bloom_capacity=10_000)
+    checkpoint = SweepCheckpointStore(
+        path=tmp_path / "ckpt.json",
+        sweep_id=grid_identity(grid),
+        total_combos=orch_mod.count_sweep_tuples(grid),
+    )
+    guards = SweepGuards(
+        audit=audit,
+        progress=SweepProgress(),
+        checkpoint=checkpoint,
+        cache=cache,
+        watchdog=SweepWatchdog(),
+    )
+    try:
+        yield guards
+    finally:
+        audit.close()
+        cache.close()
+
+
+def _tree(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+class TestGridDriversSeam:
+    def test_run_one_tuple_forwards_the_stamper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        grid = _grid()
+        (tuple_,) = list(orch_mod.iter_sweep_tuples(grid))
+        with (
+            _capture_kwarg(monkeypatch, orch_mod, "run_persisted_sweep") as captured,
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+        ):
+            orch_mod.run_one_tuple(
+                grid,
+                tuple_,
+                bars_for=_bars_for,
+                store_for=orch_mod.make_store_for(tmp_path / "out", grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                audit=audit,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_run_sweep_grid_forwards_the_stamper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        grid = _grid()
+        with (
+            _capture_kwarg(monkeypatch, orch_mod, "run_one_tuple") as captured,
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+        ):
+            orch_mod.run_sweep_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=orch_mod.make_store_for(tmp_path / "out", grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                audit=audit,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_run_supervised_grid_forwards_the_stamper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        grid = _grid()
+        with (
+            _capture_kwarg(monkeypatch, supervisor_mod, "run_one_tuple") as captured,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=orch_mod.make_store_for(tmp_path / "out", grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                ingest_audit=ingest,
+                guards=guards,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+
+class TestParallelSeam:
+    def test_worker_context_with_stamper_is_spawn_picklable(self, tmp_path: Path) -> None:
+        ctx = parallel_mod._WorkerContext(grid=_grid(), root=tmp_path, reference_stamper=_STAMPER)
+        restored = pickle.loads(pickle.dumps(ctx))  # noqa: S301 — self-produced bytes
+        assert restored.reference_stamper is not None
+        # The pickled stamper resolves the SAME levels — value-preserving.
+        ts = _BARS[0].timestamp
+        assert restored.reference_stamper.vix.level_at(ts) == _STAMPER.vix.level_at(ts)
+
+    def test_worker_context_stamper_defaults_to_none(self, tmp_path: Path) -> None:
+        ctx = parallel_mod._WorkerContext(grid=_grid(), root=tmp_path)
+        assert ctx.reference_stamper is None
+
+    def test_run_tuple_in_worker_binds_the_context_stamper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        grid = _grid()
+        ctx = parallel_mod._WorkerContext(grid=grid, root=tmp_path, reference_stamper=_STAMPER)
+        monkeypatch.setattr(parallel_mod, "_WORKER_CTX", ctx)
+        (tuple_,) = list(orch_mod.iter_sweep_tuples(grid))
+        with _capture_kwarg(monkeypatch, parallel_mod, "run_one_tuple") as captured:
+            parallel_mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert captured == [_STAMPER]
+
+    def test_two_worker_stamped_tree_equals_unstamped_sequential_tree(self, tmp_path: Path) -> None:
+        """THE parity pin: a 2-spawn-worker STAMPED parallel run writes the
+        byte-identical per-tuple Parquet tree an UNSTAMPED sequential run
+        writes — the stamp never leaks into a persisted byte, on any worker.
+        """
+        grid = _grid(k_values=[1, 2])
+        seq_tmp = tmp_path / "seq"
+        seq_tmp.mkdir()
+        with (
+            AuditWriter.open(seq_tmp / "ingest.jsonl") as ingest,
+            _guards(seq_tmp, grid) as guards,
+        ):
+            run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=orch_mod.make_store_for(seq_tmp / "out", grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        par_tmp = tmp_path / "par"
+        par_tmp.mkdir()
+        with (
+            AuditWriter.open(par_tmp / "ingest.jsonl") as ingest,
+            _guards(par_tmp, grid) as guards,
+        ):
+            parallel_mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=par_tmp / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+                reference_stamper=_STAMPER,
+            )
+        seq_tree = _tree(seq_tmp / "out")
+        par_tree = _tree(par_tmp / "out")
+        assert seq_tree and par_tree == seq_tree
+
+
+# ────────────────────────── stage3_wire seam ──────────────────────────
+
+
+class TestStage3WireSeam:
+    def test_disabled_pass_never_invokes_stamper_for(self, tmp_path: Path) -> None:
+        def _explodes() -> TradeReferenceStamper | None:
+            raise AssertionError("stamper_for must not be invoked on a disabled pass")
+
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            report = stage3_mod.run_stage3_pass(
+                _grid(stage3_enable=False),
+                results_root=tmp_path,
+                bars_for=_bars_for,
+                audit=audit,
+                exchange="NSE",
+                segment="INDEX",
+                start="2026-01-01",
+                end="2026-02-01",
+                stamper_for=_explodes,
+            )
+        assert report.enabled is False
+
+    def test_enabled_pass_resolves_stamper_for_exactly_once(self, tmp_path: Path) -> None:
+        # Pre-import cma with its matplotlib-less UserWarning suppressed (the
+        # repo's filterwarnings=error would otherwise escalate the import-time
+        # warning; the stage3 suites do this via module-level importorskip).
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pytest.importorskip("cma")
+        calls: list[int] = []
+
+        def _counting() -> TradeReferenceStamper | None:
+            calls.append(1)
+            return _STAMPER
+
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            report = stage3_mod.run_stage3_pass(
+                _grid(stage3_enable=True, stage3_max_fevals=4, stage3_max_restarts=1),
+                results_root=tmp_path / "empty",  # no persisted stores → zero survivors
+                bars_for=_bars_for,
+                audit=audit,
+                exchange="NSE",
+                segment="INDEX",
+                start="2026-01-01",
+                end="2026-02-01",
+                stamper_for=_counting,
+            )
+        assert report.enabled is True
+        assert calls == [1]
+
+    def test_make_evaluator_binds_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bar_bits = build_bar_bits(_BARS)
+        with _capture_kwarg(monkeypatch, stage3_mod, "metrics_for_mask") as captured:
+            evaluate = stage3_mod._make_evaluator(
+                bars=_BARS,
+                bar_bits=bar_bits,
+                mask=0,
+                side=Side.BUY,
+                tf_minutes=1,
+                start_equity_paisa=10_000_000,
+                reference_stamper=_STAMPER,
+            )
+            evaluate(80, 50)
+        assert captured == [_STAMPER]
+
+
+# ────────────────────────── cascade_wire seam ──────────────────────────
+
+
+def _cascade_spec(winners: tuple[tuple[str, int], ...]) -> cw.CascadeTupleSpec:
+    return cw.CascadeTupleSpec(
+        instrument="NIFTY",
+        tf_label="1minute",
+        tf_minutes=1,
+        direction_label="bull",
+        sl_paisa=None,
+        tp_paisa=50,
+        prior_n=3,
+        proximity_bps=None,
+        start_equity_paisa=10_000_000,
+        winners=winners,
+    )
+
+
+class TestCascadeWireSeam:
+    def _candidate_kwargs(self) -> dict[str, Any]:
+        return {
+            "run_id": "0" * 64,
+            "mask": 0,
+            "bars": _BARS,
+            "bar_bits": build_bar_bits(_BARS),
+            "direction_label": "bull",
+            "tf_minutes": 1,
+            "sl_paisa": None,
+            "tp_paisa": 50,
+            "start_equity_paisa": 10_000_000,
+        }
+
+    def test_build_candidate_input_binds_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with _capture_kwarg(monkeypatch, trade_sim_mod, "simulate_trades") as captured:
+            cw.build_candidate_input(**self._candidate_kwargs(), reference_stamper=_STAMPER)
+        assert captured == [_STAMPER]
+
+    def test_mc_permutation_stream_stays_unstamped_even_when_candidate_is_stamped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Build INSIDE the capture: the MC closure binds simulate_trades at
+        # construction, so the spy must already be in place.
+        with _capture_kwarg(monkeypatch, trade_sim_mod, "simulate_trades") as captured:
+            candidate = cw.build_candidate_input(
+                **self._candidate_kwargs(), reference_stamper=_STAMPER
+            )
+            candidate.mc_evaluate(np.array([0, 3, 6], dtype=np.intp))
+        # The candidate's own re-simulation bound the stamper; the discarded
+        # Monte-Carlo null stream is EXPLICITLY unstamped.
+        assert captured == [_STAMPER, None]
+
+    def test_candidates_for_spec_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spec = _cascade_spec((("0" * 64, 0),))
+        with _capture_kwarg(monkeypatch, cw, "build_candidate_input") as captured:
+            cw.candidates_for_spec(spec, _BARS, reference_stamper=_STAMPER)
+        assert captured == [_STAMPER]
+
+    def test_run_cascade_over_specs_threads_the_stamper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spec = _cascade_spec((("0" * 64, 0),))
+        with _capture_kwarg(monkeypatch, cw, "candidates_for_spec") as captured:
+            cw.run_cascade_over_specs(
+                [spec],
+                bars_for=lambda _i, _t: _BARS,
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_run_and_write_from_specs_threads_the_stamper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spec = _cascade_spec((("0" * 64, 0),))
+        with _capture_kwarg(monkeypatch, cw, "run_cascade_over_specs") as captured:
+            cw.run_and_write_from_specs(
+                tmp_path,
+                sweep_id="a" * 64,
+                specs=[spec],
+                bars_for=lambda _i, _t: _BARS,
+                bars_context=cw.BarsContext(
+                    exchange="NSE", segment="INDEX", start="2026-01-01", end="2026-02-01"
+                ),
+                cascade_config=cw.cascade_config_for_sweep("a" * 64),
+                reference_stamper=_STAMPER,
+            )
+        assert captured == [_STAMPER]
+
+    def test_run_and_write_from_manifest_threads_the_stamper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        spec = _cascade_spec((("0" * 64, 0),))
+        cw.write_manifest(
+            tmp_path,
+            cw.CascadeManifest(
+                version=cw.MANIFEST_VERSION,
+                sweep_id="a" * 64,
+                cascade_config=cw.cascade_config_for_sweep("a" * 64),
+                bars_context=cw.BarsContext(
+                    exchange="NSE", segment="INDEX", start="2026-01-01", end="2026-02-01"
+                ),
+                specs=(spec,),
+            ),
+        )
+        with _capture_kwarg(monkeypatch, cw, "run_cascade_over_specs") as captured:
+            cw.run_and_write_from_manifest(
+                tmp_path, bars_for=lambda _i, _t: _BARS, reference_stamper=_STAMPER
+            )
+        assert captured == [_STAMPER]
+
+    def test_stamped_report_bytes_equal_unstamped_report_bytes(self) -> None:
+        """The auto==manual golden contract survives the stamper (report bytes)."""
+        spec = _cascade_spec((("0" * 64, 0),))
+        config = cw.cascade_config_for_sweep("a" * 64)
+        plain = cw.run_cascade_over_specs(
+            [spec], bars_for=lambda _i, _t: _BARS, config=config, sweep_id="a" * 64
+        )
+        stamped = cw.run_cascade_over_specs(
+            [spec],
+            bars_for=lambda _i, _t: _BARS,
+            config=config,
+            sweep_id="a" * 64,
+            reference_stamper=_STAMPER,
+        )
+        assert cw.serialize_wire_report(stamped) == cw.serialize_wire_report(plain)
+
+
+class TestVixStamperForManifest:
+    def _manifest(self) -> cw.CascadeManifest:
+        return cw.CascadeManifest(
+            version=cw.MANIFEST_VERSION,
+            sweep_id="a" * 64,
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2026-01-05", end="2026-01-10"
+            ),
+            specs=(_cascade_spec((("0" * 64, 0),)),),
+        )
+
+    def test_manifest_window_dt_naive_is_utc(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05")
+        assert parsed == datetime(2026, 1, 5, tzinfo=UTC)
+
+    def test_manifest_window_dt_aware_is_preserved(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
+        assert parsed.utcoffset() == timedelta(hours=5, minutes=30)
+
+    def test_vixless_lake_degrades_to_none_with_zero_catalog_io(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            stamper = cw.vix_stamper_for_manifest(self._manifest(), lake_root=tmp_path)
+        assert stamper is None
+        assert any(e["event"] == "reference_wire.vix_lake_missing" for e in logs)
+        assert not (tmp_path / "catalog.duckdb").exists()
+
+    def test_vix_lake_builds_a_window_bounded_stamper(self, tmp_path: Path) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        vix_dir = tmp_path / "bars" / "NSE" / "INDEX" / "INDIAVIX" / "1minute" / "2026"
+        vix_dir.mkdir(parents=True)
+        ts = datetime(2026, 1, 5, 9, 16, tzinfo=_IST).astimezone(UTC)
+        table = pa.table(
+            {
+                "timestamp": pa.array([ts], type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array([14.0], type=pa.float64()),
+                "high": pa.array([14.5], type=pa.float64()),
+                "low": pa.array([13.5], type=pa.float64()),
+                "close": pa.array([14.25], type=pa.float64()),
+                "volume": pa.array([0], type=pa.int64()),
+                "open_interest": pa.array([None], type=pa.int64()),
+            }
+        )
+        pq.write_table(table, vix_dir / "01.parquet")
+        stamper = cw.vix_stamper_for_manifest(self._manifest(), lake_root=tmp_path)
+        assert stamper is not None
+        assert stamper.vix.level_at(ts) == Decimal("14.25")

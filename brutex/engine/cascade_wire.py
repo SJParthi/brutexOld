@@ -113,12 +113,14 @@ from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
+    from datetime import datetime
     from pathlib import Path
 
     import numpy as np
     import numpy.typing as npt
 
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.results_store import ResultRow
     from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
     from brutex.engine.trial_stats import LeaderboardTrialStats
@@ -625,6 +627,19 @@ def _make_mc_evaluate(
             tf_minutes=tf_minutes,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
+            # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
+            # Monte-Carlo permutation filter's trades are the DISCARDED null
+            # distribution — relocated entry signals whose per-trade Sharpe is
+            # the only output; no row, report or operator surface ever sees
+            # the trades themselves — so stamping every permutation's trades
+            # would be pure wasted work with zero observable output. The
+            # stream is EXPLICITLY unstamped via this literal (one of exactly
+            # TWO sanctioned literal-None seam bindings, AST-pinned with
+            # exact counts by tests/unit/test_vix_stamper_binding_pin.py —
+            # never a silent omission). REVERT LEVER: thread the candidate's
+            # stamper through _make_mc_evaluate and bind it here (one kwarg;
+            # the null statistic is VIX-independent either way).
+            reference_stamper=None,
         )
         rets = [t.pnl_paisa / start_equity_paisa for t in trades]
         sharpe = sharpe_of_returns(rets)
@@ -646,6 +661,7 @@ def build_candidate_input(
     start_equity_paisa: int,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> CandidateInput:
     """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
 
@@ -675,6 +691,16 @@ def build_candidate_input(
         here would re-introduce a train/holdout mismatch for any non-default
         config). Defaults are the lockbox module's own public constants.
 
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001) bound to the candidate's OBSERVABLE
+        re-simulation (the trades behind the cascade's returns/lockbox
+        evidence). REFERENCE ONLY — every ``CandidateInput`` field and the
+        cascade report bytes are identical with or without it. The filter-#9
+        Monte-Carlo permutation stream stays deliberately UNSTAMPED (see
+        :func:`_make_mc_evaluate`). ``None`` (default) = unstamped.
+
     Returns
     -------
     CandidateInput
@@ -698,6 +724,7 @@ def build_candidate_input(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        reference_stamper=reference_stamper,
     )
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
@@ -796,13 +823,15 @@ def candidates_for_spec(
     *,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[CandidateInput]:
     """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
 
     Builds the Stage-1A ``bar_bits`` once (the tuple's proximity + prior_n), then
     projects each winning mask through :func:`build_candidate_input`. The lockbox
     window params are threaded through unchanged (see
-    :func:`build_candidate_input` — they MUST match the cascade config's).
+    :func:`build_candidate_input` — they MUST match the cascade config's), as is
+    the optional India-VIX ``reference_stamper`` (DEC-VIX-STAMP-WIRE-001).
     """
     from brutex.engine.stage1a import build_bar_bits
     from brutex.vocabulary import ProximityParams
@@ -832,6 +861,7 @@ def candidates_for_spec(
             start_equity_paisa=spec.start_equity_paisa,
             lockbox_default_window_days=lockbox_default_window_days,
             lockbox_min_trades=lockbox_min_trades,
+            reference_stamper=reference_stamper,
         )
         for run_id, mask in spec.winners
     ]
@@ -847,6 +877,7 @@ def run_cascade_over_specs(
     config: CascadeConfig,
     sweep_id: str,
     leaderboard_trials: Sequence[LeaderboardTrialsRecord] | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> CascadeWireReport:
     """Run the Stage-4 cascade per ``(instrument, tf)`` pool → one aggregate report.
 
@@ -865,6 +896,11 @@ def run_cascade_over_specs(
         The :class:`CascadeConfig` (shared across pools — same seed + thresholds).
     sweep_id
         The grid identity stamped on the report.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to every
+        candidate re-simulation. REFERENCE ONLY — the report bytes are
+        identical with or without it, so the auto-path == manual-path golden
+        contract is unaffected by which side binds a stamper.
 
     Returns
     -------
@@ -930,6 +966,7 @@ def run_cascade_over_specs(
                     # config would otherwise silently mismatch them.
                     lockbox_default_window_days=config.lockbox_default_window_days,
                     lockbox_min_trades=config.lockbox_min_trades,
+                    reference_stamper=reference_stamper,
                 )
             )
         if not candidates:
@@ -1653,6 +1690,7 @@ def run_and_write_from_specs(
     cascade_config: CascadeConfig,
     stage3: Stage3ManifestRecord | None = None,
     leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> CascadeWireReport:
     """AUTOMATIC path: run the cascade + write the manifest AND the report.
 
@@ -1662,6 +1700,8 @@ def run_and_write_from_specs(
     *results_root*. When the sweep ran the Stage-3 refinement pass
     (DEC-STAGE3-WIRE-001), its :class:`Stage3ManifestRecord` is recorded in the
     manifest so refined-cell specs stay distinguishable from grid-cell specs.
+    ``reference_stamper`` (DEC-VIX-STAMP-WIRE-001) rides every candidate
+    re-simulation; the manifest + report bytes are identical either way.
 
     Returns
     -------
@@ -1683,6 +1723,7 @@ def run_and_write_from_specs(
         config=cascade_config,
         sweep_id=sweep_id,
         leaderboard_trials=leaderboard_trials,
+        reference_stamper=reference_stamper,
     )
     write_manifest(results_root, manifest)
     write_report(results_root, report)
@@ -1693,13 +1734,16 @@ def run_and_write_from_manifest(
     results_root: Path,
     *,
     bars_for: Callable[[str, str], Sequence[CandleBar]],
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> CascadeWireReport:
     """MANUAL path: replay the manifest this sweep wrote → the SAME report bytes.
 
     Reloads the manifest under *results_root*, re-runs :func:`run_cascade_over_specs`
     with the stored config + specs over freshly-loaded bars, and re-writes
     ``cascade/cascade-report.json``. Given an unchanged lake, the rewritten report
-    is byte-identical to the one the AUTOMATIC path wrote (the golden contract).
+    is byte-identical to the one the AUTOMATIC path wrote (the golden contract —
+    which the optional India-VIX ``reference_stamper``, DEC-VIX-STAMP-WIRE-001,
+    cannot break: the stamp never feeds a report byte).
 
     Returns
     -------
@@ -1720,9 +1764,66 @@ def run_and_write_from_manifest(
         # The FROZEN numbers — the manifest is the only replay-time source
         # (ADR-0008 condition 1; sidecars are never re-read here).
         leaderboard_trials=manifest.leaderboard_trials,
+        reference_stamper=reference_stamper,
     )
     write_report(results_root, report)
     return report
+
+
+def _manifest_window_dt(value: str) -> datetime:
+    """Parse a manifest :class:`BarsContext` window endpoint (naive ⇒ UTC).
+
+    The ONE parse both manifest-replay consumers share (CLAUDE.md §11 COMMON):
+    :func:`load_bars_for_manifest`'s slice reads and
+    :func:`vix_stamper_for_manifest`'s VIX window — so the stamper's bounded
+    read can never drift from the bars it stamps.
+    """
+    from datetime import UTC, datetime
+
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def vix_stamper_for_manifest(
+    manifest: CascadeManifest,
+    *,
+    lake_root: Path,
+    catalog_path: Path | None = None,
+) -> TradeReferenceStamper | None:
+    """Build the manifest window's India-VIX stamper, or ``None`` honestly.
+
+    The MANUAL-replay binding seam (DEC-VIX-STAMP-WIRE-001): ``brutex cascade``
+    and the dashboard "Run cascade" button call this beside
+    :func:`load_bars_for_manifest` so the replayed candidates' re-simulated
+    trades carry the SAME window-bounded VIX stamps the automatic path bound.
+    Delegates to :func:`~brutex.engine.reference_wire.build_vix_stamper` over
+    the manifest's :class:`BarsContext` window — a VIX-less / VIX-empty lake
+    degrades to ``None`` observe-only (the replay proceeds unstamped, never a
+    fabricated stamp and never a failed cascade; Golden Rule #1).
+
+    Parameters
+    ----------
+    manifest
+        The replayed manifest (its ``bars_context`` bounds the VIX read).
+    lake_root
+        The lake root directory.
+    catalog_path
+        The catalog DuckDB path (default ``<lake_root>/catalog.duckdb``).
+
+    Returns
+    -------
+    TradeReferenceStamper | None
+        The stamper, or ``None`` when the lake carries no usable VIX data.
+    """
+    from brutex.engine.reference_wire import build_vix_stamper
+
+    ctx = manifest.bars_context
+    return build_vix_stamper(
+        lake_root=lake_root,
+        start=_manifest_window_dt(ctx.start),
+        end=_manifest_window_dt(ctx.end),
+        catalog_path=catalog_path,
+    )
 
 
 def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFeed
@@ -1764,14 +1865,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     Callable[[str, str], list[CandleBar]]
         A ``(instrument, tf_label) -> bars`` closure over the loaded slices.
     """
-    from datetime import UTC, datetime
-
     from brutex.data.catalog import Catalog
     from brutex.engine.lake_slice import load_lake_slice
-
-    def _parse(value: str) -> datetime:
-        parsed = datetime.fromisoformat(value)
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     ctx = manifest.bars_context
     catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
@@ -1789,8 +1884,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
                 segment=ctx.segment,
                 symbol=instrument,
                 interval=tf_label,
-                start=_parse(ctx.start),
-                end=_parse(ctx.end),
+                start=_manifest_window_dt(ctx.start),
+                end=_manifest_window_dt(ctx.end),
                 dedup_source=f"cascade_wire:{instrument}/{tf_label}",
             )
 
@@ -1831,6 +1926,7 @@ __all__ = [
     "run_cascade_over_specs",
     "serialize_wire_report",
     "spec_from_store_rows",
+    "vix_stamper_for_manifest",
     "wire_report_to_dict",
     "write_manifest",
     "write_report",

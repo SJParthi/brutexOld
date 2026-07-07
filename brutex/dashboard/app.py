@@ -5518,6 +5518,7 @@ def build_app(
                 load_bars_for_manifest,
                 load_manifest,
                 run_and_write_from_manifest,
+                vix_stamper_for_manifest,
             )
 
             try:
@@ -5525,7 +5526,13 @@ def build_app(
             except CascadeWireError as exc:
                 return 400, {"ok": False, "error": str(exc)}
             bars_for = load_bars_for_manifest(manifest, lake_root=lake)
-            report = run_and_write_from_manifest(root, bars_for=bars_for)
+            # The dashboard replay binds the SAME window-bounded India-VIX
+            # stamper the sweep bound (DEC-VIX-STAMP-WIRE-001; None-degrade
+            # on a VIX-less lake — report bytes identical either way).
+            reference_stamper = vix_stamper_for_manifest(manifest, lake_root=lake)
+            report = run_and_write_from_manifest(
+                root, bars_for=bars_for, reference_stamper=reference_stamper
+            )
             return 200, {
                 "ok": True,
                 "sweep_id": manifest.sweep_id,

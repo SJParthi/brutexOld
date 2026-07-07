@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     # so the strict per-module `--cov=brutex.engine` gate stays clean (the same
     # constraint sweep_run.py observes). Both are *received*, never constructed.
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.sweep_run import DedupSink
     from brutex.orchestrator.audit import AuditSink
 
@@ -791,6 +792,7 @@ def run_one_tuple(
     audit: AuditSink,
     skip_empty: bool = True,
     kernel_cache: ResidentKernelCache | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepRunSummary | None:
     """Execute ONE grid tuple — the single per-tuple body shared across drivers.
 
@@ -833,6 +835,13 @@ def run_one_tuple(
         from it and handed to :func:`~brutex.engine.sweep_run.run_persisted_sweep`
         (``kernel=``) — a byte-identical result, only the redundant rebuild is
         skipped (Golden Rule #4). ``None`` rebuilds per tuple (legacy path).
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001), forwarded verbatim to
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` — the run's
+        stamper reaches the finalist projection through this ONE conduit.
+        REFERENCE ONLY; the persisted bytes are identical with or without it.
 
     Returns
     -------
@@ -875,6 +884,7 @@ def run_one_tuple(
         # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
         # the digest is the same collision guard the store filename carries.
         trial_stats_digest=_tuple_digest(tuple_, grid),
+        reference_stamper=reference_stamper,
     )
 
 
@@ -888,6 +898,7 @@ def run_sweep_grid(
     skip_empty: bool = True,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     reuse_bar_bits: bool = True,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
 
@@ -947,6 +958,9 @@ def run_sweep_grid(
         ``False`` to rebuild per tuple (the legacy path). Honest envelope (Golden
         Rule #10): the cache holds at most ``|proximities|`` bar windows resident →
         bounded ``O(|proximities| · N_bars)`` memory, never O(1) total.
+    reference_stamper
+        Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001), forwarded to
+        every tuple's :func:`run_one_tuple` — ONE stamper per grid run.
 
     Returns
     -------
@@ -1021,6 +1035,7 @@ def run_sweep_grid(
                 audit=audit,
                 skip_empty=skip_empty,
                 kernel_cache=kernel_cache,
+                reference_stamper=reference_stamper,
             )
         except SweepComboError as exc:
             tuples_failed += 1

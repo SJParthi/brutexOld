@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     # Annotation-only — keeps brutex.orchestrator.audit (and anything it pulls)
     # out of this module's runtime import graph, mirroring the sweep_run /
     # sweep_orchestrator discipline for the strict per-module coverage gates.
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.metrics.compute import ResultMetrics
     from brutex.orchestrator.audit import AuditWriter
 
@@ -439,12 +440,15 @@ def _make_evaluator(
     side: Side,
     tf_minutes: int,
     start_equity_paisa: int,
+    reference_stamper: TradeReferenceStamper | None,
 ) -> Evaluator:
     """Bind one survivor's FULL-backtest evaluator over the TRAIN slice (condition 7).
 
     The production binding of the slice-4 engine seam: each call is one
     standalone :func:`~brutex.engine.sweep_driver.metrics_for_mask` backtest at
     a quantized on-grid ``(sl_paisa, tp_paisa)`` — O(bars) per call, never O(1).
+    The run's India-VIX stamper rides each evaluation's trade sim
+    (DEC-VIX-STAMP-WIRE-001; required, no default — the caller decides).
     """
 
     def _evaluate(sl_paisa: int, tp_paisa: int) -> ResultMetrics:
@@ -457,6 +461,7 @@ def _make_evaluator(
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
+            reference_stamper=reference_stamper,
         )
 
     return _evaluate
@@ -566,6 +571,7 @@ def run_stage3_pass(
     segment: str,
     start: str,
     end: str,
+    stamper_for: Callable[[], TradeReferenceStamper | None] | None = None,
 ) -> Stage3PassReport:
     """Run the Stage-3 refinement post-pass over a persisted grid — single-threaded.
 
@@ -608,6 +614,14 @@ def run_stage3_pass(
     exchange, segment, start, end
         The data-scope labels the launcher hashed its full window with —
         reused verbatim for the train-slice hash derivation.
+    stamper_for
+        Optional ZERO-ARG provider of the run's India-VIX stamper
+        (DEC-VIX-STAMP-WIRE-001) — e.g. the launcher's cached
+        :func:`~brutex.engine.reference_wire.vix_stamper_provider` closure.
+        Invoked LAZILY, once, AFTER the ``stage3_enable`` fast path (a
+        disabled pass never touches the VIX lake); the resolved stamper (or
+        an honest ``None``) rides every refinement evaluation AND the
+        persisted refined-row projection. ``None`` (default) = unstamped.
 
     Returns
     -------
@@ -634,6 +648,10 @@ def run_stage3_pass(
             cells=(),
         )
     ensure_stage3_runtime()
+    # LAZY stamper resolution (DEC-VIX-STAMP-WIRE-001): resolved exactly once,
+    # strictly AFTER the disabled fast path above — a stage3-disabled grid
+    # never reads the VIX lake through this seam.
+    reference_stamper: TradeReferenceStamper | None = None if stamper_for is None else stamper_for()
 
     grid_rows: list[ResultRow] = []
     for tuple_ in iter_sweep_tuples(grid):
@@ -708,6 +726,7 @@ def run_stage3_pass(
                     side=side,
                     tf_minutes=tf.minutes,
                     start_equity_paisa=grid.start_equity_paisa,
+                    reference_stamper=reference_stamper,
                 ),
                 budget=budget,
                 audit=sink,
@@ -754,6 +773,9 @@ def run_stage3_pass(
                     tf_minutes=tf.minutes,
                     sl_paisa=refined_eval.sl_paisa,
                     tp_paisa=refined_eval.tp_paisa,
+                    # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the refined
+                    # row's re-simulation feeds the PERSISTED cell store.
+                    reference_stamper=reference_stamper,
                 )
                 cell = SweepTuple(
                     instrument=row.instrument,

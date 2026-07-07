@@ -4799,6 +4799,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     cache_path = out_root / "dedup-cache"
     progress_path = out_root / "progress" / "sweep-progress.json"
 
+    # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
+    # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
+    # window, then handed to every observable trade surface below (grid
+    # finalist projection, Stage-3 refined rows, Stage-4 cascade). An absent /
+    # empty VIX lake degrades honestly to None (observe-only WARN inside the
+    # builder — the sweep proceeds with unstamped trades, never a fabricated
+    # stamp and never a refused launch).
+    from brutex.engine.reference_wire import build_vix_stamper
+
+    reference_stamper = build_vix_stamper(
+        lake_root=resolved_lake,
+        start=_parse_dt(start),
+        end=_parse_dt(end),
+        catalog_path=catalog,
+    )
+
     def _bars_for(symbol: str, interval: str) -> list[Any]:
         return slices.get((symbol, interval), [])
 
@@ -4899,6 +4915,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    reference_stamper=reference_stamper,
                 )
             else:
                 result = run_supervised_grid(
@@ -4911,6 +4928,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     on_tuple=_on_tuple,
                     on_progress=_on_progress,
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    reference_stamper=reference_stamper,
                 )
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
@@ -4930,6 +4948,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 segment=segment,
                 start=start,
                 end=end,
+                # The launch's already-built stamper (never a second lake
+                # read); resolved lazily by the pass so a stage3-disabled
+                # grid pays nothing extra.
+                stamper_for=lambda: reference_stamper,
             )
         # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
         # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
@@ -5036,6 +5058,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 cascade_config=cascade_config_for_sweep(sweep_id),
                 stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                 leaderboard_trials=leaderboard_trials,
+                reference_stamper=reference_stamper,
             )
             print(
                 f"[brutex] cascade — pools={len(cascade_report.groups)} "
@@ -5378,6 +5401,7 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         load_manifest,
         report_path,
         run_and_write_from_manifest,
+        vix_stamper_for_manifest,
     )
 
     resolved_lake = _resolve_lake_root(lake_root)
@@ -5397,7 +5421,15 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         return EXIT_USER_ERROR
 
     bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
-    report = run_and_write_from_manifest(root, bars_for=bars_for)
+    # The manual replay binds the SAME window-bounded India-VIX stamper the
+    # automatic path bound (DEC-VIX-STAMP-WIRE-001; None-degrade on a VIX-less
+    # lake — the replayed report bytes are identical either way).
+    reference_stamper = vix_stamper_for_manifest(
+        manifest, lake_root=resolved_lake, catalog_path=catalog
+    )
+    report = run_and_write_from_manifest(
+        root, bars_for=bars_for, reference_stamper=reference_stamper
+    )
     print(
         f"[brutex] cascade done — sweep={manifest.sweep_id[:16]} pools={len(report.groups)} "
         f"candidates={report.n_input} survivors={report.n_survived}"
@@ -6434,6 +6466,7 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     start: str,
     end: str,
     expiry_kind: Any,
+    reference_stamper: Any = None,
 ) -> list[Any]:
     """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
 
@@ -6490,7 +6523,16 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         return []
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
-    trades = simulate_trades(bars, entry_signals, direction=side, tf_minutes=tf_minutes)
+    # The CLI-replay bind (DEC-VIX-STAMP-WIRE-001): the replayed round-trips
+    # feed the OBSERVABLE options-sim leaderboard, so the caller's stamper
+    # rides here (None-degrade on a VIX-less lake).
+    trades = simulate_trades(
+        bars,
+        entry_signals,
+        direction=side,
+        tf_minutes=tf_minutes,
+        reference_stamper=reference_stamper,
+    )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
     # is LAST-wins on a duplicated timestamp — the COMMON gate keeps the first
     # bar + WARNs (the catalog gate upstream already collapses; belt-and-braces).
@@ -6564,6 +6606,7 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
     expiry: str,
     broker: str,
     audit_path: Path,
+    reference_stamper: Any = None,
 ) -> tuple[Any, ...]:
     """Replay a winning spot run into priced per-rule options results + audit."""
     from brutex.options.executor import ExpiryKind, execute_options_sim
@@ -6579,6 +6622,7 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
         start=start,
         end=end,
         expiry_kind=expiry_kind,
+        reference_stamper=reference_stamper,
     )
     source = _LakeOptionBarSource(lake_root=lake_root)
     with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
@@ -6629,6 +6673,16 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # The manual replay binds the window-bounded India-VIX stamper
+    # (DEC-VIX-STAMP-WIRE-001; None-degrade on a VIX-less lake).
+    from brutex.engine.reference_wire import build_vix_stamper
+
+    reference_stamper = build_vix_stamper(
+        lake_root=resolved_lake,
+        start=_parse_dt(start),
+        end=_parse_dt(end),
+        catalog_path=catalog,
+    )
     results = _options_sim_for_row(
         row,
         lake_root=resolved_lake,
@@ -6640,6 +6694,7 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         expiry=expiry,
         broker=broker,
         audit_path=audit_path,
+        reference_stamper=reference_stamper,
     )
     total_signals = results[0].n_signals if results else 0
     if total_signals == 0:
@@ -6686,6 +6741,16 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
         return
     winners = store.top_k(top, by="net_pnl_paisa")
     print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
+    # ONE stamper for every winner's replay (DEC-VIX-STAMP-WIRE-001; the VIX
+    # lake is read at most once per auto-hook, None-degrade when absent).
+    from brutex.engine.reference_wire import build_vix_stamper
+
+    reference_stamper = build_vix_stamper(
+        lake_root=lake_root,
+        start=_parse_dt(start),
+        end=_parse_dt(end),
+        catalog_path=catalog_path,
+    )
     for row in winners:
         audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
         try:
@@ -6700,6 +6765,7 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
                 expiry=expiry,
                 broker=broker,
                 audit_path=audit_path,
+                reference_stamper=reference_stamper,
             )
         except (ValueError, KeyError, OSError) as exc:
             print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")

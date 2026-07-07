@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import fno_math
 
@@ -61,6 +61,9 @@ from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.ranking import MIN_TRADES, RankedCombo, passes_gates, rank_combos
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from brutex.engine.reference_series import TradeReferenceStamper
 
 #: Notional capital base (paisa) for the signal-only equity curve. ₹100,000.
 #: Only the denominator of percentage metrics — absolute paisa P&L is unaffected.
@@ -165,6 +168,7 @@ def evaluate_combo(
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> ResultMetrics:
     """Backtest ONE strategy combo over real bars → its full result metrics.
 
@@ -194,6 +198,13 @@ def evaluate_combo(
         Proximity tolerances for the ``near_*`` conditions (defaults to 10 bps).
     prior_n
         Prior-bar pattern look-back ∈ {1, 2, 3, 4} (defaults to 3).
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001) threaded to the trade sim so every simulated
+        trade carries ``vix_at_entry`` / ``vix_at_exit`` — REFERENCE ONLY,
+        never a signal / metric / run-identity input; the returned metrics are
+        byte-identical with or without it. ``None`` (default) = unstamped.
 
     Returns
     -------
@@ -218,6 +229,7 @@ def evaluate_combo(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
+        reference_stamper=reference_stamper,
     )
 
 
@@ -231,6 +243,7 @@ def metrics_for_mask(
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> ResultMetrics:
     """Project one mask onto pre-built ``bar_bits`` → its metrics (the shared core).
 
@@ -248,6 +261,7 @@ def metrics_for_mask(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
+        reference_stamper=reference_stamper,
     )
     return metrics_from_trades(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
@@ -263,6 +277,7 @@ def _simulate_window(
     tf_minutes: int,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[ClosedTrade]:
     """Project a mask onto ``bar_bits`` and simulate the trades (the shared seam).
 
@@ -279,6 +294,7 @@ def _simulate_window(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
+        reference_stamper=reference_stamper,
     )
 
 
@@ -414,6 +430,7 @@ def sweep_masks(
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
     min_hits: int = 0,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[tuple[int, ResultMetrics]]:
     """Backtest MANY masks over the same bars → ``(mask, metrics)`` pairs.
 
@@ -473,6 +490,7 @@ def sweep_masks(
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 start_equity_paisa=start_equity_paisa,
+                reference_stamper=reference_stamper,
             ),
         )
         for mask in swept
@@ -491,6 +509,7 @@ def rank_sweep(
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
     min_hits: int = 0,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[RankedCombo]:
     """Sweep a set of masks and return the **ranked leaderboard** — the top combos.
 
@@ -500,7 +519,9 @@ def rank_sweep(
     returned list is the top-performing combo for this
     ``(instrument, TF, direction, params)``. ``min_hits`` (default ``0`` = off) only
     skips masks that could never clear the trade-count gate, so it never changes the
-    ranked result — see :func:`sweep_masks`.
+    ranked result — see :func:`sweep_masks`. ``reference_stamper`` is the pure
+    conduit to :func:`sweep_masks` (DEC-VIX-STAMP-WIRE-001) — the ranked result is
+    byte-identical with or without it (VIX is REFERENCE ONLY, never ranked on).
     """
     return rank_combos(
         sweep_masks(
@@ -514,6 +535,7 @@ def rank_sweep(
             proximity=proximity,
             prior_n=prior_n,
             min_hits=min_hits,
+            reference_stamper=reference_stamper,
         )
     )
 
@@ -532,6 +554,7 @@ def rank_sweep_over_bits(
     prior_n: int = 3,
     max_combos: int = DEFAULT_MAX_COMBOS,
     min_hits: int = MIN_TRADES,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[RankedCombo]:
     """Sweep + rank over the **K-of-the-chosen-condition-bits** mask space → top combos.
 
@@ -607,6 +630,7 @@ def rank_sweep_over_bits(
         proximity=proximity,
         prior_n=prior_n,
         min_hits=min_hits,
+        reference_stamper=reference_stamper,
     )
 
 
@@ -892,6 +916,7 @@ def _score_fold(
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> FoldResult:
     """Score one mask on one fold's train + held-out test windows.
 
@@ -916,6 +941,7 @@ def _score_fold(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
+        reference_stamper=reference_stamper,
     )
     test_bars = bars[fold.test_start_bar : fold.test_end_bar]
     test_trades = _simulate_window(
@@ -926,6 +952,7 @@ def _score_fold(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
+        reference_stamper=reference_stamper,
     )
     _assert_trades_confined(test_bars, test_trades)
     test_metrics = metrics_from_trades(
@@ -983,6 +1010,7 @@ def evaluate_combo_walk_forward(
     train_days: int = DEFAULT_WF_TRAIN_DAYS,
     test_days: int = DEFAULT_WF_TEST_DAYS,
     step_days: int = DEFAULT_WF_STEP_DAYS,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> WalkForwardResult:
     """Backtest ONE combo across a rolling walk-forward schedule → its WF outcome.
 
@@ -1041,6 +1069,7 @@ def evaluate_combo_walk_forward(
             stop_loss_paisa=stop_loss_paisa,
             take_profit_paisa=take_profit_paisa,
             start_equity_paisa=start_equity_paisa,
+            reference_stamper=reference_stamper,
         )
         for fold in schedule.folds
     ]
@@ -1072,6 +1101,7 @@ def walk_forward_sweep(
     train_days: int = DEFAULT_WF_TRAIN_DAYS,
     test_days: int = DEFAULT_WF_TEST_DAYS,
     step_days: int = DEFAULT_WF_STEP_DAYS,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[tuple[int, WalkForwardResult]]:
     """Walk-forward MANY masks over the same bars → ``(mask, WalkForwardResult)`` pairs.
 
@@ -1126,6 +1156,7 @@ def walk_forward_sweep(
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
                 start_equity_paisa=start_equity_paisa,
+                reference_stamper=reference_stamper,
             )
             for fold in schedule.folds
         ]

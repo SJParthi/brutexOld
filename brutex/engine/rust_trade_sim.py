@@ -113,6 +113,7 @@ from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
 
     # ``ClosedTrade`` is imported lazily at its construction site (see the note in
     # :mod:`brutex.engine.trade_sim`) to keep numpy out of the engine package's
@@ -237,6 +238,19 @@ class ResidentTradeSim:
     tf_minutes
         The bar timeframe in whole minutes (``>= 1``), for the timeframe-aware
         forced-exit detection.
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001). When supplied, EVERY trade this window emits
+        — on the Rust arm AND the Python-oracle fallback arm alike — carries
+        ``vix_at_entry`` / ``vix_at_exit`` (REFERENCE ONLY, never a signal
+        input; a missing VIX bar stamps ``None``, never fabricated). The Rust
+        kernel itself is UNTOUCHED: the stamp happens Python-side in the
+        :meth:`_to_trade` converter (an O(1) post-stamp per trade), so the
+        kernel's trade tuples stay engine-blind and both arms stamp through
+        the SAME :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp`.
+        ``None`` (the default) leaves both VIX fields ``None`` — byte-identical
+        to the pre-wiring output.
 
     Raises
     ------
@@ -250,7 +264,14 @@ class ResidentTradeSim:
         (mirrors :meth:`brutex.engine.trade_sim.TradeSimWalker` exactly).
     """
 
-    __slots__ = ("_bar_bits", "_bars", "_call_fallback_warned", "_rust", "_tf_minutes")
+    __slots__ = (
+        "_bar_bits",
+        "_bars",
+        "_call_fallback_warned",
+        "_reference_stamper",
+        "_rust",
+        "_tf_minutes",
+    )
 
     def __init__(
         self,
@@ -258,6 +279,7 @@ class ResidentTradeSim:
         bar_bits: Sequence[int],
         *,
         tf_minutes: int,
+        reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         if not bars:
             raise ValueError("ResidentTradeSim: bars must be non-empty")
@@ -270,6 +292,7 @@ class ResidentTradeSim:
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
+        self._reference_stamper = reference_stamper
         # Per-(instance, reason) warn-once memo for the per-call fallback (module
         # docstring): the sweep chunks a tuple into up to thousands of
         # `simulate_masks` calls, so a per-CALL warning on a sticky reason (e.g.
@@ -358,6 +381,18 @@ class ResidentTradeSim:
     def n_bars(self) -> int:
         """Number of bars in the resident window."""
         return len(self._bars)
+
+    @property
+    def reference_stamper(self) -> TradeReferenceStamper | None:
+        """The India-VIX stamper bound to this window (``None`` = unstamped).
+
+        PUBLIC so the sweep's chunk-failure re-attribution can hand the
+        Python-oracle replay the SAME stamper this window simulates with
+        (DEC-VIX-STAMP-WIRE-001, the STRUCTURAL oracle≡batch guarantee: the
+        oracle and the batch can never diverge on the stamping input because
+        the oracle reads it FROM the sim, never from a second wiring).
+        """
+        return self._reference_stamper
 
     @property
     def rust_active(self) -> bool:
@@ -449,7 +484,10 @@ class ResidentTradeSim:
                     )
                 rust = None
         if rust is None:
-            # Pure-Python fallback: the exact oracle, one mask at a time.
+            # Pure-Python fallback: the exact oracle, one mask at a time. The
+            # window's OWN stamper rides along, so a fallback-served window
+            # stamps identically to the kernel-served one (never a wheel-state
+            # divergence — DEC-VIX-STAMP-WIRE-001).
             return [
                 simulate_trades(
                     self._bars,
@@ -459,6 +497,7 @@ class ResidentTradeSim:
                     stop_loss_paisa=stop_loss_paisa,
                     take_profit_paisa=take_profit_paisa,
                     policy=policy,
+                    reference_stamper=self._reference_stamper,
                 )
                 for mask in masks
             ]
@@ -476,24 +515,49 @@ class ResidentTradeSim:
             tp_next_open,
             tp_first,
         )
+        # HOISTED converter input (DEC-VIX-STAMP-WIRE-001): the stamper is read
+        # ONCE per batch call — not once per trade — and threaded into the
+        # per-record converter, which post-stamps each Rust trade Python-side.
+        stamper = self._reference_stamper
         return [
-            [self._to_trade(record, direction) for record in mask_records] for mask_records in raw
+            [self._to_trade(record, direction, stamper) for record in mask_records]
+            for mask_records in raw
         ]
 
     def _to_trade(
-        self, record: tuple[int, int, int, int, int, int], direction: Side
+        self,
+        record: tuple[int, int, int, int, int, int],
+        direction: Side,
+        stamper: TradeReferenceStamper | None,
     ) -> ClosedTrade:
-        """Map one Rust trade tuple → a :class:`ClosedTrade` (idx→bar timestamps)."""
+        """Map one Rust trade tuple → a :class:`ClosedTrade` (idx→bar timestamps).
+
+        The POST-STAMP seam (DEC-VIX-STAMP-WIRE-001): when a *stamper* is bound
+        the trade's ``vix_at_entry`` / ``vix_at_exit`` are resolved HERE, at the
+        Python-side conversion, through the SAME
+        :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp` the
+        pure-Python walker uses — so Rust-batch trades and oracle trades stamp
+        bit-identically, the kernel stays engine-blind, and a missing VIX bar
+        stamps ``None`` (never fabricated). O(1) per trade: two dict probes.
+        """
         # Lazy import (numpy-load-once guard; see the module/TYPE_CHECKING note).
         from brutex.metrics.types import ClosedTrade
 
         pnl, mfe, mae, holding, entry_idx, exit_idx = record
+        entry_ts = self._bars[entry_idx].timestamp
+        exit_ts = self._bars[exit_idx].timestamp
+        if stamper is not None:
+            vix_at_entry, vix_at_exit = stamper.stamp(entry_ts, exit_ts)
+        else:
+            vix_at_entry, vix_at_exit = None, None
         return ClosedTrade(
             pnl_paisa=pnl,
             mfe_paisa=mfe,
             mae_paisa=mae,
             holding_bars=holding,
-            entry_ts=self._bars[entry_idx].timestamp,
-            exit_ts=self._bars[exit_idx].timestamp,
+            entry_ts=entry_ts,
+            exit_ts=exit_ts,
             direction=direction,
+            vix_at_entry=vix_at_entry,
+            vix_at_exit=vix_at_exit,
         )
