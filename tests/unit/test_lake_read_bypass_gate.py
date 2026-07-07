@@ -70,7 +70,10 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     ),
     "brutex/dashboard/app.py": "comment reference only (no executable raw read)",
     "brutex/dashboard/movers_snapshot.py": "wired: _read_daily_partition dedups",
-    "brutex/dashboard/movers_futures.py": "wired: _prev_day_oi dedups",
+    "brutex/dashboard/movers_futures.py": (
+        "wired: resolve_prev_oi dedups (the _prev_day_oi value seam rides it — "
+        "DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 kept the OI scan physically here)"
+    ),
     "brutex/dashboard/movers_warm.py": (
         "candidate-discovery aggregate over symbols (ranking warm), not a bar-serving read"
     ),
