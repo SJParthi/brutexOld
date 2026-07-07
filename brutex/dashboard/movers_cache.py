@@ -75,6 +75,7 @@ route.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -82,6 +83,8 @@ from dataclasses import dataclass
 from typing import Final, TypeVar
 
 import structlog
+
+from brutex.dashboard.summary_cache import effective_adaptive_floor
 
 _LOG = structlog.get_logger(__name__)
 
@@ -91,6 +94,7 @@ __all__ = [
     "MAX_ADAPTIVE_FLOOR_CAP_S",
     "MoversSnapshotCache",
     "candidate_key",
+    "revision_generation",
 ]
 
 #: The default maximum number of distinct snapshot coordinates kept resident.
@@ -194,6 +198,33 @@ def candidate_key(
         expiry_track or "",
     )
     return _KEY_SEP.join(parts)
+
+
+def revision_generation(token: str) -> int:
+    """Map a content token onto a :class:`MoversSnapshotCache` generation int — one digest bridge.
+
+    DEC-LEDGER-DELTA-O-PAGE-001: :class:`MoversSnapshotCache` keys freshness on
+    an ``int`` *generation*, while the lake content signals are opaque string
+    tokens (a ledger stamp token, a :mod:`~brutex.dashboard.lake_revision`
+    composite). This bridge digests the token to the first 8 bytes of its
+    SHA-256 — a 64-bit int, so ANY token change moves the generation. HONEST
+    envelope (Golden Rule #10): two distinct tokens collide with probability
+    ~2\\ :sup:`-64`; a collision would serve ONE stale entry for that colliding
+    pair and self-heals on the next token move — documented, not hidden. Pure,
+    O(len(token)).
+
+    Homed HERE — beside the cache whose generations it feeds — and NOT in
+    :mod:`~brutex.dashboard.lake_revision` (the token producer), because a
+    module-level ``db_view → lake_revision`` import closes a real import cycle
+    (CodeQL ``py/cyclic-import`` alert 690): ``lake_revision`` lazily imports
+    ``brutex.data.window_ledger_store``, whose cold-start reconcile lazily
+    imports ``brutex.dashboard.coverage_reconcile``, which lazily imports
+    ``db_view`` back. This module is a leaf (only the stdlib +
+    :mod:`~brutex.dashboard.summary_cache`), so ``db_view``'s existing
+    module-level import stays cycle-free — AST-pinned by
+    ``test_db_view_no_lake_revision_import``.
+    """
+    return int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,9 +418,12 @@ class MoversSnapshotCache:
                 return entry.value  # type: ignore[return-value]
         if entry is not None and self._adaptive_floor and not force_fresh and self._pull_active():
             age = self._clock() - entry.computed_at
-            effective_floor = min(
-                max(self._adaptive_base_floor_s, entry.compute_duration),
-                self._adaptive_floor_cap_s,
+            # Delegates to the ONE extracted #920 formula (byte-equal arithmetic
+            # — DEC-LEDGER-DELTA-O-PAGE-001, CLAUDE.md §11 COMMON).
+            effective_floor = effective_adaptive_floor(
+                entry.compute_duration,
+                base_s=self._adaptive_base_floor_s,
+                cap_s=self._adaptive_floor_cap_s,
             )
             if age < effective_floor:
                 _LOG.info(
