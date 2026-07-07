@@ -3493,6 +3493,33 @@ def _publish_cli_pull_inactive(lake_root: Path, controller: Any, adapter: Any) -
         )
 
 
+def _next_day_saturating(day: date) -> date:
+    """Widen an inclusive end date to its half-open ``+1 day`` boundary, saturating.
+
+    ``date.max + timedelta(days=1)`` raises :class:`OverflowError`; the fetch
+    seam widens AFTER the pull completed, and its outcome must never be
+    replaced by a widening crash ("an enrich error NEVER fails the pull" —
+    DEC-CLI-GREEKS-ENRICH-001, review round-1 fix). Saturating at
+    ``date.max`` loses nothing: the widened value only clamps lake
+    discovery, and the canonical partition window ends at
+    ``MAX_PARTITION_YEAR`` (2100) — no stored bar can sit ON ``9999-12-31``
+    for the exclusive end to drop.
+
+    Parameters
+    ----------
+    day
+        The inclusive end date to widen.
+
+    Returns
+    -------
+    datetime.date
+        ``day + 1 day`` — or ``date.max`` unchanged when no later date exists.
+    """
+    if day == date.max:
+        return date.max
+    return day + timedelta(days=1)
+
+
 def _run_cli_greeks_enrich(
     *, lake_root: Path, instruments: Sequence[Any], start: date, end: date
 ) -> Any:  # -> GreeksEnrichOutcome
@@ -4207,7 +4234,10 @@ def cmd_fetch(
                     lake_root=resolved,
                     instruments=fetch_instruments,
                     start=start_dt.date(),
-                    end=end_dt.date() + timedelta(days=1),  # inclusive pull end → half-open
+                    # Inclusive pull end → half-open, SATURATING at date.max so a
+                    # degenerate `--end 9999-12-31` pull can never crash the seam
+                    # after the pull completed (review round-1 fix).
+                    end=_next_day_saturating(end_dt.date()),
                 )
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
@@ -4295,7 +4325,8 @@ def cmd_enrich_greeks(
         Optional inclusive IST window start, ``YYYY-MM-DD``.
     end
         Optional INCLUSIVE IST window end, ``YYYY-MM-DD`` (``+1 day``
-        internally).
+        internally; ``9999-12-31`` = ``date.max`` is refused as a clean
+        user error — the widening would overflow, review round-1 fix).
     dry_run
         Discovery-only counts; enrich nothing, take no lock.
 
@@ -4303,6 +4334,14 @@ def cmd_enrich_greeks(
     -------
     int
         Process exit code (see above).
+
+    Raises
+    ------
+    CliUserError
+        If the resolved lake root is not an existing directory — the
+        DEC-CLI-USER-ERROR-HYGIENE-001 read-command guard (a typo'd
+        ``--lake-root`` must never read as a green zero-target run, nor
+        materialise a phantom ``.locks/`` tree; review round-1 fix).
     """
     from brutex.data.greeks_enrich_pass import (
         discover_option_windows,
@@ -4311,6 +4350,12 @@ def cmd_enrich_greeks(
     )
 
     resolved = _resolve_lake_root(lake_root)
+    # Refuse a nonexistent lake root LOUDLY (dry-run included): enrich-greeks
+    # READS an existing lake, and a typo'd --lake-root previously exited green
+    # ("errored_targets=0") while the live path even materialised the phantom
+    # lake's .locks/ dir — the exact silent-illusion class _require_lake_dir
+    # exists to prevent (review round-1 fix, DEC-CLI-USER-ERROR-HYGIENE-001).
+    _require_lake_dir(resolved, command="enrich-greeks")
     try:
         start_d = date.fromisoformat(start) if start else None
         end_given = date.fromisoformat(end) if end else None
@@ -4320,6 +4365,17 @@ def cmd_enrich_greeks(
     if start_d is not None and end_given is not None and start_d > end_given:
         print(
             f"[brutex] --start {start_d} is after --end {end_given}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if end_given is not None and end_given == date.max:
+        # date.max is the ONE valid ISO date the +1-day widening below cannot
+        # represent (OverflowError) — refuse it as cleanly as every other
+        # malformed date instead of a raw traceback (review round-1 fix).
+        print(
+            f"[brutex] --end {end_given.isoformat()} is out of range: the "
+            "inclusive end is widened +1 day internally and no later date "
+            "exists — pass a real trading date",
             file=sys.stderr,
         )
         return EXIT_USER_ERROR

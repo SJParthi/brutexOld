@@ -357,7 +357,14 @@ hostile-review pass._
   discovery counts, no lock) takes the pull single-flight lock + `keep_awake` and exits `EXIT_OK` iff `ok is True
   and errored_targets == 0` (the `lake audit-unique` cron-visible precedent — a deliberate, documented divergence
   from the never-fail pull path). Discovery bounds year dirs via the canonical `brutex.data.partition` constants
-  (§11 COMMON — imported, never re-minted). HONEST: NOT O(1) — discovery is O(option partition dirs + month entries)
+  (§11 COMMON — imported, never re-minted). Review round-1 fixes folded: discovery's year/month names are
+  ASCII-digit-gated (`_is_canonical_digits` — bare `isdigit()` admitted non-decimal Unicode digits like `²024` whose
+  `int()` raise killed the whole pass, and silently accepted Arabic-Indic decimals; both now skip per the
+  junk-tolerance contract); the fetch seam's `+1 day` widening SATURATES at `date.max` (`_next_day_saturating` — a
+  degenerate `--end 9999-12-31` pull previously died on an uncaught post-drain `OverflowError`); `enrich-greeks`
+  refuses `--end 9999-12-31` cleanly (`EXIT_USER_ERROR`, never a traceback) and refuses a nonexistent `--lake-root`
+  loudly via the COMMON `_require_lake_dir` (previously a green `errored_targets=0` illusion + a materialised
+  phantom `.locks/`). HONEST: NOT O(1) — discovery is O(option partition dirs + month entries)
   and the pass re-READS the scoped stored bars every run (`already_current` skips writes/solves, not reads; a
   full-floor fetch over a dashboard-populated lake re-reads the whole stored index-options history inside the lock —
   levers: window scoping, `BRUTEX_CLI_GREEKS_ENRICH=0`, `BRUTEX_GREEKS_WORKERS=1`); NO CLI L2 heal seam (the

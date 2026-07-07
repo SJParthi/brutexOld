@@ -324,16 +324,47 @@ def has_option_candles(lake_root: Path) -> bool:
         return False
 
 
+def _is_canonical_digits(token: str, width: int) -> bool:
+    """``True`` iff *token* is EXACTLY *width* ASCII decimal digits.
+
+    ``str.isdigit`` alone is a junk-tolerance trap (review round-1 fix,
+    DEC-CLI-GREEKS-ENRICH-001): a NON-decimal Unicode digit (superscript
+    ``"²024"``) passes ``isdigit()`` yet makes ``int()`` raise ``ValueError``
+    — which would propagate out of discovery and flip the WHOLE pass to
+    ``ok=False`` — and a non-ASCII DECIMAL digit (Arabic-Indic ``"٢٠٢٤"``)
+    passes both and would be silently accepted as a canonical year. The lake
+    writer only ever emits ASCII ``{year:04d}`` / ``{month:02d}`` names, so
+    anything non-ASCII is junk to SKIP silently, never to parse.
+
+    Parameters
+    ----------
+    token
+        The candidate year-dir name or month-file stem.
+    width
+        The exact canonical digit width (:data:`_YEAR_DIR_WIDTH` /
+        :data:`_MONTH_STEM_WIDTH`).
+
+    Returns
+    -------
+    bool
+        ``True`` when ``int(token)`` is safe AND the name is canonical.
+    """
+    return len(token) == width and token.isascii() and token.isdigit()
+
+
 def _stored_months(interval_dir: Path) -> frozenset[tuple[int, int]]:
     """Collect a contract's stored ``(year, month)`` set from its month files.
 
     One bounded readdir pass over ``<contract>/1minute/<yyyy>/<mm>.parquet``:
-    4-digit numeric year dirs bounded to the canonical partition-year window
+    4-digit ASCII-numeric year dirs (:func:`_is_canonical_digits` — plain
+    ``isdigit`` admits non-decimal Unicode digits that make ``int()`` raise)
+    bounded to the canonical partition-year window
     ``[MIN_PARTITION_YEAR, MAX_PARTITION_YEAR]`` (the writer's own validation
     window — anything outside is junk, and the bound keeps the month-after
-    span endpoint constructible), 2-digit ``NN.parquet`` stems in ``01..12``;
-    junk names are skipped silently (the :func:`parse_fno_symbol` tolerance
-    convention). A missing ``1minute/`` dir yields the empty set.
+    span endpoint constructible), 2-digit ASCII ``NN.parquet`` stems in
+    ``01..12``; junk names are skipped silently (the
+    :func:`parse_fno_symbol` tolerance convention). A missing ``1minute/``
+    dir yields the empty set.
 
     Parameters
     ----------
@@ -350,7 +381,7 @@ def _stored_months(interval_dir: Path) -> frozenset[tuple[int, int]]:
     months: set[tuple[int, int]] = set()
     for year_dir in interval_dir.iterdir():
         year_name = year_dir.name
-        if not year_dir.is_dir() or len(year_name) != _YEAR_DIR_WIDTH or not year_name.isdigit():
+        if not year_dir.is_dir() or not _is_canonical_digits(year_name, _YEAR_DIR_WIDTH):
             continue
         year = int(year_name)
         if not MIN_PARTITION_YEAR <= year <= MAX_PARTITION_YEAR:
@@ -360,7 +391,7 @@ def _stored_months(interval_dir: Path) -> frozenset[tuple[int, int]]:
             if not month_name.endswith(_PARQUET_SUFFIX):
                 continue
             stem = month_name[: -len(_PARQUET_SUFFIX)]
-            if len(stem) != _MONTH_STEM_WIDTH or not stem.isdigit():
+            if not _is_canonical_digits(stem, _MONTH_STEM_WIDTH):
                 continue
             month = int(stem)
             if 1 <= month <= MONTHS_PER_YEAR:

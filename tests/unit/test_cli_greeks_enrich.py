@@ -353,6 +353,46 @@ def test_seam_runs_after_drains_and_ledger_persist_with_pulled_scope(
     assert enrich_calls[0]["end"] == date(2024, 1, 4)  # inclusive end → half-open +1d
 
 
+def test_seam_end_date_max_saturates_instead_of_crashing_the_pull(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degenerate ``--end 9999-12-31`` pull completes; the seam saturates.
+
+    Review round-1 regression (finding 2): the seam's ``+1 day`` widening was
+    evaluated BEFORE ``_run_cli_greeks_enrich`` (outside both the fence and
+    the halt except-tuple), so ``end_dt.date() == date.max`` raised an
+    uncaught ``OverflowError`` AFTER the drains + ledger persist — replacing
+    the completed pull's summary/exit with a traceback, violating "an enrich
+    error NEVER fails the pull". The widening now saturates at ``date.max``.
+    """
+    _wire_live_fakes(monkeypatch)
+    enrich_calls = _spy_enrich_runner(monkeypatch)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "9999-12-01",
+        "9999-12-31",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+
+    assert rc == cli.EXIT_OK
+    assert len(enrich_calls) == 1
+    assert enrich_calls[0]["start"] == date(9999, 12, 1)
+    assert enrich_calls[0]["end"] == date.max  # saturated — not date.max + 1 (overflow)
+    assert "[brutex] fetch done" in capsys.readouterr().out  # the pull summary survived
+
+
+def test_next_day_saturating_widens_and_saturates() -> None:
+    """The helper's two branches: ordinary +1 day; ``date.max`` unchanged."""
+    assert cli._next_day_saturating(date(2024, 1, 2)) == date(2024, 1, 3)
+    assert cli._next_day_saturating(date(9999, 12, 30)) == date.max
+    assert cli._next_day_saturating(date.max) == date.max
+
+
 def test_until_clean_enriches_once_after_all_rounds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

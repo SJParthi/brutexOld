@@ -295,6 +295,96 @@ class TestEnrichGreeksDates:
         # The printed window shows the internal half-open end: 15th + 1 day.
         assert "window=[2024-01-15 → 2024-01-16)" in capsys.readouterr().out
 
+    def test_end_date_max_is_clean_user_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--end 9999-12-31`` (``date.max``) is refused cleanly, never a traceback.
+
+        Review round-1 regression (findings 1/4): the +1-day widening raised an
+        uncaught ``OverflowError`` for the ONE valid ISO date it cannot widen —
+        it must get the same one-line ``[brutex]`` + ``EXIT_USER_ERROR`` every
+        other malformed date gets (DEC-CLI-USER-ERROR-HYGIENE-001).
+        """
+
+        def _never(*_a: Any, **_k: Any) -> Any:
+            raise AssertionError("discovery must not run on a refused --end")
+
+        monkeypatch.setattr(gep, "discover_option_windows", _never)
+        _forbid_pass(monkeypatch)
+        rc = cli.cmd_enrich_greeks(
+            tmp_path, underlying=None, start=None, end="9999-12-31", dry_run=True
+        )
+        assert rc == cli.EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert "[brutex] --end 9999-12-31 is out of range" in err
+        assert "widened +1 day" in err
+
+    def test_end_date_max_via_main_returns_user_error_not_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The real-CLI shape of the same pin: ``main`` exits USER_ERROR, no raise."""
+        rc = cli.main(
+            ["enrich-greeks", "--lake-root", str(tmp_path), "--end", "9999-12-31", "--dry-run"]
+        )
+        assert rc == cli.EXIT_USER_ERROR
+        assert "--end 9999-12-31 is out of range" in capsys.readouterr().err
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Lake-root existence — the read-command guard (review round-1, finding 5)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEnrichGreeksLakeRoot:
+    """A typo'd ``--lake-root`` must fail LOUDLY, never exit green.
+
+    Review round-1 regression (finding 5): ``enrich-greeks`` on a nonexistent
+    lake previously discovered ``()``, logged an all-zeros ``done``, printed
+    ``errored_targets=0`` with ``EXIT_OK`` — and the live path even
+    materialised ``<typo>/.locks/`` — the exact silent-illusion class
+    ``_require_lake_dir`` (DEC-CLI-USER-ERROR-HYGIENE-001) prevents on every
+    other lake-READING command.
+    """
+
+    def test_missing_lake_root_refused_on_dry_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--dry-run`` over a phantom lake refuses BEFORE any discovery."""
+
+        def _never(*_a: Any, **_k: Any) -> Any:
+            raise AssertionError("discovery must not run on a missing lake root")
+
+        monkeypatch.setattr(gep, "discover_option_windows", _never)
+        _forbid_pass(monkeypatch)
+        missing = tmp_path / "tpyo"
+        rc = cli.main(["enrich-greeks", "--lake-root", str(missing), "--dry-run"])
+        assert rc == cli.EXIT_USER_ERROR
+        err = capsys.readouterr().err
+        assert f"lake root not found: {missing}" in err
+        assert "brutex enrich-greeks` reads an existing lake" in err
+        assert not missing.exists()  # nothing materialised
+
+    def test_missing_lake_root_refused_live_and_no_locks_materialised(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The live path refuses too — and never creates the phantom ``.locks/``."""
+        _skip_account_lock(monkeypatch)
+        _forbid_pass(monkeypatch)
+        locks: list[Any] = []
+
+        def _never_lock(*_a: Any, **_k: Any) -> bool:
+            locks.append(_a)
+            raise AssertionError("the single-flight gate must not run on a missing lake root")
+
+        monkeypatch.setattr(cli, "_enter_pull_singleflight", _never_lock)
+        missing = tmp_path / "tpyo"
+        rc = cli.main(["enrich-greeks", "--lake-root", str(missing)])
+        assert rc == cli.EXIT_USER_ERROR
+        assert f"lake root not found: {missing}" in capsys.readouterr().err
+        assert locks == []  # refused BEFORE the lock leg
+        assert not missing.exists()  # no .locks/ dir conjured
+        assert not (missing / ".locks").exists()
+
 
 # ────────────────────────────────────────────────────────────────────────
 # --dry-run — counts only; zero writes, zero locks, zero events

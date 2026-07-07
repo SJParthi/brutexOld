@@ -540,6 +540,34 @@ class TestStoredMonths:
         (tmp_path / "1minute" / "2026").mkdir()  # a valid-looking EMPTY year dir
         assert gep._stored_months(tmp_path / "1minute") == frozenset({(2024, 3)})
 
+    def test_non_ascii_digit_year_dirs_skipped_not_raised(self, tmp_path: Path) -> None:
+        """Unicode-digit year dirs are JUNK to skip, never a discovery crash.
+
+        Review round-1 regression (finding 3): ``"²024"`` (superscript two)
+        passes ``str.isdigit()`` but ``int()`` raises ``ValueError`` — the old
+        gate let it through and the raise killed the WHOLE pass; and the
+        Arabic-Indic ``"٢٠٢٤"`` passes BOTH ``isdigit()`` and ``int()`` (as
+        2024) yet is not a writer-canonical ASCII name — both must skip
+        silently while the sibling canonical year survives.
+        """
+        interval = tmp_path / "1minute"
+        interval.mkdir()
+        (interval / "²024").mkdir()  # isdigit() True, int() ValueError
+        (interval / "٢٠٢٤").mkdir()  # isdigit() True AND int() == 2024 — still junk
+        good = interval / "2025"
+        good.mkdir()
+        (good / "01.parquet").touch()
+        assert gep._stored_months(interval) == frozenset({(2025, 1)})
+
+    def test_non_ascii_digit_month_stems_skipped_not_raised(self, tmp_path: Path) -> None:
+        """Unicode-digit month stems skip silently too (the mirror of the year gate)."""
+        year_dir = tmp_path / "1minute" / "2024"
+        year_dir.mkdir(parents=True)
+        (year_dir / "0¹.parquet").touch()  # isdigit() True, int() ValueError
+        (year_dir / "٠٣.parquet").touch()  # isdigit() True AND int() == 3 — still junk
+        (year_dir / "04.parquet").touch()
+        assert gep._stored_months(tmp_path / "1minute") == frozenset({(2024, 4)})
+
     def test_first_day_of_next_month_rollover(self) -> None:
         assert gep._first_day_of_next_month(2024, 12) == date(2025, 1, 1)
         assert gep._first_day_of_next_month(2024, 1) == date(2024, 2, 1)
@@ -571,6 +599,18 @@ class TestDiscoverOptionWindows:
         assert [row.symbol for row in rows] == [_CE, _PE]
         assert all(row.underlying == "NIFTY" for row in rows)
         assert all(row.expiry == _EXPIRY_JAN for row in rows)
+
+    def test_unicode_digit_year_dir_never_kills_discovery(self, tmp_path: Path) -> None:
+        """THE finding-3 whole-pass-kill regression: a hostile year-dir name in
+        ONE contract must not raise out of discovery — the valid sibling
+        contract is still discovered (junk-tolerance contract, Golden Rule #1)."""
+        _make_contract(tmp_path, _CE, [(2024, 1)])
+        poisoned = _make_contract(tmp_path, _PE, [])
+        bad_year = poisoned / "1minute" / "²024"
+        bad_year.mkdir(parents=True)
+        (bad_year / "01.parquet").touch()
+        rows = discover_option_windows(tmp_path)
+        assert [row.symbol for row in rows] == [_CE]
 
     def test_contract_with_no_months_skipped(self, tmp_path: Path) -> None:
         # An empty 1minute/ tree AND a contract dir with no 1minute/ at all.
