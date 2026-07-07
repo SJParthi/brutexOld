@@ -1279,13 +1279,17 @@ class TestBridgeMaxAge:
         assert BRIDGE_MAX_AGE_S == 900.0  # the pinned policy literal (Golden Rule #10)
 
     def test_non_finite_bridge_age_ignored(self) -> None:
-        """A NaN/inf bridge age takes the panel path — the isfinite CONTRACT pin.
+        """A NaN/±inf bridge age takes the panel path — the isfinite CONTRACT pin.
 
-        MUTANT KILLED: the ``math.isfinite`` conjunct severed → the NaN behaviour
-        would silently depend on float-comparison ordering (``nan <= x`` is False
-        for every comparison, but the contract must not hinge on that accident).
+        MUTANT KILLED: the ``math.isfinite`` conjunct severed → the ``-inf`` case
+        is the killing input (``-inf <= 900`` AND ``-inf < panel_age`` are BOTH
+        True, so ONLY ``isfinite`` blocks the bridge path — the mutant would
+        project the bridge's FLOWING numbers where the contract reads IDLE).
+        The ``nan``/``+inf`` cases are independently blocked by the
+        ``<= bridge_max_age_s`` comparison and pin that behaviour as a CONTRACT,
+        not an accident of float-comparison ordering.
         """
-        for bad_age in (float("nan"), math.inf):
+        for bad_age in (float("nan"), math.inf, float("-inf")):
             merged = build_pull_rate_view_merged(
                 panel_effective_rps=0.0,
                 panel_current_rps=0.0,
