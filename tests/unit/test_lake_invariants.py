@@ -540,6 +540,65 @@ class TestScanBounds:
         report = scan_lake_invariants(tmp_path, per_file_pause=pause)
         assert ticks["n"] == report.files_scanned + report.option_files_scanned == 3
 
+    def test_per_file_pause_ticks_targeted_canonical_reads(self, tmp_path: Path) -> None:
+        """Round-5 MINOR (refuter-confirmed surviving mutants): BOTH
+        ``_canonical_option_keys`` pause arms were unpinned — deleting either
+        passed every covering suite, silently unthrottling the L3 boot
+        sweep's targeted canonical-sibling reads (the exact seam
+        *per_file_pause* exists for; the scan docstring promises a tick
+        after EVERY read including the targeted canonical one). Fixture:
+        a bars July file with a June foreign ts (1 targeted bars canonical
+        read — the pre-existing bars twin ``_canonical_timestamps`` rides
+        the same pin) + an options July file with a June foreign key
+        (1 targeted option canonical read)."""
+        _write_bars(tmp_path, [_bar(_ts(1))])
+        _plant_raw(_dest(tmp_path, month=7), [_ts(2, month=7, day=1), _ts(3)])
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1))])
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))]
+        )
+        ticks = {"n": 0}
+
+        def pause() -> None:
+            ticks["n"] += 1
+
+        report = scan_lake_invariants(tmp_path, per_file_pause=pause)
+        assert report.files_scanned == 2
+        assert report.option_files_scanned == 2
+        foreigns = {
+            type(f).__name__
+            for f in report.findings
+            if isinstance(f, ForeignMonthRows | OptionForeignMonthRows)
+        }
+        assert foreigns == {"ForeignMonthRows", "OptionForeignMonthRows"}
+        # 4 scanned files + 1 targeted bars canonical + 1 targeted option
+        # canonical = 6 ticks (a deleted success-arm pause reads 5 — killed).
+        assert ticks["n"] == report.files_scanned + report.option_files_scanned + 2 == 6
+
+    def test_per_file_pause_ticks_unreadable_canonical_read(self, tmp_path: Path) -> None:
+        """The error-arm twin (round-5 MINOR): a garbage canonical option
+        sibling still ticks the pause after its FAILED targeted read — the
+        docstring's "including a failed/skipped read" promise."""
+        june = _opt_dest(tmp_path, "2024-06")
+        june.parent.mkdir(parents=True, exist_ok=True)
+        june.write_bytes(b"not a parquet file at all")
+        _plant_option_raw(
+            _opt_dest(tmp_path, "2024-07"), [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))]
+        )
+        ticks = {"n": 0}
+
+        def pause() -> None:
+            ticks["n"] += 1
+
+        report = scan_lake_invariants(tmp_path, per_file_pause=pause)
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 1
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert foreigns[0].overlap_rows is None  # honest abstain
+        # June garbage scan attempt + July scan + the FAILED targeted June
+        # canonical read = 3 ticks (a deleted error-arm pause reads 2 — killed).
+        assert ticks["n"] == 3
+
     def test_include_options_false_skips_options_tree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -974,6 +1033,63 @@ class TestOptionForeignScan:
         assert report.option_files_skipped == 1  # counted, mass-rail honest
         skips = _events(logs, "lake.invariant.symlink_skipped")
         assert [s["path"] for s in skips] == [str(series / "2021-01.parquet")]
+
+    def test_out_of_scope_symlinked_file_silently_scope_skipped(self, tmp_path: Path) -> None:
+        """Round-5 NIT: the months-scope bound (a pure filename parse) runs
+        BEFORE the per-file symlink probe — an OUT-of-scope symlinked option
+        file is silently scope-skipped like any other out-of-scope file
+        (neither warned nor counted, the L2 scope law); an IN-scope
+        symlinked file is still warned + counted; the unbounded sweep
+        (``test_symlinked_partition_file_skipped``) still warns."""
+        outside = tmp_path / "outside"
+        _plant_option_raw(outside / "2024-07.parquet", [("CE", _ts(1, month=7, day=1))])
+        _plant_option_raw(_opt_dest(tmp_path, "2024-06"), [("CE", _ts(1))])
+        _opt_dest(tmp_path, "2024-07").symlink_to(outside / "2024-07.parquet")
+        with capture_logs() as logs:
+            scoped = scan_lake_invariants(tmp_path, months={(2024, 6)}, include_bars=False)
+        assert scoped.option_files_scanned == 1  # the real June file
+        assert scoped.option_files_skipped == 0  # the July symlink: scope-skipped
+        assert _events(logs, "lake.invariant.symlink_skipped") == []
+        with capture_logs() as logs_in_scope:
+            scoped_july = scan_lake_invariants(tmp_path, months={(2024, 7)}, include_bars=False)
+        assert scoped_july.option_files_scanned == 0  # June scope-skipped silently
+        assert scoped_july.option_files_skipped == 1  # the in-scope symlink counted
+        skips = _events(logs_in_scope, "lake.invariant.symlink_skipped")
+        assert [s["path"] for s in skips] == [str(_opt_dest(tmp_path, "2024-07"))]
+
+    def test_symlinked_canonical_sibling_abstains_unread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-5 NIT: the targeted canonical-sibling overlap read now takes
+        the SAME symlink skip as the main glob loop — warned loudly, NEVER
+        read (spy-pinned), overlap honestly unclassified (``None``). A
+        scan-time READ only (the writer's containment rail still refuses the
+        heal-side target) — but the scan must not follow the link either."""
+        outside = tmp_path / "outside"
+        _plant_option_raw(outside / "2024-06.parquet", [("CE", _ts(1))])
+        july = _opt_dest(tmp_path, "2024-07")
+        _plant_option_raw(july, [("CE", _ts(1)), ("PE", _ts(2, month=7, day=1))])
+        june = _opt_dest(tmp_path, "2024-06")
+        june.symlink_to(outside / "2024-06.parquet")
+        calls: list[Path] = []
+        real = li._read_key_columns
+
+        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
+            calls.append(path)
+            return real(path, columns)
+
+        monkeypatch.setattr(li, "_read_key_columns", spy)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.option_files_scanned == 1  # July only
+        assert report.option_files_skipped == 1  # the June symlink (glob loop)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].overlap_rows is None  # honest abstain, never a guess
+        assert calls == [july]  # the linked canonical was NEVER read
+        skips = _events(logs, "lake.invariant.symlink_skipped")
+        # Once from the glob loop, once from the targeted canonical read.
+        assert [s["path"] for s in skips] == [str(june), str(june)]
 
     def test_no_scope_unparsable_name_still_dup_scanned(self, tmp_path: Path) -> None:
         # Today's behaviour pinned: without a months scope an unparsable-name

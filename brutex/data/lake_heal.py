@@ -4,7 +4,10 @@ The ACTION half of DEC-LAKE-HEAL-001 (the detection half is
 :mod:`brutex.data.lake_invariants`): given the scanner's findings, heal each one
 through the NORMAL write path — both partition locks in the writers' order →
 quarantine-COPY the original to ``<lake>/.quarantine/<UTC-ts>/<lake-relative
-path>`` → mode-independent keep-FIRST row-removing/row-REASSIGNING transform →
+path>`` (a ``-NN`` serial suffix on the second-granular ``<UTC-ts>`` when a
+same-second earlier batch already created the dir — the earlier batch's
+before-image is never overwritten) → mode-independent keep-FIRST
+row-removing/row-REASSIGNING transform →
 atomic rewrite via the public :meth:`~brutex.data.parquet_writer.ParquetWriter.heal_partition`
 / :meth:`~brutex.data.option_parquet_writer.OptionParquetWriter.heal_partition`
 (so ``raw_hash`` ROTATES and the catalog row is re-upserted — a healed partition
@@ -1408,9 +1411,22 @@ def heal_findings(
         if on_report is not None:
             on_report(report)
         return report
-    quarantine_root = (
-        lake_root / QUARANTINE_DIRNAME / (now_fn().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ"))
-    )
+    stamp = now_fn().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    quarantine_root = lake_root / QUARANTINE_DIRNAME / stamp
+    serial = 0
+    while quarantine_root.exists():
+        # Round-5 NIT fold (pre-existing DEC-LAKE-HEAL-001 machinery): the
+        # stamp is second-granular, so a SECOND batch in the same second
+        # reused the dir and its atomic quarantine copy OVERWROTE the earlier
+        # batch's before-image at the same lake-relative path — losing the
+        # forensic original the quarantine exists to preserve. A ``-NN``
+        # serial picks the first unused dir; the probe only fires when the
+        # earlier batch actually quarantined something (a no-op batch never
+        # creates its dir). Best-effort: an exists()-then-use race between
+        # two same-second PROCESSES remains theoretically possible — honest
+        # envelope, not claimed closed.
+        serial += 1
+        quarantine_root = lake_root / QUARANTINE_DIRNAME / f"{stamp}-{serial:02d}"
     state = _BatchState(
         lake_root=lake_root,
         quarantine_root=quarantine_root,

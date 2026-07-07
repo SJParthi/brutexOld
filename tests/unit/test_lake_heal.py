@@ -2101,6 +2101,128 @@ class TestOptionSymlinkContainment:
         assert len(errors) == 1
         assert "outside the options tree" in str(errors[0]["error"])
 
+    def test_symlink_loop_reassignment_target_isolated_not_batch_abort(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-5 MAJOR (refuter-confirmed): a symlink LOOP planted as the
+        reassignment TARGET (the foreign rows' canonical home-month file)
+        made ``_assert_options_containment``'s ``dest.resolve()`` raise a
+        bare ``RuntimeError('Symlink loop from …')`` on Python ≤ 3.12 — NOT
+        in ``_PER_FINDING_HEAL_ERRORS`` and not ``LakeWriteHalt``, so it
+        escaped ``heal_findings``' per-finding isolation loop and aborted
+        the WHOLE batch: no HealReport, no stats bump, no ``on_report``
+        alert, and every later finding went unhealed. NO TOCTOU timing is
+        needed — the scanner symlink-skips only the flagged SOURCE file,
+        never the reassignment target, so a pre-planted loop suffices. Now
+        the refusal is the documented isolated counted
+        ``OptionWriterError``; the batch continues and a later finding in
+        the SAME batch still heals."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        # Series A: a real June file carrying a Jan-foreign row; the canonical
+        # Jan home file is a self-referential symlink loop.
+        june = _opt_series_dir(lake) / "2024-06.parquet"
+        june.parent.mkdir(parents=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "CE"], type=pa.string()),
+                    "timestamp": pa.array(
+                        [_ts(0), _ts(1, month=1, day=2)], type=pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            june,
+        )
+        loop = june.parent / "2024-01.parquet"
+        loop.symlink_to(loop)
+        # Series B: an unrelated dup that MUST still heal after the refusal.
+        dup_file = lake / "options" / "ZZ_DUP" / "2024-06.parquet"
+        dup_file.parent.mkdir(parents=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "CE"], type=pa.string()),
+                    "timestamp": pa.array([_ts(5), _ts(5)], type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            dup_file,
+        )
+        scan = scan_lake_invariants(lake)
+        assert {type(f).__name__ for f in scan.findings} == {
+            "OptionForeignMonthRows",
+            "OptionIntraFileDup",
+        }
+        june_bytes = june.read_bytes()
+        reports: list[HealReport] = []
+        with capture_logs() as logs:
+            report = heal_findings(  # pre-fix: raises RuntimeError right here
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned + scan.option_files_scanned,
+                mode="auto",
+                on_report=reports.append,
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 1  # the loop refusal — isolated, counted
+        assert report.healed == 1  # the LATER dup finding still healed
+        assert report.skipped == 0
+        assert reports == [report]  # the alert seam fired despite the refusal
+        assert june.read_bytes() == june_bytes  # refusal preceded any mutation
+        assert loop.is_symlink()  # the loop itself untouched
+        errors = _events(logs, "lake_heal.partition_error")
+        assert len(errors) == 1
+        assert "cannot resolve" in str(errors[0]["error"])
+        # The dup heal quarantined its original as usual.
+        assert report.quarantine_root == str(lake / ".quarantine" / _QUARANTINE_TS)
+
+
+class TestQuarantineRootCollision:
+    def test_same_second_second_batch_keeps_first_before_image(self, tmp_path: Path) -> None:
+        """Round-5 NIT (pre-existing DEC-LAKE-HEAL-001 machinery): the
+        quarantine stamp is second-granular, so a SECOND batch under the
+        same clock reused ``<lake>/.quarantine/<ts>/`` and its atomic copy
+        OVERWROTE the first batch's before-image at the same lake-relative
+        path — losing the forensic original. The ``-NN`` serial now picks a
+        fresh dir; both before-images survive."""
+        lake = tmp_path / "lake"
+        dest = _dest(lake)
+        _poison(dest, [(_ts(1), 100.0, 10), (_ts(1), 100.0, 10)])
+        scan1 = scan_lake_invariants(lake)
+        report1 = heal_findings(
+            scan1.findings,
+            lake_root=lake,
+            files_scanned=scan1.files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report1.healed == 1
+        assert report1.quarantine_root == str(lake / ".quarantine" / _QUARANTINE_TS)
+        first_image = lake / ".quarantine" / _QUARANTINE_TS / dest.relative_to(lake)
+        first_bytes = first_image.read_bytes()
+        # Re-poison the SAME partition with DIFFERENT rows; same-second clock.
+        _poison(dest, [(_ts(2), 200.0, 5), (_ts(2), 200.0, 5)])
+        scan2 = scan_lake_invariants(lake)
+        report2 = heal_findings(
+            scan2.findings,
+            lake_root=lake,
+            files_scanned=scan2.files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report2.healed == 1
+        assert report2.quarantine_root == str(lake / ".quarantine" / f"{_QUARANTINE_TS}-01")
+        # Pre-fix: the second copy landed at first_image and clobbered it.
+        assert first_image.read_bytes() == first_bytes
+        second_image = lake / ".quarantine" / f"{_QUARANTINE_TS}-01" / dest.relative_to(lake)
+        assert second_image.exists()
+        assert second_image.read_bytes() != first_bytes
+
 
 # ── heal order + idempotent re-run + failure envelopes ─────────────────────
 

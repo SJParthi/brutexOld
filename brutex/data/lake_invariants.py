@@ -658,12 +658,21 @@ def _canonical_option_keys(
 
     ``set()`` for a missing sibling (pure misplacement); ``None`` for an
     unreadable one (honest abstain + one ``lake.invariant.scan_skip`` WARNING
-    + ``_pause``). Reads via the ONE :func:`_read_key_columns` seam (the
+    + ``_pause``) — and for a SYMLINKED one (round-5 NIT fold: the main glob
+    loop skips a symlinked partition file loudly, but this targeted sibling
+    read followed one; a scan-time READ only — the writer's containment rail
+    still guards the heal — yet skipped for consistency, same loud
+    ``lake.invariant.symlink_skipped`` event, overlap honestly unclassified,
+    no ``_pause`` because no read is attempted). Reads via the ONE
+    :func:`_read_key_columns` seam (the
     spy-count tests keep working). Simpler than the bars twin
     :func:`_canonical_timestamps`: the sibling lives in the SAME directory —
     no ``build_partition_path``, no ``PartitionError`` arm.
     """
     canonical = series_dir / f"{year:04d}-{month:02d}.parquet"
+    if canonical.is_symlink():
+        _LOG.warning("lake.invariant.symlink_skipped", path=str(canonical))
+        return None
     if not canonical.exists():
         return set()
     try:
@@ -811,6 +820,10 @@ def scan_lake_invariants(
         an O(1) parse with no read — the ``options/`` tree; an options file
         whose name does not parse to a month is skipped under a months scope
         (it cannot be proven in scope; the unbounded L3 sweep still scans it).
+        The scope bound runs BEFORE the per-file symlink probe (round-5 NIT
+        fold), so an out-of-scope symlinked option file is silently
+        scope-skipped — neither warned nor counted; the unbounded L3 sweep
+        still warns on it.
     include_options
         Scan the ``options/`` tree for ``(side, timestamp)`` dups +
         foreign-month rows (overlap subsumed —
@@ -950,6 +963,16 @@ def scan_lake_invariants(
                 ] = {}
                 pending_option_overlap: list[tuple[int, set[tuple[str | None, datetime]]]] = []
                 for path in sorted(series_dir.glob("*.parquet")):
+                    home = _option_file_month(path)
+                    if month_scope is not None and (home is None or home not in month_scope):
+                        # The L2 scope bound — never read (bars precedent).
+                        # Checked BEFORE the symlink probe (round-5 NIT fold):
+                        # the bound is a pure filename parse, so an
+                        # out-of-scope symlinked file is silently
+                        # scope-skipped like any other out-of-scope file —
+                        # neither warned nor counted (the unbounded L3 sweep
+                        # still warns on it).
+                        continue
                     if path.is_symlink():
                         # Round-4 MINOR fold (refuter-confirmed): the root +
                         # series-dir probes above never check the PARTITION
@@ -967,9 +990,6 @@ def scan_lake_invariants(
                         _LOG.warning("lake.invariant.symlink_skipped", path=str(path))
                         option_files_skipped += 1
                         continue
-                    home = _option_file_month(path)
-                    if month_scope is not None and (home is None or home not in month_scope):
-                        continue  # the L2 scope bound — never read (bars precedent)
                     try:
                         frame = _read_key_columns(path, UNIQUE_KEY_OPTIONS)
                     except parquet_read_skip_errors() as exc:

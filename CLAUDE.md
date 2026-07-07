@@ -107,7 +107,28 @@ two vectorized O(rows) scans) + the two remaining in-module singular
 sibling-read docstring copies reworded honestly; the reassignment months
 `sorted()` order was pinned only by fixture-order luck — a descending
 fixture now kills the surviving `sorted→list` mutant; the ledger #1482 F5
-new-event miscount corrected. HONEST: no production
+new-event miscount corrected.
+ROUND 5 (refuter-confirmed): MAJOR — a symlink-LOOP dest made
+`_assert_options_containment`'s `dest.resolve()` raise a bare
+`RuntimeError("Symlink loop from …")` on Python ≤3.12 — NOT in the
+per-finding isolation set, so ONE pre-planted loop as a reassignment
+TARGET (the scanner symlink-skips only the SOURCE, no TOCTOU needed)
+aborted the WHOLE heal batch (no report/stats/alert; reproduced
+end-to-end); both `resolve()` calls are now guarded `(OSError,
+RuntimeError)` → the documented isolated `OptionWriterError`, all three
+heal-side entries covered, batch continues (later findings still heal).
+MINOR — BOTH `_canonical_option_keys` `per_file_pause` arms were
+surviving mutants (deleting either passed every suite — the L3 throttle
+promise for targeted canonical reads had no teeth); now pinned by
+tick-count tests (success + error arms; the bars twin rides the same
+pin), all 3 mutants re-applied + verified killed. NITs: an out-of-scope
+symlinked option file is now silently scope-skipped (scope bound before
+the symlink probe — L2 no longer warns/counts it); the targeted
+canonical-sibling read takes the same symlink skip as the glob loop
+(warned, never read, overlap honestly None); a same-second second heal
+batch gets a `-NN`-serialed quarantine dir so the first batch's
+before-image is never overwritten (pre-existing #1175 machinery).
+HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
 deterministically (canonical/path-ordered-first wins, originals in
@@ -529,10 +550,34 @@ hostile-review pass._
   F3 test plants May before July — a `sorted→list` mutant SURVIVED it): NEW
   `test_option_reassign_months_sorted_not_insertion_order` plants July physically FIRST and pins the ascending
   audit/log `months` list (mutant re-applied + verified KILLED while the F3 test still passed under it); the ledger
-  #1482 F5 clause's new-log-event miscount corrected in place. Remaining
+  #1482 F5 clause's new-log-event miscount corrected in place. HOSTILE-REVIEW FOLDS (round 5, refuter-confirmed; the
+  MAJOR regressions verified FAILING pre-fix, all three pause mutants applied + verified KILLED, every NIT regression
+  verified failing against its reverted fix): (R5-1·MAJOR) a symlink-LOOP `dest` made `_assert_options_containment`'s
+  `dest.resolve()` raise a bare `RuntimeError("Symlink loop from …")` on Python ≤3.12 — NOT in
+  `_PER_FINDING_HEAL_ERRORS` and not `LakeWriteHalt`, so it ESCAPED the per-finding isolation loop and aborted the
+  WHOLE heal batch (no HealReport, no stats bump, no on_report/Telegram alert, later findings unhealed — the same
+  isolation-escape class the round-3 zero-row fold eliminated). NO TOCTOU needed: the scanner symlink-skips only the
+  flagged SOURCE file, never the reassignment TARGET, so a pre-planted loop as the foreign rows' canonical home-month
+  file crashed the default AUTO-ON heal from the L2 F&O seam + the L3 startup sweep (reproduced end-to-end, Python
+  3.12.3); DoS-of-healing only — the crash preceded any mutation. FIXED at the one chokepoint: both `resolve()` calls
+  guarded `(OSError, RuntimeError)` → the documented quarantinable `OptionWriterError`, covering all THREE heal-side
+  entries; regressions pin the writer refusal (nothing created) + the end-to-end batch continuation (errors=1, a
+  later same-batch dup still heals, on_report fires). (R5-2·MINOR surviving mutants) BOTH `per_file_pause` arms in
+  `_canonical_option_keys` were UNPINNED — deleting either passed every covering suite despite the scan docstring's
+  "pause after every read incl. the targeted canonical read" promise (the only pause test used a clean fixture with
+  zero canonical reads — unthrottled L3 canonical-read bursts would ship silently); pinned by two tick-count tests
+  (success arm: bars+options foreign fixture, ticks == scanned + 2 canonical reads; error arm: garbage sibling —
+  the bars twin `_canonical_timestamps` rides the same pin), all THREE mutants re-applied + verified killed.
+  (R5-3·NITs, each reverted-fix-verified): the L2 months-scope bound (pure filename parse) now runs BEFORE the
+  per-file symlink probe — an out-of-scope symlinked option file is silently scope-skipped, no longer warned+counted
+  (in-scope + unbounded-L3 behavior unchanged); the targeted canonical-sibling overlap read now takes the SAME
+  symlink skip as the main glob loop (warned loudly, spy-pinned never read, `overlap_rows=None` honest abstain);
+  `heal_findings` serials a same-second quarantine dir (`<ts>-NN`) so a second batch under the second-granular stamp
+  can never overwrite the first batch's forensic before-image (pre-existing DEC-LAKE-HEAL-001 machinery; honest:
+  a same-second cross-PROCESS exists()-then-use race remains theoretically possible, not claimed closed). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (443/150) + `option_parquet_writer.py`
-  (156/30) + `lake_heal.py` (589/164) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (446/152) + `option_parquet_writer.py`
+  (159/30) + `lake_heal.py` (594/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

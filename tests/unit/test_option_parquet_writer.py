@@ -1121,3 +1121,30 @@ class TestMutationContainment:
                 dest, quarantine_to=lake / ".quarantine" / "ts" / "2021-01.parquet"
             )
         assert outside_file.read_bytes() == outside_bytes
+
+    def test_symlink_loop_dest_refused_as_writer_error(self, tmp_path: Path) -> None:
+        """Round-5 MAJOR (refuter-confirmed): a symlink-LOOP ``dest`` made
+        ``_assert_options_containment``'s ``dest.resolve()`` raise a bare
+        ``RuntimeError('Symlink loop from …')`` on Python ≤ 3.12 —
+        ``RuntimeError`` is NOT in the healer's per-finding isolation set,
+        so the containment check itself became a batch-aborting escape (the
+        same isolation-escape class the round-3 zero-row fold eliminated).
+        All THREE heal-side entries must refuse with the quarantinable
+        :class:`OptionWriterError` instead; nothing is created or mutated."""
+        lake = tmp_path / "lake"
+        series = lake / "options" / "SERIES"
+        series.mkdir(parents=True)
+        loop = series / "2021-01.parquet"
+        loop.symlink_to(loop)  # self-referential symlink loop
+        writer = OptionParquetWriter(lake_root=lake)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        with pytest.raises(OptionWriterError, match="cannot resolve"):
+            writer.merge_partition_frame(loop, self._frame([("CE", ts0, 1.0)]))
+        with pytest.raises(OptionWriterError, match="cannot resolve"):
+            writer.heal_partition(
+                loop, quarantine_to=lake / ".quarantine" / "ts" / "2021-01.parquet"
+            )
+        with pytest.raises(OptionWriterError, match="cannot resolve"):
+            writer.read_partition_frame(loop)
+        assert not (lake / ".quarantine").exists()  # refused before any copy
+        assert loop.is_symlink()  # the loop itself is left untouched

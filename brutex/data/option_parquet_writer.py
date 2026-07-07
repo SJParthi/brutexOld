@@ -312,14 +312,33 @@ class OptionParquetWriter:
         shape) still passes because BOTH sides resolve consistently
         (test-pinned). Raises the quarantinable :class:`OptionWriterError`
         (a member of the healer's per-finding isolation set — the refusal is
-        counted + logged, the batch continues, nothing is mutated). Honest
+        counted + logged, the batch continues, nothing is mutated). The
+        ``resolve()`` calls themselves are GUARDED (hostile-review round-5
+        MAJOR fold): on Python ≤ 3.12 ``Path.resolve(strict=False)`` raises a
+        bare ``RuntimeError("Symlink loop from …")`` for a symlink-LOOP
+        *dest* (3.13+ raises ``OSError`` ``ELOOP``), and ``RuntimeError`` is
+        NOT in the healer's per-finding isolation set — pre-fix ONE planted
+        loop as a reassignment TARGET escaped the isolation loop and aborted
+        the WHOLE heal batch (no report, no stats, no alert, no audit-batch
+        line; the exact isolation-escape class the round-3 zero-row fold
+        eliminated). An unresolvable *dest* now takes the SAME documented
+        isolated refusal as an escaping one. Honest
         envelope (Golden Rule #10): this closes the demonstrated scan→heal
         window; a sub-microsecond swap between this check and the atomic
         rename inside the SAME call would need dirfd-relative I/O to close —
         out of scope, not claimed.
         """
-        options_root = self._lake_root.resolve() / _OPTIONS_SUBDIR
-        resolved_parent = dest.resolve().parent
+        try:
+            options_root = self._lake_root.resolve() / _OPTIONS_SUBDIR
+            resolved_parent = dest.resolve().parent
+        except (OSError, RuntimeError) as exc:
+            # Symlink loop / unresolvable path: RuntimeError on Python ≤3.12,
+            # OSError (ELOOP) on 3.13+ — either way the documented isolated
+            # refusal, never a batch-aborting escape (round-5 MAJOR fold).
+            raise OptionWriterError(
+                f"cannot resolve {dest} for the options-containment check: {exc} "
+                f"— refusing to touch it"
+            ) from exc
         if not resolved_parent.is_relative_to(options_root):
             raise OptionWriterError(
                 f"destination {dest} resolves outside the options tree "
