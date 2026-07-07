@@ -1682,8 +1682,12 @@ def pull_all_spot(
         # LATCHES pull-wide — a per-pass fresh instance let a sub-floor retry
         # round settle windows the trip alarm promised were halted. Resolved
         # unconditionally (unlike the storm breaker): a dry-run's windows are
-        # ineligible by construction (`detect_completeness_gaps=False` → never
-        # observed), so the instance stays inert there — byte-identical settles.
+        # ineligible by construction (the `detect_completeness_gaps=not dry_run`
+        # threading below → never observed — review round 5: this entrypoint
+        # previously omitted the kwarg entirely, so the REAL bulk pull's windows
+        # were equally ineligible and the breaker was structurally inert on the
+        # primary production path), so the instance stays inert there —
+        # byte-identical settles.
         _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
         # per-pull instance over the PACED replica of THIS pull's adapter. The live
@@ -1842,6 +1846,19 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    # A REAL live pull OPTS IN to the data-completeness re-pull
+                    # demotions (index-gated INTERIOR_GAP/SUSPECTED_PARTIAL +
+                    # the ungated ALL_FILTERED — DEC-INTERIOR-GAP-DETECT-001 /
+                    # DEC-INGEST-BOUNDARY-INTEGRITY-001) AND thereby the mass
+                    # all-filtered breaker feed above (its spot eligibility
+                    # requires this flag). Review round 5 (the CLI cmd_fetch
+                    # pattern): this kwarg was MISSING here, so the dashboard
+                    # BULK pull — the primary zero-click production path —
+                    # never demoted a boundary-emptied window (it settled
+                    # SUCCESS with 0 stored bars) and never fed the breaker.
+                    # A dry-run (synthetic adapter, first-day-only bars)
+                    # threads False so it never false-reds.
+                    detect_completeness_gaps=not dry_run,
                     observed_holidays=_observed_holidays,
                     all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
@@ -2622,7 +2639,11 @@ def pull_candles(
         # review round 4) — the single-symbol twin of the pull_all_spot wiring:
         # resolved once and threaded into BOTH phase invocations so the latch is
         # pull-scoped, never per driver invocation. Resolved unconditionally: a
-        # dry-run's windows are ineligible by construction (never observed).
+        # dry-run's windows are ineligible by construction (the
+        # `detect_completeness_gaps=not dry_run` threading below → never
+        # observed — review round 5: this site previously hardcoded the flag
+        # True, so a dry-run's weekend-start synthetic windows WERE observed as
+        # all-filtered, contradicting the dry-run-never-feeds contract).
         _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner + learned-floor planning clamp
         # (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
@@ -2713,9 +2734,12 @@ def pull_candles(
                     # Real production Groww pull → OPT IN to the data-completeness re-pull demotion
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001). A dense INDEX
                     # 1-minute window with a confirmed interior hole / trailing truncation is
-                    # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
-                    # false-red on the synthetic adapter's first-day-only bars.
-                    detect_completeness_gaps=True,
+                    # re-pulled; a dry-run threads False EXPLICITLY so its synthetic first-day-only
+                    # bars never false-red NOR feed the mass all-filtered breaker (review round 5:
+                    # this site hardcoded True since #1230, so a dry-run's weekend-start synthetic
+                    # windows were demoted AND observed as all-filtered — the stale "leaves this
+                    # OFF (the default)" wording papered over it; the CLI cmd_fetch pattern).
+                    detect_completeness_gaps=not dry_run,
                     observed_holidays=_observed_holidays,
                     all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,

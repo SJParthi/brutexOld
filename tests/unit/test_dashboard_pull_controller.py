@@ -2544,14 +2544,19 @@ class TestPullAllLedgerRescueSurface:
         # Run 1 settles the range SUCCESS (real sink + ledger, dry_run=False with an
         # injected synthetic adapter); run 2 skips the settled window WITHOUT a
         # vendor hit and SAYS so — in the report, its dict, the spine INFO line,
-        # and the pull-done INFO.
+        # and the pull-done INFO. Range 02-02 → 02-03 (1 missing session, under the
+        # 5-session truncation tolerance): the bulk pull now ARMS
+        # detect_completeness_gaps (review round 5), so a wider span with the
+        # synthetic adapter's first-day-only bars would be correctly DEMOTED
+        # SUSPECTED_PARTIAL instead of settling — this test pins the skip-settled
+        # reporting, so its fixture must be a genuinely complete-looking window.
         first = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
             from_date="2026-02-02",
-            to_date="2026-02-13",
+            to_date="2026-02-03",
             adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
         )
         assert first.windows_skipped == 0  # a fresh lake has nothing skippable
@@ -2562,7 +2567,7 @@ class TestPullAllLedgerRescueSurface:
                 dry_run=False,
                 now=_BULK_NOW,
                 from_date="2026-02-02",
-                to_date="2026-02-13",
+                to_date="2026-02-03",
                 adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
             )
         # One symbol × the 1-minute default interval × one 30-day tile = 1 window.

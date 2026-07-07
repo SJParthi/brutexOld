@@ -903,40 +903,6 @@ def _process_option_window_tail(
         },
     )
     all_filtered = interval != _DAILY and all_boundary_filtered
-    # Mass ALL-FILTERED breaker feed (DEC-ALLFILTERED-MASS-BREAKER-001 — the spot-tail
-    # twin): observe every ELIGIBLE window's boundary verdict. Eligibility matches the
-    # F&O demotion's own gate — ``interval != _DAILY`` + raw-bars>0 (deliberately
-    # UNgated on ``detect_completeness_gaps``, exactly like the :``all_filtered``
-    # demotion below: the F&O dry-run client returns EMPTY payloads, so
-    # ``raw_bars == 0`` makes a dry-run window ineligible by construction). Observe
-    # BEFORE the record below — the trip-crossing window suppresses ITSELF through
-    # the record-time ``allow_degraded_settle`` re-check (evaluated inside
-    # ``record()`` UNDER the ledger lock, serialized with the trip's rescind —
-    # review round 1 TOCTOU closure). The series is keyed on the UNDERLYING, not
-    # the contract (review round 2 — the ``health_key`` grouping precedent above):
-    # one weird underlying's CE/PE chain spans dozens-to-hundreds of contract
-    # symbols, so a per-CONTRACT key crossed the SPREAD floor at the 10th strike
-    # and fired the vendor-wide alarm off a single-underlying event; keyed per
-    # underlying the whole chain is ONE series — structurally below the floor,
-    # the selectivity the breaker documents for BOTH spines. A blank underlying
-    # falls back to the contract symbol so the key is never empty.
-    af_eligible = interval != _DAILY and len(raw_bars) > 0
-    if all_filtered_breaker is not None and af_eligible:
-        af_series = f"{contract.underlying_symbol or contract.symbol}:{interval}"
-        if all_filtered_breaker.observe(
-            af_series,
-            all_filtered=all_boundary_filtered,
-            window_start=key.start.isoformat(),
-            window_end=key.end.isoformat(),
-        ):
-            # The trip TRANSITION (exactly once per pull): rescind + ONE loud alarm
-            # via the COMMON emit both spines share (lazy import at trip time).
-            from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
-
-            rescinded = ledger.rescind_all_filtered_settles() if ledger is not None else 0
-            emit_mass_all_filtered_alert(
-                all_filtered_breaker.trip_snapshot(), rescinded=rescinded, pull_id=pull_id
-            )
     try:
         # Bound the durable write by a wall-clock deadline so a wedged fsync/replace (a hung
         # durable write that never raises) can NEVER block this consumer — and therefore the
@@ -1014,6 +980,44 @@ def _process_option_window_tail(
             settled=settle_empty,
             **fields,
         )
+    # Mass ALL-FILTERED breaker feed (DEC-ALLFILTERED-MASS-BREAKER-001 — the spot-tail
+    # twin): observe every ELIGIBLE window's boundary verdict. Eligibility matches the
+    # F&O demotion's own gate — ``interval != _DAILY`` + raw-bars>0 (deliberately
+    # UNgated on ``detect_completeness_gaps``, exactly like the ``all_filtered``
+    # demotion below: the F&O dry-run client returns EMPTY payloads, so
+    # ``raw_bars == 0`` makes a dry-run window ineligible by construction). Placed
+    # AFTER the write-deferral early-return above — the spot-tail symmetry (review
+    # round 5): a window whose durable write DEFERS is re-attempted by a later
+    # pass, so observing it here (only on the attempt that completes the tail)
+    # keeps the pull-CUMULATIVE counters from double-counting a defer — and
+    # BEFORE the record below, so the trip-crossing window suppresses ITSELF
+    # through the record-time ``allow_degraded_settle`` re-check (evaluated inside
+    # ``record()`` UNDER the ledger lock, serialized with the trip's rescind —
+    # review round 1 TOCTOU closure). The series is keyed on the UNDERLYING, not
+    # the contract (review round 2 — the ``health_key`` grouping precedent above):
+    # one weird underlying's CE/PE chain spans dozens-to-hundreds of contract
+    # symbols, so a per-CONTRACT key crossed the SPREAD floor at the 10th strike
+    # and fired the vendor-wide alarm off a single-underlying event; keyed per
+    # underlying the whole chain is ONE series — structurally below the floor,
+    # the selectivity the breaker documents for BOTH spines. A blank underlying
+    # falls back to the contract symbol so the key is never empty.
+    af_eligible = interval != _DAILY and len(raw_bars) > 0
+    if all_filtered_breaker is not None and af_eligible:
+        af_series = f"{contract.underlying_symbol or contract.symbol}:{interval}"
+        if all_filtered_breaker.observe(
+            af_series,
+            all_filtered=all_boundary_filtered,
+            window_start=key.start.isoformat(),
+            window_end=key.end.isoformat(),
+        ):
+            # The trip TRANSITION (exactly once per pull): rescind + ONE loud alarm
+            # via the COMMON emit both spines share (lazy import at trip time).
+            from brutex.notifications.sweep_alerts import emit_mass_all_filtered_alert
+
+            rescinded = ledger.rescind_all_filtered_settles() if ledger is not None else 0
+            emit_mass_all_filtered_alert(
+                all_filtered_breaker.trip_snapshot(), rescinded=rescinded, pull_id=pull_id
+            )
     # Mass ALL-FILTERED suppression seam (DEC-ALLFILTERED-MASS-BREAKER-001): the
     # breaker is handed to ``record()`` as its ``allow_degraded_settle`` callable
     # and consulted INSIDE the ledger lock — NEVER pre-computed in this tail (the

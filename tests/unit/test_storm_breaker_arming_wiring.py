@@ -510,6 +510,147 @@ class TestAllFilteredBreakerPullScope:
         assert all(b is sentinel for b in captured)
         assert len(resolves) == 1, "ONE breaker per pull, shared by every phase"
 
+    def test_pull_all_spot_live_arms_detect_and_feeds_the_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL bulk pull's windows actually REACH the breaker (review round 5).
+
+        FAIL-BEFORE: ``pull_all_spot`` never passed ``detect_completeness_gaps``
+        (default ``False``), so the spot tail's eligibility gate made EVERY bulk
+        window unobservable — the round-4 pull-scoped wiring was structurally
+        inert on the primary production path (the /pull-pipeline spot phase +
+        the one-click "Pull ALL"). Post-fix the bulk pull threads
+        ``detect_completeness_gaps=not dry_run`` (the CLI ``cmd_fetch`` pattern)
+        and a 3-series weekend-start mass all-filtered event TRIPS the breaker.
+        """
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        # SPREAD floor 3 (min_observations 100 keeps the FRACTION rule out of
+        # the way) — the 3-index vendor-day shape must trip on the 3rd series.
+        sentinel = AllFilteredBreaker(
+            spread_series_limit=3,
+            fraction_limit=0.5,
+            min_observations=100,
+            fraction_min_series=3,
+        )
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", lambda: sentinel)
+
+        def _factory(
+            lake_root: Path, _insts: Sequence[Instrument]
+        ) -> tuple[MarketAdapter, BarSink]:
+            del lake_root
+            return SyntheticSpotAdapter(), NullBarSink()
+
+        # 2024-03-02 is a Saturday: every window's synthetic bars anchor on the
+        # window-START day, so the calendar-aware boundary filter drops them ALL
+        # — three genuinely all-filtered series, the mass vendor-day shape.
+        pull_all_spot(
+            [_index("A1"), _index("A2"), _index("A3")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            from_date="2024-03-02",
+            to_date="2024-03-03",
+            adapter_factory=_factory,
+        )
+        assert detect_seen and all(d is True for d in detect_seen)
+        assert sentinel.counts() == (3, 3, 3)  # fail-before: (0, 0, 0)
+        assert sentinel.tripped
+
+    def test_pull_all_spot_dry_run_threads_detect_false_and_never_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run bulk pull threads ``detect_completeness_gaps=False`` — the
+        resolved breaker stays inert (the comment's "ineligible by construction"
+        claim, now enforced by explicit wiring instead of a missing kwarg)."""
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest_with_retry
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest_with_retry", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", lambda: sentinel)
+        pull_all_spot(
+            [_index("A1")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_NOW,
+            from_date="2024-03-02",
+            to_date="2024-03-03",
+        )
+        assert detect_seen and all(d is False for d in detect_seen)
+        assert sentinel.counts() == (0, 0, 0)
+        assert not sentinel.tripped
+
+    def test_pull_candles_dry_run_threads_detect_false_and_never_observes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run ``pull_candles`` never feeds the breaker (review round 5).
+
+        FAIL-BEFORE: this site hardcoded ``detect_completeness_gaps=True`` (a
+        #1230-era leftover), so a dry-run's weekend-start synthetic window WAS
+        observed as all-filtered — counts ``(2, 1, 1)`` over 2024-03 (the
+        2024-03-31 Sunday-start tile) — contradicting the documented
+        dry-run-never-feeds contract. Post-fix: ``not dry_run`` → ``(0, 0, 0)``.
+        """
+        from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
+
+        sentinel = AllFilteredBreaker()
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        monkeypatch.setattr(pull_controller, "resolve_all_filtered_breaker", lambda: sentinel)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=True,
+        )
+        assert detect_seen and all(d is False for d in detect_seen)
+        assert sentinel.counts() == (0, 0, 0)  # fail-before: (2, 1, 1)
+        assert not sentinel.tripped
+
+    def test_pull_candles_live_still_arms_detect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The round-5 ``not dry_run`` flip keeps the REAL single-symbol pull armed."""
+        detect_seen: list[object] = []
+        real = pull_controller.run_groww_spot_ingest
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            detect_seen.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pull_controller, "run_groww_spot_ingest", spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (SyntheticSpotAdapter(), NullBarSink()),
+        )
+        assert detect_seen and all(d is True for d in detect_seen)
+
     def test_cli_cmd_fetch_resolves_and_threads_the_pull_breaker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

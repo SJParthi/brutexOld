@@ -4908,6 +4908,35 @@ class TestOptionMassAllFilteredBreaker:
         assert rec.status == "FAILED"
         assert rec.empty_streak == 0  # suppressed — no bump, no settle leak
 
+    def test_option_deferred_window_is_not_observed_by_the_breaker(self) -> None:
+        # Review round 5 (spot-tail symmetry): the F&O observe used to run BEFORE
+        # the durable write, so a window whose write DEFERS (PartitionLockTimeout /
+        # WriteDeadlineExceeded → recorded FAILED, re-attempted next pass) was
+        # observed at the deferring attempt AND re-observed at the re-attempt — a
+        # within-pull double count in the pull-CUMULATIVE counters (numerator AND
+        # denominator for an all-filtered window). The observe now sits AFTER the
+        # write-deferral early-return, so only the attempt that COMPLETES the tail
+        # counts. FAIL-BEFORE: counts read (1, 1, 1) after the defer.
+        breaker = self._tiny_breaker()
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(_FakeSDK(payload=_candles(_SATURDAY))),
+            _LockTimeoutSink(),
+            contract=self._chain_ce("NSE-AAA-02Jan25-100-CE"),
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 8),
+            ledger=ledger,
+            max_attempts=0,
+            now_ist=_now,
+            all_filtered_breaker=breaker,
+        )
+        assert breaker.counts() == (0, 0, 0)  # the deferred attempt never counts
+        assert ledger.records()[0].status == "FAILED"  # still deferred to the next pull
+        # The re-attempt that COMPLETES the tail (a working sink) counts exactly once.
+        self._pull_contract("NSE-AAA-02Jan25-100-CE", ledger, breaker)
+        assert breaker.counts() == (1, 1, 1)
+
     def test_option_settle_is_suppressed_when_trip_lands_during_the_write(self) -> None:
         # Review round 1, finding F1 (the widest race window): pre-fix the F&O
         # tail computed the suppression bool BEFORE the 90 s-bounded durable
