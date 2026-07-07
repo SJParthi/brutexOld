@@ -50,6 +50,24 @@ def _vix_bar(minute: int, close: str) -> CandleBar:
     )
 
 
+def _inf_bar(minute: int) -> CandleBar:
+    """A corrupt all-``Infinity`` bar — constructible: ``CandleBar`` is
+    deliberately permissive and the engine read boundary's ``price <= 0``
+    positivity gate is ``False`` for ``inf`` (only out-of-band storage
+    corruption produces one; ingest ``to_price``/``round_money`` both reject
+    non-finite)."""
+    inf = Decimal("Infinity")
+    return CandleBar(
+        timestamp=_T0 + timedelta(minutes=minute),
+        open=inf,
+        high=inf,
+        low=inf,
+        close=inf,
+        volume=0,
+        open_interest=None,
+    )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # ReferenceSeries
 # ────────────────────────────────────────────────────────────────────────
@@ -96,6 +114,37 @@ class TestReferenceSeries:
         series = ReferenceSeries.from_bars(VIX_SERIES_NAME, [])
         assert series.close_by_ts == {}
         assert series.level_at(_T0) is None
+
+    def test_non_finite_close_is_skipped_counted_and_warned(self) -> None:
+        """An ``Infinity`` close (out-of-band corruption) never enters the map.
+
+        DEC-VIX-STAMP-WIRE-001 round-3 panel: ``CandleBar`` accepts
+        ``Decimal("Infinity")`` (the engine read boundary's ``price <= 0``
+        gate is False for ``inf``), and an inf level would flow through
+        ``aggregate_trade_vix`` into the ResultRow finite-validation as a
+        PLAIN grid-aborting ``ResultsStoreError`` misdirected at upstream
+        non-determinism. The gate here skips it — the instant honestly stamps
+        ``None`` — with ONE named WARNING pointing at the corrupt partition.
+        """
+        corrupt = _inf_bar(minute=1)
+        with _capture_logs() as logs:
+            series = ReferenceSeries.from_bars(VIX_SERIES_NAME, [_vix_bar(0, "15.10"), corrupt])
+        assert series.level_at(_T0) == Decimal("15.10")  # the finite bar survives
+        assert series.level_at(corrupt.timestamp) is None  # honest miss, never inf
+        warns = [e for e in logs if e["event"] == "reference_series.non_finite_level"]
+        assert len(warns) == 1
+        assert warns[0]["series"] == VIX_SERIES_NAME
+        assert warns[0]["skipped"] == 1
+        assert warns[0]["sample"] == [corrupt.timestamp.isoformat()]
+
+    def test_non_finite_skip_makes_the_stamp_an_honest_counted_miss(self) -> None:
+        """Stamping the corrupt instant is a normal miss: ``None`` + tallied."""
+        corrupt = _inf_bar(minute=1)
+        stamper = TradeReferenceStamper.from_vix_bars([_vix_bar(0, "15.10"), corrupt])
+        entry, exit_ = stamper.stamp(_T0, corrupt.timestamp)
+        assert entry == Decimal("15.10")
+        assert exit_ is None
+        assert stamper.miss_count == 1
 
 
 # ────────────────────────────────────────────────────────────────────────

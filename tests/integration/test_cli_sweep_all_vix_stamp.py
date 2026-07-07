@@ -36,6 +36,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
 from brutex.engine.results_store import ResultsStore
+from structlog.testing import capture_logs
 
 pytest.importorskip("polars")
 pytest.importorskip("duckdb")
@@ -205,14 +206,25 @@ def _stamped_rows(results_root: Path) -> list[Any]:
 def test_cmd_sweep_all_persists_non_none_ordered_vix_trios(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The positive-bind pin: the launch stamper genuinely reaches the rows."""
+    """The positive-bind pin: the launch stamper genuinely reaches the rows.
+
+    Also pins the once-per-launch lake-read law DYNAMICALLY (round-3 panel):
+    the REAL ``cmd_sweep_all`` launch emits EXACTLY ONE
+    ``reference_wire.vix_stamper_built`` — the net the static builder-call-count
+    AST pin cannot provide against a build drifting inside a per-tuple loop
+    (round-1 CONFIRMED the VIX lake read TWICE per launch; nothing counted
+    builds until now).
+    """
     lake_root, catalog_path = _persist(tmp_path)
     results_root = tmp_path / "sweeps"
     monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
 
-    rc = _sweep_all(lake_root, catalog_path, results_root)
+    with capture_logs() as logs:
+        rc = _sweep_all(lake_root, catalog_path, results_root)
 
     assert rc == 0
+    built = [e for e in logs if e["event"] == "reference_wire.vix_stamper_built"]
+    assert len(built) == 1, f"expected exactly ONE stamper build per launch, saw {len(built)}"
     rows = _stamped_rows(results_root)
     assert rows, "the sweep must persist finalists for the trio pin to bite"
     for row in rows:

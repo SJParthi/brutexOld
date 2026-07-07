@@ -73,7 +73,7 @@ from brutex.engine.cascade_wire import (
     spec_from_store_rows,
 )
 from brutex.engine.combo_mask import popcount
-from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.results_store import ResultRow, ResultsStore, VixTrioConflictError
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.stage3_refine import (
     Evaluator,
@@ -522,7 +522,16 @@ class Stage3PassReport:
         Leaderboards skipped because their train slice was empty (a window no
         longer than the lockbox window leaves nothing to train on).
     cells
-        Every refined cell written, in deterministic order.
+        Every refined cell written, in deterministic order (a VIX-conflicted
+        cell is EXCLUDED — it was not written this pass).
+    cells_conflicted
+        Refined cells SKIPPED because their pre-existing store's REFERENCE-ONLY
+        VIX trio conflicts with this pass's re-derivation
+        (:class:`~brutex.engine.results_store.VixTrioConflictError` — the
+        India-VIX lake moved between launches). Each skip leaves the on-disk
+        cell store + sidecar untouched, WARNs ``stage3_wire.cell_vix_conflict``
+        with the quarantine remedy, and makes the launch verdict non-zero —
+        the stage-3 twin of the grid drivers' #904 tuple-skip contract.
     """
 
     enabled: bool
@@ -536,6 +545,7 @@ class Stage3PassReport:
     skipped_empty_train: int
     cells: tuple[Stage3RefinedCell, ...]
     sidecars_written: int = 0
+    cells_conflicted: int = 0
 
 
 def _cell_sort_key(cell: SweepTuple) -> tuple[str, str, str, int, int, int, tuple[int, int, int]]:
@@ -596,7 +606,13 @@ def run_stage3_pass(
        :class:`~brutex.engine.results_store.ResultRow` stamped with the train
        hash.
     6. Write each refined cell's rows to its OWN Parquet file (review F3) in
-       deterministic cell order via the load-or-create store (idempotent).
+       deterministic cell order via the load-or-create store (idempotent). A
+       cell whose PRE-EXISTING store's VIX trio conflicts with this pass's
+       re-derivation (the India-VIX lake moved between launches —
+       :class:`~brutex.engine.results_store.VixTrioConflictError`) is SKIPPED
+       + counted (``cells_conflicted``) + WARNed with the quarantine remedy,
+       its on-disk store/sidecar untouched — the stage-3 arm of the #904
+       skip-and-continue contract, never a whole-launch abort.
     7. Emit ``STAGE_3_PASS_COMPLETE`` with the full tally.
 
     Parameters
@@ -799,16 +815,44 @@ def run_stage3_pass(
 
     rows_appended = 0
     sidecars_written = 0
+    cells_conflicted = 0
     cells: list[Stage3RefinedCell] = []
     for cell in sorted(cell_rows, key=_cell_sort_key):
         cell_path = tuple_store_path(results_root, cell, train_grid)
         store = load_or_create_store(cell_path)
-        for refined_row in cell_rows[cell]:
-            # Identical re-derived rows (re-runs; the same refined cell reached
-            # from two survivors of the same mask) are idempotent no-ops.
-            if store.append(refined_row):
-                rows_appended += 1
-        cell_flush = store.flush()
+        cell_appended = 0
+        try:
+            for refined_row in cell_rows[cell]:
+                # Identical re-derived rows (re-runs; the same refined cell reached
+                # from two survivors of the same mask) are idempotent no-ops.
+                if store.append(refined_row):
+                    cell_appended += 1
+            cell_flush = store.flush()
+        except VixTrioConflictError as exc:
+            # The India-VIX lake moved between two launches and this cell's
+            # PRE-EXISTING store carries the old trio (DEC-VIX-STAMP-WIRE-001
+            # round-3 panel MAJOR: the pass re-appends into existing cell
+            # stores on EVERY resume — the dominant redo path for this
+            # reference-only conflict, which the grid drivers' #904 tuple-skip
+            # never sees because sentinel-resumed tuples skip their appends).
+            # Mirror the grid contract: skip + count THIS ONE cell — the flush
+            # is skipped so its on-disk store + sidecar stay untouched, the
+            # cell is excluded from the cascade-spec list, and the launch
+            # verdict goes non-zero via ``cells_conflicted`` — never a
+            # whole-launch abort over a reference-only annotation.
+            cells_conflicted += 1
+            _LOG.warning(
+                "stage3_wire.cell_vix_conflict",
+                cell_path=str(cell_path),
+                error=str(exc),
+                remediation=(
+                    "quarantine/delete this cell's results store so a redo "
+                    "re-persists it against the current VIX series, or re-run "
+                    "after the VIX lake settles"
+                ),
+            )
+            continue
+        rows_appended += cell_appended
         # Per-cell trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001): the pass
         # re-derives every cell deterministically, so recompute-and-overwrite
         # is the idempotent policy HERE (the grid tuples' preserve-on-skips
@@ -848,6 +892,7 @@ def run_stage3_pass(
         "cells_written": len(cells),
         "rows_appended": rows_appended,
         "sidecars_written": sidecars_written,
+        "cells_conflicted": cells_conflicted,
         "skipped_empty_train": skipped_empty_train,
         "train_snapshot_hash": train_hash,
     }
@@ -865,6 +910,7 @@ def run_stage3_pass(
         skipped_empty_train=skipped_empty_train,
         cells=tuple(cells),
         sidecars_written=sidecars_written,
+        cells_conflicted=cells_conflicted,
     )
 
 

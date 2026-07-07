@@ -516,6 +516,47 @@ class TestSweepReportSeam:
             )
         assert captured == [_STAMPER]
 
+    def test_sweep_report_bytes_identical_stamped_vs_unstamped(self) -> None:
+        """The pin cited at ``cmd_sweep``'s sanctioned literal-``None`` site.
+
+        ``brutex sweep`` renders a TEXT leaderboard and persists nothing — its
+        literal ``reference_stamper=None`` is sanctioned BECAUSE the report
+        surface carries no VIX field, so a stamp there is provably
+        unobservable. This is the actual byte-equality regression that claim
+        rides on (round-3 panel: the claim shipped in cli.py / MIGRATION.md
+        #1535 / CLAUDE.md §2 Rule 3 citing a test that did not exist — the
+        cascade ``serialize_wire_report`` A/B pinned a DIFFERENT surface).
+        A future VIX column in the report text fails HERE and forces the
+        conscious revert-lever decision (bind a stamper at ``cmd_sweep``).
+        """
+        stamped = report_mod.sweep_report(
+            _BARS,
+            instrument="NIFTY",
+            tf_label="1m",
+            tf_minutes=1,
+            direction=Side.BUY,
+            condition_bits=[0, 1],
+            k=1,
+            take_profit_paisa=50,
+            min_hits=0,
+            validate_oos=True,  # the widest report surface: ranked table + OOS section
+            reference_stamper=_STAMPER,
+        )
+        plain = report_mod.sweep_report(
+            _BARS,
+            instrument="NIFTY",
+            tf_label="1m",
+            tf_minutes=1,
+            direction=Side.BUY,
+            condition_bits=[0, 1],
+            k=1,
+            take_profit_paisa=50,
+            min_hits=0,
+            validate_oos=True,
+            reference_stamper=None,
+        )
+        assert stamped == plain
+
     def test_oos_section_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ranked = [_ranked_combo()]
         with _capture_kwarg(monkeypatch, report_mod, "validate_out_of_sample") as captured:

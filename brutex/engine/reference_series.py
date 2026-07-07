@@ -90,6 +90,9 @@ VIX_SERIES_NAME: Final[str] = "india_vix"
 #: the total warning volume per stamper is bounded at ``cap + 1``.
 MISS_WARN_DETAIL_CAP: Final[int] = 20
 
+#: Cap on the timestamps sampled into the one ``non_finite_level`` WARNING.
+_NON_FINITE_SAMPLE_CAP: Final[int] = 5
+
 
 @dataclass(slots=True)
 class _MissWarnMemo:
@@ -144,6 +147,16 @@ class ReferenceSeries:
         DEC-LAKE-READ-UNIQUE-001; previously a silent last-wins dict, so a
         poisoned-era duplicate re-statement silently replaced the real close).
 
+        A NON-FINITE close (``Infinity`` / ``NaN`` — only possible from
+        out-of-band storage corruption: the ingest boundary and the engine
+        read boundary both reject non-positive prices, but ``inf`` slips the
+        latter's ``price <= 0`` gate and ``CandleBar`` accepts it) is SKIPPED
+        + counted with ONE ``reference_series.non_finite_level`` WARNING per
+        build — the instant then honestly stamps ``None`` (a miss), never a
+        fabricated level and never an ``inf`` that would later abort the grid
+        as a plain finite-validation :class:`ResultsStoreError` misdirected at
+        upstream non-determinism (DEC-VIX-STAMP-WIRE-001 round-3 panel).
+
         Parameters
         ----------
         name
@@ -158,7 +171,27 @@ class ReferenceSeries:
             The O(1)-lookup series.
         """
         first_by_ts = bars_by_ts_first(bars, source=f"reference_series:{name}")
-        return cls(name=name, close_by_ts={ts: bar.close for ts, bar in first_by_ts.items()})
+        close_by_ts: dict[datetime, Decimal] = {}
+        non_finite: list[datetime] = []
+        for ts, bar in first_by_ts.items():
+            if bar.close.is_finite():
+                close_by_ts[ts] = bar.close
+            else:
+                non_finite.append(ts)
+        if non_finite:
+            _LOG.warning(
+                "reference_series.non_finite_level",
+                series=name,
+                skipped=len(non_finite),
+                sample=[ts.isoformat() for ts in non_finite[:_NON_FINITE_SAMPLE_CAP]],
+                detail=(
+                    "non-finite close in the reference partition (out-of-band storage "
+                    "corruption) — the instant will stamp None; repair/quarantine the "
+                    "corrupt partition file (the lake healer is row-removing only and "
+                    "will not value-edit it)"
+                ),
+            )
+        return cls(name=name, close_by_ts=close_by_ts)
 
     def level_at(self, ts: datetime) -> Decimal | None:
         """Return the series' close at ``ts``, or ``None`` if no bar exists there.

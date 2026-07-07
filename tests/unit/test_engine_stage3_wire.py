@@ -35,6 +35,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.cascade_wire import Stage3ManifestRecord
+from brutex.engine.reference_series import ReferenceSeries, TradeReferenceStamper
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.stage3_wire import (
@@ -70,6 +71,7 @@ from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluati
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.strategies.types import FibAnchorKind, Side
 from brutex.vocabulary import ProximityParams
+from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
     from brutex.metrics.compute import ResultMetrics
@@ -172,7 +174,13 @@ def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
 
 
-def _run_full(out_root: Path, bars: list[CandleBar], grid: SweepGridConfig) -> Stage3PassReport:
+def _run_full(
+    out_root: Path,
+    bars: list[CandleBar],
+    grid: SweepGridConfig,
+    *,
+    stamper: TradeReferenceStamper | None = None,
+) -> Stage3PassReport:
     """One full enabled run: grid sweep → Stage-3 pass, one audit chain."""
 
     def bars_for(_instrument: str, _tf_label: str) -> list[CandleBar]:
@@ -196,6 +204,7 @@ def _run_full(out_root: Path, bars: list[CandleBar], grid: SweepGridConfig) -> S
             segment=_SCOPE["segment"],
             start=_SCOPE["start"],
             end=_SCOPE["end"],
+            stamper_for=(lambda: stamper) if stamper is not None else None,
         )
 
 
@@ -705,6 +714,64 @@ class TestDeterminismOracle:
         assert report_b2.rows_appended == 0
         assert report_b2.evals_total == report_b.evals_total
         assert _tree_hashes(out_root_b) == tree_b
+
+
+def _const_stamper(bars: list[CandleBar], level: str) -> TradeReferenceStamper:
+    """A stamper serving one CONSTANT level at every fixture-bar instant."""
+    return TradeReferenceStamper(
+        vix=ReferenceSeries(
+            name="india_vix",
+            close_by_ts={bar.timestamp: Decimal(level) for bar in bars},
+        )
+    )
+
+
+class TestVixConflictCellSkip:
+    """A VIX-lake-moved re-launch SKIPS conflicted cells — never aborts the pass.
+
+    DEC-VIX-STAMP-WIRE-001 round-3 panel MAJOR: the round-2 tuple-skip fix
+    covered only the grid drivers, but ``run_stage3_pass`` re-appends into
+    PRE-EXISTING cell stores on every resume (the grid tuples sentinel-skip,
+    so this is the DOMINANT redo path for the reference-only conflict) — a
+    :class:`~brutex.engine.results_store.VixTrioConflictError` escaped the
+    pass and aborted the whole sweep-all launch with a false CRITICAL alert.
+    """
+
+    def test_vix_moved_relaunch_skips_conflicted_cells_never_aborts(self, tmp_path: Path) -> None:
+        bars = _trending_bars(_N_DAYS)
+        report_1 = _run_full(tmp_path, bars, _grid(), stamper=_const_stamper(bars, "14.5"))
+        assert report_1.cells_conflicted == 0
+        assert report_1.rows_appended > 0
+        tree_before = _tree_hashes(tmp_path)
+
+        # The sanctioned lake movement: the India-VIX series re-pulled at NEW
+        # levels between the two launches (VIX is outside the run identity, so
+        # the redo re-derives byte-identical non-VIX columns + a NEW trio).
+        with capture_logs() as logs:
+            report_2 = _run_full(tmp_path, bars, _grid(), stamper=_const_stamper(bars, "19.5"))
+
+        # Every stamped cell conflicts → skipped + counted, never a raise.
+        assert report_2.cells_conflicted > 0
+        assert len(report_2.cells) == len(report_1.cells) - report_2.cells_conflicted
+        assert report_2.rows_appended == 0
+        # The on-disk tree is untouched — a conflicted cell's store + sidecar
+        # keep their launch-1 bytes (the redo contract: quarantine to re-persist).
+        assert _tree_hashes(tmp_path) == tree_before
+        warns = [e for e in logs if e["event"] == "stage3_wire.cell_vix_conflict"]
+        assert len(warns) == report_2.cells_conflicted
+        assert "quarantine" in warns[0]["remediation"]
+        assert "REFERENCE-ONLY VIX trio conflict" in warns[0]["error"]
+
+    def test_same_lake_relaunch_has_zero_conflicts(self, tmp_path: Path) -> None:
+        """The no-move control: an unchanged VIX lake re-launches conflict-free."""
+        bars = _trending_bars(_N_DAYS)
+        stamper = _const_stamper(bars, "14.5")
+        report_1 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+        report_2 = _run_full(tmp_path, bars, _grid(), stamper=stamper)
+        assert report_1.cells_conflicted == 0
+        assert report_2.cells_conflicted == 0
+        assert report_2.rows_appended == 0
+        assert report_2.cells == report_1.cells
 
 
 # ────── cascade_specs_for_refined_cells (reviews F3 + F8) ──────

@@ -231,10 +231,14 @@ class VixTrioConflictError(ResultsStoreError):
     Kept a DISTINCT type so the grid drivers (``run_sweep_grid`` /
     ``run_supervised_grid`` / ``_run_tuple_in_worker``) can ride the #904
     "Resilient: skip + continue" tuple-skip contract — ONE tuple is skipped +
-    counted + audited ``TUPLE_FAILED`` and the grid completes — instead of
-    aborting the WHOLE grid over a reference-only annotation. Still a
-    :class:`ResultsStoreError` subclass, so every existing store-error handler
-    catches it unchanged.
+    counted + audited ``TUPLE_FAILED`` and the grid completes — and the
+    Stage-3 pass (``run_stage3_pass``) can skip + count the ONE conflicted
+    refined cell (``cells_conflicted`` +
+    ``stage3_wire.cell_vix_conflict`` — the dominant redo path: a resumed
+    launch sentinel-skips its grid tuples but ALWAYS re-appends into the
+    pre-existing stage-3 cell stores) — instead of aborting the WHOLE launch
+    over a reference-only annotation. Still a :class:`ResultsStoreError`
+    subclass, so every existing store-error handler catches it unchanged.
     """
 
 
@@ -831,8 +835,9 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
             f"run identity (CLAUDE.md §2 Rule 3), so this is NOT upstream non-determinism "
             f"— the India-VIX lake moved between the two runs (a re-pull backfilled "
             f"missing VIX bars, or the derived 1day partition was re-derived "
-            f"latest-wins). Grid drivers skip this ONE tuple (the #904 contract) and the "
-            f"rest of the grid completes; remedy: quarantine/delete this tuple's results "
+            f"latest-wins). Grid drivers skip this ONE tuple and the Stage-3 pass skips "
+            f"this ONE refined cell (the #904 skip-and-continue contract) — the rest of "
+            f"the launch completes; remedy: quarantine/delete this tuple's results "
             f"store so a redo re-persists it against the current VIX series, or re-run "
             f"after the VIX lake settles."
         )

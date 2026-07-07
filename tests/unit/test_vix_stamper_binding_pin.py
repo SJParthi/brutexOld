@@ -146,6 +146,34 @@ _REQUIRED_BOUND_ENTRYPOINTS: Final[dict[tuple[str, str], int]] = {
 #: The entry-point modules whose BOUND seam calls the positive law enumerates.
 _ENTRYPOINT_MODULES: Final[frozenset[str]] = frozenset({"brutex/cli.py", "brutex/dashboard/app.py"})
 
+#: The VIX-lake-reading stamper BUILDERS (each call is one full lake read).
+_BUILDER_CALLEES: Final[frozenset[str]] = frozenset(
+    {"build_vix_stamper", "vix_stamper_for_manifest"}
+)
+
+#: EXACT builder-call counts per production module — the once-per-launch lake
+#: read law (round-3 panel MINOR: round-1 CONFIRMED the VIX lake read TWICE
+#: per ``sweep-all --options-sim`` launch, fixed by deleting the extra builds
+#: — but nothing pinned the count, so the regression class could silently
+#: return). A NEW eager build anywhere in ``brutex/`` fails this map; the
+#: complementary DYNAMIC net (a build drifting INSIDE a per-tuple loop keeps
+#: the static count at 1) is the exactly-one
+#: ``reference_wire.vix_stamper_built`` log-event assertion over the REAL
+#: ``cmd_sweep_all`` launch in
+#: ``tests/integration/test_cli_sweep_all_vix_stamp.py``.
+_REQUIRED_BUILDER_CALLS: Final[dict[tuple[str, str], int]] = {
+    # cmd_sweep_all's single launch build + the sweep-verify recount's build.
+    ("brutex/cli.py", "build_vix_stamper"): 2,
+    # cmd_cascade's manifest replay.
+    ("brutex/cli.py", "vix_stamper_for_manifest"): 1,
+    # The dashboard cascade route.
+    ("brutex/dashboard/app.py", "vix_stamper_for_manifest"): 1,
+    # vix_stamper_for_manifest's own delegation to the ONE builder.
+    ("brutex/engine/cascade_wire.py", "build_vix_stamper"): 1,
+    # The lazy vix_stamper_provider closure (no production consumer today).
+    ("brutex/engine/reference_wire.py", "build_vix_stamper"): 1,
+}
+
 
 class _SeamCall(NamedTuple):
     """One seam call site: where it is + how it binds the stamper kwarg."""
@@ -268,6 +296,34 @@ class TestVixStamperBindingPin:
             "a MISSING key means a launch site lost its stamper bind (the "
             "#935/#1014 dormant-binding trap); an EXTRA key means a new "
             "production bind landed and must be enumerated consciously"
+        )
+
+    def test_builder_calls_match_the_once_per_launch_map_exactly(self) -> None:
+        """The once-per-launch VIX-lake-read law (round-3 panel): every call
+        to a stamper BUILDER in production code is enumerated with an exact
+        count — a second eager build in a launcher (the round-1 confirmed
+        double-read class) or a brand-new build site fails here and forces a
+        conscious review. (A build MOVED inside a per-tuple loop keeps the
+        static count — that arm is owned by the exactly-one
+        ``vix_stamper_built`` log assertion in the sweep-all integration
+        suite.)"""
+        package_root = Path(brutex.__file__).resolve().parent
+        tally: dict[tuple[str, str], int] = {}
+        for path in sorted(package_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            rel = str(path.relative_to(package_root.parent))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                callee = _callee_name(node)
+                if callee in _BUILDER_CALLEES:
+                    key = (rel, callee)
+                    tally[key] = tally.get(key, 0) + 1
+        assert tally == _REQUIRED_BUILDER_CALLS, (
+            "the production stamper-builder call sites drifted from the "
+            "once-per-launch map — an EXTRA key/count means a new lake-reading "
+            "build landed (enumerate it consciously, never a second build per "
+            "launch); a MISSING key means a launcher lost its single build"
         )
 
     def test_no_seam_call_splats_kwargs(self) -> None:

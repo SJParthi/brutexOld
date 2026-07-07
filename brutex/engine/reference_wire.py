@@ -312,7 +312,13 @@ def build_vix_stamper(
             symbol=VIX_LAKE_SYMBOL,
             start=start.isoformat(),
             end=end.isoformat(),
-            detail="VIX partition holds no bar in the window — trades unstamped",
+            detail=(
+                "VIX partition holds no bar in the window — trades unstamped. "
+                "If parquet files DO exist on disk, check for preceding "
+                "catalog.reconcile.parquet_skip WARNings: a corrupt/unreadable "
+                "partition file is skipped loudly by the reconcile and presents "
+                "here as an empty window (repair the file, don't re-pull)"
+            ),
         )
         return None
     warn_stale_vix_derived(minute_bars, daily_bars)

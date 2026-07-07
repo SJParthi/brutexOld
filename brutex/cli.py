@@ -192,7 +192,10 @@ def sweep_all_exit_code(tuples_failed: int) -> int:
     Parameters
     ----------
     tuples_failed
-        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`.
+        The count from the :class:`~brutex.engine.sweep_supervisor.SupervisedGridSummary`
+        (``cmd_sweep_all`` folds the stage-3 pass's ``cells_conflicted`` —
+        VIX-trio-conflicted refined cells skipped under the same
+        skip-and-continue contract — into this count).
 
     Returns
     -------
@@ -4319,8 +4322,10 @@ def cmd_sweep(
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): `brutex
         # sweep` renders a TEXT leaderboard and persists nothing — the report
         # bytes are regression-pinned IDENTICAL stamped-vs-unstamped
-        # (test_engine_vix_stamper_wiring: the report surface carries no VIX
-        # column), so a stamp here is provably unobservable and a stamper
+        # (test_engine_vix_stamper_wiring.py::TestSweepReportSeam::
+        # test_sweep_report_bytes_identical_stamped_vs_unstamped — the report
+        # surface carries no VIX column), so a stamp here is provably
+        # unobservable and a stamper
         # build would be pure wasted lake I/O. The stream is EXPLICITLY
         # unstamped via this literal (an enumerated sanctioned literal-None
         # site, AST-pinned by tests/unit/test_vix_stamper_binding_pin.py —
@@ -4811,22 +4816,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     cache_path = out_root / "dedup-cache"
     progress_path = out_root / "progress" / "sweep-progress.json"
 
-    # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
-    # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
-    # window, then handed to every observable trade surface below (grid
-    # finalist projection, Stage-3 refined rows, Stage-4 cascade). An absent /
-    # empty VIX lake degrades honestly to None (observe-only WARN inside the
-    # builder — the sweep proceeds with unstamped trades, never a fabricated
-    # stamp and never a refused launch).
-    from brutex.engine.reference_wire import build_vix_stamper
-
-    reference_stamper = build_vix_stamper(
-        lake_root=resolved_lake,
-        start=_parse_dt(start),
-        end=_parse_dt(end),
-        catalog_path=catalog,
-    )
-
     def _bars_for(symbol: str, interval: str) -> list[Any]:
         return slices.get((symbol, interval), [])
 
@@ -4867,6 +4856,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
     with sweep_abort_alert(_emit_pull_halt_alert):
+        # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
+        # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept
+        # window, then handed to every observable trade surface below (grid
+        # finalist projection, Stage-3 refined rows, Stage-4 cascade). An
+        # absent / empty VIX lake degrades honestly to None (observe-only WARN
+        # inside the builder — the sweep proceeds with unstamped trades, never
+        # a fabricated stamp and never a refused launch). Built INSIDE the
+        # abort-alert wrap (round-3 panel): load_lake_slice runs the L1 heal —
+        # a WRITE-capable lake path whose LakeWriteHalt (disk-full/OOM during
+        # a heal rewrite) is an infrastructure abort that must fire the
+        # CRITICAL push, unlike the clean user-config errors gated above.
+        from brutex.engine.reference_wire import build_vix_stamper
+
+        reference_stamper = build_vix_stamper(
+            lake_root=resolved_lake,
+            start=_parse_dt(start),
+            end=_parse_dt(end),
+            catalog_path=catalog,
+        )
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
@@ -4990,8 +4998,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
                 f"evals={stage3_report.evals_total} cells={len(stage3_report.cells)} "
                 f"rows_appended={stage3_report.rows_appended} "
+                f"cells_conflicted={stage3_report.cells_conflicted} "
                 f"skipped_empty_train={stage3_report.skipped_empty_train} "
                 f"train_snapshot={stage3_report.train_snapshot_hash}"
+            )
+        if stage3_report.cells_conflicted > 0:
+            # The stage-3 twin of the tuples_failed warning (Golden Rule #10):
+            # a VIX-conflicted refined cell was SKIPPED (store untouched) — the
+            # India-VIX lake moved between launches; the verdict goes non-zero.
+            print(
+                f"[brutex] WARNING: {stage3_report.cells_conflicted} stage-3 cell(s) hold a "
+                f"REFERENCE-ONLY VIX trio conflicting with this launch's re-derivation and "
+                "were SKIPPED — see the stage3_wire.cell_vix_conflict log lines; "
+                "quarantine/delete those cell stores to re-persist against the current VIX "
+                "series (exit code non-zero).",
+                file=sys.stderr,
             )
         print(
             f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}"
@@ -5078,8 +5099,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
-        # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
-        return sweep_all_exit_code(result.tuples_failed)
+        # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
+        # skipped on a VIX-trio conflict — makes the exit non-zero.
+        return sweep_all_exit_code(result.tuples_failed + stage3_report.cells_conflicted)
 
 
 def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler
