@@ -132,6 +132,7 @@ import json
 import math
 import os
 import re
+import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import MAXYEAR, UTC, datetime
@@ -1068,17 +1069,48 @@ def load_valid_dataset_stats(
 
 
 def _unlink_shard(shard_path: Path) -> None:
-    """Remove the shard best-effort — a failure logs, never raises."""
+    """Remove the shard best-effort — a failure logs, never raises.
+
+    A DIRECTORY planted at the shard path (local filesystem tamper — the same
+    threat model as every other lake sidecar) is not ``unlink``-able (EISDIR
+    on Linux, EPERM on macOS), so before review round 7 the corrupt-unlink
+    heal could never succeed on it: every later write to a viewed dataset
+    re-emitted the ``corrupt_unlinked`` + ``unlink_failed`` warn pair forever.
+    The planted tree is removed via ``shutil.rmtree`` instead (it does not
+    follow symlinks, so the removal stays inside ``.manifest/stats/``); any
+    OTHER unlink failure keeps the warn-only contract.
+    """
     try:
         shard_path.unlink()
     except FileNotFoundError:
         return
     except OSError as exc:
+        # ``os.path.isdir`` (not ``Path.is_dir``): it swallows EVERY OSError
+        # to False, so the never-raises contract holds even when the stat
+        # itself is denied. A symlink is always ``unlink``-able, so reaching
+        # here with isdir=True means a REAL directory — rmtree is safe.
+        if not os.path.isdir(shard_path):
+            _LOG.warning(
+                "lake.stats_manifest.unlink_failed",
+                shard=str(shard_path),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+        try:
+            shutil.rmtree(shard_path)
+        except OSError as tree_exc:
+            _LOG.warning(
+                "lake.stats_manifest.unlink_failed",
+                shard=str(shard_path),
+                error_type=type(tree_exc).__name__,
+                error=str(tree_exc),
+            )
+            return
         _LOG.warning(
-            "lake.stats_manifest.unlink_failed",
+            "lake.stats_manifest.dir_shard_removed",
             shard=str(shard_path),
             error_type=type(exc).__name__,
-            error=str(exc),
         )
 
 

@@ -1252,6 +1252,37 @@ class TestUnlinkAndProbeHelpers:
             lsm._unlink_shard(target)
         assert any(e["event"] == "lake.stats_manifest.unlink_failed" for e in logs)
 
+    def test_unlink_directory_planted_is_removed(self, tmp_path: Path) -> None:
+        """Review round 7 (fails-before): a DIRECTORY planted at the shard
+        path is not ``unlink``-able (EISDIR/EPERM), so the heal previously
+        never succeeded — the planted tree (NON-empty + nested, so a bare
+        ``os.rmdir`` fallback would not suffice) must be removed instead,
+        with no ``unlink_failed`` warn."""
+        target = tmp_path / "s.json"
+        (target / "nested").mkdir(parents=True)
+        (target / "nested" / "f.txt").write_text("x", encoding="utf-8")
+        with capture_logs() as logs:
+            lsm._unlink_shard(target)
+        assert not target.exists(), "the planted directory tree must be removed"
+        assert any(e["event"] == "lake.stats_manifest.dir_shard_removed" for e in logs)
+        assert not any(e["event"] == "lake.stats_manifest.unlink_failed" for e in logs)
+
+    def test_unlink_directory_rmtree_failure_logged_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The never-raises contract holds even when the rmtree heal fails."""
+        target = tmp_path / "s.json"
+        target.mkdir()
+
+        def _boom(path: Any, *args: Any, **kwargs: Any) -> None:
+            raise PermissionError("rmtree denied")
+
+        monkeypatch.setattr(lsm.shutil, "rmtree", _boom)
+        with capture_logs() as logs:
+            lsm._unlink_shard(target)  # no raise
+        assert target.exists()
+        assert any(e["event"] == "lake.stats_manifest.unlink_failed" for e in logs)
+
     def test_shard_exists_oserror_is_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1459,6 +1490,34 @@ class TestRecordPartitionStats:
         assert any(
             e["event"] == "lake.stats_manifest.corrupt_unlinked" and e["clause"] == "not_regular"
             for e in logs
+        )
+
+    def test_directory_shard_removed_heals_never_warn_loops(self, tmp_path: Path) -> None:
+        """Review round 7 (fails-before): a DIRECTORY planted at the shard
+        path fails closed as ``not_regular`` (safe — never a wrong number or
+        a raise), but ``Path.unlink`` cannot remove a directory, so the heal
+        never succeeded and EVERY later write to the viewed dataset
+        re-emitted the ``corrupt_unlinked`` + ``unlink_failed`` warn pair
+        forever. The planted tree (non-empty — an ``os.rmdir`` fallback
+        would not suffice) must be REMOVED, and the NEXT write must be the
+        silent lazy-accretion no-op (absent shard), never a repeat warn."""
+        shard = _seed_bars(tmp_path)
+        shard.unlink()
+        shard.mkdir()
+        (shard / "planted.txt").write_text("x", encoding="utf-8")
+        dest = self._dest(tmp_path)
+        with capture_logs() as logs:
+            assert self._record(tmp_path, dest) is False
+        assert any(
+            e["event"] == "lake.stats_manifest.corrupt_unlinked" and e["clause"] == "not_regular"
+            for e in logs
+        )
+        assert not shard.exists(), "the planted directory must be removed (healed)"
+        assert not any(e["event"] == "lake.stats_manifest.unlink_failed" for e in logs)
+        with capture_logs() as logs2:
+            assert self._record(tmp_path, dest) is False
+        assert not any(e["event"] == "lake.stats_manifest.corrupt_unlinked" for e in logs2), (
+            "the healed shard path must make the next write a silent lazy no-op"
         )
 
     def test_future_overflow_error_degrades_best_effort(

@@ -70,9 +70,9 @@ def store(tmp_path: Path):
     s.close()
 
 
-def _obar(side: str) -> OptionBar:
+def _obar(side: str, *, minute: int = 0) -> OptionBar:
     return OptionBar(
-        timestamp=datetime(2024, 3, 1, 4, 0, tzinfo=UTC),
+        timestamp=datetime(2024, 3, 1, 4, minute, tzinfo=UTC),
         open=Decimal("100.00"),
         high=Decimal("110.10"),
         low=Decimal("90.00"),
@@ -86,8 +86,13 @@ def _obar(side: str) -> OptionBar:
     )
 
 
-def _write_option_series(lake_root: Path, partition_key: str) -> None:
-    """One CE+PE bar pair via the PRODUCTION writer (real on-disk layout)."""
+def _write_option_series(lake_root: Path, partition_key: str, *, minute: int = 0) -> None:
+    """One CE+PE bar pair via the PRODUCTION writer (real on-disk layout).
+
+    *minute* offsets the pair's shared timestamp so a SECOND call can append
+    two genuinely NEW ``(side, timestamp)`` identity keys to the same month
+    partition (the keep-first sink dedups a same-key rewrite to a no-op).
+    """
     seg, sec, flag, code, offset, _typ = partition_key.split("|")
     OptionParquetWriter(lake_root=lake_root).write(
         partition_key=partition_key,
@@ -100,7 +105,7 @@ def _write_option_series(lake_root: Path, partition_key: str) -> None:
             expiry_code=int(code),
             strike_offset=offset,
         ),
-        bars=[_obar("CE"), _obar("PE")],
+        bars=[_obar("CE", minute=minute), _obar("PE", minute=minute)],
     )
 
 
@@ -308,14 +313,21 @@ class TestDbOptionsRouteCountCache:
             "click 1 = one legacy COUNT + the one-time seed scan; later clicks recount NOTHING"
         )
 
-        # A pull bumps the generation → the next click REVALIDATES instead of
-        # blindly recounting: the seeded stats shard still matches the live
-        # directory (per-request stat-token validation), so the fresh total is
-        # served from the manifest with ZERO further COUNT scans — never stale,
-        # and cheaper than the pre-manifest recount (DEC-LAKE-STATS-MANIFEST-001).
+        # A pull writes NEW bars then bumps the generation → the next click
+        # must serve the NEW total on the wire (the #1025 anti-staleness
+        # direction: a generation-ignored stale cache would still answer 2 —
+        # this assertion has teeth precisely BECAUSE the data changed across
+        # the bump, review round 7). The production writer's stats-manifest
+        # hook re-stamps the seeded shard under the partition lock, so the
+        # revalidated manifest serves the fresh total with ZERO further COUNT
+        # scans — never stale, and cheaper than the pre-manifest recount
+        # (DEC-LAKE-STATS-MANIFEST-001).
+        _write_option_series(tmp_path, "NSE_FNO|25|MONTH|1|ATM-10|CALL", minute=1)
         summary_cache.mark_dirty()
         after = client.get("/api/v1/db/options", params={"series": series, "limit": 1}).json()
-        assert after["total"] == 2
+        assert after["total"] == 4, (
+            "the bumped generation must surface the two NEW (side, timestamp) keys on the wire"
+        )
         assert execs["count"] == 2, (
             "the bumped generation must revalidate via the manifest — no recount scan"
         )

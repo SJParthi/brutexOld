@@ -2220,6 +2220,30 @@ def _stats_star_columns(
         return None
 
 
+def _stats_tokens_intact(ctx: _StatsReadContext, planned: Sequence[StatsFileRow]) -> bool:
+    """Post-query TOCTOU re-stat over the request's touched files.
+
+    Re-stats the pruned page sublist (*planned*) AND the straddler-counted
+    files (their live bounded counts fed the manifest total, so a straddler
+    replaced between its ``COUNT`` and the response must degrade too). ANY
+    moved token logs the ``stat_token_moved`` fallback clause, flips
+    ``ctx.served`` off (the whole-request degrade law), and returns ``False``
+    — the caller discards the pruned result and re-runs on the legacy path.
+    """
+    for row in (*planned, *ctx.straddlers):
+        if not file_token_matches(ctx.base / row.rel, row):
+            _LOG.info(
+                _STATS_FALLBACK_EVENT,
+                kind=ctx.kind,
+                key=dict(ctx.key),
+                clause="stat_token_moved",
+                rel=row.rel,
+            )
+            ctx.served = False
+            return False
+    return True
+
+
 def _stats_pruned_page(
     ctx: _StatsReadContext | None,
     *,
@@ -2261,7 +2285,11 @@ def _stats_pruned_page(
 
     An empty planned sublist (offset past the end / empty bounded range) skips
     the query and returns the expected columns with zero rows — byte-identical
-    to the legacy query returning no rows.
+    to the legacy query returning no rows. It still runs the SAME post-query
+    re-stat over the straddler-counted files first (review round 7): their
+    live counts fed the manifest total, so a straddler replaced between its
+    bounded ``COUNT`` and this response degrades the whole request exactly
+    like a non-empty page would.
     """
     if ctx is None or not ctx.served:
         return None
@@ -2294,6 +2322,8 @@ def _stats_pruned_page(
             return None
     planned, rebased = ctx.plan_page(descending=descending, limit=limit, offset=offset)
     if not planned:
+        if not _stats_tokens_intact(ctx, planned):
+            return None
         return (expected, [])
     paths = [str(ctx.base / row.rel) for row in planned]
     sql = f"SELECT {page_select} FROM {DEDUP_PARQUET_SOURCE_SQL}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?"  # noqa: S608  # nosec B608 - validated select + constant fragments; file list and values bound
@@ -2322,17 +2352,8 @@ def _stats_pruned_page(
         )
         ctx.served = False
         return None
-    for row in (*planned, *ctx.straddlers):
-        if not file_token_matches(ctx.base / row.rel, row):
-            _LOG.info(
-                _STATS_FALLBACK_EVENT,
-                kind=ctx.kind,
-                key=dict(ctx.key),
-                clause="stat_token_moved",
-                rel=row.rel,
-            )
-            ctx.served = False
-            return None
+    if not _stats_tokens_intact(ctx, planned):
+        return None
     return (out_columns, raw_rows)
 
 

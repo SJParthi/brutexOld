@@ -908,6 +908,35 @@ class TestToctouAndDegradeLaw:
         assert served == legacy
         assert "stat_token_moved" in _fallback_clauses(logs)
 
+    def test_empty_planned_page_still_restats_straddlers(self, conn: Any, tmp_path: Path) -> None:
+        """Review round 7 (fails-before): an offset past the in-bound total
+        plans an EMPTY file sublist, which previously returned the empty page
+        BEFORE the post-query TOCTOU re-stat — a straddler file replaced
+        between its bounded ``COUNT`` (which fed the manifest total) and the
+        response went undetected for that request. The empty planned page now
+        runs the SAME re-stat over the straddler-counted files, so the moved
+        token degrades the WHOLE request to the legacy path (total AND page
+        together — the no-wrong-pairing law, uniformly)."""
+        _write_months(tmp_path)
+        _seed_by_reading(conn, tmp_path)
+        dataset = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, _COORDS)
+        # Feb-06 → Mar-06 cuts through BOTH the Feb and Mar files (15 + 10 =
+        # 25 in-bound rows); offset=25 is past the end ⇒ plan_page → [].
+        kw: dict[str, Any] = {"start": "2024-02-06", "end": "2024-03-06", "offset": 25, "limit": 5}
+        rig = _MutatingConn(
+            conn,
+            trigger=_straddler_count_trigger,
+            side_effect=lambda: _touch(dataset / "2024" / "02.parquet"),
+            fire_after=True,
+        )
+        with capture_logs() as logs:
+            served = _q(rig, tmp_path, use=True, **kw)
+        assert rig.fired, "the rig must have touched the straddler AFTER its bounded COUNT"
+        legacy = _q(conn, tmp_path, use=False, **kw)
+        assert served == legacy
+        assert served["total"] == 25 and served["rows"] == []
+        assert "stat_token_moved" in _fallback_clauses(logs)
+
     def test_corrupt_file_mid_request_degrades_whole_request(
         self, conn: Any, tmp_path: Path
     ) -> None:
