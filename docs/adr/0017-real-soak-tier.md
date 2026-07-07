@@ -59,12 +59,20 @@ wall-clock runner:
    requested duration** (`soak_minutes + 30 + soak_minutes/6` — fixed
    install/rebuild slack plus the duration-LINEAR teardown cost, per SOAK-R7-4;
    default 360 → 450; applied at BOTH the job level and the pytest step) so it
-   can never outrun its own clock. `soak_minutes` is fenced to `1..5760` (4
-   days): a zero dispatch would fake-green a ~1 s "multi-hour" soak
-   (SOAK-R8-3), and GitHub terminates ANY self-hosted job after 5 days
-   (7200 min) of execution — the documented platform job-execution limit is the
-   binding outer bound, so the largest derived timeout that fits is
-   `5760 + 30 + 960 = 6750` (SOAK-R8-1/SEC8-2). The derivation runs as
+   can never outrun its own clock. `soak_minutes` is fenced to `1..1200`
+   (20 h): a zero dispatch would fake-green a ~1 s "multi-hour" soak
+   (SOAK-R8-3), and on a self-hosted runner the job's `GITHUB_TOKEN` can only
+   be refreshed for up to **24 hours** (documented) — every step past the 24-h
+   mark holds a dead token, so the "open issue on failure" watchdog would 401
+   and file nothing; the derived timeout `m + 30 + m/6` must therefore fit
+   under 1440 min, giving `m <= 1208` → ceiling 1200, derived timeout 1430
+   (SEC9-1 — this token bound is TIGHTER than, and supersedes as the binding
+   bound, the 5-day/7200-min platform execution kill of SOAK-R8-1/SEC8-2,
+   which had set the previous 5760 ceiling). A disk PREFLIGHT step refuses a
+   dispatch the runner disk cannot hold: the fsync'd audit JSONL grows
+   ~1.5 GiB per soak-hour (the SOAK-R7-4 measurement), so a long soak on a
+   near-full disk would burn hours then die at ENOSPC mid-run — the same
+   burn-then-die shape as the clock traps (SOAK-R9-3). The derivation runs as
    SHELL arithmetic in a tiny GitHub-hosted `plan` job whose digits-validated
    outputs feed `fromJSON(needs.plan.outputs.…)` — NOT as expression arithmetic,
    because GitHub Actions expressions have NO arithmetic operators (an
@@ -115,9 +123,15 @@ named follow-up.
 
 **Positive**
 
-* The 24h/multi-hour soak is now genuinely runnable to completion (on the
-  self-hosted tier, for the dispatched duration) — the fixed-60 trap is closed by
-  a duration-derived timeout.
+* A genuine multi-hour soak (up to 20 h per dispatch) is now runnable to
+  completion on the self-hosted tier — the fixed-60 trap is closed by a
+  duration-derived timeout. HONEST bound (SEC9-1): a single-dispatch soak
+  **longer than 20 h — including a literal 24 h run — is NOT yet possible**,
+  because the job's `GITHUB_TOKEN` expires at 24 h on self-hosted runners and
+  the end-of-job issue watchdog must still be able to authenticate; the >20 h
+  tier is blocked on the out-of-job watchdog follow-up below (which carries
+  its own fresh token and would let the fence rise back toward the 4-day
+  platform bound).
 * Whole-process RSS + fd are now HARD-gated automatically (deterministic); the
   drift LOGIC is 100%-covered on synthetic series. p99-latency-drift is
   OBSERVE-ONLY (structlog + the `brutex_soak_p99_ratio` gauge) — neither a
@@ -133,18 +147,27 @@ named follow-up.
   self-hosted job-queue limit) WITHOUT any step executing, so the in-job issue
   watchdog structurally cannot fire for a never-started run and a weekly cron
   soak on an asleep Mac dies SILENTLY, week after week — the exact §11
-  silent-death pathology, on a path no in-job step can cover. The queue-age
-  watchdog named below is the follow-up that closes this gap.
-* GitHub also terminates ANY self-hosted job after 5 days (7200 min) of
-  execution, which is why the `soak_minutes` fence caps at 5760 (4 days) — a
-  larger dispatch is structurally un-completable (SOAK-R8-1/SEC8-2).
+  silent-death pathology, on a path no in-job step can cover.
+* A run that STARTED and then LOST its runner is equally in-job-uncoverable
+  (SOAK-R9-1): if the M4-Pro sleeps, reboots or loses power mid-soak — at
+  least as plausible unattended as the never-started case — GitHub marks the
+  job failed after losing runner communication, but NO further step can
+  execute on the dead runner, so the `failure() || cancelled()` watchdog never
+  runs, no issue is filed and no Telegram fires. The out-of-job watchdog named
+  below is the follow-up that closes BOTH gaps.
+* The job's `GITHUB_TOKEN` can only be refreshed for up to 24 hours on a
+  self-hosted runner (SEC9-1) — the binding bound behind the 1200-min fence
+  (see §2); GitHub additionally terminates ANY self-hosted job after 5 days
+  (7200 min) of execution (SOAK-R8-1/SEC8-2), the outer platform bound a
+  future >20 h tier must still respect.
 
 **Honest limits (Golden Rule #10)**
 
 * This is NOT a claim that a 24h run happens in PR CI. The PR tier proves the
   drift LOGIC; the ubuntu tier is a ~5-min regression gate; only the scheduled
   self-hosted job runs the multi-hour wall-clock, and only for the dispatched
-  `soak_minutes` (default weekly = 6 h).
+  `soak_minutes` (default weekly = 6 h; max 20 h per dispatch — the SEC9-1
+  token bound, see §2 and Consequences).
 * On macOS the RSS fallback reads `ru_maxrss` (a process-lifetime PEAK), so the
   RSS rule is an absolute CEILING backstop, not a growth slope. The fd-growth
   rule is the hard-gated slope signal; `soak.p99_drift` is the drift signal but
@@ -160,12 +183,18 @@ named follow-up.
 
 **Named follow-ups (NOT built here)**
 
-* A queue-age watchdog that alerts when the self-hosted soak sits queued /
-  never ran (an unregistered/offline runner) — REQUIRED for full §11 coverage,
-  because GitHub auto-cancels a >24h-queued job with no step executing, so the
-  in-job watchdog cannot see it (SOAK-R8-2); e.g. a cheap GitHub-hosted cron
-  that checks the last `soak-selfhosted` run's conclusion and opens an issue on
-  cancelled/never-ran.
+* An OUT-OF-JOB watchdog — a cheap GitHub-hosted cron (with its own fresh
+  `GITHUB_TOKEN`) that **opens an issue whenever the last `soak-selfhosted`
+  run concluded anything but success and no tracking issue exists** — REQUIRED
+  for full §11 coverage, because THREE failure paths are structurally
+  invisible to the in-job watchdog: (a) a never-started run (GitHub
+  auto-cancels a >24h-queued job with no step executing, SOAK-R8-2); (b) a
+  started run whose runner died mid-soak (sleep/reboot/power loss — the job
+  concludes `failure` with no further step able to execute, SOAK-R9-1; note a
+  "cancelled/never-ran"-only check would MISS this path); and (c) any future
+  >20 h tier whose in-job token has expired (SEC9-1). This watchdog is ALSO
+  the prerequisite for raising the `soak_minutes` fence above 1200 back
+  toward the 4-day platform bound.
 * A Linux self-hosted soak variant (so `/proc` VmRSS current-slope RSS gating is
   available on a dedicated box, not just the macOS PEAK backstop).
 

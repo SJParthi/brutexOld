@@ -171,6 +171,20 @@ jobs:
             echo "::error::Run a real multi-hour soak via .github/workflows/soak-selfhosted.yml (soak_minutes input)." >&2
             exit 1
           fi
+          # Base-10 coercion + lower bound (SOAK-R9-2 — mirrors the soak plan
+          # fence's SOAK-R7-3 + SOAK-R8-3, the round-8 bound this COMMON
+          # pattern's sibling gained and this one missed): '0'/'00'/'0_0'
+          # passed every fence above, and test_audit_chain_sustained then
+          # appends ZERO events — verify_chain over an empty chain returns 0
+          # and the run greens: a fake-green "audit-chain stress" that
+          # stressed nothing (reproduced live). The 10# coercion also removes
+          # the leading-zero ambiguity before the -gt compare (safe — the
+          # digits fence guarantees non-empty digits).
+          ev=$((10#$ev))
+          if [ "$ev" -lt 1 ]; then
+            echo "::error::STRESS_EVENTS must be >= 1 — a zero-event dispatch fake-greens the audit-chain stress test." >&2
+            exit 1
+          fi
           if [ "$ev" -gt "$max" ]; then
             echo "::error::STRESS_EVENTS=$STRESS_EVENTS exceeds the ubuntu-tier ceiling ($max)." >&2
             echo "::error::This job's 60-min timeout cannot complete a soak-scale run." >&2

@@ -52,8 +52,12 @@ nightly ``-m stress`` tier never runs the multi-hour driver and the per-PR
 ``-m 'not soak'`` step deselects it; ONLY the self-hosted
 ``-m 'stress or soak'`` tier selects it. Because both marker tiers select BY
 MARKER, an UNMARKED stress test silently drops out of both (only the per-PR
-``-m 'not soak'`` step would still run it) — the SOAK-R7-1 drift; the
-collection pin is ``-m stress`` == everything except the long soak and
-``-m 'stress or soak'`` == the whole directory. Unit / property / integration
-runs SKIP both markers. Bench tests are separate (``tests/bench/``).
+``-m 'not soak'`` step would still run it) — the SOAK-R7-1 drift. The
+collection pin — ``-m stress`` == everything except the long soak,
+``-m 'stress or soak'`` == the whole directory — is ENFORCED per PR by
+``tests/unit/test_stress_marker_discipline.py`` (every test here must carry
+EXACTLY ONE of ``stress``/``soak``, and ``soak`` is pinned to exactly
+``test_soak_sustained``), no longer a manual verification (AL9-4). Unit /
+property / integration runs SKIP both markers. Bench tests are separate
+(``tests/bench/``).
 """
