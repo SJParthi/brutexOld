@@ -1,0 +1,132 @@
+"""Python-FFI-level pins for the u128 trade-sim kernel (DEC-TRADE-SIM-U128-KERNEL-001).
+
+``fno_math.ResidentSweepSimU128`` is the >64-bit twin of ``ResidentSweepSim``
+— both ride the ONE width-generic ``MaskWord`` core in
+``rust/fno-math/src/trade_sim.rs``. The Rust ``#[cfg(test)]`` suite covers the
+pure cores (bit 63/64/127 boundaries, the anti-drift bridge, rayon alignment,
+validation parity); this file is the complementary REAL-wheel oracle pinning
+what only the PyO3 boundary can prove:
+
+* the probe-verified ``Vec<u128>`` extraction envelope — ``2**128`` and a
+  negative int raise ``OverflowError`` at the FFI edge (bar_bits AND masks),
+  while ``2**128 - 1`` round-trips exactly;
+* the FFI-level bridge — on u64-fit inputs the installed u128 kernel emits
+  tuples identical to the installed u64 kernel's;
+* validation ``ValueError``s naming ``ResidentSweepSimU128`` (never the u64
+  sibling's label) through the wheel.
+
+HONEST envelope (Golden Rule #10): today's production vocabulary is 60 bits
+(``IMPLEMENTED_MASK = (1 << 60) - 1``), so this kernel is future headroom —
+production behaviour is unchanged and only tests (plus a future >64-bit
+vocabulary) drive it.
+"""
+
+from __future__ import annotations
+
+import fno_math
+import pytest
+
+
+def _flat_window(
+    n: int, bar_bits: list[int]
+) -> tuple[list[int], list[int], list[int], list[int], list[bool], list[int]]:
+    """One-session window: open/close 10_000, high +150, low −150, no forced bars."""
+    return (
+        [10_000] * n,
+        [10_150] * n,
+        [9_850] * n,
+        [10_000] * n,
+        [False] * n,
+        [0] * n,
+    )
+
+
+def _u128_sim(bar_bits: list[int]) -> fno_math.ResidentSweepSimU128:
+    o, h, lo, c, forced, sess = _flat_window(len(bar_bits), bar_bits)
+    return fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, bar_bits)
+
+
+class TestU128FfiExtractionEnvelope:
+    """The probe-pinned ``Vec<u128>`` edge: in-range exact, out-of-range OverflowError."""
+
+    def test_max_u128_bar_bits_and_mask_round_trip(self) -> None:
+        # 2**128 − 1 is IN envelope on both bar_bits and masks: the all-ones
+        # mask fires only on the all-ones bar (arms bar0, fills at open[1],
+        # end-of-data close at close[2] → pnl 0, holding 2).
+        sim = _u128_sim([(1 << 128) - 1, 0, 0])
+        out = sim.simulate_masks([(1 << 128) - 1], True, None, None)
+        assert out == [[(0, 150, 150, 2, 1, 2)]]
+
+    @pytest.mark.parametrize("bad", [1 << 128, -1])
+    def test_out_of_range_bar_bits_raise_overflow_error(self, bad: int) -> None:
+        o, h, lo, c, forced, sess = _flat_window(2, [0, 0])
+        with pytest.raises(OverflowError):
+            fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, [0, bad])
+
+    @pytest.mark.parametrize("bad", [1 << 128, -1])
+    def test_out_of_range_mask_raises_overflow_error(self, bad: int) -> None:
+        sim = _u128_sim([1, 0, 0])
+        with pytest.raises(OverflowError):
+            sim.simulate_masks([bad], True, None, None)
+        with pytest.raises(OverflowError):
+            sim.count_trades([bad], True, None, None)
+
+
+class TestU128WideMasksThroughTheWheel:
+    """Wide (>64-bit) masks produce real trades through the installed wheel."""
+
+    def test_bit_64_and_127_masks_fire_on_their_bars(self) -> None:
+        # bar0 carries bits 63+64 (straddles the limb boundary), bar2 bit 127.
+        sim = _u128_sim([(1 << 63) | (1 << 64), 0, 1 << 127, 0])
+        out = sim.simulate_masks([(1 << 63) | (1 << 64), 1 << 64, 1 << 127], True, None, None)
+        # Straddle + lone-bit-64 masks: bar0 is a superset of both → entry at
+        # open[1], end-of-data close at close[3] → pnl 0, holding 3.
+        assert out[0] == [(0, 150, 150, 3, 1, 3)]
+        assert out[1] == out[0]
+        # Bit-127 mask fires bar2 → entry open[3], end-of-data close close[3]
+        # (the flat window folds the same ±150 excursion on the entry bar).
+        assert out[2] == [(0, 150, 150, 1, 3, 3)]
+        assert sim.count_trades([(1 << 63) | (1 << 64), 1 << 64, 1 << 127], True, None, None) == [
+            1,
+            1,
+            1,
+        ]
+
+    def test_n_bars_getter(self) -> None:
+        assert _u128_sim([0, 0, 0, 0]).n_bars == 4
+
+
+class TestU128BridgeMatchesU64KernelAtFfi:
+    """On u64-fit inputs the two installed kernels emit identical tuples."""
+
+    def test_simulate_masks_and_count_trades_field_identical(self) -> None:
+        bar_bits = [1, 0, 1, 1 << 63, 0]
+        o, h, lo, c, forced, sess = _flat_window(5, bar_bits)
+        s64 = fno_math.ResidentSweepSim(o, h, lo, c, forced, sess, bar_bits)
+        s128 = fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, bar_bits)
+        masks = [0, 1, 1 << 63]
+        assert s64.simulate_masks(masks, True, 80, 120) == s128.simulate_masks(masks, True, 80, 120)
+        assert s64.count_trades(masks, True, 80, 120) == s128.count_trades(masks, True, 80, 120)
+
+
+class TestU128ValidationNamesTheWideClass:
+    """ValueErrors from the wide kernel name ResidentSweepSimU128 (never the u64 twin)."""
+
+    def test_length_mismatch_valueerror(self) -> None:
+        o, h, lo, c, forced, sess = _flat_window(2, [0, 0])
+        with pytest.raises(ValueError, match="ResidentSweepSimU128: column length mismatch"):
+            fno_math.ResidentSweepSimU128(o, h, lo, c, forced, sess, [0])
+
+    def test_price_out_of_range_valueerror(self) -> None:
+        ceiling = (2**63 - 1) // 8  # MAX_PRICE_PAISA — re-derived independently
+        _o, h, lo, c, forced, sess = _flat_window(2, [0, 0])
+        with pytest.raises(ValueError, match="ResidentSweepSimU128: open value"):
+            fno_math.ResidentSweepSimU128([ceiling + 1, 10_000], h, lo, c, forced, sess, [0, 0])
+
+    def test_sl_tp_out_of_range_valueerror(self) -> None:
+        ceiling = (2**63 - 1) // 8
+        sim = _u128_sim([1, 0, 0])
+        with pytest.raises(ValueError, match="ResidentSweepSimU128: sl_paisa"):
+            sim.simulate_masks([1], True, ceiling + 1, None)
+        with pytest.raises(ValueError, match="ResidentSweepSimU128: tp_paisa"):
+            sim.count_trades([1], True, None, -1)

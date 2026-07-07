@@ -16,8 +16,10 @@ Modules:
 - `weekly_anchors` — Rolling-weekly + weekly-static Fib anchors (PR-2).
 - `pivots`         — Standard Pivot Points (P, R1-R5, S1-S5 — R5/S5 added PR-2).
 - `ema`            — EMA (alpha=2/(N+1), SMA-seed at bar N-1).
-- `vwap`           — Session-anchored intraday futures VWAP state (PR-2).
-- `market_structure` — BOS/CHoCH fractal swing state (DEC-NIFTY-BOS-CHOCH-001).
+- `market_structure` — the resolved BOS/CHoCH signal container (the stateful
+  detector — and the session-anchored VWAP state — live in the shared Rust
+  `trading_core` crate, the single source since
+  DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001).
 - `day_extremes`   — Running Day High / Day Low from session open.
 - `prev_day_ohlc`  — Previous Day OHLC anchors (calendar-aware).
 - `conditions`     — Vocabulary: 52 boolean conditions per bar (TBD).
@@ -38,11 +40,7 @@ from brutex.indicators.fib_levels import (
     FibLevels,
     compute_fib_levels,
 )
-from brutex.indicators.market_structure import (
-    MarketStructureSignal,
-    MarketStructureState,
-    Trend,
-)
+from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.indicators.prev_day_ohlc import (
     DailyCandle,
@@ -51,7 +49,6 @@ from brutex.indicators.prev_day_ohlc import (
     lookup_prev_day_ohlc,
     lookup_prev_day_ohlc_series,
 )
-from brutex.indicators.vwap import VwapState
 from brutex.indicators.weekly_anchors import (
     FibAnchor,
     rolling_weekly_anchor,
@@ -71,11 +68,8 @@ __all__ = [
     "FibDirection",
     "FibLevels",
     "MarketStructureSignal",
-    "MarketStructureState",
     "PivotLevels",
     "PrevDayOHLC",
-    "Trend",
-    "VwapState",
     "alpha",
     "compute_day_extremes",
     "compute_ema",
