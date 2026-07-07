@@ -59,6 +59,7 @@ from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with
 from brutex.metrics.compute import ResultMetrics, compute_metrics, compute_metrics_from_scalars
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.ranking import MIN_TRADES, RankedCombo, passes_gates, rank_combos
+from brutex.strategies.combo import reject_unit_separator
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -855,10 +856,32 @@ def _walk_forward_run_hash(
     Binds the combo (mask + direction + TF + exit/cost/proximity params) to the
     **fold schedule** (via ``schedule_hash``) so a result is reproducible only
     against the exact layout it was scored on (Golden Rule #4). Uses the same
-    ``fno_math.blake3_hash`` primitive + canonical-JSON rules + ``\\x1f`` field
-    join as :func:`brutex.strategies.combo.combo_hash` — one hashing source of
-    truth (CLAUDE.md §11 COMMON).
+    ``fno_math.blake3_hash`` primitive + the SAME canonical-JSON kwargs
+    convention (``sort_keys`` / ``(",", ":")`` separators / ``ensure_ascii`` /
+    ``allow_nan=False``) + ``\\x1f`` field join as
+    :func:`brutex.strategies.combo.combo_hash` — deliberately PARALLEL, not
+    shared: this payload is a fixed flat dict of int/str/None built right
+    here, and routing it through the combo canonicaliser would bind this hash
+    to that module's future-float encoding convention (the rejected
+    consolidation — see DEC-RUN-IDENTITY-GUARD-PARITY-001; the equivalence is
+    tripwire-pinned in the walk-forward unit suite). ``schedule_hash`` — the
+    only injectable string token (the mode label is a module ``Final``, the
+    JSON is ASCII-escaped) — is screened through the COMMON
+    :func:`~brutex.strategies.combo.reject_unit_separator` guard; REJECT-ONLY,
+    every currently-legal input's digest is byte-unchanged (golden-pinned).
+
+    Raises
+    ------
+    ValueError
+        If ``schedule_hash`` contains the ``\\x1f`` unit-separator byte, or a
+        non-finite float is smuggled into the payload (``allow_nan=False``,
+        unreachable for the typed int/str/None fields).
     """
+    reject_unit_separator(
+        "_walk_forward_run_hash",
+        (("schedule_hash", schedule_hash),),
+        error=ValueError,
+    )
     prox = proximity if proximity is not None else ProximityParams()
     canonical = json.dumps(
         {
@@ -876,6 +899,7 @@ def _walk_forward_run_hash(
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
     )
     payload = "\x1f".join([_WALK_FORWARD_MODE_LABEL, schedule_hash, canonical])
     return fno_math.blake3_hash(payload.encode("utf-8")).hex()

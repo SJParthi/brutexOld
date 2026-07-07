@@ -921,9 +921,17 @@ def _walk_forward_schedule_hash(
     collision-resistance, two schedules then share a digest only when their
     parameters, stream shape, and every fold's ``[train_start_bar, train_end_bar,
     test_start_bar, test_end_bar]`` all match. Uses the same
-    ``fno_math.blake3_hash`` primitive and canonical-JSON rules as the combo
-    identity hash (:func:`brutex.strategies.combo.combo_hash`) — one hashing
-    source of truth (CLAUDE.md §11 COMMON).
+    ``fno_math.blake3_hash`` primitive and the SAME canonical-JSON kwargs
+    convention (``sort_keys`` / ``(",", ":")`` separators / ``ensure_ascii``
+    / ``allow_nan=False``) as the combo identity hash
+    (:func:`brutex.strategies.combo.combo_hash`) — deliberately PARALLEL, not
+    shared (the all-int payload is built right here; see
+    DEC-RUN-IDENTITY-GUARD-PARITY-001 for the rejected consolidation). The
+    ``allow_nan=False`` rider raises :class:`ValueError` on a smuggled
+    non-finite float — unreachable for the typed all-int fields, so every
+    currently-legal digest is byte-unchanged (golden-pinned). No string field
+    is joined raw here (single JSON document, no ``\\x1f`` join), so the
+    unit-separator guard has nothing to screen at this site.
     """
     payload = json.dumps(
         {
@@ -941,6 +949,7 @@ def _walk_forward_schedule_hash(
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
     )
     return fno_math.blake3_hash(payload.encode("utf-8")).hex()
 
