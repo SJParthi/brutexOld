@@ -1,0 +1,912 @@
+"""Red-team contract pins for the doctor-daily cron workflow
+(DEC-DOCTOR-DAILY-CRON-001, MIGRATION.md #1525).
+
+``.github/workflows/doctor-daily.yml`` runs the plain ``brutex doctor``
+daily at 02:00 UTC (= 07:30 IST) on a hosted runner in a hermetic empty
+envelope. These pins keep its safety properties from silently rotting:
+
+* **Trigger discipline** — cron + dispatch + a paths-filtered push smoke
+  on ``main`` ONLY; NEVER a ``pull_request`` trigger (a scheduled
+  observability contract must never gate PRs or join ci-ok); the doctor
+  JOB and the doctor/assert STEPS are unconditional and the whole step
+  ``if:`` surface is equality-pinned — a job-level (or doctor+assert
+  paired) never-true ``if:`` SKIPS the work while the run reports
+  SUCCESS, hollowing the cron with no red anywhere (empirically verified
+  to survive every other pin).
+* **Envelope honesty** — the workflow ASSERTS the 5 operator-envelope
+  checks stay SKIP-with-reason and BOTH wheel-freshness handshakes stay
+  PASS (never fake-green, never quietly hollow); the check-set contract
+  is TWO-sided: a MISSING/renamed name reds via the per-name asserts and
+  an ADDED check reds via the exact-7 row-count pin (a future check that
+  fabricates PASS against the hermetic envelope can never sail through
+  unclassified); ``--live`` (the sandbox-blind Mac kit) never runs;
+  ``BRUTEX_SKIP_WHEEL_FRESHNESS`` is never set (the wheel handshakes are
+  the cron's substantive teeth). The assert step's bash is FUNCTIONALLY
+  executed here against fixture reports (the DEC-CI-FORK-PR-HARDEN-001
+  executed-script precedent), so hollowing mutations (``exit 1`` ->
+  ``exit 0``, a ``true`` body) fail loudly instead of surviving textual
+  grep pins.
+* **Alerting** — every alert step fires on ``cancelled()`` too
+  (DEC-MUTATION-ALERT-CANCELLED-001: a job killed by its own
+  ``timeout-minutes`` reports CANCELLED, live-probed run 28748795864)
+  and BOTH arms — ``failure()`` AND ``cancelled()`` — are STEP-SCOPED
+  to the doctor/assert outcomes (bare job-scoped forms are Golden-Rule
+  #1 hazards: a post-doctor summary/upload flake OR a manual cancel of
+  the tail steps on a GREEN doctor day must never file a 'doctor is
+  RED' alarm over an all-green table); both red-path guards are pinned
+  by EXACT string equality, not substrings — a one-token ``||`` ->
+  ``&&`` mutation was empirically verified to hollow the entire alert
+  channel while every substring pin stayed green; the tracking issue
+  title is STABLE (SHA-free) AND byte-identical between the filer and
+  the closer (the exact-title find is the other half of the dedupe key
+  — a one-sided title edit would break close-on-green forever); red
+  days fold into ONE open issue via ``createComment`` and a green day
+  closes it; the dedupe query's ``state: 'open'`` arm is pinned textually
+  AND functionally (a verified-surviving ``state: 'all'`` mutation would
+  match the CLOSED prior-episode issue via the stable title, muting the
+  channel); an EMPTY report (``tee`` pre-creates the file, so a
+  timeout-kill mid-doctor leaves it existing but empty) reads as
+  'doctor output unavailable' in both the filer and the step summary,
+  never an empty code fence; BOTH issue-lifecycle steps AND the Telegram step are
+  ref-gated to ``refs/heads/main`` (the issue is repo-global state
+  while concurrency serializes only per-ref, and a red branch
+  ``workflow_dispatch`` — the natural debug move while main is red —
+  must never ping the operator with a message indistinguishable from
+  the main daily alarm); the Telegram step degrades gracefully when its
+  secrets are unset and can NEVER fail the job.
+* **Token hygiene** — checkout sets ``persist-credentials: false``
+  (DEC-CI-FORK-PR-HARDEN-001 convention): the job's ``issues: write``
+  GITHUB_TOKEN must never land in ``.git/config`` under the third-party
+  pip/cargo build surface the later steps execute.
+
+YAML-parse meta-tests plus THREE functional harnesses — no network, no
+``brutex`` import (zero coverage-gate impact: ``--cov=brutex`` measures
+the package only):
+
+* a subprocess-executed bash harness for the ASSERT step;
+* a node-executed harness for BOTH ``actions/github-script`` bodies
+  (filer + closer), run against a stubbed ``github``/``context``/``core``
+  (the DEC-CI-FORK-PR-HARDEN-001 executed-script precedent + the
+  node-executed ``bx-format.js`` golden of #1510) — empirically-verified
+  surviving mutations (filer ``if (open)`` inverted, closer
+  ``if (!open) return;`` inverted) hollow the issue lifecycle while every
+  textual pin stays green, so the branch logic is executed, not grepped;
+* a subprocess-executed bash harness for the TELEGRAM step with a stub
+  ``curl`` on PATH — deleting the send left the step a silent no-op while
+  the ``exit 0``/``||`` substring pins stayed satisfied.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DOCTOR_DAILY_YML = REPO_ROOT / ".github" / "workflows" / "doctor-daily.yml"
+
+# The ONE red-path alert guard, pinned by EXACT equality (mirroring the
+# closer's existing equality pin). Substring pins alone were empirically
+# mutation-vulnerable: rewriting `(failure() || cancelled()) && (...)` to
+# `(failure() && cancelled()) && (...)` — one token — keeps every
+# substring assert green while failure() and cancelled() are mutually
+# exclusive job states, so NO alert would EVER fire. Any future guard
+# refinement must red this pin and be reclassified consciously. BOTH arms
+# are step-scoped (a manual cancel AFTER a green doctor+assert is not a
+# doctor verdict) and the guard is main-ref-gated (a red branch dispatch
+# must never masquerade as the main daily alarm).
+RED_ALERT_GUARD = (
+    "((failure() || cancelled()) && "
+    "(steps.doctor.outcome != 'success' || steps.assert.outcome != 'success')) "
+    "&& github.ref == 'refs/heads/main'"
+)
+
+# The stable dedupe-key title, byte-identical in the filer AND the closer.
+ISSUE_TITLE = "doctor-daily: brutex doctor is RED"
+
+# The EXACT step-`if:` classification (step name -> guard). Mirrors the
+# RED_ALERT_GUARD equality-pin pattern: any future conditional anywhere in
+# the job must red this map and be reclassified consciously. Steps absent
+# from this map — crucially the doctor + assert steps — must carry NO `if:`.
+EXPECTED_STEP_IF = {
+    "Publish run summary (envelope-honest)": "always()",
+    "Upload doctor report": "always()",
+    "Telegram alert on red (best-effort — NEVER fails the job)": RED_ALERT_GUARD,
+    "File or update the single doctor-daily tracking issue": RED_ALERT_GUARD,
+    "Close the tracking issue on recovery": ("success() && github.ref == 'refs/heads/main'"),
+}
+
+EXPECTED_STATUSES = {
+    "audit_chain": "SKIP",
+    "runtime_file": "SKIP",
+    "audit_replay": "SKIP",
+    "derived_freshness": "SKIP",
+    "lake_uniqueness": "SKIP",
+    "wheel_freshness": "PASS",
+    "wheel_freshness_fno_math": "PASS",
+}
+
+
+def _load() -> dict[Any, Any]:
+    """Parse the workflow YAML into a mapping.
+
+    Keyed ``dict[Any, Any]`` because YAML 1.1 parses a bare ``on:`` key
+    as the boolean ``True`` (same handling as the redteam siblings).
+    """
+    data = yaml.safe_load(DOCTOR_DAILY_YML.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    return data
+
+
+def _raw() -> str:
+    """Return the raw workflow file text."""
+    return DOCTOR_DAILY_YML.read_text(encoding="utf-8")
+
+
+def _on(data: dict[Any, Any]) -> dict[str, Any]:
+    """Return the trigger mapping (YAML 1.1 parses a bare ``on:`` as True)."""
+    triggers = data.get("on", data.get(True))
+    assert isinstance(triggers, dict), "workflow has no trigger mapping"
+    return triggers
+
+
+def _job(data: dict[Any, Any]) -> dict[str, Any]:
+    """Return the single doctor job mapping."""
+    jobs = data["jobs"]
+    assert isinstance(jobs, dict) and list(jobs) == ["doctor"], (
+        "doctor-daily must hold exactly the one 'doctor' job"
+    )
+    job = jobs["doctor"]
+    assert isinstance(job, dict)
+    return job
+
+
+def _steps(data: dict[Any, Any]) -> list[dict[str, Any]]:
+    """Return the doctor job's step list."""
+    steps = _job(data)["steps"]
+    assert isinstance(steps, list) and steps
+    return [s for s in steps if isinstance(s, dict)]
+
+
+def _doctor_step(data: dict[Any, Any]) -> dict[str, Any]:
+    """Return the step whose run script invokes ``brutex doctor``."""
+    for step in _steps(data):
+        run = step.get("run")
+        if isinstance(run, str) and "brutex doctor" in run:
+            return step
+    raise AssertionError("no step runs `brutex doctor`")
+
+
+def _alert_steps(data: dict[Any, Any]) -> list[dict[str, Any]]:
+    """Return the red-path alert steps (Telegram + issue filer)."""
+    alerts = [s for s in _steps(data) if "failure()" in str(s.get("if", ""))]
+    assert len(alerts) == 2, "expected exactly the Telegram + issue alert steps"
+    return alerts
+
+
+def test_workflow_exists_and_parses() -> None:
+    """The workflow file exists and is valid YAML with the doctor job."""
+    assert DOCTOR_DAILY_YML.exists(), "doctor-daily.yml is missing"
+    data = _load()
+    assert data["name"] == "doctor-daily"
+    assert _job(data)["runs-on"] == "ubuntu-24.04"
+
+
+def test_cron_is_0730_ist_plus_dispatch() -> None:
+    """Schedule fires 02:00 UTC (= 07:30 IST, no DST) + manual dispatch."""
+    triggers = _on(_load())
+    schedule = triggers["schedule"]
+    assert schedule == [{"cron": "0 2 * * *"}]
+    assert "workflow_dispatch" in triggers
+    # The IST translation must stay documented next to the cron.
+    assert "07:30 IST" in _raw()
+
+
+def test_no_pull_request_trigger_and_scoped_push() -> None:
+    """NEVER a pull_request trigger; the push smoke stays paths-filtered.
+
+    This workflow must never gate a PR (an offline-day red would wedge
+    mergeable state and it must never join ci-ok). The push trigger is
+    ONLY the nightly-sibling smoke: main-only, owned paths only.
+    """
+    triggers = _on(_load())
+    assert "pull_request" not in triggers
+    assert "pull_request_target" not in triggers
+    # The push smoke is a HARD part of the trigger contract (deleting it
+    # would defer a broken doctor-daily.yml / doctor.py merged to main to
+    # the next 02:00 UTC cron — up to ~24h of undetected red).
+    push = triggers["push"]
+    assert push["branches"] == ["main"]
+    assert set(push["paths"]) == {
+        ".github/workflows/doctor-daily.yml",
+        "brutex/doctor.py",
+    }
+
+
+def test_permissions_minimal() -> None:
+    """contents: read + issues: write and nothing else."""
+    permissions = _load()["permissions"]
+    assert permissions == {"contents": "read", "issues": "write"}
+
+
+def test_checkout_never_persists_credentials() -> None:
+    """Checkout must set persist-credentials: false.
+
+    DEC-CI-FORK-PR-HARDEN-001 convention (pre-merge-gate.yml,
+    auto-merge.yml): the default ``persist-credentials: true`` writes the
+    job's ``issues: write`` GITHUB_TOKEN into ``.git/config``, where the
+    third-party build surface the later steps execute (PyPI build
+    backends, cargo build.rs/proc-macros) could read it and tamper with
+    the very alerting channel this workflow provides. Nothing here uses
+    git credentials after checkout, so the hardened form is free.
+    """
+    checkouts = [
+        s for s in _steps(_load()) if str(s.get("uses", "")).startswith("actions/checkout")
+    ]
+    assert checkouts, "the doctor job must have a checkout step"
+    for step in checkouts:
+        assert step.get("with", {}).get("persist-credentials") is False
+
+
+def test_concurrency_never_cancels_in_flight() -> None:
+    """cancel-in-progress false + the EXACT per-ref group value.
+
+    The group must be pinned exactly: the issue-lifecycle safety argument
+    (main-ref-gated find-then-create is genuinely serialized) leans on
+    every main run sharing the ONE ``doctor-daily-refs/heads/main``
+    group. A per-run group (e.g. ``doctor-daily-${{ github.run_id }}``)
+    would keep the substring pin green while giving ZERO serialization —
+    two concurrent red main runs could both pass the listForRepo dedupe
+    and mint two same-titled 'critical' issues.
+    """
+    concurrency = _load()["concurrency"]
+    assert concurrency["cancel-in-progress"] is False
+    assert concurrency["group"] == "doctor-daily-${{ github.ref }}"
+
+
+def test_job_timeout_bounded() -> None:
+    """The job carries an honest bounded timeout."""
+    timeout = _job(_load())["timeout-minutes"]
+    assert isinstance(timeout, int)
+    assert 15 <= timeout <= 60
+
+
+def test_job_unconditional_and_step_if_set_pinned_exactly() -> None:
+    """No job-level ``if:``; the set of steps carrying ``if:`` is EXACT.
+
+    Empirically verified before this pin: inserting a job-level
+    ``if: github.event_name != 'schedule'`` (or any never-true guard,
+    e.g. ``if: false``) survived every other test — a SKIPPED job reports
+    the workflow run as SUCCESS, so the daily 07:30 IST doctor silently
+    never runs, NO red appears in the Actions tab, the red-path guards
+    never fire, and the tracking-issue channel stays mute — functionally
+    identical to deleting ``schedule:`` (which IS pinned) yet invisible
+    to every other pin. The paired variant (the same ``if:`` on the
+    doctor + assert steps) is worse: the job completes GREEN,
+    ``success()`` is true, and the closer would actively CLOSE a genuine
+    open 'critical' alarm every day. With 'alert if missed' an honest
+    NON-goal (MIGRATION #1525), nothing else detects this class, so the
+    whole ``if:`` surface is equality-pinned.
+    """
+    data = _load()
+    assert "if" not in _job(data), "the doctor job must be unconditional"
+    if_map = {str(step.get("name")): str(step["if"]) for step in _steps(data) if "if" in step}
+    assert if_map == EXPECTED_STEP_IF, (
+        "the step `if:` set drifted from the pinned classification — any new "
+        "conditional (especially on the doctor/assert steps, which must stay "
+        "unconditional) must be reclassified here consciously"
+    )
+
+
+def test_doctor_step_has_own_timeout() -> None:
+    """The doctor step is step-bounded, bash, and pipefail-guarded.
+
+    Step timeout = step FAILURE (alertable); pipefail because GitHub's
+    default ``bash -e`` lacks it and ``tee`` would mask the doctor's
+    exit 1 otherwise.
+    """
+    step = _doctor_step(_load())
+    assert step["timeout-minutes"] == 5
+    assert step["shell"] == "bash"
+    assert "set -o pipefail" in step["run"]
+
+
+def test_doctor_is_hermetic_and_never_live() -> None:
+    """Plain doctor only: hermetic paths, no --live, no wheel-check skip."""
+    data = _load()
+    step = _doctor_step(data)
+    run = step["run"]
+    assert "--live" not in run, "doctor --live is sandbox-blind — never in CI"
+    assert "--audit-dir" in run
+    assert "--runtime-file" in run
+    # The hermetic lake root is injected so both lake checks SKIP
+    # deterministically regardless of runner-image residue.
+    assert "BRUTEX_LAKE_ROOT" in str(step.get("env", {}))
+    assert "BRUTEX_LAKE_ROOT" in str(_steps(data))
+    # The wheel handshakes are the cron's teeth — the skip env var must
+    # never be SET (as an env key or a shell export; the workflow's own
+    # comment naming it is fine).
+    raw = _raw()
+    assert "BRUTEX_SKIP_WHEEL_FRESHNESS:" not in raw
+    assert "BRUTEX_SKIP_WHEEL_FRESHNESS=" not in raw
+    for wf_step in _steps(data):
+        assert "BRUTEX_SKIP_WHEEL_FRESHNESS" not in str(wf_step.get("env", {}))
+
+
+def test_both_wheels_installed() -> None:
+    """brutex.cli hard-requires both PyO3 wheels at import."""
+    raw = _raw()
+    assert "pip install ./rust/fno-math" in raw
+    assert "pip install ./rust/trading-core" in raw
+
+
+def test_envelope_honesty_contract_asserted() -> None:
+    """All 7 check verdicts are pinned: 5 SKIP-with-reason + 2 PASS.
+
+    Plus the TWO-sided check-set pin: the per-name asserts red a
+    REMOVED/RENAMED check, and the exact-7 row-count pin reds an ADDED
+    one (functionally proven by
+    ``test_assert_step_reds_an_added_unclassified_check``).
+    """
+    run = _assert_step_run()
+    for name, want in EXPECTED_STATUSES.items():
+        assert f"assert_status {name} {want}" in run, (
+            f"envelope contract line for {name} -> {want} is missing"
+        )
+    assert '"$n" -ne 7' in run, "the exact-7 check-row count pin is missing"
+
+
+# ---------------------------------------------------------------------------
+# Functional teeth for the assert step (DEC-CI-FORK-PR-HARDEN-001 precedent:
+# execute the REAL script, don't just grep for its invocation lines). A
+# hollowing mutation — `exit 1` -> `exit 0`, an appended `|| true`, a `true`
+# body — survives every textual pin but fails these subprocess runs.
+# ---------------------------------------------------------------------------
+
+# Mirrors DoctorReport.format()'s status -> glyph map (brutex/doctor.py).
+_STATUS_GLYPH = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏸", "WARN": "⚠️"}
+
+
+def _assert_step_run() -> str:
+    """Return the envelope-honesty assert step's real run script."""
+    step = next(s for s in _steps(_load()) if "assert_status" in str(s.get("run", "")))
+    run = step["run"]
+    assert isinstance(run, str)
+    return run
+
+
+def _render_report(statuses: dict[str, str]) -> str:
+    """Render a fixture report in the exact DoctorReport.format() shape.
+
+    Line shape: ``<glyph> <name:20s> <status:5s> <detail>`` — awk $2 is
+    the check name and $3 the status, exactly what the workflow parses.
+    """
+    lines = ["brutex doctor — health check report", "=" * 40]
+    for name, status in statuses.items():
+        lines.append(f"{_STATUS_GLYPH[status]} {name:20s} {status:5s} fixture detail text")
+    lines.append("=" * 40)
+    lines.append("OVERALL: ✅ PASS")
+    return "\n".join(lines) + "\n"
+
+
+def _run_assert_step(tmp_path: Path, statuses: dict[str, str]) -> int:
+    """Execute the assert step's real bash against a fixture report."""
+    (tmp_path / "doctor-report.txt").write_text(_render_report(statuses), encoding="utf-8")
+    # Executes the repo's OWN workflow bash (nothing attacker-controlled).
+    proc = subprocess.run(
+        ["bash", "-c", _assert_step_run()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode
+
+
+def test_assert_step_greens_the_expected_hermetic_report(tmp_path: Path) -> None:
+    """The shipped assert bash exits 0 on the exact expected report."""
+    assert _run_assert_step(tmp_path, dict(EXPECTED_STATUSES)) == 0
+
+
+def test_assert_step_reds_a_fabricated_envelope_pass(tmp_path: Path) -> None:
+    """A PASS on an operator-envelope check in CI is a fabricated verdict."""
+    statuses = dict(EXPECTED_STATUSES)
+    statuses["audit_chain"] = "PASS"
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
+def test_assert_step_reds_a_warn_wheel_handshake(tmp_path: Path) -> None:
+    """A WARN wheel handshake means the run proved nothing -> red."""
+    statuses = dict(EXPECTED_STATUSES)
+    statuses["wheel_freshness_fno_math"] = "WARN"
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
+def test_assert_step_reds_a_missing_check_name(tmp_path: Path) -> None:
+    """A missing check name means the doctor check set changed -> red."""
+    statuses = dict(EXPECTED_STATUSES)
+    del statuses["wheel_freshness"]
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
+def test_assert_step_reds_an_added_unclassified_check(tmp_path: Path) -> None:
+    """An ADDED check reds too — the check-set contract is two-sided.
+
+    A future check appended to ``run_doctor()`` that fabricates PASS (or
+    quietly SKIPs, hiding hollowed teeth) against the hermetic hosted
+    envelope is the exact class the assert step exists to catch; without
+    the row-count pin it would sail through green because the per-name
+    asserts only query the 7 listed names.
+    """
+    statuses = dict(EXPECTED_STATUSES)
+    statuses["vendor_reachability"] = "PASS"
+    assert _run_assert_step(tmp_path, statuses) == 1
+
+
+def test_summary_step_treats_empty_report_as_unavailable() -> None:
+    """The step summary embeds the report only when NON-empty (``-s``).
+
+    The bash twin of the filer's empty-report guard: ``tee`` pre-creates
+    doctor-report.txt, so ``-f`` is true even after a timeout-kill
+    mid-doctor and the summary would render an empty code fence instead
+    of the honest unavailable line.
+    """
+    summary = next(s for s in _steps(_load()) if "GITHUB_STEP_SUMMARY" in str(s.get("run", "")))
+    run = summary["run"]
+    assert isinstance(run, str)
+    assert "[ -s doctor-report.txt ]" in run, "summary must test NON-empty, not mere existence"
+    assert "[ -f doctor-report.txt ]" not in run
+    assert "doctor output unavailable" in run
+
+
+def test_alert_steps_fire_on_cancelled() -> None:
+    """Every alert step's guard includes cancelled().
+
+    DEC-MUTATION-ALERT-CANCELLED-001: a job killed by its own
+    ``timeout-minutes`` reports CANCELLED, not FAILED — an alert guard
+    of bare ``failure()`` dies silently on a timeout-kill.
+    """
+    for step in _alert_steps(_load()):
+        assert "cancelled()" in str(step["if"])
+
+
+def test_alert_guards_are_step_scoped_to_doctor_and_assert() -> None:
+    """Both red-path guards equal RED_ALERT_GUARD exactly — never bare forms.
+
+    Bare ``failure()`` is JOB-scoped: a transient post-doctor infra
+    failure (summary write / artifact upload — a real recurring GHA
+    failure mode) on a GREEN doctor day would file/extend the
+    'brutex doctor is RED' critical issue whose own body shows an
+    all-green report table — an alarm overclaiming a doctor verdict the
+    run never produced (Golden Rule #1). Bare ``cancelled()`` is
+    job-scoped the same way: a manual cancel of the summary/upload tail
+    AFTER a green doctor+assert is not a doctor verdict either. Both
+    arms therefore key on the doctor/assert outcomes (``!= 'success'``
+    also covers a setup/bootstrap failure — the doctor step is then
+    SKIPPED — and a timeout-kill mid-doctor — outcome 'cancelled').
+
+    EXACT-equality pin (not substrings): a one-token ``||`` -> ``&&``
+    guard mutation was empirically verified to pass every substring
+    assert while disabling ALL red alerting (failure() and cancelled()
+    are effectively mutually exclusive), as does a ``false && (...)``
+    prefix. The closer already carries the same equality-pin pattern.
+    """
+    data = _load()
+    assert _doctor_step(data).get("id") == "doctor"
+    assert_step = next(s for s in _steps(data) if "assert_status" in str(s.get("run", "")))
+    assert assert_step.get("id") == "assert"
+    for step in _alert_steps(data):
+        assert step["if"] == RED_ALERT_GUARD, (
+            "red-path alert guard drifted from the pinned expression — any "
+            "refinement must be reclassified here consciously"
+        )
+
+
+def test_issue_title_stable_and_lifecycle_wired() -> None:
+    """SHA-free stable title, filer==closer title, dedupe + close-on-green."""
+    raw = _raw()
+    title_lines = [ln for ln in raw.splitlines() if "const title" in ln]
+    assert len(title_lines) == 2, "filer + closer must each define the title constant"
+    for line in title_lines:
+        assert "context.sha" not in line, (
+            "a per-SHA title mints one issue per red day — title must be stable"
+        )
+    # Pin the dedupe KEY's other half end-to-end, mirroring the labels-filter
+    # count pin below: the closer finds the filer-created issue by EXACT
+    # title match, so the two duplicated `const title` literals must stay
+    # byte-identical — a one-sided edit (empirically verified to pass every
+    # other pin) would leave the open 'critical' alarm never auto-closed on
+    # green, silently breaking the issue body's own 'a green day auto-closes
+    # it' promise (Golden Rule #1).
+    titles = re.findall(r"const title = '([^']*)';", raw)
+    assert len(titles) == 2, "filer + closer must each define exactly one title constant"
+    assert set(titles) == {ISSUE_TITLE}, (
+        "filer and closer title constants must both equal the pinned stable "
+        "title byte-for-byte — a divergent closer title breaks close-on-green "
+        "forever"
+    )
+    assert "createComment" in raw, "repeat reds must fold into one issue"
+    # Pin the dedupe QUERY end-to-end: both lifecycle steps must list with
+    # the SAME label filter, and the created issue must carry a superset of
+    # those labels so the query can find it (a drifted filter would mint a
+    # new 'critical' issue every red day and never auto-close any of them).
+    assert raw.count("labels: 'bug,doctor',") == 2, (
+        "filer + closer must both query with the labels: 'bug,doctor' filter"
+    )
+    # The dedupe query's THIRD arm: state must be 'open' in BOTH steps. An
+    # empirically-verified surviving mutation flipped it to state: 'all' —
+    # because the title is deliberately STABLE across episodes, a later red
+    # day would then find the CLOSED prior-episode issue by exact title and
+    # post 'Still red' comments onto a closed issue instead of opening a
+    # fresh 'critical' alarm (episode semantics broken, primary channel
+    # muted), and the closer would comment/re-close it on every green day.
+    assert raw.count("state: 'open',") == 2, (
+        "filer + closer must both query with state: 'open' — 'all' would "
+        "match the CLOSED prior-episode issue via the stable title"
+    )
+    assert "labels: ['bug', 'doctor', 'critical']," in raw, (
+        "the created issue's labels must be a superset of the query filter"
+    )
+    assert "state: 'closed'" in raw, "a green day must close the tracking issue"
+    close_step = next(
+        s for s in _steps(_load()) if "state: 'closed'" in str(s.get("with", {}).get("script", ""))
+    )
+    assert close_step["if"] == "success() && github.ref == 'refs/heads/main'"
+
+
+def test_issue_lifecycle_is_main_ref_gated() -> None:
+    """Both issue-lifecycle steps only run on refs/heads/main.
+
+    The tracking issue is repo-global mutable state keyed by a STABLE
+    title, but the concurrency group serializes only per-ref. Ungated, a
+    GREEN branch ``workflow_dispatch`` (the natural debug move while main
+    is red) would falsely close the live main 'critical' alarm, and a RED
+    branch dispatch racing a red main run could pass the find-then-create
+    dedupe twice and mint two same-titled issues. The main-ref gate puts
+    every issue-touching run in the ONE main concurrency group.
+    """
+    issue_steps = [
+        s for s in _steps(_load()) if "listForRepo" in str(s.get("with", {}).get("script", ""))
+    ]
+    assert len(issue_steps) == 2, "expected exactly the filer + closer issue steps"
+    for step in issue_steps:
+        assert "github.ref == 'refs/heads/main'" in str(step["if"])
+
+
+def test_telegram_degrades_gracefully() -> None:
+    """Unset secrets => notice + exit 0; send failure non-fatal; env-mapped."""
+    data = _load()
+    telegram = next(s for s in _steps(data) if "TG_TOKEN" in str(s.get("env", {})))
+    env = telegram["env"]
+    assert "secrets.BRUTEX_TELEGRAM_BOT_TOKEN" in env["TG_TOKEN"]
+    assert "secrets.BRUTEX_TELEGRAM_CHAT_ID" in env["TG_CHAT"]
+    run = telegram["run"]
+    assert "exit 0" in run, "missing-secret path must exit 0"
+    assert "||" in run, "a failed send must be non-fatal"
+    # `secrets.*` must never appear in an `if:` (unreliable there — route
+    # through env), and the step must fire on the red path.
+    for step in _steps(data):
+        assert "secrets." not in str(step.get("if", ""))
+    assert "cancelled()" in str(telegram["if"])
+    # MAIN-REF-GATED like the issue steps: a red branch workflow_dispatch
+    # (the natural debug move while main is red) must never ping the
+    # operator with a message indistinguishable from the main daily alarm.
+    assert "github.ref == 'refs/heads/main'" in str(telegram["if"])
+
+
+# ---------------------------------------------------------------------------
+# Functional teeth for the two actions/github-script bodies (filer + closer).
+# DEC-CI-FORK-PR-HARDEN-001 precedent (execute the REAL script against stubs)
+# + the node-executed bx-format.js golden (#1510). Empirically-verified
+# surviving mutations these kill: (a) filer `if (open)` -> `if (!open)` — the
+# FIRST red day files NOTHING (createComment on undefined `.number` throws,
+# swallowed into a core.warning) and every later red day mints a DUPLICATE
+# same-titled 'critical' issue; (b) closer `if (!open) return;` ->
+# `if (open) return;` — close-on-green broken forever, the exact stale-alarm
+# hazard (Golden Rule #1), while the `createComment`/`state: 'closed'`
+# substring pins stay green on the dead literals.
+# ---------------------------------------------------------------------------
+
+# Runs a github-script body the way actions/github-script does (an async
+# function body with `github`/`context`/`core`/`require` in scope, so a bare
+# top-level `return` is legal), records every issues.* call, and prints the
+# call log + core.warning log as JSON. Stub-only — no network, no token.
+_GITHUB_SCRIPT_HARNESS = """
+'use strict';
+const scriptBody = process.argv[1];
+const fixture = JSON.parse(process.argv[2]);
+const calls = [];
+const record = (name) => async (args) => { calls.push({ name, args }); return {}; };
+const github = { rest: { issues: {
+  listForRepo: async (args) => {
+    calls.push({ name: 'listForRepo', args });
+    return { data: fixture.issues };
+  },
+  create: record('create'),
+  createComment: record('createComment'),
+  update: record('update'),
+} } };
+const context = {
+  serverUrl: 'https://github.example',
+  repo: { owner: 'SJParthi', repo: 'bruteX' },
+  runId: 123,
+  sha: 'deadbeefcafe',
+  eventName: 'schedule',
+};
+const warnings = [];
+const core = { warning: (m) => warnings.push(String(m)) };
+const fn = new Function(
+  'github', 'context', 'core', 'require',
+  'return (async () => {\\n' + scriptBody + '\\n})();'
+);
+fn(github, context, core, require).then(() => {
+  process.stdout.write(JSON.stringify({ calls, warnings }));
+}).catch((e) => { process.stderr.write(String(e)); process.exit(1); });
+"""
+
+requires_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+
+
+def _lifecycle_script(marker: str) -> str:
+    """Return the github-script body whose text contains ``marker``."""
+    for step in _steps(_load()):
+        script = step.get("with", {}).get("script", "")
+        if isinstance(script, str) and marker in script:
+            return script
+    raise AssertionError(f"no github-script step contains {marker!r}")
+
+
+def _filer_script() -> str:
+    """The file-or-update tracking-issue script body."""
+    return _lifecycle_script("issues.create(")
+
+
+def _closer_script() -> str:
+    """The close-on-recovery script body."""
+    return _lifecycle_script("state: 'closed'")
+
+
+def _run_lifecycle_script(
+    tmp_path: Path, script_body: str, issues: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Node-execute a github-script body against the stubbed API fixture."""
+    proc = subprocess.run(  # nosec B603 — fixed argv, repo-owned script, test-only
+        ["node", "-e", _GITHUB_SCRIPT_HARNESS, script_body, json.dumps({"issues": issues})],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"harness failed: {proc.stderr}"
+    result = json.loads(proc.stdout)
+    assert isinstance(result, dict)
+    return result
+
+
+def _calls(result: dict[str, Any], name: str) -> list[dict[str, Any]]:
+    """Return the recorded calls to the named issues.* method."""
+    return [c["args"] for c in result["calls"] if c["name"] == name]
+
+
+def _assert_open_dedupe_query(result: dict[str, Any]) -> None:
+    """Every recorded listForRepo call carries the full 3-arm dedupe query.
+
+    The functional twin of the ``state: 'open',`` textual pin: the stub
+    returns the fixture issues regardless of args, so without inspecting
+    the RECORDED query args a ``state: 'all'`` mutation (empirically
+    verified to survive) would keep every lifecycle test green while
+    matching CLOSED prior-episode issues via the stable title.
+    """
+    queries = _calls(result, "listForRepo")
+    assert queries, "the lifecycle script must query for the tracking issue"
+    for args in queries:
+        assert args["state"] == "open", "the dedupe query must filter to OPEN issues only"
+        assert args["labels"] == "bug,doctor"
+
+
+# An open same-labelled issue with a DIFFERENT title: the dedupe/close key is
+# the exact stable title, so this distractor must never be commented/closed.
+_DISTRACTOR_ISSUE = {"number": 7, "title": "doctor-daily: some other thread"}
+_OPEN_TRACKING_ISSUE = {"number": 42, "title": ISSUE_TITLE}
+
+
+@requires_node
+def test_filer_creates_the_pinned_issue_when_none_open(tmp_path: Path) -> None:
+    """First red day: exactly one create with the pinned title/labels.
+
+    Kills the empirically-verified surviving `if (open)` -> `if (!open)`
+    inversion: inverted, this case throws inside the try (createComment on
+    undefined `.number`), swallows the error into a core.warning, and
+    files NOTHING on the first red day.
+    """
+    (tmp_path / "doctor-report.txt").write_text("FIXTURE TABLE\n", encoding="utf-8")
+    result = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    _assert_open_dedupe_query(result)
+    creates = _calls(result, "create")
+    assert len(creates) == 1, "the first red day must file exactly one issue"
+    assert creates[0]["title"] == ISSUE_TITLE
+    assert creates[0]["labels"] == ["bug", "doctor", "critical"]
+    assert "FIXTURE TABLE" in creates[0]["body"], "the doctor report must be threaded in"
+    assert _calls(result, "createComment") == []
+    assert _calls(result, "update") == []
+    assert result["warnings"] == [], "the happy path must not swallow an error"
+
+
+@requires_node
+def test_filer_treats_empty_or_missing_report_as_unavailable(tmp_path: Path) -> None:
+    """A timeout-kill mid-doctor leaves an EMPTY report — never an empty fence.
+
+    ``tee`` CREATES doctor-report.txt at pipeline start while the doctor
+    prints its whole report in ONE write at process end, so the
+    DEC-MUTATION-ALERT-CANCELLED-001 timeout-kill/cancel class leaves the
+    file EXISTING but EMPTY; a fallback keyed only on a readFileSync
+    THROW embeds a bare empty code fence in the 'critical' issue instead
+    of the honest unavailable note. Both the empty-file AND the no-file
+    case must carry the fallback text.
+    """
+    (tmp_path / "doctor-report.txt").write_text("   \n", encoding="utf-8")
+    empty_file = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    (tmp_path / "doctor-report.txt").unlink()
+    missing_file = _run_lifecycle_script(tmp_path, _filer_script(), [_DISTRACTOR_ISSUE])
+    for result in (empty_file, missing_file):
+        creates = _calls(result, "create")
+        assert len(creates) == 1
+        assert "doctor output unavailable" in creates[0]["body"], (
+            "an empty/missing report must read as unavailable, never an empty fence"
+        )
+        assert result["warnings"] == []
+
+
+@requires_node
+def test_filer_folds_a_repeat_red_into_the_open_issue(tmp_path: Path) -> None:
+    """Repeat red day: one createComment on the open issue, NO duplicate."""
+    result = _run_lifecycle_script(
+        tmp_path, _filer_script(), [_DISTRACTOR_ISSUE, _OPEN_TRACKING_ISSUE]
+    )
+    _assert_open_dedupe_query(result)
+    comments = _calls(result, "createComment")
+    assert len(comments) == 1, "a repeat red must fold into the ONE open issue"
+    assert comments[0]["issue_number"] == 42, "the comment must land on the exact-title match"
+    assert comments[0]["body"].startswith("Still red:")
+    assert _calls(result, "create") == [], "a repeat red must never mint a duplicate issue"
+    assert _calls(result, "update") == []
+    assert result["warnings"] == []
+
+
+@requires_node
+def test_closer_comments_and_closes_the_open_issue(tmp_path: Path) -> None:
+    """Green with an open alarm: recovery comment + state closed.
+
+    Kills the empirically-verified surviving `if (!open) return;` ->
+    `if (open) return;` inversion, which breaks close-on-green forever
+    (the stale open 'critical' alarm — the exact Golden-Rule-#1 hazard
+    this step exists to prevent) while the substring pins stay green.
+    """
+    result = _run_lifecycle_script(
+        tmp_path, _closer_script(), [_DISTRACTOR_ISSUE, _OPEN_TRACKING_ISSUE]
+    )
+    _assert_open_dedupe_query(result)
+    comments = _calls(result, "createComment")
+    assert len(comments) == 1
+    assert comments[0]["issue_number"] == 42
+    assert "Recovered" in comments[0]["body"]
+    updates = _calls(result, "update")
+    assert len(updates) == 1, "a green day must close the tracking issue"
+    assert updates[0]["issue_number"] == 42
+    assert updates[0]["state"] == "closed"
+    assert result["warnings"] == []
+
+
+@requires_node
+def test_closer_is_a_noop_when_no_tracking_issue_open(tmp_path: Path) -> None:
+    """Green with no open alarm: list only — never comment/close/create."""
+    result = _run_lifecycle_script(tmp_path, _closer_script(), [_DISTRACTOR_ISSUE])
+    _assert_open_dedupe_query(result)
+    assert _calls(result, "createComment") == []
+    assert _calls(result, "update") == []
+    assert _calls(result, "create") == []
+    assert result["warnings"] == [], "the no-issue path must return early, not throw"
+
+
+# ---------------------------------------------------------------------------
+# Functional teeth for the Telegram step: run the REAL bash with a stub
+# `curl` on PATH. Empirically verified: deleting the curl send left the step
+# a silent no-op while the `exit 0` / `||` substring pins stayed satisfied
+# by the secret-check if-statement alone.
+# ---------------------------------------------------------------------------
+
+
+def _telegram_run() -> str:
+    """Return the Telegram alert step's real run script."""
+    step = next(s for s in _steps(_load()) if "TG_TOKEN" in str(s.get("env", {})))
+    run = step["run"]
+    assert isinstance(run, str)
+    return run
+
+
+def _run_telegram_step(tmp_path: Path, extra_env: dict[str, str]) -> tuple[int, str, list[str]]:
+    """Execute the Telegram bash with a call-recording stub curl on PATH.
+
+    Returns (exit code, combined output, one recorded line per curl call).
+    """
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    call_log = tmp_path / "curl-calls.log"
+    stub = bin_dir / "curl"
+    stub.write_text(
+        '#!/usr/bin/env bash\necho "CURL $*" >> "$CURL_CALL_LOG"\nexit "${CURL_STUB_EXIT:-0}"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "CURL_CALL_LOG": str(call_log),
+        "GITHUB_SHA": "deadbeefcafe",
+        "RUN_URL": "https://github.example/SJParthi/bruteX/actions/runs/123",
+        **extra_env,
+    }
+    proc = subprocess.run(  # nosec B603 — fixed argv, repo-owned script, test-only
+        ["bash", "-c", _telegram_run()],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
+    return proc.returncode, proc.stdout + proc.stderr, calls
+
+
+def test_telegram_sends_exactly_once_when_secrets_set(tmp_path: Path) -> None:
+    """Both secrets set: exactly ONE curl sendMessage call, exit 0.
+
+    Kills the verified surviving delete-the-curl-send mutation (a silent
+    no-op alert channel behind green substring pins).
+    """
+    code, _, calls = _run_telegram_step(
+        tmp_path, {"TG_TOKEN": "test-token", "TG_CHAT": "test-chat"}
+    )
+    assert code == 0
+    assert len(calls) == 1, "the red-path alert must invoke curl exactly once"
+    assert "api.telegram.org/bottest-token/sendMessage" in calls[0]
+    assert "chat_id=test-chat" in calls[0]
+    assert "doctor-daily RED" in calls[0]
+
+
+def test_telegram_skips_silently_when_secrets_unset(tmp_path: Path) -> None:
+    """Unset secrets: notice + exit 0, curl NEVER invoked."""
+    code, output, calls = _run_telegram_step(tmp_path, {"TG_TOKEN": "", "TG_CHAT": ""})
+    assert code == 0, "the missing-secret path must exit 0, never fail the job"
+    assert calls == [], "no secrets => no network attempt at all"
+    assert "::notice::" in output
+
+
+def test_telegram_send_failure_is_nonfatal(tmp_path: Path) -> None:
+    """A failed curl degrades to a ::warning:: and still exits 0."""
+    code, output, calls = _run_telegram_step(
+        tmp_path,
+        {"TG_TOKEN": "test-token", "TG_CHAT": "test-chat", "CURL_STUB_EXIT": "7"},
+    )
+    assert code == 0, "a failed send must never fail the job"
+    assert len(calls) == 1
+    assert "::warning::" in output
+
+
+def test_continue_on_error_only_on_telegram() -> None:
+    """Belt-and-braces continue-on-error is Telegram-only.
+
+    Anywhere else it would mask a genuine red (a hollowed-out assert
+    step with continue-on-error would fake-green the whole cron).
+    """
+    for step in _steps(_load()):
+        if "TG_TOKEN" in str(step.get("env", {})):
+            assert step.get("continue-on-error") is True
+        else:
+            assert "continue-on-error" not in step
