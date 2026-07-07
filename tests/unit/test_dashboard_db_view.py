@@ -35,6 +35,7 @@ from brutex.dashboard.db_view import (
     WINDOW_PHASES,
     _build_window_payload_duckdb,
     _json_safe,
+    _ledger_scan_source,
     _window_counts_since,
     _window_counts_total,
     _window_severity_order_sql,
@@ -598,11 +599,21 @@ class TestOptionWindowDecode:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # C3: the 4 s page poll must not re-pay the full Parquet load — the read
-        # is cached on the file's mtime and ANY flush invalidates it.
+        # is cached on the ledger stamp and ANY flush invalidates it (past the
+        # DEC-LEDGER-DELTA-O-PAGE-001 adaptive floor — the injected clock steps
+        # over it so the fresh-parse-per-stamp law stays pinned).
         import os
 
+        from brutex.dashboard import db_view as db_view_module
         from brutex.data import window_ledger_store as store_module
         from brutex.data.window_ledger_store import ledger_path
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
 
         ledger = WindowLedger()
         ledger.record(
@@ -624,9 +635,10 @@ class TestOptionWindowDecode:
         assert first["windows"] == second["windows"]
         assert calls["n"] <= 1  # the second poll was served from the cache
 
-        # Any flush bumps the mtime → the cache MUST refresh.
+        # Any flush bumps the mtime → the cache MUST refresh (past the floor).
         path = ledger_path(tmp_path)
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         loaded_before = calls["n"]
         build_window_payload(tmp_path)
         assert calls["n"] == loaded_before + 1
@@ -713,13 +725,21 @@ class TestSpotWindowRollup:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The grouping is O(rows) at universe scale — it must run once per
-        # ledger flush, not once per 4 s poll (hostile C7).
+        # ledger flush, not once per 4 s poll (hostile C7). The injected clock
+        # steps past the DEC-LEDGER-DELTA-O-PAGE-001 adaptive floor so the
+        # flush → exactly-one-regroup law stays pinned.
         import os
 
         from brutex.dashboard import db_view as db_view_module
         from brutex.dashboard.db_view import spot_window_rollup
         from brutex.data.window_ledger_store import ledger_path
 
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
         ledger = WindowLedger()
         ledger.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
@@ -727,24 +747,32 @@ class TestSpotWindowRollup:
         save_window_ledger(ledger, tmp_path)
 
         calls = {"n": 0}
-        real_records = db_view_module._ledger_records_cached
+        from brutex.data import window_ledger_store as store_module
 
-        def _counting_records(root: Path) -> tuple[object, ...]:
+        real_load = store_module.load_window_ledger
+
+        def _counting_load(root: Path, **kwargs: object) -> object:
             calls["n"] += 1
-            return real_records(root)
+            return real_load(root, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(db_view_module, "_ledger_records_cached", _counting_records)
+        monkeypatch.setattr(store_module, "load_window_ledger", _counting_load)
 
         first = spot_window_rollup(tmp_path)
         second = spot_window_rollup(tmp_path)
         assert first == second
-        assert calls["n"] <= 1  # second poll served from the rollup cache
+        # Object IDENTITY: the second poll is served from the rollup cache —
+        # the O(rows) regroup never re-ran (a recompute builds a new dict).
+        assert second is first
+        assert calls["n"] <= 1  # and the ledger was parsed at most once
 
         path = ledger_path(tmp_path)
         os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         before = calls["n"]
-        spot_window_rollup(tmp_path)
-        assert calls["n"] == before + 1  # mtime bump re-groups exactly once
+        third = spot_window_rollup(tmp_path)
+        assert calls["n"] == before + 1  # mtime bump re-parses exactly once…
+        assert third is not first  # …and re-groups (a genuinely new rollup)
+        assert spot_window_rollup(tmp_path) is third  # then cached again
 
     def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
@@ -890,17 +918,21 @@ class TestBuildWindowPayloadDuckDB:
         calls = {"n": 0}
         original = _window_counts_total  # the top-level import (no second `import` form)
 
-        def _counting(c: object, glob: str) -> tuple[dict[str, dict[str, int]], int]:
+        def _counting(c: object, source: object) -> tuple[dict[str, dict[str, int]], int]:
             calls["n"] += 1
-            return original(c, glob)
+            return original(c, source)  # type: ignore[arg-type]
 
         monkeypatch.setattr("brutex.dashboard.db_view._window_counts_total", _counting)
-        # Two calls at the SAME generation → counts computed ONCE (the cache HIT).
+        # Two calls at the SAME ledger stamp → counts computed ONCE (the cache HIT) —
+        # even across GENERATION bumps (DEC-LEDGER-DELTA-O-PAGE-001: the keys ride the
+        # composite stamp token at a fixed generation=0, so a mid-pull mark_dirty storm
+        # can never thrash the entry).
         a = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=1)
-        b = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=1)
+        b = build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=2)
         assert a["counts"] == b["counts"]
         assert calls["n"] == 1
-        # A new generation (a pull) → recompute (never a stale total).
+        # A STAMP move (a fresh ledger save — new base mtime) → recompute (never stale).
+        _save_mixed_ledger(tmp_path)
         build_window_payload(tmp_path, conn=conn, count_cache=cache, generation=2)
         assert calls["n"] == 2
 
@@ -923,7 +955,9 @@ class TestBuildWindowPayloadDuckDB:
         _save_mixed_ledger(tmp_path)
         from brutex.data.window_ledger_store import ledger_path
 
-        counts, total = _window_counts_total(duckdb.connect(), ledger_path(tmp_path).as_posix())
+        counts, total = _window_counts_total(
+            duckdb.connect(), _ledger_scan_source(ledger_path(tmp_path))
+        )
         assert total == 6
         assert counts["options"] == {"SUCCESS": 1}
         assert counts["futures"] == {"SUCCESS": 1}
@@ -1284,8 +1318,9 @@ class TestPhaseProgressPayload:
 
     def test_cache_reuses_counts_across_two_polls(self, tmp_path: Path) -> None:
         # Prove NO new O(files) scan per poll: `_window_counts_total` runs ONCE per
-        # (generation, mtime) across two polls (the cache HIT), then again on a new
-        # generation (a pull) — the O(1)-on-repeat guarantee.
+        # ledger stamp across polls (the cache HIT) — even across GENERATION bumps
+        # (DEC-LEDGER-DELTA-O-PAGE-001: fixed generation=0, stamp-token keys) — then
+        # again on a STAMP move (a fresh save), never stale.
         from brutex.data.window_ledger_store import ledger_path
 
         _save_phase_ledger(tmp_path)
@@ -1295,9 +1330,9 @@ class TestPhaseProgressPayload:
         calls = {"n": 0}
         original = _window_counts_total
 
-        def _counting(c: object, glob: str) -> tuple[dict[str, dict[str, int]], int]:
+        def _counting(c: object, source: object) -> tuple[dict[str, dict[str, int]], int]:
             calls["n"] += 1
-            return original(c, glob)
+            return original(c, source)  # type: ignore[arg-type]
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("brutex.dashboard.db_view._window_counts_total", _counting)
@@ -1305,10 +1340,11 @@ class TestPhaseProgressPayload:
                 conn, ledger_file, current_phase="spot", count_cache=cache, generation=1
             )
             phase_progress_payload(
-                conn, ledger_file, current_phase="spot", count_cache=cache, generation=1
+                conn, ledger_file, current_phase="spot", count_cache=cache, generation=2
             )
-            assert calls["n"] == 1  # second poll is an O(1) cache HIT
-            # A new generation (a pull bumped it) → recompute, never stale.
+            assert calls["n"] == 1  # second poll is an O(1) cache HIT (stamp unchanged)
+            # A STAMP move (a fresh ledger save) → recompute, never stale.
+            _save_phase_ledger(tmp_path)
             phase_progress_payload(
                 conn, ledger_file, current_phase="spot", count_cache=cache, generation=2
             )
@@ -1532,7 +1568,7 @@ class TestWindowCountsSincePullStart:
 
         _save_two_pull_ledger(tmp_path)
         counts, total = _window_counts_since(
-            duckdb.connect(), ledger_path(tmp_path).as_posix(), _RUN_SINCE
+            duckdb.connect(), _ledger_scan_source(ledger_path(tmp_path)), _RUN_SINCE
         )
         # Only the NEW pull's two attempted rows: the OLD EMPTY is before the start,
         # the PLANNED row has a NULL last_attempt_at (attempted statuses only).
@@ -1546,7 +1582,7 @@ class TestWindowCountsSincePullStart:
 
         _save_two_pull_ledger(tmp_path)
         counts, total = _window_counts_since(
-            duckdb.connect(), ledger_path(tmp_path).as_posix(), _RUN_NEW.isoformat()
+            duckdb.connect(), _ledger_scan_source(ledger_path(tmp_path)), _RUN_NEW.isoformat()
         )
         assert total == 2  # both 12:00 rows; the 10:00 row is out
         assert counts["spot"] == {"EMPTY": 1, "SUCCESS": 1}
@@ -1557,7 +1593,7 @@ class TestWindowCountsSincePullStart:
         _save_two_pull_ledger(tmp_path)
         counts, total = _window_counts_since(
             duckdb.connect(),
-            ledger_path(tmp_path).as_posix(),
+            _ledger_scan_source(ledger_path(tmp_path)),
             "2026-06-08T13:00:00+00:00",
         )
         assert total == 0
@@ -1602,9 +1638,11 @@ class TestWindowCountsSincePullStart:
         calls = {"n": 0}
         original = _window_counts_since
 
-        def _counting(c: object, glob: str, since: str) -> tuple[dict[str, dict[str, int]], int]:
+        def _counting(
+            c: object, source: object, since: str
+        ) -> tuple[dict[str, dict[str, int]], int]:
             calls["n"] += 1
-            return original(c, glob, since)
+            return original(c, source, since)  # type: ignore[arg-type]
 
         monkeypatch.setattr("brutex.dashboard.db_view._window_counts_since", _counting)
         a = build_window_payload(
@@ -1698,8 +1736,10 @@ class TestLedgerDeltaAwareness:
 
     The mid-pull flush now APPENDS delta Parquets beside ``ledger.parquet``
     instead of rewriting it; a base-only reader would freeze for the whole
-    pull. The fast DuckDB paths DEFER to the fold-aware legacy read while
-    deltas are pending (the SQL-side fold is the named follow-up).
+    pull. The fast DuckDB paths SERVE the latest-wins fold IN SQL while deltas
+    are pending (DEC-LEDGER-DELTA-O-PAGE-001 — supersedes the defer-to-legacy
+    stance; the dedicated fold suite lives in
+    ``test_dashboard_db_view_ledger_delta_fold.py``).
     """
 
     @staticmethod
@@ -1719,12 +1759,14 @@ class TestLedgerDeltaAwareness:
 
         assert db_view_module._LEDGER_DELTAS_DIRNAME == DELTAS_DIRNAME
 
-    def test_window_payload_fast_path_defers_to_the_delta_fold(self, tmp_path: Path) -> None:
+    def test_window_payload_fast_path_serves_the_delta_fold(self, tmp_path: Path) -> None:
         """With a conn AND pending deltas, the payload reflects the delta rows.
 
-        Regression: the DuckDB fast path reads ONLY the base Parquet, which the
-        mid-pull flush no longer rewrites — without the defer the page froze at
-        pull-start state for the whole pull.
+        Regression: the DuckDB fast path once read ONLY the base Parquet, which
+        the mid-pull flush no longer rewrites — the page froze at pull-start
+        state for the whole pull. It now folds the deltas latest-wins IN SQL
+        (DEC-LEDGER-DELTA-O-PAGE-001) and stays field-for-field equal to the
+        Python fold on this fixture.
         """
         import duckdb
 
@@ -1752,7 +1794,20 @@ class TestLedgerDeltaAwareness:
         assert payload["source"] == "ledger"
         assert [w["symbol"] for w in payload["windows"]] == ["NIFTY"]
 
-    def test_records_cache_refreshes_on_a_delta_append(self, tmp_path: Path) -> None:
+    def test_records_cache_refreshes_on_a_delta_append(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The injected clock steps past the DEC-LEDGER-DELTA-O-PAGE-001 adaptive
+        # floor so the delta-append → fresh-parse law stays pinned (a read
+        # WITHIN the floor serves the prior fold stale — bounded + logged).
+        from brutex.dashboard import db_view as db_view_module
+
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
         base = WindowLedger()
         base.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
@@ -1760,14 +1815,24 @@ class TestLedgerDeltaAwareness:
         save_window_ledger(base, tmp_path)
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {"NIFTY"}
         self._append_delta(tmp_path, "SENSEX")  # base mtime UNTOUCHED
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         assert {w["symbol"] for w in build_window_payload(tmp_path)["windows"]} == {
             "NIFTY",
             "SENSEX",
         }
 
-    def test_spot_window_rollup_sees_mid_pull_deltas(self, tmp_path: Path) -> None:
+    def test_spot_window_rollup_sees_mid_pull_deltas(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import db_view as db_view_module
         from brutex.dashboard.db_view import spot_window_rollup
 
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            db_view_module,
+            "_LEDGER_READ_CACHE",
+            db_view_module._make_ledger_read_cache(clock=lambda: clock["t"]),
+        )
         base = WindowLedger()
         base.record(
             _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
@@ -1775,6 +1840,7 @@ class TestLedgerDeltaAwareness:
         save_window_ledger(base, tmp_path)
         assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
         self._append_delta(tmp_path, "BANKNIFTY")  # base mtime UNTOUCHED
+        clock["t"] += 121.0  # step past the adaptive-floor cap
         assert spot_window_rollup(tmp_path) == {
             ("NIFTY", "1minute"): (1, 0, 0),
             ("BANKNIFTY", "1minute"): (1, 0, 0),

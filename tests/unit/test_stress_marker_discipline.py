@@ -1,6 +1,6 @@
 """Enforce the ``tests/stress`` marker contract — the SOAK-R7-1 drift, pinned.
 
-Round 7 of DEC-SOAK-REAL-TIER-001 (MIGRATION.md #1512 (x)) found 3 stress files
+Round 7 of DEC-SOAK-REAL-TIER-001 (MIGRATION.md #1534 (x)) found 3 stress files
 (8 tests) carrying NEITHER ``@pytest.mark.stress`` NOR ``@pytest.mark.soak``:
 because BOTH CI tiers select BY MARKER (nightly ``-m stress``; self-hosted soak
 ``-m 'stress or soak'``), an unmarked stress test silently drops out of both —

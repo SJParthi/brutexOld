@@ -50,7 +50,7 @@ Every row is enforced automatically on **every pull request**. Nothing ships on 
 | **Property (Hypothesis)** | edge cases you didn't think of | ✅ 106 |
 | **Golden** | byte-level output drift | ✅ 3 corpora |
 | **Benchmark** | O(1) regressions | ✅ 40 |
-| **Stress / soak** | sustained leaks / drift over hours | ✅ nightly ~5-min regression gate + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, DEC-SOAK-REAL-TIER-001 #1512 — the prior “24h nightly” claim was false and is retracted) |
+| **Stress / soak** | sustained leaks / drift over hours | ✅ nightly ~5-min regression gate + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, DEC-SOAK-REAL-TIER-001 #1534 — the prior “24h nightly” claim was false and is retracted) |
 | **Smoke + Red-team** | fast pre-push + gate-integrity (planted bugs) | ✅ 12 + 32 |
 
 ---

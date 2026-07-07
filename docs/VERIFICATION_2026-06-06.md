@@ -72,7 +72,7 @@
 | Benchmark | 65 | O(1) regressions |
 | Smoke | 12 | fast pre-push sanity |
 | Red-team | 52 | gate-integrity (plants bugs, asserts gates catch them) |
-| Stress / soak | 1 | ~~24 h sustained leak (nightly)~~ **CORRECTED (DEC-SOAK-REAL-TIER-001 #1512): the nightly was a light sustained-leak regression, never a 24 h soak — its 60-min timeout structurally forbade one; the real multi-hour soak now runs on `soak-selfhosted.yml`** |
+| Stress / soak | 1 | ~~24 h sustained leak (nightly)~~ **CORRECTED (DEC-SOAK-REAL-TIER-001 #1534): the nightly was a light sustained-leak regression, never a 24 h soak — its 60-min timeout structurally forbade one; the real multi-hour soak now runs on `soak-selfhosted.yml`** |
 | **Rust (both crates)** | **501** | kernel correctness + golden parity |
 
 ---

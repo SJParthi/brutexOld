@@ -1,6 +1,6 @@
 # soak-selfhosted.yml — The REAL multi-hour soak on the self-hosted M4-Pro runner.
 #
-# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1512)
+# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1534)
 # ------------------------------------------------------
 # The nightly `stress-nightly.yml` runs on GitHub-hosted `ubuntu-24.04` with a
 # FIXED 60-minute job timeout — which STRUCTURALLY forbids a real multi-hour
@@ -18,7 +18,7 @@
 # bound — the 5-day/7200-min platform execution kill of SOAK-R8-1/SEC8-2; a
 # larger dispatch would burn hours then lose its own failure signal or be
 # platform-killed mid-soak, the exact un-completable-tier trap this workflow
-# exists to close; a >20 h tier is BLOCKED on the ADR-0017 out-of-job watchdog
+# exists to close; a >20 h tier is BLOCKED on the ADR-0018 out-of-job watchdog
 # follow-up, which authenticates with its own fresh token). It drives `tests/stress/test_soak_sustained.py::test_soak_sustained`
 # (the `soak` marker) for the full `STRESS_DURATION_S`, feeding each time window
 # to the pure `brutex.observability.soak_drift.SoakDriftMonitor` (RSS ceiling /
@@ -73,7 +73,7 @@
 # watchdog never runs, no issue is filed, no Telegram fires. An out-of-job
 # watchdog — a cheap GitHub-hosted cron (with its own fresh GITHUB_TOKEN) that
 # opens an issue whenever the last soak-selfhosted run concluded anything but
-# success and no tracking issue exists — is the named ADR-0017 follow-up that
+# success and no tracking issue exists — is the named ADR-0018 follow-up that
 # covers BOTH gaps (NOT built here).
 #
 # HONEST ENVELOPE (Golden Rule #10)
@@ -96,7 +96,7 @@
 # the issue watchdog covers a STARTED soak job's failure/cancellation while
 # the runner is still alive and the job token still valid (the 1200-min fence
 # guarantees the token half; SEC9-1) — the unattended (cron) risk the watchdog
-# exists for; a never-started or runner-lost run needs the ADR-0017 out-of-job
+# exists for; a never-started or runner-lost run needs the ADR-0018 out-of-job
 # watchdog (SOAK-R8-2 + SOAK-R9-1, not built here).
 
 name: Real soak (self-hosted M4-Pro)
@@ -191,10 +191,10 @@ jobs:
           # 1440 min: m <= 1208 → ceiling 1200 (20 h; derived timeout 1430).
           # The 5-day platform execution kill (7200 min, SOAK-R8-1/SEC8-2)
           # remains the outer bound but is no longer binding. A >20 h tier is
-          # BLOCKED on the ADR-0017 out-of-job watchdog follow-up (its own
+          # BLOCKED on the ADR-0018 out-of-job watchdog follow-up (its own
           # fresh token), NOT re-enabled by raising this fence.
           if [ "$m" -gt 1200 ]; then
-            echo "::error::soak_minutes=$m exceeds the 20-hour ceiling (1200): the job's GITHUB_TOKEN expires at 24 h on self-hosted runners, so a longer soak's failure watchdog could never file its issue (SEC9-1). A >20 h tier needs the ADR-0017 out-of-job watchdog first." >&2
+            echo "::error::soak_minutes=$m exceeds the 20-hour ceiling (1200): the job's GITHUB_TOKEN expires at 24 h on self-hosted runners, so a longer soak's failure watchdog could never file its issue (SEC9-1). A >20 h tier needs the ADR-0018 out-of-job watchdog first." >&2
             exit 1
           fi
           # Slack SCALES with duration (SOAK-R7-4): the end-of-run cost is
@@ -216,7 +216,7 @@ jobs:
     # set is online the job queues, blocks no PR, and GitHub AUTO-CANCELS it
     # after 24 h (documented job-queue limit) with NO step ever running — the
     # in-job issue watchdog below cannot fire for a never-started run, so an
-    # offline-runner cron soak dies silently (SOAK-R8-2; the ADR-0017
+    # offline-runner cron soak dies silently (SOAK-R8-2; the ADR-0018
     # queue-age watchdog follow-up covers this gap). Same runner precedent as
     # verify-m4pro.yml / bench-m4pro.yml.
     runs-on: [self-hosted, macos, m4pro]
@@ -398,6 +398,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any MONOTONE RSS/fd drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time ONLY IF the runner daemon's environment exports the BRUTEX_TELEGRAM_* credentials (this workflow wires no Telegram secrets; without them the push is a silent no-op — and a timeout-kill fires none either), so this issue is the primary automatic signal — guaranteed only for a run that STARTED and kept its runner: a never-started run (24 h queue auto-cancel, SOAK-R8-2) or a runner lost mid-soak (sleep/reboot/power loss, SOAK-R9-1) executes no step and files nothing; the ADR-0017 out-of-job watchdog follow-up covers those paths; soak.p99_drift is observe-only (structlog + the brutex_soak_p99_ratio gauge) — it fires no Telegram alert and never opens this issue.`,
+              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any MONOTONE RSS/fd drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time ONLY IF the runner daemon's environment exports the BRUTEX_TELEGRAM_* credentials (this workflow wires no Telegram secrets; without them the push is a silent no-op — and a timeout-kill fires none either), so this issue is the primary automatic signal — guaranteed only for a run that STARTED and kept its runner: a never-started run (24 h queue auto-cancel, SOAK-R8-2) or a runner lost mid-soak (sleep/reboot/power loss, SOAK-R9-1) executes no step and files nothing; the ADR-0018 out-of-job watchdog follow-up covers those paths; soak.p99_drift is observe-only (structlog + the brutex_soak_p99_ratio gauge) — it fires no Telegram alert and never opens this issue.`,
               labels: ['bug', 'soak', 'critical'],
             });
