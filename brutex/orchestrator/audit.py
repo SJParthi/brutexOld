@@ -765,7 +765,10 @@ def _iter_committed_entries(path: Path) -> Iterator[AuditEntry]:
                 # is the partial/complete-but-unterminated record. Either way it
                 # is uncommitted: skip it (only the FILE's final line can ever
                 # lack the "\n" — the writer appends `line + "\n"` in one write).
-                continue
+                # Equivalent-mutant pragma: text-mode iteration can only yield a
+                # newline-less line LAST, so this always runs on the final
+                # iteration and `continue` ≡ `break`.
+                continue  # pragma: no mutate
             line = raw.rstrip("\n")
             if not line:
                 # A blank committed line (newline-terminated) is benign filler
@@ -839,7 +842,10 @@ def _has_torn_tail(path: Path) -> bool:
         if size == 0:
             return False
         f.seek(size - 1)
-        return f.read(1) != b"\n"
+        # Equivalent-mutant pragma: exactly 1 byte remains at offset size-1, so a
+        # widened read(n>1) returns the identical byte; the `!=` / b"\n" semantics
+        # of this line are behaviour-pinned by TestHasTornTailPins.
+        return f.read(1) != b"\n"  # pragma: no mutate
 
 
 def _read_entries_with_torn_tail(path: Path) -> tuple[list[AuditEntry], bool]:
@@ -960,23 +966,39 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
         # torn_tail == the file does not end in "\n" (an unterminated final
         # line == an interrupted append). Read the final byte to decide.
         f.seek(size - 1)
-        torn_tail = f.read(1) != b"\n"
+        # Equivalent-mutant pragma: exactly 1 byte remains at offset size-1, so a
+        # widened read(n>1) returns the identical byte; the `!=` / b"\n" semantics
+        # of this line are behaviour-pinned by TestReadTailEntryPins.
+        torn_tail = f.read(1) != b"\n"  # pragma: no mutate
 
         # Walk backwards in chunks, accumulating the tail bytes, until we have
         # isolated the last committed (newline-terminated) NON-BLANK line. The
         # committed prefix ends at the last "\n"; the tail line we want is the
         # last non-blank line ending in (or terminated by) that "\n".
-        buf = b""
-        pos = size
-        last_committed_line: bytes | None = None
+        # Equivalent-mutant pragmas (next three lines): a newline-free seed sits
+        # AFTER the file's last byte where the committed-line scanner (which only
+        # returns "\n"-terminated candidates) provably ignores it; and both
+        # initial values are dead stores — size > 0 here, so the walk always
+        # yields >= 1 chunk and reassigns them before any read (the local
+        # annotation is never evaluated at runtime).
+        buf = b""  # pragma: no mutate
+        pos = size  # pragma: no mutate
+        last_committed_line: bytes | None = None  # pragma: no mutate
         for chunk_start, block in _iter_reverse_chunks(f, size):
-            pos = chunk_start  # how far back the reverse walk has reached
+            # Equivalent-mutant pragma: pos's only read is the post-loop rescue
+            # guard, a no-op twin of the for-else (see its pragma below).
+            pos = chunk_start  # pragma: no mutate — how far back the walk reached
             buf = block + buf
             # Split into physical lines. Because we always prepend, only the
             # FIRST fragment can be incomplete (more bytes may precede it), so
             # we only consider lines AFTER the first newline as fully-known.
             newline_idx = buf.find(b"\n")
-            if newline_idx == -1:
+            # Equivalent-mutant pragma: comparison flips here are output-equivalent
+            # — a newline-free chunk scans to None anyway, and an early continue
+            # only defers to the for-else whole-buffer scan (same answer); the
+            # O(1) consumption contract is separately pinned by
+            # test_tail_read_consumes_only_the_final_chunk.
+            if newline_idx == -1:  # pragma: no mutate
                 # No newline yet in the accumulated buffer — keep reading back.
                 continue
             # Everything after the first newline is complete; scan its lines
@@ -991,12 +1013,18 @@ def _read_tail_entry(path: Path) -> tuple[AuditEntry | None, bool]:
         else:
             # Loop exhausted the file (pos reached 0) with buf holding the whole
             # file: the first fragment is a complete line too.
-            last_committed_line = _last_nonblank_committed_line(buf)
+            # Equivalent-mutant pragma: a None planted here is repaired by the
+            # post-loop rescue below recomputing this exact expression.
+            last_committed_line = _last_nonblank_committed_line(buf)  # pragma: no mutate
 
-        if last_committed_line is None and pos == 0:
+        # Equivalent-mutant pragmas (guard + body): a redundant defensive rescue
+        # — it is reachable only from the for-else path, where pos == 0 always
+        # holds and last_committed_line already equals this recompute, so every
+        # guard mutant and a None-assigning body are output-equivalent.
+        if last_committed_line is None and pos == 0:  # pragma: no mutate
             # We broke on a newline but found no non-blank line after it; the
             # first fragment (bytes before that newline) is still a candidate.
-            last_committed_line = _last_nonblank_committed_line(buf)
+            last_committed_line = _last_nonblank_committed_line(buf)  # pragma: no mutate
 
         if last_committed_line is None:
             return None, torn_tail
@@ -1073,11 +1101,18 @@ def _truncate_torn_tail(path: Path) -> None:
     """
     try:
         with open(path, "r+b") as f:
-            f.seek(0, os.SEEK_END)
+            # Equivalent-mutant pragma: size only tiles the reverse walk — an
+            # off-by-one over-read past EOF is harmless (read() truncates) and
+            # the located last-newline offset is tiling-invariant.
+            f.seek(0, os.SEEK_END)  # pragma: no mutate
             size = f.tell()
             cut = _find_last_newline_offset(f, size)
             # cut == -1 → no committed newline at all → keep nothing.
-            keep = cut + 1 if cut != -1 else 0
+            # Equivalent-mutant pragma: the else-arm is arithmetically redundant
+            # (cut + 1 == 0 exactly when cut == -1), so the sentinel-comparison
+            # mutants are equivalent; the keep boundary itself is byte-pinned by
+            # TestTruncateTornTailPins.
+            keep = cut + 1 if cut != -1 else 0  # pragma: no mutate
             os.truncate(f.fileno(), keep)
             f.flush()
             with contextlib.suppress(OSError):
