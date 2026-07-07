@@ -42,11 +42,21 @@ Strategy-bug guardrails (so a future red is diagnosable)
   P-10(a) on a short side — that would be a strategy bug, not an STT leak.
 * ``trade_outcome`` is FIXED at ``"NORMAL_CLOSE"`` — every other outcome
   raises ``UnsupportedTradeOutcomeError`` by design (calculator Step 0).
-* Entry dates are BOUNDED to the lot-size history's recorded coverage
-  (``brutex.options.lot_size_history`` starts 2021-01-01; ``get_lot_size``
-  raises before it) while still spanning ALL THREE STT regimes
-  (pre-2024-10-01 / 2024-10-01..2026-03-31 / ≥2026-04-01). An
-  out-of-range-date raise would be a strategy bug, not a finding.
+* Entry dates for the P-10/P-12 value properties are BOUNDED to the
+  honestly-PRICEABLE window ``[ETC_REGIME_OCT_2024_START → 2026-12-31]``:
+  per DEC-ETC-REGIME-HISTORY-001 (MIGRATION.md #1524) the full
+  ``compute_trade_cost`` REFUSES any options trade dated before
+  2024-10-01 (the exchange-transaction-charge regime tables carry
+  rate-less refusal rows there — ``UnverifiedCostRegimeError``), so the
+  priceable window spans the TWO reachable STT regimes
+  (2024-10-01..2026-03-31 / ≥2026-04-01); the pre-2024-10-01 STT regime
+  constant is unreachable through the full calculator by design. The
+  pre-boundary window (lot-size history start 2021-01-01 →
+  2024-09-30) is NOT dropped — a dedicated refusal property pins that
+  every trade there raises exactly ``UnverifiedCostRegimeError``. An
+  out-of-range-date raise elsewhere would be a strategy bug, not a
+  finding (``brutex.options.lot_size_history`` starts 2021-01-01;
+  ``get_lot_size`` raises before it).
 * Bar opens are ≥ 5 paise (1 tick — the ``TradeInput.__post_init__``
   floor) and ``exit_dt ≥ entry_dt`` by construction (same-day 15:20 exit).
 * Every property carries an explicit ``deadline=None`` so the derandomized
@@ -61,6 +71,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
 
+import pytest
 from brutex.costs import constants as cost_constants
 from brutex.costs.calculator import compute_trade_cost
 from brutex.costs.types import (
@@ -69,6 +80,7 @@ from brutex.costs.types import (
     OptionType,
     TradeInput,
     TradeSide,
+    UnverifiedCostRegimeError,
 )
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -86,19 +98,35 @@ _LONG_SIDES: Final[tuple[TradeSide, ...]] = ("long_call", "long_put")
 
 #: Lot-size history recorded floor (lot_size_history._LOT_HISTORY_*[0]).
 _LOT_HISTORY_START: Final[date] = date(2021, 1, 1)
+#: The ETC verified-rate boundary (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md
+#: #1524): ``compute_trade_cost`` REFUSES any options trade dated before it
+#: (``UnverifiedCostRegimeError`` from the rate-less ETC refusal rows), so
+#: the value properties draw entry dates from here onward and the refusal
+#: property pins the window before it.
+_ETC_VERIFIED_START: Final[date] = cost_constants.ETC_REGIME_OCT_2024_START
 #: Far enough to exercise the post-2026-04-01 Finance Act 2026 STT regime.
 _DATE_MAX: Final[date] = date(2026, 12, 31)
 
 #: Bar-open premium range: 1 tick (5 paise) .. ₹20,000 (deep-ITM premium).
 _open_paisa = st.integers(min_value=5, max_value=2_000_000)
 _n_lots = st.integers(min_value=1, max_value=500)
-_entry_dates = st.dates(min_value=_LOT_HISTORY_START, max_value=_DATE_MAX)
+#: PRICEABLE-window entry dates for the P-10/P-12 value properties.
+_entry_dates = st.dates(min_value=_ETC_VERIFIED_START, max_value=_DATE_MAX)
+#: PRE-boundary entry dates (lot-history floor → the day before the ETC
+#: boundary) — the honest-REFUSAL window pinned by the dedicated property.
+_refusal_entry_dates = st.dates(
+    min_value=_LOT_HISTORY_START,
+    max_value=_ETC_VERIFIED_START - timedelta(days=1),
+)
 
 
 @st.composite
-def trade_inputs(draw: st.DrawFn) -> TradeInput:
+def trade_inputs(
+    draw: st.DrawFn,
+    entry_dates: st.SearchStrategy[date] = _entry_dates,
+) -> TradeInput:
     """Draw a VALID Track 2 ``TradeInput`` (long-only, NORMAL_CLOSE)."""
-    entry_date = draw(_entry_dates)
+    entry_date = draw(entry_dates)
     return TradeInput(
         entry_dt_ist=datetime.combine(entry_date, time(10, 0)),
         # Track 2 forced 15:20 IST same-day exit (DEC-RISK-011) — always
@@ -221,3 +249,24 @@ def test_p_12_brokerage_pairwise_monotone_in_notional(
         key=lambda b: b.buy_notional_paisa + b.sell_notional_paisa,
     )
     assert lo.brokerage_paisa <= hi.brokerage_paisa
+
+
+# ────────────────────────────────────────────────────────────────────
+# Pre-ETC-boundary window — the honest REFUSAL is itself an invariant
+# ────────────────────────────────────────────────────────────────────
+
+
+@given(trade=trade_inputs(entry_dates=_refusal_entry_dates))
+@settings(max_examples=200, deadline=None)
+def test_pre_etc_boundary_trade_refuses_loudly(trade: TradeInput) -> None:
+    """DEC-ETC-REGIME-HISTORY-001 (MIGRATION.md #1524): EVERY options trade
+    dated in ``[2021-01-01 → 2024-09-30]`` — before the first VERIFIED
+    exchange-transaction-charge rate row (NSE/BSE eff. 2024-10-01) — is
+    REFUSED by ``compute_trade_cost`` with exactly
+    :class:`UnverifiedCostRegimeError`, never silently priced at an
+    invented/current rate. This pins the refusal window so the P-10/P-12
+    value properties' priceable-window date bound can never silently rot:
+    if the boundary moves (a cited pre-2024 circular lands), this property
+    fails loudly and both windows get consciously re-derived."""
+    with pytest.raises(UnverifiedCostRegimeError):
+        compute_trade_cost(trade)
