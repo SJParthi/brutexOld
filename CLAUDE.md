@@ -80,7 +80,12 @@ continuity gate: `seed_enclosed_windows`/the reconciles (+ documented-INERT F&O 
 above the reconcile at all five chokepoints (ONE consistent snapshot for seed + detectors —
 ordering-spy-pinned), the exactly-tolerance+1-run refusal flip is the fail-before, and
 `filter_to_trading_session` deliberately stays overlay-blind (stance pinned in-code — the
-remove-only overlay is healed BY the bars an overlay-aware filter would drop). ENGINE
+remove-only overlay is healed BY the bars an overlay-aware filter would drop; review round 7:
+the shared run-walker breaks a run on every COVERED static session BEFORE consulting the
+overlay, so the shrink-only/monotonicity law is STRUCTURAL — a STALE overlay entry over a
+since-backfilled day (entries heal only on the next drift-CLI run, NOT the moment bars appear)
+can no longer MERGE flanking runs into a new seed refusal; the property pin drops its
+disjointness restriction). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched modules 100%
 line+branch).
 Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
@@ -618,7 +623,10 @@ hostile-review pass._
   deliberately NOT a global stop; below-threshold bounded-terminal
   byte-unchanged); and the observed-overlay threading into the cold-start seed gate (one hoisted load per
   pull = one consistent snapshot; the tolerance+1 refusal flip closed; the session filter deliberately
-  overlay-blind). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
+  overlay-blind; round 7: the run-walker breaks on covered static sessions BEFORE the overlay, so a stale
+  entry over a since-backfilled day can never merge flanking runs into a new refusal — shrink-only is
+  structural for every overlay shape, disjointness restriction dropped from the property pin). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
   ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact 37-error/433-warning pre-change
   baseline (origin/main 83baab8df — the restore-replay rebase target; the earlier 426-warning figure
   was the pre-rebase d1f9c3e base), 0 new).

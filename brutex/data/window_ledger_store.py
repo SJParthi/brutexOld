@@ -1274,12 +1274,15 @@ def seed_enclosed_windows(
     classifier called continuous — one redundant vendor re-fetch per cold
     start); the caller HOISTS its ONE per-pull ``load_observed_holidays`` read
     above the reconcile so the seed and the fetch-time detectors share ONE
-    consistent snapshot (single source of truth; the overlay is REMOVE-only, so
-    threading it can only SHORTEN runs — the seed becomes strictly MORE
-    permissive, never newly refusing, for the PRODUCTION overlay shape —
-    entries are evidence-gated on ZERO-bar days and self-heal when bars appear,
-    so ``observed ∩ covered == ∅`` by construction; the property-pinned
-    monotonicity law);
+    consistent snapshot (single source of truth; the shared run-walker breaks
+    a run on every COVERED static session BEFORE consulting the overlay, so
+    threading the remove-only overlay can only SHORTEN runs — the seed
+    becomes strictly MORE permissive, never newly refusing, for EVERY overlay
+    shape: a STALE entry over a since-backfilled covered day — reachable,
+    because an entry self-heals only when ``brutex detect-session-drift``
+    next re-runs, NOT the moment bars appear — can no longer MERGE its two
+    flanking runs into a super-tolerance refusal; the property-pinned
+    monotonicity law, pinned WITHOUT a disjointness restriction);
     sub-tolerance holes still seed; and CONVERGENCE after a
     refusal is fetch-verdict-dependent — a run CONTAINED in one window is
     demoted at fetch time (``INTERIOR_GAP``, bounded → SKIPPED), while a

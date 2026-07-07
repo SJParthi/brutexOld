@@ -183,18 +183,22 @@ def test_seed_gate_matches_fetch_classifier_and_overlay_is_monotone(
     INDEPENDENT window-intersection over the fetch-time ``interior_gap_runs``
     classification with the SAME overlay. (2) MONOTONICITY: the overlay only
     REMOVES trading days, so ``refused(observed) ⊆ refused(∅)`` — threading it
-    can make the seed strictly MORE permissive, never newly refusing."""
+    can make the seed strictly MORE permissive, never newly refusing — for ANY
+    overlay shape, stale entries over covered days included."""
     from datetime import timedelta
 
     from brutex.data.interior_gap_detect import interior_gap_runs
 
     session_dates = frozenset(_SESSIONS[i] for i in covered_idx)
-    # PRODUCTION overlay shape (DEC-CALENDAR-OBSERVED-SESSIONS-001): an entry is
-    # evidence-gated on ZERO-bar days and SELF-HEALS the moment bars appear, so
-    # ``observed ∩ covered == ∅`` by construction — the monotonicity law below
-    # holds exactly for that shape (an overlaid COVERED day would instead MERGE
-    # its two flanking runs in the shared walker — unreachable in production).
-    observed = frozenset(_SESSIONS[i] for i in overlay_idx if i not in covered_idx)
+    # ANY overlay shape — deliberately INCLUDING ``observed ∩ covered != ∅``
+    # (a STALE overlay entry over a since-BACKFILLED day: an entry self-heals
+    # only when ``brutex detect-session-drift`` next re-runs, NOT the moment
+    # bars appear, so the non-disjoint shape IS reachable in production). The
+    # run-walker breaks a run on every COVERED static session BEFORE
+    # consulting the overlay (DEC-SEED-OBSERVED-OVERLAY-001 review fold), so
+    # the monotonicity law below is STRUCTURAL — a stale entry can never MERGE
+    # two flanking runs into a new refusal.
+    observed = frozenset(_SESSIONS[i] for i in overlay_idx)
 
     with_overlay = _seed_verdicts(session_dates, observed)
     without_overlay = _seed_verdicts(session_dates, frozenset())
