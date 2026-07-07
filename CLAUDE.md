@@ -18,7 +18,41 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+_Last updated: 2026-07-07 (DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md #1541 —
+the R9 nightly zero-click chain: ONE `brutex nightly run` executes COLLISION →
+DISK → BACKUP → PULL → PREBUILD → SWEEP over EXISTING public entry points only
+(a headless `run_full_pipeline` binding mirroring the dashboard closures; the
+sweep via `cmd_sweep_all` on the daemon key-list precedent, the three
+unattended escape flags structurally absent AND dispatch-hard-refused —
+STRICTER than the daemon, which refuses only `--allow-out-of-scope`), under a
+NEW nightly flock + acquire-and-HELD pull locks (the LAKE pull lock held
+through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical;
+holder-note honesty on refusals — a pull refused mid-nightly reads
+"(holder: nightly:<id>)"), with the R42 break law (first failing link stops;
+later links BLOCKED-because-<link>; tripwires — link-transition, DURABLE-audit
+read-back reconcile, pull coherence, snapshot re-read, sweep-count identity —
+⇒ SUSPECT ⇒ cron-RED exit 2) and the R50 sealed-snapshot backup
+(hash-of-DESTINATION manifest written LAST, full pre-seal verify,
+`.partial`→one-rename seal; restore = verify-EVERYTHING-then-write, destination
+ledger deltas CLEARED of manifest-extraneous files, `ledger.parquet` strictly
+LAST, `--yes` gated, CI-drilled every push) + launchd install with the
+MANDATORY `launchctl list` verification (installed-but-unverified FAILS — the
+TickVault lesson) + the morning Telegram summary/refusal (per-run dedupe keys;
+unknown counts read "?", never 0). HONEST: R48 decay diff deferred to v1.1 by
+operator directive — a recorded DIVERGENCE from the living requirements (R48
+homes in P6; the v1.1 item is R49; the P3 top100.json probe is the seam);
+sweep-liveness is a dual-mtime HEURISTIC until P2's results-root flock; the
+first post-deploy nightly re-sweeps everything (`code_commit_sha` re-key,
+documented not fixed); `bars/` stays OUT of the automated backup (the manual
+rsync/Time-Machine path retained) and night-N sweep results are captured night
+N+1 (≤24 h exposure); launchd cannot wake a sleeping Mac (next-wake catch-up;
+pmset opt-in documented, never run); backup/restore honestly O(files+bytes) —
+probes bench-gated flat, backup bench-asserted LINEAR; `--dry-run` runs probes
+ONLY (no pipeline even in spine dry-run mode — those write synthetic bars),
+tree-oracle-pinned zero mutation. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate change; every new module + the
+three touched COMMON modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
 MIGRATION.md #1539 — the /movers prev-close calendar-contiguity honesty guard:
 a previous-day close/OI baseline that provably skipped a nearer NSE session (a
 lake hole — the confirmed repro printed 2.2822% where the true Friday-based
@@ -785,7 +819,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes — folded from
+- **Active branch:** `claude/intelligent-hamilton-qf3w38` (**DEC-SWEEP-NIGHTLY-AUTOMATION-001,
+  MIGRATION.md #1541** — the R9 nightly zero-click chain + R50 backup/restore + launchd scheduling:
+  NEW `brutex/nightly/` package (chain/probes/pipeline_binding/sweep_binding/backup/restore/report/
+  schedule/run) driving ONLY existing public entry points; `brutex nightly
+  run/backup/restore/install/uninstall/status`; the nightly single-flight flock + holder-note seams on
+  the ONE `_flock_singleflight` core (existing callers byte-identical); two SweepAlerter methods
+  (`nightly_summary` INFO/WARN/CRITICAL + the instant `nightly_refused` CRITICAL, per-run dedupe keys,
+  "?" for unknown counts); the R42 break law property-pinned over every failure position; SUSPECT ⇒
+  exit 2 (cron-red); the CI restore drill (real-writer lake → snapshot → mutilate + extra post-snapshot
+  delta → restore → byte-parity + deltas-clear + ledger-LAST + audit chain green) on every push; the
+  headless pipeline binding parity-pinned against the dashboard closures (ONE shared
+  SessionRateController; `nightly_metadata_years` ≡ `app._resolve_metadata_years`); the sweep leg's
+  kwargs signature-drift-pinned vs `cmd_sweep_all` with the escape-flag trio structurally absent.
+  HONEST: R48 decay diff deferred to v1.1 by operator directive (recorded divergence — R48 homes in P6,
+  the file's v1.1 item is R49); liveness heuristic until P2's flock; post-deploy full re-sweep
+  (`code_commit_sha` re-key) documented not fixed; `bars/` excluded from the automated backup; ≤24 h
+  snapshot exposure (backup runs PRE-pull — the rollback point); launchd wake limits + pmset opt-in
+  documented; backup honestly O(files+bytes). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the 39-error pre-change baseline, 0 new).
+  Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes — folded from
   `claude/trusting-einstein-bobai2`, PR #1246) (**DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
   MIGRATION.md #1539** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
   previous-day close + futures/options previous-day OI baselines (which silently served the NEAREST-prior lake bar

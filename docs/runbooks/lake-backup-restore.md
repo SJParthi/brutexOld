@@ -6,6 +6,19 @@
 > copy time. **Golden Rule #1:** every path below traces to the cited
 > `file:line` on this build (2026-07-03).
 
+> **Amendment (2026-07-07, DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md
+> #1541):** the MECHANIZED nightly path is `brutex nightly backup` /
+> `brutex nightly restore` (`docs/runbooks/nightly-automation.md` §4-5) for
+> the stores it covers — the window ledger (+deltas), `instruments.duckdb`,
+> `registry.duckdb`, `catalog.duckdb`, the lake `audit/` and the whole
+> `sweeps/` results tree — with sealed hash-verified snapshots, a
+> verify-everything-then-write restore (destination `window_ledger/deltas/`
+> cleared of manifest-extraneous files; `ledger.parquet` strictly LAST, the
+> law §4 below states), and a CI restore drill on every push. **`bars/` is
+> deliberately NOT in the automated set** (re-pullable) — the tar/rsync/
+> Time-Machine recipe below REMAINS the full-lake (incl. `bars/`) manual
+> path. No law below changes.
+
 ## 0. Where the lake is
 
 The lake root resolves as `$BRUTEX_LAKE_ROOT`, else `~/.brutex/lake`
