@@ -248,6 +248,7 @@ class NewPageFactory(Protocol):
         expect_console_clean: bool = True,
     ) -> PageSession:
         """Serve ``fixture`` on a fresh server+context; return its session."""
+        ...
 
 
 def _arm_route_policy(context: Any, *, stub_widgets: bool) -> None:
