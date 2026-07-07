@@ -687,6 +687,13 @@ def test_audit_chain_records_run_and_pairs(monkeypatch: pytest.MonkeyPatch, tmp_
     start_entry = entries[0]
     assert start_entry.subject == "pull:pull-xyz"
     assert start_entry.payload["jobs"] == 2
+    # Round-6 review fix (Golden Rules #1/#8): the forensic date-range payload
+    # is VALUE-pinned — the #1183 re-execution replay was the only consumer of
+    # these fields and its capture-mode upgrade (correctly) stopped reading
+    # them, so a start/end SWAP mutant in run_ingest's INGEST_RUN_START block
+    # survived the whole suite. These two asserts kill it deterministically.
+    assert start_entry.payload["start"] == _START.isoformat()
+    assert start_entry.payload["end"] == _END.isoformat()
     failed = next(e for e in entries if e.action == "INGEST_PAIR_FAILED")
     assert failed.payload["auth_failure"] is False
     complete = entries[-1]

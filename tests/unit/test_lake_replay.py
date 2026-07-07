@@ -30,6 +30,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -236,7 +237,9 @@ def test_replay_sorts_by_capture_seq_not_chain_order(tmp_path: Path) -> None:
     )
 
 
-def test_multi_run_resumed_chain_replays_in_run_order(tmp_path: Path) -> None:
+def test_multi_run_resumed_chain_replays_in_run_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Two pulls (fresh sink each — ``capture_seq`` restarts at 0) on ONE
     resume-appended chain replay in run order, never interleaved by seq.
 
@@ -248,40 +251,58 @@ def test_multi_run_resumed_chain_replays_in_run_order(tmp_path: Path) -> None:
     storing the conflicting close and false-raising on run 2's anchor (which
     was captured over the merged live file). The ``(capture_run,
     capture_seq)`` order replays the honest multi-pull log clean.
+
+    Round-6 review fix: the two run nonces are pinned DETERMINISTICALLY, with
+    run 1's (``"ff"*16``) lexicographically GREATER than run 2's
+    (``"00"*16``). Chain first-appearance order and lexicographic nonce order
+    therefore DISAGREE, so a mutant sorting by the nonce VALUE —
+    ``key=(e.capture_run, e.capture_seq)`` — applies run 2's conflicting
+    999.99 close first and fails run 2's anchor on EVERY execution (with the
+    prior random ``uuid4`` nonces the kill was a coin flip: the mutant
+    survived whenever run 1's random hex happened to sort first).
     """
     lake_root = tmp_path / "lake"
     replay_root = tmp_path / "replay"
     audit_path = tmp_path / "audit" / "spot-ingest.jsonl"
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _one_run(symbol_batches: list[tuple[str, list[CandleBar]]]) -> str:
-        """One 'process': a FRESH capture sink drained onto the shared chain."""
+    def _one_run(nonce: str, symbol_batches: list[tuple[str, list[CandleBar]]]) -> None:
+        """One 'process': a FRESH capture sink drained onto the shared chain,
+        its ``capture_run`` nonce pinned to *nonce* (deterministic teeth)."""
+        monkeypatch.setattr(
+            "brutex.data.audit_capture.uuid.uuid4",
+            lambda: SimpleNamespace(hex=nonce),
+        )
         sink = AuditCaptureSink(
             ParquetBarSink(writer=ParquetWriter(lake_root=lake_root)),
             lake_root=lake_root,
             mode=CaptureMode.CAPTURE,
         )
+        assert sink.run_nonce == nonce
         for symbol, bars in symbol_batches:
             sink.append(
                 exchange="NSE", segment="INDEX", symbol=symbol, interval="1minute", bars=bars
             )
         _write_records(audit_path, list(sink.drain_remaining()))
-        return sink.run_nonce
 
-    # Run 1: NIFTY (seq 0) then BANKNIFTY (seq 1) — BANKNIFTY stores 100.00.
+    # Run 1 (nonce "ff…" — lexicographically LAST): NIFTY (seq 0) then
+    # BANKNIFTY (seq 1) — BANKNIFTY stores 100.00.
     _one_run(
+        "ff" * 16,
         [
             ("NSE-NIFTY", [_bar(_JAN_TS, 0)]),
             ("NSE-BANKNIFTY", [_bar(_JAN_TS, 0, close="100.00")]),
-        ]
+        ],
     )
-    # Run 2 (seq restarts at 0): BANKNIFTY FIRST — a keep-first conflict
-    # (999.99 must LOSE to run 1's stored 100.00) + one net-new bar — then NIFTY.
+    # Run 2 (nonce "00…" — lexicographically FIRST; seq restarts at 0):
+    # BANKNIFTY FIRST — a keep-first conflict (999.99 must LOSE to run 1's
+    # stored 100.00) + one net-new bar — then NIFTY.
     _one_run(
+        "00" * 16,
         [
             ("NSE-BANKNIFTY", [_bar(_JAN_TS, 0, close="999.99"), _bar(_JAN_TS, 1)]),
             ("NSE-NIFTY", [_bar(_JAN_TS, 1)]),
-        ]
+        ],
     )
     report = replay_lake_from_audit(audit_path, replay_root=replay_root)
     assert report.appends_replayed == 4
