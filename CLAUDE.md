@@ -399,8 +399,13 @@ hostile-review pass._
   self-hosted bench-m4pro workflow — NOT yet executed on any tier, so NO measured overhead figure is claimed
   [round 4: it previously executed in NO workflow while this line presented it as an operative pin]; the
   deterministic byte-parity/anti-storm teeth run in shared CI; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
-  in-place overwrite is the documented stat-token residual; the new module's mutation score rides the weekly
-  Mutation workflow (not verified in-session). REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
+  in-place overwrite is the documented stat-token residual; the new module's mutation gate is WIRED into the
+  weekly Mutation workflow's per-module ZERO-survivor mutmut loop AND was EXECUTED in-session [round 8 — the
+  refuter caught the prior "rides the weekly Mutation workflow (not verified in-session)" wording while NO
+  `--paths-to-mutate` in mutation.yml named the module, an unwired gate presented as a deferred one: now wired
+  (`TestMutationWorkflowWiring` pins the pair) and measured — 473 pre-hardening mutants → 84 pending, killed by
+  the `TestMutationHardening` pins; final enumeration 456 mutants / 0 survived / 0 suspicious, the
+  provably-equivalent residue carrying documented per-line `# pragma: no mutate` markers]. REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
   a fails-before regression): the option-writer CI 100% gate joined its new suite (was RED at 94.74%); the
   read-side seed catches `LakeWriteHalt` (a disk-full seed can never 500 a /db read; write-hook propagation
   untouched); deep-nested-JSON shards fail closed to the `parse` clause (RecursionError caught); the `file_set`

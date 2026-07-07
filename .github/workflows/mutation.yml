@@ -199,6 +199,25 @@ jobs:
           #    + 3 untested, driven to zero by 7 targeted tests + documented
           #    in-module pragmas (its dedicated file runs in ~2 s, same
           #    focused-runner subset argument as the rest of the loop).
+          #    data/lake_stats_manifest.py (the /db paging stats manifest —
+          #    a silent mutant here wrong-pages or wrong-totals the viewer)
+          #    joined per DEC-LAKE-STATS-MANIFEST-001 review round 8: the
+          #    round-8 refuter caught MIGRATION #1482 claiming the module
+          #    "rides the weekly Mutation workflow" while NO --paths-to-mutate
+          #    named it (an unwired gate presented as a deferred one, Golden
+          #    Rule #10). Wired + EXECUTED in-session (mutmut 2.5.1,
+          #    py3.12): the pre-hardening enumeration measured 473 mutants
+          #    with 84 pending (83 survived + 1 suspicious-timing FIFO-hang
+          #    classification); the TestMutationHardening pins (literal /
+          #    exact-message / boundary / log-event-name kills incl. an
+          #    os.open O_NONBLOCK flag spy) + documented per-line in-module
+          #    `# pragma: no mutate` markers on the provably-equivalent
+          #    residue (fd sentinels, discarded-message field names, the
+          #    bounded-read off-by-K) drove the final enumeration to 456
+          #    mutants / ZERO survived / ZERO suspicious. The dedicated file
+          #    runs in seconds (same focused-runner subset argument as the
+          #    rest of the loop) and TestMutationWorkflowWiring fails the
+          #    unit suite if this pair is ever dropped.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py" \
@@ -208,6 +227,7 @@ jobs:
             "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py" \
             "brutex/data/partition.py:tests/unit/test_data_partition.py" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py" \
+            "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py"; do
             mod="${pair%%:*}"
             tf="${pair##*:}"

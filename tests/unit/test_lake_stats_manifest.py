@@ -18,10 +18,13 @@ Whitebox: exercises private helpers per the DEC-P0-017 convention, so
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import fcntl
+import hashlib
 import json
 import os
+import re
 import signal
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
@@ -678,6 +681,524 @@ class TestShardRoundtrip:
         _mutate_shard(shard, _drop)
         stats = lsm.load_shard_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
         assert stats is not None and stats.updated_utc == ""
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    Review round 8: MIGRATION #1482 claimed the module's mutation score
+    "rides the standard weekly Mutation workflow" while NO
+    ``--paths-to-mutate`` in ``.github/workflows/mutation.yml`` named it —
+    an unwired gate presented as a deferred one (Golden Rule #10). The
+    module:suite pair now sits in the workflow's per-module ``mutmut`` loop;
+    this deterministic pin (the ``TestBenchWorkflowWiring`` precedent) fails
+    if the pair is ever dropped. HONEST: it pins the WIRING only — the
+    weekly run executes on its own schedule/push triggers.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert (
+            '"brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py"' in text
+        ), "lake_stats_manifest.py is not wired into mutation.yml's per-module mutmut loop"
+
+
+class TestMutationHardening:
+    """Deterministic pins killing the round-8 in-session mutation survivors.
+
+    The wired mutation gate (``TestMutationWorkflowWiring``) demands ZERO
+    surviving mutants, so every behavioural literal the module persists or
+    exposes — kind tags, env-var names, the shard-path digest recipe, the
+    canonical render, error messages, boundary comparisons, log event
+    names — is pinned EXACTLY here. Provably-equivalent mutants (fd
+    sentinels, discarded-message field names, the bounded-read off-by-K)
+    carry documented ``# pragma: no mutate`` markers in the module instead.
+    Placed BEFORE ``TestStructuralClauses`` so ``pytest -x`` under mutmut
+    fails FAST on flag mutants whose only later symptom is a 5 s watchdog
+    alarm (a "suspicious"-timing classification, not a clean kill).
+    """
+
+    # ── schema / knob literals (persisted or operator-facing contracts) ──
+
+    def test_schema_and_knob_literals_pinned(self) -> None:
+        assert lsm.KIND_BARS == "bars"
+        assert lsm.KIND_OPTIONS == "options"
+        assert lsm.STATS_SUBDIRNAME == "stats"
+        assert lsm.STATS_MANIFEST_VERSION == 1
+        assert lsm.STATS_MANIFEST_OFF == "off"
+        assert lsm.STATS_LOCK_TIMEOUT_S == 5.0
+        assert lsm.FALLBACK_REL_LOG_CAP == 20
+
+    def test_env_names_pinned_against_real_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The env-var NAMES are the operator contract — literal, not via the constant."""
+        monkeypatch.setenv("BRUTEX_LAKE_STATS_MANIFEST", "off")
+        assert lsm.stats_manifest_enabled() is False
+        monkeypatch.delenv("BRUTEX_LAKE_STATS_MANIFEST")
+        assert lsm.stats_manifest_enabled() is True
+        monkeypatch.setenv("BRUTEX_STATS_LOCK_TIMEOUT_S", "2.5")
+        assert lsm.resolve_stats_lock_timeout_seconds() == 2.5
+
+    def test_shard_path_digest_literal_pin(self, tmp_path: Path) -> None:
+        """The digest recipe (sorted-keys compact JSON token) is an on-disk contract."""
+        digest = "de2f4528964ee6cb947b89f65cde0201c9d79a1b23b4a4ee667bc4f71326fa59"
+        expected = tmp_path / ".manifest" / "stats" / digest[:2] / f"{digest}.json"
+        assert lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, BARS_KEY) == expected
+        token = (
+            '["bars",{"exchange":"NSE","interval":"1minute","segment":"INDEX","symbol":"NIFTY"}]'
+        )
+        assert hashlib.sha256(token.encode("utf-8")).hexdigest() == digest
+
+    def test_rows_are_frozen_slots_dataclasses(self) -> None:
+        row = lsm.StatsFileRow(
+            rel="2026/07.parquet",
+            rows=1,
+            min_ts=_ts(2026, 7, 1),
+            max_ts=_ts(2026, 7, 2),
+            mtime_ns=0,
+            size=0,
+            raw_hash=None,
+        )
+        stats = lsm.build_dataset_stats(kind=lsm.KIND_BARS, key=BARS_KEY, files=[row])
+        # via setattr on a REAL field of each class: a literal frozen-field
+        # assignment is a type error, and a non-field name would take the
+        # frozen __setattr__'s super() path instead of FrozenInstanceError.
+        for frozen, attr in ((row, "rel"), (stats, "kind")):
+            with pytest.raises(dataclasses.FrozenInstanceError):
+                setattr(frozen, attr, "x")
+            assert not hasattr(frozen, "__dict__"), "slots=True must hold (no __dict__)"
+
+    def test_render_shard_canonical_literal_pin(self) -> None:
+        """Unit-level schema freeze: the golden suite does NOT run under the
+        focused mutmut runner, so the canonical render literal is pinned here
+        too (kills the render key-name / sort_keys / separators mutants)."""
+        row = lsm.StatsFileRow(
+            rel="2026/07.parquet",
+            rows=2,
+            min_ts=_ts(2026, 7, 1),
+            max_ts=_ts(2026, 7, 2),
+            mtime_ns=5,
+            size=9,
+            raw_hash=None,
+        )
+        stats = lsm.build_dataset_stats(
+            kind=lsm.KIND_BARS,
+            key=BARS_KEY,
+            files=[row],
+            updated_utc="2026-07-07T00:00:00+00:00",
+        )
+        assert lsm.render_shard(stats) == (
+            '{"files":[{"max_ts":"2026-07-02T09:15:00+00:00","min_ts":"2026-07-01T09:15:00+00:00"'
+            ',"mtime_ns":5,"raw_hash":null,"rel":"2026/07.parquet","rows":2,"size":9}],'
+            '"identity_key":["timestamp"],"key":{"exchange":"NSE","interval":"1minute",'
+            '"segment":"INDEX","symbol":"NIFTY"},"kind":"bars",'
+            '"max_ts":"2026-07-02T09:15:00+00:00","min_ts":"2026-07-01T09:15:00+00:00",'
+            '"row_count":2,"updated_utc":"2026-07-07T00:00:00+00:00","version":1}'
+        )
+
+    # ── month grammar boundaries ──
+
+    def test_parse_rel_month_lower_bounds(self) -> None:
+        assert lsm.parse_rel_month(lsm.KIND_BARS, "0001/01.parquet") == (1, 1)
+        assert lsm.parse_rel_month(lsm.KIND_BARS, "0000/01.parquet") is None
+        assert lsm.parse_rel_month(lsm.KIND_BARS, "2026/00.parquet") is None
+        assert lsm.parse_rel_month(lsm.KIND_OPTIONS, "0001-01.parquet") == (1, 1)
+
+    # ── exact error messages (fail-loud contracts; kills the XX-string mutants) ──
+
+    def test_timeout_env_messages_exact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cases = [
+            (
+                "   ",
+                "BRUTEX_STATS_LOCK_TIMEOUT_S is set but blank — "
+                "set a positive number of seconds or unset it",
+            ),
+            ("banana", "BRUTEX_STATS_LOCK_TIMEOUT_S='banana' is not a number"),
+            ("0", "BRUTEX_STATS_LOCK_TIMEOUT_S='0' must be a finite positive number of seconds"),
+        ]
+        for raw, message in cases:
+            monkeypatch.setenv(lsm.STATS_LOCK_TIMEOUT_ENV, raw)
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                lsm.resolve_stats_lock_timeout_seconds()
+
+    def test_key_and_kind_messages_exact(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match=r"^unknown stats-manifest kind 'greeks'$"):
+            lsm.stats_shard_path(tmp_path, "greeks", BARS_KEY)
+        with pytest.raises(ValueError, match=r"^unknown stats-manifest kind 'greeks'$"):
+            lsm.parse_rel_month("greeks", "2026/07.parquet")
+        with pytest.raises(
+            ValueError,
+            match=r"^stats-manifest key field 'exchange' must be a non-empty string, got None$",
+        ):
+            lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, {})
+
+    def test_dest_rel_message_exact(self) -> None:
+        dest = Path("/lake/bars/NSE/INDEX/NIFTY/1minute/2026/june.parquet")
+        message = f"dest {dest!r} does not match the {lsm.KIND_BARS!r} month grammar"
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            lsm.dest_rel(lsm.KIND_BARS, dest)
+
+    def test_require_int_and_ts_messages_exact(self) -> None:
+        with pytest.raises(ValueError, match=r"^rows must be an int, got 'x'$"):
+            lsm._require_int("x", field="rows", minimum=1)
+        with pytest.raises(ValueError, match=r"^rows must be >= 1, got 0$"):
+            lsm._require_int(0, field="rows", minimum=1)
+        with pytest.raises(ValueError, match=r"^min_ts must be an ISO-8601 timestamp, got 'junk'$"):
+            lsm._require_ts("junk", field="min_ts")
+        with pytest.raises(ValueError, match=r"^min_ts must be a timestamp, got 42$"):
+            lsm._require_ts(42, field="min_ts")
+        with pytest.raises(
+            ValueError,
+            match=r"^min_ts must be timezone-aware, got naive '2026-07-01T09:15:00'$",
+        ):
+            lsm._require_ts("2026-07-01T09:15:00", field="min_ts")
+        with pytest.raises(
+            ValueError,
+            match=r"^min_ts timestamp out of datetime range: '0001-01-01T00:00:00\+05:30'$",
+        ):
+            lsm._require_ts("0001-01-01T00:00:00+05:30", field="min_ts")
+
+    def _valid_row(self, **overrides: Any) -> lsm.StatsFileRow:
+        base: dict[str, Any] = {
+            "rel": "2026/07.parquet",
+            "rows": 1,
+            "min_ts": _ts(2026, 7, 1),
+            "max_ts": _ts(2026, 7, 2),
+            "mtime_ns": 0,
+            "size": 0,
+            "raw_hash": None,
+        }
+        base.update(overrides)
+        return lsm.StatsFileRow(**base)
+
+    def test_normalized_row_messages_name_the_field_exactly(self) -> None:
+        naive = datetime(2026, 7, 1, 9, 15)
+        cases: list[tuple[lsm.StatsFileRow, str]] = [
+            (self._valid_row(rel=""), "rel must be a non-empty string, got ''"),
+            (self._valid_row(rows=0), "rows must be >= 1, got 0"),
+            (self._valid_row(min_ts=naive), f"min_ts must be timezone-aware, got naive {naive!r}"),
+            (self._valid_row(max_ts=naive), f"max_ts must be timezone-aware, got naive {naive!r}"),
+            (self._valid_row(min_ts=_ts(2026, 7, 3)), "file '2026/07.parquet' has min_ts > max_ts"),
+            (self._valid_row(mtime_ns=-1), "mtime_ns must be >= 0, got -1"),
+            (self._valid_row(size=-1), "size must be >= 0, got -1"),
+            (self._valid_row(raw_hash=""), "raw_hash must be a non-empty string or None, got ''"),
+        ]
+        for row, message in cases:
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                lsm._normalized_row(row)
+
+    def test_normalized_row_accepts_equal_bounds(self) -> None:
+        """min_ts == max_ts is a VALID single-instant file (the > is strict)."""
+        row = self._valid_row(min_ts=_ts(2026, 7, 1), max_ts=_ts(2026, 7, 1))
+        assert lsm._normalized_row(row).rows == 1
+
+    def test_build_dataset_stats_messages_exact(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"^files must be non-empty — an empty dataset has NO shard$"
+        ):
+            lsm.build_dataset_stats(kind=lsm.KIND_BARS, key=BARS_KEY, files=[])
+        dup = [self._valid_row(), self._valid_row(rows=2)]
+        rels = ["2026/07.parquet", "2026/07.parquet"]
+        with pytest.raises(ValueError, match=f"^{re.escape(f'duplicate rel in files: {rels!r}')}$"):
+            lsm.build_dataset_stats(kind=lsm.KIND_BARS, key=BARS_KEY, files=dup)
+        with pytest.raises(
+            ValueError,
+            match=r"^rel 'junk\.parquet' does not match the 'bars' month grammar$",
+        ):
+            lsm.build_dataset_stats(
+                kind=lsm.KIND_BARS, key=BARS_KEY, files=[self._valid_row(rel="junk.parquet")]
+            )
+        with pytest.raises(
+            ValueError, match=r"^file '2026/07\.parquet' bounds lie outside its UTC month$"
+        ):
+            lsm.build_dataset_stats(
+                kind=lsm.KIND_BARS,
+                key=BARS_KEY,
+                files=[self._valid_row(min_ts=_ts(2026, 6, 30), max_ts=_ts(2026, 7, 2))],
+            )
+
+    def test_build_dataset_stats_accepts_min_exactly_at_month_start(self) -> None:
+        """The month window is half-open [start, next): min_ts == start is INSIDE."""
+        start = datetime(2026, 7, 1, tzinfo=UTC)
+        stats = lsm.build_dataset_stats(
+            kind=lsm.KIND_BARS,
+            key=BARS_KEY,
+            files=[self._valid_row(min_ts=start, max_ts=_ts(2026, 7, 2))],
+        )
+        assert stats.min_ts == start
+
+    def _row_json(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "rel": "2026/07.parquet",
+            "rows": 1,
+            "min_ts": "2026-07-01T09:15:00+00:00",
+            "max_ts": "2026-07-02T09:15:00+00:00",
+            "mtime_ns": 0,
+            "size": 0,
+            "raw_hash": None,
+        }
+        base.update(overrides)
+        return base
+
+    def test_row_from_json_messages_exact(self) -> None:
+        with pytest.raises(ValueError, match=r"^file row must be an object, got 42$"):
+            lsm._row_from_json(42)
+        with pytest.raises(ValueError, match=r"^rel must be a non-empty string, got None$"):
+            lsm._row_from_json({})
+        with pytest.raises(ValueError, match=r"^raw_hash must be a string or null, got 7$"):
+            lsm._row_from_json(self._row_json(raw_hash=7))
+        for field, overrides, message in [
+            ("rows", {"rows": 0}, "rows must be >= 1, got 0"),
+            ("min_ts", {"min_ts": 42}, "min_ts must be a timestamp, got 42"),
+            ("max_ts", {"max_ts": 42}, "max_ts must be a timestamp, got 42"),
+            ("mtime_ns", {"mtime_ns": -1}, "mtime_ns must be >= 0, got -1"),
+            ("size", {"size": -1}, "size must be >= 0, got -1"),
+        ]:
+            assert field in message  # the message must NAME the offending field
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                lsm._row_from_json(self._row_json(**overrides))
+
+    def test_row_from_json_accepts_minimal_row(self) -> None:
+        """rows=1 / mtime_ns=0 / size=0 are all VALID minima (>=, not >)."""
+        row = lsm._row_from_json(self._row_json())
+        assert (row.rows, row.mtime_ns, row.size) == (1, 0, 0)
+
+    # ── loader boundaries + observability round-trips ──
+
+    def test_loader_opens_shard_nonblocking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The O_NONBLOCK bit is the FIFO-hang guard (review round 6) — pin
+        the flags actually passed to ``os.open`` so a ``|``→``&`` mutation
+        dies HERE, fast, instead of only via the 5 s watchdog alarm in the
+        FIFO tests further down the file (a "suspicious"-timing
+        classification under mutmut, not a clean kill)."""
+        shard = _seed_bars(tmp_path)
+        seen: list[int] = []
+        real_open = os.open
+
+        def _spy(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(os.fspath(path)) == shard:
+                seen.append(flags)
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", _spy)
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is not None and clause is None
+        assert seen and all(flags & os.O_NONBLOCK for flags in seen)
+
+    def test_shard_exactly_at_cap_still_loads(self, tmp_path: Path) -> None:
+        """The oversized guard is STRICTLY greater-than: a shard of exactly
+        ``MAX_SHARD_BYTES`` (valid JSON + trailing-space padding) must load."""
+        shard = _seed_bars(tmp_path)
+        body = shard.read_bytes()
+        shard.write_bytes(body + b" " * (lsm.MAX_SHARD_BYTES - len(body)))
+        assert shard.stat().st_size == lsm.MAX_SHARD_BYTES
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert clause is None and stats is not None
+
+    def test_loaded_stats_preserve_updated_utc(self, tmp_path: Path) -> None:
+        """The observability stamp round-trips verbatim (never re-derived)."""
+        shard = _seed_bars(tmp_path)
+        stamp = json.loads(shard.read_text(encoding="utf-8"))["updated_utc"]
+        assert isinstance(stamp, str) and stamp
+        loaded = lsm.load_shard_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded is not None and loaded.updated_utc == stamp
+
+    def test_single_file_row_count_one_shard_loads(self, tmp_path: Path) -> None:
+        """row_count == 1 is a VALID total (minimum 1, not 2)."""
+        _write_partition(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 6)
+        row = _row_for(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 6, rows=1)
+        assert lsm.seed_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, files=[row])
+        stats = lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is not None and stats.row_count == 1
+
+    def test_read_side_serves_min_exactly_at_month_start(self, tmp_path: Path) -> None:
+        """Clause 4 mirrors the factory: min_ts == month start is INSIDE."""
+        _write_partition(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 6)
+        stat = os.stat(lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY) / "2026" / "06.parquet")
+        row = lsm.StatsFileRow(
+            rel="2026/06.parquet",
+            rows=3,
+            min_ts=datetime(2026, 6, 1, tzinfo=UTC),
+            max_ts=_ts(2026, 6, 15),
+            mtime_ns=stat.st_mtime_ns,
+            size=stat.st_size,
+            raw_hash=None,
+        )
+        assert lsm.seed_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, files=[row])
+        assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is not None
+
+    def test_read_side_month_bounds_reject_each_side_independently(self, tmp_path: Path) -> None:
+        """max_ts AT the next month's start (half-open) falls back, and a
+        min-only violation falls back too (the check is an OR, not an AND) —
+        crafted shard bytes, since the factory refuses to build these."""
+        for lo, hi in [
+            ("2026-06-15T00:00:00+00:00", "2026-07-01T00:00:00+00:00"),
+            ("2026-05-31T23:59:00+00:00", "2026-06-15T00:00:00+00:00"),
+        ]:
+            shard = _seed_bars(tmp_path, months=((2026, 6),))
+
+            def _poison(obj: dict[str, Any], lo: str = lo, hi: str = hi) -> None:
+                obj["files"][0]["min_ts"] = lo
+                obj["files"][0]["max_ts"] = hi
+                obj["min_ts"] = lo
+                obj["max_ts"] = hi
+
+            _mutate_shard(shard, _poison)
+            with capture_logs() as logs:
+                assert (
+                    lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+                )
+            assert _fallback_clauses(logs) == ["month_bounds"]
+            shard.unlink()
+
+    # ── write-hook observability event names + env-misconfig containment ──
+
+    def test_record_success_event_name_pinned(self, tmp_path: Path) -> None:
+        _seed_bars(tmp_path)
+        dest = _write_partition(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 8)
+        with capture_logs() as logs:
+            assert (
+                lsm.record_partition_stats(
+                    tmp_path,
+                    kind=lsm.KIND_BARS,
+                    key=BARS_KEY,
+                    dest=dest,
+                    rows=7,
+                    min_ts=_ts(2026, 8, 1),
+                    max_ts=_ts(2026, 8, 2),
+                    raw_hash=None,
+                    stat=os.stat(dest),
+                )
+                is True
+            )
+        assert any(e["event"] == "lake.stats_manifest.recorded" for e in logs)
+
+    def test_vanished_shard_between_probe_and_lock_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The absent clause under the lock stays LAZY — never the
+        corrupt-unlink warn path (record AND remove twins)."""
+        monkeypatch.setattr(lsm, "_shard_exists", lambda _path: True)
+        dest = _write_partition(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 8)
+        with capture_logs() as logs:
+            assert (
+                lsm.record_partition_stats(
+                    tmp_path,
+                    kind=lsm.KIND_BARS,
+                    key=BARS_KEY,
+                    dest=dest,
+                    rows=7,
+                    min_ts=_ts(2026, 8, 1),
+                    max_ts=_ts(2026, 8, 2),
+                    raw_hash=None,
+                    stat=os.stat(dest),
+                )
+                is False
+            )
+            assert (
+                lsm.remove_partition_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, dest=dest)
+                is False
+            )
+        assert not any(e["event"] == "lake.stats_manifest.corrupt_unlinked" for e in logs)
+
+    def test_remove_event_names_pinned(self, tmp_path: Path) -> None:
+        dest_dir = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY)
+        _seed_bars(tmp_path)
+        with capture_logs() as logs:
+            assert (
+                lsm.remove_partition_stats(
+                    tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, dest=dest_dir / "2026/12.parquet"
+                )
+                is True
+            )
+        assert any(e["event"] == "lake.stats_manifest.remove_noop" for e in logs)
+        with capture_logs() as logs:
+            assert (
+                lsm.remove_partition_stats(
+                    tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, dest=dest_dir / "2026/07.parquet"
+                )
+                is True
+            )
+        assert any(e["event"] == "lake.stats_manifest.row_removed" for e in logs)
+        with capture_logs() as logs:
+            assert (
+                lsm.remove_partition_stats(
+                    tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, dest=dest_dir / "2026/06.parquet"
+                )
+                is True
+            )
+        assert any(e["event"] == "lake.stats_manifest.removed_last_row" for e in logs)
+
+    def test_remove_dataset_event_names_pinned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_bars(tmp_path)
+        with capture_logs() as logs:
+            lsm.remove_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert any(e["event"] == "lake.stats_manifest.dataset_removed" for e in logs)
+        shard = _seed_bars(tmp_path)
+        monkeypatch.setattr(
+            lsm,
+            "partition_write_lock",
+            lambda *a, **k: _raising_lock(PartitionLockTimeout(5.0)),
+        )
+        with capture_logs() as logs:
+            lsm.remove_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert not shard.exists()
+        assert any(e["event"] == "lake.stats_manifest.remove_dataset_lock_failed" for e in logs)
+
+    def test_seed_empty_files_reason_pinned(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            assert (
+                lsm.seed_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, files=[])
+                is False
+            )
+        assert any(
+            e["event"] == "lake.stats_manifest.seed_rejected" and e["reason"] == "empty_files"
+            for e in logs
+        )
+
+    def test_env_misconfig_contained_in_remove_and_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A misconfigured timeout knob must be CONSULTED (and contained) by
+        every lock-taking hook — remove / remove-dataset / seed; the record
+        twin is pinned by ``test_env_misconfig_fails_loud_but_contained``."""
+        shard = _seed_bars(tmp_path)
+        row = _row_for(tmp_path, lsm.KIND_BARS, BARS_KEY, 2026, 6)
+        monkeypatch.setenv(lsm.STATS_LOCK_TIMEOUT_ENV, "banana")
+        with capture_logs() as logs:
+            assert (
+                lsm.remove_partition_stats(
+                    tmp_path,
+                    kind=lsm.KIND_BARS,
+                    key=BARS_KEY,
+                    dest=lsm.dataset_dir(tmp_path, lsm.KIND_BARS, BARS_KEY) / "2026/07.parquet",
+                )
+                is False
+            )
+        assert not shard.exists()
+        assert any(e["event"] == "lake.stats_manifest.remove_failed" for e in logs)
+
+        with capture_logs() as logs:
+            assert (
+                lsm.seed_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, files=[row])
+                is False
+            )
+        assert any(e["event"] == "lake.stats_manifest.seed_failed" for e in logs)
+
+        monkeypatch.delenv(lsm.STATS_LOCK_TIMEOUT_ENV)
+        shard = _seed_bars(tmp_path)
+        monkeypatch.setenv(lsm.STATS_LOCK_TIMEOUT_ENV, "banana")
+        with capture_logs() as logs:
+            lsm.remove_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert not shard.exists()
+        assert any(e["event"] == "lake.stats_manifest.remove_dataset_lock_failed" for e in logs)
 
 
 class TestStructuralClauses:
