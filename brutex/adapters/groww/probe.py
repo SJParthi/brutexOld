@@ -568,10 +568,12 @@ class AmpersandFormCall:
         carried an uninterpretable format-drift value — see :func:`_array_evidence`).
     error
         The neutral :class:`~brutex.adapters.groww.errors.GrowwError` shape
-        (``"Type: message"``) on a raise, a ``format_drift: …`` marker on a
-        PRESENT-but-non-array ``expiries``/``contracts`` value (round-3 review
-        fix — the shape production fail-louds on is never a clean empty here),
-        or ``None`` on a clean return.
+        (``"Type: message"``) on a raise, a ``format_drift: …`` marker on an
+        uninterpretable payload shape — a NON-MAPPING top-level payload
+        (round-4 review fix) or a PRESENT-but-non-array
+        ``expiries``/``contracts`` value (round-3) — the shapes production
+        fail-louds on are never a clean empty here, or ``None`` on a clean
+        return.
     """
 
     underlying: str
@@ -645,20 +647,23 @@ def ampersand_family(instruments: Iterable[Instrument]) -> tuple[str, ...]:
 def _array_evidence(payload: object, key: str) -> tuple[int | None, str | None]:
     """Classify a ``{"expiries"|"contracts": [...]}`` payload → ``(count, error)``.
 
-    A well-shaped payload counts its items; a MISSING *key* (and, defensively, a
-    non-Mapping payload) counts as a CLEAN 0 — the lenient-empty arm of
-    production's ``contracts._expiries_array``. A PRESENT-yet-non-array value is
-    the exact FORMAT DRIFT that production fail-louds on (Golden Rule #1) and is
-    returned as a call-level ANOMALY (``count=None`` + a ``format_drift`` error)
-    so :func:`_amp_verdict` demotes it exactly like a raised
-    :class:`~brutex.adapters.groww.errors.GrowwError` — an uninterpretable shape
-    is NOT a clean-empty observation of the no-data side, so one-sided drift can
-    never mint a CLEAR verdict, a DECISIVE report, or the stamp (round-3 review
-    fix: pre-fix the drift counted 0 and the transcript could not distinguish
-    "vendor said empty" from "vendor sent an uninterpretable shape").
+    A well-shaped payload counts its items; a MISSING *key* on a Mapping counts
+    as a CLEAN 0 — the ONE genuinely lenient-empty arm of production's
+    ``contracts._expiries_array`` (whose signature REQUIRES a Mapping; production
+    handed a non-Mapping payload crashes loudly on ``payload.get`` — a fail-loud
+    shape, never a lenient empty). A NON-MAPPING payload (round-4 review fix) or
+    a PRESENT-yet-non-array value (round-3) is therefore an uninterpretable
+    FORMAT DRIFT and is returned as a call-level ANOMALY (``count=None`` + a
+    ``format_drift`` error) so :func:`_amp_verdict` demotes it exactly like a
+    raised :class:`~brutex.adapters.groww.errors.GrowwError` — an uninterpretable
+    shape is NOT a clean-empty observation of the no-data side, so one-sided
+    drift can never mint a CLEAR verdict, a DECISIVE report, or the stamp
+    (pre-fix either drift counted 0 with ``error=None`` and the transcript could
+    not distinguish "vendor said empty" from "vendor sent an uninterpretable
+    shape").
     """
     if not isinstance(payload, Mapping):
-        return 0, None
+        return None, f"format_drift: payload is {type(payload).__name__}, not a mapping"
     items = payload.get(key, ())
     if not isinstance(items, (list, tuple)):
         return None, f"format_drift: {key!r} is {type(items).__name__}, not an array"
@@ -769,11 +774,11 @@ def probe_ampersand_forms(
     the account) and mirrored to *transcript* as ONE ``amp.call`` event with the
     RAW count/error BEFORE any verdict interpretation ("EVIDENCE OR IT DID NOT
     HAPPEN"). A raised :class:`~brutex.adapters.groww.errors.GrowwError` is
-    recorded as that call's evidence, and a PRESENT-but-non-array
-    ``expiries``/``contracts`` value is recorded as a ``format_drift`` call
-    anomaly that contaminates the verdict exactly like a raise
-    (:func:`_array_evidence`, round-3 review fix); a non-Groww exception
-    propagates (a code
+    recorded as that call's evidence, and an uninterpretable payload shape — a
+    NON-MAPPING top-level payload (round-4 review fix) or a PRESENT-but-non-array
+    ``expiries``/``contracts`` value (round-3) — is recorded as a
+    ``format_drift`` call anomaly that contaminates the verdict exactly like a
+    raise (:func:`_array_evidence`); a non-Groww exception propagates (a code
     bug stays loud). A defensive single-form name (no ``&``) is SKIPPED — the
     probe never invents a second form.
     """

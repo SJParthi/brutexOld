@@ -5,8 +5,9 @@ ALWAYS called; one canonical transcript event per physical call BEFORE any
 verdict interpretation; budget spent BEFORE each call), every per-underlying
 verdict branch (PLAIN_OK / ENCODED_ONLY / BOTH_OK / the error-contaminated
 *_UNCONFIRMED pair — data beside a RAISED sibling seeds a winner but can never
-be decisive, and a present-but-non-array format-drift payload contaminates the
-SAME way (round-3 review fix) / NEITHER / ERROR), the
+be decisive, and a format-drift payload (a present-but-non-array value, round-3
+review fix, or a non-Mapping payload, round-4) contaminates the
+SAME way / NEITHER / ERROR), the
 aggregate/decisive fold (incl. the MIXED family), the DYNAMIC family
 derivation from the instrument master (a novel ``X&Y`` listing auto-probes),
 and the bounded budget abort. Together with the stage-14 suite in
@@ -324,14 +325,61 @@ class TestAmpersandEvidence:
         assert sdk.contract_forms == []
         assert report.per_underlying == {"M&M": AMP_VERDICT_BOTH_OK}
 
-    def test_non_mapping_payload_counts_zero(self) -> None:
+    def test_non_mapping_payload_is_a_format_drift_anomaly(self) -> None:
+        """Round-4 review fix: a NON-MAPPING payload is drift, never a clean 0.
+
+        Pre-fix a non-Mapping top-level payload (the SDK returning a parsed
+        list/None) counted as a CLEAN empty (``count=0``, ``error=None``) — the
+        same contamination class as the round-3 non-array value, one level up
+        (production's ``contracts._expiries_array`` REQUIRES a Mapping and
+        crashes loudly otherwise — a fail-loud shape, not a lenient empty).
+        Both sides drifting now reads ERROR, seeds nothing.
+        """
+
         class _WeirdSDK(_AmpSDK):
             def get_expiries(self, **kw: object) -> Mapping[str, object]:
                 self.expiry_forms.append(str(kw["underlying_symbol"]))
                 return ["not", "a", "mapping"]  # type: ignore[return-value]
 
         report, _t = _probe(_WeirdSDK(), ["M&M"])
-        assert report.per_underlying == {"M&M": AMP_VERDICT_NEITHER}
+        assert report.per_underlying == {"M&M": AMP_VERDICT_ERROR}
+        assert report.winners == {}  # nothing seeded from drift
+        assert report.decisive is False
+        assert [c.count for c in report.results] == [None, None]
+        errors = [c.error for c in report.results]
+        assert errors == ["format_drift: payload is list, not a mapping"] * 2
+
+    def test_one_sided_non_mapping_payload_demotes_to_unconfirmed_never_stamps(self) -> None:
+        """Round-4 review fix — the stamp-minting permutation, one level up.
+
+        The encoded form returns real data while the plain form's calls return
+        a parsed non-Mapping (``None``). Pre-fix that drift counted as an
+        UNCONTAMINATED clean empty of the no-data side, so the underlying read
+        ENCODED_ONLY — a CLEAR verdict that could make the family DECISIVE and
+        mint the ``groww.form_probe.verdict`` stamp from an uninterpretable
+        observation, with a transcript (``count=0``/``error=None``)
+        indistinguishable from a genuine vendor empty. Now it demotes to
+        *_UNCONFIRMED exactly like a raised GrowwError: the winner still seeds
+        (data is real evidence for the ORDER), but the verdict is non-clear →
+        never decisive → never the stamp.
+        """
+
+        class _PlainNoneSDK(_AmpSDK):
+            def get_expiries(self, **kw: object) -> Mapping[str, object]:
+                form = str(kw["underlying_symbol"])
+                self.expiry_forms.append(form)
+                if form == "M%26M":
+                    return {"expiries": ["2026-07-30"]}
+                return None  # type: ignore[return-value]  # parsed non-dict: DRIFT
+
+        sdk = _PlainNoneSDK(contracts={"M%26M": "data"})
+        report, _t = _probe(sdk, ["M&M"])
+        assert report.per_underlying == {"M&M": AMP_VERDICT_ENCODED_ONLY_UNCONFIRMED}
+        assert report.decisive is False  # never a DECISIVE report → never the stamp
+        assert report.winners == {"M&M": "M%26M"}  # the winner STILL seeds
+        drift_calls = [c for c in report.results if c.error is not None]
+        assert [(c.role, c.api, c.count) for c in drift_calls] == [("plain", "expiries", None)]
+        assert drift_calls[0].error == "format_drift: payload is NoneType, not a mapping"
 
     def test_non_array_expiries_value_is_a_format_drift_anomaly(self) -> None:
         """A PRESENT-but-non-array ``expiries`` value is a call-level anomaly.
