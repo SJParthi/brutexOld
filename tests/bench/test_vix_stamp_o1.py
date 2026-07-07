@@ -52,8 +52,10 @@ _N_STAMPS = 20_000
 _REPEATS = 5
 
 #: A/B ceiling for the converter arm: the stamp may not more-than-double the
-#: whole batch-simulate + convert call (its true share is a few percent — two
-#: dict probes vs a full kernel walk + ClosedTrade construction per trade).
+#: whole batch-simulate + convert call. Its MEASURED share is ~10-15% (ledger
+#: A/B 1.14x; ~313 ns/trade of two dict probes over a full kernel walk +
+#: ClosedTrade construction per trade), so 2.0x is generous headroom while an
+#: O(n)-per-trade regression (~6x measured when simulated) still fails loudly.
 _AB_CEILING = 2.0
 
 _T0 = datetime(2026, 1, 5, 3, 46, tzinfo=UTC)  # 09:16 IST

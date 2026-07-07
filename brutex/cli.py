@@ -6358,8 +6358,13 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # the window-bounded India-VIX stamper into every persisted row,
             # so an UNSTAMPED recount over a stamped tree would byte-diverge
             # on the VIX trio and false-condemn every good store as
-            # 'corrupt'. Same build law as the launcher (None-degrade on a
-            # VIX-less lake keeps legacy/VIX-less trees byte-identical).
+            # 'corrupt'. Same build law as the launcher; None-degrade on a
+            # VIX-less lake reproduces a SAME-generation unstamped tree
+            # byte-identically. A PRE-VIX-generation tree (no trio columns
+            # on disk) can NEVER be byte-identical — the reflush appends the
+            # three all-null trio columns — and is attributed as the
+            # non-corrupt schema-migration 'backfill' variant (round-5
+            # panel; _is_pre_vix_schema_migration), never condemned.
             # RESIDUAL envelope: VIX sits OUTSIDE the recorded context, so a
             # VIX lake that moved BETWEEN the run and this recount still
             # diverges the trio — compare_recount classifies that case as

@@ -30,6 +30,7 @@ edge shapes named by the spec):
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -409,6 +410,31 @@ class TestDecimalExtremes:
         assert mean is not None and low is not None and high is not None
         assert (low, high) == (1e-300, 1e300)
         assert low <= mean <= high  # the order law holds at the float extremes
+
+    def test_fsum_overflow_grade_level_aggregates_without_aborting(self) -> None:
+        """Round-5 panel MINOR: the FULL screens → stamp → aggregate path at 1.5E+308.
+
+        ``Decimal("1.5E+308")`` is positive, Float64-REPRESENTABLE (it
+        round-trips the stored lake, unlike the round-4 ``1E+400`` residual)
+        and passes BOTH ``from_bars`` screens (``is_finite()`` AND
+        ``math.isfinite(float(...))``) — so it stamps normally, and ONE trade
+        whose entry+exit both hit it made ``math.fsum`` raise
+        ``OverflowError: intermediate overflow in fsum`` inside the finalist
+        projection, aborting the whole launch outside the tuple-fence. The
+        pre-scaled fallback now degrades gracefully: total, finite, ordered.
+        """
+        corrupt = Decimal("1.5E+308")
+        assert math.isfinite(float(corrupt))  # the reachability precondition
+        stamper = TradeReferenceStamper.from_vix_bars(
+            [
+                _vix_bar(_SESSION_TS, str(corrupt)),
+                _vix_bar(_SESSION_TS + timedelta(minutes=1), str(corrupt)),
+            ]
+        )
+        trade = _trade(_SESSION_TS, _SESSION_TS + timedelta(minutes=1), stamper)
+        assert (trade.vix_at_entry, trade.vix_at_exit) == (corrupt, corrupt)
+        mean, low, high = aggregate_trade_vix([trade])  # pre-fix: OverflowError
+        assert (mean, low, high) == (1.5e308, 1.5e308, 1.5e308)
 
 
 # ────────────────────────── old store part-null ──────────────────────────

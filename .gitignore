@@ -70,6 +70,11 @@ runs/
 # … but the byte-frozen golden fixtures ARE committed (optional-column
 # back-compat corpora, DEC-VIX-STAMP-WIRE-001 — see tests/golden/fixtures/README.md)
 !tests/golden/fixtures/*.parquet
+# Repo-root panel/repro sweep-output scratch trees (e.g. stage3vix<random>/ from
+# adversarial-review repros): the *.parquet halves are already ignored above, but
+# the audit.jsonl + *.trials.json sidecars were `git add -A`-committable — ignore
+# the whole tree so a repro can never be staged (DEC-VIX-STAMP-WIRE-001 round-5).
+/stage3vix*/
 *.arrow
 *.zst
 *.zstd

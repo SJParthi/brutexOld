@@ -38,6 +38,7 @@ from brutex.engine.sweep_verify import (
     SweepVerifyError,
     TreeVerifyReport,
     VerifyFinding,
+    _is_pre_vix_schema_migration,
     _sentinel_diff_is_the_vix_repair,
     _stores_differ_only_in_vix,
     compare_recount,
@@ -775,6 +776,33 @@ class TestRecountVixDivergence:
             == "backfill"
         )
 
+    def test_pre_vix_schema_tree_recount_is_the_backfill_variant(self, tmp_path: Path) -> None:
+        """Round-5 panel MINOR: the SCHEMA-generation shape must not drop to the ladder.
+
+        A pre-VIX-generation store (no trio COLUMNS on disk) loads an
+        all-``None`` trio, so an unstamped recount reproduces every row fully
+        EQUAL — yet the recount's reflush appends the three all-null columns
+        and the bytes can NEVER match. Pre-fix the helper abstained on
+        fully-equal rows and this landed on the generic ladder — under a
+        matched context that is verdict-grade ``recount_divergence`` CORRUPT,
+        a false condemnation of a provably-reproduced store.
+        """
+        original, scratch, grid = self._two_trees(tmp_path, None, None)
+        store_path = _store_path(original, grid)
+        _drop_store_columns(store_path, ["vix_mean", "vix_min", "vix_max"])
+        assert store_path.read_bytes() != _store_path(scratch, grid).read_bytes()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence"}
+        assert len(report.findings) == 1  # sidecar+sentinel byte-identical → silent
+        assert report.clean is True  # warn-grade — NEVER heal-grade
+        finding = report.findings[0]
+        assert finding.severity == "warn"
+        assert "India-VIX lake moved" not in finding.detail
+        assert "original rows carry NO trio values" in finding.detail
+        assert "None→value backfill" in finding.detail
+        assert "no quarantine needed" in finding.detail
+
     def test_vix_divergence_under_context_mismatch_keeps_the_precise_code(
         self, tmp_path: Path
     ) -> None:
@@ -995,6 +1023,92 @@ class TestRecountVixDivergence:
         report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
         assert _codes(report) == {"cell_recount_vix_divergence"}
         assert report.clean is True
+
+
+def _drop_store_columns(path: Path, columns: list[str]) -> None:
+    """Rewrite *path* in place without *columns* — a pre-generation schema stand-in."""
+    import polars as pl
+
+    pl.read_parquet(path).drop(columns).write_parquet(path)
+
+
+_PRE_VIX_FIXTURE = (
+    Path(__file__).resolve().parent.parent
+    / "golden"
+    / "fixtures"
+    / "results_store_pre_vix_columns.parquet"
+)
+
+
+class TestPreVixSchemaMigration:
+    """Branch coverage of the round-5 schema-generation attribution helper.
+
+    ``_is_pre_vix_schema_migration`` attributes a fully-equal-rows byte diff
+    to the trio columns' EXISTENCE iff the only schema difference is the
+    missing trio; every less-provable shape abstains (Golden Rule #1).
+    """
+
+    def _reflush(self, source: Path, dest: Path) -> None:
+        """Reflush *source*'s rows through the CURRENT writer into *dest*."""
+        store = ResultsStore(path=dest)
+        for row in ResultsStore.load(source).rows():
+            store.append(row)
+        store.flush()
+
+    def test_committed_pre_vix_fixture_reflushed_is_the_backfill_shape(
+        self, tmp_path: Path
+    ) -> None:
+        """The panel's executed probe: the REAL pre-VIX fixture vs a current reflush.
+
+        The committed fixture is PROVEN byte-identical to the real pre-Stage-C
+        writer (its golden suite), so this is exactly what a `sweep-verify
+        --recount` of a main-era tree produces over a VIX-less lake: bytes
+        differ (the writer appends the three all-null trio columns), rows
+        fully equal — the helper must attribute, not abstain.
+        """
+        original = tmp_path / "original.parquet"
+        shutil.copyfile(_PRE_VIX_FIXTURE, original)
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(original, scratch)
+        assert original.read_bytes() != scratch.read_bytes()  # never byte-identical
+        assert _is_pre_vix_schema_migration(original, scratch) is True
+        assert _stores_differ_only_in_vix(original, scratch) == "backfill"
+
+    def test_partial_trio_presence_abstains(self, tmp_path: Path) -> None:
+        # A store carrying SOME trio columns is not the pre-VIX generation.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(original, ["vix_min", "vix_max"])  # vix_mean kept
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+        assert _stores_differ_only_in_vix(original, scratch) is None
+
+    def test_scratch_without_the_trio_abstains(self, tmp_path: Path) -> None:
+        # The recount side must CARRY the trio for the migration to explain
+        # the diff — two pre-VIX-generation files are not this shape.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        shutil.copyfile(_PRE_VIX_FIXTURE, original)
+        shutil.copyfile(_PRE_VIX_FIXTURE, scratch)
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+
+    def test_extra_schema_drift_abstains(self, tmp_path: Path) -> None:
+        # Missing trio PLUS any other column drift — stripping the trio from
+        # the scratch schema no longer reproduces the original: abstain.
+        original = tmp_path / "original.parquet"
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, original)
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        _drop_store_columns(original, ["vix_mean", "vix_min", "vix_max", "deflated_sharpe"])
+        assert _is_pre_vix_schema_migration(original, scratch) is False
+
+    def test_unreadable_footer_abstains(self, tmp_path: Path) -> None:
+        original = tmp_path / "original.parquet"
+        original.write_bytes(b"not a parquet footer")
+        scratch = tmp_path / "scratch.parquet"
+        self._reflush(_PRE_VIX_FIXTURE, scratch)
+        assert _is_pre_vix_schema_migration(original, scratch) is False
 
 
 # ── Stage-3 recount support (DEC-STAGE3-RECOUNT-001) ─────────────────────────

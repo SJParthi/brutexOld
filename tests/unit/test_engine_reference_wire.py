@@ -154,6 +154,31 @@ class TestAggregateTradeVix:
         assert mean == (10.01 + 10.02) / 2
         assert (low, high) == (10.01, 10.02)
 
+    def test_fsum_overflow_falls_back_to_the_prescaled_fold_never_raises(self) -> None:
+        """Round-5 panel MINOR: an fsum intermediate overflow must never abort.
+
+        Each level is individually Float64-finite (``1.5E+308`` round-trips
+        the stored lake, unlike the round-4 ``1E+400`` residual) and passes
+        BOTH ``from_bars`` screens — yet the RUNNING sum of two such stamps
+        exceeds the Float64 range and ``math.fsum`` RAISES ``OverflowError``.
+        The call site (the finalist projection) sits OUTSIDE the grid
+        tuple-fence, so pre-fix this aborted the WHOLE launch with a raw
+        traceback that never named VIX. The pre-scaled fallback keeps the
+        fold total and finite.
+        """
+        mean, low, high = aggregate_trade_vix([_trade("1.5E+308", "1.5E+308")])
+        assert (mean, low, high) == (1.5e308, 1.5e308, 1.5e308)
+
+    def test_overflow_fallback_mean_obeys_the_order_law(self) -> None:
+        """The fallback's per-term rounding stays clamped into [min, max]."""
+        mean, low, high = aggregate_trade_vix([_trade("1E+308", "1.7E+308"), _trade("10", None)])
+        assert mean is not None and low is not None and high is not None
+        assert (low, high) == (10.0, 1.7e308)
+        assert low <= mean <= high
+        # (1e308 + 1.7e308 + 10) / 3 ≈ 9.0e307 — the true mean, unreachable
+        # through a plain fsum (the exact sum 2.7e308 exceeds Float64).
+        assert mean == pytest.approx(9.0e307, rel=1e-12)
+
 
 # ────────────────────────────────────────────────────────────────────────
 # warn_stale_vix_derived (pure, observe-only)

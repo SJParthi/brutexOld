@@ -103,11 +103,28 @@ def aggregate_trade_vix(
     *trades* sequence or an all-``None`` stamp set returns
     ``(None, None, None)`` — the honest "unknown" trio, never a fabricated
     ``0.0``. The mean is CLAMPED into ``[min, max]``: the true mean always
-    lies there, but the final float DIVISION can land one ulp outside on a
-    degenerate pool (e.g. three identical ``0.0108`` stamps divide to
+    lies there, but the computed float can land outside on a degenerate pool
+    — on the primary path only the final DIVISION rounds, so the clamp snaps
+    a ≤ 1-ulp artefact (e.g. three identical ``0.0108`` stamps divide to
     ``0.010799999999999999``); the clamp restores the mathematical order law
-    ``min <= mean <= max`` and can only ever snap a ≤ 1-ulp division artefact
-    onto an ACTUALLY-ATTAINED level — never a fabricated one.
+    ``min <= mean <= max`` and only ever snaps onto an ACTUALLY-ATTAINED
+    level — never a fabricated one.
+
+    OVERFLOW envelope (round-5 panel): each level is individually
+    Float64-finite (the ``from_bars`` screens guarantee that), but the RUNNING
+    SUM of a corrupt-grade pool can exceed the Float64 range — ``math.fsum``
+    then RAISES ``OverflowError`` ("intermediate overflow in fsum"), and the
+    call site (the finalist projection) sits OUTSIDE the grid tuple-fence, so
+    an uncaught raise would abort a whole launch with a traceback that never
+    names VIX. The fold therefore falls back to the pre-scaled sum
+    ``fsum(x / n for x in levels)``: each term's magnitude is ``≤ max|x| / n``
+    so every exact partial sum is bounded by ``max|x|`` — structurally
+    overflow-free. On that fallback each term rounds individually, so the
+    clamp guards the fold's accumulated rounding (a few ulp, not the primary
+    path's ≤ 1) — still only ever snapping onto an attained level. Real VIX
+    is ~9-90; this arm is reachable only from corrupt stored closes that are
+    nonetheless Float64-representable (they round-trip the lake), which is
+    exactly why it must degrade gracefully instead of aborting the sweep.
 
     Parameters
     ----------
@@ -128,10 +145,20 @@ def aggregate_trade_vix(
     if not levels:
         return (None, None, None)
     low, high = min(levels), max(levels)
-    # fsum is exactly rounded, but the final division can land 1 ulp outside
-    # [low, high] on a degenerate pool — clamp back (see the docstring).
-    mean = min(max(math.fsum(levels) / len(levels), low), high)
-    return (mean, low, high)
+    n = len(levels)
+    try:
+        mean = math.fsum(levels) / n
+    except OverflowError:
+        # Corrupt-grade magnitudes: every level is Float64-finite but the
+        # exact running sum exceeds the Float64 range and fsum RAISES. The
+        # pre-scaled fold is structurally overflow-free (each term ≤ max/n in
+        # magnitude, every partial sum bounded by max) — see the docstring's
+        # OVERFLOW envelope. Never an abort, never a fabricated value.
+        mean = math.fsum(level / n for level in levels)
+    # fsum is exactly rounded, but the final division (or the fallback's
+    # per-term rounding) can land outside [low, high] on a degenerate pool —
+    # clamp back (see the docstring).
+    return (min(max(mean, low), high), low, high)
 
 
 def warn_stale_vix_derived(

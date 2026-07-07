@@ -814,23 +814,34 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
 
     The attribution test behind the ``recount_vix_divergence`` finding family
     (DEC-VIX-STAMP-WIRE-001): both stores must LOAD cleanly, hold the SAME
-    ``run_id`` set, agree on EVERY non-VIX field of every row, and disagree on
-    at least one ``vix_mean``/``vix_min``/``vix_max`` value. Anything less
-    provable returns ``None`` — an unreadable Parquet, a run_id-set drift, a
-    non-VIX field difference, or rows that are fully EQUAL (the byte diff then
-    has an unknown non-row cause) all fall back to the caller's normal
-    corrupt/inconclusive ladder. Honest attribution only, never a guess
-    (Golden Rule #1).
+    ``run_id`` set, agree on EVERY non-VIX field of every row, and either
+    disagree on at least one ``vix_mean``/``vix_min``/``vix_max`` value OR
+    differ ONLY in the trio columns' very EXISTENCE (the schema-generation
+    shape below). Anything less provable returns ``None`` — an unreadable
+    Parquet, a run_id-set drift, a non-VIX field difference, or fully-EQUAL
+    rows over IDENTICAL schemas (the byte diff then has an unknown non-row
+    cause) all fall back to the caller's normal corrupt/inconclusive ladder.
+    Honest attribution only, never a guess (Golden Rule #1).
 
-    A confirmed VIX-only diff is one of TWO cheaply-distinguishable shapes —
-    the round-4 panel caught the old single "the lake moved" wording claiming
-    a cause it had not established for the first shape:
+    A confirmed VIX-only diff is one of THREE cheaply-distinguishable shapes
+    (two row-level + one schema-level) — the round-4 panel caught the old
+    single "the lake moved" wording claiming a cause it had not established
+    for the first shape, and the round-5 panel caught the schema shape
+    silently abstaining onto the generic ladder:
 
-    * ``"backfill"`` — every differing trio field is ``None`` on the ORIGINAL
-      side (a store written BEFORE the VIX columns landed, or a VIX lake that
-      has since GAINED coverage): nothing recorded was contradicted, and a
-      plain redo appends the trio as the sanctioned directional None→value
-      backfill — no quarantine needed.
+    * ``"backfill"`` (row shape) — every differing trio field is ``None`` on
+      the ORIGINAL side (a VIX lake that has since GAINED coverage, or a
+      part-null store): nothing recorded was contradicted, and a plain redo
+      appends the trio as the sanctioned directional None→value backfill —
+      no quarantine needed.
+    * ``"backfill"`` (schema shape) — every row fully EQUAL (both sides an
+      all-``None`` trio) but the ORIGINAL file predates the trio COLUMNS
+      themselves: a pre-VIX-generation store loads ``None`` per
+      ``_row_from_record``'s optional read, while the recount's reflush
+      writes the current schema WITH the three all-null columns appended, so
+      such a tree can NEVER be byte-identical. Attributed iff the ONLY
+      schema difference is the missing trio
+      (:func:`_is_pre_vix_schema_migration`) — same family, same remedy.
     * ``"moved"`` — some recorded trio VALUE disagrees with the recount's
       (value-vs-value, or a recorded value the recount can no longer
       reproduce): the India-VIX lake genuinely moved between the run and the
@@ -862,8 +873,51 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
             if mine != recount and mine is not None:
                 recorded_value_differs = True
     if not vix_differs:
-        return None
+        # Rows fully EQUAL yet the caller saw a byte diff: the ONE provable
+        # cause is the schema-generation migration (a pre-VIX-columns store
+        # vs the current writer's appended all-null trio — the round-5 panel
+        # shape); anything else honestly abstains to the normal ladder.
+        return "backfill" if _is_pre_vix_schema_migration(original, scratch) else None
     return "moved" if recorded_value_differs else "backfill"
+
+
+#: The persisted REFERENCE-ONLY trio columns (mirrors ``results_store._VIX_FIELDS``;
+#: the row-level attribution above hardcodes the same three names in ``replace``).
+_VIX_TRIO_COLUMNS: Final[tuple[str, str, str]] = ("vix_mean", "vix_min", "vix_max")
+
+
+def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
+    """``True`` iff *original*'s Parquet schema is exactly *scratch*'s minus the VIX trio.
+
+    The schema test behind :func:`_stores_differ_only_in_vix`'s third shape
+    (round-5 panel): a store written BEFORE the trio columns landed loads an
+    all-``None`` trio, so its rows compare fully EQUAL to an unstamped
+    recount's — yet the recount's reflush writes the CURRENT schema with the
+    three all-null trio columns and the bytes differ. That diff is
+    attributable iff the ONLY schema difference is the missing trio: the
+    scratch must carry all three columns, the original none, and stripping
+    the trio from the scratch schema must reproduce the original schema
+    EXACTLY (names AND dtypes, order-sensitively). Anything less provable —
+    partial trio presence, any other column/dtype drift, an unreadable
+    footer — returns ``False`` and the caller abstains to the normal ladder.
+    Honest attribution only, never a guess (Golden Rule #1). O(columns) —
+    two Parquet footer reads, no row data.
+    """
+    import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
+
+    try:
+        original_schema = list(pl.read_parquet_schema(original).items())
+        scratch_schema = list(pl.read_parquet_schema(scratch).items())
+    except (pl.exceptions.PolarsError, OSError):
+        return False  # an unreadable footer is never VIX-attributable
+    original_names = {name for name, _ in original_schema}
+    if any(name in original_names for name in _VIX_TRIO_COLUMNS):
+        return False  # partial/total trio presence — not the pre-VIX generation
+    scratch_names = {name for name, _ in scratch_schema}
+    if any(name not in scratch_names for name in _VIX_TRIO_COLUMNS):
+        return False  # the recount side lacks the trio — not this migration
+    stripped = [entry for entry in scratch_schema if entry[0] not in _VIX_TRIO_COLUMNS]
+    return stripped == original_schema
 
 
 def _hashes_pair_with_stores(
