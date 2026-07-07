@@ -2014,7 +2014,9 @@ hostile-review pass._
     `docs/STANDARDS_100PCT.md` §1, post-DEC-COV-CLI-HARNESS-001
     2026-06-12 — coverage rows 1/2 flipped 🟢 when the omit list was
     deleted at a measured package-wide 100.00% line+branch; the one
-    🟡 is row 3 pending DEC-MUTATION-RUNTIME-002's verification run.
+    🟡 is row 3 pending DEC-MUTATION-RUNTIME-003's verification run
+    (the first green SCHEDULED `mutation.yml` run; supersedes -002's
+    never-verified run — MIGRATION.md #1528).
     Earlier: row 3 honestly re-classified 🟡 while the orchestrator
     mutation pass exceeded its weekly budget, DEC-MUTATION-RUNTIME-001;
     the prior "15/2 (~71%)" wording here was the pre-re-classification
