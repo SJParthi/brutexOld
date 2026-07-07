@@ -734,22 +734,39 @@ class SweepAlerter:
             dedupe_key=f"backup-overdue:{reason}",
         )
 
-    def backup_repo_corrupt(self, *, detail: str) -> bool:
+    def backup_repo_corrupt(self, *, detail: str, source: str = "verify") -> bool:
         """The backup repo failed verification / the restore drill found a byte mismatch (CRITICAL).
 
         DEC-BACKUP-OFFBOX-001 (F11/F20): remediation is HUMAN — an automated
         "repair" of a corrupt repo can destroy the last good copy, so the
-        alert points at the runbook instead.
+        alert points at the runbook instead. The escalation promise is
+        SPLIT per arm (round-5 NIT): the nightly-``verify`` arm stamps NO
+        success, so the dead-man goes OVERDUE and keeps escalating; the
+        monthly-``drill`` arm does NOT stop nightly successes (the rotating
+        read-data subset can take ~56 nights to reach the affected pack and
+        the deep check id-matches), so the dead-man stays QUIET — that page
+        is the only automated signal.
 
         Parameters
         ----------
         detail
             Non-secret description of the corruption finding.
+        source
+            ``"verify"`` (nightly ``restic check`` — the default) or
+            ``"drill"`` (monthly restore-drill byte mismatch).
         """
+        if source == "drill":
+            tail = (
+                "Nightly backups may KEEP stamping success (the rotating read-data subset "
+                "can take ~56 nights to reach the affected pack), so the dead-man stays "
+                "QUIET — this page is your ONLY automated signal; act on it now, do not "
+                "wait for escalation."
+            )
+        else:
+            tail = "The dead-man keeps escalating until a VERIFIED backup succeeds."
         message = escape_markdown_v2(
             f"🛑 BACKUP REPO CORRUPT: {detail}. Do NOT run automated repair — follow "
-            "docs/runbooks/backup-offbox.md (restore-from-older / re-seed). The dead-man "
-            "keeps escalating until a VERIFIED backup succeeds."
+            f"docs/runbooks/backup-offbox.md (restore-from-older / re-seed). {tail}"
         )
         return self._publish(
             kind=TelegramEventKind.PHASE_BLOCKED,

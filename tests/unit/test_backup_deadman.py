@@ -508,7 +508,8 @@ class TestDeepTier:
         assert code == EXIT_DEADMAN_BREACH
         assert runner.tags == ["brutex"]
         assert fake.published[0].dedupe_key == "backup-overdue:state_remote_divergence"
-        # A COMPLETED comparison stamps the durable deep gate either way.
+        # A DIVERGED comparison stamps the durable deep gate because its
+        # CRITICAL was DELIVERED (round 5: only-stamp-on-delivered-alert).
         assert load_deadman(deadman_path(cfg)).last_deep_check_at == NOW
 
     def test_deep_agreement_stamps_last_deep_check(self, tmp_path: Path) -> None:
@@ -622,7 +623,13 @@ class TestDeepTier:
         assert code == EXIT_DEADMAN_BREACH
         assert load_deadman(deadman_path(cfg)).last_deep_check_at is None
 
-    def test_deep_unparseable_output_diverges_with_stamp(self, tmp_path: Path) -> None:
+    def test_deep_unparseable_output_diverges_no_stamp_when_undelivered(
+        self, tmp_path: Path
+    ) -> None:
+        """Unparseable snapshots output is a COMPLETED divergence — but with
+        the CRITICAL undelivered (Telegram disabled here) the deep gate must
+        NOT advance (round 5: a diverged comparison stamps only on a
+        delivered alert, so the next tick retries)."""
         cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
         save_state(state_path(cfg), _state())
         code = run_deadman_check(
@@ -633,7 +640,7 @@ class TestDeepTier:
             runner_factory=_factory(FakeDeepRunner("this is not json")),
         )
         assert code == EXIT_DEADMAN_BREACH
-        assert load_deadman(deadman_path(cfg)).last_deep_check_at == NOW
+        assert load_deadman(deadman_path(cfg)).last_deep_check_at is None
 
     def test_deep_empty_repo_diverges(self, tmp_path: Path) -> None:
         """An empty snapshot list is a REAL answer — divergence, not assume-fine."""
@@ -762,7 +769,8 @@ class TestDeepTier:
         last_snapshot_id + last_attempt_at (both ~40 d old, no remote
         knowledge needed) — must read CRITICAL divergence, not the id-match
         AGREE the round-3 short-circuit alone would give: the success stamp
-        post-dates the run anchor by ~959 h ≫ max_runtime_hours (48)."""
+        post-dates the remote snapshot's own time by ~959 h ≫ max_runtime_hours
+        (48)."""
         cfg = _shell_cfg(
             tmp_path, BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p", **_repo_env(tmp_path)
         )
@@ -798,6 +806,90 @@ class TestDeepTier:
         diverged = [e for e in logs if e["event"] == "backup.deadman.remote_divergence"]
         assert len(diverged) == 1
         assert "plausible-stamp forgery" in diverged[0]["detail"]
+
+    def test_deep_two_field_bump_forgery_kept_id_diverges(self, tmp_path: Path) -> None:
+        """Round-5 MAJOR pin: the TWO-field forgery — bump last_success_at AND
+        last_attempt_at to ~now while keeping the REAL old snapshot id (two
+        adjacent fields of the same forgeable state.json, no remote knowledge
+        needed) — must read CRITICAL divergence. Pre-fix the tier-1 anchor
+        was max(remote time, last_attempt_at), so this shape passed tier 1
+        (overshoot ≈ 0) and the tier-2 id match short-circuited to AGREE
+        forever; the anchor is now the remote snapshot time ALONE."""
+        cfg = _shell_cfg(
+            tmp_path, BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p", **_repo_env(tmp_path)
+        )
+        save_state(
+            state_path(cfg),
+            _state(
+                last_attempt_at=NOW - timedelta(hours=1),  # forged bump
+                last_success_at=NOW - timedelta(hours=1),  # forged bump
+                last_snapshot_id="deadbeef",  # the REAL old id, kept
+            ),
+        )
+        stamp = (NOW - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        runner = FakeDeepRunner(f'[{{"short_id": "deadbeef", "time": "{stamp}"}}]')
+        fake = FakeNotifier()
+        pings: list[str] = []
+
+        def _ping(url: str) -> bool:
+            pings.append(url)
+            return True
+
+        with structlog.testing.capture_logs() as logs:
+            code = run_deadman_check(
+                cfg,
+                deep=True,
+                alerter=SweepAlerter(notifier=fake),
+                clock=_clock,
+                runner_factory=_factory(runner),
+                ping=_ping,
+            )
+        assert code == EXIT_DEADMAN_BREACH
+        assert fake.published[0].dedupe_key == "backup-overdue:state_remote_divergence"
+        assert pings == ["http://hc.local/p/fail"]
+        diverged = [e for e in logs if e["event"] == "backup.deadman.remote_divergence"]
+        assert len(diverged) == 1
+        assert "plausible-stamp forgery" in diverged[0]["detail"]
+
+    def test_deep_diverged_undelivered_alert_retries_next_tick(self, tmp_path: Path) -> None:
+        """Round-5 MINOR pin: a DIVERGED deep comparison whose CRITICAL publish
+        FAILS must NOT advance last_deep_check_at — the next hourly tick
+        re-runs the bounded metadata call and hands the RECOVERED notifier the
+        divergence, instead of 24 h of exit-0 ticks + plain success pings
+        (the last_overdue_alert_at only-stamp-on-success law, one field over)."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        save_state(state_path(cfg), _state())
+        runner1 = FakeDeepRunner(_diverging_snapshots_json())
+        with structlog.testing.capture_logs() as logs1:
+            code1 = run_deadman_check(
+                cfg,
+                deep=True,
+                alerter=SweepAlerter(resolver=lambda: None),  # Telegram outage/OFF
+                clock=_clock,
+                runner_factory=_factory(runner1),
+            )
+        assert code1 == EXIT_DEADMAN_BREACH
+        assert any(entry["event"] == "backup.alert.not_delivered" for entry in logs1)
+        sidecar1 = load_deadman(deadman_path(cfg))
+        assert sidecar1.last_deep_check_at is None  # gate NOT advanced
+        assert sidecar1.last_overdue_alert_at is None
+        # The NEXT hourly tick (Telegram recovered): the unstamped gate makes
+        # deep due WITHOUT --deep; the divergence is re-detected, DELIVERED,
+        # and only then are both stamps written.
+        runner2 = FakeDeepRunner(_diverging_snapshots_json())
+        fake = FakeNotifier()
+        code2 = run_deadman_check(
+            cfg,
+            alerter=SweepAlerter(notifier=fake),
+            clock=_clock,
+            runner_factory=_factory(runner2),
+        )
+        assert code2 == EXIT_DEADMAN_BREACH
+        assert runner2.tags == ["brutex"]  # the metadata call WAS retried
+        assert fake.published[0].dedupe_key == "backup-overdue:state_remote_divergence"
+        sidecar2 = load_deadman(deadman_path(cfg))
+        assert sidecar2.last_deep_check_at == NOW
+        assert sidecar2.last_overdue_alert_at == NOW
 
     def test_deep_bumped_success_forgery_idless_old_attempt_diverges(self, tmp_path: Path) -> None:
         """Round-4 MAJOR pin (id-less variant): the same bump-only forgery

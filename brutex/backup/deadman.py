@@ -4,13 +4,14 @@ DEC-BACKUP-OFFBOX-001: the hourly ``brutex backup check`` reads ONE tiny JSON
 (+ the checker-owned throttle sidecar), evaluates the pure
 :func:`evaluate_deadman`, publishes at most ONE alert, and fires ONE HTTP ping
 — NEVER a lake walk, never a restic call except the DAILY deep cross-check
-(F21: one metadata call at most once per 24 h **on a COMPLETED comparison** —
-gated on the durable ``deadman.json:last_deep_check_at`` stamp, which a FAILED
-metadata call deliberately does NOT advance, so during a remote outage the
-deep tier retries next tick: bounded to one call per hourly tick,
-fail-toward-alarm, alerts realert-bounded; the call itself is bounded by
-:data:`DEEP_CHECK_TIMEOUT_S`, never the multi-day backup deadline). SCALABLE
-by construction.
+(F21: one metadata call at most once per 24 h **on a COMPLETED AGREEING
+comparison or a DELIVERED divergence CRITICAL** — gated on the durable
+``deadman.json:last_deep_check_at`` stamp, which a FAILED metadata call AND
+an UNDELIVERED divergence alert deliberately do NOT advance, so during a
+remote/Telegram outage the deep tier retries next tick: bounded to one call
+per hourly tick, fail-toward-alarm, alerts realert-bounded; the call itself
+is bounded by :data:`DEEP_CHECK_TIMEOUT_S`, never the multi-day backup
+deadline). SCALABLE by construction.
 
 Fail-toward-alarm invariants:
 
@@ -358,17 +359,22 @@ def _deep_divergence(
 
     THREE tiers, in order:
 
-    1. **Stamp-plausibility bound (round-4 MAJOR — the forgery keystone):**
-       a success stamp can legitimately land at most one bounded run-duration
-       (``cfg.max_runtime_hours`` — the SAME knob that deadlines the run
-       itself, ``timeout_s`` default = ``max_runtime_hours × 3600``) after
-       the LATER of the run's start (``last_attempt_at``) and the remote
-       latest snapshot's own time (restic stamps ``time`` at backup START).
-       The naive F21 poisoning — bump ``last_success_at`` to "now" while
-       keeping the real old id/attempt stamps (no remote knowledge needed) —
-       passes BOTH agreement arms below, so it is screened FIRST, before the
-       id short-circuit. A legit multi-day seed passes because the operator
-       raises ``max_runtime_hours`` for the seed window (runbook step 6) and
+    1. **Stamp-plausibility bound (round-4 MAJOR, re-anchored round 5 —
+       the forgery keystone):** a success stamp can legitimately land at
+       most one bounded run-duration (``cfg.max_runtime_hours`` — the SAME
+       knob that deadlines the run itself, ``timeout_s`` default =
+       ``max_runtime_hours × 3600``) after the REMOTE latest snapshot's own
+       time (restic stamps ``time`` at backup START inside the same run).
+       The anchor is the remote time ALONE — the one stamp no on-box write
+       can move: round 5 proved that folding ``last_attempt_at`` into the
+       anchor (round 4) let a TWO-field forgery (bump success AND attempt,
+       keep the real id — the same forgeable ``state.json``, no remote
+       knowledge needed) read AGREE forever. The F21 poisoning — bump the
+       stamp(s) while keeping the real old id — passes BOTH agreement arms
+       below, so this bound is screened FIRST, before the id short-circuit.
+       A legit multi-day seed passes because the operator raises
+       ``max_runtime_hours`` for the seed window IN ``~/.brutex/.env`` so
+       the hourly checker resolves the same bound (runbook step 6) and
        keeps it raised until the next nightly success restamps.
        Fail-toward-alarm: a pathological verify tail longer than
        ``max_runtime_hours`` would cost an extra page, never silence.
@@ -407,22 +413,26 @@ def _deep_divergence(
         # Unreachable via the FRESH gate (FRESH implies a success stamp) —
         # kept as a defensive divergence, never an assert.
         return True, True, "state carries no success stamp to compare against"
-    # Tier 1 — stamp plausibility (must precede the id short-circuit: the
-    # bump-only forgery KEEPS the real old id, which the remote still holds).
-    anchor = info.time_utc
-    if state.last_attempt_at is not None and state.last_attempt_at > anchor:
-        anchor = state.last_attempt_at
-    overshoot_hours = (state.last_success_at - anchor).total_seconds() / _SECONDS_PER_HOUR
+    # Tier 1 — stamp plausibility (must precede the id short-circuit: a stamp
+    # forgery KEEPS the real old id, which the remote still holds). Anchored
+    # SOLELY on the remote latest snapshot's own time — the one stamp no
+    # on-box write can move (round-5 MAJOR: state.last_attempt_at lives in
+    # the SAME forgeable state.json, so folding it into the anchor let a
+    # two-field bump — success + attempt — read AGREE forever). No legit
+    # flow needs the attempt stamp here: restic stamps ``time`` at backup
+    # START inside the same run, so an honest success always lands within
+    # one bounded run-duration of the remote time.
+    overshoot_hours = (state.last_success_at - info.time_utc).total_seconds() / _SECONDS_PER_HOUR
     if overshoot_hours > cfg.max_runtime_hours:
         return (
             True,
             True,
             (
-                f"last_success_at {state.last_success_at.isoformat()} post-dates the run "
-                f"anchor {anchor.isoformat()} by {overshoot_hours:.1f} h > max_runtime_hours "
-                f"{cfg.max_runtime_hours:g} h — a success stamp cannot legitimately land "
-                "more than one bounded run-duration after the run started (plausible-stamp "
-                "forgery, F21)"
+                f"last_success_at {state.last_success_at.isoformat()} post-dates the remote "
+                f"latest snapshot's time {info.time_utc.isoformat()} by {overshoot_hours:.1f} h "
+                f"> max_runtime_hours {cfg.max_runtime_hours:g} h — a success stamp cannot "
+                "legitimately land more than one bounded run-duration after its own backup "
+                "started (plausible-stamp forgery, F21)"
             ),
         )
     if _snapshot_ids_match(state.last_snapshot_id, info.snapshot_id):
@@ -507,9 +517,11 @@ def run_deadman_check(
     # DEEP tier (F21) — only when shallow reads FRESH (an already-alarming
     # state needs no divergence proof), never on dry-run, at most once per
     # DEEP_CHECK_INTERVAL_HOURS on a COMPLETED comparison unless forced. A
-    # FAILED metadata call does NOT stamp last_deep_check_at, so it retries
-    # on the NEXT hourly tick — bounded to one call/hour during a remote
-    # outage (fail-toward-alarm; alerts stay realert-bounded). A FUTURE
+    # FAILED metadata call — and, since round 5, a DIVERGED comparison whose
+    # CRITICAL was NOT delivered — does NOT stamp last_deep_check_at, so it
+    # retries on the NEXT hourly tick — bounded to one call/hour during a
+    # remote/Telegram outage (fail-toward-alarm; alerts stay realert-bounded;
+    # the stamp lands after the publish attempt, below). A FUTURE
     # last_deep_check_at (a botched ~/.brutex restore, a backward NTP step —
     # the F14 vectors, the _should_alert guard's twin one field over) reads
     # as "no prior deep check": deep is due NOW, and a completed comparison
@@ -522,6 +534,8 @@ def run_deadman_check(
         or (now - sidecar.last_deep_check_at).total_seconds()
         >= DEEP_CHECK_INTERVAL_HOURS * _SECONDS_PER_HOUR
     )
+    deep_completed = False
+    deep_diverged = False
     if deep_due and not dry_run and report.verdict is DeadmanVerdict.FRESH and state is not None:
         if not _config_resolves_repo(cfg):
             _LOG.info("backup.deadman.deep_skipped", reason="no_repo_config")
@@ -531,9 +545,8 @@ def run_deadman_check(
             # checker must never inherit the multi-day backup timeout for one
             # metadata call (a wedged mount would silence ticks AND pings).
             deep_cfg = replace(cfg, timeout_s=min(cfg.timeout_s, DEEP_CHECK_TIMEOUT_S))
-            diverged, completed, detail = _deep_divergence(cfg, state, factory(deep_cfg))
-            if completed:
-                sidecar = replace(sidecar, last_deep_check_at=now)
+            diverged, deep_completed, detail = _deep_divergence(cfg, state, factory(deep_cfg))
+            deep_diverged = diverged
             if diverged:
                 _LOG.error("backup.deadman.remote_divergence", detail=detail)
                 reason = "state_remote_divergence"
@@ -563,6 +576,7 @@ def run_deadman_check(
     if dry_run:
         return EXIT_OK if quiet else EXIT_DEADMAN_BREACH
 
+    alert_delivered = False
     if report.should_alert:
         active_alerter = alerter if alerter is not None else SweepAlerter()
         published = active_alerter.backup_overdue(
@@ -573,9 +587,20 @@ def run_deadman_check(
         if published:
             # Only-stamp-on-success: a failed/disabled publish leaves the
             # stamp untouched so the NEXT tick retries (F22).
+            alert_delivered = True
             sidecar = replace(sidecar, last_overdue_alert_at=now)
         else:
             _LOG.warning("backup.alert.not_delivered", reason=reason)
+
+    if deep_completed and (not deep_diverged or alert_delivered):
+        # Round-5 MINOR: a DIVERGED comparison advances the daily deep gate
+        # ONLY when its CRITICAL actually reached a live notifier — the
+        # last_overdue_alert_at only-stamp-on-success law, one field over.
+        # An undelivered divergence (Telegram outage, or diverged-but-
+        # realert-throttled) retries the bounded 120 s metadata call on the
+        # NEXT hourly tick instead of going quiet (exit 0 + plain success
+        # pings) for 24 h. AGREEMENT stamps unconditionally.
+        sidecar = replace(sidecar, last_deep_check_at=now)
 
     try:
         save_deadman(deadman_path(cfg), sidecar)

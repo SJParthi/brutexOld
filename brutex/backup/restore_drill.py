@@ -39,13 +39,16 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.backup.errors import (
+    EXIT_BUSY,
     EXIT_CONFIG,
     EXIT_CORRUPTION,
     EXIT_OK,
     EXIT_RESTIC,
+    BackupBusyError,
     BackupError,
     BackupStateError,
 )
+from brutex.backup.plan import backup_singleflight_lock
 from brutex.backup.restic_runner import (
     CANARY_TAG,
     default_runner_factory,
@@ -325,7 +328,9 @@ def run_restore_drill(
         ``EXIT_OK`` iff canary verified AND zero corrupt AND zero restore
         errors; ``EXIT_CORRUPTION`` on any byte mismatch (CRITICAL alert);
         ``EXIT_RESTIC`` on a restic invocation failure; ``EXIT_CONFIG`` when
-        config/snapshot are unusable.
+        config/snapshot are unusable; ``EXIT_BUSY`` when the nightly run (or
+        another drill) holds the single-flight lock — benign overlap, no
+        alert, re-run manually or move the drill's fire time (F15).
     """
     del clock  # deliberate: no wall-clock dependence (documented above)
     active_alerter = alerter if alerter is not None else SweepAlerter()
@@ -366,16 +371,28 @@ def run_restore_drill(
         return EXIT_CONFIG
 
     try:
-        return _drill_flow(
-            cfg,
-            snapshot_id=snapshot_id,
-            lake_root=lake,
-            sample=sample,
-            target_dir=target_dir,
-            keep=keep,
-            alerter=active_alerter,
-            runner_factory=runner_factory,
-        )
+        # Round-5 MAJOR: the drill holds the SAME single-flight lock as the
+        # nightly run (F15). The monthly Day-1 04:30 fire can land inside the
+        # nightly 03:35 run's verify tail (§5 egress math) — without the lock
+        # the drill's canary `restic backup`/`restore` collides with the
+        # nightly `check`/`forget --prune` EXCLUSIVE repo locks, reading as a
+        # false `drill_restic` failure or (drill-wins race) mapping the
+        # nightly's lock-conflict `check` rc to the false backup_repo_corrupt
+        # triple. Contention = benign busy: exit 5, no alert.
+        with backup_singleflight_lock(cfg.state_dir):
+            return _drill_flow(
+                cfg,
+                snapshot_id=snapshot_id,
+                lake_root=lake,
+                sample=sample,
+                target_dir=target_dir,
+                keep=keep,
+                alerter=active_alerter,
+                runner_factory=runner_factory,
+            )
+    except BackupBusyError:
+        _LOG.info("backup.drill.busy", state_dir=str(cfg.state_dir))
+        return EXIT_BUSY
     except OSError as exc:
         # The drill's own F10 direction: canary/tmp setup or verification I/O
         # failed (ENOSPC / permissions on the home volume) — a deterministic
@@ -422,7 +439,9 @@ def _drill_flow(
 
     canary_verdict = _run_canary(cfg, runner, target_dir)
     if canary_verdict == EXIT_CORRUPTION:
-        active_alerter.backup_repo_corrupt(detail="drill mismatch: canary bytes differ")
+        active_alerter.backup_repo_corrupt(
+            detail="drill mismatch: canary bytes differ", source="drill"
+        )
         return EXIT_CORRUPTION  # tree KEPT for forensics
     if canary_verdict is not None:
         active_alerter.backup_failed(
@@ -470,7 +489,9 @@ def _drill_flow(
             )
 
     if tally.corrupt_paths:
-        active_alerter.backup_repo_corrupt(detail=f"drill mismatch: {tally.corrupt_paths[0]}")
+        active_alerter.backup_repo_corrupt(
+            detail=f"drill mismatch: {tally.corrupt_paths[0]}", source="drill"
+        )
         return EXIT_CORRUPTION  # tree KEPT for forensics
     if tally.restore_errors:
         active_alerter.backup_failed(

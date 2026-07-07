@@ -13,6 +13,7 @@ byte-PREFIX law, and the kept-on-failure/removed-on-success tree contract.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -22,7 +23,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog.testing
-from brutex.backup.errors import EXIT_CONFIG, EXIT_CORRUPTION, EXIT_OK, EXIT_RESTIC
+from brutex.backup.errors import (
+    EXIT_BUSY,
+    EXIT_CONFIG,
+    EXIT_CORRUPTION,
+    EXIT_OK,
+    EXIT_RESTIC,
+)
 from brutex.backup.restore_drill import (
     CANARY_SIZE_BYTES,
     _categorize,
@@ -548,3 +555,39 @@ class TestDrillIOResilience:
         assert len(ok_events) == 1
         assert ok_events[0]["skipped_changed"].get("bars") == 1
         assert not ok_events[0]["corrupt"]
+
+
+class TestSingleFlight:
+    def test_drill_busy_when_backup_lock_held_no_alert_no_restic(self, world: DrillWorld) -> None:
+        """Round-5 MAJOR pin (F15): the monthly drill takes the SAME
+        single-flight lock as the nightly run. While a nightly run holds it
+        (the Day-1 04:30 drill firing inside the 03:35 run's verify tail),
+        the drill exits busy (5), fires NO alert, and never invokes restic —
+        so the drill's canary backup/restore can never collide with the
+        nightly ``check``/``forget --prune`` EXCLUSIVE repo locks and read as
+        a false ``drill_restic`` failure or a false corruption page."""
+        world.cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(world.cfg.state_dir / "backup.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # the "nightly run"
+            with structlog.testing.capture_logs() as logs:
+                code = world.drill()
+        finally:
+            os.close(fd)
+        assert code == EXIT_BUSY
+        assert world.notifier.published == []  # benign overlap — NO alert
+        assert world.fake.calls() == []  # zero restic invocations
+        busy = [entry for entry in logs if entry["event"] == "backup.drill.busy"]
+        assert len(busy) == 1
+
+    def test_drill_acquires_and_releases_lock_on_success(self, world: DrillWorld) -> None:
+        """The lock is RELEASED after a clean drill: a second drill (or the
+        nightly run) can acquire it immediately — no stale-lock wedge."""
+        world.set_script({"ls": {"stdout": world.ls_stdout()}})
+        assert world.drill() == EXIT_OK
+        lock_file = world.cfg.state_dir / "backup.lock"
+        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must NOT raise
+        finally:
+            os.close(fd)

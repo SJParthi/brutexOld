@@ -65,10 +65,19 @@ heals via the ledger-reconcile design of
    the default, raise `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` (default 48) for the
    seed window — it is BOTH the restic runtime deadline and the RUNNING→HUNG
    bound; the dead-man reads **RUNNING** while the run is alive (no false
-   page) and HUNG only past that bound. **Keep the raised value in place
-   until the NEXT nightly backup stamps a fresh success:** the daily deep
+   page) and HUNG only past that bound. **Set the raise in `~/.brutex/.env`
+   — NOT only the seed shell:** the hourly dead-man checker is a SEPARATE
+   launchd process that resolves the SAME bound from its own environment
+   (`bootstrap_env()` loads `~/.brutex/.env` at every CLI dispatch; the
+   dead-man plist deliberately carries no backup env), so a shell-only
+   export on the seed command leaves the checker at 48 h — false HUNG
+   CRITICALs from hour 48 of the seed, and a false forgery-divergence page
+   after it. **Keep the raised value in place
+   until the NEXT nightly backup stamps a fresh success** (then remove it
+   from `.env`): the daily deep
    cross-check also uses it as the stamp-PLAUSIBILITY bound (a success stamp
-   landing more than one run-duration after the seed's start would otherwise
+   landing more than one run-duration after the remote snapshot's own start
+   time would otherwise
    page as a forgery). A Ctrl-C abort of the foreground seed clears the
    RUNNING marker before propagating, so the dead-man honestly reads
    NEVER_SUCCEEDED/OVERDUE — never a stale quiet RUNNING. The single-flight
@@ -165,10 +174,14 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   forces the remote cross-check (`restic snapshots --json --latest 1 --tag
   brutex` compared against the local stamp) this tick. THREE tiers: (1) a
   stamp-PLAUSIBILITY bound is screened FIRST — a `last_success_at` landing
-  more than `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` after the later of the run's
-  start and the remote latest snapshot's own time is CRITICAL divergence,
-  catching the bump-only stamp forgery that keeps the real snapshot id
-  (keep a seed-window `MAX_RUNTIME` raise in place until the next nightly
+  more than `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` after the REMOTE latest
+  snapshot's own time is CRITICAL divergence. The anchor is the remote time
+  ALONE — the one stamp no on-box `state.json` write can move — so ANY
+  stamp forgery that keeps the real snapshot id is caught (bump-only OR
+  success+attempt bumped together; anchoring on the local attempt stamp
+  would let the two-field bump read as agreement)
+  (keep a seed-window `MAX_RUNTIME` raise in place — in `~/.brutex/.env` so
+  the hourly checker resolves the same bound — until the next nightly
   success restamps, step 6); (2) agreement = the remote latest snapshot id
   matching the stamped `last_snapshot_id`; (3) the time-gap fallback
   (id-less state) is judged against the NEARER of the attempt/success
@@ -179,6 +192,18 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   2 config · 3 preflight (unmounted/phantom/empty lake) · 4 restic/state
   failure · 5 busy (benign overlap, no alert) · 6 corruption
   (verify/drill) · 7 maintenance failed (data-success stamp stands).
+- A DIVERGED deep check advances its daily gate ONLY when the CRITICAL was
+  actually delivered — an undelivered divergence (Telegram outage/OFF)
+  retries the bounded metadata call every hourly tick (exit 1 + `/fail`
+  ping each tick) instead of going quiet for 24 h.
+- The monthly drill takes the SAME single-flight lock as the nightly run:
+  if the nightly verify tail is still running at the drill's Day-1 04:30
+  fire time (see the §5 egress math — the rotating read-data subset can
+  hold the repo's exclusive locks for hours), the drill exits busy (5, no
+  alert) rather than colliding on the restic repo lock (which would read
+  as a false `drill_restic` failure or a false corruption page). If that
+  overlap recurs, move the drill's fire time later in the day or run
+  `brutex backup restore-drill` manually.
 - Every failure maps to a deterministic triple (exit code + `backup.*`
   structlog event + alert-or-explicit-no-alert) — the full 23-row
   failure-mode matrix lives in the DEC-BACKUP-OFFBOX-001 PR body and

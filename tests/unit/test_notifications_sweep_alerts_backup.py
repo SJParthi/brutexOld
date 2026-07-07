@@ -145,15 +145,37 @@ class TestBackupRepoCorrupt:
     def test_backup_repo_corrupt_kind_severity_dedupe_and_escaped_message(self) -> None:
         fake = FakeNotifier()
         assert (
-            SweepAlerter(notifier=fake).backup_repo_corrupt(detail="drill mismatch: /lake/x.pq")
+            SweepAlerter(notifier=fake).backup_repo_corrupt(detail="check failed: /lake/x.pq")
             is True
         )
         event = fake.published[0]
         assert event.kind == TelegramEventKind.PHASE_BLOCKED
         assert event.severity == TelegramSeverity.CRITICAL
         assert event.dedupe_key == "backup-repo-corrupt"
-        assert "drill mismatch: /lake/x\\.pq" in event.message
+        assert "check failed: /lake/x\\.pq" in event.message
         assert "Do NOT run automated repair" in event.message
+        # The nightly-verify arm (default): NO success is stamped, so the
+        # dead-man really does go OVERDUE and escalate — the claim is honest.
+        assert "keeps escalating" in event.message
+        assert "ONLY automated signal" not in event.message
+
+    def test_backup_repo_corrupt_drill_arm_says_deadman_stays_quiet(self) -> None:
+        """Round-5 NIT pin: the DRILL-mismatch arm must NOT promise dead-man
+        escalation — nightly backups keep stamping success (the rotating
+        read-data subset can miss the corrupt pack for ~56 nights, the deep
+        check id-matches), so that page is the only automated signal."""
+        fake = FakeNotifier()
+        assert (
+            SweepAlerter(notifier=fake).backup_repo_corrupt(
+                detail="drill mismatch: /lake/x.pq", source="drill"
+            )
+            is True
+        )
+        event = fake.published[0]
+        assert event.dedupe_key == "backup-repo-corrupt"
+        assert "keeps escalating" not in event.message
+        assert "dead\\-man stays QUIET" in event.message
+        assert "ONLY automated signal" in event.message
 
     def test_backup_repo_corrupt_disabled_returns_false(self) -> None:
         assert SweepAlerter(resolver=lambda: None).backup_repo_corrupt(detail="x") is False
