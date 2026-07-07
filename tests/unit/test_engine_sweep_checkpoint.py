@@ -118,6 +118,35 @@ def test_from_dict_malformed_field_raises() -> None:
         SweepCheckpoint.from_dict(d)
 
 
+@pytest.mark.parametrize("field", ["total_combos", "last_completed_index"])
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")], ids=["inf", "-inf"])
+def test_from_dict_infinite_int_field_raises_domain_error(field: str, value: float) -> None:
+    """An infinite float in an int field maps to SweepCheckpointError.
+
+    Refuter-confirmed (fix round 6): stdlib ``json.loads`` parses ``1e999``
+    and the bare ``Infinity``/``-Infinity`` literals to ``float('inf')``, and
+    ``int(float('inf'))`` raises ``OverflowError`` — which subclasses
+    ``ArithmeticError``, NOT ``ValueError``/``TypeError`` — so it escaped the
+    coercion catch RAW, past every consumer's narrow
+    ``except SweepCheckpointError`` (the greeks-backfill runner's documented
+    graceful fresh start, the sweep's own resume path), wedging every wet run
+    behind one corrupt/planted checkpoint file until manual deletion —
+    falsifying the load contract's "every corruption class maps to
+    SweepCheckpointError". Inconsistently, ``NaN`` in the same field mapped
+    gracefully (``int(nan)`` raises ``ValueError``).
+    """
+    d = {
+        "version": CHECKPOINT_VERSION,
+        "sweep_id": "s",
+        "total_combos": 10,
+        "last_completed_index": 0,
+        "updated_at": 1.0,
+        field: value,
+    }
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint field"):
+        SweepCheckpoint.from_dict(d)
+
+
 @pytest.mark.parametrize("payload", [[], None, "hello", 42, True])
 def test_from_dict_non_object_payload_raises(payload: object) -> None:
     """A valid-JSON NON-OBJECT payload is the caller-catchable domain error.
@@ -185,6 +214,28 @@ def test_load_non_object_json_raises_domain_error(tmp_path: Path, payload: str) 
     p = tmp_path / "ckpt.json"
     p.write_text(payload, encoding="utf-8")
     with pytest.raises(SweepCheckpointError, match="must be a JSON object"):
+        _store(tmp_path).load()
+
+
+@pytest.mark.parametrize("literal", ["1e999", "Infinity", "-Infinity"])
+def test_load_infinite_total_raises_domain_error_not_overflow(tmp_path: Path, literal: str) -> None:
+    """load() on an Infinity/1e999 int field is the caller-catchable domain error.
+
+    Refuter repro (fix round 6): ``json.loads`` accepts all three literals as
+    ``float('inf')`` and ``int(inf)`` raised a RAW ``OverflowError`` out of
+    ``from_dict``'s ``(TypeError, ValueError)`` catch — escaping
+    ``run_greeks_backfill``'s ``except SweepCheckpointError`` (the documented
+    graceful fresh start) and crashing every wet run until the operator
+    deleted ``<lake>/.greeks_backfill/checkpoint.json`` (the file is unlinked
+    only on clean completion, so the wedge was persistent).
+    """
+    p = tmp_path / "ckpt.json"
+    p.write_text(
+        '{"version": 1, "sweep_id": "sweep-1", "total_combos": ' + literal + ", "
+        '"last_completed_index": 0, "updated_at": 1.0}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint field"):
         _store(tmp_path).load()
 
 

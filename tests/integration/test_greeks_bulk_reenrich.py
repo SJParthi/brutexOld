@@ -342,6 +342,66 @@ class TestUnfixableConvergence:
         for pid in stamps[1:]:
             assert unpack_greeks_provenance(int(pid)).status == STATUS_OK
 
+    def test_stale_stamp_on_nonfinite_ohlc_row_converges_to_stale_unfixable(
+        self, lake: Path
+    ) -> None:
+        """Fix round 6 (refuter-confirmed): the round-4 guarantee's NON-null sibling.
+
+        The refuter repro: a previously-enriched contract whose row 0 is
+        out-of-band poisoned to ``close=NaN`` while KEEPING a NON-null stale
+        stamp (formula v1) escaped the round-4 null-only fixability gate — the
+        scan re-targeted it on every run (``stale_v1=1``) while the wet run
+        read ``already_current=1 errored=0 bars_written=0`` (the driver skips
+        the row BEFORE its reuse gate, so the stale stamp could never be
+        rewritten): 'NEVER CONVERGES: re-targeted on every run while the run
+        reads green'. The probe now applies the SAME driver-skip predicate to
+        the rows carrying the stale stamps: the contract lands in
+        ``stale_unfixable``, is never targeted, and the note says so.
+        """
+        _seed_spot(lake)
+        _seed_option(lake)
+        enrich_greeks_for_targets(targets=_targets(_CE), lake_root=lake, rate_source=_RATE)
+        partition = _option_partition(lake)
+        frame = pl.read_parquet(partition)
+        n = frame.height
+        stored = unpack_greeks_provenance(int(frame["greeks_provenance_id"][0]))
+        v1_pid = pack_greeks_provenance(
+            rate_source_id=stored.rate_source_id,
+            rate_version=stored.rate_version,
+            style_flag=stored.style_flag,
+            status=stored.status,
+            formula_version=1,
+            q_bias_id=stored.q_bias_id,
+            tte_convention_id=stored.tte_convention_id,
+        )
+        poisoned = frame.with_columns(
+            pl.when(pl.arange(0, n) == 0)
+            .then(pl.lit(float("nan"), dtype=pl.Float64))
+            .otherwise(pl.col("close"))
+            .alias("close"),
+            pl.when(pl.arange(0, n) == 0)
+            .then(pl.lit(v1_pid, dtype=pl.Int32))
+            .otherwise(pl.col("greeks_provenance_id"))
+            .alias("greeks_provenance_id"),
+        )
+        poisoned.write_parquet(partition)
+        for _ in range(3):  # every rescan reproduces the SAME stable verdict
+            plan = _scan_plan(lake)
+            assert plan.targets == ()  # never re-targeted — the forever-loop is dead
+            assert plan.scan.stale_unfixable == 1
+            assert plan.scan.stale_v1 == 0 and plan.scan.current == 0
+            report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
+            assert report.stale_unfixable == 1 and report.errored == 0
+            assert "1 contract(s) UNFIXABLE" in report.note
+        # The healthy rows keep their v2 OK stamps; the poisoned row's v1
+        # stamp persists HONESTLY (repair is a lake task), no longer under a
+        # loop that claimed to be fixing it.
+        stamps = pl.read_parquet(partition)["greeks_provenance_id"].to_list()
+        assert unpack_greeks_provenance(int(stamps[0])).formula_version == 1
+        for pid in stamps[1:]:
+            assert unpack_greeks_provenance(int(pid)).formula_version == 2
+            assert unpack_greeks_provenance(int(pid)).status == STATUS_OK
+
 
 class TestDriverUnreachableConvergence:
     def test_non_padded_month_file_converges_to_probe_failed(self, lake: Path) -> None:

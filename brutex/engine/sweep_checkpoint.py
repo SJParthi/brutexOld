@@ -151,7 +151,13 @@ class SweepCheckpoint:
             ``[]`` / ``null`` / ``"hello"`` / ``42`` — every corruption class
             must land in the caller's ``SweepCheckpointError`` handling, never
             an ``AttributeError`` that wedges the run), a required field is
-            missing, has the wrong type, or the schema version is unknown.
+            missing, has the wrong type, overflows the int coercion (stdlib
+            ``json.loads`` accepts ``1e999`` and the bare ``Infinity`` /
+            ``-Infinity`` literals as ``float('inf')``, and ``int(inf)``
+            raises ``OverflowError`` — fix round 6, refuter-confirmed: it is
+            neither a ``ValueError`` nor a ``TypeError``, so it previously
+            escaped raw and wedged every wet run behind one corrupt file), or
+            the schema version is unknown.
         """
         if not isinstance(data, dict):
             raise SweepCheckpointError(
@@ -176,7 +182,9 @@ class SweepCheckpoint:
                 last_completed_index=int(data["last_completed_index"]),
                 updated_at=float(data["updated_at"]),
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
+            # OverflowError covers int(float("inf")) — a JSON 1e999/Infinity
+            # in an int field (subclasses ArithmeticError, NOT ValueError).
             raise SweepCheckpointError(f"Malformed checkpoint field: {exc}") from exc
 
 

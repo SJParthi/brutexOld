@@ -41,8 +41,8 @@ from brutex.data.greeks_backfill import (
     BackfillScan,
     _contract_window,
     _month_files,
-    _null_stamped_rows_fixable,
     _rate_source_value_fingerprint,
+    _stamped_rows_fixable,
     checkpoint_path,
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -360,6 +360,33 @@ class TestScanner:
         scan = _scan(lake)
         assert scan.probe_failed == 1 and scan.targets == () and scan.current == 1
 
+    @pytest.mark.parametrize("poison", [float("inf"), float("-inf"), 1e999])
+    def test_schema_poisoned_inf_float_stamp_column_is_probe_failed_not_fatal(
+        self, lake: Path, poison: float
+    ) -> None:
+        """A non-null inf/1e999 float stamp folds into probe_failed, never a crash.
+
+        Fix round 6 (refuter-confirmed): ``int(float("inf"))`` raises
+        ``OverflowError`` — neither ``ValueError`` nor ``TypeError`` — so the
+        round-1 schema-poisoned-stamp catch let ONE inf-stamped month file
+        kill the WHOLE scan with a raw traceback, recurring on every run until
+        the file was manually repaired (the persistent-DoS class the round-1
+        fix claims closed; the sibling NaN stamp in the SAME code path maps to
+        ``ValueError`` and was already handled — the exact asymmetry).
+        """
+        from structlog.testing import capture_logs
+
+        poisoned = _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
+        pl.DataFrame({"greeks_provenance_id": pl.Series([poison], dtype=pl.Float64)}).write_parquet(
+            poisoned
+        )
+        _write_month(lake, _PE, 2024, 1, [_V1_PID])  # the healthy sibling still scans
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.current == 1
+        assert [t.symbol for t in scan.targets] == [_PE]
+        assert any(r["event"] == "greeks_backfill.probe_skip" and "dtype" in r for r in logs)
+
     @pytest.mark.parametrize("poison", [float("nan"), float("inf"), float("-inf")])
     def test_nonfinite_ohlc_null_stamp_is_stale_unfixable_never_targeted(
         self, lake: Path, poison: float
@@ -404,6 +431,63 @@ class TestScanner:
         assert [t.symbol for t in scan.targets] == [_CE]
         assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
 
+    @pytest.mark.parametrize(
+        ("stale_pid", "census"),
+        [(_V1_PID, "stale_v1"), (_DRIFT_PID, "stale_inputs_drift")],
+        ids=["v1", "drift"],
+    )
+    def test_stale_stamp_on_nonfinite_ohlc_row_is_stale_unfixable_never_targeted(
+        self, lake: Path, stale_pid: int, census: str
+    ) -> None:
+        """The fix-round-6 non-convergence regression (refuter-confirmed).
+
+        Fix round 4 gated the fixability probe on ``null_count() > 0`` only,
+        so a NON-null stale stamp (v1 / inputs-drift) sitting on the SAME
+        driver-skippable non-finite-OHLC row took the stale-stamp path with no
+        actionability check: the driver skipped the row BEFORE its reuse gate,
+        ``changed == 0`` read ``already_current``, the stale stamp persisted,
+        and the contract was re-targeted on EVERY scan under a ✅/EXIT_OK
+        false green — the exact eternal re-feed the round-4 fix closed for the
+        null variant. Such a contract now classifies ``stale_unfixable``.
+        """
+        from structlog.testing import capture_logs
+
+        _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID, stale_pid], [100.0, float("nan")])
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1
+        assert getattr(scan, census) == 0 and scan.current == 0
+        assert any(r["event"] == "greeks_backfill.contract_unfixable" for r in logs)
+        # Convergence: a re-scan reproduces the SAME stable census — never a
+        # re-queued target (the finding's forever-loop).
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.stale_unfixable == 1
+
+    def test_mixed_fixable_and_unfixable_stale_rows_still_target(self, lake: Path) -> None:
+        """One driver-stampable stale-stamped row is enough to target the contract."""
+        _write_month_prices(lake, _CE, 2024, 1, [_V1_PID, _V1_PID], [float("nan"), 100.0])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
+
+    def test_unfixable_stale_file_does_not_mask_stale_sibling_month(self, lake: Path) -> None:
+        """An all-skippable stale month never masks a genuinely-stale sibling month."""
+        _write_month_prices(lake, _CE, 2024, 1, [_V1_PID], [float("nan")])
+        _write_month_prices(lake, _CE, 2024, 2, [_V1_PID], [100.0])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
+        assert scan.files_probed == 2
+
+    def test_mixed_v1_and_drift_stamps_in_one_file_classify_first_stale(self, lake: Path) -> None:
+        """Two distinct stale kinds in one file: first row-order stale wins the
+        census label; the contract is targeted exactly once either way."""
+        _write_month_prices(lake, _CE, 2024, 1, [_V1_PID, _DRIFT_PID], [100.0, 100.0])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_inputs_drift == 0
+
     def test_null_price_null_stamp_stays_stale_null(self, lake: Path) -> None:
         """A NULL price errors the target LOUDLY in the driver — so re-feed it."""
         _write_month_prices(lake, _CE, 2024, 1, [None], [None])
@@ -430,7 +514,12 @@ class TestScanner:
     def test_fixability_probe_fails_open_without_visible_null_rows(self, lake: Path) -> None:
         """The defensive no-null-rows arm fails OPEN (re-feed the driver)."""
         dest = _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID], [100.0])
-        assert _null_stamped_rows_fixable(dest) is True
+        assert _stamped_rows_fixable(dest) is True
+
+    def test_fixability_probe_fails_open_without_visible_stale_rows(self, lake: Path) -> None:
+        """The stale-pid selector's no-visible-rows arm ALSO fails OPEN."""
+        dest = _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID], [100.0])
+        assert _stamped_rows_fixable(dest, [_V1_PID]) is True
 
     def test_scan_beats_the_stall_watchdog_per_contract_and_per_file(self, lake: Path) -> None:
         """The O(files) scan feeds the pull stall watchdog (refuter-confirmed):
@@ -1060,6 +1149,39 @@ class TestRunner:
         path = checkpoint_path(lake)
         path.parent.mkdir(parents=True)
         path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=_plan(1), rate_source=_RATE, batch_size=1, enrich=_SpyEnrich()
+            )
+        assert report.resumed_from == 0 and report.batches == 1
+        assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+        assert not checkpoint_path(lake).exists()  # clean completion deletes the poison
+
+    @pytest.mark.parametrize("literal", ["1e999", "Infinity", "-Infinity"])
+    def test_infinite_int_field_checkpoint_is_ignored_loudly_never_a_crash(
+        self, lake: Path, literal: str
+    ) -> None:
+        """An Infinity/1e999 int field takes the LOUD fresh-start path.
+
+        Refuter repro (fix round 6): ``json.loads`` default-parses all three
+        literals to ``float('inf')`` and ``int(inf)`` raised a RAW
+        ``OverflowError`` — outside ``from_dict``'s ``(TypeError, ValueError)``
+        catch — escaping the runner's ``except SweepCheckpointError`` and
+        crashing EVERY wet run (dashboard job → error state; CLI → raw
+        traceback) instead of the documented graceful fresh start; the file is
+        unlinked only on clean completion, so the wedge persisted until manual
+        deletion — the exact class the round-2 hardening (size cap,
+        RecursionError, non-object) was added to close.
+        """
+        path = checkpoint_path(lake)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            '{"version": 1, "sweep_id": "x", "total_combos": ' + literal + ", "
+            '"last_completed_index": 0, "updated_at": 0.0}',
+            encoding="utf-8",
+        )
         from structlog.testing import capture_logs
 
         with capture_logs() as logs:
