@@ -2,9 +2,13 @@
 
 **Decision ID:** `DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001` (MIGRATION.md entry #1528)
 **Date:** 2026-07-06
-**Status:** **ACCEPTED** — the flip this ADR owns ships in the same PR, as its
-LAST commit (recoverability by construction: every earlier commit is fully
-green under the prior default-OFF; the revert is ONE constant).
+**Status:** **ACCEPTED** — the flip this ADR owns ships in the same PR. It was
+ORIGINALLY authored as the PR's LAST commit (every earlier commit fully green
+under the prior default-OFF), but after a container-restart wipe the branch was
+RECONSTRUCTED from transcripts as ONE combined commit, so that commit-granular
+recoverability does NOT exist in the pushed history (reconciled 2026-07-07,
+Golden Rule #1). The substantive rollback paths (§6) are unaffected: the revert
+is ONE constant, and `BRUTEX_SWEEP_RUST_METRICS=0` kills per process.
 **Author:** engine-scale follow-up (executes a named deferral)
 **Executes the deferral of:** `DEC-SWEEP-RUST-METRICS-001` (MIGRATION.md
 entry #1186), whose flag section states verbatim: *"the flip to ON-by-default
