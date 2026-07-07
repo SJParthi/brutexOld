@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1528 —
+_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1529 —
 the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
 one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
 winning form STRING — the winner's ROLE applied to the key's own
@@ -68,6 +68,17 @@ a decisive operator-run probe lands its transcript; the map itself needs no
 probe (production pulls self-learn from ordinary fallback wins). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched
 modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
+preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
+cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
+interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
+rebuild always stamps the PRE-walk ledger token (mid-walk race → the stale-stamped base still LANDS — it is
+record_dataset's write-side convergence seed, the round-6 restore of an interim SKIP design — plus one
+observe-only db_view.manifest_rebuilt_stale INFO; the load-side token gate stays the freshness authority),
+welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
+tests/bench/_o1_tiers.py (robust 3–10× shared-CI / strict 1.1× M4-Pro via BRUTEX_M4PRO_STRICT=1 / measured 3×
+cache-tier — words only, NO gate weakened), and two new bench pins (u128 two-limb mask + orchestrator audit
+append). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-06 (DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527 —
 the operator's STRICT six-step pull order: every Groww pull executes
 INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES → STOCKS-FUTURES →
@@ -607,7 +618,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
-  MIGRATION.md #1528** — the durable `&`-form winner map: `schema_meta` rows
+  MIGRATION.md #1529** — the durable `&`-form winner map: `schema_meta` rows
   (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
   ROLE applied to the key's own `underlying_symbol_forms` tuple, so the metadata
   and candle phases share ONE value space; `underlying_symbol_forms` moved into
@@ -632,6 +643,23 @@ hostile-review pass._
   transcript. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
   touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean,
   pyright at the pre-change baseline).
+  Earlier: `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528** —
+  the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
+  COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by
+  `warm_discovery_memos` off its ONE unfiltered walk, `_MEMOS_SEEDED` 5→7; pullability tagging deliberately
+  live — the keyless `load-instruments` `master_revision` trap); `resolve_report_datasets` discovers FILTERED
+  at the source (`exclude_segments={FNO}` prunes the contract tree at walk descent + `intervals={required}`;
+  SANCTIONED: an F&O contract partition is no longer offered as a report symbol) with a NEW `datasets=`
+  pre-walked seam; the `db_view.list_candle_datasets` manifest rebuild always stamps the PRE-walk ledger token
+  (mid-walk race → the stale-stamped base still LANDS — it is `record_dataset`'s write-side convergence
+  seed, the round-6 review restore of an interim SKIP design — plus one observe-only
+  `db_view.manifest_rebuilt_stale` INFO; the load-side token gate stays the freshness authority); welcome.html + Golden Rule #5 reworded to the TRUE
+  two-tier O(1) enforcement of `tests/bench/_o1_tiers.py` (robust 3–10× shared-CI / strict 1.1× M4-Pro via
+  `BRUTEX_M4PRO_STRICT=1` / measured 3× cache-tier — words only, NO gate weakened); two NEW bench pins
+  (u128 two-limb mask + `AuditWriter.append` flat vs chain length, prefill via the COMMON
+  `tests/fakes/audit_chain.py`). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; dashboard read-side + docs +
+  bench only; touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  pre-change baseline).
   Earlier: `claude/ecstatic-pascal-7vjsju` (**DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527** — the
   operator's STRICT six-step pull order: every Groww pull executes INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES →
   STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO existing execution
@@ -1987,8 +2015,23 @@ hostile-review pass._
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
-   append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
-   for each hot path. Any regression fails CI.
+   append must all be O(1). The decree TARGET is
+   `p99(N=1M) / p99(N=1K) ≤ 1.1` per hot path; ENFORCEMENT is the
+   two-tier gate defined once in `tests/bench/_o1_tiers.py`
+   (DEC-O1-CLAIMS-HONESTY-001 wording reconcile — no gate value
+   changed): every O(1) bench asserts a robust/mean-based **3–10×**
+   ratio ceiling on the shared 2-core GitHub runners (DEC-P0-020 —
+   the raw 1.1× is too noisy to gate there without flaking), and the
+   decreed strict **1.1×** tier is enforced where
+   `BRUTEX_M4PRO_STRICT=1` on the dedicated self-hosted M4-Pro runner
+   (DEC-O1-STRICT-TIER-001; per `bench-m4pro.yml` that tier is DORMANT
+   until the operator registers the runner — the shared-CI tier is what
+   actually gates every push today), with a measured **3×** cache-tier
+   allowance for ratio tests whose big/small workloads cross a CPU
+   cache tier (DEC-O1-CACHE-TIER-001 — memory-tier physics, not an
+   algorithmic regression; `cache_tier_ceiling` never returns looser
+   than the shared default). Any regression past its tier's ceiling
+   fails CI.
 6. **Rate-limit safety.** Groww publishes type-level limits (the
    **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
