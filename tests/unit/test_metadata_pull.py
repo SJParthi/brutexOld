@@ -1858,8 +1858,6 @@ def test_rewrite_counts_defer_breaks_and_counts(tmp_path: Path) -> None:
     registry.close()
 
 
-
-
 # ── metadata pool workers carry the run id (DEC-PULL-BEAT-PERRUN-001 fix round) ──
 
 
