@@ -149,8 +149,17 @@ def test_stage1a_per_bar_cost_is_flat_with_roll_schedule() -> None:
 
     Same two-tier probe as the spot gate, with a ~monthly ``roll_schedule``
     spanning each stream (the big tier crosses ~13 roll boundaries, the small
-    ~1) — a cursor that rescans the schedule per bar, or a reset that grows
-    with history, blows the ratio.
+    ~1) — per-bar work that grows with HISTORY (a reset that replays prior
+    bars, or any super-linear per-bar rescan) blows the ratio.
+
+    HONEST sensitivity envelope (review round-4 finding 6, Golden Rule #10):
+    with only ~14 schedule entries on the big tier, a hypothetical per-bar
+    LINEAR rescan of the schedule adds ~1e2 ns against the µs-scale Stage-1A
+    per-bar baseline (~1.05× ratio shift) — UNDER both ceiling tiers — so
+    this gate does NOT detect a constant-small per-bar schedule rescan. The
+    cursor's O(1)-amortised advance is owned by code review (stage1a.py's
+    monotone `_roll_cursor`) + the unit reset suite; this bench owns the
+    history-scaling regression class only.
     """
     small = _make_bars(_N_SMALL)
     big = _make_bars(_N_BIG)
