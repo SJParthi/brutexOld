@@ -1098,7 +1098,8 @@ def compute_options_candidates(
     -------
     OptionsCandidates
         The contract rows + skipped count + normalised date + canonical tier/track +
-        the ``calendar_only_expiry`` honest-no-data flag.
+        the ``calendar_only_expiry`` honest-no-data flag + the per-underlying PCR
+        rows (DEC-MOVERS-OPTIONS-PCR-001).
 
     Raises
     ------
