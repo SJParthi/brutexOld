@@ -5941,6 +5941,25 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
             audit_path = scratch / "audit.jsonl"
             audit_path.parent.mkdir(parents=True, exist_ok=True)
+            # The shadow re-sweep must stamp EXACTLY like the launcher did
+            # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
+            # the window-bounded India-VIX stamper into every persisted row,
+            # so an UNSTAMPED recount over a stamped tree would byte-diverge
+            # on the VIX trio and false-condemn every good store as
+            # 'corrupt'. Same build law as the launcher (None-degrade on a
+            # VIX-less lake keeps legacy/VIX-less trees byte-identical).
+            # RESIDUAL envelope: VIX sits OUTSIDE the recorded context, so a
+            # VIX lake that moved BETWEEN the run and this recount still
+            # diverges the trio — compare_recount classifies that case as
+            # the non-corrupt `recount_vix_divergence` warn, never heal-grade.
+            from brutex.engine.reference_wire import build_vix_stamper
+
+            recount_stamper = build_vix_stamper(
+                lake_root=resolved_lake,
+                start=_parse_dt(start),
+                end=_parse_dt(end),
+                catalog_path=catalog,
+            )
             train_hash_ok = True
             # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
             # twin): the shadow re-sweep runs the SAME digest path
@@ -5957,6 +5976,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     store_for=make_store_for(scratch, grid),
                     dedup=plan_launch_dedup(grid, digest_path=True),
                     audit=audit,
+                    reference_stamper=recount_stamper,
                 )
                 # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
                 # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
@@ -5984,6 +6004,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         segment=segment,
                         start=start,
                         end=end,
+                        # The SAME recount stamper — stage3 cell stores carry
+                        # the trio too (they ride ranked_combo_to_result_row).
+                        stamper_for=lambda: recount_stamper,
                     )
                     # Condition B6: the recomputed train hash must match the
                     # manifest's recorded one — the cell path digests fold it.

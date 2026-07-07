@@ -9,6 +9,8 @@ THE #650 inflation signature (``rows > top_k``), the grid-mismatch refusal,
 and the Stage-3 cell attribution arms.
 """
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import dataclasses
@@ -20,6 +22,7 @@ from pathlib import Path
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -35,6 +38,8 @@ from brutex.engine.sweep_verify import (
     SweepVerifyError,
     TreeVerifyReport,
     VerifyFinding,
+    _sentinel_diff_is_the_vix_repair,
+    _stores_differ_only_in_vix,
     compare_recount,
     plan_expected_stores,
     recorded_context_from_audit,
@@ -43,6 +48,7 @@ from brutex.engine.sweep_verify import (
     verify_structural,
 )
 from brutex.engine.trial_stats import (
+    read_tuple_trial_stats,
     trial_stats_sidecar_path,
     tuple_trial_stats_from_sharpes,
     write_tuple_trial_stats,
@@ -108,7 +114,9 @@ def _grid(**overrides: object) -> SweepGridConfig:
     return SweepGridConfig(**base)  # type: ignore[arg-type]
 
 
-def _sweep(root: Path, grid: SweepGridConfig) -> None:
+def _sweep(
+    root: Path, grid: SweepGridConfig, reference_stamper: TradeReferenceStamper | None = None
+) -> None:
     from brutex.engine.sweep_orchestrator import make_store_for
 
     with AuditWriter.open(root / "audit.jsonl") as audit:
@@ -118,7 +126,30 @@ def _sweep(root: Path, grid: SweepGridConfig) -> None:
             store_for=make_store_for(root, grid),
             dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
             audit=audit,
+            reference_stamper=reference_stamper,
         )
+
+
+def _verify_stamper(base: str) -> TradeReferenceStamper:
+    """A stamper covering EVERY ``_trending_bars`` instant at *base*-anchored levels.
+
+    Two different *base* values model the sanctioned India-VIX lake movement
+    between a recorded sweep and its recount (DEC-VIX-STAMP-WIRE-001): same
+    instants, different levels → same run identity, different persisted trio.
+    """
+    vix_bars = [
+        CandleBar(
+            timestamp=bar.timestamp,
+            open=Decimal(base),
+            high=Decimal(base) + Decimal("1"),
+            low=Decimal(base) - Decimal("1"),
+            close=Decimal(base) + Decimal(i % 7) / Decimal(100),
+            volume=0,
+            open_interest=None,
+        )
+        for i, bar in enumerate(_trending_bars())
+    ]
+    return TradeReferenceStamper.from_vix_bars(vix_bars)
 
 
 @pytest.fixture(scope="module")
@@ -644,6 +675,289 @@ class TestRecountCompare:
         report = compare_recount(original, scratch, plan, context_match=True)
         assert report.findings == ()
         assert report.checked_stores == 3  # only the surviving tuple's triple
+
+
+# ── VIX-only recount divergence (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER) ─────
+
+
+class TestRecountVixDivergence:
+    """A VIX-lake movement between run and recount is warn-attributed, never CORRUPT.
+
+    The residual envelope of the recount-stamper BLOCKER fix: VIX sits outside
+    the recorded context AND the run identity, so a VIX re-pull / 1day
+    re-derivation between the original run and the recount byte-diverges the
+    trio (and the sentinel's store-hash re-pair) even under a fully matched
+    context — the comparator must attribute it precisely instead of
+    condemning a provably-reproduced store as heal-grade corruption.
+    """
+
+    def _two_trees(
+        self,
+        tmp_path: Path,
+        original_stamper: TradeReferenceStamper | None,
+        scratch_stamper: TradeReferenceStamper | None,
+    ) -> tuple[Path, Path, SweepGridConfig]:
+        grid = _grid()
+        original, scratch = tmp_path / "original", tmp_path / "scratch"
+        for root, stamper in ((original, original_stamper), (scratch, scratch_stamper)):
+            root.mkdir()
+            _sweep(root, grid, reference_stamper=stamper)
+        return original, scratch, grid
+
+    def test_identical_stamped_trees_verify_clean(self, tmp_path: Path) -> None:
+        # THE BLOCKER regression end-state: a recount stamped from the SAME
+        # lake state as the run byte-reproduces the whole triple — silence.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert report.findings == ()
+        assert report.clean is True
+
+    def test_vix_moved_lake_is_warn_never_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        # ALL THREE artifacts land in the VIX family: the store (the trio
+        # columns) plus BOTH pairing artifacts (sidecar + sentinel each embed
+        # the store's content hash, so they necessarily re-pair).
+        assert _codes(report) == {"recount_vix_divergence"}
+        assert len(report.findings) == 3
+        assert report.clean is True  # warn-grade — NEVER heal-grade
+        for finding in report.findings:
+            assert finding.severity == "warn"
+            assert "India-VIX lake moved" in finding.detail
+
+    def test_stamped_vs_unstamped_recount_is_vix_warn(self, tmp_path: Path) -> None:
+        # value-vs-None is a VIX-only divergence too (the backfill direction).
+        original, scratch, grid = self._two_trees(tmp_path, _verify_stamper("14.00"), None)
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence"}
+        assert report.clean is True
+
+    def test_vix_divergence_under_context_mismatch_keeps_the_precise_code(
+        self, tmp_path: Path
+    ) -> None:
+        # The attribution is exact regardless of the context gate — a proven
+        # VIX-only diff is more informative than a generic inconclusive.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=False)
+        assert _codes(report) == {"recount_vix_divergence"}
+        assert "recount_divergence_inconclusive" not in _codes(report)
+
+    def _rewrite_store(self, path: Path, rows: tuple[object, ...]) -> None:
+        replacement = ResultsStore(path=path)
+        for row in rows:
+            replacement.append(row)  # type: ignore[arg-type]
+        replacement.flush()
+
+    def test_non_vix_row_difference_stays_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        self._rewrite_store(store_path, (dataclasses.replace(rows[0], sharpe_ratio=9.9), *rows[1:]))
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_divergence"}
+        assert not report.clean
+
+    def test_run_id_set_drift_stays_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        self._rewrite_store(store_path, (dataclasses.replace(rows[0], run_id="f" * 64), *rows[1:]))
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert "recount_divergence" in _codes(report)
+        assert "recount_vix_divergence" not in _codes(report)
+
+    def test_equal_rows_are_never_vix_attributed(self, tmp_path: Path) -> None:
+        # Fully-EQUAL rows mean the byte diff (if any) has a non-row cause —
+        # the helper honestly abstains instead of guessing VIX.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        assert (
+            _stores_differ_only_in_vix(_store_path(original, grid), _store_path(scratch, grid))
+            is False
+        )
+
+    def test_helper_attributes_a_mixed_equal_and_vix_diff_row_set(self, tmp_path: Path) -> None:
+        # One row equal + one row differing ONLY in the trio → attributed.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        store_path = _store_path(original, grid)
+        rows = ResultsStore.load(store_path).rows()
+        assert len(rows) >= 2  # the fixture persists a multi-row leaderboard
+        scratch_store_path = _store_path(scratch, grid)
+        scratch_rows = ResultsStore.load(scratch_store_path).rows()
+        self._rewrite_store(
+            scratch_store_path,
+            (dataclasses.replace(scratch_rows[0], vix_max=99.0), *scratch_rows[1:]),
+        )
+        assert _stores_differ_only_in_vix(store_path, scratch_store_path) is True
+
+    def test_tampered_sentinel_in_a_vix_moved_pair_stays_on_the_ladder(
+        self, tmp_path: Path
+    ) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        sentinel = completion_sentinel_path(_store_path(original, grid))
+        sentinel.write_text("{not json", encoding="utf-8")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        # The store keeps its precise VIX attribution; the unreadable sentinel
+        # is NEVER folded into it — it stays verdict-grade on the ladder.
+        assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
+        assert not report.clean
+
+    def test_sentinel_non_hash_field_drift_is_not_the_vix_repair(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        sentinel = completion_sentinel_path(_store_path(original, grid))
+        recorded = read_completion_sentinel(sentinel)
+        write_completion_sentinel(
+            sentinel,
+            TupleCompletionSentinel(
+                tuple_digest=recorded.tuple_digest,
+                store_content_hash=recorded.store_content_hash,
+                sidecar_written=recorded.sidecar_written,
+                n_marked=recorded.n_marked + 1,
+            ),
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
+
+    def test_sentinel_stale_hash_is_not_the_vix_repair(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        sentinel = completion_sentinel_path(_store_path(original, grid))
+        recorded = read_completion_sentinel(sentinel)
+        write_completion_sentinel(
+            sentinel,
+            TupleCompletionSentinel(
+                tuple_digest=recorded.tuple_digest,
+                store_content_hash="0" * 64,  # no longer pairs with its own store
+                sidecar_written=recorded.sidecar_written,
+                n_marked=recorded.n_marked,
+            ),
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
+        # Direct pin of the final pairing arm.
+        assert (
+            _sentinel_diff_is_the_vix_repair(
+                sentinel,
+                completion_sentinel_path(_store_path(scratch, grid)),
+                _store_path(original, grid),
+                _store_path(scratch, grid),
+            )
+            is False
+        )
+
+    def test_sentinel_divergence_with_missing_original_store_stays_on_the_ladder(
+        self, tmp_path: Path
+    ) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        _store_path(original, grid).unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes  # the store artifact
+        assert "recount_divergence" in codes  # the sentinel — never VIX-guessed
+        assert "recount_vix_divergence" not in codes
+
+    def test_sidecar_divergence_with_identical_stores_stays_on_the_ladder(
+        self, tmp_path: Path
+    ) -> None:
+        # The store pair is byte-identical → nothing is VIX-attributable; a
+        # diverging sidecar is judged on the normal ladder.
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("14.00")
+        )
+        sidecar = trial_stats_sidecar_path(_store_path(original, grid))
+        sidecar.write_bytes(sidecar.read_bytes() + b"tampered")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_divergence"}
+
+    def test_tampered_sidecar_in_a_vix_moved_pair_stays_on_the_ladder(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        sidecar = trial_stats_sidecar_path(_store_path(original, grid))
+        sidecar.write_text("{not json", encoding="utf-8")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        # store + sentinel keep the precise VIX attribution; the unreadable
+        # sidecar is never folded into it.
+        assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
+
+    def test_sidecar_statistic_drift_is_not_the_vix_repair(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        sidecar = trial_stats_sidecar_path(_store_path(original, grid))
+        recorded = read_tuple_trial_stats(sidecar)
+        write_tuple_trial_stats(
+            sidecar, dataclasses.replace(recorded, n_enumerated=recorded.n_enumerated + 1)
+        )
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
+
+    def test_sidecar_stale_hash_is_not_the_vix_repair(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        sidecar = trial_stats_sidecar_path(_store_path(original, grid))
+        recorded = read_tuple_trial_stats(sidecar)
+        write_tuple_trial_stats(sidecar, dataclasses.replace(recorded, store_content_hash="0" * 64))
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
+
+    def test_cell_vix_divergence_gets_the_cell_code(self, tmp_path: Path) -> None:
+        # Stage-3 cell stores persist the trio through the SAME projector —
+        # a VIX-moved cell recount gets its OWN non-corrupt code (never
+        # aliasing the grid family, condition B2).
+        original, scratch, grid = self._two_trees(tmp_path, None, None)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        template = ResultsStore.load(_store_path(original, grid)).rows()[0]
+        for root, mean in ((original, 14.0), (scratch, 20.0)):
+            dest = root / cell_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            cell_store = ResultsStore(path=dest)
+            cell_store.append(
+                dataclasses.replace(template, vix_mean=mean, vix_min=mean - 1.0, vix_max=mean + 1.0)
+            )
+            cell_store.flush()
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        assert _codes(report) == {"cell_recount_vix_divergence"}
+        assert report.clean is True
 
 
 # ── Stage-3 recount support (DEC-STAGE3-RECOUNT-001) ─────────────────────────
