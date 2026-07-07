@@ -38,6 +38,7 @@ from brutex.data.sink import ParquetBarSink
 from brutex.feed import series_load
 from brutex.feed.replay import ReplayFeed
 from brutex.feed.series_load import load_sweep_slice
+from structlog.testing import capture_logs
 
 pytest.importorskip("polars")
 pytest.importorskip("duckdb")
@@ -450,11 +451,14 @@ class TestFuturesRefusals:
                 _load_alias(cat, lake, resolution=crafted)
         assert "disjoint IST-date ownership" in str(exc.value)
 
-    def test_segment_wholly_outside_the_window_is_a_zero_bar_refusal(
+    def test_segment_wholly_outside_the_window_skips_with_one_warn(
         self, lake: Path, tmp_path: Path
     ) -> None:
-        # A degenerate window∩ownership intersection cannot own bars — it is
-        # reported as the zero-bar refusal, never a silent skip.
+        # A degenerate window∩ownership intersection cannot own bars — it
+        # holds NO session instant, so it is SKIPPED with one WARN (review
+        # round-1: the old unconditional zero-bar refusal false-blocked
+        # legitimate boundary windows), never a silent skip and never a
+        # false "re-pull" refusal.
         with Catalog.open(tmp_path / "cat.duckdb") as cat:
             _futures_lake(lake, cat)
             crafted = FuturesSeriesResolution(
@@ -470,14 +474,184 @@ class TestFuturesRefusals:
                 head_clamped=False,
                 tail_unowned_days=0,
             )
-            with pytest.raises(FuturesSeriesError, match="EMPTY"):
-                _load_alias(cat, lake, resolution=crafted)
+            with capture_logs() as logs:
+                out = _load_alias(cat, lake, resolution=crafted)
+        assert out == []
+        warned = [rec for rec in logs if rec["event"] == "series_load.boundary_segment_no_session"]
+        assert len(warned) == 1
+        assert warned[0]["contract"] == _JUN
 
 
 def _futures_lake_no_catalog(lake: Path) -> None:
     """Write the 2-contract lake WITHOUT touching the caller's catalog."""
     with Catalog.open(lake.parent / "throwaway.duckdb") as seed_cat:
         _futures_lake(lake, seed_cat)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Boundary segments with NO expectable session instant (review round-1 2/16/22)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _skip_warns(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [rec for rec in logs if rec["event"] == "series_load.boundary_segment_no_session"]
+
+
+class TestBoundarySegmentSessionSkip:
+    """A bar-less boundary sliver SKIPS with one WARN; a real hole still refuses.
+
+    Review round-1 findings 2/16/22: the resolver selects segments by IST
+    DATE while the loader cuts by DATETIME, so a legitimate window edge (a
+    day-only ``--end`` the morning after an expiry, a post-close ``--start``,
+    a holiday right after a roll) intersected a fresh segment entirely
+    OUTSIDE market hours → zero bars → a false whole-sweep "re-pull" refusal.
+    The refusal is now gated on the intersection holding at least one
+    expectable session instant (real NSE calendar).
+    """
+
+    def test_day_only_end_on_the_first_post_roll_day_skips_the_boundary_segment(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # The finding-22 repro: a COMPLETE lake, `--end 2025-06-27` (day-only
+        # ISO → midnight UTC = 05:30 IST) — the July segment's intersection
+        # [00:00 → 05:30 IST] is entirely pre-open. Pre-fix: FuturesSeriesError
+        # "EMPTY … re-pull the contract" although the lake is complete.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    start=_ist(2025, 6, 25, 0, 0),
+                    end=datetime(2025, 6, 27, 0, 0, tzinfo=UTC),  # cli day-only _parse_dt shape
+                )
+        assert [b.close for b in out] == [Decimal("100"), Decimal("101")]  # June bars only
+        warned = _skip_warns(logs)
+        assert len(warned) == 1
+        assert warned[0]["contract"] == _JUL
+        assert warned[0]["interval"] == "1minute"
+
+    def test_post_close_start_on_expiry_day_skips_not_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # The symmetric head edge: a post-close --start on the expiry date.
+        # The June segment's intersection [16:00 → 23:59 IST] starts AT/after
+        # the session close → no expectable bar label → skip, empty result
+        # (the caller's zero-bar preflight owns that refusal, spot-mirroring).
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    start=_ist(2025, 6, 26, 16, 0),
+                    end=_ist(2025, 6, 26, 23, 59),
+                )
+        assert out == []
+        assert len(_skip_warns(logs)) == 1
+
+    def test_holiday_after_expiry_skips_the_successor_segment(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # Finding-2's second shape: window end on a holiday right after an
+        # expiry (2024-03-28 March expiry; 2024-03-29 is Good Friday). The
+        # April segment owns ONLY the holiday in-window → zero bars is
+        # EXPECTED → skip, never a false refusal.
+        mar = "NSE-NIFTY-28Mar24-FUT"
+        apr = "NSE-NIFTY-25Apr24-FUT"
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _seed(lake, cat, symbol=mar, bars=[_bar(_ist(2024, 3, 27), 100.0)])
+            _seed(lake, cat, symbol=apr, bars=[_bar(_ist(2024, 4, 1), 200.0)])
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    start=_ist(2024, 3, 27, 0, 0),
+                    end=_ist(2024, 3, 29, 23, 59),
+                )
+        assert [b.close for b in out] == [Decimal("100")]
+        warned = _skip_warns(logs)
+        assert len(warned) == 1
+        assert warned[0]["contract"] == apr
+
+    def test_weekend_run_with_a_trading_monday_still_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # A crafted Sat→Mon owned window: Sat+Sun hold no session but MONDAY
+        # does — a zero-bar read there is a REAL data hole → the loud refusal
+        # stands (the session walk skips non-trading days, then finds Monday).
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            crafted = FuturesSeriesResolution(
+                segments=(
+                    FuturesSeriesSegment(
+                        _JUN, date(2025, 6, 26), date(2025, 6, 28), date(2025, 6, 30)
+                    ),
+                ),
+                roll_schedule=(date(2025, 6, 26).toordinal(),),
+                contract_symbols=(_JUN,),
+                unparsed_dirs=(),
+                cross_checks=(),
+                head_clamped=False,
+                tail_unowned_days=0,
+            )
+            with pytest.raises(FuturesSeriesError, match="EMPTY"):
+                _load_alias(
+                    cat,
+                    lake,
+                    start=_ist(2025, 6, 28, 0, 0),
+                    end=_ist(2025, 6, 30, 23, 59),
+                    resolution=crafted,
+                )
+
+    def test_1day_midnight_stamp_in_window_still_refuses(self, lake: Path, tmp_path: Path) -> None:
+        # The derived FNO 1day bar is stamped midnight IST: a pre-open sliver
+        # [00:00 → 05:30] DOES hold the expectable 1day instant, so a missing
+        # 1day partition there is a REAL prebuild gap → refusal stands.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)  # 1minute only — no 1day partitions
+            with pytest.raises(FuturesSeriesError, match="'1day' is EMPTY"):
+                _load_alias(
+                    cat,
+                    lake,
+                    interval="1day",
+                    start=_ist(2025, 6, 27, 0, 0),
+                    end=_ist(2025, 6, 27, 5, 30),
+                )
+
+    def test_1day_midnight_stamp_outside_window_skips(self, lake: Path, tmp_path: Path) -> None:
+        # The same trading date but an intersection strictly AFTER midnight:
+        # no expectable 1day stamp in [06:00 → 07:00] → skip, empty result.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with capture_logs() as logs:
+                out = _load_alias(
+                    cat,
+                    lake,
+                    interval="1day",
+                    start=_ist(2025, 6, 27, 6, 0),
+                    end=_ist(2025, 6, 27, 7, 0),
+                )
+        assert out == []
+        assert len(_skip_warns(logs)) == 1
+
+    def test_out_of_calendar_coverage_keeps_the_loud_refusal(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # HONEST abstain: a 2027+ weekday is outside the holiday coverage —
+        # the loader cannot prove the window bar-less, so the refusal stands
+        # (never a silent skip the calendar cannot vouch for).
+        dec27 = "NSE-NIFTY-30Dec27-FUT"
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            lake.mkdir(parents=True, exist_ok=True)
+            (lake / "bars" / "NSE" / "FNO" / dec27).mkdir(parents=True)
+            with pytest.raises(FuturesSeriesError, match="EMPTY"):
+                _load_alias(
+                    cat,
+                    lake,
+                    start=_ist(2027, 12, 1, 0, 0),
+                    end=_ist(2027, 12, 30, 23, 59),
+                )
 
 
 # ────────────────────────────────────────────────────────────────────────

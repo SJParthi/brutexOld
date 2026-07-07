@@ -36,8 +36,10 @@ on the returned list stays O(1); no O(1)-total claim.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING
+
+import structlog
 
 from brutex.calendars.nse import IST
 from brutex.data.futures_series import (
@@ -59,6 +61,54 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 __all__ = [
     "load_sweep_slice",
 ]
+
+_LOG = structlog.get_logger("brutex.feed.series_load")
+
+
+def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end: datetime) -> bool:
+    """True iff ``[seg_start, seg_end]`` can contain ANY stored bar timestamp.
+
+    Judged per IST date against the REAL NSE session calendar
+    (:func:`brutex.calendars.nse.get_session_checked` — muhurat + special
+    weekend sessions included): an intraday interval labels its bars inside
+    ``[session open, session close)``, while the derived FNO ``1day`` bar is
+    stamped at its session date's midnight IST. A window that holds NO such
+    instant (a pre-open / post-close boundary sliver, a weekend/holiday run)
+    genuinely cannot hold bars, so an empty read there is NOT a data defect
+    (review round-1 findings 2/16/22 — the false "re-pull" refusal on a
+    legitimate roll-boundary window).
+
+    HONEST abstain: an out-of-coverage date (2027+ weekday) raises
+    ``HolidayDataUnavailableError`` — this helper then returns ``True`` so the
+    caller KEEPS its loud empty-partition refusal rather than silently
+    skipping a window the calendar cannot vouch for. O(days in the window
+    intersection), bounded by one contract's ownership span.
+    """
+    from brutex.calendars.nse import HolidayDataUnavailableError, get_session_checked
+
+    if seg_end < seg_start:  # a degenerate intersection holds no instants
+        return False
+    day = seg_start.astimezone(IST).date()
+    last_day = seg_end.astimezone(IST).date()
+    while day <= last_day:
+        try:
+            session = get_session_checked(day)
+        except HolidayDataUnavailableError:
+            return True  # cannot prove bar-less → keep the loud refusal
+        if session is not None:
+            if interval == "1day":
+                stamp = datetime.combine(day, time.min, tzinfo=IST)
+                if seg_start <= stamp <= seg_end:
+                    return True
+            else:
+                open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
+                close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
+                # Bar labels live in [open, close): the last 1-minute bar is
+                # close − 1 min, so a window starting AT the close holds none.
+                if seg_start < close_dt and seg_end >= open_dt:
+                    return True
+        day += timedelta(days=1)
+    return False
 
 
 def _reconcile(
@@ -170,9 +220,14 @@ def load_sweep_slice(
     ------
     FuturesSeriesError
         Futures alias only: resolution refusals (interior hole etc.), a
-        per-``(contract, interval)`` ZERO-BAR owned window (dir exists but the
-        requested interval is empty — distinct message from a missing
-        contract), or a boundary monotonicity break (never silent).
+        per-``(contract, interval)`` ZERO-BAR owned window whose in-window
+        span holds at least one expectable session instant (dir exists but
+        the requested interval is empty — distinct message from a missing
+        contract; a bar-less boundary sliver — pre-open/post-close edges,
+        a holiday/weekend run after an expiry, a degenerate intersection —
+        is SKIPPED with one ``series_load.boundary_segment_no_session`` WARN
+        instead of a false refusal), or a boundary monotonicity break (never
+        silent).
     """
     if not is_futures_series_symbol(symbol):
         # Spot / verbatim-dir path: EXACTLY the inline optional-reconcile +
@@ -247,6 +302,26 @@ def load_sweep_slice(
                 if seg.own_start <= bar.timestamp.astimezone(IST).date() <= seg.own_end
             ]
         if not seg_bars:
+            if not _expected_bar_time_in_window(
+                interval=interval, seg_start=seg_start, seg_end=seg_end
+            ):
+                # The in-window slice of this segment's owned span holds NO
+                # expectable bar instant (a pre-open/post-close boundary
+                # sliver — e.g. a day-only `--end` the morning after an
+                # expiry — a holiday/weekend run right after a roll, or a
+                # degenerate intersection): an empty read is EXPECTED, not a
+                # data defect. Skip the boundary segment with ONE WARN
+                # instead of a false "re-pull" whole-sweep refusal (review
+                # round-1 findings 2/16/22); the loud refusal below stands
+                # for any span the calendar says SHOULD hold bars.
+                _LOG.warning(
+                    "series_load.boundary_segment_no_session",
+                    contract=seg.contract_symbol,
+                    interval=interval,
+                    window_start=seg_start.astimezone(IST).isoformat(),
+                    window_end=seg_end.astimezone(IST).isoformat(),
+                )
+                continue
             hint = (
                 ""
                 if reconcile
