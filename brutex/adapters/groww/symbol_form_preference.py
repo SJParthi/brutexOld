@@ -222,7 +222,8 @@ class SymbolFormPreference:
     ``order`` returns the given canonical forms with the remembered winner moved
     FIRST (stable order of the rest, NEVER dropping a form); ``record_winner`` stores
     the winning form's index in the canonical tuple. Unknown keys / out-of-range
-    indices are no-ops, so the preference can only ever REORDER, never narrow.
+    indices / single-form tuples are no-ops, so the preference can only ever
+    REORDER, never narrow.
     """
 
     def __init__(self) -> None:
@@ -249,13 +250,27 @@ class SymbolFormPreference:
         """Remember that *winning_form* (∈ the CANONICAL *forms*) returned data — O(forms).
 
         Called ONLY on a non-empty result. A *winning_form* not present in *forms*
-        (defensive — a caller bug) is ignored rather than poisoning the memory.
+        (defensive — a caller bug) is ignored rather than poisoning the memory, and
+        a SINGLE-form *forms* is a NO-OP too (round-3 review fix): a 1-tuple
+        carries ZERO role information — its only possible index, 0, is already the
+        ``order`` no-op — while the phases SHARE one preference keyed by the
+        PRIMARY underlying, so a plain-spelling candle win (``candles.py`` records
+        the CONTRACT symbol's own canonical tuple, a 1-tuple when that spelling
+        has no ``&``) under an ``&`` *key* would otherwise CLOBBER a learned /
+        durable-seeded encoded role back to plain-0 for the rest of the run.
         ``O(forms)`` is O(2) in practice (plain + encoded). Returns ``True`` iff the
         remembered winner CHANGED (computed atomically under the map lock — the
         write-on-change seam :class:`PersistentSymbolFormPreference` persists on;
         DEC-FORM-WINNER-PERSIST-001. Every pre-existing caller ignores the return
-        value, so the base behaviour is byte-identical).
+        value, and ORDERING is unaffected by the single-form no-op — an index-0
+        memory was already the ``order`` no-op — so caller-visible behaviour is
+        unchanged).
         """
+        if len(forms) <= 1:
+            # No fallback → no role to remember: remembering index 0 has no
+            # ordering benefit whatsoever, only the shared-key clobber side
+            # effect above. Nothing stored, nothing changed.
+            return False
         try:
             idx = forms.index(winning_form)
         except ValueError:
@@ -415,7 +430,9 @@ class PersistentSymbolFormPreference(SymbolFormPreference):
         durable row is written only when the winner actually CHANGED, *forms*
         carries a real fallback (``len(forms) > 1`` — a single-form plain key is
         NEVER persisted: there is no role to remember, so the ~750 plain
-        underlyings pay ZERO store I/O here too), the
+        underlyings pay ZERO store I/O here too; since the round-3 base-class
+        single-form NO-OP such a record already returns ``changed=False``, so
+        this gate is a defensive belt), the
         :func:`form_winner_persist_enabled` kill switch is on, and a store is
         wired — OUTSIDE the map lock, under ``_persist_lock``, with the
         ``set_meta`` itself wall-clock-BOUNDED by the COMMON

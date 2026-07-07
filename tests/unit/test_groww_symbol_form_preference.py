@@ -95,6 +95,27 @@ class TestSymbolFormPreference:
         pref.record_winner("M&M", forms, "SOMETHING-ELSE")
         assert pref.order("M&M", forms) == forms  # nothing poisoned
 
+    def test_single_form_record_is_a_noop_and_never_clobbers_a_multiform_role(self) -> None:
+        """Round-3 review fix: a 1-tuple carries ZERO role information.
+
+        The metadata AND candle phases share ONE preference keyed by the PRIMARY
+        underlying, and ``candles.py`` records the CONTRACT symbol's own canonical
+        tuple — a 1-tuple when that spelling carries no ``&`` — under the ``&``
+        ``preference_key``. Pre-fix the base record stored index 0 under the
+        shared key, resetting a learned encoded=1 role back to plain-0 for the
+        rest of the run (one wasted plain-form empty fetch per subsequent
+        multi-form call until an encoded win re-recorded). A single-form record
+        is now a NO-OP: nothing stored, nothing clobbered, ``False`` returned.
+        """
+        pref = SymbolFormPreference()
+        forms = ("M&M", "M%26M")
+        assert pref.record_winner("M&M", forms, "M%26M") is True  # encoded role learned
+        # A candle win whose contract spelling has no '&' (1-tuple) under the
+        # SAME primary key must not reset the learned role.
+        one_form = ("NSE-M-25Sep25-100-CE",)
+        assert pref.record_winner("M&M", one_form, one_form[0]) is False
+        assert pref.order("M&M", forms) == ("M%26M", "M&M")  # role intact
+
     def test_learning_transfers_across_keys_independently(self) -> None:
         pref = SymbolFormPreference()
         a = ("M&M", "M%26M")
@@ -537,13 +558,16 @@ class TestPersistentSymbolFormPreference:
         so without the ``len(forms) > 1`` persist gate every plain F&O underlying
         wrote one junk ``schema_meta`` row per pull process (~212 rows/pull,
         never read back — order() only consults the store for multi-form keys).
+        Round-3 review fix: a single-form record is now a base-class NO-OP too
+        (``False`` — a 1-tuple carries zero role information), so nothing is
+        stored in memory either.
         """
         store = _MemMetaStore()
         pref = PersistentSymbolFormPreference(store)
         for name in ("NIFTY", "RELIANCE", "TCS", "HDFCBANK"):
-            # The in-memory record still happens (changed=True on first win)…
-            assert pref.record_winner(name, (name,), name) is True
-        # …but the durable store sees ZERO I/O — no junk rows, no hot-path writes.
+            # A single-form record is a NO-OP end to end (round 3)…
+            assert pref.record_winner(name, (name,), name) is False
+        # …and the durable store sees ZERO I/O — no junk rows, no hot-path writes.
         assert store.set_calls == []
         assert store.get_calls == []
         assert store.rows == {}
@@ -553,8 +577,27 @@ class TestPersistentSymbolFormPreference:
         store = _MemMetaStore()
         pref = PersistentSymbolFormPreference(store)
         symbol = "NSE-TCS-25Sep25-3000-CE"
-        assert pref.record_winner(symbol, (symbol,), symbol) is True
+        assert pref.record_winner(symbol, (symbol,), symbol) is False  # round-3 no-op
         assert store.set_calls == []
+
+    def test_single_form_record_never_clobbers_a_durable_seeded_role(self) -> None:
+        """Round-3 review fix: the durable-seeded encoded role survives a 1-tuple win.
+
+        The candle phase can record a no-``&`` contract spelling (a 1-tuple from
+        ``underlying_symbol_forms``) under an ``&`` PRIMARY ``preference_key``
+        (``candles.py`` — ``pref_key = contract.underlying_symbol``). Pre-fix the
+        base record reset the durable-seeded encoded=1 role back to plain-0
+        IN MEMORY for the rest of the run (the durable row itself was already
+        persist-gated), re-paying one wasted plain-form empty fetch per later
+        multi-form call. Now the 1-tuple record is a no-op end to end.
+        """
+        store = _MemMetaStore(rows={form_winner_key("M&M"): "M%26M"})
+        pref = PersistentSymbolFormPreference(store)
+        assert pref.order("M&M", _FORMS) == ("M%26M", "M&M")  # durable seed adopted
+        one_form = ("NSE-M-25Sep25-100-CE",)
+        assert pref.record_winner("M&M", one_form, one_form[0]) is False
+        assert pref.order("M&M", _FORMS) == ("M%26M", "M&M")  # seeded role INTACT
+        assert store.set_calls == []  # durable row untouched too
 
     def test_get_meta_error_warns_and_degrades_without_a_reread_storm(self) -> None:
         class _RaisingStore(_MemMetaStore):

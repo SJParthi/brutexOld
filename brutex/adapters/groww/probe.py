@@ -484,11 +484,13 @@ def probe_depth(
 #: hypothesis demonstrated for that name); BOTH_OK = both forms returned data (a
 #: positive claim about each side — an incidental sibling error cannot undermine
 #: it); PLAIN_OK_UNCONFIRMED / ENCODED_ONLY_UNCONFIRMED = one side returned data
-#: but the OTHER side RAISED (throttle/5xx), so "the other form CANNOT return
-#: data" was NOT cleanly observed — the winner still seeds (order optimisation is
+#: but the OTHER side RAISED (throttle/5xx) or returned an uninterpretable
+#: format-drift shape (a present-but-non-array value — round-3 review fix), so
+#: "the other form CANNOT return data" was NOT cleanly observed — the winner
+#: still seeds (order optimisation is
 #: harmless) but the verdict is NON-clear and can never stamp (Golden Rule #1: a
 #: throttled side is not a refuted side); NEITHER = every call was a clean empty;
-#: ERROR = no data and at least one call raised. MIXED is an AGGREGATE-only
+#: ERROR = no data and at least one call errored. MIXED is an AGGREGATE-only
 #: verdict — a family whose per-underlying verdicts disagree (never assigned to a
 #: single underlying).
 AMP_VERDICT_PLAIN_OK: Final[str] = "PLAIN_OK"
@@ -562,10 +564,14 @@ class AmpersandFormCall:
     api
         ``"expiries"`` or ``"contracts"`` — which vendor surface was called.
     count
-        Returned item count (``None`` when the call raised).
+        Returned item count (``None`` when the call raised OR the payload
+        carried an uninterpretable format-drift value — see :func:`_array_evidence`).
     error
         The neutral :class:`~brutex.adapters.groww.errors.GrowwError` shape
-        (``"Type: message"``), or ``None`` on a clean return.
+        (``"Type: message"``) on a raise, a ``format_drift: …`` marker on a
+        PRESENT-but-non-array ``expiries``/``contracts`` value (round-3 review
+        fix — the shape production fail-louds on is never a clean empty here),
+        or ``None`` on a clean return.
     """
 
     underlying: str
@@ -636,14 +642,27 @@ def ampersand_family(instruments: Iterable[Instrument]) -> tuple[str, ...]:
     return tuple(sorted(family))
 
 
-def _array_len(payload: object, key: str) -> int:
-    """Defensive item count of a ``{"expiries"|"contracts": [...]}`` payload."""
+def _array_evidence(payload: object, key: str) -> tuple[int | None, str | None]:
+    """Classify a ``{"expiries"|"contracts": [...]}`` payload → ``(count, error)``.
+
+    A well-shaped payload counts its items; a MISSING *key* (and, defensively, a
+    non-Mapping payload) counts as a CLEAN 0 — the lenient-empty arm of
+    production's ``contracts._expiries_array``. A PRESENT-yet-non-array value is
+    the exact FORMAT DRIFT that production fail-louds on (Golden Rule #1) and is
+    returned as a call-level ANOMALY (``count=None`` + a ``format_drift`` error)
+    so :func:`_amp_verdict` demotes it exactly like a raised
+    :class:`~brutex.adapters.groww.errors.GrowwError` — an uninterpretable shape
+    is NOT a clean-empty observation of the no-data side, so one-sided drift can
+    never mint a CLEAR verdict, a DECISIVE report, or the stamp (round-3 review
+    fix: pre-fix the drift counted 0 and the transcript could not distinguish
+    "vendor said empty" from "vendor sent an uninterpretable shape").
+    """
     if not isinstance(payload, Mapping):
-        return 0
-    items = payload.get(key)
+        return 0, None
+    items = payload.get(key, ())
     if not isinstance(items, (list, tuple)):
-        return 0
-    return len(items)
+        return None, f"format_drift: {key!r} is {type(items).__name__}, not an array"
+    return len(items), None
 
 
 def _nearest_expiry(payloads: Iterable[object]) -> str | None:
@@ -705,8 +724,10 @@ def _amp_verdict(calls: Sequence[AmpersandFormCall]) -> str:
     sibling error (the winner can seed). But the one-sided CLEAR verdicts
     (PLAIN_OK / ENCODED_ONLY) additionally assert the NEGATIVE — "the other form
     returns NO data" — which is demonstrated only when every call on that other
-    side was a CLEAN empty: a raised throttle/5xx on the no-data side leaves the
-    negative claim UNOBSERVED, so the verdict demotes to the matching
+    side was a CLEAN empty: a raised throttle/5xx OR a format-drift payload
+    (:func:`_array_evidence` — an uninterpretable shape is not a clean empty) on
+    the no-data side leaves the negative claim UNOBSERVED, so the verdict
+    demotes to the matching
     *_UNCONFIRMED (non-clear → never decisive → never stamped; Golden Rule #1 —
     a 429 is not a refutation). BOTH_OK needs no such guard: it makes two
     positive claims, each proven by its own returned data.
@@ -748,7 +769,11 @@ def probe_ampersand_forms(
     the account) and mirrored to *transcript* as ONE ``amp.call`` event with the
     RAW count/error BEFORE any verdict interpretation ("EVIDENCE OR IT DID NOT
     HAPPEN"). A raised :class:`~brutex.adapters.groww.errors.GrowwError` is
-    recorded as that call's evidence; a non-Groww exception propagates (a code
+    recorded as that call's evidence, and a PRESENT-but-non-array
+    ``expiries``/``contracts`` value is recorded as a ``format_drift`` call
+    anomaly that contaminates the verdict exactly like a raise
+    (:func:`_array_evidence`, round-3 review fix); a non-Groww exception
+    propagates (a code
     bug stays loud). A defensive single-form name (no ``&``) is SKIPPED — the
     probe never invents a second form.
     """
@@ -777,13 +802,14 @@ def probe_ampersand_forms(
                 )
             else:
                 expiry_payloads.append(payload)
+                count, drift = _array_evidence(payload, "expiries")
                 call = AmpersandFormCall(
                     underlying=underlying,
                     form=form,
                     role=role,
                     api="expiries",
-                    count=_array_len(payload, "expiries"),
-                    error=None,
+                    count=count,
+                    error=drift,
                 )
             _emit_call(transcript, results, calls, call)
         nearest = _nearest_expiry(expiry_payloads)
@@ -804,13 +830,14 @@ def probe_ampersand_forms(
                         error=f"{type(exc).__name__}: {exc}",
                     )
                 else:
+                    count, drift = _array_evidence(payload, "contracts")
                     call = AmpersandFormCall(
                         underlying=underlying,
                         form=form,
                         role=role,
                         api="contracts",
-                        count=_array_len(payload, "contracts"),
-                        error=None,
+                        count=count,
+                        error=drift,
                     )
                 _emit_call(transcript, results, calls, call)
         verdict = _amp_verdict(calls)
