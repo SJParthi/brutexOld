@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1540 —
+_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1541 —
 the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
 one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
 winning form STRING — the winner's ROLE applied to the key's own
@@ -843,7 +843,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
-  MIGRATION.md #1540** — the durable `&`-form winner map: `schema_meta` rows
+  MIGRATION.md #1541** — the durable `&`-form winner map: `schema_meta` rows
   (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
   ROLE applied to the key's own `underlying_symbol_forms` tuple, so the metadata
   and candle phases share ONE value space; `underlying_symbol_forms` moved into
