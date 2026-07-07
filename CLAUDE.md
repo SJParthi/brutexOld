@@ -694,7 +694,20 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
+- **Active branch:** `claude/eloquent-shannon-bdjnuv` (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1534**
+  — the `/movers` SPOT "Top Value" (turnover) is now TIMEFRAME-INVARIANT: re-sourced from the RAW 1-minute session
+  frame (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options `_read_future_session`, instead of the resampled display-timeframe bars — so the SAME (symbol, day,
+  as-of) turnover no longer CHANGES with the selected display timeframe (reproduced NSE-NIFTY 2024-01-02 whole-day:
+  1m 19583300 ≠ 5m 19833500 ≠ 1day 20100000 paisa, now all byte-identical to the raw-1m answer). Three edits ALL in
+  `brutex/dashboard/movers_snapshot.py`: extract the shared raw-1m read+cut into `_read_cut_1m_frame` (§11 COMMON,
+  `_read_session_bars` a byte-identical wrapper), the NEW no-`interval`-arg `spot_session_value_paisa` (HLC3 × volume
+  via the ONE COMMON `session_traded_value_paisa`, `None` on missing 1-minute — never fabricates), and a
+  `value_paisa: int | None = None` injection into `compute_snapshot` (`None`/omitted falls back byte-identically, the
+  320000/318660 goldens pass UNMODIFIED). HONEST: a SANCTIONED display-value correction on coarse timeframes;
+  value(1minute) byte-unchanged; futures/options value BYTE-UNCHANGED; READ-ONLY dashboard ranking; ENGINE UNCHANGED
+  — NIFTY/BANKNIFTY/SENSEX; touched module 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
   ledger-read O(page) discipline restored across (a)-(f): (a) the /coverage/windows + pull-progress DuckDB fast paths
   fold pending window-ledger deltas latest-wins IN SQL via NEW `lake_read.dedup_qualify_latest_sql`/
   `dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql` — `ORDER BY (filename = <bound base path>) ASC,
