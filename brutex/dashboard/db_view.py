@@ -2250,6 +2250,10 @@ def _stats_pruned_page(
     manifest total is never paired with a degraded page):
 
     * the star-projection resolve fails (:func:`_stats_star_columns`);
+    * a resolved column name is un-quotable (contains ``"`` —
+      :func:`_quote_ident`'s reject; an out-of-band parquet can carry such a
+      name, and the legacy star path never quotes names, so it must degrade,
+      never escape as a route-level 400 — review round 4);
     * the pruned execute raises an unreadable-file error;
     * the cursor's column set differs from the expected projection;
     * the post-query TOCTOU re-stat finds ANY touched file's stat token moved
@@ -2270,7 +2274,24 @@ def _stats_pruned_page(
             ctx.served = False
             return None
         expected = star
-        page_select = ", ".join(_quote_ident(column) for column in star)
+        try:
+            page_select = ", ".join(_quote_ident(column) for column in star)
+        except ValueError as exc:
+            # A physical column name carrying a double quote (an out-of-band
+            # parquet — exactly the tamper class every other clause fails
+            # closed on) previously escaped this ladder as a raw ValueError →
+            # a persistent per-click HTTP 400, while the legacy path (star
+            # ``SELECT * EXCLUDE`` — never quotes names) renders fine
+            # (review round 4). Degrade the WHOLE request instead.
+            _LOG.info(
+                _STATS_FALLBACK_EVENT,
+                kind=ctx.kind,
+                key=dict(ctx.key),
+                clause="star_columns",
+                error=str(exc),
+            )
+            ctx.served = False
+            return None
     planned, rebased = ctx.plan_page(descending=descending, limit=limit, offset=offset)
     if not planned:
         return (expected, [])

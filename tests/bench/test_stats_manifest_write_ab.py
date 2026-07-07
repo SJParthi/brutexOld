@@ -25,6 +25,14 @@ no shard ever created; review round 2). Two layers:
   hook may never dominate even the CHEAPEST merge. Mitigation ladder if this
   gate ever fails (spec §7): move the shard upsert to just AFTER the
   partition-lock release (stat still captured UNDER the lock) → kill switch.
+
+  HONEST envelope (Golden Rule #10, review round 4): the gating env var is
+  set ONLY by ``.github/workflows/bench-m4pro.yml``, which previously neither
+  listed this file in its ``paths`` triggers nor invoked it — so the 12 ms
+  assertion executed in NO workflow while the ledger presented it as a pin.
+  It is now wired into that workflow (:class:`TestBenchWorkflowWiring` pins
+  the wiring), but the m4pro runner itself is DORMANT until the operator
+  registers it, so NO measured overhead figure is claimed anywhere.
 """
 
 from __future__ import annotations
@@ -192,8 +200,44 @@ class TestWallClockAB:
         assert _shard_files(tmp_path / "on"), "the ON arm must have paid the shard rewrites"
 
         overhead_ms = statistics.median(on_ms) - statistics.median(off_ms)
+        print(f"stats-manifest hook median overhead: {overhead_ms:.3f} ms/append")
         assert overhead_ms <= _MERGE_BUDGET_FLOOR_MS, (
             f"stats-manifest hook overhead {overhead_ms:.2f} ms/append exceeds the "
             f"{_MERGE_BUDGET_FLOOR_MS} ms merge-budget floor (#946) — adopt the spec §7 "
             "mitigation (upsert after lock release, stat under the lock) or kill-switch"
         )
+
+
+class TestBenchWorkflowWiring:
+    """Pin the A/B + O(page) gates INTO ``bench-m4pro.yml`` (review round 4).
+
+    The wall-clock gate above skips unless ``BRUTEX_M4PRO_ABS=1`` and the
+    O(page) bench's strict 1.1× tier needs ``BRUTEX_M4PRO_STRICT=1`` — both
+    set ONLY by ``.github/workflows/bench-m4pro.yml``, which previously
+    neither listed these files in its ``paths`` triggers nor ran them: the
+    gates executed in NO workflow. This deterministic pin (runs on shared CI)
+    fails if that wiring regresses. HONEST: it pins the WIRING only — the
+    m4pro runner is dormant until the operator registers it, so this cannot
+    prove an execution happened (and no measured figure is claimed).
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "bench-m4pro.yml"
+    _BENCHES = (
+        "tests/bench/test_stats_manifest_write_ab.py",
+        "tests/bench/test_db_paging_o_page.py",
+    )
+
+    def test_benches_listed_in_paths_triggers(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        for bench in self._BENCHES:
+            assert f'- "{bench}"' in text, f"{bench} missing from bench-m4pro.yml paths triggers"
+
+    def test_benches_invoked_by_a_pytest_step(self) -> None:
+        # Fold shell line continuations so a multi-line pytest command reads
+        # as one invocation line.
+        joined = self._WORKFLOW.read_text(encoding="utf-8").replace("\\\n", " ")
+        pytest_lines = [line for line in joined.splitlines() if "pytest " in line]
+        for bench in self._BENCHES:
+            assert any(bench in line for line in pytest_lines), (
+                f"{bench} is not invoked by any pytest step in bench-m4pro.yml"
+            )

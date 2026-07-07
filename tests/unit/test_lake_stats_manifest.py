@@ -674,16 +674,53 @@ class TestStructuralClauses:
 
     def test_shard_read_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         shard = _seed_bars(tmp_path)
-        real = Path.read_text
+        real = Path.open
 
-        def _boom(self: Path, *args: Any, **kwargs: Any) -> str:
+        def _boom(self: Path, *args: Any, **kwargs: Any) -> Any:
             if self == shard:
                 raise PermissionError("read denied")
             return real(self, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "read_text", _boom)
+        monkeypatch.setattr(Path, "open", _boom)
         stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
         assert stats is None and clause == "shard_read"
+
+    def test_oversized_shard_is_fail_closed_oversized_clause(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard grown past :data:`MAX_SHARD_BYTES` must fail CLOSED from a
+        BOUNDED read — the fails-before shape is a still-VALID-JSON shard
+        merely padded past the cap (``json.loads`` ignores trailing
+        whitespace), which the pre-round-4 unbounded ``read_text`` loaded
+        successfully; a multi-GB out-of-band shard would have been read WHOLE
+        on every /db consult AND inside the writers' partition-locked hooks,
+        where the resulting ``MemoryError`` is outside
+        ``_BEST_EFFORT_ERRORS`` and raises raw into the pull (review
+        round 4)."""
+        shard = _seed_bars(tmp_path)
+        shard.write_bytes(shard.read_bytes() + b" " * 4096)
+        monkeypatch.setattr(lsm, "MAX_SHARD_BYTES", 1024)
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is None and clause == "oversized"
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["oversized"]
+
+    def test_oversized_shard_rejected_at_the_real_cap(self, tmp_path: Path) -> None:
+        """End-to-end at the REAL 16 MiB cap: a valid-JSON shard padded to
+        ``MAX_SHARD_BYTES + 1`` bytes reads ``oversized``; the loader read at
+        most ``MAX_SHARD_BYTES + 1`` bytes by construction (the bound is the
+        read call itself, race-free — not a ``stat`` pre-check)."""
+        shard = _seed_bars(tmp_path)
+        body = shard.read_bytes()
+        shard.write_bytes(body + b" " * (lsm.MAX_SHARD_BYTES + 1 - len(body)))
+        assert shard.stat().st_size == lsm.MAX_SHARD_BYTES + 1
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is None and clause == "oversized"
+
+    def test_shard_size_cap_is_pinned(self) -> None:
+        """The cap is ~1000× a real ~16 KB shard — a deliberate constant pin."""
+        assert lsm.MAX_SHARD_BYTES == 16 * 1024 * 1024
 
     def test_corrupt_json(self, tmp_path: Path) -> None:
         shard = _seed_bars(tmp_path)
@@ -1333,6 +1370,31 @@ class TestRecordPartitionStats:
             assert self._record(tmp_path, dest) is False
         assert not shard.exists()
         assert any(e["event"] == "lake.stats_manifest.corrupt_unlinked" for e in logs)
+
+    def test_oversized_shard_unlinked_never_read_whole_into_the_pull(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The multi-GB-shard class inside the WRITER hook (review round 4):
+        the spot writer's hook runs inside the held partition locks and
+        OUTSIDE any ``lake_write_guard``, so an unbounded read's
+        ``MemoryError`` (deliberately NOT in ``_BEST_EFFORT_ERRORS``) would
+        raise RAW out of ``ParquetWriter.write`` into the ingest spine —
+        neither a ``BruteXError`` (per-symbol quarantine) nor a global stop,
+        i.e. a pool-tripping "code bug". The bounded read caps the exposure
+        at ``MAX_SHARD_BYTES + 1`` bytes and the oversized shard takes the
+        corrupt-unlink path (fails-before: valid JSON padded past the cap
+        was previously read whole AND merged into)."""
+        shard = _seed_bars(tmp_path)
+        shard.write_bytes(shard.read_bytes() + b" " * 4096)
+        monkeypatch.setattr(lsm, "MAX_SHARD_BYTES", 1024)
+        dest = self._dest(tmp_path)
+        with capture_logs() as logs:
+            assert self._record(tmp_path, dest) is False
+        assert not shard.exists()
+        assert any(
+            e["event"] == "lake.stats_manifest.corrupt_unlinked" and e["clause"] == "oversized"
+            for e in logs
+        )
 
     def test_future_overflow_error_degrades_best_effort(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -49,7 +49,10 @@ Anti-illusion law (Golden Rule #1)
 following hold, re-checked on every consult (O(D) in the ONE dataset's month
 files — metadata syscalls only, independent of total lake depth):
 
-1. parse + version + key echo + well-formed rows + sorted + sum invariant;
+1. parse + version + key echo + well-formed rows + sorted + sum invariant —
+   over a BOUNDED read (at most :data:`MAX_SHARD_BYTES` + 1 bytes; an
+   out-of-band multi-GB shard fails closed as ``oversized``, never read
+   whole);
 2. FILE-SET EQUALITY — one recursive walk of the dataset dir (``*.parquet``
    only, ANY depth — the exact file set the readers' legacy ``**/*.parquet``
    DuckDB glob scans) yields exactly the shard's ``rel`` set;
@@ -247,6 +250,21 @@ _MONTHS_PER_YEAR: Final[int] = 12
 #: shares — the read-side seed's ``seed_skipped`` event (db_view) reuses it
 #: rather than growing a private copy (CLAUDE.md §11 COMMON).
 FALLBACK_REL_LOG_CAP: Final[int] = 20
+
+#: Upper bound (bytes) on a shard READ. A real shard is ~16 KB (one JSON row
+#: per month file — spec §7), so 16 MiB is ~1000× headroom; a shard replaced
+#: out-of-band with a multi-GB file would otherwise be read WHOLE on every
+#: ``/db`` consult AND inside the writers' partition-locked hooks, where the
+#: resulting :class:`MemoryError` is OUTSIDE :data:`_BEST_EFFORT_ERRORS` and
+#: would raise RAW into the pull — breaking the hooks' "never raises into the
+#: pull" contract for arbitrary shard bytes (review round 4; the same class
+#: as the round-3 deep-nesting / huge-int / invalid-UTF-8 inputs). The loader
+#: reads AT MOST ``MAX_SHARD_BYTES + 1`` bytes (a BOUNDED read — race-free,
+#: strictly stronger than a ``stat`` pre-check a growing file could defeat)
+#: and anything larger fails CLOSED: the read side falls back to the legacy
+#: scan under the distinct ``oversized`` clause (+ reseed), the write side
+#: corrupt-unlinks the shard.
+MAX_SHARD_BYTES: Final[int] = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -772,26 +790,39 @@ def _load_shard_with_clause(
 ) -> tuple[DatasetStats | None, str | None]:
     """Read + structurally validate the shard → ``(stats, None)`` or ``(None, clause)``.
 
-    Clause 1 of the read-time validation: parse + version + kind/key echo +
-    identity-key echo + well-formed rows + sorted files + sum invariant +
-    aggregate-bounds consistency. Takes NO lock (``os.replace`` atomicity —
-    a read sees a complete old or new shard). Raises :class:`ValueError` only
-    for a malformed *kind*/*key* argument (a programming error, not bad data).
+    Clause 1 of the read-time validation: a BOUNDED read (at most
+    :data:`MAX_SHARD_BYTES` + 1 bytes — an out-of-band multi-GB shard fails
+    closed as ``oversized`` instead of being read whole into memory, review
+    round 4) + parse + version + kind/key echo + identity-key echo +
+    well-formed rows + sorted files + sum invariant + aggregate-bounds
+    consistency. Takes NO lock (``os.replace`` atomicity — a read sees a
+    complete old or new shard). Raises :class:`ValueError` only for a
+    malformed *kind*/*key* argument (a programming error, not bad data).
     """
     canonical = _canonical_key(kind, key)
     shard_path = stats_shard_path(lake_root, kind, key)
     try:
-        text = shard_path.read_text(encoding="utf-8")
+        with shard_path.open("rb") as handle:
+            raw = handle.read(MAX_SHARD_BYTES + 1)
     except FileNotFoundError:
         return None, "absent"
-    except UnicodeDecodeError:
-        # Invalid-UTF-8 shard bytes raise out of the DECODE — a ``ValueError``
-        # subclass, NOT an ``OSError``, so it slipped past the two handlers
-        # below and escaped the read path as a raw raise (review round 3):
-        # arbitrary shard bytes, the ``parse`` fail-closed clause.
-        return None, "parse"
     except OSError:
         return None, "shard_read"
+    if len(raw) > MAX_SHARD_BYTES:
+        # A shard replaced out-of-band with a huge file: the bytes past the
+        # cap were never read, so neither this read thread nor the writers'
+        # partition-locked hooks can MemoryError on it (review round 4 —
+        # MemoryError is deliberately NOT in _BEST_EFFORT_ERRORS; the bound
+        # removes the vector instead of swallowing genuine OOM).
+        return None, "oversized"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # Invalid-UTF-8 shard bytes raise out of the DECODE — a ``ValueError``
+        # subclass, NOT an ``OSError``, so it previously slipped past the two
+        # read handlers and escaped the read path as a raw raise (review
+        # round 3): arbitrary shard bytes, the ``parse`` fail-closed clause.
+        return None, "parse"
     try:
         obj = json.loads(text)
     except (ValueError, RecursionError):
@@ -1390,6 +1421,7 @@ __all__ = [
     "FALLBACK_REL_LOG_CAP",
     "KIND_BARS",
     "KIND_OPTIONS",
+    "MAX_SHARD_BYTES",
     "STATS_IDENTITY_KEYS",
     "STATS_KEY_FIELDS",
     "STATS_LOCK_TIMEOUT_ENV",

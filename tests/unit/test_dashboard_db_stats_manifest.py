@@ -363,6 +363,75 @@ def _plant_extra_column_month(root: Path, year: int, month: int, *, n_rows: int 
     return dest
 
 
+#: A parquet column name no quoting scheme accepts (``_quote_ident`` rejects
+#: any embedded ``"``) — the review-round-4 out-of-band tamper fixture.
+_QUOTED_COLUMN = 'evil" FROM x; --'
+
+
+def _plant_quoted_column_month(root: Path, year: int, month: int, *, n_rows: int = 3) -> Path:
+    """Raw-pyarrow plant of a SPOT month whose extra column name carries ``"``.
+
+    The seed's grouped scan quotes only ``"timestamp"``, so the shard seeds
+    fine — but the manifest STAR page must project the union explicitly and
+    ``_quote_ident`` rejects the name (review round 4): pre-fix that raw
+    ``ValueError`` escaped ``query_candles`` (→ a persistent per-click HTTP
+    400 at the route); the legacy star path (``SELECT * EXCLUDE``) never
+    quotes names and renders fine.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = (
+        root
+        / "bars"
+        / _COORDS["exchange"]
+        / _COORDS["segment"]
+        / _COORDS["symbol"]
+        / _COORDS["interval"]
+        / f"{year:04d}"
+        / f"{month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    stamps = [datetime(year, month, 7, 4, minute, tzinfo=UTC) for minute in range(n_rows)]
+    prices = [150.0 + i for i in range(n_rows)]
+    table = pa.table(
+        {
+            "timestamp": pa.array(stamps, type=pa.timestamp("us", tz="UTC")),
+            "open": pa.array(prices, type=pa.float64()),
+            "high": pa.array(prices, type=pa.float64()),
+            "low": pa.array(prices, type=pa.float64()),
+            "close": pa.array(prices, type=pa.float64()),
+            "volume": pa.array([10] * n_rows, type=pa.int64()),
+            "open_interest": pa.array([None] * n_rows, type=pa.int64()),
+            _QUOTED_COLUMN: pa.array([1.5 * i for i in range(n_rows)], type=pa.float64()),
+        }
+    )
+    pq.write_table(table, dest)
+    return dest
+
+
+def _plant_quoted_column_option_month(
+    root: Path, year: int, month: int, *, n_rows: int = 3
+) -> Path:
+    """The options-tree twin of :func:`_plant_quoted_column_month`."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = root / "options" / _OPT_SERIES / f"{year:04d}-{month:02d}.parquet"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    stamps = [datetime(year, month, 2, 4, minute, tzinfo=UTC) for minute in range(n_rows)]
+    table = pa.table(
+        {
+            "side": pa.array(["CE"] * n_rows, type=pa.string()),
+            "timestamp": pa.array(stamps, type=pa.timestamp("us", tz="UTC")),
+            "close": pa.array([105.0 + i for i in range(n_rows)], type=pa.float64()),
+            _QUOTED_COLUMN: pa.array([2.5 * i for i in range(n_rows)], type=pa.float64()),
+        }
+    )
+    pq.write_table(table, dest)
+    return dest
+
+
 @pytest.fixture
 def conn() -> Any:
     """A real in-process DuckDB connection."""
@@ -535,6 +604,49 @@ class TestManifestPageByteEquality:
             served_asc = _q(conn, tmp_path, use=True, descending=False, limit=3)
         assert served_asc == legacy_asc
         assert "page_read" in _fallback_clauses(logs)
+
+    def test_quoted_star_column_falls_back_never_raises_spot(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """A physical column name carrying ``"`` (an out-of-band parquet) must
+        join the fail-closed degrade ladder: pre-round-4 the star-projection
+        build raised a raw ``ValueError`` out of ``query_candles`` on EVERY
+        manifest-served click — the production route maps it to a persistent
+        per-click HTTP 400 — while the legacy path (which never quotes names)
+        rendered fine. Now: legacy rerun + one ``star_columns`` clause,
+        payload byte-identical to the kill-switched truth."""
+        _write_months(tmp_path, ((2024, 1),), n_bars=4)
+        _plant_quoted_column_month(tmp_path, 2024, 2, n_rows=3)
+        _seed_by_reading(conn, tmp_path)
+        assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=_COORDS) is not None
+        legacy = _q(conn, tmp_path, use=False, descending=True, limit=3)
+        assert _QUOTED_COLUMN in legacy["columns"], "the legacy star page renders the evil column"
+        rec = _RecordingConn(conn)
+        with capture_logs() as logs:
+            served = _q(rec, tmp_path, use=True, descending=True, limit=3)
+        assert served == legacy, "the degraded request must serve the legacy payload"
+        assert "star_columns" in _fallback_clauses(logs)
+        assert isinstance(rec.page_sources()[0], str), "the whole-request rerun binds the glob"
+
+    def test_quoted_star_column_falls_back_never_raises_options(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """The options-pager twin (``query_option_candles`` rides the SAME
+        pruned-page helper, so the same escape → route 400 existed there)."""
+        _write_option_months(tmp_path, ((2024, 3),))
+        _plant_quoted_column_option_month(tmp_path, 2024, 4, n_rows=3)
+        _qopt(conn, tmp_path, use=True)  # fallback(absent) + write-behind seed
+        assert (
+            lsm.load_valid_dataset_stats(
+                tmp_path, kind=lsm.KIND_OPTIONS, key={"series": _OPT_SERIES}
+            )
+            is not None
+        )
+        legacy = _qopt(conn, tmp_path, use=False, descending=True, limit=3)
+        with capture_logs() as logs:
+            served = _qopt(conn, tmp_path, use=True, descending=True, limit=3)
+        assert served == legacy, "the degraded options request must serve the legacy payload"
+        assert "star_columns" in _fallback_clauses(logs)
 
 
 # ── kill switch + purity + generation ───────────────────────────────────────────────

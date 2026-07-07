@@ -14,7 +14,13 @@ DEC-SURFACE-TRIAL-001 pattern): the production ``/api/v1/db/candles`` +
 
 Skipped when ``fastapi`` / ``duckdb`` are absent (the existing
 ``test_dashboard_coverage.py`` convention).
+
+Whitebox spy on ``db_view._stats_read_context`` per the DEC-P0-017
+convention (review round 4 — it pins that the fresh manifest arm's totals
+traverse the manifest ON THE WIRE), so ``reportPrivateUsage`` is silenced.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -29,6 +35,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 pytest.importorskip("polars")
 
+from brutex.dashboard import db_view
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data import lake_stats_manifest as lsm
 from brutex.data.instrument_store import InstrumentStore
@@ -157,37 +164,80 @@ class TestRouteManifestPaging:
     def test_routes_seed_then_serve_cell_identical_pages(
         self, store: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Both /db pagers: control (kill-switched legacy) == manifest-served."""
+        """Both /db pagers: manifest-served == kill-switched legacy control —
+        with the manifest arm on a FRESH app so every wire TOTAL is COMPUTED
+        through the manifest path, never an O(1) cache hit of a control-run
+        legacy total.
+
+        Review round 4: the prior single-app shape ran the kill-switched
+        control clicks FIRST, populating the app's generation-stamped count
+        cache under the SAME generation the manifest clicks then used — so
+        every manifest-run TOTAL was a cache hit of the control run's LEGACY
+        number and a WRONG manifest total could never have failed the
+        route-level equality. Three apps now separate the arms:
+
+        1. a CONTROL app (kill switch) computes the pure-legacy payloads;
+        2. a SEED app (manifest on) pays each dataset's first-view fallback +
+           write-behind seed;
+        3. a FRESH manifest app (empty caches, shards already present) whose
+           every total/page compute traverses the manifest — pinned by a spy
+           proving every request built a SERVED stats context.
+        """
         _write_spot(tmp_path)
         _write_options(tmp_path)
-        client = TestClient(build_app(DashboardState(), instrument_store=store))
         clicks: list[dict[str, Any]] = [
             {"limit": 5, "offset": 0, "desc": True},
             {"limit": 5, "offset": 5, "desc": True},
             {"limit": 4, "offset": 10, "desc": False},
             {"limit": 4, "offset": 0, "desc": False, "start": "2024-02-01", "end": "2024-02-06"},
         ]
-        # Control run FIRST under the kill switch — pure legacy, no shard.
+
+        def _run_clicks(client: TestClient) -> tuple[list[Any], list[Any]]:
+            spot = [client.get(_SPOT_URL, params={**_SPOT_PARAMS, **c}).json() for c in clicks]
+            opt = [
+                client.get("/api/v1/db/options", params={"series": _OPT_SERIES, **c}).json()
+                for c in clicks
+            ]
+            return spot, opt
+
+        # (1) CONTROL app under the kill switch — pure legacy, no shard.
         monkeypatch.setenv(lsm.STATS_MANIFEST_ENV, "off")
-        spot_control = [client.get(_SPOT_URL, params={**_SPOT_PARAMS, **c}).json() for c in clicks]
-        opt_control = [
-            client.get("/api/v1/db/options", params={"series": _OPT_SERIES, **c}).json()
-            for c in clicks
-        ]
+        control_client = TestClient(build_app(DashboardState(), instrument_store=store))
+        spot_control, opt_control = _run_clicks(control_client)
         assert not lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, _SPOT_KEY).exists()
-        # Manifest ON: the first click seeds, every later click is served.
+
+        # (2) SEED app: each pager's first view falls back + write-behind seeds.
         monkeypatch.delenv(lsm.STATS_MANIFEST_ENV)
-        spot_live = [client.get(_SPOT_URL, params={**_SPOT_PARAMS, **c}).json() for c in clicks]
+        seed_client = TestClient(build_app(DashboardState(), instrument_store=store))
+        seed_client.get(_SPOT_URL, params={**_SPOT_PARAMS, "limit": 5})
+        seed_client.get("/api/v1/db/options", params={"series": _OPT_SERIES, "limit": 5})
         assert lsm.stats_shard_path(tmp_path, lsm.KIND_BARS, _SPOT_KEY).exists(), (
             "the route's first view must write-behind seed the spot shard"
         )
         assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=_SPOT_KEY)
-        opt_live = [
-            client.get("/api/v1/db/options", params={"series": _OPT_SERIES, **c}).json()
-            for c in clicks
-        ]
         assert lsm.load_valid_dataset_stats(
             tmp_path, kind=lsm.KIND_OPTIONS, key={"series": _OPT_SERIES}
+        )
+
+        # (3) FRESH manifest app: empty count caches + valid shards ⇒ every
+        # total is computed THIS run, through the manifest. The spy pins that
+        # every request consulted AND served the validated shard (a wrong
+        # manifest total would now fail the cell-identical asserts below).
+        contexts: list[Any] = []
+        real_ctx = db_view._stats_read_context
+
+        def _spy_ctx(*args: Any, **kwargs: Any) -> Any:
+            ctx = real_ctx(*args, **kwargs)
+            contexts.append(ctx)
+            return ctx
+
+        monkeypatch.setattr(db_view, "_stats_read_context", _spy_ctx)
+        manifest_client = TestClient(build_app(DashboardState(), instrument_store=store))
+        spot_live, opt_live = _run_clicks(manifest_client)
+        assert len(contexts) == 2 * len(clicks), "every route request must consult the manifest"
+        assert all(ctx is not None and ctx.served for ctx in contexts), (
+            "every manifest-arm request must SERVE the validated shard "
+            "(totals + pages traversed the manifest on the wire)"
         )
         assert spot_live == spot_control, "manifest-served spot pages must be cell-identical"
         assert opt_live == opt_control, "manifest-served option pages must be cell-identical"

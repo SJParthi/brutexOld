@@ -394,8 +394,11 @@ hostile-review pass._
   distinct `empty_file` reason) is LATCHED per (dataset, generation) so the doomed grouped scan never repays per
   click, and the degrade-law LEGACY recount memoises under its own `legacytotal|` generation key so a
   persistently-unprunable page (heterogeneous star union) recounts ONCE per generation, never per click [round 2];
-  a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (gated A/B pins the
-  median overhead under the 12 ms merge-budget floor; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
+  a viewed dataset's write pays one bounded shard flock + small fsync'd JSON rewrite (the wall-clock A/B gate
+  asserting the median overhead under the 12 ms merge-budget floor is AUTHORED + wired into the DORMANT
+  self-hosted bench-m4pro workflow — NOT yet executed on any tier, so NO measured overhead figure is claimed
+  [round 4: it previously executed in NO workflow while this line presented it as an operative pin]; the
+  deterministic byte-parity/anti-storm teeth run in shared CI; unviewed = one probe, pinned); a same-`(mtime_ns,size)`
   in-place overwrite is the documented stat-token residual; the new module's mutation score rides the weekly
   Mutation workflow (not verified in-session). REVIEW ROUND 1 (refuter panel — every CONFIRMED finding fixed with
   a fails-before regression): the option-writer CI 100% gate joined its new suite (was RED at 94.74%); the
@@ -412,6 +415,15 @@ hostile-review pass._
   48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
   capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
   overclaim softened; the #1482 GATES counts refreshed.
+  ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
+  closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
+  (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`
+  fallback log instead of a persistent per-click HTTP 400 on both pagers; the shard read is BOUNDED
+  (`MAX_SHARD_BYTES` 16 MiB, ~1000× a real shard — an out-of-band multi-GB shard fails closed `oversized` /
+  corrupt-unlink instead of being read whole where a MemoryError would raise into the pull); the A/B +
+  O(page) benches wired into bench-m4pro.yml (workflow-wiring pin test) + this blurb's stale "pins" wording
+  fixed; the route-level integration now proves manifest-served TOTALS on the wire via a fresh app (the
+  control run's shared count cache had cushioned the equality).
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
   Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
