@@ -914,6 +914,58 @@ class TestCalendarDrivenTiersEndToEnd:
         assert "vendor calendar" in payload["note"]
         assert "NO option contract candles" in payload["note"]
 
+    def test_mixed_calendar_only_underlying_yields_no_pcr_row_mirroring_the_table(
+        self, tmp_path: Path
+    ) -> None:
+        # Round-7 hostile-review fold — the MIXED per-underlying permutation
+        # between design edges 9 and 15: NIFTY holds candles on its near-tier
+        # calendar expiry (07-Jul) while BANKNIFTY holds lake contracts ONLY
+        # on 14-Jul but the vendor calendar places ITS near tier at 07-Jul —
+        # so the tier filter drops every BANKNIFTY contract BEFORE the PCR
+        # discovery count. Pins the documented honest envelope: the PCR panel
+        # mirrors the movers TABLE exactly (NIFTY-only rows — BANKNIFTY's
+        # calendar-known-but-unpulled chain is absent from BOTH surfaces,
+        # panel/table agreement law) and the whole-payload
+        # calendar_only_expiry flag stays False (the lake HAD matching
+        # contracts for at least one underlying).
+        for opt in ("CE", "PE"):
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=f"NSE-NIFTY-07Jul25-24000-{opt}",
+                interval="1minute",
+                bars=[
+                    _min_bar(
+                        hour=9, minute=15, close="150", volume=100, oi=10, day=date(2025, 7, 7)
+                    )
+                ],
+            )
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=f"NSE-BANKNIFTY-14Jul25-52000-{opt}",
+                interval="1minute",
+                bars=[
+                    _min_bar(hour=9, minute=15, close="300", volume=50, oi=5, day=date(2025, 7, 14))
+                ],
+            )
+        calendar = {
+            "NIFTY": {date(2025, 7, 7), date(2025, 7, 14)},
+            "BANKNIFTY": {date(2025, 7, 7), date(2025, 7, 14)},
+        }
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2025-07-07",
+            time=None,
+            expiry_tier="near",
+            expiry_track="all",
+            calendar_expiries=calendar,
+        )
+        assert {m.underlying for m in cands.movers} == {"NIFTY"}
+        assert [r.underlying for r in cands.pcr] == ["NIFTY"]
+        assert cands.calendar_only_expiry is False
+
     def test_registry_round_trip_drives_calendar_tiers(self, tmp_path: Path) -> None:
         # The FULL chain: persist the July calendar into a real RegistryStore, read it
         # back via load_registry_expiries, and prove the Far weekly tier is 21-Jul.
@@ -1537,6 +1589,11 @@ class TestOptionsPcr:
         detail = response.json()["detail"]
         assert detail.startswith("lake corruption:")
         assert "negative metric" in detail
+        # Round-7 hostile-review fold: the detail LOCATES the corrupted chain
+        # (the movers_pcr adapter appends its group key), so the operator
+        # never blind-bisects a ~212-underlying lake for one bit-rotted cell.
+        assert "underlying 'NIFTY'" in detail
+        assert "expiry 2024-06-27" in detail
 
     def test_all_put_chain_reads_real_put_sums(
         self, store: InstrumentStore, tmp_path: Path

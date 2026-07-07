@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date as date_cls
 from typing import Any
 
-from brutex.data.pcr import PcrResult, compute_pcr
+from brutex.data.pcr import PcrCorruptionError, PcrResult, compute_pcr
 
 __all__ = ["PcrLeg", "UnderlyingPcr", "compute_pcr_rows", "pcr_row_json"]
 
@@ -85,12 +85,20 @@ def compute_pcr_rows(
 ) -> tuple[UnderlyingPcr, ...]:
     """Fold the read legs into per-underlying PCR rows (pure, deterministic).
 
-    Emits ONE row per *legs_total* key (the authoritative tier universe) —
-    INCLUDING an underlying whose EVERY leg was skipped (``legs_read=0``,
-    zero sums, both statuses ``zero_denominator``, coverage ``"empty"``):
-    a chain that exists but was unreadable is REPORTED, never silently
-    absent (the #919 silent-vanish lesson, read-side; Golden Rule #1).
-    Rows are sorted by the PARSED ``underlying`` (deterministic payload).
+    Emits ONE row per *legs_total* key — the lake-DISCOVERED tier universe:
+    the underlyings with at least one tier-filtered contract PARTITION on
+    disk, counted BEFORE any read. That INCLUDES an underlying whose EVERY
+    leg was skipped at READ time (``legs_read=0``, zero sums, both statuses
+    ``zero_denominator``, coverage ``"empty"``): a DISCOVERED chain that was
+    unreadable is REPORTED, never silently absent (the #919 silent-vanish
+    lesson, read-side; Golden Rule #1). HONEST ENVELOPE (round-7
+    hostile-review fold): an underlying whose CALENDAR tier expiry has ZERO
+    pulled contracts never enters *legs_total* (the tier filter drops its
+    contracts before discovery counting), so it yields NO row — exactly
+    mirroring the movers TABLE, which cannot show that chain either (the
+    panel/table agreement law; the whole-payload case is flagged by
+    ``calendar_only_expiry``). Rows are sorted by the PARSED ``underlying``
+    (deterministic payload).
 
     Parameters
     ----------
@@ -111,6 +119,13 @@ def compute_pcr_rows(
 
     Raises
     ------
+    PcrCorruptionError
+        On a negative metric cell (lake VALUE corruption) — re-raised with
+        the offending GROUP KEY appended
+        (``… (underlying 'X', expiry YYYY-MM-DD)``), so the 500 detail LOCATES
+        the corrupted chain instead of forcing a blind bisection of a
+        ~212-underlying options lake (this adapter knows the group key; the
+        fold stays generic — round-7 hostile-review fold).
     ValueError
         When a leg's ``underlying`` is not a *legs_total* key, or a
         per-underlying ``legs_total`` undercounts its read group (via
@@ -132,18 +147,28 @@ def compute_pcr_rows(
     rows: list[UnderlyingPcr] = []
     for underlying in sorted(legs_total):
         group: Sequence[PcrLeg] = groups.get(underlying, ())
+        try:
+            pcr = compute_pcr(
+                group,
+                side_of=lambda leg: leg.opt_type,
+                oi_of=lambda leg: leg.oi,
+                volume_of=lambda leg: leg.volume,
+                legs_total=legs_total[underlying],
+            )
+        except PcrCorruptionError as exc:
+            # Enrich the generic fold trip with the GROUP KEY this adapter
+            # (and only this adapter) knows, so the route's 500 detail names
+            # the corrupted (underlying, expiry) chain — sibling-consistent
+            # with log_movers_skip naming source+symbol (round-7 fold).
+            raise PcrCorruptionError(
+                f"{exc} (underlying {underlying!r}, expiry {target_expiry[underlying].isoformat()})"
+            ) from exc
         rows.append(
             UnderlyingPcr(
                 underlying=underlying,
                 display_underlying=names.get(underlying, underlying),
                 expiry=target_expiry[underlying],
-                pcr=compute_pcr(
-                    group,
-                    side_of=lambda leg: leg.opt_type,
-                    oi_of=lambda leg: leg.oi,
-                    volume_of=lambda leg: leg.volume,
-                    legs_total=legs_total[underlying],
-                ),
+                pcr=pcr,
             )
         )
     return tuple(rows)

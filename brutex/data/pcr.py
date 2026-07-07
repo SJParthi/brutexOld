@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from enum import Enum
 from typing import Final
 
@@ -68,6 +68,15 @@ COVERAGE_FULL: Final[str] = "full"
 COVERAGE_PARTIAL: Final[str] = "partial"
 #: Coverage label — the chain exists (or is vacuous) but ZERO legs were readable.
 COVERAGE_EMPTY: Final[str] = "empty"
+
+#: The EXPLICITLY PINNED ratio-division context — the default context's values
+#: (28 significant digits, banker's rounding), pinned so the wire string can
+#: never be skewed by an ambient thread-local ``decimal`` context mutation
+#: (the NFR-DET-001 precedent: ``execution/costs.py`` pins ``ROUND_HALF_EVEN``
+#: explicitly because relying on the process-global context is a cross-module
+#: non-determinism vector). ``localcontext`` COPIES this, so the constant is
+#: never mutated.
+_RATIO_CONTEXT: Final[Context] = Context(prec=28, rounding=ROUND_HALF_EVEN)
 
 
 class RatioStatus(Enum):
@@ -279,8 +288,11 @@ def fold_side_ratio[LegT](
        cell is corruption and must trip. The distinct type lets a route map
        lake corruption to an honest 500, never a client-error 400.
     4. ``denominator_sum > 0`` → ``ratio = Decimal(numerator_sum) /
-       Decimal(denominator_sum)`` under the default context (28 significant
-       digits — deterministic, full precision; never ``round_money``).
+       Decimal(denominator_sum)`` under the EXPLICITLY PINNED
+       :data:`_RATIO_CONTEXT` (28 significant digits, ``ROUND_HALF_EVEN`` —
+       the default context's values, pinned via ``localcontext`` so the
+       determinism is STRUCTURAL, never a bet on the ambient thread-local
+       context; full precision, never ``round_money``).
     5. ``denominator_sum == 0`` (including 0/0 and the empty iterable) →
        ``ratio = None``, :attr:`RatioStatus.ZERO_DENOMINATOR` — never
        ``Infinity``; the raw sums stay in the outcome.
@@ -330,8 +342,10 @@ def fold_side_ratio[LegT](
         else:
             denominator_sum += value
     if denominator_sum > 0:
+        with localcontext(_RATIO_CONTEXT):
+            ratio = Decimal(numerator_sum) / Decimal(denominator_sum)
         return RatioOutcome(
-            ratio=Decimal(numerator_sum) / Decimal(denominator_sum),
+            ratio=ratio,
             status=RatioStatus.OK,
             numerator_sum=numerator_sum,
             denominator_sum=denominator_sum,

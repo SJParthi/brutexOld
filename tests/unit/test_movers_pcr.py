@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import pytest
 from brutex.dashboard.movers_pcr import PcrLeg, UnderlyingPcr, compute_pcr_rows, pcr_row_json
-from brutex.data.pcr import RatioStatus
+from brutex.data.pcr import PcrCorruptionError, RatioStatus
 
 _EXP = date(2025, 6, 26)
 _EXP_B = date(2025, 7, 3)
@@ -82,6 +82,25 @@ class TestComputePcrRows:
                 legs_total={"NIFTY": 1},
                 target_expiry={"NIFTY": _EXP},
             )
+
+    def test_corruption_trip_is_enriched_with_the_group_key(self) -> None:
+        # Round-7 hostile-review fold: the fold's generic "negative metric"
+        # trip is re-raised by THIS adapter (the only layer that knows the
+        # group key) carrying the offending underlying + tier expiry, so the
+        # route's 500 detail LOCATES the corrupted chain instead of forcing a
+        # blind bisection of a full options lake. Still the TYPED
+        # PcrCorruptionError (the 500-vs-400 route split holds) and still
+        # chained from the original fold trip.
+        with pytest.raises(
+            PcrCorruptionError,
+            match=r"negative metric -3 \(underlying 'NIFTY', expiry 2025-06-26\)",
+        ) as excinfo:
+            compute_pcr_rows(
+                [_leg("NIFTY", "PE", oi=-3, volume=1)],
+                legs_total={"NIFTY": 1},
+                target_expiry={"NIFTY": _EXP},
+            )
+        assert isinstance(excinfo.value.__cause__, PcrCorruptionError)
 
     def test_missing_target_expiry_key_propagates_keyerror(self) -> None:
         with pytest.raises(KeyError):

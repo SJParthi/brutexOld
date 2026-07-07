@@ -5160,7 +5160,11 @@ def build_app(
             # it must surface as an honest 500 with a corruption-specific
             # detail — NOT ride the malformed-date/time 400 mapping below
             # (round-1 hostile-review fold). Checked BEFORE ValueError (it is a
-            # ValueError subclass, so ordering is load-bearing).
+            # ValueError subclass, so ordering is load-bearing). ONE structlog
+            # WARN so the corruption (named by the adapter-enriched
+            # underlying/expiry group key, round-7 fold) reaches the log even
+            # when nobody is watching the wire.
+            _LOG.warning("movers.pcr_corruption", error=str(exc))
             raise HTTPException(status_code=500, detail=f"lake corruption: {exc}") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

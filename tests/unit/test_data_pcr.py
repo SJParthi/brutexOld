@@ -18,6 +18,7 @@ contract proven by construction (no adapter class needed).
 
 from __future__ import annotations
 
+import decimal
 from decimal import Decimal
 from fractions import Fraction
 
@@ -93,6 +94,30 @@ class TestFoldSideRatio:
         legs: list[Leg] = [(PUT_SIDE, 46, None), (CALL_SIDE, 40, None)]
         outcome = _fold(legs)
         assert outcome.ratio == Decimal("1.15")
+
+    def test_denominator_of_exactly_one_is_ok_with_the_exact_ratio(self) -> None:
+        # The smallest LIVE denominator — the clause 4/5 sentinel BOUNDARY.
+        # Pins `denominator_sum > 0` exactly: a `> 1` mutant (a standard
+        # mutmut number mutation) silently demotes this chain to
+        # zero_denominator/None, which no other deterministic test and no
+        # self-consistent property catches (round-7 hostile-review
+        # mutation-gap fold; empirically proven surviving mutant).
+        outcome = _fold([(PUT_SIDE, 5, None), (CALL_SIDE, 1, None)])
+        assert outcome.status is RatioStatus.OK
+        assert outcome.ratio == Decimal(5)
+        assert (outcome.numerator_sum, outcome.denominator_sum) == (5, 1)
+
+    def test_ratio_context_is_pinned_against_ambient_mutation(self) -> None:
+        # Clause 4's determinism claim is STRUCTURAL (round-7 hostile-review
+        # fold, the execution/costs.py NFR-DET-001 precedent): the division
+        # runs under an explicitly pinned 28-digit ROUND_HALF_EVEN context,
+        # so a hostile ambient thread-local context (tiny precision +
+        # truncating rounding) cannot skew the wire string. Fails without
+        # the localcontext pin ("0.87" under prec=2 ROUND_DOWN).
+        legs: list[Leg] = [(PUT_SIDE, 117_000, None), (CALL_SIDE, 134_000, None)]
+        with decimal.localcontext(decimal.Context(prec=2, rounding=decimal.ROUND_DOWN)):
+            outcome = _fold(legs)
+        assert str(outcome.ratio).startswith("0.8731343283582089552238805970")
 
     def test_zero_denominator_puts_alive_calls_dead(self) -> None:
         # Clause 5: puts > 0, calls == 0 → typed sentinel, NEVER Infinity;
@@ -288,8 +313,9 @@ _legs_st = st.lists(
     max_size=40,
 )
 
-# The fold divides under the DEFAULT 28-significant-digit Decimal context
-# (ROUND_HALF_EVEN), so the produced Decimal sits within half an ulp of the
+# The fold divides under its EXPLICITLY PINNED 28-significant-digit
+# ROUND_HALF_EVEN context (the default context's values, pinned via
+# localcontext — round-7 fold), so the produced Decimal sits within half an ulp of the
 # exact quotient — a RELATIVE error ≤ 5×10⁻²⁸. 10⁻²⁶ relative is a 20×
 # safety margin that still fails on any real defect (e.g. an inverted
 # den/num fold, off-by-one sums, a truncating division).

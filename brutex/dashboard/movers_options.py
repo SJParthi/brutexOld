@@ -1026,9 +1026,14 @@ class OptionsCandidates:
     pcr
         The per-underlying Put-Call Ratio rows folded from the SAME session
         reads that built :attr:`movers` (DEC-MOVERS-OPTIONS-PCR-001 — zero new
-        I/O; one row per tier-universe underlying, including an all-skipped
-        ``empty`` chain). Defaulted LAST so every existing constructor call
-        site stays valid; the early-return paths carry the honest ``()``.
+        I/O; one row per lake-DISCOVERED tier-universe underlying, including
+        an all-skipped ``empty`` chain). HONEST ENVELOPE: an underlying whose
+        CALENDAR tier expiry has zero pulled contracts is dropped by the tier
+        filter BEFORE discovery counting, so it yields no row — mirroring the
+        movers table exactly (panel/table agreement; the whole-payload case is
+        :attr:`calendar_only_expiry` — round-7 hostile-review fold). Defaulted
+        LAST so every existing constructor call site stays valid; the
+        early-return paths carry the honest ``()``.
     """
 
     movers: tuple[OptionMover, ...]
