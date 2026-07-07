@@ -50,8 +50,11 @@ brutex/ (zero offenders; the `brutex/*.py` + `brutex/**/*.py` pathspec PAIR —
 round-2 caught git's `**` glob alone missing the 12 top-level modules); (h) P-10/P-12 promoted to real cost-calculator
 properties (STT sell-leg-only; brokerage = the VERIFIED flat ₹20/order law —
 the stale min(₹20, 0.03%) wording corrected); (i) the sweep worker-scaling
-A/B bench enumerated in bench-m4pro.yml (activation-ready; dormant until the
-M4 Pro runner registers). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+A/B bench enumerated in bench-m4pro.yml — EXECUTING GREEN on the live
+registered M4 Pro runner (in-PR reconcile: the first real run failed on the
+missing polars [data] extra, fixed a54c9a0a; re-run fully green, run
+28851211762 — step measured 20 s vs the generous 25-min timeout; VERDICT:
+KEEP CAP=8). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 scope/vocab/rate change; apparatus/CI/docs only.
 Earlier: 2026-07-06 (DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527 —
 the operator's STRICT six-step pull order: every Groww pull executes
@@ -602,8 +605,10 @@ hostile-review pass._
   to fixpoint in-PR) · the DEC-ID appropriateness heuristic (row 18 stays PARTIAL) · jscpd
   3%→1% (0.37% measured) · the brutex/-wide pandas import ban (zero offenders) · P-10/P-12
   promoted to real cost-model properties (flat ₹20/order brokerage law; stale min() wording
-  corrected) · the sweep worker-scaling bench enumerated in bench-m4pro.yml
-  (activation-ready, dormant until the M4 Pro runner registers). ENGINE UNCHANGED —
+  corrected) · the sweep worker-scaling bench enumerated in bench-m4pro.yml, EXECUTING GREEN
+  on the live registered M4 Pro runner (in-PR reconcile: first real run failed on the missing
+  polars [data] extra, fixed a54c9a0a; re-run fully green, run 28851211762 — step measured
+  20 s vs the generous 25-min timeout; VERDICT: KEEP CAP=8). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; apparatus/CI/docs only; ruff/ruff-format/mypy --strict/pyright at
   the pre-change baseline).
   Earlier: `claude/ecstatic-pascal-7vjsju` (**DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527** — the

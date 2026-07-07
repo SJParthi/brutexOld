@@ -8,18 +8,18 @@
 # chronic-flakes any absolute ops/s assertion (DEC-P0-020 honest envelope).
 # So the absolute gate lives ONLY on the M4 Pro self-hosted runner.
 #
-# Activation
-# ----------
-# This workflow is harmless on a freshly-cloned repo: it requires both a
-# self-hosted runner labelled `m4pro` AND the env var `BRUTEX_M4PRO_ABS=1`.
-# Until the operator registers the runner, every run sits in the GitHub
-# "queued" state and the test would skip anyway via pytest.mark.skipif
-# in tests/bench/test_throughput_absolute.py. Zero impact on shared CI.
-#
-# Once the operator registers the runner per:
-#   GitHub → sjparthi/brutex → Settings → Actions → Runners → "New self-hosted runner"
-#   → macOS → register with labels: self-hosted, macos, m4pro
-# the next push triggers this workflow and the absolute gate activates.
+# Activation — RUNNER IS LIVE (2026-07-07)
+# ----------------------------------------
+# The self-hosted M4 Pro runner (labels: self-hosted, macos, m4pro) is
+# REGISTERED and jobs EXECUTE on push (proven: run 28850622113 on
+# "Parthibans-MacBook-Pro"; runs succeed on main; fully-green run
+# 28851211762 on this branch — sweep worker-scaling step measured 20 s
+# wall, VERDICT: KEEP CAP=8). The historical safety
+# design stands: the workflow is harmless on a freshly-cloned repo — it
+# requires both the `m4pro` runner label AND the env var
+# `BRUTEX_M4PRO_ABS=1`, and on a repo without the runner every run would
+# sit "queued" while the test skips via pytest.mark.skipif in
+# tests/bench/test_throughput_absolute.py. Zero impact on shared CI.
 #
 # Decision: DEC-M4PRO-ABSOLUTE-001 (2026-05-25, MIGRATION #236).
 # Bench-surface (-s -rA) wiring: DEC-M4PRO-BENCH-SURFACE-001 (MIGRATION #979).
@@ -247,18 +247,19 @@ jobs:
           # decreed 1.1x ceiling (DEC-O1-STRICT-TIER-001) — meaningful only on
           # this quiet self-hosted runner; shared CI keeps the robust 3-10x tier.
           #
-          # HONEST ENVELOPE (Golden Rule #10) — DORMANCY DISCLOSURE:
-          # THIS strict 1.1x tier is DORMANT until the operator registers the
-          # self-hosted [self-hosted, macos, m4pro] runner (see the header note
-          # + `runs-on:` above). Until then this whole job sits "queued" and
-          # never executes, so the strict 1.1x gate does NOT run on any current
-          # CI. The ACTUALLY-RUNNABLE O(1) gate for EVERY bench below is the
-          # `bench` job in ci.yml, which runs a bare `pytest tests/bench` (the
-          # whole dir) on the shared ubuntu-24.04 runner at the robust ~5x tier
-          # (BRUTEX_M4PRO_STRICT unset -> ratio_ceiling/cache_tier_ceiling return
-          # their 5x default). So a real O(n) regression in any Golden-Rule-#5
-          # hot path is caught on shared CI TODAY; the strict 1.1x is the
-          # tighter second tier that activates once the M4-Pro runner is online.
+          # HONEST ENVELOPE (Golden Rule #10) — RUNNER LIVE (2026-07-07):
+          # the self-hosted [self-hosted, macos, m4pro] runner is REGISTERED
+          # and this job EXECUTES on push (see the header note + `runs-on:`
+          # above; proven live on "Parthibans-MacBook-Pro"), so the strict
+          # 1.1x tier now genuinely runs — the former dormancy disclosure
+          # ("job sits queued, tier never executes") is superseded. The
+          # shared-CI first tier still stands independently: the `bench` job
+          # in ci.yml runs a bare `pytest tests/bench` (the whole dir) on the
+          # shared ubuntu-24.04 runner at the robust ~5x tier
+          # (BRUTEX_M4PRO_STRICT unset -> ratio_ceiling/cache_tier_ceiling
+          # return their 5x default), so a real O(n) regression in any
+          # Golden-Rule-#5 hot path is caught on shared CI regardless; the
+          # strict 1.1x is the tighter second tier on this quiet runner.
           #
           # DEC-O1-BENCH-GATE-COMPLETE-001 (M2): the strict tier now lists EVERY
           # Golden-Rule-#5 hot path (CLAUDE.md §2 r5) as a dedicated ISOLATED
