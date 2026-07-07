@@ -43,6 +43,7 @@ from brutex.observability.progress_beat import (
     reset_progress_beats,
 )
 from brutex.observability.watchdog import WorkerEvent
+from structlog.typing import EventDict
 
 from tests.unit.test_dashboard_pull_stall import _spy_factory
 
@@ -146,7 +147,7 @@ class TestForeignBeatIsolation:
         alerts: list[BaseException] = []
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
         stalled_mid_run: list[bool] = []
-        suspect_events: list[dict[str, object]] = []
+        suspect_events: list[EventDict] = []
 
         def work(_on_progress: ProgressHook) -> None:
             box.advance(400.0)
@@ -495,7 +496,7 @@ class TestDirectHookGate:
         a_id = a_ids[0]
 
         stalled_mid_b: list[bool] = []
-        drop_events: list[dict[str, object]] = []
+        drop_events: list[EventDict] = []
 
         def work_b(_on_progress: ProgressHook) -> None:
             box.advance(400.0)
@@ -592,7 +593,7 @@ class TestStallEdgeRunId:
         clock, box = _make_clock()
         job, built = _real_watchdog_job(clock)
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
-        events: list[dict[str, object]] = []
+        events: list[EventDict] = []
 
         def work(_on_progress: ProgressHook) -> None:
             run_id = job.pull_id
@@ -612,7 +613,7 @@ class TestStallEdgeRunId:
         clock, box = _make_clock()
         job, built = _real_watchdog_job(clock)
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", lambda _e: None)
-        events: list[dict[str, object]] = []
+        events: list[EventDict] = []
 
         def work(_on_progress: ProgressHook) -> None:
             run_id = job.pull_id
@@ -636,7 +637,7 @@ class TestStallEdgeRunId:
         job, built = _real_watchdog_job(clock)
         alerts: list[BaseException] = []
         monkeypatch.setattr("brutex.dashboard.pull_jobs.emit_pull_halt_alert", alerts.append)
-        events: list[dict[str, object]] = []
+        events: list[EventDict] = []
 
         def work(_on_progress: ProgressHook) -> None:
             run_id = job.pull_id
