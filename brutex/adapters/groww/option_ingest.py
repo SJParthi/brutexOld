@@ -63,7 +63,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import sleep as _time_sleep
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -118,6 +118,7 @@ from brutex.adapters.ingest_common import (
     OLD_GAP_HORIZON_DAYS,
     clamp_window_end,
     drop_bars_after,
+    maybe_audit,
     summarize_conflicts,
 )
 from brutex.adapters.ingest_common import (
@@ -153,6 +154,9 @@ from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import SerialRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 from brutex.orchestrator.universe_phases import RunParallel
+
+if TYPE_CHECKING:
+    from brutex.orchestrator.audit import AuditWriter
 
 #: Structured logger — per-contract DEBUG detail + the transient/quarantine
 #: WARNING, every event carrying the pull's ``pull_id`` (the per-underlying INFO
@@ -1848,6 +1852,7 @@ def run_groww_option_ingest(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
+    audit: AuditWriter | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1990,6 +1995,24 @@ def run_groww_option_ingest(
     :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`
     (the ``capture_hook_factory`` / ``detect_completeness_gaps`` gating pattern).
 
+    *audit* (DEC-INGEST-AUDIT-WIRING-001 — Golden Rule #8): the optional
+    hash-chained :class:`~brutex.orchestrator.audit.AuditWriter` this driver
+    appends its trail to, MIRRORING the spot spine's events —
+    ``INGEST_RUN_START`` → one ``INGEST_PAIR_DONE`` / ``INGEST_PAIR_FAILED``
+    per ``(contract, interval)`` pair → ``INGEST_RUN_COMPLETE`` — via the ONE
+    COMMON :func:`~brutex.adapters.ingest_common.maybe_audit` guard. Every
+    append runs on the single controller drain thread (never a fetch worker),
+    O(1) per event, so wiring it can never block or slow the fetch lane.
+    HONEST envelope (Golden Rule #10): in async-pipeline mode
+    (``fetch_pipeline`` wired — the production pull) the per-pair
+    ``bars_appended`` recorded on the trail is the PRODUCER-resolved count
+    (``0``; the background consumer folds the real durable counts post-drain)
+    — exactly the semantics of the spot chain's pair rows under the same
+    pipeline, never a fabricated number. A pull-wide halt raised out of the
+    drain leaves the chain WITHOUT its ``INGEST_RUN_COMPLETE`` (the honest
+    marker of an aborted pass, mirroring the spot chain). ``None`` (default —
+    dry-run / synthetic / unit-test callers) writes nothing.
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -2124,6 +2147,22 @@ def run_groww_option_ingest(
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[OptionPairFailure] = []
+    # Golden Rule #8 (DEC-INGEST-AUDIT-WIRING-001): the F&O trail mirrors the spot
+    # spine's — RUN_START before the drain, one PAIR row per outcome on the
+    # controller thread, RUN_COMPLETE after the drain.
+    maybe_audit(
+        audit,
+        "INGEST_RUN_START",
+        f"pull:{pull_id}",
+        {
+            "contracts": len(contract_list),
+            "intervals": list(intervals),
+            "jobs": len(jobs),
+            "market": market,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+    )
     # Drain the fan-out on the controller thread: on_progress + the quarantine WARNING
     # fire here (single-threaded), so the hook need not be thread-safe. A global-stop or
     # a captured code bug surfaces; a terminal DOMAIN error is quarantined.
@@ -2135,6 +2174,16 @@ def run_groww_option_ingest(
             if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[contract.symbol, interval] = report
+            maybe_audit(
+                audit,
+                "INGEST_PAIR_DONE",
+                f"{contract.symbol}:{interval}",
+                {
+                    "bars_appended": report.bars_appended,
+                    "windows": report.windows,
+                    "still_failed_windows": report.still_failed_windows,
+                },
+            )
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
             continue
@@ -2173,6 +2222,12 @@ def run_groww_option_ingest(
                 auth_failure=auth_failed,
             )
         )
+        maybe_audit(
+            audit,
+            "INGEST_PAIR_FAILED",
+            f"{contract.symbol}:{interval}",
+            {"error": str(exc), "auth_failure": auth_failed},
+        )
         _LOG.warning(
             "option.ingest.quarantine",
             pull_id=pull_id,
@@ -2204,6 +2259,16 @@ def run_groww_option_ingest(
             failed_symbols=[f.symbol for f in failures],
             pull_id=pull_id,
         )
+    maybe_audit(
+        audit,
+        "INGEST_RUN_COMPLETE",
+        f"pull:{pull_id}",
+        {
+            "pairs_ok": len(pairs),
+            "pairs_failed": len(failures),
+            "total_bars": sum(report.bars_appended for report in pairs.values()),
+        },
+    )
     run_report = GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
     # VISIBLE settled-window skips (DEC-WINDOW-LEDGER-RESCUE-001): ONE INFO line per
     # driver pass with the AGGREGATE count — the per-window skip stays DEBUG (a

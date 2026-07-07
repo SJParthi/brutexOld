@@ -42,6 +42,7 @@ from brutex.costs.types import (
     TradeOutcome,
     TradeSide,
     UnsupportedTradeOutcomeError,
+    UnverifiedCostRegimeError,
 )
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "TradeOutcome",
     "TradeSide",
     "UnsupportedTradeOutcomeError",
+    "UnverifiedCostRegimeError",
     "compute_trade_cost",
     "constants",
     "is_cost_bearing",
