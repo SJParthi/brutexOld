@@ -58,10 +58,13 @@ Honest envelope (Golden Rule #10)
 
 The discovery + read is ``O(stores × rows)`` — bounded by the funnel's final
 10²–10⁴ finalist rows per tuple (``TRACK1_BACKTEST_SPEC.md`` §"Result Row Schema")
-— plus ONE ``O(audit lines)`` scan of the tree's audit chain for the era markers
-(paid on the same cached build, never per poll). The route memoises it behind the
-dashboard write-generation so a repeat poll is an O(1) cache hit
-(DEC-MOVERS-O1-LATENCY-001 pattern).
+— plus ONE ``O(audit lines)`` STREAMING scan of the tree's audit chain for the
+era markers (O(1) memory — :func:`brutex.orchestrator.audit.iter_entries`).
+Since DEC-LEDGER-DELTA-O-PAGE-001 that generation-invariant work is split into
+:func:`load_sweep_scan` (a :class:`SweepScan`), which the route caches behind
+the ``sweep_results_revision`` content token — so a filter/rank/top_n click
+within one revision re-pays ONLY the O(N log N) rank + O(top_n) projection,
+zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 """
 
 from __future__ import annotations
@@ -88,7 +91,9 @@ __all__ = [
     "SNAPSHOT_ERA_UNKNOWN",
     "SWEEPS_DIRNAME",
     "SweepLeaderboard",
+    "SweepScan",
     "build_sweep_leaderboard",
+    "load_sweep_scan",
 ]
 
 #: The sub-directory of the lake root that holds the per-tuple sweep stores —
@@ -236,6 +241,98 @@ class SweepLeaderboard:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SweepScan:
+    """Every rank-independent scan product of ``<lake>/sweeps`` — cache once per revision.
+
+    DEC-LEDGER-DELTA-O-PAGE-001: the ``/results`` build splits into this
+    generation-invariant SCAN (store discovery + resilient load + the streaming
+    audit era pass + the option sets) and the cheap per-request RANK
+    (:func:`build_sweep_leaderboard`), so the route can cache ONE scan per
+    ``sweep_results_revision`` and re-rank it per filter/rank/top_n click with
+    zero store loads + zero audit reads. Carries ALL the payload-honesty fields
+    (``skipped`` / ``run_id_conflicts`` / ``snapshot_hashes`` / the dropdown
+    option sets) so none can drift across the split.
+
+    Attributes
+    ----------
+    rows
+        Every distinct (run_id-deduped) :class:`ResultRow` discovered across the
+        readable stores, in the deterministic first-wins load order.
+    store_count, skipped, run_id_conflicts
+        The honest load counters (see :func:`_load_rows_resilient`).
+    eras
+        Tuple-coordinate → recorded ``data_snapshot_hash`` eras
+        (see :func:`_snapshot_eras`); empty when no rows / no audit signal.
+    instruments, timeframes, directions
+        The sorted distinct option sets over EVERY discovered row (filter
+        dropdowns — independent of any active filter).
+    snapshot_hashes
+        The sorted distinct eras recorded for the coordinates the discovered
+        rows cover (empty = honest "no signal").
+    """
+
+    rows: tuple[ResultRow, ...]
+    store_count: int
+    skipped: int
+    run_id_conflicts: int
+    eras: dict[_EraKey, frozenset[str]]
+    instruments: tuple[str, ...]
+    timeframes: tuple[str, ...]
+    directions: tuple[str, ...]
+    snapshot_hashes: tuple[str, ...]
+
+
+def load_sweep_scan(lake_root: Path) -> SweepScan:
+    """Perform the generation-invariant ``<lake>/sweeps`` scan for the ``/results`` page.
+
+    The rank-independent half of the pre-split ``build_sweep_leaderboard`` body,
+    moved verbatim (DEC-LEDGER-DELTA-O-PAGE-001): store discovery
+    (:func:`_iter_store_paths`) → resilient load (:func:`_load_rows_resilient`)
+    → the dropdown option sets → the era map (:func:`_snapshot_eras`, only when
+    rows exist) → the covered ``snapshot_hashes``. Pure function of the sweeps
+    tree — the route caches the result under the ``sweep_results_revision``
+    content token.
+
+    Honest envelope (Golden Rule #10): cold cost is O(stores) glob +
+    O(stores × rows) load + ONE O(audit lines) STREAMING era pass (O(1) memory
+    via :func:`brutex.orchestrator.audit.iter_entries`) — paid once per
+    revision, NOT per poll; the per-era byte-offset ``AuditCursor`` resume is
+    NAMED future work, not claimed.
+    """
+    sweeps_root = lake_root / SWEEPS_DIRNAME
+    paths = _iter_store_paths(sweeps_root)
+    all_rows, store_count, skipped, run_id_conflicts = _load_rows_resilient(paths)
+
+    # The filter dropdown option sets come from EVERY discovered row (so a filter
+    # the operator can pick is always one that exists), independent of the active
+    # filter.
+    instruments = tuple(sorted({r.instrument for r in all_rows}))
+    timeframes = tuple(sorted({r.tf for r in all_rows}))
+    directions = tuple(sorted({r.direction for r in all_rows}))
+
+    # Snapshot-era honesty (DEC-RESULTS-SURFACE-HONESTY-001): the distinct
+    # recorded data eras behind the DISCOVERED rows (all of them, independent of
+    # the active filter — a mixed tree stays loudly mixed on every filtered view).
+    eras = _snapshot_eras(sweeps_root) if all_rows else {}
+    covered_eras: set[str] = set()
+    for key in {_row_era_key(r) for r in all_rows}:
+        covered_eras |= eras.get(key, frozenset())
+    snapshot_hashes = tuple(sorted(covered_eras))
+
+    return SweepScan(
+        rows=tuple(all_rows),
+        store_count=store_count,
+        skipped=skipped,
+        run_id_conflicts=run_id_conflicts,
+        eras=eras,
+        instruments=instruments,
+        timeframes=timeframes,
+        directions=directions,
+        snapshot_hashes=snapshot_hashes,
+    )
+
+
 def _resolve_rank_by(rank_by: str | None) -> str:
     """Return the ranking column to use — the default for ``None`` / an unknown name.
 
@@ -336,48 +433,59 @@ def _snapshot_eras(sweeps_root: Path) -> dict[_EraKey, frozenset[str]]:
     self-description :func:`brutex.engine.results_report._recorded_snapshot_hash`
     reads — collecting every ``SWEEP_START`` payload's
     ``(instrument, tf, direction, mode, k) → data_snapshot_hash``. One
-    ``O(audit lines)`` pass, paid once per (generation-cached) leaderboard build.
+    ``O(audit lines)`` STREAMING pass over
+    :func:`brutex.orchestrator.audit.iter_entries` — O(1) peak memory, never the
+    whole chain in a list (DEC-LEDGER-DELTA-O-PAGE-001) — paid once per
+    ``sweep_results_revision`` (the route's :class:`SweepScan` cache), never per
+    poll / per filter click. The per-era byte-offset incremental resume (an
+    ``AuditCursor`` in :mod:`brutex.orchestrator.audit`) is NAMED future work,
+    not claimed; :func:`~brutex.orchestrator.audit.verify_chain`'s full-stream
+    integrity contract is structurally untouched (audit.py has zero diff here).
 
     Honest envelope (Golden Rule #10): an absent / unreadable / corrupt chain, or
     a payload missing the needed keys, degrades to NO signal for the affected
     coordinates (logged once for a chain-level failure) — never a guess, never a
-    500 on the read-only page. Per-FILE recorded hashes do not exist (the
-    per-tuple filename digest folds the hash one-way), so a coordinate re-swept
-    under two eras honestly maps to BOTH (→ ``ambiguous`` rows); the per-file
-    authority is dup-train PR-3's at-rest census, NOT claimed here.
+    500 on the read-only page. ``iter_entries`` skips an unterminated torn TAIL
+    in the generator itself, but a malformed COMMITTED line raises
+    :class:`AuditError` at iteration time — so the guard wraps the LOOP and
+    discards any partial collection (today's exact all-or-nothing degrade). A
+    coordinate re-swept under two eras honestly maps to BOTH (→ ``ambiguous``
+    rows); the per-file authority is dup-train PR-3's at-rest census, NOT
+    claimed here (per-tuple filename digests fold the hash one-way).
     """
     # Function-local import mirroring results_report._recorded_snapshot_hash:
     # this module's read+render surface stays lean; the audit reader is only
-    # paid when a leaderboard is actually built.
-    from brutex.orchestrator.audit import AuditError, read_entries
+    # paid when a leaderboard scan is actually built.
+    from brutex.orchestrator.audit import AuditError, iter_entries
 
     audit_path = sweeps_root.joinpath(*_AUDIT_RELPATH)
     if not audit_path.exists():
+        # iter_entries raises AuditError at CALL time on a missing file; the
+        # absent chain is the ordinary "no signal yet" state, not a failure.
         return {}
+    collected: dict[_EraKey, set[str]] = {}
     try:
-        entries = read_entries(audit_path)
+        for entry in iter_entries(audit_path):
+            if entry.action != _SWEEP_START_ACTION:
+                continue
+            payload = entry.payload
+            try:
+                key: _EraKey = (
+                    str(payload["instrument"]),
+                    str(payload["tf"]),
+                    str(payload["direction"]),
+                    str(payload["mode"]),
+                    int(payload["k"]),
+                )
+                snapshot = str(payload["data_snapshot_hash"])
+            except (KeyError, TypeError, ValueError):
+                # A malformed SWEEP_START payload contributes no signal — skipped,
+                # never a 500 (the doctor's verify path is where malformation raises).
+                continue
+            collected.setdefault(key, set()).add(snapshot)
     except AuditError as exc:
         _LOG.warning("sweep_results.era_scan_failed", audit_path=str(audit_path), error=str(exc))
         return {}
-    collected: dict[_EraKey, set[str]] = {}
-    for entry in entries:
-        if entry.action != _SWEEP_START_ACTION:
-            continue
-        payload = entry.payload
-        try:
-            key: _EraKey = (
-                str(payload["instrument"]),
-                str(payload["tf"]),
-                str(payload["direction"]),
-                str(payload["mode"]),
-                int(payload["k"]),
-            )
-            snapshot = str(payload["data_snapshot_hash"])
-        except (KeyError, TypeError, ValueError):
-            # A malformed SWEEP_START payload contributes no signal — skipped,
-            # never a 500 (the doctor's verify path is where malformation raises).
-            continue
-        collected.setdefault(key, set()).add(snapshot)
     return {key: frozenset(hashes) for key, hashes in collected.items()}
 
 
@@ -475,13 +583,19 @@ def build_sweep_leaderboard(
     direction: str | None = None,
     rank_by: str | None = None,
     top_n: int = DEFAULT_TOP_N,
+    scan: SweepScan | None = None,
 ) -> SweepLeaderboard:
     """Build the ranked sweep leaderboard for the ``/results`` page.
 
-    Discovers every per-tuple store under ``<lake_root>/sweeps``, loads them
-    resiliently, applies the optional filters, ranks the surviving rows by
-    *rank_by* (descending — best first), and projects the top-*top_n* into display
-    dicts. Pure + framework-free (no FastAPI), so it is unit-tested directly.
+    Applies the optional filters over the :class:`SweepScan`'s rows, ranks the
+    survivors by *rank_by* (descending — best first), and projects the
+    top-*top_n* into display dicts. Pure + framework-free (no FastAPI), so it is
+    unit-tested directly. With ``scan=None`` (the default) the scan is performed
+    inline via :func:`load_sweep_scan` — byte-identical to the pre-split
+    behaviour for every existing caller; passing a cached *scan* skips the
+    O(stores × rows) load + the audit era pass entirely
+    (DEC-LEDGER-DELTA-O-PAGE-001) and pays ONLY the O(N log N) rank +
+    O(top_n) projection.
 
     Parameters
     ----------
@@ -495,6 +609,9 @@ def build_sweep_leaderboard(
         unknown value falls back to :data:`DEFAULT_RANK_BY` (never an error).
     top_n
         Leaderboard depth, clamped into ``[1, MAX_TOP_N]``.
+    scan
+        An already-performed :func:`load_sweep_scan` result to rank, or ``None``
+        to scan now.
 
     Returns
     -------
@@ -503,29 +620,11 @@ def build_sweep_leaderboard(
     """
     resolved_rank = _resolve_rank_by(rank_by)
     depth = _clamp_top_n(top_n)
-    sweeps_root = lake_root / SWEEPS_DIRNAME
-
-    paths = _iter_store_paths(sweeps_root)
-    all_rows, store_count, skipped, run_id_conflicts = _load_rows_resilient(paths)
-
-    # The filter dropdown option sets come from EVERY discovered row (so a filter
-    # the operator can pick is always one that exists), independent of the active
-    # filter.
-    instruments = tuple(sorted({r.instrument for r in all_rows}))
-    timeframes = tuple(sorted({r.tf for r in all_rows}))
-    directions = tuple(sorted({r.direction for r in all_rows}))
-
-    # Snapshot-era honesty (DEC-RESULTS-SURFACE-HONESTY-001): the distinct
-    # recorded data eras behind the DISCOVERED rows (all of them, independent of
-    # the active filter — a mixed tree stays loudly mixed on every filtered view).
-    eras = _snapshot_eras(sweeps_root) if all_rows else {}
-    covered_eras: set[str] = set()
-    for key in {_row_era_key(r) for r in all_rows}:
-        covered_eras |= eras.get(key, frozenset())
-    snapshot_hashes = tuple(sorted(covered_eras))
+    if scan is None:
+        scan = load_sweep_scan(lake_root)
 
     filtered = [
-        r for r in all_rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
+        r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
     ]
     # Deterministic rank: by the chosen column descending, ties broken by run_id
     # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
@@ -533,21 +632,21 @@ def build_sweep_leaderboard(
     ordered = sorted(filtered, key=lambda r: r.run_id)
     ordered.sort(key=lambda r: _rank_value(r, resolved_rank), reverse=True)
     rows = tuple(
-        _project_row(r, rank, snapshot_era=_row_snapshot_era(r, eras))
+        _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
         for rank, r in enumerate(ordered[:depth], start=1)
     )
 
     return SweepLeaderboard(
         rows=rows,
-        available=store_count > 0,
+        available=scan.store_count > 0,
         total_rows=len(filtered),
-        store_count=store_count,
-        skipped=skipped,
+        store_count=scan.store_count,
+        skipped=scan.skipped,
         rank_by=resolved_rank,
-        instruments=instruments,
-        timeframes=timeframes,
-        directions=directions,
-        snapshot_hashes=snapshot_hashes,
-        mixed_snapshot_eras=len(snapshot_hashes) > 1,
-        run_id_conflicts=run_id_conflicts,
+        instruments=scan.instruments,
+        timeframes=scan.timeframes,
+        directions=scan.directions,
+        snapshot_hashes=scan.snapshot_hashes,
+        mixed_snapshot_eras=len(scan.snapshot_hashes) > 1,
+        run_id_conflicts=scan.run_id_conflicts,
     )

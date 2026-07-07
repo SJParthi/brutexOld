@@ -819,6 +819,141 @@ class TestMoversApi:
         assert "Min volume" not in body["note"]
 
 
+def _seed_finalized_day_lake(tmp_path: Path) -> None:
+    """A FINALIZED trading day whose last three 1-minute closes are DISTINCT.
+
+    NIFTY 1-minute: 09:15 (20000) then the late trio 15:27 (21800) / 15:28
+    (21900) / 15:29 (22000) — so an as-of pinned to a coarse TF's last grid slot
+    (15:27) would freeze at 21800 while 1minute reaches 22000. The stored 1-day
+    bar's close == the 15:29 close (22000), so the DAILY read agrees with the
+    whole-day 1-minute last bar. Prior-day (06-12) 1-day close 20000 gives a
+    clean +10% gainer. Used by DEC-MOVERS-ASOF-LATEST-DEFAULT-001's equality pin.
+    """
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1minute",
+        [
+            _min_bar(hour=9, minute=15, close="20000", volume=100),
+            _min_bar(hour=15, minute=27, close="21800", volume=100),
+            _min_bar(hour=15, minute=28, close="21900", volume=100),
+            _min_bar(hour=15, minute=29, close="22000", volume=500),
+        ],
+    )
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1day",
+        [
+            _day_bar(day=date(2024, 6, 12), open_="19900", close="20000", volume=300),
+            _day_bar(day=_DAY, open_="20000", close="22000", volume=700),
+        ],
+    )
+
+
+class TestMoversAsofLatestDefault:
+    """DEC-MOVERS-ASOF-LATEST-DEFAULT-001 — the default as-of shows the identical
+    latest close across every timeframe (the Groww/Dhan-consistent behaviour)."""
+
+    #: Every intraday TF (divisor + non-divisor) + the daily TF — the default
+    #: poll must read the SAME latest close on all of them.
+    _TFS = ("1minute", "2minute", "3minute", "5minute", "3hour", "1day")
+
+    def test_default_asof_identical_latest_close_across_timeframes(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # THE core pin (the executable form of "Dixon 1D/5m/3m/2m/1m all C=13237.00"):
+        # with NO explicit time, EVERY timeframe shows the identical 15:29 latest close.
+        _seed_finalized_day_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        ltps: set[str] = set()
+        for tf in self._TFS:
+            body = client.get("/api/v1/movers", params={"asset": "spot", "interval": tf}).json()
+            assert body["date"] == "2024-06-13"  # defaulted to the latest available day
+            assert body["price_gainers"][0]["symbol"] == "NIFTY"
+            ltps.add(body["price_gainers"][0]["ltp"])
+        assert ltps == {"₹22,000.00"}, ltps  # ONE value across all six timeframes
+
+    def test_teeth_old_per_tf_default_slot_would_differ(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # The bug reproduction: the OLD per-TF default pinned 3minute to its last
+        # grid slot 15:27 → the 15:27 partial-bucket close 21800, DIFFERENT from
+        # the new default's 15:29 latest close 22000. Explicit times still cut honestly.
+        _seed_finalized_day_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        at_1527 = client.get(
+            "/api/v1/movers",
+            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "15:27"},
+        ).json()
+        at_0915 = client.get(
+            "/api/v1/movers",
+            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "09:15"},
+        ).json()
+        # Read the LTP from the volume category (always includes the row — at 09:15
+        # the pct change is 0% so it is not a gainer/loser).
+        assert at_1527["volume"][0]["ltp"] == "₹21,800.00"
+        assert at_0915["volume"][0]["ltp"] == "₹20,000.00"
+        # The per-TF slots DIFFER from each other AND from the new default's 22000 —
+        # exactly the operator-reported divergence the default fix removes.
+        assert at_1527["volume"][0]["ltp"] != at_0915["volume"][0]["ltp"]
+        default = client.get(
+            "/api/v1/movers", params={"asset": "spot", "interval": "3minute"}
+        ).json()
+        assert default["price_gainers"][0]["ltp"] == "₹22,000.00"
+
+    def test_default_intraday_echoes_latest_time_and_null_time(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # The additive display echo: default intraday poll → latest_time="15:29"
+        # (the real latest minute), time echoes null (whole-day cut, stored-fast).
+        _seed_finalized_day_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/movers", params={"asset": "spot", "interval": "3minute"}).json()
+        assert body["latest_time"] == "15:29"
+        assert body["time"] is None
+
+    def test_daily_interval_latest_time_is_none(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # A daily interval has no intraday time → latest_time is None (plain label).
+        _seed_finalized_day_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/movers", params={"asset": "spot", "interval": "1day"}).json()
+        assert body["latest_time"] is None
+
+    def test_explicit_time_leaves_latest_time_none(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # An EXPLICIT as-of is honestly partial — no latest_time echo (the picker
+        # already shows the chosen minute); the honest cut semantic is unchanged.
+        _seed_finalized_day_lake(tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "15:27"},
+        ).json()
+        assert body["latest_time"] is None
+
+    def test_latest_time_none_when_no_intraday_bars(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Only a 1-day lake (no 1-minute) → the intraday default resolves latest_time
+        # to None (empty 1m glob) and still cuts whole-day. Honest "latest" label.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar(day=date(2024, 6, 12), open_="19900", close="20000", volume=300),
+                _day_bar(day=_DAY, open_="20000", close="22000", volume=700),
+            ],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/movers", params={"asset": "spot", "interval": "3minute"}).json()
+        assert body["latest_time"] is None
+
+
 class TestMoversPage:
     def test_movers_page_renders(self, store: InstrumentStore) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
