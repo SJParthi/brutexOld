@@ -272,15 +272,31 @@ def test_encode_bars_empty_batch() -> None:
 
 
 def test_decode_encode_exact_roundtrip() -> None:
-    """``decode_bars(encode_bars(x)) == x`` — Decimal / None / UTC exact."""
+    """``decode_bars(encode_bars(x)) == x`` — Decimal / None / UTC exact.
+
+    Includes >2dp vendor-noise prices (``14020.7999`` + the exact ``".xx5"``
+    ROUND_HALF_UP boundary ``14031.005``): the capture contract is PRE-snap
+    fidelity, so a codec that quantizes to the 2dp tick grid (a
+    precision-corrupting decode mutant — numerically EQUAL on 2dp-only
+    fixtures) is killed HERE, deterministically (round-4 review fix).
+    """
     bars = [
         _bar(0, close="14020.79", volume=7, open_interest=None),
         _bar(3, close="0.05", volume=0, open_interest=123456),
+        _bar(5, close="14031.005", volume=3, open_interest=None),
+        _bar(6, close="14020.7999", volume=1, open_interest=9),
     ]
     decoded = decode_bars(encode_bars(bars))
     assert decoded == bars
     assert decoded[0].timestamp.tzinfo is UTC
     assert isinstance(decoded[0].close, Decimal)
+    # The noise prices survive EXACTLY — no tick-grid snap in the codec
+    # (ROUND_HALF_UP would give 14031.01, ROUND_HALF_EVEN 14031.00; both
+    # compare UNEQUAL to the raw Decimal, unlike a 2dp fixture).
+    assert decoded[2].close == Decimal("14031.005")
+    assert decoded[2].close != Decimal("14031.01")
+    assert decoded[2].close != Decimal("14031.00")
+    assert decoded[3].close == Decimal("14020.7999")
 
 
 def test_encode_bars_refuses_fno_greeks_bar() -> None:

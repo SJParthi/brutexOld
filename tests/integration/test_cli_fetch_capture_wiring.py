@@ -260,7 +260,7 @@ def test_cmd_fetch_async_path_fourth_seam_lands_pipeline_deferred_records(
 
     monkeypatch.setattr(pull_pipeline, "drain_fetch_pipeline", _release_then_drain)
 
-    cli.cmd_fetch(
+    rc = cli.cmd_fetch(
         lake,
         _START,
         _END,
@@ -270,6 +270,10 @@ def test_cmd_fetch_async_path_fourth_seam_lands_pipeline_deferred_records(
         inspect=False,
         rows_per_chunk=1,
     )
+    # Round-4 review fix (NIT): pin the pull's real outcome like the sync
+    # arm — a regression failing the async pull (non-OK rc) while still
+    # landing bars + capture events must not pass silently.
+    assert rc == cli.EXIT_OK
     assert gate.is_set()  # the drain ran (and released the gated appends)
 
     audit_path = lake / "audit" / "spot-ingest.jsonl"

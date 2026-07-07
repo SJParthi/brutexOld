@@ -47,6 +47,20 @@ _GOLDEN_BLAKE3 = "1965d5631877576a3c4804a17f385fd1e79f04996a088428165b00884aee6e
 _GOLDEN_BLAKE3_FIRST = "46a9d533c4008ac378cdfe99fd2fa8c8c1deb841932cc38354db9e78b42a7192"
 _GOLDEN_BLAKE3_EMPTY = "d53d18c23212ea7b6300594bb89bce60218f6eff2b9d628b8cc42d3e79bbd5ab"
 
+#: Round-4 review fix (MINOR) — ADDITIVE vendor-noise answer-key (the frozen
+#: two-bar fixture above is a locked key and stays byte-untouched). Pins
+#: that the capture encoding is the RAW pre-``_tick_round`` input: >2dp
+#: vendor-noise prices (incl. the exact ``".xx5"``/``".xx50"`` ROUND_HALF_UP
+#: boundaries and a trailing-zero Decimal) survive to the wire EXACTLY. A
+#: codec that snaps to the 2dp tick grid re-keys this digest AND breaks the
+#: round-trip below — the decode-precision mutant a 2dp-only golden lets
+#: through (numeric Decimal equality hides a re-quantize at 2dp).
+_GOLDEN_NOISE_ENCODED: list[list[object]] = [
+    [1609732020, "14020.7999", "14031.005", "14019.004999", "14030.0050", 7, None],
+]
+_GOLDEN_NOISE_JSON = '[[1609732020,"14020.7999","14031.005","14019.004999","14030.0050",7,null]]'
+_GOLDEN_NOISE_BLAKE3 = "b857b5dbc678c56c339d0f15cfc3c0cf21a5cd7d7c739f3425a1f50ee361514a"
+
 
 def _fixture_bars() -> list[CandleBar]:
     """The frozen two-bar fixture (whole-second UTC, exact Decimals, OI None/int)."""
@@ -93,3 +107,34 @@ def test_input_blake3_matches_golden() -> None:
 def test_golden_encoding_round_trips_exactly() -> None:
     """decode(golden rows) reproduces the fixture bars exactly (Decimal/None)."""
     assert decode_bars(_GOLDEN_ENCODED) == _fixture_bars()
+
+
+def _noise_fixture_bar() -> CandleBar:
+    """The frozen vendor-noise bar — RAW >2dp pre-snap prices (round-4)."""
+    return CandleBar(
+        timestamp=datetime(2021, 1, 4, 3, 47, tzinfo=UTC),
+        open=Decimal("14020.7999"),
+        high=Decimal("14031.005"),
+        low=Decimal("14019.004999"),
+        close=Decimal("14030.0050"),
+        volume=7,
+        open_interest=None,
+    )
+
+
+def test_vendor_noise_encoding_matches_golden() -> None:
+    """The >2dp pre-snap encoding (rows / wire JSON / digest) is frozen."""
+    encoded = encode_bars([_noise_fixture_bar()])
+    assert encoded == _GOLDEN_NOISE_ENCODED
+    assert _canonical_json(encoded) == _GOLDEN_NOISE_JSON
+    assert input_blake3(encoded) == _GOLDEN_NOISE_BLAKE3
+
+
+def test_vendor_noise_golden_round_trips_exactly() -> None:
+    """decode(noise rows) is EXACT — trailing zero + half-up boundary intact.
+
+    A quantizing decode mutant yields ``14031.01``/``14031.00`` (HALF_UP /
+    HALF_EVEN) for the ``high``; both are numerically UNEQUAL to the raw
+    ``Decimal("14031.005")``, so the equality below kills it.
+    """
+    assert decode_bars(_GOLDEN_NOISE_ENCODED) == [_noise_fixture_bar()]

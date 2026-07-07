@@ -28,6 +28,17 @@ Also pinned here:
 Bounded + deterministic + offline: ≤4 appends × ≤8 bars over a fixed
 15-slot timestamp pool spanning one month boundary, real writers on a
 ``TemporaryDirectory``, no network, no clock.
+
+Round-4 review fix (MINOR): the generated prices now include >2dp
+vendor-noise tails (a sub-paisa component, incl. the exact ``".xx50"``
+ROUND_HALF_UP boundary), so the writer's 2dp tick snap
+(``parquet_writer._tick_round``) is genuinely TRAVERSED by the replay
+property instead of being an identity on already-snapped fixtures — the
+capture contract ("bars are captured PRE-snap; replay re-applies the
+writer's own rounding") is pinned end-to-end, and a decode-precision
+mutant (a quantizing ``decode_bars``) is killed deterministically by
+:func:`test_vendor_noise_capture_replay_snaps_half_up_and_byte_equal`
+below plus the widened identity property.
 """
 
 from __future__ import annotations
@@ -37,6 +48,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import polars as pl
 import pytest
 from brutex.data.audit_capture import (
     DEDUP_ADD_ACTION,
@@ -80,12 +92,20 @@ _COORDS = {
     "interval": "1minute",
 }
 
-#: One bar spec = (slot index, close paise, volume). Same slot + different
-#: close across appends is a keep-first CONFLICT; within one batch it is a
-#: within-batch vendor duplicate — both replay-order-sensitive on purpose.
+#: One bar spec = (slot index, close paise, sub-paisa noise, volume). The
+#: sub-paisa component (units of 1e-4 rupees) makes the price a 4dp
+#: vendor-noise Decimal: ``0`` keeps the exact-tick arm, ``50`` is the exact
+#: ``".xx50"`` ROUND_HALF_UP boundary, ``99`` a generic >2dp tail — so the
+#: writer's 2dp snap is genuinely traversed, never an identity (round-4
+#: review). Same slot + different close across appends is a keep-first
+#: CONFLICT; within one batch it is a within-batch vendor duplicate — both
+#: replay-order-sensitive on purpose.
+_BarSpec = tuple[int, int, int, int]
+
 _bar_spec = st.tuples(
     st.integers(min_value=0, max_value=len(_SLOT_TIMESTAMPS) - 1),
     st.integers(min_value=1, max_value=9_999_999),
+    st.sampled_from((0, 50, 99)),
     st.integers(min_value=0, max_value=10_000),
 )
 
@@ -96,9 +116,9 @@ _schedule = st.lists(_batch, min_size=1, max_size=4)
 _merge_modes = st.lists(st.sampled_from(["keep-first", "latest-wins"]), min_size=4, max_size=4)
 
 
-def _spec_to_bar(spec: tuple[int, int, int]) -> CandleBar:
-    slot, close_paise, volume = spec
-    price = Decimal(close_paise).scaleb(-2)
+def _spec_to_bar(spec: _BarSpec) -> CandleBar:
+    slot, close_paise, subpaisa, volume = spec
+    price = Decimal(close_paise).scaleb(-2) + Decimal(subpaisa).scaleb(-4)
     return CandleBar(
         timestamp=_SLOT_TIMESTAMPS[slot],
         open=price,
@@ -117,7 +137,7 @@ def _make_capture_sink(root: Path, *, journal: DedupJournal | None = None) -> Au
     )
 
 
-def _append(sink: AuditCaptureSink, specs: list[tuple[int, int, int]], merge_mode: str) -> None:
+def _append(sink: AuditCaptureSink, specs: list[_BarSpec], merge_mode: str) -> None:
     sink.append(
         exchange=_COORDS["exchange"],
         segment=_COORDS["segment"],
@@ -142,7 +162,7 @@ def _write_chain(audit_path: Path, records: list[BufferedAuditRecord]) -> None:
 @given(schedule=_schedule, merge_modes=_merge_modes)
 @settings(max_examples=25, deadline=None)
 def test_p_20_capture_replay_byte_equal_for_any_schedule(
-    schedule: list[list[tuple[int, int, int]]], merge_modes: list[str]
+    schedule: list[list[_BarSpec]], merge_modes: list[str]
 ) -> None:
     """P-20: replaying the verified capture log through the REAL writers
     reproduces the original lake byte-for-byte — duplicates, keep-first
@@ -169,6 +189,14 @@ def test_p_20_capture_replay_byte_equal_for_any_schedule(
 
 _price_paise = st.integers(min_value=1, max_value=10**9)
 
+#: Price scale exponents: ``-2`` is the exact 2dp tick grid; ``-3``/``-4``
+#: produce >2dp vendor-noise Decimals (incl. the exact ``".xx5"`` half-up
+#: boundary whenever the drawn integer ends in 5) — a quantizing
+#: ``decode_bars`` mutant is numerically UNEQUAL to these and fails the
+#: identity below (round-4 review; 2dp-only fixtures compare equal through
+#: a re-quantize, hiding precision corruption).
+_price_scale = st.sampled_from((-2, -3, -4))
+
 
 @st.composite
 def _valid_bars(draw: st.DrawFn) -> list[CandleBar]:
@@ -176,7 +204,8 @@ def _valid_bars(draw: st.DrawFn) -> list[CandleBar]:
     count = draw(st.integers(min_value=0, max_value=12))
     bars: list[CandleBar] = []
     for i in range(count):
-        prices = sorted(Decimal(p).scaleb(-2) for p in draw(st.tuples(*[_price_paise] * 4)))
+        scale = draw(_price_scale)
+        prices = sorted(Decimal(p).scaleb(scale) for p in draw(st.tuples(*[_price_paise] * 4)))
         low, open_, close, high = prices[0], prices[1], prices[2], prices[3]
         bars.append(
             CandleBar(
@@ -207,7 +236,7 @@ def test_decode_encode_is_identity(bars: list[CandleBar]) -> None:
 @given(schedule=_schedule, merge_modes=_merge_modes, data=st.data())
 @settings(max_examples=20, deadline=None)
 def test_repull_prefix_emits_zero_add_rows_and_oracle_is_clean(
-    schedule: list[list[tuple[int, int, int]]],
+    schedule: list[list[_BarSpec]],
     merge_modes: list[str],
     data: st.DataObject,
 ) -> None:
@@ -257,7 +286,7 @@ def test_repull_prefix_emits_zero_add_rows_and_oracle_is_clean(
 @given(schedule=_schedule, merge_modes=_merge_modes)
 @settings(max_examples=20, deadline=None)
 def test_torn_capture_self_heals_on_repull(
-    schedule: list[list[tuple[int, int, int]]], merge_modes: list[str]
+    schedule: list[list[_BarSpec]], merge_modes: list[str]
 ) -> None:
     """Drop the LAST append's buffered records before the drain (the durable
     write survived, its capture record did not — the crash window §6 risk 3),
@@ -287,4 +316,84 @@ def test_torn_capture_self_heals_on_repull(
         assert report.appends_replayed == len(schedule)  # N-1 originals + 1 re-pull
         assert_lake_byte_equal(
             original_root=root / "lake", replay_root=root / "replay", report=report
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Vendor-noise snap path — deterministic round-4 regression (not @given)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_vendor_noise_capture_replay_snaps_half_up_and_byte_equal() -> None:
+    """DETERMINISTIC round-4 regression — the >2dp snap path is traversed.
+
+    A capture of raw vendor-noise prices (``14020.7999`` / the exact
+    ``".xx5"``/``".xx50"`` half-up boundaries) pins all three legs of the
+    capture contract at once:
+
+    * the chain carries the RAW pre-snap price strings (capture is PRE
+      ``parquet_writer._tick_round`` — a quantizing ``decode_bars``/
+      ``encode_bars`` mutant re-keys these bytes and fails here);
+    * the ORIGINAL lake stored the ``ROUND_HALF_UP`` 2dp snap
+      (``14031.005 → 14031.01`` where ``ROUND_HALF_EVEN`` would store
+      ``14031.00`` — the writer-rounding mutant tooth);
+    * replay from the chain alone re-applies the writer's own rounding and
+      is byte-equal under strict mode.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sink = _make_capture_sink(root)
+        noise = CandleBar(
+            timestamp=_SLOT_TIMESTAMPS[0],
+            open=Decimal("14020.7999"),
+            high=Decimal("14031.005"),
+            low=Decimal("14019.004999"),
+            close=Decimal("14030.0050"),
+            volume=7,
+            open_interest=None,
+        )
+        sink.append(
+            exchange=_COORDS["exchange"],
+            segment=_COORDS["segment"],
+            symbol=_COORDS["symbol"],
+            interval=_COORDS["interval"],
+            bars=[noise],
+            merge_mode="keep-first",
+        )
+        records = list(sink.drain_remaining())
+        anchors = [r for r in records if r.action == LAKE_APPEND_ACTION]
+        assert len(anchors) == 1
+        # Leg 1 — the chain payload is the RAW pre-snap input, exact strings.
+        assert anchors[0].payload["bars"] == [
+            [
+                int(noise.timestamp.timestamp()),
+                "14020.7999",
+                "14031.005",
+                "14019.004999",
+                "14030.0050",
+                7,
+                None,
+            ]
+        ]
+
+        # Leg 2 — the ORIGINAL lake snapped ROUND_HALF_UP at the write
+        # boundary (HALF_EVEN would give high/close 14031.00 / 14030.00).
+        files = sorted((root / "lake").rglob("*.parquet"))
+        assert len(files) == 1
+        row = pl.read_parquet(files[0]).row(0, named=True)
+        assert row["open"] == 14020.80
+        assert row["high"] == 14031.01
+        assert row["low"] == 14019.00
+        assert row["close"] == 14030.01
+
+        # Leg 3 — replay re-applies the SAME snap: strict byte equality.
+        audit_path = root / "audit.jsonl"
+        _write_chain(audit_path, records)
+        report = replay_lake_from_audit(audit_path, replay_root=root / "replay")
+        assert report.appends_replayed == 1
+        assert_lake_byte_equal(
+            original_root=root / "lake",
+            replay_root=root / "replay",
+            report=report,
+            strict=True,
         )
