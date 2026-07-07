@@ -35,10 +35,13 @@ for the fail-closed branches), so ``reportPrivateUsage`` is silenced.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping, Sequence
+import signal
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 import pytest
@@ -298,6 +301,28 @@ def _touch(path: Path) -> None:
     """Move a file's stat token WITHOUT changing its bytes (mtime_ns bump)."""
     stat = os.stat(path)
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 5) -> Generator[None, None, None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-6 FIFO defect is an ``open(2)`` that
+    blocks FOREVER (a reader-side FIFO open waits for a writer) — a plain
+    regression test would HANG the whole run rather than fail; the
+    ``SIGALRM`` handler raising interrupts the blocked syscall instead.
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"/db shard read blocked > {seconds}s (FIFO open hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _corrupt(path: Path) -> None:
@@ -753,6 +778,21 @@ class TestFallbackMatrix:
         _seed_by_reading(conn, tmp_path)
         _shard_path(tmp_path).write_text("{corrupt", encoding="utf-8")
         self._assert_fallback(conn, tmp_path, expect_clause="parse")
+
+    def test_fifo_shard_falls_back_and_reseeds(self, conn: Any, tmp_path: Path) -> None:
+        """A FIFO planted at the shard path (the round-6 blocking-inode tamper
+        class) fails closed as ``not_regular`` — it must NEVER block the /db
+        read thread (fails-before: the plain ``open(2)`` hung the FastAPI
+        worker forever, a threadpool-exhaustion DoS from one inode) — and the
+        reseed's ``os.replace`` heals the inode back to a regular file."""
+        _write_months(tmp_path)
+        _seed_by_reading(conn, tmp_path)
+        shard = _shard_path(tmp_path)
+        shard.unlink()
+        os.mkfifo(shard)
+        with _hang_watchdog():
+            self._assert_fallback(conn, tmp_path, expect_clause="not_regular")
+        assert S_ISREG(shard.stat().st_mode), "the reseed must restore a regular file"
 
     def test_out_of_band_new_file_falls_back(self, conn: Any, tmp_path: Path) -> None:
         """A hand-copied month appears out of band ⇒ set mismatch ⇒ legacy + reseed."""
@@ -1687,7 +1727,26 @@ class TestProvenanceEvent:
         reads = [e for e in logs if e["event"] == "db.stats_manifest.read"]
         assert [e["page_source"] for e in reads] == ["live_scan", "manifest"]
         assert [e["validated"] for e in reads] == [False, True]
+        assert [e["kind"] for e in reads] == [lsm.KIND_BARS, lsm.KIND_BARS]
         # Emitted at INFO (production logging defaults to INFO): an operator
         # must be able to POSITIVELY confirm the manifest path is being taken
         # — a DEBUG-only event made the healthy path invisible in production.
+        assert [e["log_level"] for e in reads] == ["info", "info"]
+
+    def test_options_read_event_names_the_page_source(self, conn: Any, tmp_path: Path) -> None:
+        """The OPTIONS pager's provenance emission is a SEPARATE inline
+        emission from the spot twin (``query_option_candles``), so pin its
+        content independently — review round 6: only the spot event was
+        content-asserted, leaving an options ``page_source`` label swap or
+        field drop invisible to the suite (execution coverage alone cannot
+        catch a wrong label)."""
+        _write_option_months(tmp_path, ((2024, 3),))
+        with capture_logs() as logs:
+            _qopt(conn, tmp_path, use=True)  # fallback + seed
+            _qopt(conn, tmp_path, use=True)  # manifest-served
+        reads = [e for e in logs if e["event"] == "db.stats_manifest.read"]
+        assert [e["page_source"] for e in reads] == ["live_scan", "manifest"]
+        assert [e["validated"] for e in reads] == [False, True]
+        assert [e["kind"] for e in reads] == [lsm.KIND_OPTIONS, lsm.KIND_OPTIONS]
+        assert [e["series"] for e in reads] == [_OPT_SERIES, _OPT_SERIES]
         assert [e["log_level"] for e in reads] == ["info", "info"]

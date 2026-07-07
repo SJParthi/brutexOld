@@ -22,6 +22,7 @@ import errno
 import fcntl
 import json
 import os
+import signal
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -113,6 +114,28 @@ def _fallback_clauses(logs: Sequence[Mapping[str, Any]]) -> list[str]:
 def _raising_lock(exc: BaseException) -> Generator[None, None, None]:
     raise exc
     yield  # pragma: no cover - unreachable
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 5) -> Generator[None, None, None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-6 FIFO defect is an ``open(2)`` that
+    blocks FOREVER (a reader-side FIFO open waits for a writer), so a plain
+    regression test would HANG rather than fail; the ``SIGALRM`` handler
+    raising interrupts the blocked syscall and fails the test instead.
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"shard read blocked > {seconds}s (FIFO open hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 class TestKillSwitch:
@@ -674,16 +697,37 @@ class TestStructuralClauses:
 
     def test_shard_read_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         shard = _seed_bars(tmp_path)
-        real = Path.open
+        real = os.open
 
-        def _boom(self: Path, *args: Any, **kwargs: Any) -> Any:
-            if self == shard:
+        def _boom(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(os.fspath(path)) == shard:
                 raise PermissionError("read denied")
-            return real(self, *args, **kwargs)
+            return real(path, flags, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "open", _boom)
+        monkeypatch.setattr(os, "open", _boom)
         stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
         assert stats is None and clause == "shard_read"
+
+    def test_fifo_shard_is_fail_closed_not_regular_clause(self, tmp_path: Path) -> None:
+        """A FIFO planted at the shard path fails CLOSED as ``not_regular`` —
+        the blocking-inode member of the rounds-3/4 "shard replaced
+        out-of-band" tamper class (review round 6). Fails-before: the
+        pre-round-6 plain ``Path.open("rb")`` blocked inside ``open(2)`` until
+        a writer appeared — i.e. FOREVER — BEFORE any fail-closed clause could
+        fire (the oversized/parse/UTF-8 guards never ran); the watchdog turns
+        that hang into a loud failure. The ``O_NONBLOCK`` +
+        ``S_ISREG``-on-the-open-descriptor open returns immediately with the
+        new clause, and ``load_valid_dataset_stats`` degrades to the legacy
+        scan with the clause named."""
+        shard = _seed_bars(tmp_path)
+        shard.unlink()
+        os.mkfifo(shard)
+        with _hang_watchdog():
+            stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is None and clause == "not_regular"
+        with _hang_watchdog(), capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["not_regular"]
 
     def test_oversized_shard_is_fail_closed_oversized_clause(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1393,6 +1437,27 @@ class TestRecordPartitionStats:
         assert not shard.exists()
         assert any(
             e["event"] == "lake.stats_manifest.corrupt_unlinked" and e["clause"] == "oversized"
+            for e in logs
+        )
+
+    def test_fifo_shard_unlinked_never_blocks_the_pull(self, tmp_path: Path) -> None:
+        """The WRITE-side FIFO exposure (review round 6): the hook re-reads
+        the shard INSIDE the held data-partition lock + shard flock, so the
+        pre-round-6 blocking ``open(2)`` converted a planted FIFO into a
+        permanent per-window ``WriteDeadlineExceeded`` defer loop on the spot
+        spine (an accumulating zombie thread per pull) and wedged the
+        deadline-less heal hooks outright. The ``not_regular`` clause must
+        take the corrupt-unlink path — HEALING the inode — and return within
+        the watchdog bound, never raising into the pull."""
+        shard = _seed_bars(tmp_path)
+        shard.unlink()
+        os.mkfifo(shard)
+        dest = self._dest(tmp_path)
+        with _hang_watchdog(), capture_logs() as logs:
+            assert self._record(tmp_path, dest) is False
+        assert not shard.exists(), "the FIFO inode must be corrupt-unlinked (healed)"
+        assert any(
+            e["event"] == "lake.stats_manifest.corrupt_unlinked" and e["clause"] == "not_regular"
             for e in logs
         )
 

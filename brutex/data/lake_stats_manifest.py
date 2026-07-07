@@ -52,7 +52,10 @@ files — metadata syscalls only, independent of total lake depth):
 1. parse + version + key echo + well-formed rows + sorted + sum invariant —
    over a BOUNDED read (at most :data:`MAX_SHARD_BYTES` + 1 bytes; an
    out-of-band multi-GB shard fails closed as ``oversized``, never read
-   whole);
+   whole) of a REGULAR file only (the shard is opened ``O_NONBLOCK`` +
+   ``S_ISREG``-checked on the open descriptor, so a FIFO/device/socket inode
+   planted at the shard path fails closed as ``not_regular`` instead of
+   blocking the open forever — review round 6);
 2. FILE-SET EQUALITY — one recursive walk of the dataset dir (``*.parquet``
    only, ANY depth — the exact file set the readers' legacy ``**/*.parquet``
    DuckDB glob scans) yields exactly the shard's ``rel`` set;
@@ -133,6 +136,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import MAXYEAR, UTC, datetime
 from pathlib import Path
+from stat import S_ISREG
 from typing import Final
 
 import structlog
@@ -790,24 +794,47 @@ def _load_shard_with_clause(
 ) -> tuple[DatasetStats | None, str | None]:
     """Read + structurally validate the shard → ``(stats, None)`` or ``(None, clause)``.
 
-    Clause 1 of the read-time validation: a BOUNDED read (at most
-    :data:`MAX_SHARD_BYTES` + 1 bytes — an out-of-band multi-GB shard fails
-    closed as ``oversized`` instead of being read whole into memory, review
-    round 4) + parse + version + kind/key echo + identity-key echo +
-    well-formed rows + sorted files + sum invariant + aggregate-bounds
+    Clause 1 of the read-time validation: a REGULAR-file-only open
+    (``O_NONBLOCK`` + ``S_ISREG`` on the open descriptor — a FIFO / device /
+    socket inode planted at the shard path fails closed as ``not_regular``
+    instead of blocking ``open(2)`` forever, review round 6) + a BOUNDED read
+    (at most :data:`MAX_SHARD_BYTES` + 1 bytes — an out-of-band multi-GB
+    shard fails closed as ``oversized`` instead of being read whole into
+    memory, review round 4) + parse + version + kind/key echo + identity-key
+    echo + well-formed rows + sorted files + sum invariant + aggregate-bounds
     consistency. Takes NO lock (``os.replace`` atomicity — a read sees a
     complete old or new shard). Raises :class:`ValueError` only for a
     malformed *kind*/*key* argument (a programming error, not bad data).
     """
     canonical = _canonical_key(kind, key)
     shard_path = stats_shard_path(lake_root, kind, key)
+    fd = -1
     try:
-        with shard_path.open("rb") as handle:
+        # O_NONBLOCK: POSIX ``open(2)`` with O_RDONLY on a FIFO blocks until
+        # a writer opens it — BEFORE any fail-closed clause below could fire —
+        # so a FIFO planted at the shard path would hang every ``/db`` consult
+        # on the dataset (a dashboard threadpool-exhaustion vector) AND wedge
+        # the writers' partition-locked hooks, which re-read the shard inside
+        # the held data-partition lock (review round 6: the blocking-inode
+        # member of the rounds-3/4 "shard replaced out-of-band" tamper class).
+        # A regular file ignores the flag, so the bounded read is unchanged.
+        fd = os.open(shard_path, os.O_RDONLY | os.O_NONBLOCK)
+        if not S_ISREG(os.fstat(fd).st_mode):
+            # ``fstat`` on the OPEN descriptor — no check-to-read race. The
+            # write hooks corrupt-unlink this clause (healing the inode); the
+            # read side falls back + the seed's ``os.replace`` restores a
+            # regular file.
+            return None, "not_regular"
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1  # the file object now owns (and closes) the descriptor
             raw = handle.read(MAX_SHARD_BYTES + 1)
     except FileNotFoundError:
         return None, "absent"
     except OSError:
         return None, "shard_read"
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if len(raw) > MAX_SHARD_BYTES:
         # A shard replaced out-of-band with a huge file: the bytes past the
         # cap were never read, so neither this read thread nor the writers'
