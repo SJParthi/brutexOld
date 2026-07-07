@@ -1734,19 +1734,21 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     """Build a ``bars_for`` over the lake for the MANUAL replay (live-lake adapter).
 
     Reloads each ``(instrument, tf_label)`` slice the manifest references from the
-    Parquet lake via the SAME ``Catalog`` / ``ReplayFeed`` path the sweep used
-    (reconciling the catalog from on-disk Parquet first, mirroring
-    ``brutex sweep-all``), keyed by the manifest's :class:`BarsContext` window.
-    Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
-    core + the manifest round-trip are fully tested with injected bars; the L1
-    heal wiring below is exercised end-to-end by
-    ``tests/integration/test_cascade_reconcile_heal.py``).
+    Parquet lake via the ONE COMMON slice-read law
+    (:func:`brutex.engine.lake_slice.load_lake_slice` — the SAME ``Catalog`` /
+    ``ReplayFeed`` path the sweep used, reconciling the catalog from on-disk
+    Parquet first, mirroring ``brutex sweep-all``), keyed by the manifest's
+    :class:`BarsContext` window. Marked ``no cover``: it opens DuckDB + reads
+    the real lake (the pure cascade core + the manifest round-trip are fully
+    tested with injected bars; the L1 heal wiring inside ``load_lake_slice`` is
+    exercised end-to-end by ``tests/integration/test_cascade_reconcile_heal.py``).
 
     DEC-LAKE-HEAL-001 (L1): the reconcile's free invariant piggyback returns
     any poisoned-partition findings on ``ReconcileResult.findings``; ONE
-    :func:`~brutex.data.lake_heal.heal_after_reconcile` call heals them BEFORE
-    the feed consumes the slice (auto mode; ``BRUTEX_LAKE_HEAL=observe`` logs
-    only). ``LakeWriteHalt`` propagates to the CLI top-level halt handling.
+    :func:`~brutex.data.lake_heal.heal_after_reconcile` call (inside
+    ``load_lake_slice``) heals them BEFORE the feed consumes the slice (auto
+    mode; ``BRUTEX_LAKE_HEAL=observe`` logs only). ``LakeWriteHalt`` propagates
+    to the CLI top-level halt handling.
 
     Parameters
     ----------
@@ -1765,11 +1767,7 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     from datetime import UTC, datetime
 
     from brutex.data.catalog import Catalog
-    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
-    from brutex.data.lake_heal import heal_after_reconcile, lake_heal_audit
-    from brutex.data.lake_read import dedup_bars
-    from brutex.feed.replay import ReplayFeed
-    from brutex.notifications.sweep_alerts import emit_lake_heal_alert
+    from brutex.engine.lake_slice import load_lake_slice
 
     def _parse(value: str) -> datetime:
         parsed = datetime.fromisoformat(value)
@@ -1781,45 +1779,20 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
     slices: dict[tuple[str, str], list[CandleBar]] = {}
     with Catalog.open(catalog) as cat:
         for instrument, tf_label in coords:
-            result = reconcile_catalog_from_lake(
+            # The ONE COMMON slice-read law (reconcile → L1 heal → feed →
+            # keep-FIRST dedup); the dedup-source label keeps the historical
+            # ``cascade_wire:<instrument>/<tf>`` log bytes unchanged.
+            slices[(instrument, tf_label)] = load_lake_slice(
                 lake_root=lake_root,
                 catalog=cat,
                 exchange=ctx.exchange,
                 segment=ctx.segment,
                 symbol=instrument,
                 interval=tf_label,
-            )
-            if result.findings:
-                # DEC-LAKE-HEAL-001 L1: heal what the reconcile detected for
-                # free, so the sweep/replay reads clean bars. The audit sink is
-                # opened lazily (findings-gated — a clean lake writes nothing).
-                with lake_heal_audit(lake_root) as audit:
-                    heal_after_reconcile(
-                        result,
-                        lake_root=lake_root,
-                        catalog=cat,
-                        audit=audit,
-                        on_report=lambda r: emit_lake_heal_alert(r, scope="reconcile"),
-                    )
-            feed = ReplayFeed(
-                catalog=cat,
-                lake_root=lake_root,
-                exchange=ctx.exchange,
-                segment=ctx.segment,
-                symbols=[instrument],
-                interval=tf_label,
                 start=_parse(ctx.start),
                 end=_parse(ctx.end),
+                dedup_source=f"cascade_wire:{instrument}/{tf_label}",
             )
-            # Belt-and-braces read gate (DEC-LAKE-READ-UNIQUE-001): the feed's
-            # Catalog.get_bars already collapses stored duplicates keep-FIRST;
-            # this idempotent second pass pins the invariant at the cascade's
-            # own input mouth (a clean stream passes through byte-identically).
-            clean_bars, _dropped = dedup_bars(
-                [event.bar for event in feed],
-                source=f"cascade_wire:{instrument}/{tf_label}",
-            )
-            slices[(instrument, tf_label)] = clean_bars
 
     def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
         return slices.get((instrument, tf_label), [])
