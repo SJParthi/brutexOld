@@ -632,6 +632,26 @@
     <div id="phaseProgress" aria-live="polite"></div>
   </div>
 
+  <!-- Greeks backfill (DEC-GREEKS-BULK-REENRICH-001): bulk v1→v2 re-enrich of the
+       F&O options lake's Greeks overlay — reaches EXPIRED contracts + CLI-pulled
+       lakes the pull-side pass never touches. Zero vendor calls; the scan is
+       O(files) (honest — it can take a while on a deep lake); a pull on the same
+       lake is refused while it runs (one lake-writer job at a time). Status is
+       written via textContent ONLY (CodeQL XSS guard). -->
+  <div id="greeksBackfillPanel" role="status" aria-live="polite"
+       style="margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Greeks backfill (v1→v2)</b>
+    <button id="greeksBackfillBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
+            title="Re-stamp every stale (unstamped / v1 / inputs-drifted) option contract's Greeks overlay through the existing enrich driver — expired contracts + CLI-pulled lakes included. Idempotent; zero vendor calls; the O(files) scan may take a while; resumes after a crash from a durable checkpoint.">
+      ▶ Run backfill
+    </button>
+    <label style="margin-left:8px;color:var(--muted);">
+      <input type="checkbox" id="gbDry"> dry-run (scan + report only — zero writes)
+    </label>
+    <span id="gbstatus" style="margin-left:10px;color:var(--muted);"></span>
+  </div>
+
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
        (DEC-MAPPING-INTEGRITY-RECONCILE-001 / DEC-MAPPING-INTEGRITY-ATTEMPTED-001). VERIFIED =
        every ATTEMPTED options-eligible spot pulled its option history; RED = a spot was
@@ -2172,6 +2192,74 @@ async function refreshVerdict() {
     banner.style.display = 'flex';
   } catch (e) { /* offline — leave the banner as-is */ }
 }
+/* ── Greeks backfill (DEC-GREEKS-BULK-REENRICH-001) ──
+   POST to start the background bulk v1→v2 re-enrich, then poll its OWN O(1)
+   progress route every GB_MS (the pollProgress pattern). textContent ONLY —
+   never innerHTML (CodeQL XSS guard); transient poll blips retry bounded. */
+const GB_MS = 600;
+const GB_MAX_FEED_RETRIES = 5;
+let gbTimer = null;
+let gbFeedRetries = 0;
+function gbStatus(text) {
+  const el = document.getElementById('gbstatus');
+  if (el) el.textContent = text;
+}
+async function startGreeksBackfill() {
+  const btn = document.getElementById('greeksBackfillBtn');
+  const dry = !!(document.getElementById('gbDry') && document.getElementById('gbDry').checked);
+  if (btn) btn.disabled = true;
+  gbStatus('Starting Greeks backfill…');
+  try {
+    const r = await fetch('/api/v1/universe/greeks-backfill' + (dry ? '?dry_run=true' : ''),
+                          {method: 'POST'});
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
+    if (!body.started) {
+      gbStatus('a job is already running on this lake (backfill or pull) — retry once it finishes');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    gbStatus((dry ? 'DRY RUN · ' : '') + 'scanning the options lake (O(files) — may take a while)…');
+    pollGreeksBackfill();
+  } catch (e) {
+    gbStatus('✕ failed to start: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+async function pollGreeksBackfill() {
+  if (gbTimer) clearTimeout(gbTimer);
+  try {
+    const r = await fetch('/api/v1/universe/greeks-backfill-progress');
+    const s = await r.json();
+    gbFeedRetries = 0;
+    if (s.state === 'running') {
+      const line = (s.total || 0) > 0
+        ? `${(s.completed || 0).toLocaleString('en-IN')} / ${(s.total || 0).toLocaleString('en-IN')} contracts · ${(s.bars || 0).toLocaleString('en-IN')} bars · ${s.current || '…'}`
+        : 'scanning the options lake (O(files) — may take a while)…';
+      gbStatus('running · ' + line);
+      gbTimer = setTimeout(pollGreeksBackfill, GB_MS);
+      return;
+    }
+    // Settled (done / error / idle): the honest terminal line (detail carries
+    // the report's note headline on done, the error text on error).
+    gbStatus((s.state === 'error' ? '✕ ' : '✓ ') + (s.detail || s.state));
+    const btn = document.getElementById('greeksBackfillBtn');
+    if (btn) btn.disabled = false;
+  } catch (e) {
+    gbFeedRetries += 1;
+    if (gbFeedRetries <= GB_MAX_FEED_RETRIES) {
+      gbTimer = setTimeout(pollGreeksBackfill, GB_MS);
+      return;
+    }
+    gbFeedRetries = 0;
+    gbStatus('… live progress feed dropped (the backfill may still be running); re-open the page to re-check');
+    const btn = document.getElementById('greeksBackfillBtn');
+    if (btn) btn.disabled = false;
+  }
+}
+const greeksBackfillBtn = document.getElementById('greeksBackfillBtn');
+if (greeksBackfillBtn) greeksBackfillBtn.addEventListener('click', startGreeksBackfill);
+
 const verdictRefreshBtn = document.getElementById('verdictRefresh');
 if (verdictRefreshBtn) verdictRefreshBtn.addEventListener('click', refreshVerdict);
 const verdictRetryBtn = document.getElementById('verdictRetry');

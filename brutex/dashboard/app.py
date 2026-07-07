@@ -239,6 +239,13 @@ from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.greeks_backfill import (
+    dry_run_backfill_report,
+    plan_greeks_backfill,
+    run_greeks_backfill,
+    scan_stale_greeks_targets,
+)
+from brutex.data.greeks_enrich import resolve_risk_free_source
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
@@ -259,6 +266,7 @@ from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.models import Exchange, Instrument, InstrumentType
+from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
 from brutex.observability.correlation import request_id_scope
 from brutex.observability.power_keepawake import keep_awake
 from brutex.orchestrator.pipeline import (
@@ -2289,6 +2297,19 @@ def build_app(
     # (DEC-DASHBOARD-FASTREAD-001).
     _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
 
+    # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
+    # SEPARATE BackgroundPullJob so its progress feed never collides with a
+    # pull's. The ACCOUNT-keyed lock is skipped via the existing graceful-skip
+    # path (`account_key_resolver` returning None — the backfill makes ZERO
+    # vendor calls, so there is no account rate to protect); the DEFAULT
+    # lake-root single-flight is KEPT, so a backfill and a pull against the
+    # SAME lake serialise (one lake-writer job at a time — the honest posture;
+    # the per-partition flocks of DEC-LAKE-PARTITION-FLOCK-001 protect
+    # regardless). Owned by this app instance (no module global — CLAUDE.md §4).
+    _greeks_backfill_job = BackgroundPullJob(
+        summary_cache=_summary_cache, account_key_resolver=lambda: None
+    )
+
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
     # the production default reads THIS app's own single-flight job (`running` is an O(1)
     # lock-guarded bool), so the widget can never read "stalled" after the pull finished;
@@ -4031,6 +4052,121 @@ def build_app(
                 "until_clean": until_clean,
             }
         )
+
+    @app.post("/api/v1/universe/greeks-backfill")
+    async def api_universe_greeks_backfill(
+        dry_run: bool = Query(default=False),
+        force: bool = Query(default=False),
+        expired_only: bool = Query(default=False),
+        batch: int | None = Query(default=None),
+        limit: int | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/greeks-backfill — start the bulk Greeks v1→v2 re-enrich.
+
+        DEC-GREEKS-BULK-REENRICH-001 (the MIGRATION.md #1188 named follow-up):
+        scan the F&O options lake for contracts whose ``greeks_provenance_id``
+        stamps are UNSTAMPED / v1 / inputs-drifted, then re-enrich them in
+        bounded batches through the EXISTING
+        :func:`~brutex.data.greeks_enrich.enrich_greeks_for_targets` driver on
+        the background job (returns at once; poll ``/greeks-backfill-progress``).
+        The scan runs ON the job thread — it is HONESTLY O(files), never O(1) —
+        so the total is unknown at POST time; the first per-batch sync sets it.
+
+        NO credential gate, deliberately (unlike the pull routes): the backfill
+        makes ZERO vendor calls, and a credential-less CLI-lake box MUST be able
+        to run it — that IS gap (b) of #1188. ``dry_run`` is an explicit query
+        param (default false) and stops at the PLAN boundary: zero writes, zero
+        checkpoint, zero Telegram. Single-flight: a second click — or a pull on
+        the same lake — refuses with ``started: false``. A disk-full / broken
+        pool halts through the job's existing ``is_pull_halt`` handling (one
+        CRITICAL Telegram alert; the durable checkpoint survives for resume).
+        """
+        if batch is not None and batch < 1:
+            raise HTTPException(status_code=400, detail=f"batch must be >= 1, got {batch}")
+        if limit is not None and limit < 1:
+            raise HTTPException(status_code=400, detail=f"limit must be >= 1, got {limit}")
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        _LOG.info(
+            "universe.greeks_backfill.requested",
+            dry_run=dry_run,
+            force=force,
+            expired_only=expired_only,
+            batch=batch,
+            limit=limit,
+            lake_root=str(lake_root),
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: scan → plan → (dry-run report | run + ONE Telegram summary)."""
+            rate_source = resolve_risk_free_source()
+            scan = scan_stale_greeks_targets(
+                lake_root,
+                rate_source=rate_source,
+                expired_only=expired_only,
+                force=force,
+                limit=limit,
+            )
+            plan = plan_greeks_backfill(
+                scan, rate_source=rate_source, force=force, expired_only=expired_only
+            )
+            if dry_run:
+                # INERT by construction: no runner, no checkpoint, no alert.
+                return dry_run_backfill_report(plan).to_dict()
+
+            def _sync(completed: int, total: int, bars: int, errored: int, label: str) -> None:
+                # Absolute per-batch counts → the job's ledger-sync channel
+                # (sets the total the POST could not know; marks the summary
+                # cache dirty so overlay readers recompute — Golden Rule #1).
+                _greeks_backfill_job.sync_from_ledger(
+                    completed=completed, total=total, bars=bars, failed=errored, current=label
+                )
+
+            report = run_greeks_backfill(
+                lake_root,
+                plan=plan,
+                rate_source=rate_source,
+                batch_size=batch,
+                on_progress=_sync,
+            )
+            # EXACTLY-ONCE completion summary — the one dashboard chokepoint
+            # (the halt path is covered by the job's is_pull_halt handling).
+            emit_greeks_backfill_complete_alert(report)
+            return report.to_dict()
+
+        # total=0 + ledger_synced=True: the scan (O(files), on the job thread)
+        # discovers the real total; the first _sync sets it. The "note" of the
+        # returned report dict becomes the completion headline (_finish_detail).
+        started = _greeks_backfill_job.start(
+            _work,
+            total=0,
+            detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
+            ledger_synced=True,
+        )
+        return JSONResponse(
+            {
+                "started": started,
+                "dry_run": dry_run,
+                "force": force,
+                "expired_only": expired_only,
+                "batch": batch,
+                "limit": limit,
+                "note": (
+                    "scan is O(files) — the total appears once the scan completes; "
+                    "a pull on the same lake is refused while the backfill runs "
+                    "(one lake-writer job at a time)"
+                ),
+            }
+        )
+
+    @app.get("/api/v1/universe/greeks-backfill-progress")
+    async def api_universe_greeks_backfill_progress() -> JSONResponse:
+        """GET /api/v1/universe/greeks-backfill-progress — the O(1) backfill snapshot.
+
+        The backfill job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
+        (state / total / completed / failed / bars / current / detail / percent …)
+        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001).
+        """
+        return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
