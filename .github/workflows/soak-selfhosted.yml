@@ -1,6 +1,6 @@
 # soak-selfhosted.yml — The REAL multi-hour soak on the self-hosted M4-Pro runner.
 #
-# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1536)
+# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1537)
 # ------------------------------------------------------
 # The nightly `stress-nightly.yml` runs on GitHub-hosted `ubuntu-24.04` with a
 # FIXED 60-minute job timeout — which STRUCTURALLY forbids a real multi-hour
@@ -258,8 +258,29 @@ jobs:
       - name: Install deps
         run: pip install -e ".[dev,data]"
 
-      - name: Install Rust toolchain (for fno_math wheel)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Verify runner Rust toolchain (for the fno_math + trading_core wheels)
+        # GitHub-owned-actions-ONLY on the self-hosted M4 Pro (SEC12-1,
+        # ADR-0018 §3 risk register): verify-m4pro.yml + bench-m4pro.yml
+        # deliberately run zero third-party actions on this PERSISTENT
+        # personal machine — a mutable third-party tag (the prior
+        # `dtolnay/rust-toolchain@stable`) would execute unattended, weekly,
+        # with state persisting across runs if the tag were ever moved
+        # maliciously (the runner daemon's environment may export the
+        # Telegram token per the header above). The identical action on
+        # stress-nightly.yml / ci.yml is materially different: those run on
+        # disposable GitHub-hosted VMs. The wheels build with the runner's
+        # OWN local rustup/cargo exactly like the two precedent workflows; a
+        # missing toolchain fails LOUDLY here with the remediation named
+        # instead of a confusing pip build-backend backtrace.
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "cargo not found on the self-hosted runner PATH — install rustup" >&2
+            echo "(https://rustup.rs) in the runner daemon's environment: the same" >&2
+            echo "local-toolchain contract verify-m4pro.yml / bench-m4pro.yml rely on" >&2
+            exit 1
+          fi
+          cargo --version
+          rustc --version
 
       - name: Install fno_math Rust extension
         # Belt-and-suspenders crates.io flake guard (reused from stress-nightly.yml).

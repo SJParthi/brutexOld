@@ -1,6 +1,6 @@
 # ADR-0018 — A real self-hosted multi-hour soak tier + a pure drift detector
 
-**Decision ID:** `DEC-SOAK-REAL-TIER-001` (MIGRATION.md entry #1536)
+**Decision ID:** `DEC-SOAK-REAL-TIER-001` (MIGRATION.md entry #1537)
 **Date:** 2026-07-06
 **Status:** **ACCEPTED** — ships in the owning PR (CI + observability + tests +
 docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no Groww vendor/rate/scope/vocab change).
@@ -160,6 +160,19 @@ named follow-up.
   (see §2); GitHub additionally terminates ANY self-hosted job after 5 days
   (7200 min) of execution (SOAK-R8-1/SEC8-2), the outer platform bound a
   future >20 h tier must still respect.
+* **Supply chain — GitHub-owned actions ONLY on the self-hosted Mac
+  (SEC12-1):** the workflow runs zero third-party actions on the persistent
+  M4-Pro, matching the deliberate `verify-m4pro.yml` / `bench-m4pro.yml`
+  invariant. An early draft used `dtolnay/rust-toolchain@stable` — a MUTABLE
+  third-party tag that, if ever moved maliciously (account/repo compromise),
+  would execute unattended, weekly, on the operator's personal machine with
+  state persisting across runs (and the runner daemon's environment may
+  export the Telegram token). It was replaced with the precedent workflows'
+  local-toolchain contract: the Rust wheels build with the runner's OWN
+  rustup/cargo, and a missing toolchain fails LOUDLY with the remediation
+  named. The identical `dtolnay/rust-toolchain@stable` usage in
+  `stress-nightly.yml` / `ci.yml` is materially different (disposable
+  GitHub-hosted VMs) and is deliberately left as-is.
 
 **Honest limits (Golden Rule #10)**
 

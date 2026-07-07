@@ -12,7 +12,7 @@ Invariants verified under load:
 3. No exception, no flush stall, no entry loss under ``N_EVENTS``
    sustained appends.
 
-Budget (three-tier model — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1536)
+Budget (three-tier model — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1537)
 ----------------------------------------------------------------------
 * CI nightly (``stress-nightly.yml``, the ~5-min ubuntu regression gate):
   ``N_EVENTS = 5_000`` (default, ~30s on GHA); the workflow's guard step
