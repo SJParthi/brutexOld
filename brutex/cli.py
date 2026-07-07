@@ -614,6 +614,68 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bound the re-open to the first N matching windows (default: all matching)",
     )
 
+    # ── greeks-backfill (DEC-GREEKS-BULK-REENRICH-001) — bulk v1→v2 re-enrich ──
+    greeks_backfill = sub.add_parser(
+        "greeks-backfill",
+        help=(
+            "Bulk re-enrich the F&O options lake's Greeks overlay to the current "
+            "formula/inputs (v1→v2) — reaches EXPIRED contracts + CLI-pulled lakes "
+            "the pull-side pass never touches. Stamp-driven + idempotent; the scan "
+            "is O(files), NOT O(1). --dry-run = scan + plan only (zero writes, "
+            "zero checkpoint, zero Telegram)"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    greeks_backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Scan + report only — zero writes, zero checkpoint mutation, zero Telegram",
+    )
+    greeks_backfill.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Skip the stamp prefilter and feed EVERY option contract to the "
+            "driver's value-checked reuse gate — the escape for the "
+            "stamp-invisible rate/spot VALUE-drift class (slower; still "
+            "idempotent — unchanged bars are never rewritten)"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--expired-only",
+        action="store_true",
+        help="Only contracts whose expiry is strictly before today (IST)",
+    )
+    greeks_backfill.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help=(
+            "Contracts per batch (default 25 or $BRUTEX_GREEKS_BACKFILL_BATCH); "
+            "one durable checkpoint write per batch"
+        ),
+    )
+    greeks_backfill.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Bound this invocation to the first N stale contracts (incremental chipping)",
+    )
+    greeks_backfill.add_argument(
+        "--pause-s",
+        type=float,
+        default=None,
+        help=(
+            "Seconds slept between batches (default 0 or "
+            "$BRUTEX_GREEKS_BACKFILL_PAUSE_S — the gentleness throttle)"
+        ),
+    )
+
     # ── detect-session-drift (DEC-CALENDAR-OBSERVED-SESSIONS-001) ──
     drift = sub.add_parser(
         "detect-session-drift",
@@ -1780,6 +1842,122 @@ def cmd_reopen_skipped(
         "throttle-poisoned ones recover their data (re-opened windows are "
         "breaker-exempt deliberate re-checks — the re-pull cannot re-trip on them)."
     )
+    return EXIT_OK
+
+
+def cmd_greeks_backfill(
+    *,
+    lake_root: Path | None,
+    dry_run: bool,
+    force: bool,
+    expired_only: bool,
+    batch: int | None,
+    limit: int | None,
+    pause_s: float | None,
+) -> int:
+    """Bulk Greeks v1→v2 re-enrich — ``brutex greeks-backfill`` (DEC-GREEKS-BULK-REENRICH-001).
+
+    The gap-b fix of MIGRATION.md #1188: a CLI-``brutex fetch``-only lake (and
+    every EXPIRED contract) gets its Greeks overlay re-stamped to the current
+    formula/inputs with ZERO dashboard dependency. Scan (HONEST cost: O(files)
+    — one bounded stamp-column read per month partition, never O(1)) → plan →
+    bounded batches through the EXISTING
+    :func:`brutex.data.greeks_enrich.enrich_greeks_for_targets` driver (its
+    value-checked reuse gate + honest demotions do the correctness work; a
+    Greek is never fabricated). ``--dry-run`` is FULLY INERT: scan + plan
+    print only — zero writes, zero checkpoint mutation, zero Telegram.
+
+    Exit codes: :data:`EXIT_OK` (0) when every planned contract settled clean
+    (or dry-run), :data:`EXIT_USER_ERROR` (1) re-documented here as "N
+    contract(s) errored (re-runnable — they keep their stale stamps, so the
+    next run retries them automatically)"; a pull-wide halt
+    (:class:`~brutex.data.errors.LakeWriteHalt` /
+    :class:`~brutex.data.errors.GreeksEnrichPoolBroken`) fires the CRITICAL
+    pull-halt Telegram alert then RE-RAISES (the ``cmd_fetch`` convention) —
+    the checkpoint survives, so the next run resumes.
+    """
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.data.greeks_backfill import (
+        dry_run_backfill_report,
+        plan_greeks_backfill,
+        run_greeks_backfill,
+        scan_stale_greeks_targets,
+    )
+    from brutex.data.greeks_enrich import resolve_risk_free_source
+    from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
+    from brutex.options.risk_free import RiskFreeError
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="greeks-backfill")
+    if batch is not None and batch < 1:
+        raise CliUserError(f"--batch must be >= 1, got {batch}")
+    if limit is not None and limit < 1:
+        raise CliUserError(f"--limit must be >= 1, got {limit}")
+    if pause_s is not None and pause_s < 0:
+        raise CliUserError(f"--pause-s must be >= 0, got {pause_s}")
+    try:
+        rate_source = resolve_risk_free_source()
+    except RiskFreeError as exc:
+        # Fail-fast BEFORE any scan: never price with a rate the operator did
+        # not configure (Golden Rule #1) — zero partial work.
+        raise CliUserError(
+            f"risk-free source misconfigured ($BRUTEX_RISK_FREE_CSV): {exc}"
+        ) from exc
+    scan = scan_stale_greeks_targets(
+        resolved,
+        rate_source=rate_source,
+        expired_only=expired_only,
+        force=force,
+        limit=limit,
+    )
+    plan = plan_greeks_backfill(
+        scan, rate_source=rate_source, force=force, expired_only=expired_only
+    )
+    print(
+        f"[brutex] greeks-backfill plan {plan.backfill_id[:12]} — "
+        f"{len(plan.targets)} contract(s) targeted "
+        f"({scan.stale_null} unstamped, {scan.stale_v1} v1, "
+        f"{scan.stale_inputs_drift} inputs-drift, {scan.current} current, "
+        f"{scan.futures_skipped} futures, {scan.probe_failed} unreadable file(s) skipped; "
+        f"scan cost: O(files) — {scan.files_probed} file(s) probed)"
+    )
+    if dry_run:
+        report = dry_run_backfill_report(plan)
+        print(f"[brutex] {report.note}")
+        return EXIT_OK
+
+    def _progress(completed: int, total: int, bars: int, errored: int, label: str) -> None:
+        """One honest line per batch (CLI stdout is the sanctioned print surface)."""
+        print(
+            f"[brutex] greeks-backfill {completed}/{total} contracts · "
+            f"{bars} bars written · {errored} errored · {label}"
+        )
+
+    try:
+        report = run_greeks_backfill(
+            resolved,
+            plan=plan,
+            rate_source=rate_source,
+            batch_size=batch,
+            pause_s=pause_s,
+            on_progress=_progress,
+        )
+    except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+        # The cmd_fetch halt convention: ONE best-effort CRITICAL Telegram
+        # alert, then re-raise so the CLI exits non-zero and the checkpoint
+        # survives for the next run's resume.
+        _emit_pull_halt_alert(exc)
+        raise
+    emit_greeks_backfill_complete_alert(report)
+    print(f"[brutex] {report.note}")
+    if report.errored > 0:
+        print(
+            f"[brutex] greeks-backfill — {report.errored} contract(s) errored "
+            "(re-runnable: they keep their stale stamps, so re-running this "
+            "command retries exactly them).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     return EXIT_OK
 
 
@@ -6780,6 +6958,16 @@ def _dispatch(argv: list[str] | None) -> int:
             symbol=args.symbol,
             market=args.market,
             limit=args.limit,
+        )
+    if args.command == "greeks-backfill":
+        return cmd_greeks_backfill(
+            lake_root=args.lake_root,
+            dry_run=args.dry_run,
+            force=args.force,
+            expired_only=args.expired_only,
+            batch=args.batch,
+            limit=args.limit,
+            pause_s=args.pause_s,
         )
     if args.command == "detect-session-drift":
         return cmd_detect_session_drift(lake_root=args.lake_root, month=args.month)
