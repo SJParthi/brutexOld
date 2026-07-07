@@ -20,7 +20,7 @@
 
 _Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
 DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
-MIGRATION.md #1535–#1539 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+MIGRATION.md #1536–#1540 — the doc/spec/ops debt reconciliation pack, DOCS-first:
 (1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
 ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
 production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
@@ -48,6 +48,16 @@ per-item citations, the "10 boxes" count defect fixed, the env-var trailer super
 #1065; NO operator ack pre-claimed (requested on the PR). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the ONE code delta lives inside the
 DEC-EXEC-008-stubbed short branch, `calculator.py` stays 100% line+branch.)
+Earlier: 2026-07-07 (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 —
+the `/movers` Spot screen's DEFAULT as-of TIME now resolves to the SAME latest
+available minute across EVERY timeframe, so switching 1m ↔ 2m ↔ 3m ↔ 3hour ↔
+1day on a finalized day always shows the IDENTICAL latest close — the frontend
+per-TF grid-slot pin is dropped (default = blank → the already-tested
+`cutoff_min=None` whole-day stored-fast path), a NEW `latest_time` payload key
+echoes the resolved minute (`movers_warm.latest_movers_minute`, memoised per
+(generation, date)), and explicit as-of picks survive TF switches;
+READ-ONLY dashboard — ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX, no
+scope/vocab/rate change).
 Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
 the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
 on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
@@ -731,7 +741,7 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
-  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1535–#1539** — the doc/spec/ops debt reconciliation
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1536–#1540** — the doc/spec/ops debt reconciliation
   pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
   (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
   "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
@@ -745,6 +755,18 @@ hostile-review pass._
   the Phase-1 sign-off checklist closed by supersession (11 boxes, honest no-backdate clause).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched costs module
   stays 100% line+branch).
+  Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001,
+  MIGRATION.md #1535** — the `/movers` Spot screen's DEFAULT as-of TIME resolves to the SAME latest
+  available minute across EVERY timeframe (1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day on a finalized day always
+  show the IDENTICAL latest close, the Groww/Dhan-consistent behaviour): the frontend `fillTimes()`
+  per-TF grid-slot pin is dropped in favour of a `Latest` (`value=""`) default riding the
+  already-tested `cutoff_min=None` whole-day stored-fast path (readers UNCHANGED); NEW
+  `movers_snapshot.minute_to_hhmm` + `movers_warm.latest_movers_minute` (bounded DuckDB
+  MAX-minute resolver, `(duckdb.Error, OSError) → None` — never a 500) back an ADDITIVE
+  `latest_time` payload echo memoised per (generation, date); explicit picks survive TF switches
+  via the §11-COMMON `static/bx-movers-time.js` (node-executed golden). READ-ONLY dashboard —
+  ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no lake/schema/scope/vocab/rate
+  change).
   Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
   MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
   gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
@@ -1085,7 +1107,7 @@ hostile-review pass._
   collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
   own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
   DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
-  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1538), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1539), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
