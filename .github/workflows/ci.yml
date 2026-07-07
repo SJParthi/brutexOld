@@ -1509,8 +1509,11 @@ jobs:
           # DEC-GROWW-DASHBOARD-CREDS-PROBE-001: strict gates on the live-probe
           # modules. Both are injectable (fake GrowwClient / fake sdk_factory), so
           # standalone-gateable with no growwapi/network. 100% line+branch.
+          # The &-family form-probe driver added to probe.py by
+          # DEC-FORM-WINNER-PERSIST-001 is covered by its own suite
+          # (test_groww_probe_ampersand.py), so BOTH files feed this gate.
           if compgen -G "tests/unit/test_groww_probe.py" > /dev/null; then
-            pytest --cov=brutex.adapters.groww.probe --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_probe.py
+            pytest --cov=brutex.adapters.groww.probe --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_probe.py tests/unit/test_groww_probe_ampersand.py
           else
             echo "(brutex.adapters.groww.probe test file not present yet — gate inactive)"
           fi
@@ -1527,6 +1530,21 @@ jobs:
             pytest --cov=brutex.adapters.groww.vendor_floor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_vendor_floor.py
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
+          fi
+          # DEC-FORM-WINNER-PERSIST-001: strict gates on the durable &-underlying
+          # form-winner map (symbol_form_preference — probe-evidence fold +
+          # schema_meta persist/load) and the ONE shared schema_meta key/value
+          # Protocol (data.meta_kv). Injectable store fakes, so standalone-gateable
+          # with no growwapi/network. 100% line+branch.
+          if compgen -G "tests/unit/test_groww_symbol_form_preference.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.symbol_form_preference --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_symbol_form_preference.py
+          else
+            echo "(brutex.adapters.groww.symbol_form_preference test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_data_meta_kv.py" > /dev/null; then
+            pytest --cov=brutex.data.meta_kv --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_meta_kv.py
+          else
+            echo "(brutex.data.meta_kv test file not present yet — gate inactive)"
           fi
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
