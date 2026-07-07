@@ -2956,42 +2956,73 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
     return resolved
 
 
-def _open_cli_floor_store(stack: contextlib.ExitStack, lake_root: Path) -> Any:
-    """Open the lake's instrument-master store as the pull's vendor-floor sidecar.
+class _TransientCliFloorStore:
+    """Per-OPERATION transient vendor-floor sidecar over the lake's instrument master.
 
     The CLI twin of the dashboard routes' ``floor_store=instrument_store`` seam
-    (DEC-VENDOR-FLOOR-LAZY-PROBE-001 / DEC-CLI-DEPTH-FLOORS-001): the returned
-    :class:`~brutex.data.instrument_store.InstrumentStore` structurally satisfies
-    :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore` — its
-    generic ``schema_meta`` key/value sidecar carries the
-    ``groww.vendor_floor.<symbol>`` rows, so a floor learned by EITHER entrypoint
-    (dashboard pull or CLI fetch) clamps BOTH. Registered on *stack* so the
-    handle closes when the fetch exits (any exit path — the ExitStack the pull
-    single-flight lock already rides).
+    (DEC-VENDOR-FLOOR-LAZY-PROBE-001 / DEC-CLI-DEPTH-FLOORS-001), structurally
+    satisfying :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore`
+    — the generic ``schema_meta`` key/value sidecar carries the
+    ``groww.vendor_floor.<symbol>`` rows, so a floor learned by either
+    entrypoint clamps both.
 
-    BEST-EFFORT: an unopenable sidecar (a wedged / corrupt / unwritable
-    ``instruments.duckdb``) degrades to ``None`` with ONE warning — the learner
-    then learns for THIS pull only and the planning clamp resolves to the full
-    range; the fetch itself is never blocked (the un-clamped pull is always
-    correct, just slower). Only the store's own error surface is caught
-    (``CatalogError`` / ``OSError``) — a genuine code bug still propagates.
+    WHY transient (the round-1 review MAJOR fix): the previous helper opened
+    ONE read-write :class:`~brutex.data.instrument_store.InstrumentStore` and
+    held it on the fetch's ExitStack for the WHOLE (often multi-hour) pull. A
+    DuckDB read-write connection takes an EXCLUSIVE cross-process file lock, so
+    (a) ``brutex serve`` booted mid-fetch failed at its own
+    ``InstrumentStore.open`` with ``CatalogError`` — a regression (pre-branch,
+    ``cmd_fetch`` opened this file only transiently inside
+    ``_resolve_brute_force_instruments``), and (b) with a dashboard already
+    running, the CLI's whole-pull open ALWAYS failed, silently disabling depth
+    floors for every concurrent run — the "either entrypoint clamps BOTH"
+    claim held only serially. Every :meth:`get_meta` / :meth:`set_meta` now
+    opens the store, performs the ONE operation, and closes it (milliseconds;
+    O(symbols) reads once at pull start via ``load_vendor_floors`` + at most
+    one write per learned floor per pull) — the DuckDB file is never held
+    across the fetch.
+
+    BEST-EFFORT by the CALLERS' contract: a per-op open/read/write failure
+    raises the store's own error surface, and both consumers
+    (``load_vendor_floors`` + ``VendorFloorLearner._persist``) already swallow
+    + WARN and degrade — the fetch itself is never blocked (the un-clamped
+    pull is always correct, just slower). HONEST residual: while a dashboard
+    PROCESS holds ``instruments.duckdb`` open read-write, each transient op
+    still fails (DuckDB's rw lock excludes every peer connection) — but the
+    degrade is now PER-OP and self-heals the moment the dashboard releases the
+    file, instead of one boot-time failure disabling the feature for the whole
+    pull; the true concurrent-share fix (routing floors through the dashboard
+    process) stays out of scope.
     """
-    import structlog
 
-    from brutex.data.errors import CatalogError
-    from brutex.data.instrument_store import InstrumentStore
+    def __init__(self, lake_root: Path) -> None:
+        self._path = lake_root / "instruments.duckdb"
 
-    try:
-        store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    except (CatalogError, OSError) as exc:
-        structlog.get_logger("brutex.cli").warning(
-            "fetch.vendor_floor.store_open_failed",
-            lake_root=str(lake_root),
-            error=str(exc),
-        )
-        return None
-    stack.callback(store.close)
-    return store
+    @property
+    def path(self) -> Path:
+        """The sidecar's DuckDB path (diagnostics + tests) — never held open."""
+        return self._path
+
+    def get_meta(self, key: str) -> str | None:
+        """Read one ``schema_meta`` value through a transient open→read→close."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        store = InstrumentStore.open(self._path)
+        try:
+            value: str | None = store.get_meta(key)
+        finally:
+            store.close()
+        return value
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Persist one ``schema_meta`` value through a transient open→write→close."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        store = InstrumentStore.open(self._path)
+        try:
+            store.set_meta(key, value)
+        finally:
+            store.close()
 
 
 def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK + network
@@ -3914,8 +3945,12 @@ def cmd_fetch(
         # Armed ONLY for the genuine persisting live pull: `--dry-run` /
         # `--inspect` open no store, build no learner, and resolve
         # `floor_windows=None` — byte-identical planning (the same `_no_persist`
-        # gating every other persistence surface here uses).
-        floor_store = None if _no_persist else _open_cli_floor_store(storm_stack, resolved)
+        # gating every other persistence surface here uses). The store handle is
+        # TRANSIENT — opened per get/set and closed immediately, NEVER held for
+        # the multi-hour pull (the round-1 review MAJOR: a whole-pull rw DuckDB
+        # hold blocked `brutex serve` boot and always-failed under a running
+        # dashboard — see _TransientCliFloorStore).
+        floor_store = None if _no_persist else _TransientCliFloorStore(resolved)
         floor_learner = (
             None
             if _no_persist

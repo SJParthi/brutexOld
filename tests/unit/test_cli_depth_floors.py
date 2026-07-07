@@ -25,7 +25,6 @@ resolution, adapter build, the ingest engine itself).
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -144,43 +143,136 @@ def _wire_live_fakes(monkeypatch: pytest.MonkeyPatch, adapter: Any, sink: Any) -
     return seen
 
 
-# ── _open_cli_floor_store ────────────────────────────────────────────────
+# ── _TransientCliFloorStore (round-1 review MAJOR: never a whole-pull hold) ──
 
 
-def test_open_cli_floor_store_roundtrips_meta_and_closes_on_stack_exit(
-    tmp_path: Path,
-) -> None:
-    """The helper opens the instrument-master store as the vendor-floor sidecar
-    (structural ``VendorFloorMetaStore`` conformance) and closes it with the stack."""
+def test_transient_floor_store_roundtrips_meta_per_operation(tmp_path: Path) -> None:
+    """The transient sidecar roundtrips the learned-floor rows (structural
+    ``VendorFloorMetaStore`` conformance) with an open→op→close per call."""
     from brutex.adapters.groww.vendor_floor import vendor_floor_key
-    from brutex.data.errors import CatalogError
 
-    with contextlib.ExitStack() as stack:
-        store = cli._open_cli_floor_store(stack, tmp_path)
-        assert store is not None
-        assert (tmp_path / "instruments.duckdb").exists()
-        # The generic schema_meta sidecar carries the learned-floor rows.
-        store.set_meta(vendor_floor_key("NIFTY"), "2024-02-01")
-        assert store.get_meta(vendor_floor_key("NIFTY")) == "2024-02-01"
-    # The ExitStack close callback ran — the handle is closed, not leaked.
-    with pytest.raises(CatalogError):
-        store.get_meta(vendor_floor_key("NIFTY"))
+    store = cli._TransientCliFloorStore(tmp_path)
+    assert store.path == tmp_path / "instruments.duckdb"
+    assert store.get_meta(vendor_floor_key("NIFTY")) is None
+    store.set_meta(vendor_floor_key("NIFTY"), "2024-02-01")
+    assert store.get_meta(vendor_floor_key("NIFTY")) == "2024-02-01"
+    assert (tmp_path / "instruments.duckdb").exists()
 
 
-def test_open_cli_floor_store_open_failure_degrades_to_none(
+def test_transient_floor_store_never_holds_the_duckdb_handle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """BEST-EFFORT: an unopenable sidecar degrades to ``None`` (warn, never block
-    the fetch) — the un-clamped pull is always correct, just slower."""
+    """Every get/set opens then CLOSES the store — no handle survives the call
+    (the whole-pull hold was the round-1 review MAJOR)."""
+    from brutex.adapters.groww.vendor_floor import vendor_floor_key
+    from brutex.data.instrument_store import InstrumentStore
+
+    live: list[object] = []
+    real_open = InstrumentStore.open.__func__  # type: ignore[attr-defined]
+
+    def _tracking_open(cls: type[InstrumentStore], path: Path, **kwargs: Any) -> Any:
+        store = real_open(cls, path, **kwargs)
+        real_close = store.close
+
+        def _tracking_close() -> None:
+            live.remove(store)
+            real_close()
+
+        live.append(store)
+        monkeypatch.setattr(store, "close", _tracking_close, raising=False)
+        return store
+
+    monkeypatch.setattr(InstrumentStore, "open", classmethod(_tracking_open))
+    store = cli._TransientCliFloorStore(tmp_path)
+    assert live == []  # construction opens NOTHING
+    store.set_meta(vendor_floor_key("NIFTY"), "2024-02-01")
+    assert live == []  # closed before set_meta returned
+    assert store.get_meta(vendor_floor_key("NIFTY")) == "2024-02-01"
+    assert live == []  # closed before get_meta returned
+
+
+def test_transient_floor_store_close_runs_even_when_the_op_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raising op still closes the transient handle (the ``finally``)."""
+    from brutex.data.instrument_store import InstrumentStore
+
+    closed: list[bool] = []
+    real_open = InstrumentStore.open.__func__  # type: ignore[attr-defined]
+
+    def _tracking_open(cls: type[InstrumentStore], path: Path, **kwargs: Any) -> Any:
+        store = real_open(cls, path, **kwargs)
+        real_close = store.close
+        monkeypatch.setattr(
+            store, "close", lambda: (closed.append(True), real_close()), raising=False
+        )
+        monkeypatch.setattr(
+            store,
+            "get_meta",
+            lambda _key: (_ for _ in ()).throw(RuntimeError("op bug")),
+            raising=False,
+        )
+        return store
+
+    monkeypatch.setattr(InstrumentStore, "open", classmethod(_tracking_open))
+    with pytest.raises(RuntimeError, match="op bug"):
+        cli._TransientCliFloorStore(tmp_path).get_meta("k")
+    assert closed == [True]
+
+
+def test_transient_floor_store_leaves_file_openable_by_a_second_process(
+    tmp_path: Path,
+) -> None:
+    """The round-1 review MAJOR regression, proven cross-process: after the CLI
+    floor store is constructed AND used, a SECOND process (a `brutex serve`
+    boot / a dashboard) can still open ``instruments.duckdb`` read-write.
+    FAILS BEFORE the fix: the old helper held one rw DuckDB connection (an
+    exclusive cross-process file lock) for the whole fetch, so the subprocess
+    open raised ``CatalogError: ... Could not set lock on file``."""
+    import subprocess
+    import sys
+
+    from brutex.adapters.groww.vendor_floor import vendor_floor_key
+
+    store = cli._TransientCliFloorStore(tmp_path)
+    store.set_meta(vendor_floor_key("NIFTY"), "2024-02-01")  # the file exists + was used
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path\n"
+                "from brutex.data.instrument_store import InstrumentStore\n"
+                f"s = InstrumentStore.open(Path({str(tmp_path / 'instruments.duckdb')!r}))\n"
+                "print('OPENED', s.get_meta('groww.vendor_floor.NIFTY'))\n"
+                "s.close()\n"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,  # the assert below reports stderr on failure
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert "OPENED 2024-02-01" in probe.stdout
+
+
+def test_transient_floor_store_per_op_failure_degrades_load_to_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The honest concurrent envelope: while a peer holds the DuckDB file, a
+    per-op open failure propagates to ``load_vendor_floors``, which degrades to
+    ``{}`` with one WARN — the fetch is never blocked and later ops self-heal."""
+    from brutex.adapters.groww.vendor_floor import load_vendor_floors
     from brutex.data import instrument_store
     from brutex.data.errors import CatalogError
 
     def _boom(*_a: object, **_kw: object) -> object:
-        raise CatalogError("wedged sidecar")
+        raise CatalogError("file locked by a running dashboard")
 
     monkeypatch.setattr(instrument_store.InstrumentStore, "open", _boom)
-    with contextlib.ExitStack() as stack:
-        assert cli._open_cli_floor_store(stack, tmp_path) is None
+    store = cli._TransientCliFloorStore(tmp_path)
+    assert load_vendor_floors(store, ["NIFTY", "BANKNIFTY"]) == {}
 
 
 # ── cmd_fetch wiring: the persisting live pull ───────────────────────────
@@ -254,7 +346,10 @@ def test_cmd_fetch_live_builds_learner_over_paced_adapter_and_clamps_windows(
     assert controller.current_rps == GROWW_RATE_LIMIT_RPS_CEILING
     assert call["history_floor"] == GROWW_HISTORY_FLOOR
     assert call["today"] == date(2024, 3, 31)
-    assert isinstance(call["store"], InstrumentStore)
+    # The sidecar is the TRANSIENT wrapper (round-1 review MAJOR fold) — never
+    # a held-open InstrumentStore riding the whole pull.
+    assert isinstance(call["store"], cli._TransientCliFloorStore)
+    assert not isinstance(call["store"], InstrumentStore)
     assert call["store"].path == tmp_path / "instruments.duckdb"
 
     # (b) The learner + the clamp reach the ingest engine — planned keys ==

@@ -56,7 +56,13 @@ runbook — parsing byte-unchanged, the Unix-UTC assumption stays honestly
 UNVERIFIED; (6) the CLI `brutex fetch` gains the vendor-depth-floor learner +
 learned-floor planning clamp (`max(GROWW_HISTORY_FLOOR, learned floor)` via
 the existing `symbol_windows` seam, SAME schema_meta sidecar as the dashboard
-— either entrypoint's learned floor clamps both; dry-run byte-identical); (7)
+— either entrypoint's learned floor clamps both SERIALLY; dry-run
+byte-identical; round-1 review MAJOR fold: the sidecar is a TRANSIENT
+open→op→close per get/set (`_TransientCliFloorStore`) — the original
+whole-pull rw DuckDB hold blocked a `brutex serve` boot mid-fetch and
+always-failed under a running dashboard; while a dashboard process holds
+`instruments.duckdb` the per-op degrade WARNs and self-heals, never a
+blocked fetch); (7)
 the account pull single-flight gains its CROSS-HOST arm — an advisory
 heartbeat lease on shared lake storage (`.locks/pull_lease.json`, 30 s
 refresh, 180 s self-heal, kill switch `BRUTEX_PULL_LEASE=off`) refuses a
