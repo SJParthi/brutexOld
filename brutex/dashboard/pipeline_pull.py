@@ -88,9 +88,14 @@ from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 # (DEC-PULL-SIX-STEP-ORDER-001): its consumers (composite_pull/historical_pull)
 # sit BELOW this sequencer in the module import graph, so housing it here made
 # every edge of that chain a module-level import cycle. Imported — and thereby
-# RE-EXPORTED — here so existing ``from brutex.dashboard.pipeline_pull import
+# RE-EXPORTED — so existing ``from brutex.dashboard.pipeline_pull import
 # PriorStepsVerdict`` callers (the route wiring + the suites) stay byte-valid.
-from brutex.dashboard.pipeline_verdict import PriorStepsVerdict
+# The ``as`` self-alias is the explicit-re-export idiom mypy strict's
+# no-implicit-reexport demands; ruff PLC0414 flags exactly that idiom, hence
+# the per-line noqa (the repo's per-line-noqa-with-rationale house style).
+from brutex.dashboard.pipeline_verdict import (
+    PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
+)
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
