@@ -18,7 +18,42 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+_Last updated: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
+MIGRATION.md #1533 — the `/movers` SPOT "Top Value" (turnover) is now
+TIMEFRAME-INVARIANT: it is re-sourced from the RAW 1-minute session frame
+(post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, exactly
+mirroring the already-TF-invariant futures/options `_read_future_session`,
+instead of the resampled display-timeframe bars — so the SAME (symbol, day,
+as-of) turnover no longer CHANGES with the selected display timeframe
+(reproduced NSE-NIFTY 2024-01-02 whole-day: value 1m 19583300 ≠ 5m 19833500 ≠
+1day 20100000 paisa, now all byte-identical to the raw-1m answer). Three edits,
+ALL in `brutex/dashboard/movers_snapshot.py` (ZERO other source files): extract
+the shared raw-1m read+cut into `_read_cut_1m_frame` (§11 COMMON —
+`_read_session_bars` becomes a byte-identical wrapper, preserving the
+DEC-PIPELINE-AUTOPREBUILD-001 stored-vs-resample display-bar equality), the NEW
+no-`interval`-arg `spot_session_value_paisa` (HLC3 × volume via the ONE COMMON
+`session_traded_value_paisa`, per-bar `round_money` 2dp BEFORE × volume,
+`Decimal(str(...))` matching `_read_future_session`, `None` on missing 1-minute
+— never fabricates, Golden Rule #1), and a `value_paisa: int | None = None`
+injection into `compute_snapshot` (`None`/omitted falls back to the legacy
+display-bar reduction byte-identically, so the existing 320000/318660 goldens
+pass UNMODIFIED — the injection-gate mutant killer) wired from
+`compute_spot_candidates` inside the existing `skip_errors` try. HONEST
+envelope: a spot-ranking CORRECTNESS fix (Top Value becomes a genuine session
+property, mirroring futures/options) that CHANGES the displayed spot Top Value
+on coarse timeframes versus today — a SANCTIONED correction, not a silent
+break; value(1minute) byte-unchanged; a mid-session as-of legitimately keeps
+1day whole-day (the bar IS the day), so invariance is scoped PER shared
+effective as-of; disclosed I/O — one extra month-bounded raw-1m read on the
+daily/stored-first paths + a double-read on the resample-fallback path (bounded
+O(one month), candidate-cache-memoised per write-generation); futures/options
+value output BYTE-UNCHANGED (`session_traded_value_paisa` +
+`filter_to_ist_minute` + the `_read_future_session` 6-tuple untouched; diff-stat
+shows ONLY `movers_snapshot.py` in source; the F&O suites re-run UNMODIFIED
+green). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; READ-ONLY dashboard ranking;
+no lake/schema/scope/vocab/rate change; touched module 100% line+branch;
+ruff/ruff-format/`mypy --strict`/pyright clean.)
+Earlier: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
 MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
 `SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
 deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
@@ -2182,7 +2217,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/amazing-darwin-hb4caw`
+- **Active feature branch:** `claude/eloquent-shannon-bdjnuv`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

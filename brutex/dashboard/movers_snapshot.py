@@ -76,6 +76,7 @@ __all__ = [
     "run_movers_snapshot",
     "session_bar_times",
     "session_traded_value_paisa",
+    "spot_session_value_paisa",
     "value_crore_str",
     "value_meets_volume_floor",
 ]
@@ -254,6 +255,7 @@ def compute_snapshot(
     bars: Sequence[CandleBar],
     *,
     prev_close: Decimal | None,
+    value_paisa: int | None = None,
 ) -> MoverSnapshot | None:
     """Reduce one instrument's session bars (up to the selected time) to a snapshot.
 
@@ -263,17 +265,31 @@ def compute_snapshot(
     reports the instrument as skipped, never fabricated — Golden Rule #1).
 
     The last bar's close is the LTP; ``change`` / ``pct_change`` are taken vs
-    *prev_close* (the previous day's 1-day close); ``volume`` / ``value`` are the
-    cumulative fresh-session totals (no previous day).
+    *prev_close* (the previous day's 1-day close); ``volume`` is the cumulative
+    fresh-session total (no previous day).
+
+    ``value`` (turnover) is TF-INVARIANT (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001):
+    the caller passes *value_paisa* pre-computed from the RAW 1-minute session
+    frame (:func:`spot_session_value_paisa`), so the spot turnover is a session
+    property identical across every display timeframe (mirroring futures/options).
+    When *value_paisa* is ``None`` (no 1-minute frame, or an injected-seam / unit
+    caller) it falls back to the byte-identical legacy reduction over the passed
+    display *bars* — so an omitted / ``None`` argument reproduces the pre-fix
+    behaviour exactly (Golden Rule #1: never fabricated, never worse).
     """
     if not bars:
         return None
     ltp = round_money(bars[-1].close)
     volume = sum(bar.volume for bar in bars)
-    # DEC-MOVERS-VWAP-VALUE-001: turnover is the per-bar typical-price (HLC3) × volume
-    # sum, via the ONE shared helper (spot + options share it — CLAUDE.md §11 COMMON).
-    value_paisa = session_traded_value_paisa(
-        (bar.high, bar.low, bar.close, bar.volume) for bar in bars
+    # DEC-MOVERS-VWAP-VALUE-001 / DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001: turnover is
+    # the per-bar HLC3 typical-price × volume sum. The caller passes it pre-computed
+    # from the RAW 1-minute frame (TF-invariant, mirroring futures/options); a `None`
+    # falls back to the legacy reduction over the display bars (byte-identical to the
+    # pre-fix behaviour), via the ONE shared helper (CLAUDE.md §11 COMMON).
+    resolved_value = (
+        value_paisa
+        if value_paisa is not None
+        else session_traded_value_paisa((bar.high, bar.low, bar.close, bar.volume) for bar in bars)
     )
     snapped_prev = round_money(prev_close) if prev_close is not None else None
     change = (ltp - snapped_prev) if snapped_prev is not None else None
@@ -285,7 +301,7 @@ def compute_snapshot(
         change=change,
         pct_change=pct,
         volume=volume,
-        value_paisa=value_paisa,
+        value_paisa=resolved_value,
         bar_count=len(bars),
     )
 
@@ -602,17 +618,21 @@ def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -
     return frame.filter(minute_of_day <= cutoff_min)
 
 
-def _read_session_bars(
+def _read_cut_1m_frame(
     lake_root: Path,
     *,
     exchange: str,
     segment: str,
     symbol: str,
     day: date_cls,
-    minutes: int,
     cutoff_min: int | None,
-) -> list[CandleBar]:
-    """Read *day*'s 1-minute bars, cut at ``≤ cutoff_min``, resample to *minutes*.
+) -> pl.DataFrame | None:
+    """Read *day*'s RAW 1-minute frame, cut at ``≤ cutoff_min`` — the shared read+cut.
+
+    The ONE COMMON raw-1m read + as-of cut (CLAUDE.md §11 COMMON) shared by BOTH
+    the resampled display-bar reader (:func:`_read_session_bars`) AND the
+    TF-invariant session-value reader (:func:`spot_session_value_paisa`), so the
+    two never drift on the read/cut logic (no copy-paste — Golden Rule #11).
 
     Reads *day*'s bars via :func:`~brutex.data.lake_day_glob.read_day_intraday_frame`
     — ONLY ``1minute/<yyyy>/<mm>.parquet`` for a SESSION-FILTERED symbol (an IST
@@ -626,30 +646,23 @@ def _read_session_bars(
     :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
 
     **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
-    the ``cutoff_min`` filter is applied to the RAW 1-minute frame **BEFORE**
-    resampling, via the COMMON :func:`filter_to_ist_minute` — the same instant
-    the futures/options session reader cuts at. Previously the cut was applied
-    AFTER resampling on the resampled bucket-OPEN minute, so the final kept
-    bucket leaked bars PAST the as-of minute (e.g. cutoff 10:00, TF=5m: the
-    10:00 bucket included 10:01–10:04). Now the last bucket aggregates only the
-    elapsed minutes ``≤ cutoff_min``, so LTP / volume / value end at the close
-    of the as-of MINUTE (the inclusive bucket-open bar aggregates through its
-    final second — minute-granular, not instant-granular).
+    the ``cutoff_min`` filter is applied to the RAW 1-minute frame via the COMMON
+    :func:`filter_to_ist_minute` — the same instant the futures/options session
+    reader cuts at. The kept minutes are exactly those with IST minute-of-day
+    ``≤ cutoff_min`` (minute-granular, not instant-granular).
 
-    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` then buckets the kept
-    minutes to the chosen timeframe (1minute → no-op). Empty when the symbol has
-    no 1-minute bars on *day*, or none at/before the cutoff (the caller reports
-    it skipped, never fabricated — Golden Rule #1).
+    Returns the cut raw 1-minute frame, or ``None`` when the symbol has no
+    1-minute bars on *day*, or none at/before the cutoff (the caller reports it
+    skipped / abstains, never fabricated — Golden Rule #1).
     """
     import polars as pl
 
     from brutex.data.lake_day_glob import read_day_intraday_frame
-    from brutex.data.tf_resampler import resample_1m_to_tf
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
     month = read_day_intraday_frame(base, day, symbol=symbol)
     if month is None:
-        return []
+        return None
     df = (
         month.rename({"timestamp": "ts_utc"})
         .select("ts_utc", "open", "high", "low", "close", "volume")
@@ -660,9 +673,101 @@ def _read_session_bars(
     if cutoff_min is not None:
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
     if day_df.is_empty():
+        return None
+    return day_df
+
+
+def _read_session_bars(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    day: date_cls,
+    minutes: int,
+    cutoff_min: int | None,
+) -> list[CandleBar]:
+    """Read *day*'s 1-minute bars, cut at ``≤ cutoff_min``, resample to *minutes*.
+
+    Thin wrapper over the shared :func:`_read_cut_1m_frame` (the raw-1m read + the
+    unified as-of cut on the RAW frame BEFORE resampling — DEC-HARDENING-LEFTOVERS-001):
+    the cut minutes are then bucketed to the chosen timeframe by
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` (1minute → no-op). The
+    final bucket aggregates only the elapsed minutes ``≤ cutoff_min``, so
+    LTP / volume end at the close of the as-of MINUTE (the inclusive bucket-open
+    bar aggregates through its final second — minute-granular, not
+    instant-granular). Empty when the symbol has no 1-minute bars on *day*, or
+    none at/before the cutoff (the caller reports it skipped, never fabricated —
+    Golden Rule #1).
+    """
+    from brutex.data.tf_resampler import resample_1m_to_tf
+
+    day_df = _read_cut_1m_frame(
+        lake_root,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        day=day,
+        cutoff_min=cutoff_min,
+    )
+    if day_df is None:
         return []
     res = resample_1m_to_tf(day_df, minutes).sort("ts_utc")
     return [_row_to_bar(row) for row in res.iter_rows(named=True)]
+
+
+def spot_session_value_paisa(
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    day: date_cls,
+    cutoff_min: int | None,
+) -> int | None:
+    """SPOT session turnover (₹ paisa) from the RAW 1-minute frame — TF-INVARIANT.
+
+    DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001. The spot "Top Value" turnover, sourced
+    from the raw 1-minute session frame (post as-of cut, PRE-resample), exactly
+    mirroring the already-TF-invariant futures/options reader
+    (:func:`~brutex.dashboard.movers_futures._read_future_session`). Because it
+    takes NO ``interval`` / ``minutes`` argument — value is a pure function of
+    ``(exchange, segment, symbol, day, cutoff_min)`` — the turnover is a genuine
+    session property: at a shared effective as-of it is BYTE-identical across every
+    display timeframe (1minute … 1day), curing the prior per-display-bucket-HLC3
+    divergence where value(5m) ≠ value(1m) ≠ value(1day).
+
+    Reduces via the ONE COMMON :func:`session_traded_value_paisa`
+    (``Σ round_money((high+low+close)/3) × volume`` — per-bar HLC3 typical price ×
+    volume, DEC-MOVERS-VWAP-VALUE-001; per-bar ``round_money`` 2dp BEFORE the ×
+    volume, DEC-MONEY-2DP-001). The ``Decimal(str(...))`` per-column construction
+    is IDENTICAL to :func:`_row_to_bar` and the futures reader, so the value read
+    carries zero float-noise divergence from the display read.
+
+    Returns the int64-paisa turnover, or ``None`` when the symbol has no 1-minute
+    bars on *day* (or none at/before the cutoff) — never a fabricated value
+    (Golden Rule #1); the caller then falls back to the display-bar value.
+    """
+    day_df = _read_cut_1m_frame(
+        lake_root,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        day=day,
+        cutoff_min=cutoff_min,
+    )
+    if day_df is None:
+        return None
+    return session_traded_value_paisa(
+        (Decimal(str(high)), Decimal(str(low)), Decimal(str(close)), int(vol))
+        for high, low, close, vol in zip(
+            day_df.get_column("high").to_list(),
+            day_df.get_column("low").to_list(),
+            day_df.get_column("close").to_list(),
+            day_df.get_column("volume").to_list(),
+            strict=True,
+        )
+    )
 
 
 def _stored_serves_cutoff(minutes: int, cutoff_min: int | None) -> bool:
@@ -1138,6 +1243,26 @@ def compute_spot_candidates(
                 if bars
                 else None
             )
+            # DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001: source the "Top Value" turnover
+            # from the RAW 1-minute frame (post as-of cut, pre-resample) so it is a
+            # session property identical across every display TF, mirroring
+            # futures/options. ONE uniform call for the daily AND intraday branches
+            # (`cutoff_min` is already None for daily/whole-day at :1073). Inside the
+            # same `try` so a corrupt 1-minute parquet is caught by `skip_errors`
+            # below; `None` (no 1-minute) → compute_snapshot falls back to the
+            # display-bar value (no-worse). Read only when the symbol had bars.
+            value_paisa = (
+                spot_session_value_paisa(
+                    lake_root,
+                    exchange=dataset["exchange"],
+                    segment=dataset["segment"],
+                    symbol=dataset["symbol"],
+                    day=day,
+                    cutoff_min=cutoff_min,
+                )
+                if bars
+                else None
+            )
         except skip_errors as exc:
             # A corrupt / unreadable Parquet for ONE symbol must not 500 the whole
             # screen — skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
@@ -1150,7 +1275,7 @@ def compute_spot_candidates(
             segment=dataset["segment"],
             display_name=resolved_names.get(dataset["symbol"], dataset["symbol"]),
         )
-        snap = compute_snapshot(instrument, bars, prev_close=prev_close)
+        snap = compute_snapshot(instrument, bars, prev_close=prev_close, value_paisa=value_paisa)
         if snap is None:  # no bars on the selected day → reported skipped, never faked.
             skipped += 1
             continue
