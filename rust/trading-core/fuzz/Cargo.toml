@@ -18,12 +18,17 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+# fuzz_spec drives the untrusted-bytes JSON boundary (StrategySpec + mask_hex).
+# Same version pin as the parent crate's dev-dependency.
+serde_json = "1.0.146"
 
 [dependencies.trading-core]
 path = ".."
-# default features only — the pure-Rust core, NO `python`/pyo3 feature, so the
-# fuzz binary links zero Python symbols.
+# Pure-Rust core + the OPTIONAL `serde` feature (StrategySpec (de)serialize —
+# the untrusted-input parser fuzz_spec targets). Still NO `python`/pyo3
+# feature, so the fuzz binary links zero Python symbols.
 default-features = false
+features = ["serde"]
 
 # Overflow must panic (not wrap) so libFuzzer flags any out-of-domain magnitude
 # as a crash — matching the parent crate's release profile ("a paisa overflow
@@ -43,6 +48,34 @@ bench = false
 [[bin]]
 name = "fuzz_evaluator"
 path = "fuzz_targets/fuzz_evaluator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_market_structure"
+path = "fuzz_targets/fuzz_market_structure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_spec"
+path = "fuzz_targets/fuzz_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_metadata"
+path = "fuzz_targets/fuzz_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_greeks"
+path = "fuzz_targets/fuzz_greeks.rs"
 test = false
 doc = false
 bench = false
