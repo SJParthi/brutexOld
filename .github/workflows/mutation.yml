@@ -116,18 +116,25 @@ jobs:
     # pairing it with TODAY'S compute count, and was ~2.4x low on the loop
     # modules). Mutant counts measured on THIS tree via mutmut 2.5.1
     # list_mutations (method validated against two real run logs: audit
-    # 243/243 pre-round-2, rate_common 360/360): pass 1 = 258; compute.py =
-    # 354; remaining 8 loop modules = 928 (state 58 + retry 77 + audit 250 +
-    # rate_limiter 165 + store 146 + partition 108 + parser 33 + spec 91).
+    # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 258;
+    # compute.py = 354; remaining 8 loop modules = 932 (state 58 + retry 77 +
+    # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
+    # parser 33 + spec 91).
     # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
     # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
-    # Nominal: (258 + 354 + 928) x ~2.3 s ~= 59 min; + rate_common 360 at the
-    # 5-7 s band (local 2.5-3.4 s x an ASSUMED 2x shared-GHA factor — the
-    # rehearsal never reached rate_common; at its siblings' measured ~2.3-3 s
-    # pace it would be ~14-18 min instead) ~= 30-42 min; + 6 spin mutants x
-    # ~30-35 s wrap-kill ~= 3.5 min; + the ~5-10 s preflight baseline run.
-    # Total ~= 93-105 min nominal at that band -> an HONEST 15-27 min margin
-    # under 120 (>= ~35 min if rate_common paces like its siblings). A ~20%
+    # Nominal: (258 + 354 + 932) x ~2.3 s ~= 59 min; + rate_common 369
+    # (post-round-3: the 9 dropped slot pragmas return 9 mutants to the gate)
+    # at an ASSUMED 5-7 s CI baseline (local 2.5-3.4 s x an assumed 2x
+    # shared-GHA factor — the rehearsal never reached rate_common, so its CI
+    # baseline stays UNMEASURED until the first scheduled verification run; at
+    # its siblings' measured ~2.3-3 s pace it would be ~14-19 min instead)
+    # ~= 31-43 min; + 6 spin mutants x one wrap-kill each (wrap = 5 x the
+    # preflight-measured baseline, capped 30 s -> ~1-3.5 min across the
+    # admitted regime); + the ~2-10 s preflight baseline run.
+    # Total ~= 94-106 min nominal at that band -> an HONEST 14-26 min margin
+    # under 120 (>= ~35 min if rate_common paces like its siblings — and the
+    # measured-baseline wrap sizing makes a sibling-pace baseline a
+    # first-class admitted regime, NOT a preflight red). A ~20%
     # shared-runner bad day on the worst end CROSSES the 120-min kill —
     # pre-decided dial (the Rust shards' "+1 shard" twin): any observed
     # rehearsal/scheduled run > 100 min => split pass 2 across two parallel
@@ -265,46 +272,58 @@ jobs:
           # forever; mutmut's internal timeout kills only the `sh` wrapper and the
           # ORPHANED pytest grandchild holds the stdout pipe, wedging mutmut until the
           # 120-min job kill (measured 6x locally: mutants 194/195/199/209/210/213).
-          # `timeout -k 5 30` kills the pytest subtree INSIDE the sh, the pipe closes,
-          # and mutmut reads the `|| exit 1` as a kill (an infinite-loop mutant IS a
-          # caught defect). HONEST classifier arithmetic (fixer round, MIGRATION.md
-          # #1538 — the earlier "scores KILLED, never TIMEOUT, locally verified" claim
-          # was FALSE as written):
+          # `timeout -k 5 $wrap_s` — the wrap is SIZED at 5 x the preflight-MEASURED
+          # baseline, capped at the pair's 30 s (fixer round 3, R3-2; supersedes
+          # round 2's FIXED 30 s wrap) — kills the pytest subtree INSIDE the sh, the
+          # pipe closes, and mutmut reads the `|| exit 1` as a kill (an infinite-loop
+          # mutant IS a caught defect). HONEST classifier arithmetic (fixer rounds,
+          # MIGRATION.md #1538 — the round-1 "scores KILLED, never TIMEOUT, locally
+          # verified" claim was FALSE as written, and round 2's own "measured 5-7 s
+          # CI baseline" was NOT measured either — it was local 2.5-3.4 s x an
+          # ASSUMED 2x shared-GHA factor, see the budget comment; a plausible
+          # sibling-pace 2-3 s CI baseline sat INSIDE round 2's own (4, 20) s
+          # refusal band, so the FIRST scheduled verification run risked a designed
+          # preflight red + manual re-size. Sizing the wrap off the baseline the
+          # preflight itself measures removes the assumption entirely):
           #   * Without `--test-time-base`, mutmut 2.5.1 reclassifies ANY killed
           #     mutant slower than baseline x test-time-multiplier (default 2.0) as
-          #     OK_SUSPICIOUS (exit bit 8) — a ~30-35 s wrap-kill against the ~5-7 s
-          #     CI baseline is SUSPICIOUS deterministically, `mutmut results` lists
-          #     the id, and both `set -e` and the zero-survivor grep go red FOREVER.
+          #     OK_SUSPICIOUS (exit bit 8) — a wrap-kill (up to 35 s at the cap)
+          #     would be SUSPICIOUS deterministically, `mutmut results` lists the
+          #     id, and both `set -e` and the zero-survivor grep go red FOREVER.
           #     `--test-time-base 45` lifts the suspicious threshold to
-          #     45 s + 2 x baseline > the ~35 s worst-case wrap-kill for EVERY
-          #     baseline >= 0, so a wrap-killed spin mutant records KILLED
-          #     deterministically w.r.t. that classifier (verified on the local
-          #     confirmation run: 6 spin mutants KILLED, 0 suspicious).
-          #   * The wrap beats mutmut's NON-configurable hard timeout (baseline x 10,
-          #     BAD_TIMEOUT, exit bit 4) only when baseline > ~3.5 s — TRUE at the
-          #     measured 5-7 s CI baseline (hard timer 50-70 s > the 30+5 s wrap),
-          #     FALSE on a fast local box (~1.5 s baseline -> 15 s hard timer fires
-          #     first). Local confirmations therefore use a proportionally smaller
-          #     wrap (e.g. 8 s) — same mechanism, regime-sized value.
-          #   * 30 s (raised from 20) also clears the worst-case LEGITIMATE pass:
-          #     a ~3x shared-runner degradation of the 5-7 s suite is ~21 s, which a
-          #     20 s wrap would have falsely converted into a kill-shaped exit (a
-          #     slow-but-passing SURVIVOR masked as killed — the false-green
-          #     direction) and would have wrap-killed the unmutated BASELINE run
-          #     itself (a hard "Tests don't run cleanly" red). HONEST residual
-          #     (fixer round 2 — the earlier "a >30 s degraded pass remains a loud
-          #     baseline red" claim was true only of BASELINE-time degradation:
-          #     mutmut times the baseline ONCE per `mutmut run`): runner
-          #     degradation arising MID-PASS that pushes a legitimately-PASSING
-          #     (i.e. genuinely SURVIVING) mutant run past 30 s is wrap-killed and
-          #     recorded KILLED — a silent false-green with no baseline red,
-          #     self-correcting only on the NEXT weekly run. The baseline-regime
-          #     PREFLIGHT below turns both regime EDGES (fast runner: baseline
-          #     < ~3.5 s flips spin kills to BAD_TIMEOUT flake; slow runner:
-          #     baseline > 20 s widens the false-green window and risks a
-          #     wrap-killed baseline) into explicit loud refusals at the start of
-          #     the pass; a mid-pass swing INSIDE the (4, 20) s regime remains the
-          #     accepted, disclosed residual.
+          #     45 s + 2 x baseline > wrap + 5 for EVERY wrap <= the 30 s cap, so a
+          #     wrap-killed spin mutant records KILLED deterministically w.r.t.
+          #     that classifier (verified on the local confirmation runs: the spin
+          #     mutants KILLED, 0 suspicious).
+          #   * The wrap must beat mutmut's NON-configurable hard timeout
+          #     (baseline x 10, BAD_TIMEOUT, exit bit 4): with wrap = 5 x baseline
+          #     (integer-truncated) the worst-case kill completion is
+          #     wrap + 5 <= 5 x b + 5 < 10 x b for every baseline b > 1 s — the
+          #     inequality holds BY CONSTRUCTION across the whole admitted regime,
+          #     fast runners included (round 2's fixed 30 s wrap held it only for
+          #     baselines > ~3.5 s). Local confirmations use the same sizing (a
+          #     ~1.5 s local baseline -> a 7 s wrap; the round-2 local run's 8 s
+          #     wrap was the same idea, hand-sized).
+          #   * The 5x sizing also clears the worst-case LEGITIMATE pass: a ~3x
+          #     shared-runner degradation of the suite stays under the 5x wrap
+          #     for every baseline up to the 30 s cap (baseline > 6 s), beyond
+          #     which the margin decays to 1.5x at the 20 s regime top — a
+          #     smaller wrap would falsely convert a slow-but-passing SURVIVOR
+          #     into a kill-shaped exit (the false-green direction) and could
+          #     wrap-kill the unmutated BASELINE run itself (a hard "Tests don't
+          #     run cleanly" red). HONEST residual (fixer round 2, unchanged by
+          #     the adaptive sizing): mutmut times the baseline ONCE per
+          #     `mutmut run`, so runner degradation arising MID-PASS that pushes
+          #     a legitimately-PASSING (i.e. genuinely SURVIVING) mutant run past
+          #     the wrap is wrap-killed and recorded KILLED — a silent
+          #     false-green with no baseline red, self-correcting only on the
+          #     NEXT weekly run. The baseline-regime PREFLIGHT below turns both
+          #     remaining regime EDGES (baseline <= 1.2 s: the 10x hard timer
+          #     leaves < 1 s of slack over the wrap + the -k 5 grace, so spin
+          #     kills risk BAD_TIMEOUT flake; baseline > 20 s: the capped wrap
+          #     sits < 1.5x a legit pass) into explicit loud refusals at the
+          #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
+          #     regime remains the accepted, disclosed residual.
           # The 9 proven pairs keep their exact historical runner + no
           # --test-time-base (minimal diff — their verified interplay is
           # unchanged). HONEST mechanism note (fixer round 2 — the earlier "no
@@ -340,27 +359,41 @@ jobs:
             tf="${mid%:*}"
             name="$(basename "$mod" .py)"
             if [ -n "$tmo" ]; then
-              # Baseline-regime PREFLIGHT (fixer round 2): the wrap-vs-classifier
-              # arithmetic above is valid ONLY when the clean suite runs in
-              # (4, 20) s on this runner — below ~3.5-4 s mutmut's 10x-baseline
-              # hard timer beats the 30 s wrap (spin mutants flake BAD_TIMEOUT);
-              # above 20 s the wrap sits < 1.5x a legit pass (widening the
-              # mid-pass false-green window and risking a wrap-killed unmutated
-              # baseline). Time one clean run and REFUSE loudly outside the
-              # regime instead of failing silently in either direction.
+              # Baseline-regime PREFLIGHT + measured-baseline wrap SIZING (fixer
+              # round 3, R3-2 — supersedes round 2's fixed 30 s wrap over a
+              # (4, 20) s refusal band, which contradicted the budget comment's
+              # own sibling-pace scenario: a plausible ~2-3 s CI baseline sat
+              # inside the refusal band, so the FIRST scheduled verification run
+              # risked a designed preflight red). The wrap is sized from the
+              # baseline this preflight itself measures — wrap = 5 x baseline
+              # (integer-truncated seconds), capped at the pair's $tmo (30 s) —
+              # so the classifier arithmetic above holds by construction for
+              # every admitted baseline; the pair's 3rd field is now the CAP,
+              # not the wrap. Refusal band (1200, 20000) ms: at or below 1.2 s
+              # mutmut's 10x-baseline hard timer leaves < 1 s of slack over the
+              # wrap + the `-k 5` grace (spin kills would flake BAD_TIMEOUT);
+              # above 20 s the capped wrap sits < 1.5x a legit pass (widening
+              # the mid-pass false-green window and risking a wrap-killed
+              # unmutated baseline). Time one clean run and REFUSE loudly
+              # outside the regime instead of failing silently in either
+              # direction.
               start_ms=$(date +%s%3N)
               pytest "$tf" -x -q --no-header
               base_ms=$(( $(date +%s%3N) - start_ms ))
-              echo "preflight baseline for $name: ${base_ms} ms"
-              if [ "$base_ms" -lt 4000 ] || [ "$base_ms" -gt 20000 ]; then
-                echo "❌ $name preflight baseline ${base_ms} ms is outside the (4000, 20000) ms regime the 'timeout -k 5 $tmo' + --test-time-base 45 classifier arithmetic assumes — re-size the wrap for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
+              wrap_s=$(( base_ms * 5 / 1000 ))
+              if [ "$wrap_s" -gt "$tmo" ]; then
+                wrap_s="$tmo"
+              fi
+              echo "preflight baseline for $name: ${base_ms} ms -> wrap ${wrap_s} s (5 x baseline, cap ${tmo} s)"
+              if [ "$base_ms" -lt 1200 ] || [ "$base_ms" -gt 20000 ]; then
+                echo "❌ $name preflight baseline ${base_ms} ms is outside the (1200, 20000) ms regime the measured-baseline wrap sizing (5 x baseline capped at ${tmo} s, -k 5 grace) + --test-time-base 45 classifier arithmetic covers — re-derive the sizing for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
                 exit 1
               fi
               # --test-time-base 45: keep a wrap-killed spin mutant BELOW the
-              # OK_SUSPICIOUS threshold (45 + 2 x baseline > the 30+5 s wrap for
-              # every baseline) so it records KILLED — see the classifier
+              # OK_SUSPICIOUS threshold (45 + 2 x baseline > wrap + 5 for every
+              # wrap <= the 30 s cap) so it records KILLED — see the classifier
               # arithmetic above (DEC-MUTATION-RUNTIME-003 fixer round).
-              runner="sh -c 'timeout -k 5 $tmo pytest $tf -x -q --no-header || exit 1'"
+              runner="sh -c 'timeout -k 5 $wrap_s pytest $tf -x -q --no-header || exit 1'"
               mutmut run \
                 --paths-to-mutate "$mod" \
                 --runner "$runner" \
