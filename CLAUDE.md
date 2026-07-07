@@ -18,7 +18,62 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
+_Last updated: 2026-07-07 (the 10-item POLISH PACK, MIGRATION.md #1527–#1536 —
+DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
+DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
+DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
+DEC-ACCOUNT-LEASE-CROSSHOST-001 + DEC-DERIVE-LOCK-VISIBILITY-001 +
+DEC-RESUME-BANNER-AUTOCLEAR-001 + DEC-QUOTA-VERDICT-MOOT-001: (1) the
+at-close 15:30:00 boundary divergence (`daily_derive_cutoff` strict `>` vs
+`clamp_window_end` `>=`) is ruled DELIBERATE and drift-PINNED cross-module
+(closed-wontfix, the #1267 pattern; clamp byte-untouched); (2) the prebuild's
+session-close daily cutoff is REPAIRED (the #1401 M1 regression had left
+DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 production-dead — route/parallel
+orchestrator/heal recall all now ride ONE law via NEW `nse.now_ist` threaded
+as `daily_cutoff_now`) and gains the data-grounded DEFER-only variant (NEW
+`session_last_bar_complete` + `daily_derive_cutoff_grounded`, result ≤ clock
+always, abstains on every unknown, DENSE-index-gated per #1031, kill switch
+`BRUTEX_DAILY_CUTOFF_GROUNDED`; a post-close pipeline run now derives the run
+day's 1day bar SAME-RUN, an incomplete dense session DEFERS — never a partial
+daily bar; complete sessions byte-identical grounded-vs-clock, pinned); (3)
+the NTM SWR background refresh gains a CROSS-PROCESS single-flight (advisory
+flock sidecar `.ntm_revalidate.lock` + double-checked freshness under the ONE
+COMMON `_ntm_cache_is_fresh`; unavailable lock fails OPEN to the pre-fix
+refresh — never worse; closes the #1287 follow-up); (4) the conflated
+`in_pull_fetches` ledger counter is SPLIT into persisted `empty_retries` vs
+`transient_retries` (default `None` = honest unknown on old rows, the
+optional-column template's third use; spine invariant pinned `empty +
+transient + (1 if bars) == in_pull_fetches`; ACCEPTS the follow-up #924 +
+#1355 twice declined as display-only relabels — the in-CALL 6× ladder still
+NOT persisted, the #924 caveat stands); (5) the defensive epoch-timestamp
+branch gains a deterministic session-plausibility VERDICT (NEW
+`epoch_verdict.py`, unix-utc vs ist-naive against the real NSE calendar, ONE
+`groww.parse.epoch_timestamp_verdict` WARN per epoch payload) + a live-probe
+runbook — parsing byte-unchanged, the Unix-UTC assumption stays honestly
+UNVERIFIED; (6) the CLI `brutex fetch` gains the vendor-depth-floor learner +
+learned-floor planning clamp (`max(GROWW_HISTORY_FLOOR, learned floor)` via
+the existing `symbol_windows` seam, SAME schema_meta sidecar as the dashboard
+— either entrypoint's learned floor clamps both; dry-run byte-identical); (7)
+the account pull single-flight gains its CROSS-HOST arm — an advisory
+heartbeat lease on shared lake storage (`.locks/pull_lease.json`, 30 s
+refresh, 180 s self-heal, kill switch `BRUTEX_PULL_LEASE=off`) refuses a
+start on a FRESH foreign-host lease; honestly DETECTION, NOT mutual
+exclusion (TOCTOU/clock-skew/hostname-collision limits stated); (8) the
+movers `PrebuildGate` honors the cross-process derive lock — a CLI-process
+derive now yields the honest `gated:true` payload with
+`source="cross_process"` (probe OSError fails OPEN, one WARN per outage;
+closes the #1288 follow-up); (9) the intent-resume `ResumeBanner` auto-clears
+on the next REAL pull launch (it had NO production clear path — a stale
+CRITICAL banner survived its own remediation); (10) the #889 verdict-driven
+quota phone-alert follow-up is CLOSED AS MOOT (Groww backtesting has NO
+daily quota + ZERO production `DailyQuotaTracker` constructions,
+AST-pinned) and the doubly-dead informational quota surface is DELETED
+(`GET /api/v1/quota` + panel fields + `/universe` gauge — all only ever
+served the constant sentinel), the vendor-neutral enforcement seam kept
+dormant logic-byte-identical. ALL TEN: ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch behaviour
+byte-identical; touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
 rate>)` UNVERIFIED placeholder rows are DELETED and replaced by explicit
@@ -517,7 +572,23 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+- **Active branch:** `claude/blissful-curie-gp94rk` (**the 10-item POLISH PACK, MIGRATION.md #1527–#1536** —
+  DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
+  DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
+  DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
+  flock single-flight for the NTM SWR refresh) · DEC-RETRY-COUNTER-SPLIT-001 (`in_pull_fetches` split into
+  persisted `empty_retries`/`transient_retries`, old rows load `None`; accepts the #924/#1355 twice-declined
+  follow-up) · DEC-GROWW-EPOCH-VERDICT-001 (deterministic epoch-interpretation verdict WARN + live-probe
+  runbook; parsing byte-unchanged, Unix-UTC stays UNVERIFIED) · DEC-CLI-DEPTH-FLOORS-001 (CLI fetch wires the
+  vendor-depth-floor learner + learned-floor planning clamp, shared schema_meta sidecar with the dashboard) ·
+  DEC-ACCOUNT-LEASE-CROSSHOST-001 (advisory cross-host heartbeat pull lease on shared lake storage — detection,
+  NOT mutual exclusion; `BRUTEX_PULL_LEASE=off`) · DEC-DERIVE-LOCK-VISIBILITY-001 (movers PrebuildGate honors
+  the cross-process derive lock, `source="cross_process"`) · DEC-RESUME-BANNER-AUTOCLEAR-001 (the resume red
+  banner auto-clears on the next real pull launch) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
+  follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch;
+  ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
   carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`
@@ -1975,7 +2046,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zealous-maxwell-w257yf`
+- **Active feature branch:** `claude/blissful-curie-gp94rk`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
