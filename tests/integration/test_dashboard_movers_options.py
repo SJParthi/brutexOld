@@ -27,7 +27,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1327,3 +1329,326 @@ class TestRegistryStrikeStep:
             encoding="utf-8"
         )
         assert 'strike_step_confidence === "observed"' in template
+
+
+# ── the per-underlying PCR panel (DEC-MOVERS-OPTIONS-PCR-001) ──────────────
+
+
+def _seed_pcr_lake(tmp_path: Path) -> None:
+    """One NIFTY CE + PE pair with distinct multi-minute OI/volume trajectories.
+
+    CE: 09:16 (vol 100, oi 1000) → 13:45 (vol 50, oi 1100) → 14:00 (vol 25, oi 1200).
+    PE: 09:16 (vol 200, oi 900) → 13:45 (vol 60, oi 990) → 14:00 (vol 30, oi 1080).
+    As-of 13:45 (INCLUSIVE): CE vol 150 / oi 1100 · PE vol 260 / oi 990.
+    Whole day: CE vol 175 / oi 1200 · PE vol 290 / oi 1080.
+    """
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_CE,
+        interval="1minute",
+        bars=[
+            _min_bar(hour=9, minute=16, close="100", volume=100, oi=1000),
+            _min_bar(hour=13, minute=45, close="110", volume=50, oi=1100),
+            _min_bar(hour=14, minute=0, close="120", volume=25, oi=1200),
+        ],
+    )
+    _write(
+        tmp_path,
+        segment="FNO",
+        symbol=_PE,
+        interval="1minute",
+        bars=[
+            _min_bar(hour=9, minute=16, close="80", volume=200, oi=900),
+            _min_bar(hour=13, minute=45, close="75", volume=60, oi=990),
+            _min_bar(hour=14, minute=0, close="70", volume=30, oi=1080),
+        ],
+    )
+
+
+class TestOptionsPcr:
+    """End-to-end PCR over a REAL Parquet lake through the real route."""
+
+    def _get(self, store: InstrumentStore, params: dict[str, str]) -> dict[str, Any]:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        response = client.get("/api/v1/movers", params={"asset": "options", **params})
+        assert response.status_code == 200
+        body: dict[str, Any] = response.json()
+        return body
+
+    def test_intraday_as_of_cutoff_hand_summed(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # The INCLUSIVE 13:45 as-of bar counts (edge 21's intraday twin): OI is
+        # each leg's LAST open_interest ≤ cutoff, volume the session sum ≤ cutoff
+        # — hand-summed independently and Fraction-cross-checked.
+        _seed_pcr_lake(tmp_path)
+        body = self._get(
+            store,
+            {"interval": "1minute", "date": "2024-06-13", "time": "13:45"},
+        )
+        assert len(body["pcr"]) == 1
+        row = body["pcr"][0]
+        assert row["underlying"] == "NIFTY"
+        assert row["display_underlying"] == "NIFTY"
+        assert row["expiry"] == "2024-06-27"
+        assert (row["put_oi"], row["call_oi"]) == (990, 1100)
+        assert (row["put_volume"], row["call_volume"]) == (260, 150)
+        # Independent recompute (fractions — never the production Decimal path).
+        assert Fraction(row["oi_pcr"]) == Fraction(990, 1100)
+        assert abs(Fraction(row["vol_pcr"]) - Fraction(260, 150)) < Fraction(1, 10**26)
+        assert row["oi_pcr"] == "0.9"
+        assert (row["oi_status"], row["vol_status"]) == ("ok", "ok")
+        assert (row["legs_read"], row["legs_total"]) == (2, 2)
+        assert row["coverage"] == "full"
+        assert row["coverage_note"] is None
+        # Volume is non-null by the session reader's contract — pinned 0 on the
+        # wire (the field exists for the primitive's other callers).
+        assert row["volume_missing_legs"] == 0
+
+    def test_daily_interval_folds_the_whole_day(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Daily / blank time ⇒ cutoff None ⇒ whole-day semantics — identical to
+        # the movers rows (edge 21): last OI of day + whole-day volume.
+        _seed_pcr_lake(tmp_path)
+        body = self._get(store, {"interval": "1day", "date": "2024-06-13"})
+        row = body["pcr"][0]
+        assert (row["put_oi"], row["call_oi"]) == (1080, 1200)
+        assert (row["put_volume"], row["call_volume"]) == (290, 175)
+        assert row["oi_pcr"] == "0.9"
+
+    def test_futures_leg_never_pollutes_the_sums(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # A FUT partition on the SAME expiry with a huge OI must not move ANY
+        # PCR number (edge 10 — parse_option_symbol drops -FUT at discovery).
+        _seed_pcr_lake(tmp_path)
+        baseline = self._get(store, {"interval": "1day", "date": "2024-06-13"})["pcr"]
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FUT,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="23650", volume=10**6, oi=10**9)],
+        )
+        with_fut = self._get(store, {"interval": "1day", "date": "2024-06-13"})["pcr"]
+        assert with_fut == baseline
+
+    def test_corrupt_leg_reads_partial_with_honest_note(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # One corrupt PE Parquet → the row is PRESENT with n = m − 1, coverage
+        # "partial", a non-null server-composed note, skipped bumped, no 500.
+        _seed_pcr_lake(tmp_path)
+        corrupt = list((tmp_path / "bars" / _EXCHANGE / "FNO" / _PE / "1minute").rglob("*.parquet"))
+        assert corrupt
+        for path in corrupt:
+            path.write_bytes(b"not a parquet file \r\n garbage")
+        body = self._get(store, {"interval": "1day", "date": "2024-06-13"})
+        assert body["skipped_count"] == 1
+        row = body["pcr"][0]
+        assert (row["legs_read"], row["legs_total"]) == (1, 2)
+        assert row["coverage"] == "partial"
+        assert row["coverage_note"] == "1/2 legs read"
+        # Only the CE leg summed; the put side honestly reads 0 with a sentinel.
+        assert (row["put_oi"], row["call_oi"]) == (0, 1200)
+        assert row["oi_pcr"] == "0"
+
+    def test_null_oi_leg_is_excluded_and_counted_volume_still_real(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # A legacy null-OI PE cell (edge 4 end-to-end): excluded from the OI
+        # sums + counted, while its volume STILL feeds the volume PCR.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="100", volume=100, oi=1000)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="80", volume=50, oi=None)],
+        )
+        row = self._get(store, {"interval": "1day", "date": "2024-06-13"})["pcr"][0]
+        assert row["oi_missing_legs"] == 1
+        # The put OI cell was missing → the put sum is honestly 0 over a REAL
+        # 1000 call denominator: the ratio computes to exactly 0 (status ok) —
+        # a missing numerator cell is exclusion, not a zero-denominator case.
+        assert row["oi_pcr"] == "0"
+        assert row["oi_status"] == "ok"
+        assert (row["put_oi"], row["call_oi"]) == (0, 1000)
+        assert Fraction(row["vol_pcr"]) == Fraction(50, 100)
+        assert row["coverage"] == "partial"
+        assert row["coverage_note"] == "1 leg(s) missing OI"
+
+    def test_all_call_chain_reads_an_exact_zero_ratio(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # All-CE chain: the CALL denominator is REAL (1000), the put numerator 0
+        # → both ratios are an exact "0" with status "ok" (the fold law clause
+        # 4 — only a zero DENOMINATOR yields the sentinel; the design sketch's
+        # "both null" wording for all-CE contradicted its own §1.1 law and the
+        # law wins). The raw sums keep "zero puts, real calls" visible.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_CE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="100", volume=100, oi=1000)],
+        )
+        row = self._get(store, {"interval": "1day", "date": "2024-06-13"})["pcr"][0]
+        assert (row["oi_pcr"], row["vol_pcr"]) == ("0", "0")
+        assert (row["oi_status"], row["vol_status"]) == ("ok", "ok")
+        assert (row["put_oi"], row["call_oi"]) == (0, 1000)
+        assert (row["put_volume"], row["call_volume"]) == (0, 100)
+
+    def test_all_put_chain_reads_real_put_sums(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_PE,
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="80", volume=50, oi=700)],
+        )
+        row = self._get(store, {"interval": "1day", "date": "2024-06-13"})["pcr"][0]
+        assert row["oi_pcr"] is None  # 700/0 → sentinel, puts visible in the sums
+        assert (row["put_oi"], row["call_oi"]) == (700, 0)
+        assert row["oi_status"] == "zero_denominator"
+
+    def test_pre_open_as_of_emits_honest_empty_rows(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # A 09:00 as-of (pre-open) leaves every leg bar-less (edges 8-9): the
+        # chain is still REPORTED — one row, legs_read 0, coverage "empty".
+        _seed_pcr_lake(tmp_path)
+        body = self._get(store, {"interval": "1minute", "date": "2024-06-13", "time": "09:00"})
+        assert len(body["pcr"]) == 1
+        row = body["pcr"][0]
+        assert (row["legs_read"], row["legs_total"]) == (0, 2)
+        assert row["coverage"] == "empty"
+        assert row["coverage_note"] == "0/2 legs read"
+        assert row["oi_pcr"] is None
+        assert row["vol_pcr"] is None
+
+    def test_empty_lake_and_no_lake_root_serve_empty_pcr(self, store: InstrumentStore) -> None:
+        # Edge 15/16: the honest degrades all carry "pcr": [] — never a 500.
+        body = self._get(store, {"interval": "1day"})
+        assert body["pcr"] == []
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        no_root = client.get("/api/v1/movers", params={"asset": "options"}).json()
+        assert no_root["pcr"] == []
+
+    def test_unknown_interval_serves_empty_pcr(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        _seed_pcr_lake(tmp_path)
+        candidates = compute_options_candidates(
+            lake_root=tmp_path, interval="99weird", date="2024-06-13", time=None
+        )
+        assert candidates.pcr == ()
+
+    def test_gated_payload_carries_no_pcr_key(self, store: InstrumentStore) -> None:
+        # Edge 17: the gated shell is byte-unchanged — zero lake reads, no key.
+        from brutex.dashboard.prebuild_gate import PrebuildGate
+
+        gate = PrebuildGate()
+        client = TestClient(build_app(DashboardState(), instrument_store=store, prebuild_gate=gate))
+        gate.begin()
+        body = client.get("/api/v1/movers", params={"asset": "options"}).json()
+        assert body["gated"] is True
+        assert "pcr" not in body
+
+    def test_repeat_poll_is_a_cache_hit_and_a_pull_recomputes(
+        self,
+        store: InstrumentStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Edge 19 / Golden Rule #5: PCR rides INSIDE the cached OptionsCandidates
+        # — a repeat poll at one generation computes ONCE (O(1) LRU handoff, the
+        # warm-parity guarantee), and a pull (mark_dirty) recomputes.
+        import brutex.dashboard.app as app_module
+        from brutex.dashboard.summary_cache import SummaryCache
+
+        _seed_pcr_lake(tmp_path)
+        calls = {"n": 0}
+        real_compute = app_module.compute_options_candidates
+
+        def _counting(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            return real_compute(*args, **kwargs)
+
+        monkeypatch.setattr(app_module, "compute_options_candidates", _counting)
+        summary_cache = SummaryCache()
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store, summary_cache=summary_cache)
+        )
+        params = {"asset": "options", "interval": "1day", "date": "2024-06-13"}
+        first = client.get("/api/v1/movers", params=params).json()
+        second = client.get("/api/v1/movers", params=params).json()
+        assert calls["n"] == 1  # the second poll is a pure cache hit
+        assert first["pcr"] == second["pcr"] != []
+        summary_cache.mark_dirty()  # a pull landed → generation bump
+        third = client.get("/api/v1/movers", params=params).json()
+        assert calls["n"] == 2  # recomputed, never stale
+        assert third["pcr"] == first["pcr"]
+
+    def test_rename_carries_parsed_key_and_display_label(self, tmp_path: Path) -> None:
+        # Edge 14 end-to-end: a display rename never re-keys the PCR group — the
+        # row carries the PARSED underlying + the renamed display label, and the
+        # movers rows show the SAME renamed label (panel/table agreement).
+        _seed_pcr_lake(tmp_path)
+        candidates = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            names={"NIFTY": "NIFTY 50"},
+        )
+        assert len(candidates.pcr) == 1
+        row = candidates.pcr[0]
+        assert row.underlying == "NIFTY"
+        assert row.display_underlying == "NIFTY 50"
+        assert all(m.underlying == "NIFTY 50" for m in candidates.movers)
+
+    def test_run_options_snapshot_threads_pcr_to_the_payload(self, tmp_path: Path) -> None:
+        # Compose parity: the thin run_options_snapshot compose carries the SAME
+        # rows the candidate scan produced.
+        _seed_pcr_lake(tmp_path)
+        payload = run_options_snapshot(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, top_n=5
+        )
+        assert len(payload["pcr"]) == 1
+        assert payload["pcr"][0]["underlying"] == "NIFTY"
+
+    def test_pcr_reuses_the_scan_reads_zero_extra_io(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Zero-new-I/O pin: the candidate scan performs EXACTLY one session read
+        # per tier contract — the PCR fold adds none.
+        import brutex.dashboard.movers_options as mo_module
+
+        _seed_pcr_lake(tmp_path)
+        calls = {"n": 0}
+        real_read = mo_module._read_future_session
+
+        def _counting(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(mo_module, "_read_future_session", _counting)
+        candidates = compute_options_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
+        )
+        assert calls["n"] == 2  # one read per contract (CE + PE) — none for PCR
+        assert len(candidates.pcr) == 1

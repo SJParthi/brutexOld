@@ -81,3 +81,48 @@ def test_movers_no_unescaped_server_field_reaches_innerhtml() -> None:
     rows_write = re.search(r'tb\.innerHTML = data\.map\(.*?\)\.join\(""\)', html, re.DOTALL)
     assert rows_write is not None, "the rows innerHTML write must still exist"
     assert "esc(v)" in rows_write.group(0), "the rows write must escape each cell value"
+
+
+def test_movers_pcr_panel_present_hidden_and_dom_rendered() -> None:
+    """DEC-MOVERS-OPTIONS-PCR-001: the PCR panel exists, hidden by default,
+    is invalidated unconditionally at the top of ``load()``, and its renderer
+    builds every payload-derived value via DOM APIs / ``textContent`` ONLY."""
+    html = _render_movers_html()
+    # The static skeleton, hidden by default.
+    assert '<div class="note" id="pcrPanel" hidden>' in html
+    assert '<div id="pcrRows"></div>' in html
+    assert "function renderPcr(rows)" in html
+    assert "function showPcr(j)" in html
+    # Unconditional invalidation at the top of load() — covers asset switches,
+    # gated payloads, preview/catch fallbacks, and absent-key payloads.
+    assert '$("pcrPanel").hidden = true; $("pcrRows").textContent = "";' in html
+    # The success-path guard: options-only, non-gated, array-guarded.
+    assert 'state.asset === "options" && !j.gated && Array.isArray(j.pcr) && j.pcr.length' in html
+
+
+def test_movers_pcr_renderer_never_touches_innerhtml() -> None:
+    """The renderPcr/showPcr sources contain NO innerHTML write — payload values
+    reach the DOM only through ``textContent`` / the ``title`` DOM property
+    (stricter than the esc()+innerHTML pattern; CodeQL XSS gate)."""
+    html = _render_movers_html()
+    match = re.search(r"function renderPcr\(rows\).*?function showPcr\(j\).*?\n}", html, re.DOTALL)
+    assert match is not None, "renderPcr + showPcr must both be defined"
+    pcr_source = match.group(0)
+    assert ".innerHTML" not in pcr_source, "renderPcr/showPcr must never write innerHTML"
+    assert "textContent" in pcr_source
+    assert "document.createElement" in pcr_source
+    assert "document.createTextNode" in pcr_source
+    # Coverage honesty: the server-composed note is shown verbatim, never
+    # re-derived; the "~" non-full marker rides the muted span.
+    assert "r.coverage_note" in pcr_source
+    assert 'r.coverage !== "full" ? " ~" : ""' in pcr_source
+
+
+def test_movers_pcr_rendered_on_both_success_paths() -> None:
+    """showPcr runs on the full-render path AND the skip-render-when-unchanged
+    fast path (load() hides the panel at its top, so an identical repeat fetch
+    must restore it — otherwise a repeat ↻ Refresh would blank the panel)."""
+    html = _render_movers_html()
+    assert html.count("showPcr(j)") >= 2, (
+        "showPcr must run on both the full render and the unchanged-skip path"
+    )

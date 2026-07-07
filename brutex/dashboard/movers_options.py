@@ -100,6 +100,7 @@ mover.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date as date_cls
@@ -115,6 +116,7 @@ from brutex.dashboard.movers_futures import (
     _underlying_spot_ltp,
     format_contract_date,
 )
+from brutex.dashboard.movers_pcr import PcrLeg, UnderlyingPcr, compute_pcr_rows, pcr_row_json
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
@@ -603,6 +605,7 @@ def build_options_payload(
     expiry_track: str = "all",
     min_volume: int | None = None,
     calendar_only_expiry: bool = False,
+    pcr: Sequence[UnderlyingPcr] = (),
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -641,12 +644,19 @@ def build_options_payload(
         valid tier expiry but NO contract candles were pulled for it, so the note
         honestly says "no data pulled for this expiry" instead of implying the expiry
         does not exist.
+    pcr
+        The per-underlying Put-Call Ratio rows (DEC-MOVERS-OPTIONS-PCR-001,
+        from :attr:`OptionsCandidates.pcr`), serialized to the top-level
+        ``"pcr"`` payload key. A per-UNDERLYING aggregate over the FULL tier
+        chain — a panel, not a row cell — so the rank-time ``top_n`` /
+        ``min_volume`` never touch it. Defaulted ``()`` so every existing
+        caller stays valid (``"pcr": []``).
 
     Returns
     -------
     dict[str, Any]
         The Options-tab payload: the seven ranked category lists + the echo +
-        ``instrument_count`` / ``skipped_count`` / ``note``.
+        ``instrument_count`` / ``skipped_count`` / ``note`` / ``pcr``.
     """
     floor = normalize_min_volume(min_volume)
     ranked: dict[str, list[dict[str, Any]]] = {
@@ -704,6 +714,7 @@ def build_options_payload(
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "note": note,
+        "pcr": [pcr_row_json(row) for row in pcr],
         **ranked,
     }
 
@@ -1012,6 +1023,12 @@ class OptionsCandidates:
         expiry — DEC-MOVERS-CALENDAR-TIERS-001 — never silently skipped to a wrong
         serial expiry). ``False`` when the lake had at least one matching contract, or
         when no tier expiry resolved at all.
+    pcr
+        The per-underlying Put-Call Ratio rows folded from the SAME session
+        reads that built :attr:`movers` (DEC-MOVERS-OPTIONS-PCR-001 — zero new
+        I/O; one row per tier-universe underlying, including an all-skipped
+        ``empty`` chain). Defaulted LAST so every existing constructor call
+        site stays valid; the early-return paths carry the honest ``()``.
     """
 
     movers: tuple[OptionMover, ...]
@@ -1020,6 +1037,7 @@ class OptionsCandidates:
     expiry_tier: str
     expiry_track: str
     calendar_only_expiry: bool = False
+    pcr: tuple[UnderlyingPcr, ...] = ()
 
 
 def compute_options_candidates(
@@ -1119,6 +1137,20 @@ def compute_options_candidates(
             calendar_only_expiry=calendar_only_expiry,
         )
 
+    # PCR harvest maps (DEC-MOVERS-OPTIONS-PCR-001), built BEFORE any read can
+    # fail, all keyed by the PARSED underlying ``c[2]`` (rename-proof — the
+    # display transform is carried separately so the panel label provably
+    # equals the table's). ``pcr_legs_total`` is the honest "m" denominator —
+    # the tier-filtered chain size counted PRE-read, so an unreadable/empty leg
+    # still counts in m. Every tier-filtered contract's underlying has a
+    # ``target_expiry`` entry by construction of the tier filter above; if that
+    # invariant ever breaks, the dict-comp KeyError trips loudly HERE — never a
+    # fabricated row downstream (Golden Rule #1). O(contracts) — no quadratic.
+    pcr_legs_total: dict[str, int] = dict(Counter(c[2] for c in contracts))
+    pcr_expiry: dict[str, date_cls] = {u: target_expiry[u] for u in pcr_legs_total}
+    pcr_display: dict[str, str] = {u: resolved_names.get(u, u) for u in pcr_legs_total}
+    pcr_legs: list[PcrLeg] = []
+
     # Resolve the DYNAMIC strike-grid step ONCE per (underlying, expiry) — the min
     # positive gap over the AUTHORITATIVE registry chain when the LAZY loader yields
     # one (DEC-MONEYNESS-REGISTRY-STEP-001; invoked only for THESE tier-target keys —
@@ -1185,6 +1217,11 @@ def compute_options_candidates(
             log_movers_skip(source="options", symbol=symbol, error=str(exc))
             skipped += 1
             continue
+        # PCR leg capture (DEC-MOVERS-OPTIONS-PCR-001): from the PARSED loop
+        # variables (never the display-renamed mover), off the SAME single
+        # session read — zero new I/O. The two skip paths above append nothing:
+        # those legs live only in the pre-read ``pcr_legs_total`` denominator.
+        pcr_legs.append(PcrLeg(underlying=underlying, opt_type=opt_type, oi=oi, volume=volume))
         movers.append(
             compute_option_mover(
                 underlying=resolved_names.get(underlying, underlying),
@@ -1213,6 +1250,12 @@ def compute_options_candidates(
         date=date_str,
         expiry_tier=tier,
         expiry_track=track,
+        pcr=compute_pcr_rows(
+            pcr_legs,
+            legs_total=pcr_legs_total,
+            target_expiry=pcr_expiry,
+            display_names=pcr_display,
+        ),
     )
 
 
@@ -1309,4 +1352,5 @@ def run_options_snapshot(
         expiry_track=candidates.expiry_track,
         min_volume=min_volume,
         calendar_only_expiry=candidates.calendar_only_expiry,
+        pcr=candidates.pcr,
     )

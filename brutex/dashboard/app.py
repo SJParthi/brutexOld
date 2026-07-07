@@ -5068,6 +5068,7 @@ def build_app(
                         expiry_track=opt_cands.expiry_track,
                         min_volume=min_volume,
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
+                        pcr=opt_cands.pcr,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
