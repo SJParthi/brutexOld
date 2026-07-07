@@ -30,8 +30,11 @@ from brutex.options.strike_rules import RULES_BY_NAME, TradeDirection
 from tests.bench._o1_tiers import ratio_ceiling
 
 _IST = ZoneInfo("Asia/Kolkata")
-_ENTRY = datetime(2024, 5, 2, 9, 16, tzinfo=_IST)
-_EXIT = datetime(2024, 5, 2, 15, 20, tzinfo=_IST)
+# Canonical priced-path date: post-2024-10-01 (the verified ETC window —
+# DEC-ETC-REGIME-HISTORY-001 made pre-boundary dates reject) and clear of
+# the 2024-11-20 NIFTY lot transition.
+_ENTRY = datetime(2024, 10, 3, 9, 16, tzinfo=_IST)
+_EXIT = datetime(2024, 10, 3, 15, 20, tzinfo=_IST)
 _RULE = RULES_BY_NAME["atm_plus_2_in_dir"]
 
 _N_SMALL = 2_000
@@ -69,7 +72,7 @@ _SIGNAL = SpotSignal(
     entry_ts=_ENTRY,
     exit_ts=_EXIT,
     spot_at_entry=Decimal("25012"),
-    expiry_date=date(2024, 5, 30),
+    expiry_date=date(2024, 10, 31),
 )
 
 

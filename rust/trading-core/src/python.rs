@@ -1447,6 +1447,11 @@ fn py_greeks(
 #[pymodule]
 fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", version())?;
+    // Dunder-named deliberately: the doctor's wheel-freshness symbol-set
+    // check (and EXPECTED_BUILD.json) covers only non-underscore names, so
+    // this build stamp can never trip the symbol-surface comparison
+    // (DEC-RUST-SOURCE-DIGEST-TWIN-001).
+    m.add("__source_digest__", crate::SOURCE_DIGEST)?;
     m.add("TOTAL_CONDITIONS", TOTAL_CONDITIONS)?;
     m.add("PIVOT_LEVELS_LEN", PIVOT_LEVELS_LEN)?;
     m.add("FIB_LEVELS_LEN", FIB_LEVELS_LEN)?;

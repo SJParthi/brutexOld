@@ -1,0 +1,92 @@
+# BruteX — Dependency CVE audit (every push + PR)
+#
+# Complements security-audit.yml (weekly, main-only, fno-math-only rust job):
+# this workflow runs pip-audit + cargo-audit on EVERY push/PR so a dependency
+# CVE is caught at review time, and it audits BOTH Rust crates
+# (rust/fno-math AND rust/trading-core — the weekly job covers only fno-math).
+#
+# Ignore-list policy (documented, auditable — Golden Rule #10):
+# every `--ignore-vuln` below MUST carry an inline comment naming the
+# advisory, why it is unfixable today, and the condition for removal.
+
+name: Dependency audit
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dep-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  RUST_VERSION: "1.93.1"
+
+jobs:
+  python-pip-audit:
+    name: Python pip-audit (all extras)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install project (all extras) + pip-audit
+        run: |
+          pip install -e ".[data,ui,optimize,groww,token-broker,dev]" "pip-audit>=2.7"
+      - name: pip-audit
+        # Audits the fully-resolved installed environment (base + every
+        # optional extra), so transitive deps are covered too. NOTE:
+        # --strict is deliberately NOT used — it escalates the intentional
+        # --skip-editable skip of the local `brutex` dist into an error
+        # (verified locally: "brutex: distribution marked as editable",
+        # exit 1). Vulnerability findings still fail the job (exit 1).
+        #
+        # Documented ignores:
+        # - PYSEC-2026-597 (CVE-2026-12243): nltk<=3.9.4 percent-encoded
+        #   path traversal. nltk is a TRANSITIVE dep of the dev-only
+        #   `safety` scanner (safety -> nltk>=3.9), never imported by
+        #   brutex runtime code, and NO fixed nltk release exists as of
+        #   2026-07-06 (advisory lists no fix version). Remove this ignore
+        #   as soon as a patched nltk ships.
+        run: |
+          pip-audit --skip-editable \
+            --ignore-vuln PYSEC-2026-597
+
+  rust-cargo-audit:
+    name: Rust cargo-audit (${{ matrix.crate }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - rust/fno-math
+          - rust/trading-core
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        # --deny warnings promotes informational advisories (unsound /
+        # unmaintained) to failures; --deny yanked catches yanked crates.
+        run: cargo audit --deny warnings --deny yanked

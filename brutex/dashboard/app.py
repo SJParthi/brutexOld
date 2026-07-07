@@ -70,6 +70,11 @@ from brutex.dashboard.completeness import (
 )
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
+    # The ONE index/stock classification-map builder the six-step F&O order keys on
+    # (DEC-PULL-SIX-STEP-ORDER-001; CLAUDE.md §11 COMMON — the friend import is the
+    # established convention, pyproject reportPrivateUsage="warning" + per-site ignore
+    # at deliberate cross-module reuse sites — DEC-P0-017).
+    _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
 from brutex.dashboard.coverage_view import (
@@ -108,6 +113,7 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    preopen_datasets_key,
     warm_discovery_memos,
 )
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
@@ -162,7 +168,11 @@ from brutex.dashboard.pipeline_prebuild import (
     PrebuildTarget,
     run_pipeline_prebuild_guarded,
 )
-from brutex.dashboard.pipeline_pull import run_full_pipeline
+from brutex.dashboard.pipeline_pull import (
+    PriorStepsVerdict,
+    run_full_pipeline,
+    strict_gate_enabled,
+)
 from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
 from brutex.dashboard.prebuild_parallel import resolve_prebuild_workers
 from brutex.dashboard.preopen_report import (
@@ -193,6 +203,12 @@ from brutex.dashboard.pull_intent import (
     run_auto_resume,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.rate_bridge_cache import (
+    BRIDGE_SOURCE_UNWIRED,
+    BridgeReadResult,
+    RateBridgeCache,
+    stamp_bridge_freshness,
+)
 from brutex.dashboard.rate_sampler import RatePanelSampler
 from brutex.dashboard.registry_strikes import make_registry_chain_loader
 from brutex.dashboard.request_logging import emit_request_log
@@ -1088,6 +1104,7 @@ def build_app(
     summary_cache: SummaryCache | None = None,
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
+    rate_bridge_cache: RateBridgeCache | None = None,
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
@@ -1136,6 +1153,17 @@ def build_app(
         repeat poll between two instrument loads is a dict handoff, not a re-scan.
         Injected so a test can assert the hit/invalidation behaviour; ``None``
         (the default) builds a fresh production cache.
+    rate_bridge_cache
+        Optional :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache`
+        backing the ``/api/v1/pull/rate`` CLI-bridge file read
+        (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001): a repeat poll within its
+        TTL is a zero-syscall O(1) memo hit, a post-TTL refresh is
+        deadline-guarded on a worker daemon, and a wedged lake volume serves
+        the last-known snapshot honestly labelled ``unverified`` — the event
+        loop never touches the lake volume on this route. Injected so tests
+        drive the slow-read / cache-hit / provenance behaviour
+        deterministically; ``None`` (the default) builds a fresh production
+        cache.
     prebuild_gate
         Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
         the ``/api/v1/movers`` screens while the one-click pull pipeline runs
@@ -1374,6 +1402,16 @@ def build_app(
     # load moves the token and rebuilds. Content-exact (never a stale illusion —
     # Golden Rule #1).
     _universe_cache = universe_cache if universe_cache is not None else UniverseSnapshotCache()
+    # The /api/v1/pull/rate CLI-bridge read memo (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001):
+    # the bridge file lives on the lake volume (an external SSD), so its per-poll
+    # synchronous read used to run ON the event loop and a slow/stalled disk froze
+    # the whole dashboard. The cache serves a repeat poll within its 2 s TTL as a
+    # zero-syscall O(1) memo hit, bounds every post-TTL refresh (stat + read) under
+    # the COMMON `run_with_deadline` freeze guard on a daemon, and never blocks a
+    # follower while a refresh is in flight — the served provenance is stamped onto
+    # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
+    # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
@@ -1601,17 +1639,29 @@ def build_app(
 
         When NO pull is running (no live tick within the staleness window) every live
         number is ZEROED and ``flow_state`` is ``idle`` — never a fabricated "live"
-        figure (Golden Rule #1). A pure in-memory read: never touches the lake / store
-        lock, never blocks the pull.
+        figure (Golden Rule #1). The PANEL half is a pure in-memory read (never touches
+        the lake / store lock, never blocks the pull); the BRIDGE half below is
+        TTL+token-memoised, deadline-guarded and threadpool-offloaded, with its
+        provenance disclosed via ``bridge_source`` — never an unbounded lake touch on
+        the event loop (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
 
         Cross-process bridge (DEC-CLI-RATE-BRIDGE-001): a CLI ``brutex fetch`` pull runs
         in a SEPARATE process and never touches this in-memory panel, so it ALSO publishes
         its rate to ``<lake_root>/.rate/pull_rate.json``. This route best-effort reads that
-        bridge file and surfaces whichever pull (dashboard OR CLI) ticked most recently, so
-        the widget reflects the active CLI pull's real measured rate too. A missing /
-        stale / unreadable bridge file is honestly ignored (the in-memory panel wins, or
-        IDLE). This is cross-process VISIBILITY, NOT shared rate accounting — the
-        per-process caps are unchanged.
+        bridge file — through the injected
+        :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache` on an AnyIO worker
+        (a TTL hit is a zero-syscall O(1) memo; a post-TTL refresh is bounded by the
+        freeze-guard deadline; a wedged lake volume serves the last-known snapshot
+        labelled ``unverified``) — and surfaces whichever pull (dashboard OR CLI) ticked
+        most recently, so the widget reflects the active CLI pull's real measured rate
+        too. A missing / stale / unreadable bridge file is honestly ignored (the
+        in-memory panel wins, or IDLE). Staleness stays honest under the memo: the
+        verdict ages derive from the snapshot's OWN ``wall_time``, recomputed per
+        request, so a cached serve can never fake freshness. This is cross-process
+        VISIBILITY, NOT shared rate accounting — the per-process caps are unchanged.
+        The payload carries two additive freshness keys — ``bridge_source`` ∈
+        {``live``, ``cached``, ``unverified``, ``unwired``} + ``bridge_probe_age_s`` —
+        stamped by the ONE :func:`~brutex.dashboard.rate_bridge_cache.stamp_bridge_freshness`.
         """
         from brutex.dashboard.pull_rate_view import build_pull_rate_view_merged
 
@@ -1636,7 +1686,11 @@ def build_app(
         # Best-effort cross-process bridge read (never raises, never blocks the pull): a
         # damaged / absent file degrades to None so the in-memory panel alone is projected
         # (byte-identical to the pre-bridge behaviour). The lake root is read off the wired
-        # instrument store; without one (no resolvable lake) the bridge is simply skipped.
+        # instrument store; without one (no resolvable lake) the bridge is simply skipped
+        # (an honest `unwired` provenance, ZERO cache/threadpool work). The read itself
+        # goes through the memoising, deadline-guarded RateBridgeCache on an AnyIO worker
+        # (the app.py fast-read offload doctrine) so the event loop NEVER sees the lake
+        # volume on any arm (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
         bridge_age: float | None = None
         bridge_effective_rps: float | None = None
         bridge_current_rps: float | None = None
@@ -1647,20 +1701,21 @@ def build_app(
         bridge_recent_3600s: int | None = None
         bridge_pull_active: bool | None = None
         bridge_lake_root = _rate_bridge_lake_root_or_none(instrument_store)
-        if bridge_lake_root is not None:
-            from brutex.data.rate_bridge import read_rate_snapshot
-
-            snapshot = read_rate_snapshot(bridge_lake_root)
-            if snapshot is not None:
-                bridge_age = max(0.0, time.time() - snapshot.wall_time)
-                bridge_effective_rps = snapshot.effective_rps
-                bridge_current_rps = snapshot.current_rps
-                bridge_recent_minute = snapshot.recent_minute
-                bridge_recent_429 = snapshot.recent_429
-                bridge_recent_1s = snapshot.recent_1s
-                bridge_recent_600s = snapshot.recent_600s
-                bridge_recent_3600s = snapshot.recent_3600s
-                bridge_pull_active = snapshot.pull_active
+        if bridge_lake_root is None:
+            bridge_result = BridgeReadResult(None, BRIDGE_SOURCE_UNWIRED, None)
+        else:
+            bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
+        snapshot = bridge_result.snapshot
+        if snapshot is not None:
+            bridge_age = max(0.0, time.time() - snapshot.wall_time)
+            bridge_effective_rps = snapshot.effective_rps
+            bridge_current_rps = snapshot.current_rps
+            bridge_recent_minute = snapshot.recent_minute
+            bridge_recent_429 = snapshot.recent_429
+            bridge_recent_1s = snapshot.recent_1s
+            bridge_recent_600s = snapshot.recent_600s
+            bridge_recent_3600s = snapshot.recent_3600s
+            bridge_pull_active = snapshot.pull_active
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
@@ -1698,7 +1753,11 @@ def build_app(
             bridge_recent_3600s=bridge_recent_3600s,
             bridge_pull_active=bridge_pull_active,
         )
-        return JSONResponse(view.to_dict())
+        # Two ADDITIVE honest-freshness keys (bridge_source / bridge_probe_age_s),
+        # written in exactly ONE place — every pre-existing key stays byte-identical.
+        payload = view.to_dict()
+        stamp_bridge_freshness(payload, bridge_result)
+        return JSONResponse(payload)
 
     @app.get("/api/v1/quota")
     async def api_quota() -> JSONResponse:
@@ -2910,6 +2969,18 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
+        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
+        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
+        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
+        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
+        # before index options) on a real vendor pull. Build the classification map over
+        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
+        # composite uses; a selection whose underlying is somehow absent orders
+        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
+        # time (request thread), captured by the job closure below.
+        underlying_kinds = _underlying_kind_map(
+            _select_bulk_targets("index") + _select_bulk_targets("stock")
+        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -2959,6 +3030,9 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
+                    # grammars run the SAME strict steps 3-6 order as the composite.
+                    underlying_kinds=underlying_kinds,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -3085,6 +3159,10 @@ def build_app(
         # window is recomputed inside the spot phase from the SAME strings — this
         # call is the fail-fast guard.
         try:
+            # The strict post-step gate (DEC-PULL-SIX-STEP-ORDER-001): resolved
+            # ONCE, EAGERLY, at launch — a garbage BRUTEX_PIPELINE_STRICT_GATE
+            # value is a clean 400 here, never a mid-pull 500 on the job thread.
+            strict_gate = strict_gate_enabled()
             resolve_candle_range(
                 from_date=from_date,
                 to_date=to_date,
@@ -3139,6 +3217,7 @@ def build_app(
             target_source=target_source,
             years=years,
             dry_run=dry_run,
+            strict_gate=strict_gate,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -3212,7 +3291,10 @@ def build_app(
                         on_progress=partial(_metadata_progress_sync, _pull_job),
                     )
 
-            def _run_historical() -> CompositePullReport:
+            def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
+                # DEC-PULL-SIX-STEP-ORDER-001: the sequencer's spot+metadata
+                # cleanliness verdict rides into the composite → the Greeks seam,
+                # so the strict barrier can withhold the enrichment there.
                 # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the historical F&O phase pulls
                 # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
                 # "historical" label is REFINED to futures-vs-options by the live ledger
@@ -3257,6 +3339,7 @@ def build_app(
                         scope_end=fno_scope_end,
                         on_bars=_pull_job.add_bars,
                         on_ledger_sync=_hist_ledger_sync,
+                        prior_steps=prior_steps,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3669,6 +3752,7 @@ def build_app(
                         warm_futures_movers=_warm_futures_movers,
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
+                        strict_gate=strict_gate,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -5216,15 +5300,34 @@ def build_app(
         READ-ONLY; empty when no lake.
 
         DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
-        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
-        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        (``resolve_report_datasets`` → ``list_candle_datasets``) + the
         store reads run on a threadpool worker, NEVER the event loop.
-        Forensically proven (2026-07-04 run): this route ran the walk
+        Forensically proven (2026-07-04 run — a PRE-DEC-O1-CLAIMS-HONESTY-001
+        measurement of the then-UNFILTERED full ``bars/`` tree walk, ~66k
+        dirs on a materialised options lake): this route ran that walk
         SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
         froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
         requests burst-flushed on release). The store connection is built +
         used inside the worker so its RLock stays on one thread
         (DEC-DASHBOARD-FASTREAD-001).
+
+        DEC-O1-CLAIMS-HONESTY-001: the cold-miss discovery is now STRICTLY
+        CHEAPER than that measured unfiltered walk — FNO-pruned at walk
+        DESCENT (``exclude_segments={FNO}``: the F&O contract tree, the bulk
+        of the ~66k dirs above, is never entered) + interval-bounded
+        (``intervals`` = the one partition the basis reads), and a
+        manifest-served lake pays an O(manifest-rows) read, no walk at all.
+        The discovery result (the triples ONLY) is additionally memoised in
+        the COMMON generation-keyed ``_db_datasets_cache`` (the #896 pattern,
+        key ``preopen_datasets_key(basis)`` — one memo per basis, seeded by
+        the post-pull ``warm_discovery_memos``), so a repeat open within one
+        write generation is an O(1) handoff and the pruned cold-miss walk is
+        paid at most once per generation per basis. The pullability tagging below
+        is DELIBERATELY NOT cached: it reads the instrument master, which
+        moves on a keyless ``load-instruments`` WITHOUT a generation bump
+        (the ``master_revision`` trap) — the three store SELECTs are bounded
+        + cheap and stay live. Mid-pull the adaptive floor may serve a
+        bounded-stale triple list (logged ``movers_cache.stale_served``).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
@@ -5232,10 +5335,15 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
+        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
-            """Walk the lake + tag pullability off the event loop (threadpool)."""
-            triples = resolve_report_datasets(lake, basis=report_basis)
+            """Tag pullability off the event loop; discovery is generation-memoised."""
+            triples = _db_datasets_cache.get_or_compute(
+                preopen_datasets_key(report_basis),
+                generation=gen,
+                compute=lambda: resolve_report_datasets(lake, basis=report_basis),
+            )
             # Tag each report symbol with option-pullability so /reports can badge
             # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
             # the SAME store calls + single-source predicate the /universe explorer

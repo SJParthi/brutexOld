@@ -101,6 +101,40 @@ class TestDoctorReport:
         assert "❌" in text
         assert "FAIL" in text
 
+    def test_format_line_shape_pins_the_awk_field_contract(self) -> None:
+        """Pin the ``<glyph> <name> <status> <detail>`` check-line shape.
+
+        ``.github/workflows/doctor-daily.yml``'s envelope-honesty assert
+        step awk-parses every check line as ``$2 == name / $3 == status``
+        AND pins the exact check-row count between the two ``====`` rules
+        (``tests/redteam/test_redteam_doctor_daily.py`` renders its
+        fixture reports in this same shape). Any format change here —
+        column swap, an inserted timestamp column, a ``name: status``
+        style — must red THIS test on the offending PR itself, not
+        post-merge via doctor-daily's paths-filtered push smoke (which
+        would file a false 'doctor is RED' critical issue).
+        """
+        expected = [
+            ("alpha", "PASS"),
+            ("beta", "FAIL"),
+            ("gamma", "SKIP"),
+            ("delta", "WARN"),
+        ]
+        report = DoctorReport()
+        for name, status in expected:
+            report.add(CheckResult(name=name, status=status, detail="detail with spaces"))
+        lines = report.format().splitlines()
+        # Check rows sit strictly between the two ==== rules — the framing
+        # the workflow's added-check count pin relies on.
+        rules = [i for i, line in enumerate(lines) if line and set(line) == {"="}]
+        assert len(rules) == 2
+        check_lines = lines[rules[0] + 1 : rules[1]]
+        assert len(check_lines) == len(expected)
+        for line, (name, status) in zip(check_lines, expected, strict=True):
+            fields = line.split()
+            assert fields[1] == name, "awk $2 must be the check name"
+            assert fields[2] == status, "awk $3 must be the status"
+
 
 # ────────────────────────────────────────────────────────────────────────
 # check_audit_chain
@@ -313,10 +347,14 @@ class TestRunDoctor:
             lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
-        # 7 checks: audit_chain + runtime_file + audit_replay + derived_freshness
+        # 9 checks: audit_chain + runtime_file + audit_replay + derived_freshness
         # + lake_uniqueness (DEC-LAKE-HEAL-001) + wheel_freshness (R2-CC-G1)
         # + wheel_freshness_fno_math (DEC-FNOMATH-WHEEL-FRESHNESS-001)
-        assert len(report.checks) == 7
+        # + wheel_source_digest + wheel_source_digest_fno_math
+        #   (DEC-RUST-SOURCE-DIGEST-TWIN-001 — the ONE
+        #   BRUTEX_SKIP_WHEEL_FRESHNESS escape hatch covers all four wheel
+        #   stages, deliberately)
+        assert len(report.checks) == 9
         statuses = {c.name: c.status for c in report.checks}
         assert statuses == {
             "audit_chain": "SKIP",
@@ -326,6 +364,8 @@ class TestRunDoctor:
             "lake_uniqueness": "SKIP",
             "wheel_freshness": "SKIP",
             "wheel_freshness_fno_math": "SKIP",
+            "wheel_source_digest": "SKIP",
+            "wheel_source_digest_fno_math": "SKIP",
         }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:

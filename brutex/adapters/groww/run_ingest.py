@@ -71,6 +71,7 @@ from brutex.adapters.groww.errors import (
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.groww.vendor_floor import VendorFloorLearner
+from brutex.adapters.ingest_common import maybe_audit
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
@@ -317,22 +318,6 @@ class GrowwIngestReport:
         return any(f.auth_failure for f in self.failures)
 
 
-def _maybe_audit(
-    audit: AuditWriter | None,
-    action: str,
-    subject: str,
-    payload: dict[str, object],
-) -> None:
-    """Append one hash-chained audit line when an ``audit`` writer is wired.
-
-    A no-op when ``audit is None``. Called ONLY from the single controller thread
-    (the fan-out drain loop), so the not-thread-safe :class:`AuditWriter` is never
-    touched concurrently (Golden Rule #8).
-    """
-    if audit is not None:
-        audit.append(action=action, subject=subject, payload=payload)
-
-
 def run_groww_spot_ingest(
     adapter: MarketAdapter,
     sink: BarSink,
@@ -491,7 +476,25 @@ def run_groww_spot_ingest(
     pull_id = current_pull_id()
     # One breaker per PASS (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): resolved here — not
     # inside ingest_spot — so ALL pairs of this pass share ONE counter (a vendor
-    # soft-throttle hits every symbol) and a fresh pass/pull always starts clean.
+    # soft-throttle hits every pair of the pass) and a fresh pass/pull always starts
+    # clean. DISCLOSED envelope (DEC-PULL-SIX-STEP-ORDER-001 round-3 review, Golden
+    # Rule #10): under the six-step spot order the dashboard pull invokes this spine
+    # once per STEP GROUP (INDICES-SPOT, then STOCKS-SPOT) per until-clean round, so
+    # "this pass" spans ONE group — no longer the whole ~750-underlying universe the
+    # original rationale assumed. The ~4-series indices group (the ENGINE's
+    # NIFTY/BANKNIFTY/SENSEX + VIX) runs FIRST and ALONE: on an incremental pull its
+    # handful of outstanding windows sits below EVERY trip threshold
+    # (`EMPTY_BREAKER_CONSECUTIVE_LIMIT` / `EMPTY_BREAKER_MIN_OBSERVATIONS` /
+    # `EMPTY_BREAKER_FRACTION_MIN_SERIES`), so a vendor soft-throttle's clean
+    # empties there cannot trip a halt and the index windows can settle SKIPPED
+    # (`EMPTY_TERMINAL_THRESHOLD` after ~3 group-scoped rounds) before the
+    # ~746-series stocks group's breaker trips — remediation `brutex
+    # reopen-skipped`, the idempotent keep-first sink re-pulls them. Sharing one
+    # breaker across a phase's groups is a possible future tightening, deliberately
+    # NOT done here: an injected instance bypasses the per-pass resolve seam (the
+    # documented `empty_breaker=` contract, mirroring the F&O twin's reasoning), and
+    # the groups run SEQUENTIALLY to settlement, so cross-group evidence could never
+    # protect the FIRST (indices) group anyway. Full disclosure: MIGRATION.md #1527.
     breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
     # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
     # empty breaker above: all pairs share ONE per-partition defer accounting (a wedged
@@ -580,7 +583,7 @@ def run_groww_spot_ingest(
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
-    _maybe_audit(
+    maybe_audit(
         audit,
         "INGEST_RUN_START",
         f"pull:{pull_id}",
@@ -602,7 +605,7 @@ def run_groww_spot_ingest(
             if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[instrument.symbol_name, interval] = report
-            _maybe_audit(
+            maybe_audit(
                 audit,
                 "INGEST_PAIR_DONE",
                 f"{instrument.symbol_name}:{interval}",
@@ -660,7 +663,7 @@ def run_groww_spot_ingest(
                 auth_failure=auth_failed,
             )
         )
-        _maybe_audit(
+        maybe_audit(
             audit,
             "INGEST_PAIR_FAILED",
             f"{instrument.symbol_name}:{interval}",
@@ -707,7 +710,7 @@ def run_groww_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
-    _maybe_audit(
+    maybe_audit(
         audit,
         "INGEST_RUN_COMPLETE",
         f"pull:{pull_id}",
