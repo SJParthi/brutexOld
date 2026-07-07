@@ -125,8 +125,17 @@ def test_movers_pcr_renderer_never_touches_innerhtml() -> None:
 def test_movers_pcr_rendered_on_both_success_paths() -> None:
     """showPcr runs on the full-render path AND the skip-render-when-unchanged
     fast path (load() hides the panel at its top, so an identical repeat fetch
-    must restore it — otherwise a repeat ↻ Refresh would blank the panel)."""
+    must restore it — otherwise a repeat ↻ Refresh would blank the panel).
+
+    Counts CALL SITES only: the negative-lookbehind excludes the function
+    DEFINITION (``function showPcr(j) {``), so removing EITHER call site —
+    the unchanged-skip fast path or the full-render path — fails this test
+    (a bare ``count("showPcr(j)") >= 2`` would still pass at 2 with the
+    definition making up the shortfall; round-2 hostile-review fold).
+    """
     html = _render_movers_html()
-    assert html.count("showPcr(j)") >= 2, (
-        "showPcr must run on both the full render and the unchanged-skip path"
+    call_sites = re.findall(r"(?<!function )showPcr\(j\)", html)
+    assert len(call_sites) >= 2, (
+        "showPcr must be CALLED on both the full render and the unchanged-skip "
+        f"path (call sites found: {len(call_sites)})"
     )
