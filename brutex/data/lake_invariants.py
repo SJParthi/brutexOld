@@ -446,11 +446,12 @@ def log_lake_finding(finding: LakeFinding) -> None:
     convention), ``lake.invariant.option_intra_file_dup`` (``partition,
     physical_rows, unique_keys``), ``lake.invariant.option_foreign_month_rows``
     (``partition, series, foreign_rows, overlap_rows``). On BOTH option events
-    ``series`` is the RAW filesystem dir name AND the ``partition`` token
-    embeds it, so both fields ride via ``repr()`` (the #907 convention; the
-    partition field joined in the round-7 NIT fold — a control-char series
-    name must not inject into the rendered log line). The bars ``partition``
-    fields stay raw: they are catalogued coordinates
+    the ``partition`` token embeds the RAW filesystem series dir name, so it
+    rides via ``repr()`` (the #907 convention; joined in the round-7 NIT
+    fold — a control-char series name must not inject into the rendered log
+    line); the foreign event's separate ``series`` field is likewise
+    ``repr()``-wrapped (the dup event carries NO ``series`` field). The bars
+    ``partition`` fields stay raw: they are catalogued coordinates
     (``PartitionCoords.relpath()``), not vendor-derived dir names.
     """
     if isinstance(finding, IntraFileDup):

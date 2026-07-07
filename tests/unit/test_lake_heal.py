@@ -1901,6 +1901,60 @@ class TestOptionForeignHeal:
         assert len(errors) == 1
         assert errors[0]["finding"] == "OptionForeignMonthRows"
 
+    def test_option_partition_error_token_repr_guarded(self, tmp_path: Path) -> None:
+        """Round-9 fold regression: the option-finding token rides ``repr()``.
+
+        ``OptionParquetWriter._safe_segment`` rejects only ``/ \\ .. |`` and
+        does NOT strip control characters, and the series key derives from
+        vendor symbol data — so a series dir named with an embedded newline /
+        ANSI escape must not forge a fake line in a rendered structlog stream.
+        ``lake_heal.partition_error`` is precisely the attacker-triggerable
+        site (containment refusal / corrupt partition / lock timeout); the
+        observe-mode ``detail`` list rides the SAME ``_finding_token`` guard
+        (the #907 convention, matching the round-8 option-tree fold)."""
+        lake = tmp_path / "lake"
+        # A bare ESC (\x1bM, ANSI Reverse Index) — not \x1b[ — because "[" is
+        # a polars glob metacharacter and the SHARED read helpers use the
+        # default glob=True path (an unbalanced bracket is a scan_skip, a
+        # different, already-guarded failure mode).
+        evil_key = "NSE_FNO|13|WEEK\nFORGED log line \x1bM|CALL"
+        june, _july = _poison_option_foreign(lake, partition_key=evil_key)
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        with capture_logs() as observe_logs:
+            heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="observe",
+                now=_now,
+            )
+        (observe,) = _events(observe_logs, "lake_heal.observe_only")
+        detail = observe["detail"]
+        assert isinstance(detail, list)
+        assert detail == [repr(str(june))]  # repr()'d — quotes + escapes visible
+        assert "\n" not in detail[0]
+        assert "\x1b" not in detail[0]
+        june.write_bytes(b"not a parquet file at all")  # corrupt AFTER the scan
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 1
+        (error,) = _events(logs, "lake_heal.partition_error")
+        assert error["finding"] == "OptionForeignMonthRows"
+        partition = error["partition"]
+        assert isinstance(partition, str)
+        assert partition == repr(str(june))  # the raw path would embed \n + ESC
+        assert "\n" not in partition
+        assert "\x1b" not in partition
+
     def test_lake_write_halt_propagates_from_option_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

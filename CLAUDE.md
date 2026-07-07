@@ -178,7 +178,22 @@ NIT: the census OPTIONS row now folds by finding TYPE, never the
 "OPTIONS" label — a rogue bars finding whose `coords.segment` read
 "OPTIONS" (`PartitionCoords` is unvalidated; census input is any report)
 previously merged into the row and drove `clean` NEGATIVE; all 4 new
-regressions verified failing pre-fix.
+regressions verified failing pre-fix. ROUND 9 (refuter-confirmed MINOR +
+NIT): the healer's `lake_heal.partition_error` — the one
+attacker-TRIGGERABLE log site (it fires on the containment refusal, a
+corrupt partition, or a lock timeout) — still embedded the raw
+vendor-influenceable series dir name: `_finding_token` returned bare
+`str(finding.path)` for the option findings; the option token now rides
+`repr()` in `_finding_token` itself, closing BOTH consumer sites at once
+(the `partition_error` `partition=` field AND the observe-mode
+`lake_heal.observe_only` `detail=` list); bars tokens stay raw
+(catalogued coordinates) and the drift token keeps its pinned raw shape;
+the sibling `error=str(exc)` field keeps the accepted raw
+exception-message convention. Regression seeds a REAL-writer series
+named with an embedded newline + bare ESC and pins the repr'd fields on
+both sites. NIT: the `log_lake_finding` docstring no longer claims a
+`series` field on the option-DUP event (it emits none — only its
+repr()'d `partition` token).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -693,10 +708,27 @@ hostile-review pass._
   is ANY `LakeScanReport`, even though `parse_partition_path` rejects that segment at today's scan boundary) merged
   into the OPTIONS row — inflating dup/foreign/overlap and driving `clean` NEGATIVE (1 − 3 = −2 pre-fix); the
   OPTIONS accumulators are now TYPE-keyed (`isinstance`, dedicated sets), a rogue-segment bars finding lands in NO
-  segment row while staying counted in `findings_total`. Remaining
+  segment row while staying counted in `findings_total`. ROUND 9 (refuter-confirmed MINOR + NIT; the regression
+  verified failing pre-fix): (R9-1·MINOR, log-injection completeness) the healer's per-finding error handler
+  `lake_heal.partition_error` — precisely the attacker-TRIGGERABLE log site (it fires on the round-2
+  `OptionWriterError` containment refusal, a corrupt planted partition, or a `PartitionLockTimeout`) — still logged
+  `partition=_finding_token(finding)` RAW, and `_finding_token` returned bare `str(finding.path)` for the option
+  findings, whose path embeds the SAME vendor-influenceable `options/<series>/` dir name rounds 7-8 repr()-guarded
+  everywhere else (`_safe_segment` strips no control chars — a newline-named series dir forged a fake line in a
+  rendered structlog stream); `_finding_token` now returns `repr(str(finding.path))` for
+  `OptionForeignMonthRows`/`OptionIntraFileDup`, closing BOTH consumer sites in one place (the `partition_error`
+  `partition=` field AND the observe-mode `lake_heal.observe_only` `detail=` list); bars tokens stay RAW
+  (catalogued coordinates), the `LegacyKeyDrift` token keeps its pinned raw `exchange/segment/drifted_symbol`
+  shape, and the sibling `error=str(exc)` field keeps the repo-wide accepted raw-exception-message convention (per
+  the finding). Regression: a REAL-writer-seeded series keyed with an embedded newline + bare ESC (bracket-free —
+  `[` is a polars glob metachar, the round-8 honesty note), foreign-poisoned raw, corrupted AFTER the scan — the
+  `partition_error` `partition=` AND the observe `detail=` both pinned to the repr shape with no raw
+  `\n`/`\x1b`. (R9-2·NIT, docs honesty) the `log_lake_finding` docstring claimed BOTH option events carry a
+  repr()'d `series` field — the dup event emits NO `series` field (only its `partition` token is repr()'d);
+  reworded to the emitted truth. Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (447/152) + `option_parquet_writer.py`
-  (161/32) + `lake_heal.py` (594/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  (161/32) + `lake_heal.py` (596/168) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

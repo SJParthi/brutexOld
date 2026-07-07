@@ -445,9 +445,21 @@ def _affected_files(findings: Sequence[LakeFinding]) -> int:
 
 
 def _finding_token(finding: LakeFinding) -> str:
-    """A short human token naming one finding (error-log subject)."""
+    """A short human token naming one finding (error-log subject).
+
+    Option-tree tokens ride via ``repr()`` — ``finding.path`` embeds the RAW
+    vendor-derived ``options/<series>/`` dir name, and
+    ``OptionParquetWriter._safe_segment`` does not strip control characters,
+    so a newline/ANSI series name must not forge lines in a rendered
+    structlog stream (the #907 convention; the ``lake_heal.partition_error``
+    site is precisely the attacker-triggerable one — it fires on the
+    containment refusal / a corrupt partition / a lock timeout). The bars
+    tokens stay raw: catalogued coordinates, not vendor-derived dir names.
+    """
     if isinstance(finding, LegacyKeyDrift):
         return f"{finding.exchange}/{finding.segment}/{finding.drifted_symbol}"
+    if isinstance(finding, OptionForeignMonthRows | OptionIntraFileDup):
+        return repr(str(finding.path))
     return str(finding.path)
 
 
