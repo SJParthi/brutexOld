@@ -882,3 +882,180 @@ class TestMoversPage:
             resp = client.get(path)
             assert resp.status_code == 200, path
             assert 'href="/movers"' in resp.text, f"{path} is missing the Movers nav link"
+
+
+# ── prev-close calendar-contiguity goldens (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) ──
+#
+# Both arms of the EMIT-ON-FALSE byte-identity law + the ABSTAIN envelope:
+#   * CONTIGUOUS (across a weekend AND across a listed holiday) → the full row
+#     JSON is byte-identical to the pre-fix wire (NO additive key, no marker
+#     gating flag, no WARN);
+#   * NON-CONTIGUOUS (the confirmed-defect repro dates) → the served value is
+#     UNCHANGED (still the nearest-prior close — the fix makes the number
+#     HONEST, it does not change it) and the row gains exactly the two additive
+#     keys + ONE capped WARN;
+#   * ABSTAIN (pre-2020 snapshot) → value unchanged, keys omitted, no WARN.
+
+from structlog.testing import capture_logs  # noqa: E402
+
+#: The FROZEN additive-key vocabulary this decision may ever add to a movers
+#: row — a new key needs a conscious edit here (the key-NAME set pin).
+_CONTIGUITY_KEYS = frozenset(
+    {
+        "prev_close_session",
+        "prev_close_contiguous",
+        "oi_baseline_session",
+        "oi_baseline_contiguous",
+    }
+)
+
+#: The pre-fix spot row key set (the byte-identity vocabulary).
+_SPOT_ROW_KEYS = frozenset(
+    {
+        "symbol",
+        "name",
+        "exchange",
+        "segment",
+        "ltp",
+        "change",
+        "pct_change",
+        "value_cr",
+        "volume",
+        "bar_count",
+    }
+)
+
+
+class TestPrevCloseContiguityGoldens:
+    def test_contiguous_weekend_row_is_byte_identical_no_warn(self, tmp_path: Path) -> None:
+        # Fri 2025-09-26 close 24600 → Mon 2025-09-29 close 24650 (the CORRECT
+        # geometry of the repro: with Friday present the %change is ~0.2033%).
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar(day=date(2025, 9, 26), open_="24600", close="24600", volume=90),
+                _day_bar(day=date(2025, 9, 29), open_="24650", close="24650", volume=100),
+            ],
+        )
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2025-09-29", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # FULL-row byte identity: the exact pre-fix wire, computed independently.
+        assert row == {
+            "symbol": "NIFTY",
+            "name": "NIFTY",
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "ltp": "₹24,650.00",
+            "change": "₹50.00",
+            "pct_change": str(
+                (Decimal("24650.00") - Decimal("24600.00")) / Decimal("24600.00") * 100
+            ),
+            "value_cr": "0.25",
+            "volume": 100,
+            "bar_count": 1,
+        }
+        assert set(row) == _SPOT_ROW_KEYS  # the frozen pre-fix key-name set
+        assert set(row) & _CONTIGUITY_KEYS == set()  # EMIT-ON-FALSE: nothing added
+        # The correct %change is ~0.2033% (the honest sibling of the 2.2822% repro).
+        assert row["pct_change"].startswith("0.2032520325")
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_contiguous_across_a_listed_holiday_no_keys_no_warn(self, tmp_path: Path) -> None:
+        # Fri 2024-03-22 → Tue 2024-03-26 spans the weekend AND Holi (Mon
+        # 2024-03-25, HOLIDAYS_2024): still the immediately-preceding session.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar(day=date(2024, 3, 22), open_="22000", close="22000", volume=90),
+                _day_bar(day=date(2024, 3, 26), open_="22100", close="22100", volume=50),
+            ],
+        )
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-03-26", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        assert row["change"] == "₹100.00"
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_noncontiguous_repro_serves_same_value_stamped_plus_one_warn(
+        self, tmp_path: Path
+    ) -> None:
+        """The CONFIRMED-DEFECT repro (verified 2026-07-07 on the pre-fix code):
+        snapshot Mon 2025-09-29 with Wed 09-24 (24000) + Thu 09-25 (24100) in
+        the lake and the true prior session Fri 09-26 a HOLE — the baseline
+        silently read 24100 from TWO sessions back and the %change printed
+        2.2822% instead of the correct 0.2033%. The fix SERVES THE SAME VALUE
+        (never fabricates a Friday close) but stamps the row + warns ONCE."""
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar(day=date(2025, 9, 24), open_="24000", close="24000", volume=80),
+                _day_bar(day=date(2025, 9, 25), open_="24100", close="24100", volume=90),
+                # Fri 2025-09-26 is DELIBERATELY absent (the lake hole).
+                _day_bar(day=date(2025, 9, 29), open_="24650", close="24650", volume=100),
+            ],
+        )
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2025-09-29", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        # VALUE-EQUALITY: the served baseline/change are UNCHANGED by the fix.
+        assert row["ltp"] == "₹24,650.00"
+        assert row["change"] == "₹550.00"  # vs Thu 24100 — the nearest-prior close
+        assert row["pct_change"] == str(
+            (Decimal("24650.00") - Decimal("24100.00")) / Decimal("24100.00") * 100
+        )
+        assert row["pct_change"].startswith("2.2821576763")  # ≈ 2.2822% (the repro)
+        # The HONESTY stamp: exactly the two additive keys, strictly False.
+        assert row["prev_close_session"] == "2025-09-25"
+        assert row["prev_close_contiguous"] is False
+        assert set(row) - _SPOT_ROW_KEYS == {"prev_close_session", "prev_close_contiguous"}
+        # Exactly ONE capped WARN naming both sessions.
+        warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert len(warns) == 1
+        assert warns[0]["kind"] == "prev_close"
+        assert warns[0]["symbol"] == "NIFTY"
+        assert warns[0]["found_session"] == "2025-09-25"
+        assert warns[0]["expected_session"] == "2025-09-26"
+
+    def test_abstain_pre2020_snapshot_serves_value_no_keys_no_warn(self, tmp_path: Path) -> None:
+        # A pre-coverage snapshot day: the calendar ABSTAINS (contiguity
+        # unknown) — the value is served, the additive keys are OMITTED
+        # (EMIT-ON-FALSE), and no movers warning fires (one honest
+        # calendar.previous_session_coverage_exhausted is allowed).
+        # Two writes — the lake writer requires one (year, month) per call.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2019, 5, 31), open_="100", close="100", volume=10)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2019, 6, 3), open_="110", close="110", volume=10)],
+        )
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2019-06-03", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        assert row["change"] == "₹10.00"
+        assert row["pct_change"] == str(
+            (Decimal("110.00") - Decimal("100.00")) / Decimal("100.00") * 100
+        )
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []

@@ -26,13 +26,21 @@ from zoneinfo import ZoneInfo
 
 from brutex.dashboard.movers_futures import _prev_day_oi
 from brutex.dashboard.movers_snapshot import (
+    _NONCONTIGUOUS_WARN_CAP,
     _PREV_SESSION_MAX_BACK_DAYS,
+    PrevDayBaseline,
+    _calendar_exchange,
+    _NoncontiguousWarnState,
     _prev_day_close,
     _prior_session_last_from_minute,
     compute_spot_candidates,
+    prev_baseline_provenance,
+    resolve_prev_close,
+    warn_prev_baseline_noncontiguous,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from structlog.testing import capture_logs
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -107,7 +115,9 @@ class TestPriorSessionFromMinute:
         got = _prior_session_last_from_minute(
             tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
         )
-        assert got == (Decimal("101.50"), 1234)
+        # 3-tuple since DEC-MOVERS-PREVCLOSE-CONTIGUITY-001: the found IST date is
+        # APPENDED (index-append — [0]/[1] keep their historical meaning).
+        assert got == (Decimal("101.50"), 1234, date(2025, 8, 29))
 
     def test_skips_empty_days_back_to_prior_trading_day(self, tmp_path: Path) -> None:
         # day=Mon 2025-09-01 → walks back over Sun 08-31 + Sat 08-30 (no data) to Fri 08-29.
@@ -121,7 +131,8 @@ class TestPriorSessionFromMinute:
         got = _prior_session_last_from_minute(
             tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
         )
-        assert got == (Decimal("99.95"), 7)
+        # The appended date is the FOUND prior day (Fri 08-29), not day-1.
+        assert got == (Decimal("99.95"), 7, date(2025, 8, 29))
 
     def test_null_oi_returns_close_with_none_oi(self, tmp_path: Path) -> None:
         _write(
@@ -134,7 +145,7 @@ class TestPriorSessionFromMinute:
         got = _prior_session_last_from_minute(
             tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
         )
-        assert got == (Decimal("55.25"), None)
+        assert got == (Decimal("55.25"), None, date(2025, 8, 29))
 
     def test_beyond_back_bound_is_none(self, tmp_path: Path) -> None:
         # Only data far past the bound → not found within _PREV_SESSION_MAX_BACK_DAYS.
@@ -327,3 +338,197 @@ class TestSpotSegmentWhitelist:
         assert "NIFTY" in symbols
         assert _FUT not in symbols  # the future must NOT pollute the Spot tab
         assert all(s.instrument.segment in {"INDEX", "CASH"} for s in candidates.snapshots)
+
+
+# ── resolve_prev_close: the enriched baseline (value + found session date) ──
+
+
+class TestResolvePrevClose:
+    def test_1day_path_carries_the_prior_bars_ist_date(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[_day_bar(date(2025, 8, 29), close="24000.00", oi=None)],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", day=date(2025, 9, 1)
+        )
+        assert got == PrevDayBaseline(value=Decimal("24000.00"), found_date=date(2025, 8, 29))
+
+    def test_minute_fallback_carries_the_recovered_date(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FUT,
+            interval="1minute",
+            bars=[_min_bar(date(2025, 8, 29), hh=15, mm=29, close="250.75", oi=11)],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevDayBaseline(value=Decimal("250.75"), found_date=date(2025, 8, 29))
+
+    def test_neither_source_is_none_none(self, tmp_path: Path) -> None:
+        got = resolve_prev_close(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevDayBaseline(value=None, found_date=None)
+
+    def test_wrapper_value_seam_is_byte_identical(self, tmp_path: Path) -> None:
+        """_prev_day_close(...) == resolve_prev_close(...).value on every branch
+        (the DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 value-seam law)."""
+        # Branch 1: no data at all.
+        assert _prev_day_close(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+        ) == (
+            resolve_prev_close(
+                tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+            ).value
+        )
+        # Branch 2: minute fallback only.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FUT,
+            interval="1minute",
+            bars=[_min_bar(date(2025, 8, 29), hh=15, mm=29, close="250.75", oi=11)],
+        )
+        assert _prev_day_close(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+        ) == Decimal("250.75")
+        # Branch 3: 1day primary wins.
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=_FUT,
+            interval="1day",
+            bars=[_day_bar(date(2025, 8, 29), close="251.00", oi=None)],
+        )
+        assert _prev_day_close(
+            tmp_path, exchange="NSE", segment="FNO", symbol=_FUT, day=date(2025, 9, 1)
+        ) == Decimal("251.00")
+
+
+# ── prev_baseline_provenance: the four verdicts ─────────────────────────────
+
+
+class TestPrevBaselineProvenance:
+    def test_no_baseline_is_none_none(self) -> None:
+        assert prev_baseline_provenance(None, date(2025, 9, 29), exchange="NSE") == (None, None)
+
+    def test_contiguous_true_across_a_weekend(self) -> None:
+        # Snapshot Mon 2025-09-29; found Fri 2025-09-26 = the immediately-preceding
+        # NSE session → True.
+        got = prev_baseline_provenance(date(2025, 9, 26), date(2025, 9, 29), exchange="NSE")
+        assert got == ("2025-09-26", True)
+
+    def test_noncontiguous_false_on_a_lake_hole(self) -> None:
+        # The confirmed-defect repro geometry: found Thu 2025-09-25 while the
+        # calendar expects Fri 2025-09-26 → strictly False.
+        got = prev_baseline_provenance(date(2025, 9, 25), date(2025, 9, 29), exchange="NSE")
+        assert got == ("2025-09-25", False)
+
+    def test_out_of_coverage_abstains_to_null_verdict(self) -> None:
+        # A pre-2020 snapshot day: previous_trading_session abstains (None) →
+        # the session is still reported, contiguity honestly UNKNOWN (None) —
+        # the value keeps being served, no False, no marker.
+        got = prev_baseline_provenance(date(2019, 5, 31), date(2019, 6, 3), exchange=None)
+        assert got == ("2019-05-31", None)
+
+
+class TestCalendarExchange:
+    def test_known_exchanges_pass_through(self) -> None:
+        assert _calendar_exchange("NSE") == "NSE"
+        assert _calendar_exchange("BSE") == "BSE"
+
+    def test_unknown_lake_exchange_abstains_to_none(self) -> None:
+        # A nonstandard lake exchange dir must NEVER 500 the read-only screen
+        # via the calendar's eager ValueError — it abstains to the union.
+        assert _calendar_exchange("MCX") is None
+        assert _calendar_exchange("") is None
+
+
+# ── warn_prev_baseline_noncontiguous: cap + dedupe + reset seam ─────────────
+
+
+def _warn(state: _NoncontiguousWarnState, *, symbol: str, kind: str = "prev_close") -> None:
+    warn_prev_baseline_noncontiguous(
+        state,
+        kind=kind,
+        exchange="NSE",
+        segment="INDEX",
+        symbol=symbol,
+        snapshot_day=date(2025, 9, 29),
+        found_session="2025-09-25",
+        expected_session=date(2025, 9, 26),
+    )
+
+
+class TestNoncontiguousWarnCap:
+    def test_cap_emits_exactly_20_plus_one_suppressed_summary(self) -> None:
+        state = _NoncontiguousWarnState()
+        with capture_logs() as logs:
+            for i in range(_NONCONTIGUOUS_WARN_CAP + 5):  # 25 distinct symbols
+                _warn(state, symbol=f"SYM{i:03d}")
+        emitted = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        suppressed = [
+            e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous_suppressed"
+        ]
+        assert len(emitted) == _NONCONTIGUOUS_WARN_CAP == 20
+        assert len(suppressed) == 1  # the summary fires ONCE, not per drop
+        assert suppressed[0]["cap"] == _NONCONTIGUOUS_WARN_CAP
+        assert state.emitted == 20
+        assert state.suppressed == 5
+
+    def test_deduped_per_symbol_kind(self) -> None:
+        state = _NoncontiguousWarnState()
+        with capture_logs() as logs:
+            _warn(state, symbol="NIFTY", kind="prev_close")
+            _warn(state, symbol="NIFTY", kind="prev_close")  # dropped (dupe)
+            _warn(state, symbol="NIFTY", kind="oi")  # DIFFERENT kind → emits
+        emitted = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert len(emitted) == 2
+        assert {(e["symbol"], e["kind"]) for e in emitted} == {
+            ("NIFTY", "prev_close"),
+            ("NIFTY", "oi"),
+        }
+
+    def test_warn_payload_names_both_sessions(self) -> None:
+        state = _NoncontiguousWarnState()
+        with capture_logs() as logs:
+            _warn(state, symbol="NIFTY")
+        (event,) = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert event["found_session"] == "2025-09-25"
+        assert event["expected_session"] == "2025-09-26"
+        assert event["snapshot_day"] == "2025-09-29"
+
+    def test_null_expected_session_is_logged_as_none(self) -> None:
+        # Defensive: the emitter tolerates a None expected_session (typed
+        # optional) — logged as null, never a crash.
+        state = _NoncontiguousWarnState()
+        with capture_logs() as logs:
+            warn_prev_baseline_noncontiguous(
+                state,
+                kind="prev_close",
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                snapshot_day=date(2025, 9, 29),
+                found_session="2025-09-25",
+                expected_session=None,
+            )
+        (event,) = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert event["expected_session"] is None
+
+    def test_reset_seam_reopens_the_cap(self) -> None:
+        state = _NoncontiguousWarnState()
+        for i in range(_NONCONTIGUOUS_WARN_CAP + 1):
+            _warn(state, symbol=f"SYM{i:03d}")
+        assert state.suppressed == 1
+        state.reset()
+        assert (state.emitted, state.suppressed, state.seen) == (0, 0, set())
+        with capture_logs() as logs:
+            _warn(state, symbol="SYM000")  # previously-seen symbol emits again
+        assert [e["event"] for e in logs] == ["movers.prev_baseline_noncontiguous"]
