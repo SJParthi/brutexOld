@@ -14,6 +14,10 @@ build/
 # Virtual envs
 .venv/
 .venv*/
+# File/symlink form too — `.venv*/` matches directories only, which let a
+# session-local `.venv-gates` SYMLINK get swept into a commit (removed in the
+# .venv-gates cleanup); the non-slash pattern covers symlinks + plain files.
+.venv*
 .venv312/
 .devvenv/
 venv/
@@ -133,3 +137,7 @@ scratchpad/
 
 # Personal Claude Code local settings (not shared)
 .claude/settings.local.json
+
+# DEC-BENCH-ABS-BASELINE-001: runner-local absolute-bench fragments/candidate
+# working dir; committed baselines live ONLY under tests/bench/baselines/.
+abs-bench/

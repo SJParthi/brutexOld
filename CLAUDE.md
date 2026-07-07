@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1534 —
+_Last updated: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1535 —
 the test-apparatus debt pack: nine long-ledgered apparatus gaps closed as ONE
 change set, each landed fix-the-violation or measured-green: (a) a repo-wide
 doctest gate (pkgutil walk, measured 55-example teeth floor; the 3 broken
@@ -56,6 +56,46 @@ missing polars [data] extra, fixed a54c9a0a; re-run fully green, run
 28851211762 — step measured 20 s vs the generous 25-min timeout; VERDICT:
 KEEP CAP=8). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 scope/vocab/rate change; apparatus/CI/docs only.
+Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
+the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
+on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
+STANDARDS_100PCT.md §11 P1 "benchmark baseline JSON + `--benchmark-compare
+--fail` gate" backlog item, the deviation from the literal flag ledgered): NEW
+pure-stdlib zero-brutex-import `brutex/observability/bench_baseline.py` (the
+comparator/schema/capture/governance core + the ONE hardware-key format law) +
+`hardware_fingerprint`/`hardware_key` on the COMMON `config/hardware_envelope.py`
++ the env-gated 6-entry measurement suite (`tests/bench/test_absolute_baseline.py`
+over `_abs_baseline_registry.py`, house best-of-N-MIN idiom) + committed
+baselines at `tests/bench/baselines/<hardware_key>.json` (`tolerance_pct`
+structurally capped so a 2x slowdown can NEVER pass any governed config; a
+MORE-than-4x speedup FAILS as SUSPICIOUS_SPEEDUP, more-than-2x WARNs "baseline
+stale") + `scripts/ci/bench_baseline_gate.py` (validate/compare/capture/govern/
+key; exit 0 ok-or-LOUD-abstain / 1 numeric with ONE bounded fresh-process
+re-measure / 2 structural never-retried). bench-m4pro gains
+measure→compare→capture→artifact + a GitHub-hosted `bless-baseline` job (the
+ONLY contents/PR-write holder — the candidate travels runner→artifact→verbatim
+API commit with no edit surface); ci.yml's REQUIRED `bench` job gains schema
+`validate` on every run + the `govern` entry-cell diff gate on PRs with LIVE
+`gh api` provenance-run verification pinned to THIS repository. GOVERNANCE LAW
+per cell class: a MODIFIED cell needs a NEW ledgered DEC id + the literal entry
+key + the literal value token + a FRESH live-verified run; an ADDED cell rides
+the standing bootstrap authorization; a REMOVED cell / top-level change needs a
+ledgered note; a DELETED file needs its filename in the added lines; NO
+override env. BOOTSTRAP: ZERO measured numbers ship (`tests/bench/baselines/`
+holds only README.md); the first baseline is measured by the REAL M4 Pro and
+auto-blessed via a bot PR the operator nudges + merges (GITHUB_TOKEN PRs do not
+trigger CI; NO PAT). HONEST: bench-m4pro stays NON-required (a regression is
+caught post-merge as a red run + issue, not a merge blocker); the gate is
+dormant until the runner is online AND the first bless merges; the gate catches
+strictly-GREATER-than-tolerance drift ONLY (strict `>` boundary law — a
+regression exactly AT tolerance passes, test-pinned) — at-or-below-tolerance
+drift accumulates until a ledgered
+re-bless (the 1.1x ratio tiers + the single-canary-op 50 M/s floor are
+complements, NOT a sub-tolerance net); a STANDING red — numeric
+SUSPICIOUS_SPEEDUP or STRUCTURAL alike — dies at compare before a dispatch
+capture can run, recovery is removal-first (`docs/runbooks/bench-baseline.md`).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+`bench_baseline.py` + the touched `hardware_envelope.py` 100% line+branch).
 Earlier: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
 mid-pull ledger-read O(page) discipline restored: (a) the /coverage/windows +
 pull-progress DuckDB fast paths now FOLD pending window-ledger deltas
@@ -698,7 +738,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
-  MIGRATION.md #1534** — the test-apparatus debt pack: repo-wide doctest gate (measured
+  MIGRATION.md #1535** — the test-apparatus debt pack: repo-wide doctest gate (measured
   55-example floor; the 3 broken tf_resampler examples fixed — docstring-only, the sole
   brutex/ source edit) · EXPLICIT hypothesis `ci` profile on CI (GHA was already implicitly
   derandomized by hypothesis's built-in auto-CI profile; the real flip: no-env scheduled arms
@@ -713,6 +753,28 @@ hostile-review pass._
   20 s vs the generous 25-min timeout; VERDICT: KEEP CAP=8). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; apparatus/CI/docs only; ruff/ruff-format/mypy --strict/pyright at
   the pre-change baseline).
+  Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
+  MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
+  gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
+  `brutex/observability/bench_baseline.py` (schema/comparator/capture/govern + the ONE
+  hardware-key format law) + `hardware_envelope.py` gains `cpu_model_string`/`HardwareFingerprint`/
+  `hardware_key` (the BRUTEX_* sizing overrides provably cannot move the fingerprint;
+  `BRUTEX_BENCH_BASELINE_KEY` is the one explicit, slug-validated key override) + the 6-entry measurement registry
+  (`tests/bench/_abs_baseline_registry.py`, best-of-N-MIN per DEC-CANARY-MINTIME-001) + per-hardware
+  baselines at `tests/bench/baselines/<key>.json` (`tolerance_pct` capped `[0,100)` + its failure
+  multiplier `1 + t/100` float-exactly < 2.0 — a 2x slowdown can NEVER pass; strict-`>` boundary;
+  > 4x speedup FAILS) + `scripts/ci/bench_baseline_gate.py`
+  (validate/compare/capture/govern/key; 0 ok-or-LOUD-abstain / 1 numeric-retry-once / 2
+  structural-never-retried). bench-m4pro gains measure→compare→capture→artifact + the GitHub-hosted
+  `bless-baseline` bot-PR job (the ONLY contents/PR-write holder — the self-hosted runner's inherited
+  token is issues:write only, for its alert steps; main-ref + schedule/dispatch pinned);
+  ci.yml's required `bench` job gains the always-on schema validate + the PR governance diff gate
+  (a blessed-cell bump needs a NEW human-written ledger entry quoting the entry key + literal value
+  token + a LIVE-verified fresh run). BOOTSTRAP fabrication-free: ZERO numbers ship — the first
+  baseline is measured on the real M4 Pro and blessed via one operator nudge+merge; until then
+  compare ABSTAINS green-but-loud. Ratio tiers + the 50 M/s floor UNTOUCHED (complements). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; new brutex modules 100%
+  line+branch; ruff/ruff-format/mypy --strict/pyright clean).
   Earlier: `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
   ledger-read O(page) discipline restored across (a)-(f): (a) the /coverage/windows + pull-progress DuckDB fast paths
   fold pending window-ledger deltas latest-wins IN SQL via NEW `lake_read.dedup_qualify_latest_sql`/
