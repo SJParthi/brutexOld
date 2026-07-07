@@ -1166,6 +1166,50 @@ class TestClockGapSleepWake:
         ctl.on_success()  # 0 s since the re-based step → no recovery from the gap alone
         assert ctl.current_rps == FLOOR_RPS
 
+    def test_smooth_gate_gap_capture_prevents_stale_baseline_stall(self) -> None:
+        """Kills the gate-0 ``gap_evt = self._handle_clock_gap_locked(now)`` → ``= None`` mutant.
+
+        The mutant DELETES the smooth gate's own gap handling (full-run
+        survivor 188): after a large BACKWARD clock glitch the gate then
+        computes its wait from the FUTURE-stamped ``_last_issue_ts`` baseline
+        and sleeps ~600 s before admitting — the exact stall the gate-seam gap
+        capture exists to prevent. The correct path detects the gap FIRST
+        (re-bases the baseline to ``-inf``) and admits with only sub-second
+        bucket pacing. It survived before because ``_maybe_log_snapshot``
+        re-emits ``rate.clock_gap`` LATER, satisfying any event-presence
+        assertion — the SLEEP behaviour is the discriminating observable
+        (DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        ctl, clock, slept = _smooth(ceiling_rps=CEILING_RPS)
+        ctl.pace()  # stamps _last_issue_ts = 1000.0; bucket → clock 1000.2
+        slept.clear()
+        clock.advance(-(2 * CLOCK_GAP_THRESHOLD_S))  # backward glitch → 400.2
+        ctl.pace()
+        # Correct: gate 0 gap-resets (baseline → -inf) → zero smooth wait; the
+        # only sleeps are the bucket's ≤ 1/rps pacing (bounded by its acquire
+        # cap on the backward clock). Mutant: one ~600 s smooth-gate sleep.
+        assert all(s < 1.0 for s in slept), f"smooth gate slept on a stale baseline: {slept}"
+
+    def test_governor_gate_gap_capture_prevents_stale_window_stall(self) -> None:
+        """Kills the gate-1 ``gov_gap_evt = self._handle_clock_gap_locked(now)`` → ``= None`` mutant.
+
+        The governor-seam twin (full-run survivor 209): the mutant deletes the
+        governor loop's own gap handling, so after a large backward glitch the
+        full rolling window holds FUTURE-stamped issues that never age out and
+        the governor sleeps ~660 s before a slot frees. The correct path
+        gap-resets the window at the seam and admits immediately
+        (DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        ctl, clock, slept = _governed(2)
+        ctl.pace()  # issue reserved @1000.0
+        ctl.pace()  # issue reserved @1000.2 → window FULL at the cap
+        slept.clear()
+        clock.advance(-(2 * CLOCK_GAP_THRESHOLD_S))  # backward glitch → 400.4
+        ctl.pace()
+        assert all(s < 1.0 for s in slept), f"governor slept on a stale window: {slept}"
+        # The gap reset cleared the stale window; the fresh issue is the only one.
+        assert list(ctl._issues) == [pytest.approx(400.4)]
+
     def test_threshold_is_above_every_operational_window(self) -> None:
         # The gap threshold sits comfortably ABOVE every normal operational gap (the
         # longest of which is one AIMD recovery window) so genuine pacing never
@@ -1971,6 +2015,54 @@ class TestMutationBoundaryPins:
         assert 0.0 not in slept  # the break-site mutant sleeps 0.0 before re-checking
         assert ctl._last_issue_ts == 1000.125  # the stamp-site mutant never re-stamps
 
+    def test_smooth_fractional_wait_never_stamps_before_admission(self) -> None:
+        """Kills the gate-0 STAMP-site ``wait <= 0.0`` → ``<= 1.0`` mutant (full-run survivor 191).
+
+        With a FRACTIONAL wait (0 < wait ≤ 1) the gate must sleep once and
+        stamp ONLY at admission. The mutant stamps on every re-check pass
+        (moving the spacing baseline while still waiting), so the wait never
+        reaches ≤ 0 and the loop burns to ``_SMOOTH_LOOP_CAP`` — dozens of
+        extra sleeps. Pinning the exact sleep sequence + the admission stamp
+        kills it (and the ``<= 0.0`` → ``< 0.0`` no-stamp flip at the same
+        site, which would break WITHOUT stamping).
+        """
+        # Dyadic values throughout (1/8 s interval) so every float below is
+        # EXACT and the sleep-advance lands precisely on the admission instant.
+        ctl, clock, slept = _smooth(ceiling_rps=8.0)
+        ctl.pace()  # stamps @1000.0; bucket sleeps 0.125 → clock 1000.125
+        slept.clear()
+        clock.t = 1000.0625  # a jitter re-entry → smooth wait = 0.0625 (fractional)
+        ctl.pace()
+        # Exactly ONE 0.0625 s smooth sleep (to the admission instant 1000.125),
+        # then the bucket's own 0.125 s token wait — nothing else.
+        assert slept == [0.0625, 0.125]
+        assert ctl._last_issue_ts == 1000.125  # stamped at admission only
+
+    def test_governor_fractional_wait_reserves_only_at_admission(self) -> None:
+        """Kills the gate-1 BREAK-site ``gov_wait <= 0.0`` → ``<= 1.0`` mutant (full-run survivor 216).
+
+        A rate-safety boundary: with a fractional governor wait (0 < wait ≤ 1)
+        the mutant BREAKS out of the governor loop WITHOUT reserving the slot —
+        the issue proceeds unrecorded, so the rolling window under-counts and a
+        later caller can overshoot the HARD per-minute cap. The correct path
+        sleeps the fractional wait, evicts the aged slot, and reserves at
+        admission. (The RESERVE-site twin at the same boundary would reserve
+        into a FULL window — overshooting — and then still sleep a whole
+        window; the exact sleep-sequence pin kills both.)
+        """
+        ctl, clock, slept = _governed(1)
+        ctl.pace()  # slot reserved @1000.0; bucket → clock 1000.2
+        slept.clear()
+        # Dyadic offset (0.25) so the sleep-advance lands EXACTLY on the
+        # age-out instant 1060.0 — every float below is exact.
+        clock.t = 1000.0 + PER_MIN_WINDOW - 0.25  # 1059.75 → gov_wait = 0.25
+        ctl.pace()
+        # Exactly ONE 0.25 s governor sleep (to the age-out instant 1060.0); the
+        # bucket has long since refilled, so no token wait follows.
+        assert slept == [0.25]
+        # The stale slot aged out and the fresh issue was RESERVED at admission.
+        assert list(ctl._issues) == [1060.0]
+
     def test_hit_at_exact_window_age_still_counts_toward_stepdown(self) -> None:
         """Kills mutant 224 (``on_rate_limit`` evict ``<`` → ``<=``).
 
@@ -2128,6 +2220,40 @@ class TestMutationLiteralPins:
         ctl = _controller(_Clock())
         assert ctl._last_step == 1000.0
 
+    def test_bucket_downshift_pinned_at_half_the_start_rate(self) -> None:
+        """Kills the ``downshift_rps=self._rps / 2.0`` value mutant (``/ 3.0``).
+
+        The value IS directly observable on the constructed bucket, so the
+        prior "unobservable by design" pragma was unnecessary AND its proof
+        false — the ``* 2.0`` operator half already dies at construction
+        (``AdaptiveTokenBucket.__post_init__`` requires downshift < initial);
+        this pin closes the value half (DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        ctl = _controller(_Clock())
+        assert ctl._bucket.initial_rps == CEILING_RPS
+        assert ctl._bucket.downshift_rps == CEILING_RPS / 2.0
+
+    def test_issue_ring_head_starts_and_gap_resets_at_slot_zero(self) -> None:
+        """Kills the ``self._issue_head = 0`` → ``= 1`` mutants at BOTH sites.
+
+        The head slot is behaviourally arbitrary while the ring is all-zero,
+        but the documented "starts at slot 0 / gap-reset re-bases to slot 0"
+        contract is pinned so the mutants are observable instead of pragma'd
+        (the #624 observable-over-pragma idiom; DEC-MUTATION-RUNTIME-003
+        fixer round — the crash-class ``= None`` halves die elsewhere).
+        """
+        clock = _Clock()
+        ctl = _controller(clock)
+        assert ctl._issue_head == 0  # construction site
+        with ctl._lock:
+            ctl._record_issue_locked(1000.0)  # seed the ring at second 1000
+            ctl._record_issue_locked(1005.0)  # advance the head 5 slots
+        assert ctl._issue_head == 5
+        clock.advance(CLOCK_GAP_THRESHOLD_S + 1.0)
+        ctl.on_success()  # trips the sleep/wake gap handler → full ring reset
+        assert ctl._issue_head == 0  # gap-reset site
+        assert ctl._issue_newest_sec is None
+
     def test_smooth_wait_overdue_is_exactly_zero(self) -> None:
         """Kills the rephrased ``max(wait, 0.0)`` line's ``0.0 → 1.0`` mutant.
 
@@ -2159,9 +2285,14 @@ class TestPendingLogLevelSlotPins:
         """Kills the ``_PendingLog = tuple[...] → None`` alias mutant.
 
         Under PEP 563 the alias is never evaluated inside an annotation, so
-        the module-level alias OBJECT is pinned directly instead.
+        the module-level alias OBJECT is pinned directly instead. The slot
+        alias ``_PendingLogSlot`` (DEC-MUTATION-RUNTIME-003 fixer round) is
+        pinned the same way: its ``= None`` mutant never evaluates through a
+        PEP-563 annotation, and its ``|`` → ``&`` mutant already dies at
+        import (``TypeError`` — a ``GenericAlias`` does not support ``&``).
         """
         assert rate_common._PendingLog == tuple[str, str, dict[str, object]]
+        assert rate_common._PendingLogSlot == (rate_common._PendingLog | None)
 
     def test_clock_gap_pending_tuple_is_byte_exact_including_level(self) -> None:
         """Kills the clock-gap ``"warning" → "XXwarningXX"`` level-slot mutant."""
@@ -2179,7 +2310,13 @@ class TestPendingLogLevelSlotPins:
     def test_smooth_latch_pending_tuple_level_slot_is_warning(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Kills the latch ``"warning" → "XXwarningXX"`` level-slot mutant."""
+        """Kills the latch ``"warning" → "XXwarningXX"`` level-slot mutant.
+
+        The tuple is pinned BYTE-EXACT — including the full fields dict — so
+        every field KEY mutant dies too (the full-run survivor 183 was the
+        ``"scan_seconds"`` key XX-wrapped: the old loose per-field asserts
+        never read that key — DEC-MUTATION-RUNTIME-003 fixer round).
+        """
         captured: list[tuple[str, str, dict[str, object]]] = []
 
         def _capture(*events: tuple[str, str, dict[str, object]] | None) -> None:
@@ -2190,9 +2327,17 @@ class TestPendingLogLevelSlotPins:
         _seed_burst(ctl, second=int(clock.t), count=9)  # 9 > 8.0 — burst evidence
         ctl.on_rate_limit()  # latches → latch_evt rides the same flush
         latch = [e for e in captured if e[1] == "rate.smooth_pacing_latched"]
-        assert len(latch) == 1
-        assert latch[0][0] == "warning"
-        assert latch[0][2]["current_rps"] == 8.0
+        assert latch == [
+            (
+                "warning",
+                "rate.smooth_pacing_latched",
+                {
+                    "bucket_counts": [0, 0, 9],  # trailing 3 s, oldest → newest
+                    "current_rps": 8.0,
+                    "scan_seconds": 3,
+                },
+            )
+        ]
 
     def test_flush_fed_pending_tuples_are_byte_exact_including_levels(
         self, monkeypatch: pytest.MonkeyPatch
