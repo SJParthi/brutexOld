@@ -4295,7 +4295,9 @@ def cmd_sweep(
         print(f"[brutex] {scope.override_warning()}")
         structlog.get_logger("brutex.sweep").warning(
             "sweep.scope_override",
-            symbols=[verdict.symbol for verdict in scope.refused],
+            # repr(): an operator-typed symbol may embed \n/ESC — never let a
+            # hostile name forge log lines (#907/#919 repr-naming convention).
+            symbols=[repr(verdict.symbol) for verdict in scope.refused],
             exchange=exchange,
             segment=segment,
         )
@@ -4559,7 +4561,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {scope.override_warning()}")
         structlog.get_logger("brutex.sweep").warning(
             "sweep.scope_override",
-            symbols=[verdict.symbol for verdict in scope.refused],
+            # repr(): an operator-typed symbol may embed \n/ESC — never let a
+            # hostile name forge log lines (#907/#919 repr-naming convention).
+            symbols=[repr(verdict.symbol) for verdict in scope.refused],
             exchange=exchange,
             segment=segment,
         )
@@ -5658,8 +5662,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         SweepVerifyError,
         compare_recount,
         plan_expected_stores,
-        recorded_context_from_audit,
-        recorded_roll_schedules_from_audit,
+        recorded_audit_facts,
         verify_identity,
         verify_structural,
     )
@@ -5676,9 +5679,13 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     reports = [structural]
 
     # The recorded context (review condition 2a): the tree describes itself
-    # via its audit chain; explicit flags override; NEVER the operator's memory.
+    # via its audit chain; explicit flags override; NEVER the operator's
+    # memory. ONE shared audit parse derives BOTH the context and the F16
+    # recorded roll schedules (review round-4 finding 5 — a production
+    # futures audit holds one SWEEP_START per grid tuple, so the prior
+    # two-reader shape parsed thousands of lines twice per invocation).
     try:
-        recorded = recorded_context_from_audit(out_root / "audit" / "sweep-all.jsonl")
+        recorded, recorded_schedules = recorded_audit_facts(out_root / "audit" / "sweep-all.jsonl")
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -5725,7 +5732,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             print(f"[brutex] {scope.override_warning()}")
             structlog.get_logger("brutex.sweep").warning(
                 "sweep.scope_override",
-                symbols=[verdict.symbol for verdict in scope.refused],
+                # repr(): an operator-typed symbol may embed \n/ESC — never let a
+                # hostile name forge log lines (#907/#919 repr-naming convention).
+                symbols=[repr(verdict.symbol) for verdict in scope.refused],
                 exchange=exchange,
                 segment=segment,
             )
@@ -5818,14 +5827,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # ADR-0012 futures trees are SELF-DESCRIBING (DEC-NIFTY-FUTURES-SWEEP-
     # LAUNCH-001 F16): each futures run's SWEEP_START params carries its
     # roll_schedule, so Tier 2 re-derives futures row identities from the
-    # tree's OWN recorded schedule — never the operator's memory.
-    try:
-        recorded_schedules = recorded_roll_schedules_from_audit(
-            out_root / "audit" / "sweep-all.jsonl"
-        )
-    except SweepVerifyError as exc:
-        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
+    # tree's OWN recorded schedule — never the operator's memory
+    # (`recorded_schedules` from the ONE shared audit parse above).
     try:
         identity = verify_identity(
             out_root,
@@ -5938,16 +5941,25 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     "futures contract set changed since the recorded run"
                 )
             elif recorded_schedule is None:
-                # Evidence honesty (review round-1 finding 23): with the audit
-                # absent/rotated there is NO recorded schedule to compare — say
-                # so explicitly instead of leaving only a bare snapshot diff
-                # (informational, not a context mismatch: the snapshot-hash +
-                # sha/indicator gates above still own the refusal ladder).
-                print(
-                    f"[brutex] sweep-verify --recount: no RECORDED roll_schedule for "
+                # Verdict honesty (review round-4 finding 9, upgrading round-1
+                # finding 23's informational note): the roll_schedule IS
+                # recorded context for a futures tree — it enters
+                # canonical_trade_params, hence every futures row's run_id —
+                # and with the audit absent/rotated it CANNOT be matched even
+                # when the snapshot is byte-identical (the schedule can drift
+                # via a SESSIONLESS successor contract while the snapshot
+                # stays unchanged — the resume gate's own drift class). A
+                # shadow re-sweep under the FRESH schedule would byte-diverge
+                # from a healthy tree and condemn it verdict-grade CORRUPT
+                # (with a heal plan). Treat it as a context MISMATCH so
+                # divergence degrades to INCONCLUSIVE — the Tier-3 twin of
+                # Tier-2's honest `row_identity_underivable` WARN.
+                mismatches.append(
+                    f"roll_schedule[{fut_symbol}]: no RECORDED roll_schedule for "
                     f"{fut_symbol} (audit/sweep-all.jsonl absent or rotated) — recount "
-                    f"identities derive from the CURRENT lake's schedule "
-                    f"{list(derived_schedule or ())!r} only"
+                    f"identities would derive from the CURRENT lake's schedule "
+                    f"{list(derived_schedule or ())!r} only, which cannot be verified "
+                    "against the schedule the tree's rows were minted under"
                 )
         context_match = not mismatches
         if mismatches:

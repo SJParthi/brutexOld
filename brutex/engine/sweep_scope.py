@@ -122,7 +122,10 @@ class ScopeReport:
             f"sweep REFUSED: {len(self.refused)} of the requested symbol(s) under "
             f"{self.exchange}/{self.segment} are outside the brute-force engine scope:"
         ]
-        lines.extend(f"  - {verdict.symbol}: {verdict.reason}" for verdict in self.refused)
+        # {verdict.symbol!r}: the name is operator-typed and echoed to stderr —
+        # repr-quote so an embedded \n/ESC can never forge a '[brutex]' line or
+        # inject ANSI (round-4 finding 3; #907/#919 repr-naming convention).
+        lines.extend(f"  - {verdict.symbol!r}: {verdict.reason}" for verdict in self.refused)
         lines.append(
             "The engine sweeps ONLY NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) "
             "plus the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
@@ -136,7 +139,8 @@ class ScopeReport:
 
     def override_warning(self) -> str:
         """Render the loud WARNING printed when an override lets symbols through."""
-        names = ", ".join(verdict.symbol for verdict in self.refused)
+        # repr-quoted for the same stderr/log-forging reason as refusal_message.
+        names = ", ".join(repr(verdict.symbol) for verdict in self.refused)
         return (
             f"WARNING: --allow-out-of-scope OVERRIDE — sweeping {len(self.refused)} "
             f"out-of-engine-scope symbol(s) under {self.exchange}/{self.segment}: "

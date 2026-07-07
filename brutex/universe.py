@@ -481,7 +481,10 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             allowed=False,
             tier="refused",
             reason=(
-                f"{symbol} is the NIFTY-futures series alias but "
+                # {symbol!r} in every refusal reason: the name is operator-typed
+                # (may embed \n/ESC) and the reason is echoed to stderr + logs —
+                # never let it forge lines (#907/#919 repr-naming convention).
+                f"{symbol!r} is the NIFTY-futures series alias but "
                 f"{exchange}/{segment} is not its lake coordinate — expected "
                 f"{_NIFTY_FUTURES_EXCHANGE}/{_ENGINE_SWEEP_FNO_SEGMENT} (ADR-0012)"
             ),
@@ -491,7 +494,7 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             allowed=False,
             tier="refused",
             reason=(
-                f"{symbol} is an engine index but {exchange}/{segment} is not its "
+                f"{symbol!r} is an engine index but {exchange}/{segment} is not its "
                 f"lake coordinate — expected {_expected_spot_coordinates(symbol)} "
                 "(CLAUDE.md §2 Rule 3)"
             ),
@@ -541,7 +544,10 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
         allowed=False,
         tier="refused",
         reason=(
-            f"{symbol} is outside the brute-force engine scope — the engine sweeps "
+            # {symbol!r}: this generic branch is the one reached by an ARBITRARY
+            # operator-typed name (\n/ESC included) — repr-quote it so the
+            # echoed refusal can never forge stderr/log lines (round-4 finding 3).
+            f"{symbol!r} is outside the brute-force engine scope — the engine sweeps "
             "only NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) plus the "
             f"NIFTY-futures series alias {NIFTY_FUTURES_SERIES_SYMBOL!r} (ADR-0012); "
             "F&O stocks, NTM constituents and options are lake/REFERENCE_ONLY"

@@ -1133,6 +1133,18 @@ class TestClassifyEngineSweepTarget:
         # spot indexes (DEC-FUTURES-ADDRESSING-PIN-001 message reword).
         assert "'NSE-NIFTY-FUT'" in verdict.reason
 
+    def test_hostile_symbol_is_repr_quoted_never_raw(self) -> None:
+        # Round-4 finding 3: an operator-typed symbol embedding \n + ESC is
+        # echoed into stderr/log refusal messages — repr-quoting (the
+        # #907/#919 convention) keeps a forged '[brutex]' line / ANSI
+        # injection out of the rendered reason.
+        hostile = "EVIL\n[brutex] FORGED line \x1b[31m"
+        verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol=hostile)
+        assert verdict.allowed is False
+        assert repr(hostile) in verdict.reason  # escaped, quoted form
+        assert "\n" not in verdict.reason  # no RAW newline (repr renders '\\n')
+        assert "\x1b" not in verdict.reason  # no RAW ESC byte
+
     @pytest.mark.parametrize(
         "symbol",
         [

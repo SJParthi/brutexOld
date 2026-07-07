@@ -120,9 +120,10 @@ class TestRefusalCarriesTheCorpActionRationale:
         err = capsys.readouterr().err
         assert _PHRASE in err
         assert "ADR-0016" in err
-        # Only the offender is listed as refused (NIFTY passes the law).
-        assert "- RELIANCE:" in err
-        assert "- NIFTY:" not in err
+        # Only the offender is listed as refused (NIFTY passes the law);
+        # repr-quoted since round-4 finding 3 (stderr-forging guard).
+        assert "- 'RELIANCE':" in err
+        assert "- 'NIFTY':" not in err
 
     def test_in_scope_symbol_proceeds_to_no_bars_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

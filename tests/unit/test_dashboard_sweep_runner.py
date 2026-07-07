@@ -317,7 +317,8 @@ def test_out_of_scope_refusal_carries_the_corp_action_rationale() -> None:
     assert "DEC-CORP-ACTION-GATE-001" in message
     assert "DEC-ENGINE-SCOPE-GUARD-001" in message
     assert "ADR-0016" in message
-    assert "- RELIANCE:" in message
+    # repr-quoted (round-4 finding 3)
+    assert "- 'RELIANCE':" in message
     assert "- NIFTY:" not in message
 
 

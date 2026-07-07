@@ -498,15 +498,21 @@ def test_recount_names_a_recorded_vs_rederived_schedule_mismatch(
     assert "recount REFUSED" in out
 
 
-def test_recount_without_audit_notes_the_absent_recorded_schedule(
+def test_recount_without_audit_refuses_verdict_grade_and_names_the_absent_schedule(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Round-2 finding 6(b/c): the recount's absent-recorded-schedule
-    informational note (round-1 finding 23's fix) is actually executed — an
-    audit-rotated futures tree recounted under explicit context overrides says
-    OUT LOUD that identities derive from the CURRENT lake's schedule only,
-    instead of leaving a bare snapshot diff."""
-    from brutex.cli import cmd_sweep_verify
+    """Round-4 finding 9 (upgrading round-1 finding 23 / round-2 finding 6b's
+    informational note): a futures tree whose audit is absent/rotated has NO
+    recorded roll_schedule to match — and the schedule IS recorded context
+    (it enters canonical_trade_params, hence every futures run_id) and can
+    drift while the snapshot stays byte-identical (a SESSIONLESS successor
+    contract). Pre-fix the missing schedule was only PRINTED as informational,
+    `context_match` stayed True, and a shadow re-sweep under a drifted fresh
+    schedule condemned a healthy tree as verdict-grade CORRUPT (heal plan
+    included). Now it is a context MISMATCH: the recount REFUSES (or degrades
+    to INCONCLUSIVE under --allow-context-mismatch), still naming the absent
+    recorded schedule + the derived one OUT LOUD."""
+    from brutex.cli import EXIT_VERIFY_INCONCLUSIVE, cmd_sweep_verify
     from brutex.engine.sweep_verify import recorded_context_from_audit
 
     lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
@@ -526,10 +532,15 @@ def test_recount_without_audit_notes_the_absent_recorded_schedule(
     )
     rc = cmd_sweep_verify(**kwargs)
     out = capsys.readouterr().out
+    # The evidence trail stays loud (the round-1 finding 23 contract) ...
     assert f"no RECORDED roll_schedule for {_ALIAS}" in out
     assert "CURRENT lake's schedule" in out
     expected = [_JUN[1].toordinal(), _JUL[1].toordinal(), _AUG[1].toordinal()]
-    assert str(expected) in out  # the derived schedule is named in the note
+    assert str(expected) in out  # the derived schedule is named in the evidence
+    # ... but it is now a context MISMATCH, never verdict-grade (finding 9).
+    assert "recorded context does NOT match" in out
+    assert "recount REFUSED" in out
+    assert rc == EXIT_VERIFY_INCONCLUSIVE
 
 
 # ────── failure-mode matrix rows ──────

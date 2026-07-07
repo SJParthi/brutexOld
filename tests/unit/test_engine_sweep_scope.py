@@ -87,7 +87,8 @@ class TestScopeReportMessages:
         report = check_sweep_scope(["INDIAVIX", "RELIANCE"], allow_out_of_scope=True, **_SPOT_NSE)
         warning = report.override_warning()
         assert "WARNING" in warning
-        assert "INDIAVIX, RELIANCE" in warning
+        # repr-quoted since round-4 finding 3 (stderr/log-forging guard).
+        assert "'INDIAVIX', 'RELIANCE'" in warning
         assert "scope_override=True" in warning
         assert "DEC-ENGINE-SCOPE-GUARD-001" in warning
 
@@ -96,6 +97,22 @@ class TestScopeReportMessages:
         assert isinstance(verdict, SymbolVerdict)
         assert verdict.symbol == "INDIAVIX"
         assert verdict.reason
+
+    def test_hostile_symbol_is_repr_quoted_never_raw(self) -> None:
+        # Round-4 finding 3: `--symbols $'EVIL\n[brutex] FORGED \x1b[31m'` must
+        # not forge a '[brutex]' stderr line or inject ANSI — both rendered
+        # surfaces repr-quote the operator-typed name (#907/#919 convention).
+        hostile = "EVIL\n[brutex] FORGED line \x1b[31m"
+        refused = check_sweep_scope([hostile], allow_out_of_scope=False, **_SPOT_NSE)
+        message = refused.refusal_message()
+        assert repr(hostile) in message  # escaped, quoted form
+        assert "\x1b" not in message  # no RAW ESC byte
+        assert "\n[brutex]" not in message  # no forged line start
+        overridden = check_sweep_scope([hostile], allow_out_of_scope=True, **_SPOT_NSE)
+        warning = overridden.override_warning()
+        assert repr(hostile) in warning
+        assert "\x1b" not in warning
+        assert "\n" not in warning  # the warning is one line — repr keeps it so
 
 
 class TestCorporateActionExtension:

@@ -219,7 +219,8 @@ def test_out_of_scope_400_carries_the_corp_action_rationale(
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert "corporate-action adjustment layer missing" in detail
-    assert "- RELIANCE:" in detail
+    # repr-quoted (round-4 finding 3)
+    assert "- 'RELIANCE':" in detail
     assert "DEC-CORP-ACTION-GATE-001" in detail
     assert "ADR-0016" in detail
 
