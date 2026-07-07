@@ -843,7 +843,12 @@ def _heal_option_dup(finding: OptionIntraFileDup, state: _BatchState) -> bool:
     partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{path.name}"
     _LOG.warning(
         "lake_heal.partition_healed",
-        partition=partition,
+        # The partition token embeds the RAW attacker-influenceable series dir
+        # name, so the LOG field rides via repr() (the #907 convention — a
+        # control-char/ANSI-escape series name can't inject into the rendered
+        # log line); the HealAction/audit copies stay raw (JSON-encoded,
+        # machine-structured — round-7 NIT).
+        partition=repr(partition),
         kept=result.kept,
         dropped=result.dropped_duplicates,
     )
@@ -969,7 +974,10 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     months_str = [f"{y:04d}-{m:02d}" for y, m in target_months]
     _LOG.warning(
         "lake_heal.rows_reassigned",  # the SAME pinned event as bars
-        partition=partition,
+        # repr() — the token embeds the RAW series dir name (round-7 NIT: the
+        # #907 log-injection guard covers the partition field too; the
+        # HealAction/audit copies stay raw, JSON-encoded machine surfaces).
+        partition=repr(partition),
         series=repr(finding.series),  # RAW filesystem dir name — the #907 repr() convention
         tree="options",
         moved=len(keys),

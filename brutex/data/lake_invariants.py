@@ -445,8 +445,13 @@ def log_lake_finding(finding: LakeFinding) -> None:
     exchange, segment, files`` — drifted/canonical via ``repr()``, the #907
     convention), ``lake.invariant.option_intra_file_dup`` (``partition,
     physical_rows, unique_keys``), ``lake.invariant.option_foreign_month_rows``
-    (``partition, series, foreign_rows, overlap_rows`` — ``series`` is the RAW
-    filesystem dir name, so it rides via ``repr()``, the #907 convention).
+    (``partition, series, foreign_rows, overlap_rows``). On BOTH option events
+    ``series`` is the RAW filesystem dir name AND the ``partition`` token
+    embeds it, so both fields ride via ``repr()`` (the #907 convention; the
+    partition field joined in the round-7 NIT fold — a control-char series
+    name must not inject into the rendered log line). The bars ``partition``
+    fields stay raw: they are catalogued coordinates
+    (``PartitionCoords.relpath()``), not vendor-derived dir names.
     """
     if isinstance(finding, IntraFileDup):
         _LOG.warning(
@@ -474,7 +479,7 @@ def log_lake_finding(finding: LakeFinding) -> None:
     elif isinstance(finding, OptionForeignMonthRows):
         _LOG.warning(
             "lake.invariant.option_foreign_month_rows",
-            partition=f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}",
+            partition=repr(f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"),
             series=repr(finding.series),
             foreign_rows=finding.foreign_rows,
             overlap_rows=finding.overlap_rows,
@@ -482,7 +487,7 @@ def log_lake_finding(finding: LakeFinding) -> None:
     else:
         _LOG.warning(
             "lake.invariant.option_intra_file_dup",
-            partition=f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}",
+            partition=repr(f"{OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"),
             physical_rows=finding.physical_rows,
             unique_keys=finding.unique_keys,
         )

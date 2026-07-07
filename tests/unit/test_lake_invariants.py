@@ -640,7 +640,8 @@ class TestOptionsTree:
         assert finding.unique_keys == 2
         warns = _events(logs, "lake.invariant.option_intra_file_dup")
         assert len(warns) == 1
-        assert warns[0]["partition"] == ("options/NSE_FNO__13__WEEK__1__ATM/2024-06.parquet")
+        # repr() — the token embeds the RAW series dir name (round-7 NIT, #907).
+        assert warns[0]["partition"] == repr("options/NSE_FNO__13__WEEK__1__ATM/2024-06.parquet")
         assert warns[0]["physical_rows"] == 3
         assert warns[0]["unique_keys"] == 2
 
@@ -798,7 +799,8 @@ class TestOptionForeignScan:
         warns = _events(logs, "lake.invariant.option_foreign_month_rows")
         assert len(warns) == 1
         assert warns[0]["log_level"] == "warning"
-        assert warns[0]["partition"] == "options/SERIES/2024-07.parquet"
+        # repr() — the token embeds the RAW series dir name (round-7 NIT, #907).
+        assert warns[0]["partition"] == repr("options/SERIES/2024-07.parquet")
         assert warns[0]["series"] == repr("SERIES")  # raw fs name — the #907 repr() convention
         assert warns[0]["foreign_rows"] == 1
         assert warns[0]["overlap_rows"] == 0

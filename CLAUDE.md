@@ -144,6 +144,26 @@ TypeError-crashed `brutex lake audit-unique` / doctor / the `/universe`
 chip); pinned by two garbage-canonical census folds, the mutant re-applied
 at both lines + verified killed. NITs: the ledger's `TestOptionForeignHeal`
 count corrected 13 → 17; §3's stale active-branch line reconciled to §1.
+ROUND 7 (refuter-confirmed): two SURVIVING MUTANTS + a log NIT. MINOR —
+`_option_foreign_frame`'s keep="first" (the "first physical copy of a
+duplicated foreign key wins" law) flipped to keep="last" passed the WHOLE
+covering set (no fixture planted a physically DUPLICATED foreign key with
+divergent values — G7's dup rides the HOME key, collapsed by
+`heal_partition`'s own unique(), never by this frame), silently flipping
+WHICH copy's OHLCV is reassigned home; pinned by a June source carrying
+the SAME July key twice (closes 111.0 then 222.0) — July must read
+[111.0], moved ONCE, the ONE quarantine copy holds all three physical
+rows, second sweep clean. MINOR — the "production write() stays
+unguarded / a deliberately-symlinked options tree keeps a working pull"
+stance had zero ACCEPT-side teeth (defaulting `_merge_frame_locked`'s
+`containment=True` passed every refusal-side test); pinned by a write
+through a symlinked options ROOT that must LAND at the target (fresh AND
+merge arms, no refusal). Both mutants re-applied + verified killed —
+each fails ONLY its new pin, 321 sibling tests green. NIT: the four
+option-tree log events' `partition=` field embedded the raw
+attacker-influenceable series dir name unescaped — now repr()'d (#907
+log-injection guard; the HealAction/audit copies stay raw JSON-encoded
+machine surfaces; bars partition fields stay catalogued relpaths).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -614,7 +634,34 @@ hostile-review pass._
   mutant); pinned by two garbage-canonical census-fold tests (foreign_files=1, overlap_files=0, no raise — options
   + bars), the mutant re-applied at both lines + verified KILLED by each pin. (R6-3·NITs) the ledger #1482
   `TestOptionForeignHeal` count corrected 13 → 17; the stale §3 "Active feature branch" line reconciled to this
-  §1 line (pre-existing drift). Remaining
+  §1 line (pre-existing drift). HOSTILE-REVIEW FOLDS (round 7, refuter-confirmed; BOTH mutants verified surviving
+  the FULL covering set pre-pin and KILLED post-pin — each mutant applied against the new suite fails EXACTLY the
+  one new pin, 321 sibling tests green): (R7-1·MINOR surviving mutant) `_option_foreign_frame`'s `keep="first"` —
+  the "first physical copy of a duplicated foreign key wins" law its own docstring claims — had NO teeth:
+  `keep="last"` passed everything because no fixture planted a physically DUPLICATED foreign `(side, ts)` key
+  with DIVERGENT values in one source file (G7's dup rides the HOME key, collapsed by `heal_partition`'s own
+  `unique()`, never by this frame), so the mutant silently flipped WHICH physical copy's OHLCV is reassigned home
+  (nondeterministic-winner drift — the round-3 `include_bars=False` surviving-mutant class). PINNED:
+  `test_option_foreign_duplicated_key_first_physical_copy_wins` — a June source carrying the SAME July `(CE, ts)`
+  key TWICE (closes 111.0 then 222.0): July must read `close == [111.0]` (FIRST copy, moved ONCE), source cleaned,
+  the ONE quarantine copy byte-identical holding ALL THREE physical rows, second sweep clean. (R7-2·MINOR
+  surviving mutant) the deliberate "production `write()` stays UNGUARDED — an operator who symlinks the options
+  tree to another volume on purpose keeps a working pull (the healer refuses instead)" stance had ZERO
+  accept-side teeth: flipping `_merge_frame_locked`'s `containment` default to `True` passed every
+  writer/sink/healer/seam test (`TestMutationContainment` pinned every REFUSAL arm, nothing pinned the ACCEPT
+  side — a "harden everything" refactor would have silently turned that layout into per-contract
+  `OptionWriterError` quarantines of the whole options pull). PINNED:
+  `test_write_through_symlinked_options_root_keeps_working_pull` — `<lake>/options` symlinked to an outside real
+  dir; `write()` lands the FRESH render AND the MERGE (dest-exists read-modify-write) arm THROUGH the symlink at
+  its target, no refusal, the layout preserved. (R7-3·NIT, log-injection) the RAW attacker-influenceable series
+  dir name (`_safe_segment` rejects only `/`, `\`, `..` — control chars ride through) was embedded UNESCAPED in
+  the structlog `partition=` field of all four option-tree events (the `lake_heal.partition_healed` +
+  `lake_heal.rows_reassigned` option arms; the two `lake.invariant.option_*` scanner events) while the sibling
+  `series=` field already rode `repr()` — the LOG `partition` fields now ride `repr()` too (all four
+  test-pinned); the `HealAction.partition` / audit-subject copies deliberately stay RAW (JSON-encoded machine
+  surfaces, byte-pinned) and the bars `partition` fields stay raw (catalogued `PartitionCoords.relpath()`
+  coordinates, not vendor-derived dir names; the shared `lake.partition.dedup_healed` writer event keeps its
+  bars-twin `str(dest)` shape). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (446/152) + `option_parquet_writer.py`
   (161/32) + `lake_heal.py` (594/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the

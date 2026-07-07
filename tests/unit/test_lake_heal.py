@@ -1148,16 +1148,20 @@ class TestOptionDupHeal:
         scan = scan_lake_invariants(lake)
         (finding,) = scan.findings
         assert isinstance(finding, OptionIntraFileDup)
-        report = heal_findings(
-            scan.findings,
-            lake_root=lake,
-            files_scanned=scan.files_scanned + scan.option_files_scanned,
-            mode="auto",
-            audit=audit,
-            recall=False,
-            now=_now,
-        )
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned + scan.option_files_scanned,
+                mode="auto",
+                audit=audit,
+                recall=False,
+                now=_now,
+            )
         assert report.healed == 1
+        (healed_log,) = _events(logs, "lake_heal.partition_healed")
+        # repr() — the log token embeds the RAW series dir name (round-7 NIT, #907).
+        assert healed_log["partition"] == repr(f"options/{dest.parent.name}/{dest.name}")
         healed = pl.read_parquet(dest)
         assert healed.height == 2
         assert healed.filter(pl.col("side") == "CE")["close"].to_list() == [105.0]  # first won
@@ -1318,7 +1322,9 @@ class TestOptionForeignHeal:
         reassigned = _events(logs, "lake_heal.rows_reassigned")
         assert len(reassigned) == 1
         assert reassigned[0]["tree"] == "options"
-        assert reassigned[0]["partition"] == f"options/{_OPT_SERIES}/2024-06.parquet"
+        # repr() — the log token embeds the RAW series dir name (round-7 NIT, #907);
+        # the HealAction/audit copies above stay raw (JSON-encoded machine surfaces).
+        assert reassigned[0]["partition"] == repr(f"options/{_OPT_SERIES}/2024-06.parquet")
         assert reassigned[0]["series"] == repr(_OPT_SERIES)  # raw fs name — #907 repr()
         assert reassigned[0]["moved"] == 2
         assert reassigned[0]["added"] == 1
@@ -1772,6 +1778,63 @@ class TestOptionForeignHeal:
         healed = pl.read_parquet(june)
         assert healed.height == 1  # dup collapsed by the SAME rewrite
         assert healed["close"].to_list() == [100.0]  # first physical row won
+
+    def test_option_foreign_duplicated_key_first_physical_copy_wins(self, tmp_path: Path) -> None:
+        """Round-7 MINOR (surviving-mutant kill): a PHYSICALLY DUPLICATED
+        foreign ``(side, ts)`` key with DIVERGENT values moves ONCE and the
+        FIRST physical copy's values win — the ``_option_foreign_frame``
+        ``keep="first"`` law. A ``keep="last"`` mutant reassigns the LAST
+        copy's OHLCV instead (a silent nondeterministic-winner drift on
+        hand-planted poison) and survived every prior test because no fixture
+        planted the dup on a FOREIGN key: G7's dup rides the HOME key, whose
+        collapse is ``heal_partition``'s own ``unique()``, not this frame."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        writer = OptionParquetWriter(lake_root=lake)
+        writer.write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_opt_bar(side="CE", ts=_ts(0), close="100.00")],
+        )
+        june = _opt_series_dir(lake) / "2024-06.parquet"
+        df = pl.read_parquet(june)
+        july_ts = _ts(2, month=7, day=1)
+        # The SAME July (CE, ts) key TWICE with divergent closes: 111.0 FIRST,
+        # then 222.0 (raw plant — the real writer refuses dups, #1067).
+        first_copy = df[0:1].with_columns(
+            pl.lit(july_ts).dt.replace_time_zone("UTC").alias("timestamp"),
+            pl.lit(111.0).alias("close"),
+        )
+        second_copy = first_copy.with_columns(pl.lit(222.0).alias("close"))
+        pl.concat([df, first_copy, second_copy]).write_parquet(june)
+        original = june.read_bytes()
+        scan = scan_lake_invariants(lake)
+        assert {type(f).__name__ for f in scan.findings} == {
+            "OptionForeignMonthRows",
+            "OptionIntraFileDup",
+        }
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1  # the reassignment
+        assert report.skipped == 1  # the same-file dup finding read changed=False
+        assert report.errors == 0
+        july = _opt_series_dir(lake) / "2024-07.parquet"
+        july_frame = pl.read_parquet(july)
+        assert july_frame["side"].to_list() == ["CE"]
+        assert july_frame["timestamp"].to_list() == [july_ts]  # the key moved ONCE
+        assert july_frame["close"].to_list() == [111.0]  # FIRST physical copy won
+        assert pl.read_parquet(june)["timestamp"].to_list() == [_ts(0)]  # source cleaned
+        (quarantined,) = (lake / ".quarantine").rglob("*.parquet")
+        assert quarantined.read_bytes() == original  # BOTH physical copies preserved
+        assert pl.read_parquet(quarantined)["close"].to_list() == [100.0, 111.0, 222.0]
+        assert scan_lake_invariants(lake).findings == ()  # convergent — second sweep clean
 
     def test_option_foreign_heal_changed_false_guard(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

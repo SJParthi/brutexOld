@@ -1063,6 +1063,38 @@ class TestMutationContainment:
             )
         assert not (outside_series / "2021-02.parquet").exists()
 
+    def test_write_through_symlinked_options_root_keeps_working_pull(self, tmp_path: Path) -> None:
+        """The ACCEPT side of the containment stance (round-7 surviving-mutant
+        kill): the production ``write()`` path is deliberately UNGUARDED — an
+        operator who symlinks the options tree to another volume ON PURPOSE
+        keeps a working pull (the healer refuses instead). A mutant flipping
+        ``_merge_frame_locked``'s ``containment`` default to ``True`` turns
+        this layout into a per-contract ``OptionWriterError`` quarantine of
+        the WHOLE options pull and survived every refusal-side test — nothing
+        pinned that ``write()`` SUCCEEDS through the symlink."""
+        outside = tmp_path / "outside-options-volume"
+        outside.mkdir()
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        (lake / "options").symlink_to(outside, target_is_directory=True)
+        w = OptionParquetWriter(lake_root=lake)
+        # FRESH render arm: lands THROUGH the symlink, no refusal.
+        added = w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        assert added == 1
+        stored_file = outside / "NSE_FNO__13__WEEK__0__ATM__CALL" / "2021-01.parquet"
+        assert stored_file.exists()  # at the symlink TARGET (the operator's volume)
+        assert (lake / "options").is_symlink()  # the layout is preserved, never replaced
+        # MERGE arm (dest.exists() read-modify-write) works through it too.
+        added_second = w.write(
+            partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0), _bar(minute=1)]
+        )
+        assert added_second == 1  # the union added only the new key
+        stored = pl.read_parquet(stored_file).sort(["side", "timestamp"])
+        assert stored["timestamp"].to_list() == [
+            datetime(2021, 1, 4, 4, 0, tzinfo=UTC),
+            datetime(2021, 1, 4, 4, 1, tzinfo=UTC),
+        ]
+
     def test_lake_root_reached_via_symlink_still_heals(self, tmp_path: Path) -> None:
         """A lake ROOT addressed through a symlink (a legitimate mount shape,
         e.g. the §8 external SSD behind a stable alias) PASSES: both sides of
