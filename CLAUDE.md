@@ -2131,7 +2131,11 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/kind-goldberg-wln56a`
+- **Active feature branch:** `claude/movers-asof-default-latest-minute`
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1531 — the `/movers` Spot
+  default as-of TIME resolves to the SAME latest available minute across EVERY
+  timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
