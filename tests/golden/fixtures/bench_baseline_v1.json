@@ -1,0 +1,158 @@
+{
+  "context": {
+    "numpy": "2.2.1",
+    "os_version": "15.5",
+    "python": "3.12.8"
+  },
+  "entries": {
+    "bar_lookup": {
+      "decision_id": "DEC-BENCH-ABS-BASELINE-001",
+      "improvement_warn_ratio": 2.0,
+      "note": "SYNTHETIC golden fixture value \u2014 never a measurement",
+      "provenance": {
+        "captured_utc": "2026-07-06T00:00:00Z",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "run_url": "https://github.com/SJParthi/bruteX/actions/runs/100000001",
+        "runner_name": "golden-synthetic"
+      },
+      "samples_ns_per_op": [
+        123.0,
+        130.0,
+        125.0
+      ],
+      "spread_pct": 1.5,
+      "stat": "min",
+      "suspicious_speedup_ratio": 4.0,
+      "tolerance_pct": 50.0,
+      "unit": "ns_per_op",
+      "value_ns_per_op": 123.0,
+      "workload_hash": "sha256:1b40547a757f0c6fd6204d49e15ffbb75f0fcaec73ee9fc62840297ada762192"
+    },
+    "dedup_bloom_probe": {
+      "decision_id": "DEC-BENCH-ABS-BASELINE-001",
+      "improvement_warn_ratio": 2.0,
+      "note": "SYNTHETIC golden fixture value \u2014 never a measurement",
+      "provenance": {
+        "captured_utc": "2026-07-06T00:00:00Z",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "run_url": "https://github.com/SJParthi/bruteX/actions/runs/100000001",
+        "runner_name": "golden-synthetic"
+      },
+      "samples_ns_per_op": [
+        123.0,
+        130.0,
+        125.0
+      ],
+      "spread_pct": 1.5,
+      "stat": "min",
+      "suspicious_speedup_ratio": 4.0,
+      "tolerance_pct": 50.0,
+      "unit": "ns_per_op",
+      "value_ns_per_op": 123.0,
+      "workload_hash": "sha256:b9f99dc1bc3a88ae1a3f70d8717853db2449d2f0aa103eb1762b0aea708b9b04"
+    },
+    "dedup_lmdb_contains": {
+      "decision_id": "DEC-BENCH-ABS-BASELINE-001",
+      "improvement_warn_ratio": 2.0,
+      "note": "SYNTHETIC golden fixture value \u2014 never a measurement",
+      "provenance": {
+        "captured_utc": "2026-07-06T00:00:00Z",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "run_url": "https://github.com/SJParthi/bruteX/actions/runs/100000001",
+        "runner_name": "golden-synthetic"
+      },
+      "samples_ns_per_op": [
+        123.0,
+        130.0,
+        125.0
+      ],
+      "spread_pct": 1.5,
+      "stat": "min",
+      "suspicious_speedup_ratio": 4.0,
+      "tolerance_pct": 50.0,
+      "unit": "ns_per_op",
+      "value_ns_per_op": 123.0,
+      "workload_hash": "sha256:e56d757b448160628cf49ce43b5add918573c25fde03e0be016a7fa2e16be9c0"
+    },
+    "mask_and_vector_1m": {
+      "decision_id": "DEC-BENCH-ABS-BASELINE-001",
+      "improvement_warn_ratio": 2.0,
+      "note": "SYNTHETIC golden fixture value \u2014 never a measurement",
+      "provenance": {
+        "captured_utc": "2026-07-06T00:00:00Z",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "run_url": "https://github.com/SJParthi/bruteX/actions/runs/100000001",
+        "runner_name": "golden-synthetic"
+      },
+      "samples_ns_per_op": [
+        123.0,
+        130.0,
+        125.0
+      ],
+      "spread_pct": 1.5,
+      "stat": "min",
+      "suspicious_speedup_ratio": 4.0,
+      "tolerance_pct": 50.0,
+      "unit": "ns_per_op",
+      "value_ns_per_op": 123.0,
+      "workload_hash": "sha256:477af8c19474701a396ef1e32ce6bea4f5f6073de6073e5fcb646c8c927e4c69"
+    },
+    "mask_eval_scalar": {
+      "decision_id": "DEC-BENCH-ABS-BASELINE-001",
+      "improvement_warn_ratio": 2.0,
+      "note": "SYNTHETIC golden fixture value \u2014 never a measurement",
+      "provenance": {
+        "captured_utc": "2026-07-06T00:00:00Z",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "run_url": "https://github.com/SJParthi/bruteX/actions/runs/100000001",
+        "runner_name": "golden-synthetic"
+      },
+      "samples_ns_per_op": [
+        123.0,
+        130.0,
+        125.0
+      ],
+      "spread_pct": 1.5,
+      "stat": "min",
+      "suspicious_speedup_ratio": 4.0,
+      "tolerance_pct": 50.0,
+      "unit": "ns_per_op",
+      "value_ns_per_op": 123.0,
+      "workload_hash": "sha256:e38dab542fb922779ab4c82b2722a78f3809c79b7f1c981acfb9772f4239d45b"
+    },
+    "result_append": {
+      "decision_id": "DEC-BENCH-ABS-BASELINE-001",
+      "improvement_warn_ratio": 2.0,
+      "note": "SYNTHETIC golden fixture value \u2014 never a measurement",
+      "provenance": {
+        "captured_utc": "2026-07-06T00:00:00Z",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "run_url": "https://github.com/SJParthi/bruteX/actions/runs/100000001",
+        "runner_name": "golden-synthetic"
+      },
+      "samples_ns_per_op": [
+        123.0,
+        130.0,
+        125.0
+      ],
+      "spread_pct": 1.5,
+      "stat": "min",
+      "suspicious_speedup_ratio": 4.0,
+      "tolerance_pct": 50.0,
+      "unit": "ns_per_op",
+      "value_ns_per_op": 123.0,
+      "workload_hash": "sha256:2a8749548c21e9b07699c48eb66accd2872651d6efc2abd8c6cd6a948be261c7"
+    }
+  },
+  "fingerprint": {
+    "arch": "x86-64",
+    "efficiency_cores": 1,
+    "model_slug": "testos-x86",
+    "os_family": "linux",
+    "performance_cores": 1,
+    "physical_cores": 2,
+    "total_ram_gib": 1
+  },
+  "hardware_key": "testos-x86-2c1p1e-1g-x86-64",
+  "schema_version": 1
+}
