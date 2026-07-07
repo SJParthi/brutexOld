@@ -119,6 +119,31 @@ class TestFoldSideRatio:
             outcome = _fold(legs)
         assert str(outcome.ratio).startswith("0.8731343283582089552238805970")
 
+    def test_round_up_at_digit_28_pins_the_rounding_mode(self) -> None:
+        # Round-9 hostile-review mutation-gap fold: every prior deterministic
+        # fixture either terminates or rounds DOWN at significant digit 28,
+        # and the Hypothesis 1e-26 RELATIVE tolerance absorbs a 1-ulp mode
+        # difference — so a `_RATIO_CONTEXT` rounding-mode mutant
+        # (ROUND_HALF_EVEN → ROUND_FLOOR/ROUND_DOWN/ROUND_05UP) survived the
+        # ENTIRE 214-test PCR net (empirically proven). 2/3 rounds UP at
+        # digit 28; EXACT string equality kills every truncating mode
+        # ("…6666", never "…6667" under FLOOR/DOWN/05UP).
+        outcome = _fold([(PUT_SIDE, 2, None), (CALL_SIDE, 3, None)])
+        assert str(outcome.ratio) == "0.6666666666666666666666666667"
+
+    def test_exact_ties_pin_bankers_rounding_both_directions(self) -> None:
+        # The banker's-rounding half of the same round-9 fold: two EXACT-tie
+        # quotients whose 28th significant digit differs in parity. The
+        # even-digit tie must STAY ("…2" — HALF_UP/CEILING/UP would read
+        # "…3"); the odd-digit tie must round UP TO EVEN ("…8" — HALF_DOWN
+        # would read "…7"). With the round-up fixture above, ROUND_HALF_EVEN
+        # is the UNIQUE decimal rounding mode passing all three pins
+        # (enumerated over all 8 modes at prec=28).
+        even_tie = _fold([(PUT_SIDE, 10**28 + 5, None), (CALL_SIDE, 2 * 10**28, None)])
+        assert str(even_tie.ratio) == "0.5000000000000000000000000002"
+        odd_tie = _fold([(PUT_SIDE, 10**28 + 15, None), (CALL_SIDE, 2 * 10**28, None)])
+        assert str(odd_tie.ratio) == "0.5000000000000000000000000008"
+
     def test_zero_denominator_puts_alive_calls_dead(self) -> None:
         # Clause 5: puts > 0, calls == 0 → typed sentinel, NEVER Infinity;
         # the raw sums survive so "puts open, zero calls" stays visible.
