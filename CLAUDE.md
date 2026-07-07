@@ -18,7 +18,40 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+_Last updated: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
+`SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
+deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
+per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
+`sweep_lookahead`, consumed via its public `env_flag_tristate`, never
+copied), licensed by TWO safety layers —
+ORIGINALLY authored + proven fully green under the prior default-OFF before
+the flip, though the pushed branch is ONE reconstructed post-wipe commit so
+no shipped-first commit boundary exists (see ADR-0017 Status / #1532): (a) the
+exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
+simulators return each mask's certified exit-bar indices
+(`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
+over the NEW stdlib-only COMMON `brutex/engine/exit_index.py`:
+`build_ts_index` consolidating the three inline dict copies +
+`bars_strictly_increasing` producer certificate + `exit_indices_consistent`
+consumer belt) so the kernel arm consumes them O(trades) with NO per-mask
+O(N_bars) `exit_ts`→index dict build (an inconsistent stream DEMOTES to the
+dict, never to the Python oracle — results byte-identical; measured 6.1×
+sandbox tail ratio, bench-gated ≥1.15×; the sweep spine threads the pairs
+through the ONE `_iter_mask_metrics`; `_reattribute_chunk_failure` stays on
+the oracle); and (b) a per-process BURN-IN SELF-CHECK — the first 16
+kernel-served masks are bit-compared (`struct.pack` floats, signed zeros
+included) against the Python `_drawdown_stats` oracle; a mismatch SHIPS THE
+ORACLE VALUE and AUTOREVERTS the kernel for the process
+(`kernel_autoreverted` ERROR + latch; `kernel_disabled` short-circuit). The
+frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the default
+(no-env) arm reproduces them byte-for-byte with exactly ONE engaged event
+(golden-pinned; a burn-in-poisoned kernel lands on the pinned bytes with one
+autorevert event). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline).
+Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
 MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
 source change; tests + docs excepted): both poll surfaces (the site-wide
 `bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
@@ -590,7 +623,25 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+- **Active branch:** `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
+  ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
+  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
+  authored + proven fully green under the prior default-OFF before the flip, though the pushed branch is ONE
+  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1532): the
+  exit_idx-native FAST PATH — both trade simulators return each
+  mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
+  consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
+  `exit_indices_consistent` consumer belt) so the kernel arm consumes them O(trades) with NO per-mask O(N_bars)
+  `exit_ts`→index dict build (inconsistent stream DEMOTES to the dict, never to the Python oracle — results
+  byte-identical; measured 6.1× sandbox tail ratio, bench-gated ≥1.15×) — and a per-process BURN-IN SELF-CHECK: the
+  first 16 kernel-served masks are bit-compared (`struct.pack` floats, signed zeros) against the Python
+  `_drawdown_stats` oracle; a mismatch SHIPS THE ORACLE VALUE and AUTOREVERTS the kernel for the process (ERROR +
+  latch + `kernel_disabled` short-circuit). The frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the
+  default (no-env) arm reproduces them byte-for-byte with exactly ONE engaged event (golden-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+  tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
   MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
   widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
   LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
@@ -2132,10 +2183,12 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/movers-asof-default-latest-minute`
-  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1531 — the `/movers` Spot
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1533 — the `/movers` Spot
   default as-of TIME resolves to the SAME latest available minute across EVERY
   timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
   close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/amazing-darwin-hb4caw` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
