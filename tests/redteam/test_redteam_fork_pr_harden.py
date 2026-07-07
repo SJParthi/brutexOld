@@ -397,7 +397,12 @@ def test_no_workflow_run_job_checks_out_pr_head() -> None:
 # a `.yml`-only glob failed OPEN for a `claude-autofix.yaml` landing).
 # "Un-landable" is bounded by the DISCLOSED static-shape residual in
 # `_job_has_leading_trust_gate` — the gate exemption matches the gate's
-# SHAPE, it never executes the gate script.
+# SHAPE, it never executes the gate script. A job declaring NO
+# `permissions:` block is flagged outright (round-3 hostile-review fix:
+# the repo-DEFAULT GITHUB_TOKEN it inherits is read/WRITE on an
+# un-hardened repo, so `_job_write_scopes`' declared-only inspection
+# read [] while the effective token could `gh pr merge` — zero
+# violations, fail-OPEN).
 
 _COMMENT_TRIGGERS = ("issue_comment", "pull_request_review_comment", "discussion_comment")
 _PRIVILEGED_WRITE_SCOPES = ("contents", "pull-requests", "issues", "id-token")
@@ -438,13 +443,34 @@ def _job_foreign_secrets(node: Any) -> list[str]:
 
 def _job_write_scopes(workflow: dict[Any, Any], job: dict[str, Any]) -> list[str]:
     """Privileged scopes a job holds at ``write`` level (job-level
-    ``permissions:`` overrides workflow-level; ``write-all`` grants all)."""
+    ``permissions:`` overrides workflow-level; ``write-all`` grants all).
+    DECLARED permissions only — a job with NO ``permissions:`` block at
+    either level returns ``[]`` here yet runs on the repo-DEFAULT
+    ``GITHUB_TOKEN``; that statically-unboundable case is handled
+    separately via ``_job_declares_permissions`` (round-3
+    reconstruction-review fix)."""
     perms = job.get("permissions", workflow.get("permissions", {}))
     if perms == "write-all":
         return list(_PRIVILEGED_WRITE_SCOPES)
     if not isinstance(perms, dict):
         return []
     return [s for s in _PRIVILEGED_WRITE_SCOPES if str(perms.get(s, "")) == "write"]
+
+
+def _job_declares_permissions(workflow: dict[Any, Any], job: dict[str, Any]) -> bool:
+    """True iff the job's ``GITHUB_TOKEN`` scope is EXPLICITLY declared —
+    a ``permissions:`` key present at job or workflow level (any value:
+    a mapping, ``read-all``, even an empty ``{}`` disabling every scope).
+    A job with NEITHER inherits the repository-DEFAULT token, which on an
+    un-hardened repo is read/WRITE — ``_job_write_scopes``'s declared-
+    permissions inspection reads ``[]`` for it while its EFFECTIVE token
+    can ``gh pr merge`` with no checkout and no foreign secret (round-3
+    reconstruction-review fix: an ``issue_comment`` job with no
+    ``permissions:`` block and an implicit-token ``gh pr merge`` step
+    produced ZERO violations — the sweep's write-permission guarantee was
+    silently DECLARED-permissions-only, depending on the still-open #1180
+    owner task of setting the repo default token read-only)."""
+    return "permissions" in job or "permissions" in workflow
 
 
 def _job_has_leading_trust_gate(job: dict[str, Any], *, gate_every_step: bool = False) -> bool:
@@ -516,10 +542,16 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
     scope that means EVERY post-gate step (the ledgered
     revival-precondition shape; ``_job_has_leading_trust_gate`` — the
     bare substring exemption was spoofable, round-1 reconstruction-review
-    fix; the write-scope every-step rule is the round-2 fix). The ``on:``
-    value is normalized via ``_workflow_triggers`` so the scalar/list
-    trigger spellings can never bypass the pin (round-1 hostile-review
-    fix)."""
+    fix; the write-scope every-step rule is the round-2 fix). Check (d)
+    (round-3 reconstruction-review fix): a job declaring NO
+    ``permissions:`` block at either level is flagged outright — it runs
+    on the repo-DEFAULT ``GITHUB_TOKEN`` (read/WRITE on an un-hardened
+    repo), so its effective scope is statically unboundable and the
+    write-permission guarantee would otherwise silently depend on the
+    still-open #1180 owner default-token setting; it is held to the same
+    write-scope every-step trust-gate bar. The ``on:`` value is
+    normalized via ``_workflow_triggers`` so the scalar/list trigger
+    spellings can never bypass the pin (round-1 hostile-review fix)."""
     triggers = _workflow_triggers(workflow)
     if not any(trigger in triggers for trigger in _COMMENT_TRIGGERS):
         return []
@@ -528,8 +560,16 @@ def _comment_trigger_violations(name: str, workflow: dict[Any, Any]) -> list[str
         if not isinstance(job, dict):
             continue
         write_scopes = _job_write_scopes(workflow, job)
-        if _job_has_leading_trust_gate(job, gate_every_step=bool(write_scopes)):
+        default_token = not _job_declares_permissions(workflow, job)
+        gate_every_step = bool(write_scopes) or default_token
+        if _job_has_leading_trust_gate(job, gate_every_step=gate_every_step):
             continue
+        if default_token:
+            violations.append(
+                f"{name} job {job_name!r} declares no permissions: block on a "
+                "comment trigger — it runs on the repo-DEFAULT GITHUB_TOKEN "
+                "(read/WRITE on an un-hardened repo), statically unboundable"
+            )
         for scope in write_scopes:
             violations.append(
                 f"{name} job {job_name!r} holds '{scope}: write' on a comment trigger"
@@ -557,11 +597,13 @@ def test_no_issue_comment_privileged_workflows() -> None:
     workflow (``issue_comment`` / ``pull_request_review_comment`` /
     ``discussion_comment`` — all run in base-repo context on
     attacker-authored input) may combine that trigger with write
-    permissions, a non-``GITHUB_TOKEN`` secret, or a PR-controlled
-    checkout, unless an id-carrying DEC-CI-FORK-PR-HARDEN-001-pattern
-    trust check precedes the privileged steps and every one of them is
-    ``if:``-conditioned on its verdict (EVERY post-gate step, for a job
-    holding a write scope). The retired cloud auto-fix design
+    permissions, a non-``GITHUB_TOKEN`` secret, a PR-controlled
+    checkout, or an UNDECLARED ``permissions:`` block (the repo-default
+    token — round-3 fix), unless an id-carrying
+    DEC-CI-FORK-PR-HARDEN-001-pattern trust check precedes the
+    privileged steps and every one of them is ``if:``-conditioned on its
+    verdict (EVERY post-gate step, for a job holding a write scope or
+    running on the default token). The retired cloud auto-fix design
     would have slipped past the workflow_run/pull_request_target-only
     sweep above; this pin closes that blind spot directory-wide."""
     violations: list[str] = []
@@ -832,6 +874,74 @@ jobs:
             f"shaped-gate implicit-token merge: {expected} was not flagged; "
             f"violations were:\n{joined}"
         )
+
+
+_UNDECLARED_PERMISSIONS_MERGE = """\
+name: default token merge
+on:
+  issue_comment: { types: [created] }
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr merge "$PR" --squash
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+"""
+
+
+def test_issue_comment_sweep_flags_undeclared_permissions_default_token() -> None:
+    """Round-3 reconstruction-review regression pin: ``_job_write_scopes``
+    inspects only the DECLARED ``permissions:`` mapping, so a comment-
+    triggered job declaring NO ``permissions:`` block at all — which
+    inherits the repository-DEFAULT ``GITHUB_TOKEN``, read/WRITE on an
+    un-hardened repo — could ``gh pr merge`` via the implicit token with
+    no checkout and no foreign secret: ZERO violations (fail-OPEN, and
+    undisclosed — the sweep's write-permission guarantee silently
+    depended on the operator having set the repo default token
+    read-only, itself a still-open #1180 owner task). An undeclared-
+    permissions comment job is now flagged outright (its effective token
+    scope is statically unboundable) and held to the write-scope
+    every-post-gate-step trust-gate bar; an explicit read-level
+    declaration stays clean (isolating the rule from the write-scope
+    check), and a fully trust-gated default-token job stays exempt (the
+    ledgered revival-precondition shape)."""
+    undeclared = yaml.safe_load(_UNDECLARED_PERMISSIONS_MERGE)
+    violations = _comment_trigger_violations("default-token.yml", undeclared)
+    joined = "\n".join(violations)
+    assert violations and "declares no permissions: block" in joined, (
+        "a comment-triggered job with NO permissions: block (repo-default "
+        "GITHUB_TOKEN — potentially write) produced no violation — the "
+        f"declared-permissions blind spot is open again; violations were:\n{joined}"
+    )
+
+    declared_read = yaml.safe_load(_UNDECLARED_PERMISSIONS_MERGE)
+    declared_read["permissions"] = {"contents": "read"}
+    assert _comment_trigger_violations("declared-read.yml", declared_read) == [], (
+        "an explicit read-level permissions: declaration was flagged — the "
+        "undeclared-permissions rule over-reaches"
+    )
+
+    gated = yaml.safe_load(_UNDECLARED_PERMISSIONS_MERGE)
+    gated_steps = gated["jobs"]["merge"]["steps"]
+    gated_steps.insert(0, {"id": "trust-check", "run": _trust_check_script()})
+    for step in gated_steps[1:]:
+        step["if"] = "steps.trust-check.outputs.trusted == 'true'"
+    assert _comment_trigger_violations("gated-default.yml", gated) == [], (
+        "an undeclared-permissions job fully trust-gated (id-carrying real "
+        "gate, EVERY post-gate step conditioned on its verdict) is still "
+        "flagged — the revival-precondition exemption regressed for the "
+        "default-token case"
+    )
+
+    half_gated = yaml.safe_load(_UNDECLARED_PERMISSIONS_MERGE)
+    half_steps = half_gated["jobs"]["merge"]["steps"]
+    half_steps.insert(0, {"id": "trust-check", "run": _trust_check_script()})
+    # …the merge step is NOT conditioned on the gate verdict.
+    assert _comment_trigger_violations("half-gated-default.yml", half_gated), (
+        "an undeclared-permissions job whose post-gate step is UNCONDITIONED "
+        "was exempted — the default-token case escapes the write-scope "
+        "every-step rule"
+    )
 
 
 def test_workflow_sweep_covers_yaml_extension(tmp_path: Path) -> None:

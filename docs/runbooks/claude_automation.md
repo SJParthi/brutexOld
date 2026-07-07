@@ -69,8 +69,10 @@ ignores them; the parallel-review pattern is ALSO invoked explicitly each PR reg
 >    bypassed the guard suite that hardened the repo. That gap is now closed independently of
 >    this design: `test_no_issue_comment_privileged_workflows` fail-closed-pins that no
 >    comment-family-triggered workflow may hold write permissions, reference a secret other
->    than the implicit `secrets.GITHUB_TOKEN`, or check out a PR-controlled ref without a
->    #1180-pattern trust gate first.
+>    than the implicit `secrets.GITHUB_TOKEN`, check out a PR-controlled ref, or omit its
+>    `permissions:` block entirely (the repo-DEFAULT `GITHUB_TOKEN` it would inherit is
+>    read/write on an un-hardened repo — statically unboundable) without a #1180-pattern
+>    trust gate first.
 > 4. **Limbo arithmetic.** Enablement is owner-manual (§4: a session cannot add repo secrets or
 >    flip branch-protection/variables), so shipping the workflow would merely convert
 >    doc-limbo into disabled-workflow-limbo — and the snippet's action inputs were themselves
