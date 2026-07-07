@@ -125,7 +125,7 @@ class TestHeadlineClause:
         report = run_full_pipeline(
             run_spot=lambda: spot,
             run_metadata=_metadata,
-            run_historical=lambda: _composite(hist),
+            run_historical=lambda _prior: _composite(hist),
         )
         return report.note
 
@@ -169,7 +169,7 @@ class TestConflictAlertSeam:
         run_full_pipeline(
             run_spot=lambda: _spot(conflicts=1, max_close_delta=Decimal("2.00")),
             run_metadata=_metadata,
-            run_historical=lambda: _composite(_hist(vendor_dup_rows_dropped=5)),
+            run_historical=lambda _prior: _composite(_hist(vendor_dup_rows_dropped=5)),
         )
         assert calls == [{"conflicts": 1, "max_close_delta": Decimal("2.00"), "dup_rows": 5}]
 
@@ -187,7 +187,7 @@ class TestConflictAlertSeam:
         run_full_pipeline(
             run_spot=lambda: failing,
             run_metadata=_metadata,
-            run_historical=lambda: _composite(_hist()),
+            run_historical=lambda _prior: _composite(_hist()),
         )
         assert calls == []
 
@@ -220,7 +220,7 @@ class TestDiskGuardHeadline:
         report = run_full_pipeline(
             run_spot=_spot,
             run_metadata=_metadata,
-            run_historical=lambda: _composite(_hist()),
+            run_historical=lambda _prior: _composite(_hist()),
             warm_spot_movers=_warm_spot,
             run_prebuild=self._guarded_outcome,
         )
@@ -234,7 +234,7 @@ class TestDiskGuardHeadline:
         report = run_full_pipeline(
             run_spot=_spot,
             run_metadata=_metadata,
-            run_historical=lambda: _composite(_hist()),
+            run_historical=lambda _prior: _composite(_hist()),
             run_prebuild=lambda _excluded: PrebuildOutcome(
                 symbols_built=1, total_bars=10, failed=(), failed_count=0, ok=True
             ),
