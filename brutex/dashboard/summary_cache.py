@@ -97,6 +97,25 @@ PULL_DUTY_FLOOR_MULTIPLIER: Final[float] = 9.0
 #: ``snapshot_age_s`` via :meth:`SummaryCache.stamp_freshness` — never silent).
 MAX_PULL_DUTY_FLOOR_S: Final[float] = 600.0
 
+
+def effective_adaptive_floor(compute_duration: float, *, base_s: float, cap_s: float) -> float:
+    """The ONE #920 adaptive-floor formula: ``min(max(base_s, compute_duration), cap_s)``.
+
+    DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001's self-throttle law, EXTRACTED
+    (DEC-LEDGER-DELTA-O-PAGE-001) so exactly one copy of the arithmetic exists
+    (CLAUDE.md §11 COMMON): :meth:`SummaryCache._plan`, the
+    :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` opt-in floor,
+    and the db_view ledger read cache all delegate here. A recompute that took
+    ``compute_duration`` seconds may not re-fire until it has been idle at
+    least that long (a ≤50% duty cycle); a cheap recompute keeps the snappy
+    *base_s*; *cap_s* bounds how long a pathologically slow recompute can hold
+    a stale entry — staleness is bounded, never unbounded (Golden Rule #10). A
+    negative *compute_duration* (a non-monotonic clock) is neutralized by the
+    ``max(base_s, …)``. Pure, O(1).
+    """
+    return min(max(base_s, compute_duration), cap_s)
+
+
 #: A summary payload is whatever the injected ``recompute`` returns — the list of
 #: per-dataset dicts ``summarize_spot_datasets`` / ``summarize_option_datasets``
 #: produce. Treated opaquely here (the cache never inspects it).
@@ -579,8 +598,10 @@ class SummaryCache:
             # base floor) keeps the snappy base floor, so idle/fast behaviour is
             # unchanged. ``ttl_floor_s <= 0`` (the test "no floor" mode) disables the
             # base but the adaptive component still bounds a genuinely slow scan.
-            effective_floor = min(
-                max(self._ttl_floor_s, entry.compute_duration), MAX_ADAPTIVE_FLOOR_S
+            # Delegates to the ONE extracted formula (byte-equal arithmetic —
+            # DEC-LEDGER-DELTA-O-PAGE-001, CLAUDE.md §11 COMMON).
+            effective_floor = effective_adaptive_floor(
+                entry.compute_duration, base_s=self._ttl_floor_s, cap_s=MAX_ADAPTIVE_FLOOR_S
             )
             if pull_active:
                 # PULL duty-degrade (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001): while a
@@ -701,4 +722,5 @@ __all__ = [
     "SummaryCache",
     "SummaryEntryMeta",
     "SummaryPayload",
+    "effective_adaptive_floor",
 ]

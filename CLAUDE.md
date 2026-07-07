@@ -116,6 +116,42 @@ UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
 + `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
 every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
+Earlier: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
+mid-pull ledger-read O(page) discipline restored: (a) the /coverage/windows +
+pull-progress DuckDB fast paths now FOLD pending window-ledger deltas
+latest-wins IN SQL — NEW `lake_read.dedup_qualify_latest_sql`/
+`dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql`; bound
+base-path equality ordering, never LIKE — the `/deltas/`-path + `'l'>'d'`
+filename traps live-verified dead; demotions survive, filters apply OUTSIDE
+the fold so no ghost rows) assembled at ONE `db_view._ledger_scan_source`
+seam (per-attempt re-listing = the save-time prune-race self-heal); the count
+caches key on the composite (base-mtime + delta-name-set) stamp token at
+generation=0 (delta appends AND cross-process CLI writes invalidate;
+mark_dirty storms never thrash); the schema probe stays BASE-only (legacy
+12-col lakes defer wholesale — the union_by_name NULL-fill crash is
+unreachable; base-less delta-only lakes ride the fast path); a
+persistently-bad delta degrades to the legacy fold / Python-fold counts,
+never a 500 or blanked phases; SANCTIONED: mid-pull rows converge to the
+steady-state DuckDB order + counts_since_pull_start now appears mid-pull.
+(b) the three db_view ledger record caches collapse onto ONE reused
+`MoversSnapshotCache` (single-flight — 8 concurrent cold pollers pay 1 parse;
+the #920 adaptive floor EXTRACTED to `summary_cache.effective_adaptive_floor`
+and delegated byte-equal, cap 120 s; stale serves bounded + logged; the
+base-less delta-only /db grid now renders). (c) /results keys on NEW
+`lake_revision.sweep_results_revision` (sweeps dir digest + the audit chain's
+file stat — a SWEEP_START append now invalidates; probe-None computes fresh
+UNCACHED). (d) `build_sweep_leaderboard` splits into the revision-cached
+`load_sweep_scan` (frozen `SweepScan`, ALL honesty fields) + the
+byte-order-preserved rank (golden vs `ResultsStore.top_k`); `_snapshot_eras`
+streams `iter_entries` (O(1) memory; audit.py untouched). (e)
+`bx-rate-monitor.js` + `bx-liveproof.js` pause polling in hidden tabs (the
+v29 `document.hidden` guard + visibilitychange catch-up). (f) NEW
+`tests/bench/test_ledger_delta_o_page_o1.py` — 7 measured pins. HONEST: the
+fold is ONE O(total rows + delta-file footers) columnar QUALIFY per FRESH
+stamp — NOT literal O(page); delta compaction + the AuditCursor resume are
+NAMED future work. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; steady-state
+(zero-delta) SQL text + payloads byte-identical (spy-pinned); touched modules
+100% line+branch).
 Earlier: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
 MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
 `SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
@@ -761,6 +797,55 @@ hostile-review pass._
   (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/
   `sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
+  Earlier: `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
+  ledger-read O(page) discipline restored across (a)-(f): (a) the /coverage/windows + pull-progress DuckDB fast paths
+  fold pending window-ledger deltas latest-wins IN SQL via NEW `lake_read.dedup_qualify_latest_sql`/
+  `dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql` — `ORDER BY (filename = <bound base path>) ASC,
+  filename DESC, file_row_number DESC`, bound equality never LIKE; live-verified on the pinned DuckDB incl. the
+  `/deltas/`-lake-path + `'l'>'d'` filename traps, demotion survival and ghost-row safety), assembled at the ONE
+  `db_view._ledger_scan_source` seam (fresh delta listing per attempt — the existing retry-once machinery IS the
+  save-time flock-prune-race self-heal); the count caches re-key on the composite (base-mtime + delta-name-set) stamp
+  token at FIXED generation=0 (delta appends AND cross-process CLI writes invalidate; mid-pull mark_dirty storms never
+  thrash); the schema probe stays BASE-only (a legacy 12-col lake defers WHOLESALE — the union_by_name NULL-fill →
+  `int(None)` crash is structurally unreachable; a base-less delta-only first-pull checkpoint rides the fast path,
+  deltas writer-pinned at the full 14-column schema); a persistently-malformed delta degrades to the fold-aware legacy
+  pyarrow path (window payload) / the resilient Python-fold counts (phase progress — never blanked mid-pull);
+  `phase_progress_payload`'s O(records) Python delta branch DELETED; SANCTIONED mid-pull changes, pinned + ledgered:
+  rows converge to the steady-state DuckDB within-tier order, and counts_since_pull_start + pull_start_utc now ALSO
+  appear mid-pull. (b) `_WINDOW_CACHE`/`_WINDOW_ROWS_CACHE`/`_SPOT_ROLLUP_CACHE` collapse onto ONE reused
+  `MoversSnapshotCache` (`_LEDGER_READ_CACHE`: single-flight — 8 concurrent cold pollers pay exactly 1 parse; the #920
+  adaptive floor EXTRACTED to `summary_cache.effective_adaptive_floor` with `SummaryCache._plan` + `movers_cache`
+  delegating byte-equal — §11 COMMON, no second copy; floor cap 120 s, each stale serve bounded to min(max(2 s, the
+  serving entry's own compute duration), 120 s) of ledger movement — possibly spanning several ≥2 s delta flushes, a
+  TIME bound never a stamp-count bound — ALWAYS logged `movers_cache.stale_served` on the key that served it; a
+  derived rows/rollup family additionally ages under its OWN floor once the records floor passes, so its worst-case
+  staleness COMPOSES records floor + derived floor, each ≤ 120 s; NEW
+  `movers_cache.revision_generation` digest bridge (homed in the movers_cache LEAF — a db_view → lake_revision
+  edge closes a CodeQL py/cyclic-import cycle via lake_revision's lazy window_ledger_store →
+  coverage_reconcile → db_view imports; AST-pinned); the base-less delta-only /db grid inconsistency FIXED). (c)
+  `api_sweep_leaderboard` keys on NEW `lake_revision.sweep_results_revision` (the sweeps dir-mtime digest + the audit
+  chain's `(mtime_ns:size)` stat — a SWEEP_START append moves NO dir mtime, the stat closes that gap; a CLI `brutex
+  sweep-all` + a store delete + an audit-only append ALL invalidate; a probe outage computes fresh UNCACHED;
+  `on_success=mark_dirty` KEPT — redundant for /results, zero drift elsewhere). (d) `build_sweep_leaderboard` splits
+  into the revision-cached `load_sweep_scan` (NEW frozen `SweepScan` carrying EVERY payload-honesty field) + the
+  byte-order-preserved rank (two-pass sort moved verbatim; golden vs `ResultsStore.top_k` incl. the raw-int precision
+  teeth); a filter/rank click within one revision performs zero store loads + zero audit reads (spy-pinned);
+  `_snapshot_eras` streams `iter_entries` (O(1) memory; audit.py ZERO diff — `verify_chain` untouched; the AuditCursor
+  incremental resume is a NAMED follow-up). (e) `bx-rate-monitor.js` + `bx-liveproof.js` gain the v29
+  `if (document.hidden) return;` poll guard + the visibilitychange immediate catch-up (a hidden tab fires ZERO
+  fetches; never a stale pill on return; source-pinned, honestly not a browser run). (f) NEW
+  `tests/bench/test_ledger_delta_o_page_o1.py` — 7 pins, every number MEASURED 2026-07-06 in the docstrings: one-page
+  mid-pull poll flat-vs-depth 1.24× @ 1k→10k with 5 live deltas (cache_tier_ceiling — the page query is an ADMITTED
+  O(total-rows) columnar scan); ONE GROUP BY per stamp + ONE recount per real delta append + ZERO Python parses;
+  phase-progress 1.00× flat; the fresh-fold delta-file footer term measured 2.44× for 10× the files (compaction the
+  named future bound); 8-thread cold-stamp single-flight; the cold 12-store/200-audit-entry scan 21.8 ms vs a 2 s
+  ceiling + zero-rescan clicks + top_k order parity; /results polls flat under real delta + mark_dirty churn. HONEST
+  (Golden Rule #10): the fold is ONE O(total physical rows + delta-file footers) columnar QUALIFY hash-partition per
+  FRESH stamp — NOT literal O(page) (the `query_candles` envelope); the first Python parse per stamp stays O(rows);
+  each /results poll pays one O(dirs)+O(1-stat) probe. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+  REFERENCE_ONLY, no scope/vocab/rate change; steady-state (zero-delta) SQL text + payloads byte-identical
+  (spy-pinned); touched modules 100% line+branch; ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change
+  baseline).
   Earlier: `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
   DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
   ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE

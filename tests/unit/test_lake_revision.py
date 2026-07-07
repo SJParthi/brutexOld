@@ -41,6 +41,7 @@ from brutex.dashboard.lake_revision import (
     ABSENT_TOKEN,
     lake_revision,
     rate_bridge_revision,
+    sweep_results_revision,
     sweeps_revision,
 )
 from brutex.data.rate_bridge import rate_bridge_path
@@ -305,6 +306,45 @@ class TestLedgerDeltaComponent:
 
         monkeypatch.setattr(os, "stat", _denying_stat)
         assert lake_revision(tmp_path) is None
+
+
+class TestSweepResultsRevisionNoSignal:
+    """``sweep_results_revision``'s two ``None`` ("no signal") branches.
+
+    Standalone twins of ``TestSweepResultsRevisionToken`` in
+    ``test_dashboard_results_revision_key.py`` (the discovery-gate contract:
+    this module's stem-matched suite must prove them on its own).
+    """
+
+    def test_dirs_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing OSError on the sweeps root → ``None`` — never a token."""
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path) == str(tmp_path / "sweeps"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweep_results_revision(tmp_path) is None
+
+    def test_chain_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dirs digest OK but a non-missing OSError on the audit-chain stat → ``None``."""
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path).endswith("sweep-all.jsonl"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweep_results_revision(tmp_path) is None
 
 
 class TestRateBridgeRevision:
