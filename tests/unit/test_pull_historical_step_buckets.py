@@ -13,7 +13,7 @@ auth / mass-empty halt propagation (``pull.step.halted``). Fully offline.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import MutableMapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -186,7 +186,10 @@ _FOUR_BUCKET_LEGS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+type _LogEvent = MutableMapping[str, object]
+
+
+def _events(logs: Sequence[_LogEvent], name: str) -> list[_LogEvent]:
     """All captured events with ``event == name`` (in emission order)."""
     return [e for e in logs if e["event"] == name]
 
