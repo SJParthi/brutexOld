@@ -123,8 +123,8 @@ _DEFAULT_PRIOR_N: Final[int] = 3
 #: snap rule has one definition (CLAUDE.md §11 COMMON).
 _HLC3_DIVISOR: Final[Decimal] = Decimal(3)
 
-#: Engine-injected contract/session key fed to :class:`VwapState`. B1 (this PR)
-#: wires VWAP + market-structure with a CONSTANT key, so :class:`VwapState` resets
+#: Engine-injected contract/session key fed to ``trading_core.VwapState``. B1 (this
+#: PR) wires VWAP + market-structure with a CONSTANT key, so the VWAP state resets
 #: only on the IST-date change (its ``session_day`` argument) — matching the
 #: existing day-rollover rule the rest of this builder applies. The roll-aware,
 #: per-contract ``session_key`` (B2 — reset on a futures roll, not only a date
@@ -474,8 +474,8 @@ class Stage1AMatrixBuilder:
         int
             The u128 condition mask (bits 0-59) for this bar — including the
             Group-10 VWAP-position bits (52-53) and the Group-12 BOS/CHoCH bits
-            (56-59), now populated from the running :class:`VwapState` /
-            :class:`MarketStructureState` (DEC-STAGE1A-WIRE-VWAP-BOS-001).
+            (56-59), now populated from the running ``trading_core.VwapState`` /
+            ``trading_core.MarketStructureState`` (DEC-STAGE1A-WIRE-VWAP-BOS-001).
         """
         ts_ist = bar.timestamp.astimezone(IST)
         bar_day = ts_ist.date()

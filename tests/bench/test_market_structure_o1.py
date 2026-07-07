@@ -1,19 +1,21 @@
 """O(1) bench for the BOS/CHoCH per-bar update — Golden Rule #5 hot path (bits 56-59).
 
 DEC-O1-BENCH-GATE-COMPLETE-001 (M2). The market-structure detector
-:meth:`brutex.indicators.market_structure.MarketStructureState.update` is a
-per-bar hot path added by the vocabulary expansion 52 -> 60 conditions
-(DEC-NIFTY-BOS-CHOCH-001, ``docs/MIGRATION.md`` #1012): bits 56-59
-(BOS-bullish / BOS-bearish / CHoCH-bullish / CHoCH-bearish) are evaluated once
-per bar per (instrument, timeframe), so ``update`` sits inside the same
-per-evaluated-bar loop the rest of the 60-condition vocabulary does. It had NO
-dedicated O(1) ratio gate until this file (the sibling bar-lookup /
-indicator-lookup / mask-eval / dedup / result-append paths each already have
-one); the guarantee audit flagged the omission.
+``trading_core.MarketStructureState.update`` (the PRODUCTION pyclass
+``brutex/engine/stage1a.py`` drives — the single source since
+DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 deleted the hand-synced Python twin
+this bench previously timed) is a per-bar hot path added by the vocabulary
+expansion 52 -> 60 conditions (DEC-NIFTY-BOS-CHOCH-001, ``docs/MIGRATION.md``
+#1012): bits 56-59 (BOS-bullish / BOS-bearish / CHoCH-bullish / CHoCH-bearish)
+are evaluated once per bar per (instrument, timeframe), so ``update`` sits
+inside the same per-evaluated-bar loop the rest of the 60-condition vocabulary
+does. It had NO dedicated O(1) ratio gate until this file (the sibling
+bar-lookup / indicator-lookup / mask-eval / dedup / result-append paths each
+already have one); the guarantee audit flagged the omission.
 
 Why it is O(1) per bar (Golden Rule #10 honest envelope): ``update`` pushes the
-bar into a ``deque(maxlen=2k+1)`` ring, confirms the ring's CENTRE bar as a
-swing over the ``2k`` fixed-size neighbours, then tests the close against the two
+bar into a fixed ``2k+1`` ring, confirms the ring's CENTRE bar as a swing over
+the ``2k`` fixed-size neighbours, then tests the close against the two
 confirmed swing levels. Every step touches a FIXED-SIZE window (``k`` is a
 constant, default 2 -> a 5-bar fractal), NEVER a structure that grows with the
 number of bars already fed. So the per-bar latency must be independent of how
@@ -34,8 +36,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
-from brutex.indicators.market_structure import MarketStructureState
+import trading_core
 
 from tests.bench._o1_tiers import ratio_ceiling
 
@@ -82,7 +85,9 @@ def _bar(seq: int) -> tuple[int, int, int]:
     ``_confirm_centre_swing`` scan, not just the no-op warm-up fast path. The
     train is fully periodic (a pure function of ``seq``, no RNG, no growing
     state), so the timed op is byte-for-byte identical at 1K deep and 100K deep —
-    which is exactly what makes the O(1) ratio meaningful.
+    which is exactly what makes the O(1) ratio meaningful. (The generator's
+    drift makes closes re-cross previously CONFIRMED levels, exercising the
+    real BOS/CHoCH resolution branches — not just the warm-up no-op path.)
     """
     phase = seq % _PERIOD
     cycle = seq // _PERIOD
@@ -118,7 +123,7 @@ def _time_update(prefilled_bars: int) -> _TimedPhase:
     ``True`` signals fired in the timed region so the caller can assert the timed
     op really is the mixed signal-firing hot path (not a warm-up no-op).
     """
-    state = MarketStructureState()  # k=2 default (production 5-bar fractal)
+    state: Any = trading_core.MarketStructureState()  # k=2 default (5-bar fractal)
     for i in range(prefilled_bars):
         state.update(*_bar(i))
     base = prefilled_bars
@@ -129,9 +134,10 @@ def _time_update(prefilled_bars: int) -> _TimedPhase:
     choch_fired = 0
     t0 = time.perf_counter_ns()
     for k in range(ITERATIONS):
-        sig = state.update(*_bar(start + k))
-        bos_fired += sig.bos_bullish + sig.bos_bearish
-        choch_fired += sig.choch_bullish + sig.choch_bearish
+        # The FFI wire order: (bos_bullish, bos_bearish, choch_bullish, choch_bearish).
+        bos_bull, bos_bear, choch_bull, choch_bear = state.update(*_bar(start + k))
+        bos_fired += bos_bull + bos_bear
+        choch_fired += choch_bull + choch_bear
     t1 = time.perf_counter_ns()
     return _TimedPhase(
         mean_ns=(t1 - t0) / ITERATIONS,
@@ -146,7 +152,8 @@ def test_market_structure_update_is_o1_in_session_bars() -> None:
     The BOS/CHoCH detector's fixed-size fractal ring makes each bar's cost a
     constant (confirm the centre over ``2k`` neighbours + two swing-level compares);
     it must NOT scale with the number of bars already fed (bits 56-59,
-    DEC-NIFTY-BOS-CHOCH-001). A regression to a session-history re-scan blows this.
+    DEC-NIFTY-BOS-CHOCH-001). A regression to a session-history re-scan — on
+    either side of the PyO3 boundary — blows this.
     """
     small = _time_update(N_SMALL)
     big = _time_update(N_BIG)
