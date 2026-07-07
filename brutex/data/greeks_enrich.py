@@ -147,6 +147,7 @@ __all__ = [
     "GreeksEnrichReport",
     "GreeksEnrichTarget",
     "GreeksProvenance",
+    "current_inputs_pack",
     "enrich_greeks_for_targets",
     "enrich_option_bars",
     "expiry_instant_utc",
@@ -156,6 +157,7 @@ __all__ = [
     "read_spot_join_with_recovery",
     "resolve_greeks_workers",
     "resolve_risk_free_source",
+    "stamp_is_current_inputs",
     "t_years_act365",
     "unpack_greeks_provenance",
 ]
@@ -166,9 +168,11 @@ __all__ = [
 #: v2 = the DEC-GREEKS-CORRECTNESS-AUDIT-001 round (degenerate time-value
 #: pre-screen + value-hardened reuse + 2dp spot snap): every v1 stored bar —
 #: incl. the IVX-1 at-floor artifacts — recomputes + restamps on the next
-#: enrich pass over its window. HONEST envelope: that pass reaches only
-#: contracts still inside a live pull window; expired contracts keep v1
-#: stamps until a bulk re-enrich surface exists (named follow-up).
+#: enrich pass over its window. The pull-side pass reaches only contracts
+#: still inside a live pull window; EXPIRED contracts (and a CLI-pulled lake
+#: that never enriches) are reached by the bulk re-enrich backfill surface
+#: (:mod:`brutex.data.greeks_backfill` + ``brutex greeks-backfill`` —
+#: DEC-GREEKS-BULK-REENRICH-001, closing the #1188 named follow-up).
 GREEKS_FORMULA_VERSION: Final[int] = 2
 
 #: Rate-source ids packed into the provenance stamp (bits 8-11).
@@ -388,6 +392,64 @@ def rate_source_id_for(source: RiskFreeSource) -> int:
     if isinstance(source, CsvRateSource):
         return RATE_SOURCE_ID_CSV
     return RATE_SOURCE_ID_NONE
+
+
+def current_inputs_pack(rate_source: RiskFreeSource) -> int:
+    """The INPUT-defining stamp bits the CURRENT pass packs — ONE source of truth.
+
+    ``formula_version + rate_source_id + rate_version + q_bias + tte_convention``
+    (bits 0-19, the :data:`_INPUTS_MASK` subset) packed exactly as the
+    :func:`enrich_option_bars` reuse gate packs them, so the scanner-side
+    staleness predicate (:func:`stamp_is_current_inputs`) and the driver's
+    recompute decision can NEVER drift (CLAUDE.md §11 COMMON;
+    DEC-GREEKS-BULK-REENRICH-001). O(1) — two constant-time packs.
+
+    Parameters
+    ----------
+    rate_source
+        The resolved risk-free source whose packed id keys the stamp.
+
+    Returns
+    -------
+    int
+        The masked input bits a CURRENT-pass OK stamp carries.
+    """
+    source_id = rate_source_id_for(rate_source)
+    return pack_greeks_provenance(rate_source_id=source_id, style_flag=0, status=0) & _INPUTS_MASK
+
+
+def stamp_is_current_inputs(pid: int | None, *, rate_source: RiskFreeSource) -> bool:
+    """``True`` iff *pid* carries the CURRENT model-input stamp bits.
+
+    The bulk-backfill scanner's staleness predicate (DEC-GREEKS-BULK-REENRICH-001):
+    ``None`` (an unstamped legacy bar) is NEVER current; otherwise the
+    input-defining bits (:func:`current_inputs_pack` — formula version + rate
+    source id + rate version + q bias + TTE convention) must equal the bits
+    this pass would stamp. A ``False`` here is a SAFE over-approximation of
+    the driver's per-bar reuse gate (:func:`enrich_option_bars` additionally
+    value-checks ``rate_used`` / ``spot_at_bar`` / style / status), so a
+    scanner-stale contract is always re-fed to the driver, which then reuses
+    or recomputes per bar — never the other way round. HONEST blind spot
+    (Golden Rule #10): a rate/spot VALUE drift under unchanged source kinds is
+    stamp-invisible by construction — the backfill's ``--force`` mode routes
+    every contract through the driver's value-checked gate, which catches
+    exactly that class. O(1) — two int ops after one constant pack.
+
+    Parameters
+    ----------
+    pid
+        A stored ``greeks_provenance_id`` (or ``None`` when unstamped).
+    rate_source
+        The resolved risk-free source the current pass would stamp with.
+
+    Returns
+    -------
+    bool
+        Whether the stamp's input bits match the current pass's inputs.
+    """
+    if pid is None:
+        return False
+    return (pid & _INPUTS_MASK) == current_inputs_pack(rate_source)
 
 
 def resolve_risk_free_source(env: Mapping[str, str] | None = None) -> RiskFreeSource:
@@ -675,9 +737,7 @@ def enrich_option_bars(
     strike_f = float(strike)
     expiry_at = expiry_instant_utc(parts.expiry)
     source_id = rate_source_id_for(rate_source)
-    current_inputs = (
-        pack_greeks_provenance(rate_source_id=source_id, style_flag=0, status=0) & _INPUTS_MASK
-    )
+    current_inputs = current_inputs_pack(rate_source)
     rate_by_date: dict[date, RiskFreeRate | None] = {}
 
     bars: list[FnoGreeksBar] = []
