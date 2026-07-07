@@ -133,3 +133,7 @@ scratchpad/
 
 # Personal Claude Code local settings (not shared)
 .claude/settings.local.json
+
+# Headless-browser truth-suite failure artifacts (DEC-DASHBOARD-BROWSER-TRUTH-001):
+# Playwright traces/screenshots/ledgers saved on test FAILURE only — never committed.
+test-artifacts/
