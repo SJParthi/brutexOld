@@ -947,21 +947,18 @@ class TestMeterLifecycleAppWiring:
         )
         injected = SessionRateController()
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
-        try:
-            with client:  # type: ignore[attr-defined]
-                injected.register_meter(CallMeter())  # pull #1's meter (simulated)
-                assert injected.peek_meter() is not None
-                assert client.post("/api/v1/sweep/run").json()["started"] is True  # type: ignore[attr-defined]
-                # The release-aware settle wait is the ordering barrier: the flock is
-                # released strictly AFTER on_run_end in the same identity-gated
-                # finally, so the peek below can never race the clear it pins.
-                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
-                assert settled["state"] == "done"
-                assert injected.peek_meter() is None, (
-                    "the job's identity-gated finally must clear the registered meter"
-                )
-        finally:
-            store.close()  # type: ignore[attr-defined]
+        with store, client:
+            injected.register_meter(CallMeter())  # pull #1's meter (simulated)
+            assert injected.peek_meter() is not None
+            assert client.post("/api/v1/sweep/run").json()["started"] is True  # type: ignore[attr-defined]
+            # The release-aware settle wait is the ordering barrier: the flock is
+            # released strictly AFTER on_run_end in the same identity-gated
+            # finally, so the peek below can never race the clear it pins.
+            settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+            assert settled["state"] == "done"
+            assert injected.peek_meter() is None, (
+                "the job's identity-gated finally must clear the registered meter"
+            )
 
     def test_warm_process_dry_run_stays_honest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -991,25 +988,22 @@ class TestMeterLifecycleAppWiring:
         warmed.register_meter(ticked)
 
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=warmed)
-        try:
-            with client:  # type: ignore[attr-defined]
-                resp = client.post(
-                    "/api/v1/universe/pull-expiries-contracts",
-                    params={"symbols": "NIFTY", "dry_run": "true"},
-                )  # type: ignore[attr-defined]
-                assert resp.status_code == 200
-                assert resp.json()["started"] is True
-                settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
-                assert settled["state"] == "done"
-                # The dead pull's meter is gone (the dry-run gate cleared it at the
-                # build site, and the job-end hook cleared again — belt-and-braces).
-                assert warmed.peek_meter() is None
-                body = client.get("/api/v1/pull/rate").json()  # type: ignore[attr-defined]
-                # NEVER a fabricated MEASURED flowing rate after a synthetic pull.
-                assert not (body["flow_state"] == "flowing" and body["req_per_sec_achieved"] > 0.0)
-                assert body["req_per_sec_achieved"] == 0.0
-        finally:
-            store.close()  # type: ignore[attr-defined]
+        with store, client:
+            resp = client.post(
+                "/api/v1/universe/pull-expiries-contracts",
+                params={"symbols": "NIFTY", "dry_run": "true"},
+            )  # type: ignore[attr-defined]
+            assert resp.status_code == 200
+            assert resp.json()["started"] is True
+            settled = _wait_for_job_settled(client, lake_root=_job_lake_root(tmp_path))
+            assert settled["state"] == "done"
+            # The dead pull's meter is gone (the dry-run gate cleared it at the
+            # build site, and the job-end hook cleared again — belt-and-braces).
+            assert warmed.peek_meter() is None
+            body = client.get("/api/v1/pull/rate").json()  # type: ignore[attr-defined]
+            # NEVER a fabricated MEASURED flowing rate after a synthetic pull.
+            assert not (body["flow_state"] == "flowing" and body["req_per_sec_achieved"] > 0.0)
+            assert body["req_per_sec_achieved"] == 0.0
 
     def test_build_app_default_session_rate_byte_identical(self) -> None:
         """The seam's DEFAULT arm: ``session_rate=None`` builds the app's own holder
@@ -1166,19 +1160,14 @@ class TestDirectPullRouteMeterLifecycle:
         adapter, _meter = self._metered_adapter()
         self._route_real_pull_candles(monkeypatch, adapter)
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
-        try:
-            with client:
-                resp = client.post(
-                    "/api/v1/universe/pull", params={"symbol": "NIFTY", "year": "2024"}
-                )
-                assert resp.status_code == 200
-                assert resp.json()["dry_run"] is False
-                assert injected.peek_meter() is None, (
-                    "pull_candles' paired scope must clear its build-site registration "
-                    "— no in-process pull running ⇒ no meter registered"
-                )
-        finally:
-            store.close()
+        with store, client:
+            resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY", "year": "2024"})
+            assert resp.status_code == 200
+            assert resp.json()["dry_run"] is False
+            assert injected.peek_meter() is None, (
+                "pull_candles' paired scope must clear its build-site registration "
+                "— no in-process pull running ⇒ no meter registered"
+            )
 
     def test_direct_real_pull_failure_still_clears_meter(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1199,18 +1188,13 @@ class TestDirectPullRouteMeterLifecycle:
         )
         self._route_real_pull_candles(monkeypatch, adapter)
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
-        try:
-            with client:
-                resp = client.post(
-                    "/api/v1/universe/pull", params={"symbol": "NIFTY", "year": "2024"}
-                )
-                assert resp.status_code == 400
-                assert "DailyQuotaExceeded" in resp.json()["detail"]
-                assert injected.peek_meter() is None, (
-                    "the paired scope must clear the dead pull's meter on the failure arm"
-                )
-        finally:
-            store.close()
+        with store, client:
+            resp = client.post("/api/v1/universe/pull", params={"symbol": "NIFTY", "year": "2024"})
+            assert resp.status_code == 400
+            assert "DailyQuotaExceeded" in resp.json()["detail"]
+            assert injected.peek_meter() is None, (
+                "the paired scope must clear the dead pull's meter on the failure arm"
+            )
 
     def test_malformed_date_400_keeps_live_job_meter(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1244,19 +1228,16 @@ class TestDirectPullRouteMeterLifecycle:
         # (historical_pull.pull_contract_candles → register_pull_meter).
         injected.register_meter(job_meter)
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
-        try:
-            with client:
-                resp = client.post(
-                    "/api/v1/universe/pull",
-                    params={"symbol": "NIFTY", "from_date": "2026-13-99"},
-                )
-                assert resp.status_code == 400
-                assert injected.peek_meter() is job_meter, (
-                    "EVICTED: a 400 raised BEFORE pull_candles ever registered must "
-                    "never clear a LIVE job pull's registered meter (round-4 MAJOR)"
-                )
-        finally:
-            store.close()
+        with store, client:
+            resp = client.post(
+                "/api/v1/universe/pull",
+                params={"symbol": "NIFTY", "from_date": "2026-13-99"},
+            )
+            assert resp.status_code == 400
+            assert injected.peek_meter() is job_meter, (
+                "EVICTED: a 400 raised BEFORE pull_candles ever registered must "
+                "never clear a LIVE job pull's registered meter (round-4 MAJOR)"
+            )
 
     def test_direct_dry_run_never_evicts_live_meter(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1273,18 +1254,15 @@ class TestDirectPullRouteMeterLifecycle:
         live_meter = CallMeter()
         live.register_meter(live_meter)  # a LIVE job pull's registration (simulated)
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=live)
-        try:
-            with client:
-                resp = client.post(
-                    "/api/v1/universe/pull",
-                    params={"symbol": "NIFTY", "dry_run": "true"},
-                )
-                assert resp.status_code == 200
-                assert resp.json()["dry_run"] is True
-                assert live.peek_meter() is live_meter, (
-                    "an operator's concurrent dry-run on the off-job route must never "
-                    "evict a live pull's registered meter (and the finally clear is "
-                    "real-pull-only)"
-                )
-        finally:
-            store.close()
+        with store, client:
+            resp = client.post(
+                "/api/v1/universe/pull",
+                params={"symbol": "NIFTY", "dry_run": "true"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["dry_run"] is True
+            assert live.peek_meter() is live_meter, (
+                "an operator's concurrent dry-run on the off-job route must never "
+                "evict a live pull's registered meter (and the finally clear is "
+                "real-pull-only)"
+            )

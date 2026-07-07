@@ -3587,7 +3587,7 @@ class TestMeterLifecycleInvariantDocPin:
         run of whitespace / ``#`` collapses to one space before matching — the pin is
         wrap-robust in BOTH directions (a re-wrapped re-drift is still caught).
         """
-        import brutex.dashboard as dashboard_pkg
+        from brutex import dashboard as dashboard_pkg
 
         pkg_dir = Path(dashboard_pkg.__file__).resolve().parent
         sources = {
