@@ -3045,6 +3045,13 @@ def build_app(
                     # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
                     # grammars run the SAME strict steps 3-6 order as the composite.
                     underlying_kinds=underlying_kinds,
+                    # Durable &-form winner map on the direct-selection grammars too
+                    # (DEC-FORM-WINNER-PERSIST-001 review round-2 fix: this seam was
+                    # MISSED, so ?underlying=M&M re-paid the wasted plain-form fetch
+                    # and never read/persisted a winner); dry-run threads store=None.
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is

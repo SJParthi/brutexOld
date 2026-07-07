@@ -45,9 +45,13 @@ winning form STRING, i.e. the winner's ROLE applied to the key's OWN canonical t
 so the metadata phase and every per-contract candle fetch read/write ONE shared value
 space) through the injected :class:`~brutex.data.meta_kv.MetaKV` store (the
 ``vendor_floor`` durable-learned-value pattern), read back lazily on the first
-``order`` per key per process — so a fresh pull issues the learned winner FIRST on its
-very first call, never re-probing what is known. This supersedes the "cross-pull
-persistence … is a NAMED follow-up" clause of DEC-SYMBOL-FORM-PREFERENCE-001.
+``order`` per key per preference INSTANCE (production wires ONE instance per pull
+run, so a long-lived dashboard pays at most one seed read per ``&`` key per pull —
+NOT a per-process bound, and deliberately so: a fresh run picks up rows written by
+another process, e.g. the doctor probe) — so a fresh pull issues the learned winner
+FIRST on its very first call, never re-probing what is known. This supersedes the
+"cross-pull persistence … is a NAMED follow-up" clause of
+DEC-SYMBOL-FORM-PREFERENCE-001.
 """
 
 from __future__ import annotations
@@ -70,6 +74,7 @@ __all__ = [
     "FORM_PROBE_VERDICT_KEY",
     "FORM_WINNER_META_PREFIX",
     "FORM_WINNER_READ_DEADLINE_S",
+    "FORM_WINNER_WRITE_DEADLINE_S",
     "FormProbeStatus",
     "PersistentSymbolFormPreference",
     "SymbolFormPreference",
@@ -120,6 +125,25 @@ FORM_WINNER_READ_DEADLINE_S: Final[float] = 2.0
 #: COMMON :func:`~brutex.config.deadline.resolve_env_seconds` — a bad value can never
 #: disable the bound).
 _READ_DEADLINE_ENV: Final[str] = "BRUTEX_FORM_WINNER_READ_DEADLINE_S"
+
+#: Wall-clock bound on the write-on-change durable persist (``set_meta``) per learned
+#: winner — the WRITE twin of :data:`FORM_WINNER_READ_DEADLINE_S` (review round-2
+#: MAJOR: the write side shares the read side's hazard class EXACTLY — a hung DuckDB
+#: write on a stalled volume never RAISES, so the WARN-degrade ``except`` alone cannot
+#: help; an unbounded ``set_meta`` would hang the recording fetch worker FOREVER, the
+#: pull driver awaiting it, and queue every later persist behind ``_persist_lock``).
+#: On expiry the COMMON ``run_with_deadline`` freeze guard raises, the existing
+#: ``form_winner.persist_failed`` WARN fires, and the pull continues on the in-memory
+#: winner — one bounded wait + one abandoned daemon, the read-side contract (an
+#: abandoned write that eventually lands is harmless: an idempotent same-value
+#: ``INSERT OR REPLACE``). Slightly wider than the read bound because a healthy write
+#: may briefly queue behind another legitimate store writer's lock. Env override:
+#: ``BRUTEX_FORM_WINNER_WRITE_DEADLINE_S``.
+FORM_WINNER_WRITE_DEADLINE_S: Final[float] = 5.0
+
+#: The env override for :data:`FORM_WINNER_WRITE_DEADLINE_S` (same fail-safe parse —
+#: a bad value can never disable the bound).
+_WRITE_DEADLINE_ENV: Final[str] = "BRUTEX_FORM_WINNER_WRITE_DEADLINE_S"
 
 
 def underlying_symbol_forms(underlying_symbol: str) -> tuple[str, ...]:
@@ -257,8 +281,12 @@ class PersistentSymbolFormPreference(SymbolFormPreference):
     * **O(1) hot path:** the store is consulted ONLY for a multi-form key — BOTH the
       seed read in ``order`` AND the persist in ``record_winner`` are gated
       ``len(forms) > 1``, so the ~750 plain underlyings pay ZERO store I/O on either
-      path — and only ONCE per key per process (a ``_loaded`` memo, single-flight);
-      a steady-state ``order``/repeat ``record_winner`` does ZERO store I/O.
+      path — and only ONCE per key per preference INSTANCE (a ``_loaded`` memo,
+      single-flight; production constructs one instance per pull run, so a
+      long-lived dashboard pays at most one seed read per ``&`` key per pull —
+      deliberate, a fresh run picks up rows written by another process, e.g. the
+      doctor probe); a steady-state ``order``/repeat ``record_winner`` does ZERO
+      store I/O.
     * **Role-normalised value:** the persisted value is the winner's ROLE applied to
       the KEY's own :func:`underlying_symbol_forms` tuple (``"M%26M"`` under the
       ``M&M`` key — never a per-contract spelling like ``NSE-M%26M-…-CE``), so a
@@ -278,10 +306,14 @@ class PersistentSymbolFormPreference(SymbolFormPreference):
       canonical order for that one call, exactly like a load failure) and is
       wall-clock-BOUNDED by the COMMON ``run_with_deadline`` freeze guard
       (:data:`FORM_WINNER_READ_DEADLINE_S`), and the persist runs OUTSIDE the map
-      lock under a dedicated ``_persist_lock`` — so a slow or WEDGED disk can never
-      stall the fan-out's ``order`` reads (the wedged read costs its ONE bounded
-      deadline on the reading worker plus one abandoned daemon, never a stalled
-      fan-out).
+      lock under a dedicated ``_persist_lock``, its ``set_meta`` ALSO
+      deadline-bounded (:data:`FORM_WINNER_WRITE_DEADLINE_S` — review round-2
+      MAJOR: a non-raising wedged write would otherwise hang the recording fetch
+      worker forever and queue every later persist behind ``_persist_lock``) — so
+      a slow or WEDGED disk can never stall the fan-out's ``order`` reads NOR the
+      recording workers (each wedged read/write costs its ONE bounded deadline on
+      that worker plus one abandoned daemon, never a stalled fan-out or a hung
+      pull).
     * **Never crashes a pull:** every store read/write is best-effort — an exception
       (a deadline expiry included) logs ONE ``form_winner.load_failed`` /
       ``form_winner.persist_failed`` WARNING and degrades to the in-memory
@@ -295,22 +327,24 @@ class PersistentSymbolFormPreference(SymbolFormPreference):
         super().__init__()
         self._store = store
         self._persist_lock = threading.Lock()
-        #: Keys whose durable row was already consulted THIS process (hit or miss
-        #: or error) — the single-flight memo that bounds store reads to one per
-        #: key per process.
+        #: Keys whose durable row was already consulted by THIS instance (hit or
+        #: miss or error) — the single-flight memo that bounds store reads to one
+        #: per key per instance (production wires one instance per pull run; a
+        #: fresh run deliberately re-reads so another process's writes are seen).
         self._loaded: set[str] = set()
 
     def order(self, key: str, forms: tuple[str, ...]) -> tuple[str, ...]:
         """Base :meth:`SymbolFormPreference.order` + a lazy one-shot durable seed.
 
         The store is consulted ONLY when *forms* has a fallback to reorder
-        (``len(forms) > 1``) AND *key* has not been consulted yet this process —
-        the ``_loaded`` claim is taken under the map lock but the ``get_meta``
-        itself runs OUTSIDE it (deadline-bounded), so the parallel fan-out issues
-        exactly ONE ``get_meta`` per key and is NEVER serialised behind a slow
-        read (a same-key caller racing the in-flight read serves the canonical
-        order for that one call — the same tolerance as a load failure). An
-        unknown / stale persisted form is ignored; a store error or deadline
+        (``len(forms) > 1``) AND *key* has not been consulted yet by THIS
+        instance (one instance per pull run in production) — the ``_loaded``
+        claim is taken under the map lock but the ``get_meta`` itself runs
+        OUTSIDE it (deadline-bounded), so the parallel fan-out issues exactly
+        ONE ``get_meta`` per key per instance and is NEVER serialised behind a
+        slow read (a same-key caller racing the in-flight read serves the
+        canonical order for that one call — the same tolerance as a load
+        failure). An unknown / stale persisted form is ignored; a store error or deadline
         expiry WARNs once and the key stays claimed (no re-read storm). An
         in-process winner recorded before the first ``order`` is never clobbered
         by an older persisted row (``setdefault``).
@@ -383,19 +417,19 @@ class PersistentSymbolFormPreference(SymbolFormPreference):
         NEVER persisted: there is no role to remember, so the ~750 plain
         underlyings pay ZERO store I/O here too), the
         :func:`form_winner_persist_enabled` kill switch is on, and a store is
-        wired — OUTSIDE the map lock, under ``_persist_lock``. The persisted
-        value is ROLE-NORMALISED to the KEY's own canonical tuple (see
+        wired — OUTSIDE the map lock, under ``_persist_lock``, with the
+        ``set_meta`` itself wall-clock-BOUNDED by the COMMON
+        ``run_with_deadline`` freeze guard (:data:`FORM_WINNER_WRITE_DEADLINE_S`
+        — a non-raising WEDGED write degrades exactly like a raising one instead
+        of hanging the recording worker forever). The persisted value is
+        ROLE-NORMALISED to the KEY's own canonical tuple (see
         :data:`FORM_WINNER_META_PREFIX`) so one row serves every phase; a
-        ``set_meta`` failure WARNs and never raises (a pull is NEVER crashed by
-        the sidecar).
+        ``set_meta`` failure — a deadline expiry included — WARNs and never
+        raises (a pull is NEVER crashed by the sidecar).
         """
         changed = super().record_winner(key, forms, winning_form)
-        if (
-            not changed
-            or len(forms) <= 1
-            or self._store is None
-            or not form_winner_persist_enabled()
-        ):
+        store = self._store
+        if not changed or len(forms) <= 1 or store is None or not form_winner_persist_enabled():
             return changed
         # `changed` is True, so the base resolved `winning_form ∈ forms` — index()
         # cannot raise here. Persist the KEY-level form at the winner's ROLE; the
@@ -407,7 +441,17 @@ class PersistentSymbolFormPreference(SymbolFormPreference):
         value = key_forms[idx] if idx < len(key_forms) else winning_form
         with self._persist_lock:
             try:
-                self._store.set_meta(form_winner_key(key), value)
+                # Deadline-bounded like the seed READ (review round-2 MAJOR): a
+                # WEDGED set_meta never raises, so without the freeze guard it
+                # would hang this fetch worker forever AND serialise every later
+                # persist behind ``_persist_lock``; on expiry the WARN below fires
+                # and the pull continues on the in-memory winner.
+                run_with_deadline(
+                    lambda: store.set_meta(form_winner_key(key), value),
+                    resolve_env_seconds(_WRITE_DEADLINE_ENV, FORM_WINNER_WRITE_DEADLINE_S),
+                    what=f"form-winner persist ({key})",
+                    thread_name="groww-form-winner-persist",
+                )
             except Exception as exc:  # pylint: disable=broad-exception-caught — a sidecar write can never break a pull
                 _LOG.warning(
                     "form_winner.persist_failed",

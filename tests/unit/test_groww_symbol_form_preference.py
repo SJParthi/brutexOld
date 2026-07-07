@@ -57,6 +57,7 @@ from brutex.adapters.protocol import DerivativeContract
 from brutex.data.sink import NullBarSink
 from hypothesis import given
 from hypothesis import strategies as st
+from structlog.testing import capture_logs
 
 # ─────────────────────────────────────────────────────────────────────────
 # The pure primitive
@@ -794,6 +795,47 @@ class TestPersistentSymbolFormPreference:
         assert pref.order("M&M", _FORMS) == _FORMS  # loaded memo: no re-read storm
         assert len(store.get_calls) == 1
         release.set()  # let the abandoned daemon finish
+
+    def test_wedged_persist_write_is_deadline_bounded_and_never_hangs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review round-2 MAJOR: a ``set_meta`` that NEVER returns cannot hang the pull.
+
+        The read-side wedge fix (above) left the WRITE side unbounded: a
+        non-raising wedged ``instruments.duckdb`` write would block
+        ``record_winner`` FOREVER on the F&O fetch worker (the pull driver
+        awaits that worker's future — a permanent, log-less hang: the
+        ``persist_failed`` WARN only fires on a RAISING store) and queue every
+        later persist behind ``_persist_lock``. The COMMON ``run_with_deadline``
+        freeze guard now bounds the write (env
+        ``BRUTEX_FORM_WINNER_WRITE_DEADLINE_S``): on expiry the
+        ``form_winner.persist_failed`` WARN fires with ``DeadlineExceeded``,
+        the in-memory winner stands, and a LATER persist pays its OWN bound —
+        never a forever queue behind the wedge.
+        """
+        monkeypatch.setenv("BRUTEX_FORM_WINNER_WRITE_DEADLINE_S", "0.05")
+        release = threading.Event()
+
+        class _WedgedWriteStore(_MemMetaStore):
+            def set_meta(self, key: str, value: str) -> None:
+                super().set_meta(key, value)
+                release.wait(timeout=10.0)  # wedges past the 0.05 s deadline
+
+        store = _WedgedWriteStore()
+        pref = PersistentSymbolFormPreference(store)
+        started = time.monotonic()
+        with capture_logs() as logs:
+            assert pref.record_winner("M&M", _FORMS, "M%26M") is True  # bounded, no raise
+            # A later persist (another key) is NOT permanently serialised behind
+            # the wedge — it acquires the released persist lock and pays its own
+            # bounded deadline.
+            other = ("L&TFH", "L%26TFH")
+            assert pref.record_winner("L&TFH", other, "L%26TFH") is True
+        assert time.monotonic() - started < 5.0, "record_winner hung on the wedged write"
+        warns = [r for r in logs if r["event"] == "form_winner.persist_failed"]
+        assert [w["error_type"] for w in warns] == ["DeadlineExceeded", "DeadlineExceeded"]
+        assert pref.order("M&M", _FORMS) == ("M%26M", "M&M")  # in-memory truth intact
+        release.set()  # let the abandoned daemons finish
 
     def test_sixteen_thread_hammer_single_flight_and_one_write(self) -> None:
         """Concurrency: mixed order/record under a Barrier — one read, one write."""

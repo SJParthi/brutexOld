@@ -29,6 +29,10 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
+from brutex.adapters.groww.symbol_form_preference import (
+    PersistentSymbolFormPreference,
+    form_winner_key,
+)
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.greeks_health import DEFAULT_GREEKS_FAILURE_THRESHOLD
@@ -138,6 +142,10 @@ def _patch_historical(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any])
         # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection route now
         # threads the index/stock classification map — captured for assertion.
         captured["underlying_kinds"] = kwargs["underlying_kinds"]
+        # DEC-FORM-WINNER-PERSIST-001 (review round-2 fix): the direct-selection
+        # route now threads the DURABLE form-winner map too — captured for
+        # assertion (fail-loud key access: dropping the wiring fails every test).
+        captured["form_preference"] = kwargs["form_preference"]
         return HistoricalPullReport(
             dry_run=kwargs["dry_run"],
             intervals=tuple(kwargs["intervals"]),
@@ -224,6 +232,57 @@ def test_direct_selection_threads_six_step_underlying_kinds(
     assert resp.status_code == 200
     assert _wait_for_job(client)["state"] == "done"
     assert captured["underlying_kinds"] == {"NIFTY": True}
+
+
+def test_direct_selection_threads_durable_form_preference(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct-selection grammars thread the DURABLE form-winner map (round-2 fix).
+
+    DEC-FORM-WINNER-PERSIST-001 review round-2 MAJOR: round 1 wired the
+    ``?symbols=`` composite branch + the metadata route but MISSED this
+    ``?contract/?contracts/?underlying/?kind/?all`` call — the default ``None``
+    let the spine build a fresh amnesiac ``SymbolFormPreference`` per pass, so
+    on this real production surface a learned ``%26`` winner was never read
+    back (an operator's ``?underlying=M&M`` re-paid the full wasted plain-form
+    fetch), new wins were never persisted, and the within-one-pull amnesia
+    across market buckets / until-clean rounds persisted here. The FUNCTIONAL
+    pin: a winner recorded through the ROUTED preference lands in the wired
+    ``InstrumentStore``'s ``schema_meta`` (never a fresh store-less map).
+    """
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store
+
+
+def test_direct_selection_dry_run_form_preference_is_store_less(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dry-run arm threads ``store=None`` — synthetic runs never persist a row."""
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post(
+        "/api/v1/universe/pull-historical",
+        params={"underlying": "NIFTY", "dry_run": "true"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True  # in-memory learning only
+    assert store.get_meta(form_winner_key("M&M")) is None  # store=None: no durable row
 
 
 def test_pull_historical_work_feeds_greeks_health_counter(

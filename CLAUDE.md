@@ -26,13 +26,17 @@ winning form STRING — the winner's ROLE applied to the key's own
 re-exported from `contracts.py`), so a candle-phase win and a metadata win
 share ONE value space — review-fixed from the raw phase-local string) written
 through the NEW `PersistentSymbolFormPreference`
-(write-on-change, read-once-per-process single-flight, MULTI-form keys only on
+(write-on-change, read-once-per-preference-instance single-flight — one
+instance per pull run, MULTI-form keys only on
 BOTH paths — the ~750 plain underlyings pay ZERO store I/O on order AND record
 (review-fixed: the ungated persist wrote ~212 junk rows per pull process); the
 seed `get_meta` runs OUTSIDE the map lock, bounded by the COMMON
 `run_with_deadline` (2 s, `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged
 sidecar read can never stall the fan-out (review-fixed: it ran INSIDE the map
-lock); store errors WARN-only —
+lock), and the persist `set_meta` is bounded by the same guard (5 s,
+`BRUTEX_FORM_WINNER_WRITE_DEADLINE_S` — round-2 review fix: a non-raising
+wedged write would have hung the recording fetch worker forever and queued
+every later persist behind the persist lock); store errors WARN-only —
 a pull is never crashed; `BRUTEX_FORM_WINNER_PERSIST=off` is the write-side
 kill switch; SUPERSEDES the "cross-pull persistence is a NAMED follow-up"
 clause of DEC-SYMBOL-FORM-PREFERENCE-001), keyed by the PRIMARY F&O underlying
@@ -40,7 +44,9 @@ in EVERY phase (`resolve_expiries`/`resolve_contracts` gain the
 `preference_key` normalization `candles.py` already had; the metadata pull
 passes the CELL key, never the queried spelling form) and wired at every
 production pull seam (ONE instance per `/pull-pipeline` run shared by the
-metadata + historical phases; the standalone metadata/composite routes;
+metadata + historical phases; the standalone metadata/composite routes AND the
+`/pull-historical` direct-selection grammar — the latter MISSED in round 1 and
+wired by the round-2 review fix, route-pinned;
 `run_groww_option_ingest`'s fresh-per-pass default stands down — also fixing
 the within-one-pull amnesia across market buckets/until-clean rounds; a
 dry-run threads store=None, byte-identical to the process-local base). The
