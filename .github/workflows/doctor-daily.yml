@@ -6,7 +6,10 @@
 # HONEST ENVELOPE (Golden Rule #10) — what a green run PROVES / does NOT:
 #   PROVES : the `brutex doctor` CLI boots on a clean runner (full import
 #            chain incl. both PyO3 wheels); BOTH wheel-freshness handshakes
-#            PASS against the in-repo EXPECTED_BUILD.json fingerprints; the
+#            PASS against the in-repo EXPECTED_BUILD.json fingerprints and
+#            BOTH wheel source-digest handshakes PASS against the repo crate
+#            trees (DEC-RUST-SOURCE-DIGEST-TWIN-001 #1258 /
+#            DEC-DOCTOR-DAILY-CHECKSET-9-001); the
 #            doctor's skip-with-reason machinery abstained honestly on every
 #            check needing the operator envelope (ASSERTED below — a
 #            fabricated PASS on a hosted runner goes red, never fake-green;
@@ -156,7 +159,7 @@ jobs:
             --runtime-file "${CI_DOCTOR_HOME}/runtime.json" \
             | tee doctor-report.txt
 
-      - name: Assert envelope honesty (5x SKIP-with-reason, 2x wheel PASS)
+      - name: Assert envelope honesty (5x SKIP-with-reason, 4x wheel PASS)
         # Exit 0 from the doctor is necessary but NOT sufficient: (a) an
         # envelope check reading PASS against the hermetic empty envelope is
         # a fabricated verdict -> red ("CI must never claim operator-envelope
@@ -192,16 +195,28 @@ jobs:
           assert_status lake_uniqueness SKIP
           assert_status wheel_freshness PASS
           assert_status wheel_freshness_fno_math PASS
-          # Two-sided check-set pin: the 7 names above red a REMOVED/RENAMED
+          # The two wheel SOURCE-DIGEST handshakes (installed __source_digest__
+          # vs the Python-twin recompute over the repo crate tree —
+          # DEC-RUST-SOURCE-DIGEST-TWIN-001 #1258) PASS deterministically here:
+          # both wheels are built in-job from THIS checkout's crate trees, the
+          # editable install puts rust/<crate>/Cargo.toml next to the brutex
+          # package (the SKIP arm is a wheel-only install with NO crate tree —
+          # never this job), and BRUTEX_SKIP_WHEEL_FRESHNESS is never set. A
+          # WARN/SKIP would mean the run proved nothing (stale framing twin =
+          # repo defect) -> red, same law as the freshness pair
+          # (DEC-DOCTOR-DAILY-CHECKSET-9-001; live-proof run 28834010234).
+          assert_status wheel_source_digest PASS
+          assert_status wheel_source_digest_fno_math PASS
+          # Two-sided check-set pin: the 9 names above red a REMOVED/RENAMED
           # check; this exact-count pin reds an ADDED one. Check rows live
           # strictly between the two ==== rules, so the OVERALL line (whose
           # $3 is also PASS/FAIL) is never miscounted.
           n="$(awk '/^=+$/ { rules++; next } rules == 1 { count++ } END { print count + 0 }' doctor-report.txt)"
-          if [ "$n" -ne 7 ]; then
-            echo "::error::expected exactly 7 doctor check rows, got $n — the doctor check set changed: classify the new/removed check in this step consciously"
+          if [ "$n" -ne 9 ]; then
+            echo "::error::expected exactly 9 doctor check rows, got $n — the doctor check set changed: classify the new/removed check in this step consciously"
             exit 1
           fi
-          echo "envelope-honesty contract holds: 5 SKIP-with-reason + 2 PASS, exactly 7 checks"
+          echo "envelope-honesty contract holds: 5 SKIP-with-reason + 4 PASS, exactly 9 checks"
 
       - name: Publish run summary (envelope-honest)
         if: always()
