@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1482 —
+the CLI `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment
+pass the dashboard runs — post-drain Seam A (fetch lane drained + window
+ledger persisted FIRST, single-flight lock still HELD), default-ON with the
+fail-loud `BRUTEX_CLI_GREEKS_ENRICH` kill switch, inert under
+`--dry-run`/`--inspect` via `_no_persist`, halts (`LakeWriteHalt`/
+`GreeksEnrichPoolBroken`) alert-then-re-raise, a fenced failure NEVER fails
+the pull — and a NEW `brutex enrich-greeks` subcommand delivers the #1188
+bulk v1→v2 re-enrich (exit 0 iff fully clean — cron-visible). ONE COMMON
+wheel-free `brutex/data/greeks_enrich_pass.py` owns the fence (MOVED from
+`historical_pull`, whose `_enrich_greeks_from_minute` is now a thin
+delegator — dashboard behavior byte-identical, outcome types aliased to the
+SAME objects) + the chain-union lake-walk target discovery (CE/PE only,
+zero Parquet opens). HONEST: NOT O(1) — discovery is an O(option partition
+dirs) walk and the pass re-READS the scoped stored bars every run (the
+stamp-driven `already_current` gate makes re-runs cheap by skipping writes
++ solves, never reads); the CLI L2 heal seam stays the open
+DEC-LAKE-HEAL-001 follow-up. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100%
+line+branch).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +337,35 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1482** — the CLI
+  `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
+  `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
+  DEC-GREEKS-CORRECTNESS-AUDIT-001 named follow-ups ("a CLI-pulled lake never enriches" + "bulk re-enrich"). ONE
+  COMMON wheel-free module `brutex/data/greeks_enrich_pass.py` (the MOVED dashboard fence `run_greeks_enrich_pass` +
+  `GreeksEnrichOutcome`/`GREEKS_NOT_RUN` + the wheel-free chain-union lake discovery
+  `discover_option_windows`/`lake_target_builder` + the `has_option_candles` pre-gate + the fail-loud
+  `resolve_cli_greeks_enrich` env gate); `historical_pull._enrich_greeks_from_minute` is now a thin delegator —
+  dashboard behavior BYTE-IDENTICAL (event names, the 13 `done` fields in order, logger name via `log=_LOG`, the halt
+  re-raise, outcome types aliased to the SAME objects; the existing dashboard suite passes unmodified). The fetch
+  seam is Seam A — post-drain, ledger persisted, single-flight lock still HELD, default-ON
+  (`BRUTEX_CLI_GREEKS_ENRICH=0` kill switch; a junk value fails loud pre-pull `EXIT_USER_ERROR`; inert under
+  `--dry-run`/`--inspect` via `_no_persist`), scoped pulled-underlyings × pulled-window, deliberately NOT gated on
+  `bars_appended > 0` (async-pipeline counts reconcile AFTER the seam); halts alert-then-re-raise via the COMMON
+  `emit_pull_halt_alert` (`_one_fetch_pass` pattern), any other failure is fenced and NEVER fails the pull; a
+  pure-spot lake skips in O(exchange dirs) with one DEBUG event. `brutex enrich-greeks` (whole lake or
+  `--underlying`/`--start`/`--end` slice, dates CLI-inclusive → half-open internally; `--dry-run` = wheel-free
+  discovery counts, no lock) takes the pull single-flight lock + `keep_awake` and exits `EXIT_OK` iff `ok is True
+  and errored_targets == 0` (the `lake audit-unique` cron-visible precedent — a deliberate, documented divergence
+  from the never-fail pull path). Discovery bounds year dirs via the canonical `brutex.data.partition` constants
+  (§11 COMMON — imported, never re-minted). HONEST: NOT O(1) — discovery is O(option partition dirs + month entries)
+  and the pass re-READS the scoped stored bars every run (`already_current` skips writes/solves, not reads; a
+  full-floor fetch over a dashboard-populated lake re-reads the whole stored index-options history inside the lock —
+  levers: window scoping, `BRUTEX_CLI_GREEKS_ENRICH=0`, `BRUTEX_GREEKS_WORKERS=1`); NO CLI L2 heal seam (the
+  DEC-LAKE-HEAL-001 follow-up stays OPEN); `futures_skipped` reads 0 on CLI passes (FUT filtered at discovery —
+  documented asymmetry); the bulk lever is manual (no cron). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+  REFERENCE_ONLY, no scope/vocab/rate change, zero vendor calls added; touched modules 100% line+branch;
+  ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
@@ -378,8 +426,11 @@ hostile-review pass._
   SPOTJOIN-3 2dp `round_money` spot snap (spot only, never a Greek), and `GREEKS_FORMULA_VERSION` 1→2
   (enrich golden regenerated — the diff is EXACTLY the formula bit, zero value drift). HONEST envelope:
   the v2 re-enrich reaches ONLY contracts inside a live pull window (expired contracts keep v1 stamps —
-  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up); rust/** kernel out of
-  scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
+  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up) [CLI-ENRICH RECONCILE —
+  DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1482: BOTH follow-ups are now CLOSED — the CLI fetch path runs the
+  same fenced pass post-drain (default-ON, `BRUTEX_CLI_GREEKS_ENRICH` kill switch) and `brutex enrich-greeks`
+  is the bulk v1→v2 re-enrich lever; the CLI L2 heal seam remains the open DEC-LAKE-HEAL-001 follow-up];
+  rust/** kernel out of scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
   clean; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
   Prior merged: **DEC-CI-FORK-PR-HARDEN-001,
   MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
@@ -1681,7 +1732,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/nice-wright-qmb2bz`
+- **Active feature branch:** `claude/intelligent-euler-dwf2ab`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
