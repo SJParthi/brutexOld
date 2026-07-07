@@ -521,12 +521,44 @@ class TestStoredMonths:
         (interval / "2024").touch()  # a FILE named like a year — not a dir
         (interval / "202").mkdir()  # wrong width
         (interval / "20A4").mkdir()  # non-digit
-        (interval / f"{MIN_PARTITION_YEAR - 1:04d}").mkdir()  # below the writer window
-        (interval / f"{MAX_PARTITION_YEAR + 1:04d}").mkdir()  # above the writer window
+        below = interval / f"{MIN_PARTITION_YEAR - 1:04d}"  # below the writer window
+        below.mkdir()
+        (below / "01.parquet").touch()  # a REAL month file — the bound must exclude it
+        above = interval / f"{MAX_PARTITION_YEAR + 1:04d}"  # above the writer window
+        above.mkdir()
+        (above / "01.parquet").touch()  # a REAL month file — the bound must exclude it
         good = interval / "2025"
         good.mkdir()
         (good / "01.parquet").touch()
         assert gep._stored_months(interval) == frozenset({(2025, 1)})
+
+    def test_out_of_window_year_with_month_files_is_excluded(self, tmp_path: Path) -> None:
+        """Regression: the partition-year bound has EFFECT, not just coverage.
+
+        Review round-2 (finding 1): the original junk-year fixtures created
+        the out-of-window year dirs EMPTY, so a mutant deleting the
+        ``MIN_PARTITION_YEAR <= year <= MAX_PARTITION_YEAR`` bound survived —
+        admitting the dirs changed nothing observable. This test seeds REAL
+        month files into out-of-window years (including the hostile
+        ``9999/12.parquet``, which without the bound would become the stored
+        maximum and make the month-after span endpoint ``date(10000, 1, 1)``
+        unconstructible), so the frozenset equality kills the mutant.
+        """
+        interval = tmp_path / "1minute"
+        interval.mkdir()
+        below = interval / f"{MIN_PARTITION_YEAR - 1:04d}"
+        below.mkdir()
+        (below / "03.parquet").touch()
+        above = interval / f"{MAX_PARTITION_YEAR + 1:04d}"
+        above.mkdir()
+        (above / "06.parquet").touch()
+        hostile = interval / "9999"
+        hostile.mkdir()
+        (hostile / "12.parquet").touch()
+        good = interval / "2025"
+        good.mkdir()
+        (good / "07.parquet").touch()
+        assert gep._stored_months(interval) == frozenset({(2025, 7)})
 
     def test_junk_month_entries_skipped(self, tmp_path: Path) -> None:
         year_dir = tmp_path / "1minute" / "2024"
