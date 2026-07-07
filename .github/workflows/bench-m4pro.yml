@@ -348,7 +348,8 @@ jobs:
           if [ -n "${{ inputs.replace_entries }}" ]; then
             REPLACE="--replace-entries ${{ inputs.replace_entries }}"
           fi
-          # shellcheck disable=SC2086 — $REPLACE is deliberately word-split
+          # $REPLACE is deliberately word-split:
+          # shellcheck disable=SC2086
           python scripts/ci/bench_baseline_gate.py capture \
             --runs abs-bench/run1 abs-bench/run2 abs-bench/run3 \
             --baselines-dir tests/bench/baselines \
@@ -434,10 +435,12 @@ jobs:
     # test-pinned), and a REGRESSION outcome never reaches here (needs_capture
     # is set only on abstain / explicit dispatch — a red compare fails the
     # m4pro job, so `needs` blocks this job entirely on regression).
-    # The self-hosted runner never holds a write token — THIS GitHub-hosted job
-    # is the only one, and its only inputs are the artifact bytes (committed
-    # verbatim) and job outputs. No `pull_request` trigger exists on this
-    # workflow (DEC-M4PRO-PR-TRIGGER-001), so fork code never runs near it.
+    # The self-hosted runner never holds a contents/PR-write token (its
+    # inherited workflow-level token is issues:write only, for its own alert
+    # steps) — THIS GitHub-hosted job is the only contents/pull-requests write
+    # holder, and its only inputs are the artifact bytes (committed verbatim)
+    # and job outputs. No `pull_request` trigger exists on this workflow
+    # (DEC-M4PRO-PR-TRIGGER-001), so fork code never runs near it.
     if: >
       needs.m4pro-absolute-throughput.outputs.candidate_ready == '1' &&
       github.ref == 'refs/heads/main' &&

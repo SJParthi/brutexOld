@@ -3,8 +3,10 @@
 DEC-BENCH-ABS-BASELINE-001. yaml.safe_load pins (the verified
 ``test_redteam_fork_pr_harden.py`` idiom) over ``.github/workflows/ci.yml``
 and ``bench-m4pro.yml``: the required ``bench`` job carries both stdlib gate
-steps; the self-hosted runner NEVER holds a write token (only the
-GitHub-hosted ``bless-baseline`` job does, main-ref + event pinned); the
+steps; the self-hosted runner NEVER holds a contents/PR-write token — its
+inherited workflow-level token is ``issues: write`` only, for its own alert
+steps (only the GitHub-hosted ``bless-baseline`` job holds contents +
+pull-requests write, main-ref + event pinned); the
 capture step can only arm on abstain/dispatch — never on a regression; and
 the alert steps fire on ``cancelled()`` (a timeout-kill is never silent).
 """

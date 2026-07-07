@@ -50,7 +50,8 @@ measure (bench-m4pro, 6 fragments)      no <key>.json?
                                        │ (refused if cross-run spread > tolerance/2)
                                        ▼
                         bless-baseline job (GitHub-hosted, the ONLY
-                        write-token holder) commits the candidate VERBATIM
+                        contents/PR-write holder; the runner's token is
+                        issues:write only) commits the candidate VERBATIM
                         and opens a bot PR → operator nudges CI + merges
 ```
 
