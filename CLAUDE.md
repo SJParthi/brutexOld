@@ -444,9 +444,10 @@ hostile-review pass._
   live — the keyless `load-instruments` `master_revision` trap); `resolve_report_datasets` discovers FILTERED
   at the source (`exclude_segments={FNO}` prunes the contract tree at walk descent + `intervals={required}`;
   SANCTIONED: an F&O contract partition is no longer offered as a report symbol) with a NEW `datasets=`
-  pre-walked seam; the `db_view.list_candle_datasets` manifest rebuild stamps ONLY a post==pre ledger token
-  (mid-walk race → explicit SKIP + one `db_view.manifest_rebuild_skipped` INFO — a wasted-write save, the
-  load-side token gate was already false-fresh-safe); welcome.html + Golden Rule #5 reworded to the TRUE
+  pre-walked seam; the `db_view.list_candle_datasets` manifest rebuild always stamps the PRE-walk ledger token
+  (mid-walk race → the stale-stamped base still LANDS — it is `record_dataset`'s write-side convergence
+  seed, the round-6 review restore of an interim SKIP design — plus one observe-only
+  `db_view.manifest_rebuilt_stale` INFO; the load-side token gate stays the freshness authority); welcome.html + Golden Rule #5 reworded to the TRUE
   two-tier O(1) enforcement of `tests/bench/_o1_tiers.py` (robust 3–10× shared-CI / strict 1.1× M4-Pro via
   `BRUTEX_M4PRO_STRICT=1` / measured 3× cache-tier — words only, NO gate weakened); two NEW bench pins
   (u128 two-limb mask + `AuditWriter.append` flat vs chain length, prefill via the COMMON

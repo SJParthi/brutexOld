@@ -299,18 +299,22 @@ class TestManifestFirstDiscovery:
         assert any(d["symbol"] == "NIFTY" for d in listed)
         assert not lm.manifest_meta_path(tmp_path).exists()
 
-    def test_mid_walk_ledger_move_skips_rebuild_and_logs(
+    def test_mid_walk_ledger_move_rebuilds_stale_base_and_converges(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A ledger move DURING the walk → rebuild SKIPPED + one INFO event.
+        """A ledger move DURING the walk → STALE-stamped base + one INFO event.
 
-        DEC-O1-CLAIMS-HONESTY-001 (PART 1c): the rebuild stamps ONLY a
-        post==pre ledger token, so a vendor write landing mid-walk converts
-        the old write-then-stale-on-next-read into an explicit skip; the next
-        quiescent unfiltered discovery walks again and self-heals. Fails
-        before the fix (a stale-stamped manifest meta WOULD exist).
+        DEC-O1-CLAIMS-HONESTY-001 round-6 review fold: the interim
+        SKIP-on-mismatch design is REVERTED — the rebuild lands stamped with
+        the PRE-walk token (never freshness the walk did not have; the
+        load-side gate refuses to serve it as-is) because that base is the
+        seed `record_dataset`'s write-side convergence layers onto. Fails
+        before the fix: the SKIP left no base, so `record_dataset` no-oped
+        (`record_skipped_no_base`) and the prebuild could never converge the
+        manifest to served-hot after a mid-pull discovery.
         """
         _seed_lake(tmp_path)
+        pre_walk_token = db_view.ledger_stat_token(tmp_path)
         real_walk = db_view._walk_candle_datasets
 
         def _walk_then_move(*args: Any, **kwargs: Any) -> list[dict[str, str]]:
@@ -323,21 +327,46 @@ class TestManifestFirstDiscovery:
         with capture_logs() as logs:
             listed = db_view.list_candle_datasets(tmp_path)
         assert any(d["symbol"] == "NIFTY" for d in listed)  # walk result correct
-        assert not lm.manifest_meta_path(tmp_path).exists()  # NOT persisted
-        skipped = [e for e in logs if e["event"] == "db_view.manifest_rebuild_skipped"]
-        assert len(skipped) == 1
-        assert skipped[0]["pre_walk_token"] is not None
-        assert skipped[0]["post_walk_token"] is not None
-        assert skipped[0]["pre_walk_token"] != skipped[0]["post_walk_token"]
-        # Self-heal: a SECOND (quiescent) unfiltered call walks + rebuilds.
+        # The base IS persisted — stamped with the PRE-walk (now stale) token.
+        meta = json.loads(lm.manifest_meta_path(tmp_path).read_text(encoding="utf-8"))
+        assert meta["ledger_token"] == pre_walk_token
+        # Never false-fresh: the stale stamp is refused for reads as-is.
+        assert lm.load_manifest_datasets(tmp_path) is None
+        stale = [e for e in logs if e["event"] == "db_view.manifest_rebuilt_stale"]
+        assert len(stale) == 1
+        assert stale[0]["pre_walk_token"] == pre_walk_token
+        assert stale[0]["post_walk_token"] not in (None, pre_walk_token)
+        # THE CONVERGENCE SEED (the fails-before pin): a prebuild-style
+        # record layers onto the stale base + re-stamps the CURRENT token,
+        # converging the manifest to served-hot with NO further walk.
+        assert (
+            lm.record_dataset(
+                tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", interval="5minute"
+            )
+            is True
+        )
         monkeypatch.setattr(db_view, "_walk_candle_datasets", real_walk)
-        assert db_view.list_candle_datasets(tmp_path) == listed
-        assert lm.manifest_meta_path(tmp_path).exists()
+        calls = _walk_spy(monkeypatch)
+        converged = db_view.list_candle_datasets(tmp_path)
+        assert calls["n"] == 0  # manifest-served — zero walks
+        assert {
+            "kind": "spot",
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbol": "NIFTY",
+            "interval": "5minute",
+        } in converged
 
-    def test_post_walk_token_none_skips_rebuild(
+    def test_post_walk_token_none_rebuilds_with_prewalk_stamp_and_logs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An unreadable post-walk stat (`None` — unknown) cannot PROVE equality → skip."""
+        """An unreadable post-walk stat (`None`) still seeds the base, observed.
+
+        The re-read is OBSERVE-ONLY: it cannot prove quiescence, so the event
+        fires, but the rebuild still lands stamped with the PRE-walk token
+        (safe either way — the load-side gate compares against the CURRENT
+        token at read time).
+        """
         _seed_lake(tmp_path)
         real_token = db_view.ledger_stat_token(tmp_path)
         assert real_token is not None
@@ -347,11 +376,12 @@ class TestManifestFirstDiscovery:
         with capture_logs() as logs:
             listed = db_view.list_candle_datasets(tmp_path)
         assert any(d["symbol"] == "NIFTY" for d in listed)
-        assert not lm.manifest_meta_path(tmp_path).exists()
-        skipped = [e for e in logs if e["event"] == "db_view.manifest_rebuild_skipped"]
-        assert len(skipped) == 1
-        assert skipped[0]["pre_walk_token"] == real_token
-        assert skipped[0]["post_walk_token"] is None
+        meta = json.loads(lm.manifest_meta_path(tmp_path).read_text(encoding="utf-8"))
+        assert meta["ledger_token"] == real_token  # the PRE-walk stamp
+        stale = [e for e in logs if e["event"] == "db_view.manifest_rebuilt_stale"]
+        assert len(stale) == 1
+        assert stale[0]["pre_walk_token"] == real_token
+        assert stale[0]["post_walk_token"] is None
 
 
 def test_manifest_rows_with_invalid_coordinates_are_screened(tmp_path: Path) -> None:
