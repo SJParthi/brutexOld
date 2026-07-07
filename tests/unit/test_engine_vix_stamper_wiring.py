@@ -9,8 +9,9 @@ capture on the exact seam the production call crosses, or a real end-to-end
 run whose trades carry the stamps — so no bind can silently regress.
 
 Companion suite: ``tests/unit/test_vix_stamper_binding_pin.py`` (the AST pin
-enumerating the exactly-two sanctioned literal-``None`` discarded-stream
-sites). Persisted-bytes honesty (updated for Stage C — the nullable
+enumerating the sanctioned literal-``None`` discarded-stream sites — FOUR
+after the round-2 review — plus the omission + positive-presence laws).
+Persisted-bytes honesty (updated for Stage C — the nullable
 ``vix_mean``/``vix_min``/``vix_max`` columns now land on the persisted rows):
 the stamped-vs-unstamped store regression in :class:`TestSweepRunSeam` pins
 that stamping changes ONLY the three nullable VIX columns — every ``run_id``

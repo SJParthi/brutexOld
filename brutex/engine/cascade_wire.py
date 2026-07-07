@@ -633,10 +633,11 @@ def _make_mc_evaluate(
             # the only output; no row, report or operator surface ever sees
             # the trades themselves — so stamping every permutation's trades
             # would be pure wasted work with zero observable output. The
-            # stream is EXPLICITLY unstamped via this literal (one of exactly
-            # TWO sanctioned literal-None seam bindings, AST-pinned with
-            # exact counts by tests/unit/test_vix_stamper_binding_pin.py —
-            # never a silent omission). REVERT LEVER: thread the candidate's
+            # stream is EXPLICITLY unstamped via this literal (one of the
+            # ENUMERATED sanctioned literal-None seam bindings — four after
+            # the round-2 review — AST-pinned with exact counts by
+            # tests/unit/test_vix_stamper_binding_pin.py — never a silent
+            # omission). REVERT LEVER: thread the candidate's
             # stamper through _make_mc_evaluate and bind it here (one kwarg;
             # the null statistic is VIX-independent either way).
             reference_stamper=None,
