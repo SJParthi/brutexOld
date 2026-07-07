@@ -1309,14 +1309,16 @@ impl PyVwapState {
     /// volume) sit orders of magnitude below the ceiling, so the golden
     /// VWAP output is byte-unchanged.
     ///
-    /// `typical_paisa` is additionally required NON-NEGATIVE: the documented
-    /// bit-for-bit twin identity with BruteX's Python `VwapState` holds only
-    /// for non-negative operands (the native i128 `/` truncates toward zero;
-    /// Python's `//` floors — a negative `cum_pv` would silently diverge by
-    /// one paisa). A negative typical is not a real price (HLC3 of positive
-    /// prices), so BOTH twins reject it with `ValueError` instead of silently
-    /// disagreeing — the domain hole is CLOSED at the boundary, mirrored by
-    /// the Python twin's identical guard (`brutex/indicators/vwap.py`).
+    /// `typical_paisa` is additionally required NON-NEGATIVE: the bit-for-bit
+    /// twin identity that was documented against the now-DELETED Python
+    /// `VwapState` (`brutex/indicators/vwap.py`, removed by
+    /// DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001) held only for non-negative
+    /// operands (the native i128 `/` truncates toward zero; Python's `//`
+    /// floors — a negative `cum_pv` would have silently diverged by one
+    /// paisa). A negative typical is not a real price (HLC3 of positive
+    /// prices), so the guard REMAINS at this now-single-source boundary: it
+    /// raises `ValueError` exactly as both twins did while the twin lived,
+    /// keeping the domain hole CLOSED.
     #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
     fn update(
         &mut self,

@@ -2,8 +2,12 @@
 //!
 //! The stateful indicator the Group-12 `bos_bullish` / `bos_bearish` /
 //! `choch_bullish` / `choch_bearish` conditions (bits 56-59) consume
-//! (ADR-0012 D3/D4 — DEC-NIFTY-BOS-CHOCH-001). A bit-for-bit twin of
-//! `brutex/indicators/market_structure.py::MarketStructureState`.
+//! (ADR-0012 D3/D4 — DEC-NIFTY-BOS-CHOCH-001). THE single detector source:
+//! the hand-synced bit-for-bit Python twin that used to live at
+//! `brutex/indicators/market_structure.py::MarketStructureState` was DELETED
+//! by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (`docs/MIGRATION.md` #1530)
+//! — BruteX drives this state via the PyO3 pyclass, and the frozen twin-state
+//! golden fixture is replayed Rust-only against this source.
 //!
 //! ## What BOS and CHoCH are
 //!
