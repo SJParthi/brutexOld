@@ -60,8 +60,9 @@ constants module.
 | `TICK_PAISA` | `5` (= ₹0.05) | COSTS_VERIFIED §11 |
 | `GROWW_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order) | COSTS_VERIFIED §8.1 |
 | `ZERODHA_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order, also flat for F&O) | COSTS_VERIFIED §8.2 |
-| `STT_RATE_PRE_APR2026` | `0.0010` (= 0.10% of sell premium) | COSTS_VERIFIED §3 |
-| `STT_RATE_POST_APR2026` | `0.0015` (= 0.15% of sell premium) | COSTS_VERIFIED §3 (UNVERIFIED gazette text) |
+| `STT_RATE_PRE_OCT2024` | `0.000625` (= 0.0625% of sell premium, pre 2024-10-01) | `brutex/costs/constants.py` `STT_OPTIONS_PRE_OCT_2024_BPS_X100`; DEC-COST-003 (MIGRATION.md #128). Row added 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) — the code has carried this third regime since the rate lock; the table previously showed only two. |
+| `STT_RATE_PRE_APR2026` | `0.0010` (= 0.10% of sell premium, 2024-10-01 → 2026-03-31) | COSTS_VERIFIED §3 |
+| `STT_RATE_POST_APR2026` | `0.0015` (= 0.15% of sell premium, from 2026-04-01) | COSTS_VERIFIED §3 (UNVERIFIED gazette text) |
 | `STT_HIKE_EFFECTIVE_DATE` | `date(2026, 4, 1)` | Budget 2026 |
 | `NSE_FNO_RATE` | `0.00035030` (= 0.03503%, both sides) | COSTS_VERIFIED §4 |
 | `BSE_FNO_RATE` | `0.00032500` (= 0.03250%, both sides) | COSTS_VERIFIED §4 (UNVERIFIED for Bankex) |
@@ -125,11 +126,13 @@ INPUT:  entry_dt, exit_dt, instrument, side, entry_open_paisa, exit_open_paisa,
 
 # ── Step 1: apply slippage (flat 1-tick adverse, per Track 2 §9) ───────────
 buy_fill_paisa  = (entry_open_paisa + TICK_PAISA) if side starts with "long"
-                  else (exit_open_paisa - TICK_PAISA)
-sell_fill_paisa = (exit_open_paisa + TICK_PAISA) if side starts with "short"   # CHECK SIGN
+                  else (exit_open_paisa + TICK_PAISA)
+sell_fill_paisa = (entry_open_paisa - TICK_PAISA) if side starts with "short"
                   else (exit_open_paisa - TICK_PAISA)
 # Long side: BUY at entry+1tick, SELL at exit-1tick
-# Short side: SELL at entry+1tick, BUY at exit-1tick (and PnL inverts)
+# Short side: SELL entry at entry-1tick, BUY cover at exit+1tick — adverse both
+# legs (buy higher, sell lower; PnL inverts); §8 is authoritative
+# (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 — resolves the #963 MINOR-4 contradiction)
 
 # ── Step 2: lookup lot size ──────────────────────────────────────────────
 n_shares_per_lot = lot_size_lookup(instrument, entry_dt.date())
@@ -261,6 +264,21 @@ ROUND_TO_NEAREST_PAISA(paisa_raw):
 The `trade_outcome` enum (§1) drives 4 distinct charge paths. Track 2
 always sets `NORMAL_CLOSE`; the other 3 are forward-compat stubs.
 
+> **IMPLEMENTATION STATUS (2026-07-06, DEC-TRACK2-COSTS-SPEC-RECONCILE-001):**
+> Only `NORMAL_CLOSE` is implemented. `brutex/costs/calculator.py`'s Step-0
+> guard raises `UnsupportedTradeOutcomeError` on any other outcome — that guard
+> is a fail-loud REFUSAL, **NOT** an implementation of this state machine
+> (MIGRATION.md #963 MAJOR-1: "CHANGE 1 is a fail-loud GUARD, NOT the §4.2
+> state machine (still deferred)"). The three `EXPIRY_*` charge paths below are
+> SPEC-ONLY forward-compat stubs per DEC-RISK-011 (MIGRATION.md #108) /
+> DEC-EXEC-008 (#111), unreachable in Track 2 — the sole production caller
+> (`brutex/options/executor.py`, DEC-OPTIONS-EXECUTOR-001 #568) hard-codes
+> long-only sides + `trade_outcome="NORMAL_CLOSE"`. Implementing them requires
+> a new DEC; nothing here authorizes it. Two drift observations inside the
+> pseudo-code below (the `exit_dt` STT-era key; the flat "0.15% × premium"
+> assign parenthetical) are REGISTERED as §16 items 18-19, deliberately NOT
+> decided here.
+
 ```
                        ┌────────────────────────────────────────────────────┐
                        │             ENTRY (always charged)                 │
@@ -318,6 +336,12 @@ match trade_outcome:
 
   case EXPIRY_EXERCISE:
     # LONG ITM held to expiry, auto-exercised by exchange
+    # OPEN (§16 item 18, NOT decided): this illustrative line keys the STT era
+    # on exit_dt, but DEC-COST-002 (MIGRATION.md #127) locked the NORMAL_CLOSE
+    # regime key to entry_dt_ist.date() (§4 Step 5 + §7). Whether an
+    # expiry-settled event keys on exit_dt (the exercise occurs AT expiry) is
+    # deferred to the DEC that implements this branch — illustrative, not
+    # normative.
     stt_rate = 0.00125 if exit_dt < STT_HIKE_DATE else 0.0015
     stt = ROUND_TO_RUPEE(intrinsic_value_paisa * stt_rate)
     brokerage = GROWW_BROKERAGE_PAISA  # ₹20 per executed order (NOT per contract)
@@ -331,6 +355,11 @@ match trade_outcome:
   case EXPIRY_ASSIGN:
     # SHORT ITM assigned at expiry — short pays intrinsic loss from account,
     # but NO separate STT (was paid at sell-open as 0.15% × premium)
+    # NOTE (§16 item 19, NOT decided): the sell-open premium-STT rate in the
+    # parenthetical above is ERA-DEPENDENT, not a flat 0.15% — 0.0625% pre
+    # 2024-10-01 / 0.10% to 2026-03-31 / 0.15% from 2026-04-01
+    # (brutex/costs/constants.py STT_OPTIONS_*; DEC-COST-003, MIGRATION.md
+    # #128). The DEC that implements this branch must apply the era rate.
     stt = 0
     brokerage = GROWW_BROKERAGE_PAISA  # ₹20 per order (NOT per contract)
     exch = sebi = ipft = stamp = 0  # no trade event
@@ -893,10 +922,16 @@ still UNVERIFIED (3 original + 5 new):
 | 15 | **Futures STT 0.05% post-Apr-2026** | Budget 2026 (Finance Bill 2026) per multiple secondary sources | Only matters if futures scope added; Track 2 options-only | LOW (informational; verified by 2026-05-16 agent) |
 | 16 | **Groww ₹20 brokerage on EXPIRED WORTHLESS options** | Groww-specific gotcha vs Zerodha which dropped to ₹0 in June 2024 | Track 2 never holds to expiry (15:20 forced exit), but expiry branches must use ₹20 not ₹0 | LOW |
 | 17 | **STT-on-exercise rate 0.125% pre-Apr-2026 vs 0.15% post** | Both rates cited but Finance Act 2026 gazette text not pulled | Only fires for `EXPIRY_EXERCISE` outcome (Track 2 never sets this) | LOW for Track 2; MEDIUM for future tracks |
+| 18 | **`EXPIRY_*` STT-era key: `exit_dt` vs entry date** — §4.2's illustrative pseudo-code keys the exercise STT era on `exit_dt`, while DEC-COST-002 (MIGRATION.md #127) locked the NORMAL_CLOSE key to `entry_dt_ist.date()` (§4 Step 5, §7) | Exercise settles AT expiry so exit-keying may be intended — an undecided design question, not a typo. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Only fires if the `EXPIRY_*` branches are ever implemented (Track 2 never sets them, DEC-RISK-011) | LOW for Track 2; owned by the DEC that implements the expiry branches |
+| 19 | **`EXPIRY_ASSIGN` premium-STT parenthetical is era-dependent** — §4.2's "(already paid at sell-open as 0.15% × premium)" hardcodes one era's rate; the actual sell-open rate is 0.0625% / 0.10% / 0.15% by era (`brutex/costs/constants.py` `STT_OPTIONS_*`, DEC-COST-003) | Spec note written against the post-Apr-2026 era only. Registered 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001), deliberately NOT decided | Documentation/impl of `EXPIRY_ASSIGN` only (unreachable in Track 2) | LOW for Track 2; the implementing DEC must apply the era rate |
 
 **Items 1-3:** original 3 from `TRACK2_OPTIONS_SPEC §8b`.
 **Items 4-8:** added 2026-05-16 from deep research on long/short
 asymmetry + freeze quantity + hidden costs.
+**Items 18-19:** added 2026-07-06 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) —
+§4.2 expiry-branch drift observations REGISTERED without deciding them;
+they are design questions for the (unauthorized, future) DEC that
+implements the `EXPIRY_*` branches, not operator-verification items.
 
 **All 8 items require operator manual verification.** Items 1, 2, 4
 materially affect calculator output. Items 3, 5-8 affect edge cases
@@ -957,6 +992,7 @@ work but calculator can ship without them.
 | 2026-05-16 | §4.4 Prompt-error correction recorded | Claude-chat prompt claimed "₹20 per CONTRACT" for exercise/assignment. Verified WRONG: actual is "per executed ORDER". Would have over-counted 100-lot exercise brokerage by ₹1,980. |
 | 2026-05-16 | §16 expanded to 17 unverified items (added 15, 16, 17) | Futures STT 0.05% (informational), Groww ₹20-on-worthless, STT-on-exercise rate split. |
 | 2026-05-16 | TradeOutcome enum added to §11 API | Replaces `held_to_expiry_exercise: bool`. Backward-compat via DEPRECATED label on the bool. New fixtures use enum. |
+| 2026-07-06 | §4 Step-1 short-side slippage resolved to the §8 ADVERSE rule (DEC-TRACK2-COSTS-SPEC-RECONCILE-001) | §4's pseudocode disagreed with §8 on BOTH short legs (short sell = `exit_open + tick` — wrong bar; short cover buy = `exit_open − tick` — favorable) and carried a literal "# CHECK SIGN" inside a LOCKED spec (the #963 MINOR-4 contradiction). §8 (adverse — buy higher, sell lower; consistent with `TRACK2_OPTIONS_SPEC §9.2`'s per-action rule) is authoritative; "# CHECK SIGN" deleted; `brutex/costs/calculator.py`'s short SELL leg + the byte-exact test re-pinned to the resolved rule (branch stays production-unreachable — BUY-only DEC-EXEC-008 unchanged). §4.2 gained the implementation-status block (Step-0 guard ≠ state machine, MIGRATION.md #963); the `exit_dt` era-key + assign premium-STT drifts registered as §16 items 18-19 WITHOUT deciding them; §2 gained the pre-2024-10-01 0.0625% STT regime row. |
 
 ---
 

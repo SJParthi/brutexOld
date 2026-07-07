@@ -88,7 +88,7 @@ the 4 accepted-risk items in `docs/adr/0001-groww-vendor-pivot.md §3.1`.
 | `scripts/groww_probe.py` (4 sub-probes, ZERO `brutex/` imports) | PR #140 | ✅ merged 2026-05-26 |
 | `scripts/groww_universe_discovery.py` (Phase 0c companion) | PR #141 | ✅ merged 2026-05-26 |
 | Groww Trade API subscription (₹499/mo) | operator | ⏳ pending |
-| `BRUTEX_GROWW_API_KEY` + `BRUTEX_GROWW_TOTP_SECRET` env vars | operator | ⏳ pending |
+| `BRUTEX_GROWW_API_KEY` + `BRUTEX_GROWW_TOTP_SECRET` env vars (PROBE-LOCAL to the standalone `scripts/groww_probe.py` ONLY — production credentials are AWS-SSM-only, never env vars; DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065) | operator | ⏳ pending |
 | Probe 1 transcript — `docs/groww/probe/01_vix_csv_grep.json` | operator-run | ⏳ pending (**HARD GATE**) |
 | Probe 2 transcript — `docs/groww/probe/02_vix_1m_candle.json` | operator-run | ⏳ pending |
 | Probe 3 transcript — `docs/groww/probe/03_rate_limit_probe.json` | operator-run | ⏳ pending |
@@ -143,7 +143,7 @@ Phase 2+ code change is verified from day one.
 |---|---|
 | `4-agent hostile review pattern` documented as a runbook | ✅ landed 2026-05-27 (DEC-PHASE1-WEEK3-RUNBOOK-001, MIGRATION entry #253) — full runbook at `docs/runbooks/4-agent-review.md` with copy-paste prompts for all 4 agents (Audit/Architect/Hostile/Reality), trigger matrix (4-agent for major / 2-agent for compliance / 1-agent for refactor), reconciliation steps, the 2026-05-15 case study, and the operator sign-off gate |
 | First end-to-end "empty pyramid" CI run | ✅ landed 2026-05-27 (DEC-PHASE1-WEEK3-RUNBOOK-001, MIGRATION entry #253) — baseline documented in `docs/PHASE1_EMPTY_PYRAMID_BASELINE.md` with per-layer counts (all 9 layers ≥ 1 file), 24-invariant catalog snapshot (5 IMPLEMENTED + 19 ROADMAP), CI workflow inventory, reproducible verification commands, honest envelope, and 10-item Phase 1 sign-off checklist |
-| Phase 1 sign-off | 📋 OPERATOR-SIDE — tick the 10-item checklist in `docs/PHASE1_EMPTY_PYRAMID_BASELINE.md §7` after CI greens on the merged PR |
+| Phase 1 sign-off | ✅ closed by supersession 2026-07-06 (DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1531) — 11-item checklist (the original "10-item" count was defective) reconciled in `docs/PHASE1_EMPTY_PYRAMID_BASELINE.md §7` |
 
 **Exit criteria:** All 9 test layers have at least 1 file each. CI is
 green with all stubs. The verification surface is mapped.

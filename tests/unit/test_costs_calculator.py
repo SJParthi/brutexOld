@@ -997,23 +997,24 @@ def test_slippage_long_fills_byte_exact() -> None:
     assert r.sell_fill_paisa == 11_995  # exit 12000 - 5 tick (adverse, lower)
 
 
-def test_slippage_short_fills_pinned_current_behavior() -> None:
-    """MINOR-4: the short-side fills are PINNED to current behaviour.
+def test_slippage_short_fills_byte_exact_adverse() -> None:
+    """Short fills match the resolved §4/§8 adverse rule, byte-exact.
 
-    The short SELL (entry) leg sign is a documented spec ambiguity:
-    CALCULATOR_SPEC §8 table says short entry fill = ``entry_bar_open − 1
-    tick``, but the §4 pseudocode says "SELL at entry+1tick" and is flagged
-    "CHECK SIGN". Track 2 is BUY-only (DEC-EXEC-008), so this path is never
-    used in production; we PIN the current implementation (cover at
-    exit+tick, sell at entry+tick) rather than guess-change an unused path.
-    Resolve the spec contradiction before any short-side track relies on it.
+    DEC-TRACK2-COSTS-SPEC-RECONCILE-001 resolved the #963 MINOR-4 spec
+    contradiction: CALCULATOR_SPEC §8's ADVERSE table is authoritative and §4's
+    pseudocode was rewritten to agree — short entry SELL = ``entry_bar_open − 1
+    tick`` (adverse, LOWER; the old pin was the favorable ``+ 1 tick``) and
+    cover BUY = ``exit_bar_open + 1 tick`` (adverse, HIGHER — unchanged). Track
+    2 stays BUY-only (DEC-EXEC-008): this branch is production-unreachable
+    forward-compat. The long side cannot move under this flip — the standing
+    witness is ``test_slippage_long_fills_byte_exact`` above (10_005 / 11_995).
     """
     r = compute_trade_cost(
         _make_trade(entry_open_paisa=10_000, exit_open_paisa=12_000, side="short_call")
     )
     assert r.buy_fill_paisa == 12_005  # cover: exit 12000 + 5 tick (adverse, higher)
-    # Current behaviour (matches §4 pseudocode, NOT the §8 table — see docstring):
-    assert r.sell_fill_paisa == 10_005  # entry 10000 + 5 tick
+    # Resolved §4/§8 adverse rule (DEC-TRACK2-COSTS-SPEC-RECONCILE-001):
+    assert r.sell_fill_paisa == 9_995  # entry 10000 - 5 tick (adverse, lower)
 
 
 # ─────────────────────────────────────────────────────────────────

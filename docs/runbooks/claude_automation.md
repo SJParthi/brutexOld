@@ -33,38 +33,68 @@ is runtime-dependent and was NOT verified from inside this session — so they a
 **Documented**, not Verified, per CLAUDE.md Rule #1. They are additive + harmless if a runtime
 ignores them; the parallel-review pattern is ALSO invoked explicitly each PR regardless.
 
-## 3. Opt-in: cloud auto-fix + auto-merge GitHub Action (Manual — needs YOUR secret)
+## 3. Cloud auto-fix GitHub Action — RETIRED
 
-The repo already auto-merges on green WITHOUT any API key. To additionally have Claude **auto-fix**
-failing CI / respond to `@claude` in the cloud, enable `anthropics/claude-code-action` — this
-requires a repo secret **only a repo admin can add** (a session cannot set secrets):
-
-1. Add the secret: repo → Settings → Secrets and variables → Actions → `ANTHROPIC_API_KEY`.
-2. Add a workflow `.github/workflows/claude-autofix.yml` (snippet below), guarded so it no-ops
-   when the secret is absent:
-
-```yaml
-name: Claude auto-fix
-on:
-  pull_request: { types: [opened, synchronize] }
-  issue_comment: { types: [created] }
-permissions: { contents: write, pull-requests: write, issues: write }
-jobs:
-  claude:
-    if: ${{ vars.CLAUDE_AUTOFIX_ENABLED == 'true' }}   # flip the repo VARIABLE to enable
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with: { fetch-depth: 0 }
-      - uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: "If CI is failing on this PR, diagnose + fix the root cause and push; never weaken a gate."
-```
-
-Until the secret + `CLAUDE_AUTOFIX_ENABLED=true` variable are set, this stays dormant (the `if:`
-gates the job off) — no broken/red workflow. Verify the action's exact inputs against its current
-release before enabling.
+> ⚠️ **Retired 2026-07-06 (DEC-CLOUD-AUTOFIX-RETIRE-001).** The opt-in cloud auto-fix design
+> that lived in this section — a `.github/workflows/claude-autofix.yml` snippet using
+> `anthropics/claude-code-action@v1`, shipped dormant by DEC-CLAUDE-AUTOMATION-001
+> (MIGRATION.md #831: "job-gated off by a `CLAUDE_AUTOFIX_ENABLED` repo variable so it stays
+> dormant until enabled") — is **withdrawn**. It was never wired: no workflow file, no secret,
+> no repo variable, no test ever existed (grep-verified 2026-07-06 — the 13 files in
+> `.github/workflows/` carry zero references to
+> `claude-autofix` / `CLAUDE_AUTOFIX` / `claude-code-action` / `ANTHROPIC_API_KEY`; the only
+> repo-wide hits were this section and ledger entry #831). Do not resurrect the snippet from
+> git history without meeting the revival preconditions below.
+>
+> **Why retired — the four disqualifiers:**
+>
+> 1. **Never wired + redundant.** Dormant since 2026-06-19 (#831) with zero uptake, while §1's
+>    zero-click merge loop (auto-merge on green CI) already works without it and CI fixes are
+>    performed in operator-driven Claude sessions — marginal value is low.
+> 2. **Security-regression vector.** As written, the snippet combined an
+>    `issue_comment: created` trigger (base-repo context, attacker-authored input on this
+>    PUBLIC repo) with `secrets.ANTHROPIC_API_KEY` +
+>    `permissions: { contents: write, pull-requests: write, issues: write }` and NO
+>    author-trust gate — re-opening exactly the privileged-trigger class
+>    DEC-CI-FORK-PR-HARDEN-001 (MIGRATION.md #1180) closed. And author-trust gating alone does
+>    NOT bound the prompt-injection envelope of an agentic write-capable job whose prompt
+>    surface is comment/PR text.
+> 3. **Sweep blind spot.** The #1180 redteam directory sweep
+>    (`tests/redteam/test_redteam_fork_pr_harden.py`) scanned only
+>    `workflow_run`/`pull_request_target` triggers, so shipping the snippet verbatim would have
+>    bypassed the guard suite that hardened the repo. That gap is now closed independently of
+>    this design: `test_no_issue_comment_privileged_workflows` fail-closed-pins that no
+>    comment-family-triggered workflow may hold write permissions, reference a secret other
+>    than the implicit `secrets.GITHUB_TOKEN`, or check out a PR-controlled ref without a
+>    #1180-pattern trust gate first.
+> 4. **Limbo arithmetic.** Enablement is owner-manual (§4: a session cannot add repo secrets or
+>    flip branch-protection/variables), so shipping the workflow would merely convert
+>    doc-limbo into disabled-workflow-limbo — and the snippet's action inputs were themselves
+>    self-declared UNVERIFIED, which Golden Rule #1 forbids encoding.
+>
+> **Revival preconditions** (a fresh DEC + a Golden Rule #9 4-agent hostile review are
+> REQUIRED; all five must be satisfied before any auto-fix workflow lands):
+>
+> 1. Live verification of `anthropics/claude-code-action`'s CURRENT release inputs
+>    (Golden Rule #1 — never encode unverified inputs).
+> 2. The #1180 author-trust check (the `auto-merge.yml` `trust-check` step — explicit
+>    allowlist `SJParthi`/`dependabot[bot]`/`renovate[bot]` OR live `author_association` ∈
+>    OWNER/MEMBER/COLLABORATOR) EXTRACTED into ONE COMMON `scripts/ci/` script consumed by
+>    BOTH `auto-merge.yml` and the new workflow (Golden Rule #11 — the extraction is
+>    deliberately deferred to revival time: after this retirement there is no second
+>    consumer, so extracting now would be a speculative refactor of a live security-critical
+>    workflow).
+> 3. The trust gate runs BEFORE any checkout of a PR-controlled ref (the #1180 H2
+>    base-pinned-checkout law).
+> 4. The extended comment-trigger redteam sweep
+>    (`test_no_issue_comment_privileged_workflows`) passes against the new workflow.
+> 5. The #1180 owner-side server settings (branch ruleset for `main` + Actions → "Require
+>    approval for all outside collaborators" — the exact click-path is recorded in
+>    MIGRATION.md #1180's honest-limits follow-up) confirmed DONE by the operator.
+>
+> The retired snippet remains recoverable from git history if ever needed; its exact shape
+> survives as the negative teeth fixture in
+> `tests/redteam/test_redteam_fork_pr_harden.py` so the sweep can never regress silently.
 
 ## 4. Honest limits (Golden Rule #10)
 - A session **cannot** add repo secrets or flip branch-protection — those are Manual.
