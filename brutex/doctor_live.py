@@ -58,6 +58,7 @@ import inspect
 import json
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -73,6 +74,7 @@ from brutex.adapters.groww.constants import (
     EARLIEST_HISTORY,
     INDIA_VIX_SYMBOL,
 )
+from brutex.adapters.groww.contracts import underlying_symbol_forms
 from brutex.adapters.groww.errors import GrowwAuthError, GrowwError
 from brutex.adapters.groww.http_timeout import REQUEST_METHOD_NAMES
 from brutex.adapters.groww.instrument_loader import GrowwInstrumentFetchError, load_index
@@ -84,10 +86,20 @@ from brutex.adapters.groww.live import (
 )
 from brutex.adapters.groww.parser import CandleParseError, parse_candle_rows
 from brutex.adapters.groww.probe import (
+    AMP_VERDICT_BOTH_OK,
+    AMP_VERDICT_ENCODED_ONLY,
+    AMP_VERDICT_PLAIN_OK,
     VERDICT_ABSENT,
     VERDICT_OK,
+    AmpersandProbeReport,
+    ampersand_family,
+    probe_ampersand_forms,
     probe_depth,
     probe_vix,
+)
+from brutex.adapters.groww.symbol_form_preference import (
+    FORM_PROBE_VERDICT_KEY,
+    PersistentSymbolFormPreference,
 )
 from brutex.adapters.groww.token_cache import CachedToken, current_session
 from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
@@ -101,12 +113,14 @@ from brutex.config.credentials import resolve_groww_aws_credentials
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
 from brutex.config.dotenv import parse_dotenv
 from brutex.config.paths import lake_root_identity, resolve_lake_root
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.bhavcopy import (
     BhavcopyError,
     compare_daily_bar,
     fetch_index_bhavcopy,
     nse_index_name_for,
 )
+from brutex.data.meta_kv import MetaKV
 from brutex.data.models import CandleBar
 from brutex.data.raw_integrity import RawIntegrityError, RawIntegrityRecord, build_record
 from brutex.data.session import IST, filter_intraday_session
@@ -130,6 +144,10 @@ DEFAULT_CALL_BUDGET: Final[int] = 40
 DEPTH_BISECT_BUDGET: Final[int] = 60
 #: Extra budget granted by ``--rate-probe`` (kit spec stage 13).
 RATE_PROBE_BUDGET: Final[int] = 480
+#: Extra budget granted by ``--ampersand-probe`` (stage 14,
+#: DEC-FORM-WINNER-PERSIST-001): ≤ 4 calls per ``&``-underlying (both forms ×
+#: expiries+contracts) × the ~7-8-name family, with headroom for new listings.
+AMPERSAND_PROBE_BUDGET: Final[int] = 64
 
 #: Consecutive raised throttle/vendor errors that abort the rate probe.
 RATE_PROBE_ABORT_BURST: Final[int] = 3
@@ -558,6 +576,33 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "WARN rate: aborted after {bursts} consecutive raised vendor errors (sustained "
         "throttle burst) — do NOT raise the ceiling; the transcript records every shape."
     ),
+    # ── stage 14 · ampersand (%26) form probe (opt-in) ─────────────────
+    "amp.pass": (
+        "PASS ampersand: {families} &-underlying(s) probed, ALL decisive — overall {verdict}; "
+        "{seeded} winner row(s) seeded to the durable form-winner map; verdict stamp "
+        "groww.form_probe.verdict written · evidence {verdict_file}"
+    ),
+    "amp.partial": (
+        "WARN ampersand[R3]: probe NON-decisive — overall {verdict}, {clear}/{families} "
+        "underlyings clear ({summary}); {seeded} clear winner(s) still seeded per-underlying, "
+        "NO verdict stamp written (the #898 UNVERIFIED wording stands). Fix: re-run "
+        "--ampersand-probe when the vendor is healthy · evidence {verdict_file}"
+    ),
+    "amp.store_unavailable": (
+        "WARN ampersand[R3]: instrument-master store unavailable ({error}) — probe evidence "
+        "recorded, but winner rows were NOT seeded and NO verdict stamp was written this run. "
+        "Fix: load the instrument master (dashboard 'Load instruments') then re-run "
+        "--ampersand-probe."
+    ),
+    "amp.stamp_write_failed": (
+        "WARN ampersand[R3]: verdict stamp write failed ({error}) — winner rows seeded, stamp "
+        "NOT written; re-run --ampersand-probe once the instrument store is writable."
+    ),
+    "amp.verdict_write_failed": (
+        "FAIL ampersand[R3]: could not write the verdict evidence file {verdict_file} "
+        "({error}) — stage FAILED, NO winner seeded, NO stamp written (evidence or it did "
+        "not happen; kit spec §2.5)."
+    ),
     # ── runner ─────────────────────────────────────────────────────────
     "kit.budget_exhausted": (
         "FAIL {stage}: vendor-call budget exhausted ({detail}) — the kit stops rather than "
@@ -764,6 +809,12 @@ class KitDeps:
     nse_http_get: Callable[[str], str]
     # stage 5 — probe day
     probe_day: Callable[[], date]
+    # stage 14 — ampersand form probe (DEC-FORM-WINNER-PERSIST-001): the durable
+    # form-winner map's MetaKV opener (production:
+    # ``open_instrument_store(<lake_root>/instruments.duckdb)``). ``None`` (the
+    # dataclass default, so every existing fake construction stays valid) makes
+    # the stage record evidence WITHOUT seeding/stamping — honestly WARNed.
+    open_meta_store: Callable[[Path], AbstractContextManager[MetaKV]] | None = None
 
 
 @dataclass(slots=True)
@@ -786,6 +837,12 @@ class KitOptions:
     #: selection (``run_kit_stages`` sets it iff the run includes stage 6).
     auto_bisect: bool = False
     rate_probe: bool = False
+    #: Stage-14 opt-in (DEC-FORM-WINNER-PERSIST-001): probe BOTH symbol forms of
+    #: every ``&``-underlying against get_expiries/get_contracts, seed the durable
+    #: form-winner map from the per-underlying evidence, and — iff DECISIVE —
+    #: write the machine-readable ``groww.form_probe.verdict`` stamp (the ONLY
+    #: writer of that key in the repo).
+    ampersand_probe: bool = False
     against_lake: bool = False
     json_output: bool = False
     mint_anyway: bool = False
@@ -2307,12 +2364,235 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Stage 14 — ampersand (%26) form probe (opt-in --ampersand-probe)
+# ────────────────────────────────────────────────────────────────────────
+
+#: The advisory ledger-entry ids a DECISIVE stamp names for the operator's
+#: follow-up commit (DEC-FORM-WINNER-PERSIST-001 §ledger; the entries themselves
+#: are minted ONLY by the operator, with the transcript, never by this code).
+_AMP_DECISION_VERIFIED: Final[str] = "DEC-AMPERSAND-ENCODING-VERIFIED-001"
+_AMP_DECISION_REFUTED: Final[str] = "DEC-AMPERSAND-ENCODING-REFUTED-001"
+
+
+def _amp_decision_id(report: AmpersandProbeReport) -> str:
+    """The advisory decision id a DECISIVE probe's stamp should be ledgered under.
+
+    ``ENCODED_ONLY`` everywhere — or a decisive MIXED family containing at least
+    one encoded winner — demonstrates the ``%26`` encoding recovering data the
+    plain ``&`` form cannot (→ the VERIFIED id); an all-plain family refutes the
+    hypothesis for the live vendor (→ the REFUTED id). Advisory DATA for the
+    operator's follow-up ledger commit — nothing here writes MIGRATION.md.
+    """
+    if report.overall == AMP_VERDICT_ENCODED_ONLY:
+        return _AMP_DECISION_VERIFIED
+    if report.overall in (AMP_VERDICT_PLAIN_OK, AMP_VERDICT_BOTH_OK):
+        return _AMP_DECISION_REFUTED
+    if any("%26" in winner for winner in report.winners.values()):
+        return _AMP_DECISION_VERIFIED
+    return _AMP_DECISION_REFUTED
+
+
+def _amp_seed_and_stamp(
+    deps: KitDeps,
+    ctx: KitContext,
+    report: AmpersandProbeReport,
+    *,
+    verdict_path: Path,
+) -> tuple[int, bool, list[str]]:
+    """Seed the durable form-winner map + (iff decisive) write the verdict stamp.
+
+    Returns ``(seeded_count, stamp_written, warn_lines)``. Every store
+    interaction is best-effort: an unavailable/unwritable store degrades to an
+    honest WARN line — the probe EVIDENCE (transcript + verdict file) already
+    exists either way. The ``set_meta(FORM_PROBE_VERDICT_KEY, …)`` here is the
+    ONLY stamp writer in the repo (test-pinned) and fires ONLY on a DECISIVE
+    report — production pull code can never mint "verified".
+    """
+    if deps.open_meta_store is None:
+        return (
+            0,
+            False,
+            [render_diagnostic("amp.store_unavailable", error="no instrument-store opener wired")],
+        )
+    try:
+        store_cm = deps.open_meta_store(ctx.lake_root)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — an unopenable store degrades honestly
+        return (
+            0,
+            False,
+            [render_diagnostic("amp.store_unavailable", error=f"{type(exc).__name__}: {exc}")],
+        )
+    seeded = 0
+    stamped = False
+    lines: list[str] = []
+    with store_cm as store:
+        # ONE COMMON write path (CLAUDE.md §11): the probe seeds THROUGH the same
+        # PersistentSymbolFormPreference.record_winner the production pulls learn
+        # through — per-underlying, so a mixed family still persists each CLEAR name.
+        preference = PersistentSymbolFormPreference(store)
+        for underlying, winner in sorted(report.winners.items()):
+            preference.record_winner(underlying, underlying_symbol_forms(underlying), winner)
+            seeded += 1
+        if report.decisive:
+            stamp = json.dumps(
+                {
+                    "decision": _amp_decision_id(report),
+                    "probed_at": deps.now_utc().isoformat(),
+                    "run_id": ctx.run_id,
+                    "transcript": str(ctx.quarantine_root / "transcript.jsonl"),
+                    "verdict": report.overall,
+                    "verdict_file": str(verdict_path),
+                    "winners": dict(sorted(report.winners.items())),
+                },
+                sort_keys=True,
+            )
+            try:
+                store.set_meta(FORM_PROBE_VERDICT_KEY, stamp)
+            except Exception as exc:  # pylint: disable=broad-exception-caught — a failed stamp degrades honestly
+                lines.append(
+                    render_diagnostic(
+                        "amp.stamp_write_failed", error=f"{type(exc).__name__}: {exc}"
+                    )
+                )
+            else:
+                stamped = True
+    return seeded, stamped, lines
+
+
+def stage_ampersand(deps: KitDeps, ctx: KitContext) -> StageOutcome:
+    """Stage 14 — the ``&``-family (%26) form probe (DEC-FORM-WINNER-PERSIST-001).
+
+    Opt-in (``--ampersand-probe``). Probes BOTH symbol forms of every
+    master-derived ``&``-underlying against BOTH F&O APIs through the kit's REAL
+    read-only client (every call budget-spent + transcript-lined), writes the
+    canonical ``ampersand_verdict.json`` evidence sidecar under the quarantined
+    ``_liveproof/<run_id>/`` tree, SEEDS the durable form-winner map
+    per-underlying through the ONE COMMON ``record_winner`` write path, and —
+    iff the report is DECISIVE — writes the machine-readable
+    ``groww.form_probe.verdict`` stamp (this stage is its ONLY writer; a
+    non-decisive family seeds its clear names but NEVER stamps — no blanket
+    claim from partial evidence, Golden Rule #10). The ``schema_meta`` winner
+    rows are the deliberate, documented exception to the kit's
+    quarantined-writes rule: they ARE the product (the durable map production
+    pulls read), written through the production write path itself.
+    """
+    if not ctx.options.ampersand_probe:
+        return _skip(14, "ampersand", "opt-in probe not enabled (pass --ampersand-probe to run it)")
+    if ctx.client is None:
+        return _skip(14, "ampersand", "stage 3 did not run — no live client")
+    if ctx.master is None:
+        return _skip(14, "ampersand", "stage 4 did not run — no instrument master")
+    family = ampersand_family(ctx.master.universe)
+    if not family:
+        return _skip(14, "ampersand", "the instrument master lists no &-underlying with F&O legs")
+    report = probe_ampersand_forms(
+        ctx.client,
+        family,
+        exchange="NSE",
+        budget=ctx.budget,
+        transcript=ctx.transcript,
+    )
+    # Evidence FIRST (kit spec §2.5): the canonical verdict sidecar must exist
+    # before anything durable is seeded/stamped — a failed evidence write FAILs
+    # the stage with NOTHING seeded (evidence or it did not happen).
+    verdict_path = ctx.quarantine_root / "ampersand_verdict.json"
+    verdict_payload = json.dumps(
+        {
+            "decisive": report.decisive,
+            "exchange": "NSE",
+            "family": list(family),
+            "overall": report.overall,
+            "per_underlying": dict(sorted(report.per_underlying.items())),
+            "probed_at": deps.now_utc().isoformat(),
+            "results": [
+                {
+                    "api": call.api,
+                    "count": call.count,
+                    "error": call.error,
+                    "form": call.form,
+                    "role": call.role,
+                    "underlying": call.underlying,
+                }
+                for call in report.results
+            ],
+            "run_id": ctx.run_id,
+            "winners": dict(sorted(report.winners.items())),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    try:
+        verdict_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(
+            verdict_path,
+            lambda tmp: tmp.write_text(verdict_payload + "\n", encoding="utf-8"),
+        )
+    except OSError as exc:
+        ctx.transcript.event("amp.verdict_file_failed", error=f"{type(exc).__name__}: {exc}")
+        return StageOutcome(
+            stage=14,
+            name="ampersand",
+            status=STATUS_FAIL,
+            lines=(
+                render_diagnostic(
+                    "amp.verdict_write_failed",
+                    verdict_file=verdict_path,
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
+            ),
+        )
+    seeded, stamped, warn_lines = _amp_seed_and_stamp(deps, ctx, report, verdict_path=verdict_path)
+    ctx.transcript.event(
+        "amp.summary",
+        families=len(family),
+        overall=report.overall,
+        decisive=report.decisive,
+        per_underlying=dict(sorted(report.per_underlying.items())),
+        winners=dict(sorted(report.winners.items())),
+        seeded=seeded,
+        stamped=stamped,
+        verdict_file=str(verdict_path),
+    )
+    clear = len(report.winners)
+    if report.decisive and stamped:
+        lines = [
+            render_diagnostic(
+                "amp.pass",
+                families=len(family),
+                verdict=report.overall,
+                seeded=seeded,
+                verdict_file=verdict_path,
+            ),
+            *warn_lines,
+        ]
+        return StageOutcome(stage=14, name="ampersand", status=STATUS_PASS, lines=tuple(lines))
+    if report.decisive:
+        # Decisive evidence but the stamp could not land (store unavailable /
+        # unwritable) — the verdict stays honestly UNVERIFIED until a run stamps it.
+        return StageOutcome(stage=14, name="ampersand", status=STATUS_WARN, lines=tuple(warn_lines))
+    summary = ", ".join(f"{u}={v}" for u, v in sorted(report.per_underlying.items()))
+    lines = [
+        render_diagnostic(
+            "amp.partial",
+            verdict=report.overall,
+            clear=clear,
+            families=len(family),
+            summary=summary,
+            seeded=seeded,
+            verdict_file=verdict_path,
+        ),
+        *warn_lines,
+    ]
+    return StageOutcome(stage=14, name="ampersand", status=STATUS_WARN, lines=tuple(lines))
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Registry + runner
 # ────────────────────────────────────────────────────────────────────────
 
 StageFn = Callable[[KitDeps, KitContext], StageOutcome]
 
-#: The 14 stages, in run order (kit spec §4).
+#: The 15 stages, in run order (kit spec §4).
 STAGES: Final[tuple[tuple[int, str, StageFn], ...]] = (
     (0, "env", stage_env),
     (1, "creds", stage_creds),
@@ -2328,11 +2608,12 @@ STAGES: Final[tuple[tuple[int, str, StageFn], ...]] = (
     (11, "integrity", stage_integrity),
     (12, "resume", stage_resume),
     (13, "rate", stage_rate),
+    (14, "ampersand", stage_ampersand),
 )
 
 
 def compute_call_budget(options: KitOptions) -> int:
-    """The run's hard vendor-call cap (spec §2.3): 40 + 60 (bisect) + 480 (rate).
+    """The run's hard vendor-call cap (spec §2.3): 40 + 60 (bisect) + 480 (rate) + 64 (amp).
 
     ``auto_bisect`` grants the SAME :data:`DEPTH_BISECT_BUDGET` extension as
     the manual ``--depth-bisect`` — the budget must honestly cover the bisect
@@ -2342,13 +2623,16 @@ def compute_call_budget(options: KitOptions) -> int:
     decree of 2026-07-03 (DEC-DOCTOR-KIT-HONESTY-001 amendment) removed the
     depth stage from the AUTORUN stage sets, autorun runs never carry either
     flag (plain 40-call budget); the extension now serves the manual CLI path
-    and any explicit stage-6 selection.
+    and any explicit stage-6 selection. ``--ampersand-probe`` adds
+    :data:`AMPERSAND_PROBE_BUDGET` (stage 14, DEC-FORM-WINNER-PERSIST-001).
     """
     limit = DEFAULT_CALL_BUDGET
     if options.depth_bisect or options.auto_bisect:
         limit += DEPTH_BISECT_BUDGET
     if options.rate_probe:
         limit += RATE_PROBE_BUDGET
+    if options.ampersand_probe:
+        limit += AMPERSAND_PROBE_BUDGET
     return limit
 
 
@@ -2397,6 +2681,7 @@ def run_live_doctor(
         depth_bisect=options.depth_bisect,
         auto_bisect=options.auto_bisect,
         rate_probe=options.rate_probe,
+        ampersand_probe=options.ampersand_probe,
         against_lake=options.against_lake,
         mint_anyway=options.mint_anyway,
         call_budget=ctx.budget.limit,
@@ -2511,6 +2796,13 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     from brutex.adapters.groww.live import installed_growwapi_version
     from brutex.adapters.groww.reauth import _real_sdk_factory
     from brutex.data.bhavcopy import urllib_http_get_nse
+    from brutex.data.instrument_store import DEFAULT_DB_NAME, open_instrument_store
+
+    def _open_meta_store(lake_root: Path) -> AbstractContextManager[MetaKV]:
+        # Stage 14 (DEC-FORM-WINNER-PERSIST-001): the SAME sibling
+        # instruments.duckdb every production pull surface wires — its generic
+        # schema_meta sidecar is the durable form-winner map + probe stamp home.
+        return open_instrument_store(lake_root / DEFAULT_DB_NAME)  # type: ignore[no-any-return]
 
     def _git(*args: str) -> str | None:
         try:
@@ -2551,7 +2843,11 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
             raise OSError("reference host sent no Date header")
         from email.utils import parsedate_to_datetime
 
-        server = parsedate_to_datetime(server_date)
+        # Explicit annotation: the isolated pre-commit mypy env resolves
+        # ``parsedate_to_datetime`` as ``Any`` (env-dependent stub gap), which
+        # made this return ``Any`` there; the venv/CI mypy already saw
+        # ``datetime``. The annotation is a no-op for the binding gate.
+        server: datetime = parsedate_to_datetime(server_date)
         return (datetime.now(UTC) - server).total_seconds()
 
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded
@@ -2599,10 +2895,12 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         http_get=urllib_http_get,
         nse_http_get=urllib_http_get_nse,
         probe_day=_probe_day,
+        open_meta_store=_open_meta_store,
     )
 
 
 __all__ = [
+    "AMPERSAND_PROBE_BUDGET",
     "DEFAULT_CALL_BUDGET",
     "DEPTH_BISECT_BUDGET",
     "DIAGNOSTICS",

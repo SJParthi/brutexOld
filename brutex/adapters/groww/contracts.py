@@ -196,6 +196,7 @@ def resolve_expiries(
     month: int | None = None,
     empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
     form_preference: SymbolFormPreference | None = None,
+    preference_key: str | None = None,
 ) -> list[date]:
     """Resolve an underlying's FNO expiry dates for *year*/*month* (sorted, deduped).
 
@@ -209,6 +210,13 @@ def resolve_expiries(
     newly-listed weekly/monthly expiry. So the call is re-fetched up to *empty_retry_attempts*
     times via :func:`~brutex.adapters.ingest_common.fetch_until_nonempty` (first non-empty
     wins; bounded). A real empty (e.g. a pre-listing year) is recorded only after the budget.
+
+    *preference_key* (DEC-FORM-WINNER-PERSIST-001, the ``candles.py`` precedent): the
+    key the injected *form_preference* records/orders under — default ``None`` keys by
+    *underlying_symbol* verbatim (byte-identical for every existing caller). The
+    metadata pull passes the PRIMARY F&O underlying while querying with a fallback
+    SPELLING form, so one durable winner row serves every phase instead of
+    fragmenting per spelling.
 
     Raises
     ------
@@ -237,19 +245,22 @@ def resolve_expiries(
     # variant on an empty reply, BEFORE the transient-glitch empty-retry budget.
     # DEC-SYMBOL-FORM-PREFERENCE-001: an injected preference moves the last-winning form
     # FIRST (recording on every non-empty form result) — a pure reorder, never a drop.
+    # DEC-FORM-WINNER-PERSIST-001: the memory keys on *preference_key* (default: the
+    # queried underlying_symbol) so the metadata pull can normalise onto the PRIMARY key.
     canonical_forms = underlying_symbol_forms(underlying_symbol)
+    pref_key = underlying_symbol if preference_key is None else preference_key
 
     def _fetch_form_recording(symbol_form: str) -> list[date]:
         result = _fetch_form(symbol_form)
         if result and form_preference is not None:
-            form_preference.record_winner(underlying_symbol, canonical_forms, symbol_form)
+            form_preference.record_winner(pref_key, canonical_forms, symbol_form)
         return result
 
     def _fetch() -> list[date]:
         forms = (
             canonical_forms
             if form_preference is None
-            else form_preference.order(underlying_symbol, canonical_forms)
+            else form_preference.order(pref_key, canonical_forms)
         )
         return _fetch_first_nonempty_form(forms, _fetch_form_recording, is_empty=lambda r: not r)
 
@@ -264,6 +275,7 @@ def resolve_contracts(
     expiry: date,
     empty_retry_attempts: int = DEFAULT_EMPTY_RETRY_ATTEMPTS,
     form_preference: SymbolFormPreference | None = None,
+    preference_key: str | None = None,
 ) -> list[DerivativeContract]:
     """Resolve every listed contract for an ``(underlying, expiry)`` (parsed, deduped).
 
@@ -281,6 +293,10 @@ def resolve_contracts(
     *form_preference* (DEC-SYMBOL-FORM-PREFERENCE-001) optionally reorders the
     ``&``-symbol form fallback so the LAST-WINNING form is tried first (never dropping
     a form); ``None`` (the default) keeps the fixed plain-first order byte-identical.
+    *preference_key* (DEC-FORM-WINNER-PERSIST-001) keys that memory — default ``None``
+    keys by *underlying_symbol* verbatim (byte-identical for existing callers); the
+    metadata pull passes the PRIMARY F&O underlying so the durable winner row never
+    fragments across spelling forms.
 
     Raises
     ------
@@ -319,19 +335,22 @@ def resolve_contracts(
     # variant on an empty reply, BEFORE the transient-glitch empty-retry budget.
     # DEC-SYMBOL-FORM-PREFERENCE-001: an injected preference moves the last-winning form
     # FIRST (recording on every non-empty form result) — a pure reorder, never a drop.
+    # DEC-FORM-WINNER-PERSIST-001: the memory keys on *preference_key* (default: the
+    # queried underlying_symbol) so the metadata pull can normalise onto the PRIMARY key.
     canonical_forms = underlying_symbol_forms(underlying_symbol)
+    pref_key = underlying_symbol if preference_key is None else preference_key
 
     def _fetch_form_recording(symbol_form: str) -> list[DerivativeContract]:
         result = _fetch_form(symbol_form)
         if result and form_preference is not None:
-            form_preference.record_winner(underlying_symbol, canonical_forms, symbol_form)
+            form_preference.record_winner(pref_key, canonical_forms, symbol_form)
         return result
 
     def _fetch() -> list[DerivativeContract]:
         forms = (
             canonical_forms
             if form_preference is None
-            else form_preference.order(underlying_symbol, canonical_forms)
+            else form_preference.order(pref_key, canonical_forms)
         )
         return _fetch_first_nonempty_form(forms, _fetch_form_recording, is_empty=lambda r: not r)
 
@@ -364,6 +383,8 @@ def enumerate_contracts(
     exchange: str,
     underlying_symbol: str,
     years: Iterable[int],
+    form_preference: SymbolFormPreference | None = None,
+    preference_key: str | None = None,
 ) -> Iterator[DerivativeContract]:
     """Lazily yield EVERY derivative contract for an underlying across *years*.
 
@@ -372,6 +393,11 @@ def enumerate_contracts(
     deduped across adjacent-year queries via an O(1) ``set`` so a leg-set is never
     fetched twice. A generator (lazy) so a caller can stop early.
 
+    *form_preference* / *preference_key* (DEC-FORM-WINNER-PERSIST-001) are passed
+    through VERBATIM to every :func:`resolve_expiries` / :func:`resolve_contracts`
+    call, so an enumeration shares the same learned ``&``-form winners as the rest
+    of the pull; the ``None`` defaults are byte-identical to before.
+
     **Honest envelope (Golden Rule #10):** network-bound — one ``get_expiries`` per
     year + one ``get_contracts`` per discovered expiry — NOT O(1)-total; the
     per-call rate gate is the injected ``client.pace``.
@@ -379,13 +405,23 @@ def enumerate_contracts(
     seen_expiries: set[date] = set()
     for year in years:
         for expiry in resolve_expiries(
-            client, exchange=exchange, underlying_symbol=underlying_symbol, year=year
+            client,
+            exchange=exchange,
+            underlying_symbol=underlying_symbol,
+            year=year,
+            form_preference=form_preference,
+            preference_key=preference_key,
         ):
             if expiry in seen_expiries:
                 continue
             seen_expiries.add(expiry)
             yield from resolve_contracts(
-                client, exchange=exchange, underlying_symbol=underlying_symbol, expiry=expiry
+                client,
+                exchange=exchange,
+                underlying_symbol=underlying_symbol,
+                expiry=expiry,
+                form_preference=form_preference,
+                preference_key=preference_key,
             )
 
 

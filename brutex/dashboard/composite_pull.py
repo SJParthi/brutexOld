@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from brutex.adapters.groww.option_ingest import ProgressHook
+    from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.models import Instrument
 
@@ -249,6 +250,7 @@ def pull_historical_for_underlyings(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    form_preference: SymbolFormPreference | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -327,6 +329,15 @@ def pull_historical_for_underlyings(
         appended-bar delta (the frozen-bars fix); *on_ledger_sync* receives the
         throttled, F&O-scope-filtered absolute ledger counts (the honest
         denominator). ``None`` (defaults) is byte-identical.
+    form_preference
+        ONE learned ``&``-form ordering shared by BOTH phases
+        (DEC-FORM-WINNER-PERSIST-001): a metadata-phase ``%26`` win makes the candle
+        phase's very first fetch for that underlying the encoded form (the memory
+        keys on the PRIMARY underlying in both phases — the cross-phase
+        normalization). Production passes the pipeline's shared
+        :class:`~brutex.adapters.groww.symbol_form_preference.\
+PersistentSymbolFormPreference` (durable across pulls); ``None`` (the default) is
+        byte-identical to the per-phase behaviour.
 
     Returns
     -------
@@ -379,6 +390,7 @@ def pull_historical_for_underlyings(
         session_rate=session_rate,
         now=now,
         today=today,
+        form_preference=form_preference,
     )
 
     # ── Wedged-store gate (DEC-STORE-WRITE-DEADLINE-001) ────────────────────────
@@ -459,6 +471,7 @@ def pull_historical_for_underlyings(
         scope_end=scope_end,
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
+        form_preference=form_preference,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

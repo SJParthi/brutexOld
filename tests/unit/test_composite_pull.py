@@ -901,3 +901,100 @@ def test_composite_note_has_no_greeks_clause_on_a_clean_pass(
     assert report.historical is not None
     assert report.historical.greeks_enrich_ok is True
     assert "Greeks enrichment FAILED" not in report.note
+
+
+# ── DEC-FORM-WINNER-PERSIST-001: ONE preference shared by BOTH phases ─────────
+
+
+class _AmpersandOnlySDK(_FakeSDK):
+    """Both phases answer ONLY the ``%26``-encoded forms (the #898 M&M shape)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.expiry_forms: list[str] = []
+        self.contract_forms: list[str] = []
+
+    def get_expiries(self, **kw: object) -> Mapping[str, object]:
+        self.calls.append("get_expiries")
+        form = str(kw["underlying_symbol"])
+        self.expiry_forms.append(form)
+        if "%26" in form:
+            return {"expiries": ["2024-01-25"]}
+        return {"expiries": []}
+
+    def get_contracts(self, **kw: object) -> Mapping[str, object]:
+        self.calls.append("get_contracts")
+        form = str(kw["underlying_symbol"])
+        self.contract_forms.append(form)
+        if "%26" in form:
+            return {"contracts": ["NSE-M&M-25Jan24-2400-CE"]}
+        return {"contracts": []}
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        self.calls.append("get_historical_candles")
+        symbol = str(kw["groww_symbol"])
+        self.candle_symbols.append(symbol)
+        if "%26" in symbol:
+            return _candle_payload()
+        return {"candles": []}
+
+
+class _FormMetaStore:
+    """A minimal in-memory ``MetaKV`` (the durable form-winner sidecar twin)."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.rows[key] = value
+
+    def get_meta(self, key: str) -> str | None:
+        return self.rows.get(key)
+
+
+def test_one_preference_shared_across_both_phases_and_persisted(tmp_path: Path) -> None:
+    """Cross-phase pin (DEC-FORM-WINNER-PERSIST-001): metadata's %26 win makes the
+    candle phase's VERY FIRST fetch the encoded form — zero wasted plain candle
+    call — and the winner row lands durably under the PRIMARY ``M&M`` key."""
+    from brutex.adapters.groww.symbol_form_preference import (
+        PersistentSymbolFormPreference,
+        form_winner_key,
+    )
+
+    sdk = _AmpersandOnlySDK()
+    sink = _RecordingSink()
+    registry = _registry(tmp_path)
+    meta = _FormMetaStore()
+    lake_root = tmp_path / "lake"
+    lake_root.mkdir()
+    report = pull_historical_for_underlyings(
+        [_instrument("M&M", 7)],
+        reference_only_ids=frozenset(),
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        lake_root=lake_root,
+        dry_run=False,
+        intervals=("1day",),
+        years=[2024],
+        from_date=_FROM,
+        to_date=_TO,
+        now=_NOW,
+        today=_TODAY,
+        metadata_client_factory=_metadata_factory(sdk),
+        historical_client_factory=_historical_factory(sdk, sink),
+        metadata_run_parallel=_sync,
+        historical_run_parallel=_sync,
+        until_clean=False,
+        form_preference=PersistentSymbolFormPreference(meta),
+    )
+    assert report.historical is not None
+    assert report.historical.contracts_completed == 1
+    # Phase (a) learned the hard way on expiries, then led with the winner on contracts.
+    assert sdk.expiry_forms == ["M&M", "M%26M"]
+    assert sdk.contract_forms == ["M%26M"]
+    # Phase (b): the FIRST candle fetch was already the encoded contract symbol —
+    # the cross-phase share via the PRIMARY key (zero wasted plain fetch).
+    assert sdk.candle_symbols == ["NSE-M%26M-25Jan24-2400-CE"]
+    # The durable row is keyed by the PRIMARY underlying (the metadata-phase win).
+    assert meta.rows == {form_winner_key("M&M"): "M%26M"}
+    registry.close()

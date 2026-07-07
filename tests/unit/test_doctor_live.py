@@ -310,6 +310,15 @@ class TestInfrastructure:
         # extension — and never double-grants it alongside --depth-bisect.
         assert dl.compute_call_budget(dl.KitOptions(auto_bisect=True)) == 100
         assert dl.compute_call_budget(dl.KitOptions(auto_bisect=True, depth_bisect=True)) == 100
+        # --ampersand-probe grants its own extension (DEC-FORM-WINNER-PERSIST-001),
+        # composable with the others.
+        assert dl.compute_call_budget(dl.KitOptions(ampersand_probe=True)) == 104
+        assert (
+            dl.compute_call_budget(
+                dl.KitOptions(depth_bisect=True, rate_probe=True, ampersand_probe=True)
+            )
+            == 644
+        )
 
     def test_report_format_json_and_exit_codes(self, tmp_path: Path) -> None:
         ok = dl.StageOutcome(stage=0, name="env", status=dl.STATUS_PASS, lines=("PASS env: x",))
@@ -1676,6 +1685,339 @@ class TestStageRate:
         assert "(5 calls, 0 raised throttles)" in outcome.lines[0]
 
 
+# ── stage 14 · ampersand (%26) form probe (DEC-FORM-WINNER-PERSIST-001) ──
+
+
+class _AmpKitSDK(FakeKitSDK):
+    """A kit SDK whose expiries/contracts answer per FORM (data vs clean-empty)."""
+
+    def __init__(
+        self,
+        box: dict[str, Handler],
+        *,
+        expiry_data: frozenset[str] = frozenset(),
+        contract_data: frozenset[str] = frozenset(),
+    ) -> None:
+        super().__init__(box)
+        self._expiry_data = expiry_data
+        self._contract_data = contract_data
+        self.expiry_forms: list[str] = []
+        self.contract_forms: list[str] = []
+
+    def get_expiries(self, **kwargs: object) -> Mapping[str, object]:
+        form = str(kwargs["underlying_symbol"])
+        self.expiry_forms.append(form)
+        if form in self._expiry_data:
+            return {"expiries": ["2026-07-30"]}
+        return {"expiries": []}
+
+    def get_contracts(self, **kwargs: object) -> Mapping[str, object]:
+        form = str(kwargs["underlying_symbol"])
+        self.contract_forms.append(form)
+        if form in self._contract_data:
+            return {"contracts": [f"NSE-{form}-30Jul26-2400-CE"]}
+        return {"contracts": []}
+
+
+class _AmpMetaStore:
+    """An in-memory ``MetaKV`` spy for the stage's seed + stamp writes."""
+
+    def __init__(self, *, raise_on: frozenset[str] = frozenset()) -> None:
+        self.rows: dict[str, str] = {}
+        self.set_calls: list[tuple[str, str]] = []
+        self._raise_on = raise_on
+
+    def set_meta(self, key: str, value: str) -> None:
+        if key in self._raise_on:
+            raise RuntimeError(f"unwritable key {key}")
+        self.set_calls.append((key, value))
+        self.rows[key] = value
+
+    def get_meta(self, key: str) -> str | None:
+        return self.rows.get(key)
+
+
+def _amp_master_rows(underlyings: tuple[str, ...] = ("M&M",)) -> str:
+    """The benign master CSV + one FNO FUT leg per ``&``-underlying."""
+    fut_rows = [
+        _master_row(
+            exchange="NSE",
+            exchange_token=str(9000 + i),
+            trading_symbol=f"{u}-30Jul26-FUT",
+            groww_symbol=f"NSE-{u}-30Jul26-FUT",
+            name=f"{u} future",
+            instrument_type="FUT",
+            segment="FNO",
+            underlying_symbol=u,
+            expiry_date="2026-07-30",
+            lot_size="100",
+            tick_size="0.05",
+        )
+        for i, u in enumerate(underlyings)
+    ]
+    return _master_csv().rstrip("\n") + "\n" + "\n".join(fut_rows) + "\n"
+
+
+def _prepare_amp(
+    tmp_path: Path,
+    *,
+    expiry_data: frozenset[str] = frozenset(),
+    contract_data: frozenset[str] = frozenset(),
+    underlyings: tuple[str, ...] = ("M&M",),
+    store: _AmpMetaStore | None = None,
+    deps_overrides: dict[str, Any] | None = None,
+    **option_overrides: Any,
+) -> tuple[dl.KitDeps, dl.KitContext, _AmpKitSDK, list[str]]:
+    """Client (stages 1+3) + an ``&``-family master + a scripted amp SDK."""
+    from contextlib import nullcontext
+
+    from brutex.adapters.groww.instruments import load_index_from_csv
+
+    box: dict[str, Handler] = {"handler": default_handler}
+    sdk = _AmpKitSDK(box, expiry_data=expiry_data, contract_data=contract_data)
+    overrides: dict[str, Any] = {"sdk_factory": lambda _token: sdk}
+    if store is not None:
+        overrides["open_meta_store"] = lambda _root: nullcontext(store)
+    overrides.update(deps_overrides or {})
+    deps, _box = make_deps(tmp_path, **overrides)
+    ctx, events = make_ctx(tmp_path, deps, ampersand_probe=True, **option_overrides)
+    assert dl.stage_creds(deps, ctx).status == dl.STATUS_PASS
+    assert dl.stage_token(deps, ctx).status == dl.STATUS_PASS
+    ctx.master = load_index_from_csv(_amp_master_rows(underlyings))
+    return deps, ctx, sdk, events
+
+
+class TestStageAmpersand:
+    def test_skips_when_not_opted_in(self, tmp_path: Path) -> None:
+        deps, ctx, _box = prepare_client(tmp_path)
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_SKIP
+        assert "--ampersand-probe" in outcome.lines[0]
+
+    def test_skips_without_client(self, tmp_path: Path) -> None:
+        deps, _box = make_deps(tmp_path)
+        ctx, _ = make_ctx(tmp_path, deps, ampersand_probe=True)
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_SKIP
+        assert "stage 3" in outcome.lines[0]
+
+    def test_skips_without_master(self, tmp_path: Path) -> None:
+        deps, ctx, _box = prepare_client(tmp_path, ampersand_probe=True)
+        assert ctx.master is None
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_SKIP
+        assert "stage 4" in outcome.lines[0]
+
+    def test_skips_when_the_master_has_no_ampersand_family(self, tmp_path: Path) -> None:
+        from brutex.adapters.groww.instruments import load_index_from_csv
+
+        deps, ctx, _box = prepare_client(tmp_path, ampersand_probe=True)
+        ctx.master = load_index_from_csv(_master_csv())  # the benign &-free master
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_SKIP
+        assert "no &-underlying" in outcome.lines[0]
+
+    def test_decisive_encoded_only_passes_seeds_and_stamps(self, tmp_path: Path) -> None:
+        """The full happy path: evidence file + winner rows + THE stamp (PASS)."""
+        import json as json_module
+
+        from brutex.adapters.groww.symbol_form_preference import (
+            FORM_PROBE_VERDICT_KEY,
+            form_probe_status,
+            form_winner_key,
+        )
+
+        store = _AmpMetaStore()
+        deps, ctx, sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),
+            contract_data=frozenset({"M%26M"}),
+            store=store,
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS
+        assert outcome.lines[0].startswith("PASS ampersand: 1 &-underlying(s) probed")
+        # BOTH forms were called on BOTH APIs (the probe never short-circuits).
+        assert sdk.expiry_forms == ["M&M", "M%26M"]
+        assert sdk.contract_forms == ["M&M", "M%26M"]
+        # Evidence sidecar written under the quarantined run tree, canonical JSON.
+        verdict_path = ctx.quarantine_root / "ampersand_verdict.json"
+        assert verdict_path.is_file()
+        payload = json_module.loads(verdict_path.read_text(encoding="utf-8"))
+        assert payload["overall"] == "ENCODED_ONLY"
+        assert payload["decisive"] is True
+        assert payload["winners"] == {"M&M": "M%26M"}
+        assert payload["run_id"] == "lp-test"
+        # The durable winner row landed THROUGH the one common write path.
+        assert store.rows[form_winner_key("M&M")] == "M%26M"
+        # THE stamp row: machine-readable, decisive-only, evidence-carrying.
+        stamp = json_module.loads(store.rows[FORM_PROBE_VERDICT_KEY])
+        assert stamp["verdict"] == "ENCODED_ONLY"
+        assert stamp["decision"] == "DEC-AMPERSAND-ENCODING-VERIFIED-001"
+        assert stamp["run_id"] == "lp-test"
+        assert stamp["transcript"].endswith("transcript.jsonl")
+        assert stamp["winners"] == {"M&M": "M%26M"}
+        assert form_probe_status(store).verified is True
+        # Bounded: the whole family fits the stage's dedicated budget extension.
+        assert ctx.budget.used <= dl.AMPERSAND_PROBE_BUDGET
+
+    def test_mixed_family_seeds_clear_names_but_never_stamps(self, tmp_path: Path) -> None:
+        from brutex.adapters.groww.symbol_form_preference import (
+            FORM_PROBE_VERDICT_KEY,
+            form_probe_status,
+            form_winner_key,
+        )
+
+        store = _AmpMetaStore()
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),  # M&M clear; J&KBANK all-empty → NEITHER
+            underlyings=("M&M", "J&KBANK"),
+            store=store,
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert outcome.lines[0].startswith("WARN ampersand[R3]: probe NON-decisive")
+        assert "1/2 underlyings clear" in outcome.lines[0]
+        # The clear name still seeded per-underlying…
+        assert store.rows[form_winner_key("M&M")] == "M%26M"
+        # …but NO stamp — no blanket claim from partial evidence (Golden Rule #10).
+        assert FORM_PROBE_VERDICT_KEY not in store.rows
+        assert form_probe_status(store).verified is False
+
+    def test_verdict_file_oserror_fails_the_stage_with_nothing_seeded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _AmpMetaStore()
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path, expiry_data=frozenset({"M%26M"}), store=store
+        )
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(dl, "atomic_write_simple", _boom)
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert outcome.lines[0].startswith("FAIL ampersand[R3]: could not write")
+        assert store.rows == {}  # NO winner seeded, NO stamp — evidence first
+
+    def test_missing_store_opener_warns_and_never_stamps(self, tmp_path: Path) -> None:
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path, expiry_data=frozenset({"M%26M"}), store=None
+        )
+        assert deps.open_meta_store is None
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert outcome.lines[0].startswith("WARN ampersand[R3]: instrument-master store")
+        # The evidence sidecar still exists (probe evidence ≠ seeding).
+        assert (ctx.quarantine_root / "ampersand_verdict.json").is_file()
+
+    def test_store_opener_raising_warns_and_never_stamps(self, tmp_path: Path) -> None:
+        def _opener(_root: Path) -> object:
+            raise RuntimeError("duckdb locked")
+
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path,
+            expiry_data=frozenset({"M%26M"}),
+            deps_overrides={"open_meta_store": _opener},
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert "duckdb locked" in outcome.lines[0]
+
+    def test_stamp_write_failure_warns_but_winner_rows_stand(self, tmp_path: Path) -> None:
+        from brutex.adapters.groww.symbol_form_preference import (
+            FORM_PROBE_VERDICT_KEY,
+            form_winner_key,
+        )
+
+        store = _AmpMetaStore(raise_on=frozenset({FORM_PROBE_VERDICT_KEY}))
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path, expiry_data=frozenset({"M%26M"}), store=store
+        )
+        outcome = dl.stage_ampersand(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        assert outcome.lines[0].startswith("WARN ampersand[R3]: verdict stamp write failed")
+        assert store.rows[form_winner_key("M&M")] == "M%26M"  # winners seeded
+        assert FORM_PROBE_VERDICT_KEY not in store.rows
+
+    def test_budget_exhaustion_is_the_runner_bounded_fail(self, tmp_path: Path) -> None:
+        """CallBudgetExceeded propagates to the runner's SAFE-bound FAIL handling."""
+        store = _AmpMetaStore()
+        deps, ctx, _sdk, _events = _prepare_amp(
+            tmp_path, expiry_data=frozenset({"M%26M"}), store=store
+        )
+        ctx.budget = dl.CallBudget(ctx.budget.used + 1)  # room for ONE more call
+        ctx.budget.spend(count=ctx.budget.limit - 1, label="pre-spend")
+        with pytest.raises(dl.CallBudgetExceeded):
+            dl.stage_ampersand(deps, ctx)
+        assert store.rows == {}  # bounded abort: nothing seeded, nothing stamped
+
+    def test_stamp_key_has_exactly_one_writer_in_the_package(self) -> None:
+        """Repo pin: ONLY the doctor stage writes ``FORM_PROBE_VERDICT_KEY``."""
+        import brutex
+
+        package_root = Path(brutex.__file__).resolve().parent
+        writers = [
+            str(path.relative_to(package_root))
+            for path in sorted(package_root.rglob("*.py"))
+            if "set_meta(FORM_PROBE_VERDICT_KEY" in path.read_text(encoding="utf-8")
+        ]
+        assert writers == ["doctor_live.py"]
+
+    def test_amp_decision_id_maps_every_overall(self) -> None:
+        from brutex.adapters.groww.probe import (
+            AMP_VERDICT_BOTH_OK,
+            AMP_VERDICT_ENCODED_ONLY,
+            AMP_VERDICT_MIXED,
+            AMP_VERDICT_PLAIN_OK,
+            AmpersandProbeReport,
+        )
+
+        def _report(overall: str, winners: dict[str, str]) -> AmpersandProbeReport:
+            return AmpersandProbeReport(
+                results=(), per_underlying={}, winners=winners, overall=overall, decisive=True
+            )
+
+        verified = "DEC-AMPERSAND-ENCODING-VERIFIED-001"
+        refuted = "DEC-AMPERSAND-ENCODING-REFUTED-001"
+        assert dl._amp_decision_id(_report(AMP_VERDICT_ENCODED_ONLY, {"M&M": "M%26M"})) == verified
+        assert dl._amp_decision_id(_report(AMP_VERDICT_PLAIN_OK, {"M&M": "M&M"})) == refuted
+        assert dl._amp_decision_id(_report(AMP_VERDICT_BOTH_OK, {"M&M": "M&M"})) == refuted
+        # MIXED-decisive: ≥1 encoded winner demonstrates the encoding → VERIFIED…
+        assert (
+            dl._amp_decision_id(_report(AMP_VERDICT_MIXED, {"M&M": "M%26M", "L&TFH": "L&TFH"}))
+            == verified
+        )
+        # …an all-plain mixed family does not.
+        assert dl._amp_decision_id(_report(AMP_VERDICT_MIXED, {"L&TFH": "L&TFH"})) == refuted
+
+    def test_no_creds_end_to_end_stays_honestly_unverified(self, tmp_path: Path) -> None:
+        """(c) the honest no-creds stop: SKIP, zero seeds, zero stamp, UNVERIFIED."""
+        from contextlib import nullcontext
+
+        from brutex.adapters.groww.symbol_form_preference import form_probe_status
+
+        store = _AmpMetaStore()
+        deps, _box = make_deps(
+            tmp_path,
+            resolve_creds=_creds_error("no creds in this environment"),
+            open_meta_store=lambda _root: nullcontext(store),
+        )
+        report = dl.run_live_doctor(
+            deps,
+            dl.KitOptions(lake_root=tmp_path / "lake", ampersand_probe=True, keep_going=True),
+        )
+        assert report.exit_code == 2  # creds FAILed — the honest stop
+        by_name = {outcome.name: outcome for outcome in report.outcomes}
+        assert by_name["ampersand"].status == dl.STATUS_SKIP  # no client → no probe
+        assert store.set_calls == []  # ZERO map seeds, ZERO stamp
+        assert form_probe_status(store).verified is False  # every surface: UNVERIFIED
+        transcript = report.transcript_path.read_text(encoding="utf-8")
+        assert '"event": "amp.call"' not in transcript  # zero probe evidence lines
+
+
 # ── runner ──────────────────────────────────────────────────────────────
 
 
@@ -1685,10 +2027,11 @@ class TestRunner:
         options = dl.KitOptions(lake_root=tmp_path / "lake")
         report = dl.run_live_doctor(deps, options)
         assert report.exit_code == 0
-        assert [outcome.stage for outcome in report.outcomes] == list(range(14))
+        assert [outcome.stage for outcome in report.outcomes] == list(range(15))
         statuses = {outcome.name: outcome.status for outcome in report.outcomes}
         assert statuses["resample"] == dl.STATUS_SKIP  # no derived TFs in the quarantine
         assert statuses["rate"] == dl.STATUS_SKIP  # opt-in
+        assert statuses["ampersand"] == dl.STATUS_SKIP  # opt-in (DEC-FORM-WINNER-PERSIST-001)
         assert statuses["lake"] == dl.STATUS_PASS
         assert report.transcript_path.is_file()
         text = report.transcript_path.read_text(encoding="utf-8")
@@ -1713,7 +2056,7 @@ class TestRunner:
             deps, dl.KitOptions(lake_root=tmp_path / "lake", keep_going=True)
         )
         assert report.exit_code == 2
-        assert len(report.outcomes) == 14
+        assert len(report.outcomes) == 15
         assert report.outcomes[3].status == dl.STATUS_SKIP  # token skipped without creds
 
     def test_stage_selection_runs_only_requested(self, tmp_path: Path) -> None:

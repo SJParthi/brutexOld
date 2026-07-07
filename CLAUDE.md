@@ -18,7 +18,42 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
+_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1527 —
+the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
+one `schema_meta` row per underlying (`groww.form_winner.<key>` → the winning
+form STRING) written through the NEW `PersistentSymbolFormPreference`
+(write-on-change, read-once-per-process single-flight, store errors WARN-only —
+a pull is never crashed; `BRUTEX_FORM_WINNER_PERSIST=off` is the write-side
+kill switch; SUPERSEDES the "cross-pull persistence is a NAMED follow-up"
+clause of DEC-SYMBOL-FORM-PREFERENCE-001), keyed by the PRIMARY F&O underlying
+in EVERY phase (`resolve_expiries`/`resolve_contracts` gain the
+`preference_key` normalization `candles.py` already had; the metadata pull
+passes the CELL key, never the queried spelling form) and wired at every
+production pull seam (ONE instance per `/pull-pipeline` run shared by the
+metadata + historical phases; the standalone metadata/composite routes;
+`run_groww_option_ingest`'s fresh-per-pass default stands down — also fixing
+the within-one-pull amnesia across market buckets/until-clean rounds; a
+dry-run threads store=None, byte-identical to the process-local base). The
+two structurally identical set_meta/get_meta Protocols consolidate into ONE
+`brutex/data/meta_kv.py` `MetaKV` (Golden Rule #11 COMMON;
+`VendorFloorMetaStore` is now a back-compat alias). PLUS the live `&`-family
+probe TOOLING: `brutex doctor --live --ampersand-probe` (stage 14, ≤64-call
+budget) probes BOTH symbol forms of every master-DERIVED `&`-underlying
+against BOTH F&O APIs through the kit's read-only client, writes the
+`ampersand_verdict.json` evidence sidecar + per-call transcript lines, SEEDS
+the durable map per-underlying through the ONE COMMON `record_winner` write
+path, and — iff DECISIVE — writes the machine-readable
+`groww.form_probe.verdict` stamp, whose ONLY writer in the repo is that stage
+(test-pinned; `form_probe_status()` reads it back — missing/corrupt =
+honestly UNVERIFIED, "verified" is DATA not prose). HONEST (Golden Rule
+#1/#10): the probe was NOT run for this change — no Groww credentials in the
+build environment — so ZERO transcript exists, ZERO stamp was written, and
+the #898 `%26`-encoding hypothesis stays vendor-UNVERIFIED byte-INTACT until
+a decisive operator-run probe lands its transcript; the map itself needs no
+probe (production pulls self-learn from ordinary fallback wins). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched
+modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
 rate>)` UNVERIFIED placeholder rows are DELETED and replaced by explicit
@@ -105,8 +140,7 @@ UNVERIFIED — the lake_keys pledge stands); read-time recovery ONLY —
 NAMED follow-up DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 (until it lands a drifted
 stock lake shows recovered Greeks but `/db` moneyness UNKNOWN). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; `lake_keys.py`/`spot_drift.py`/
-`greeks_enrich.py` ALL 100% line+branch).
-Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+`greeks_enrich.py` ALL 100% line+branch).Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
 adversarial audit's confirmed defects fixed as ONE change set: (a) price
 POSITIVITY is enforced at the ENGINE READ BOUNDARY
@@ -517,7 +551,22 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+- **Active branch:** `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
+  MIGRATION.md #1527** — the durable `&`-form winner map: `schema_meta` rows
+  (`groww.form_winner.<key>` → the winning form STRING) via the NEW
+  `PersistentSymbolFormPreference` over the shared `brutex/data/meta_kv.py` `MetaKV`
+  Protocol (the `vendor_floor` durable-learned-value pattern; `VendorFloorMetaStore`
+  aliased); the `preference_key` PRIMARY-underlying normalization on
+  `resolve_expiries`/`resolve_contracts`; ONE shared instance wired per pipeline run
+  across the metadata + historical phases (the spine's fresh-per-pass default stands
+  down); the `brutex doctor --live --ampersand-probe` stage-14 probe TOOLING whose
+  decisive run is the ONLY writer of the `groww.form_probe.verdict` stamp. HONEST:
+  the live probe was NOT run here (no creds in the build environment) — the #898
+  `%26` UNVERIFIED wording stands byte-intact; the stamp flips it only with a real
+  transcript. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean,
+  pyright at the pre-change baseline).
+  Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
   carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`
@@ -578,8 +627,7 @@ hostile-review pass._
   DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — until it lands a drifted stock lake shows recovered Greeks but a `/db`
   moneyness UNKNOWN (honest split-brain). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no
   scope/vocab/rate change; `lake_keys.py` (75/44) + `spot_drift.py` (143/42, NEW) + `greeks_enrich.py` (539/130) ALL
-  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).
-  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
   DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
   the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
   constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
@@ -1667,7 +1715,7 @@ hostile-review pass._
   OPTIONAL gated 4th phase `run_movers` + `PipelinePullReport.movers_warmed` that runs ONLY after a
   fully-successful fetch (`historical_phase_ok`) — the operator's "never run movers unless the fetch
   succeeded". The WARMER is NOT yet bound in the route (a today-coordinate warm would cache empty snapshots
-  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump). 
+  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump).
   `pipeline_pull.py` at 100% line+branch; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED. Prior merged:
   DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876 (PR #830: the `/movers` page defaults Top-N to 100 and offers ALL
   21 Track-1 timeframes (1m + 19 derived intraday + 1d), every one derived on-the-fly from the stored
@@ -1975,7 +2023,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zealous-maxwell-w257yf`
+- **Active feature branch:** `claude/sleepy-hawking-l87497`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

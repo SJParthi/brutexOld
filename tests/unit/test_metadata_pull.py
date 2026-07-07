@@ -1856,3 +1856,125 @@ def test_rewrite_counts_defer_breaks_and_counts(tmp_path: Path) -> None:
     assert by_underlying["AAA"].status == STATUS_EXPIRIES_ONLY
     assert by_underlying["BBB"].status == STATUS_EXPIRIES_ONLY
     registry.close()
+
+
+# ── DEC-FORM-WINNER-PERSIST-001: the &-form winner keyed by the PRIMARY ──────
+
+
+class _MetaStore:
+    """A minimal in-memory ``MetaKV`` (the durable form-winner sidecar twin)."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.rows[key] = value
+
+    def get_meta(self, key: str) -> str | None:
+        return self.rows.get(key)
+
+
+def test_form_preference_records_under_the_primary_key_and_serves_phase2(
+    tmp_path: Path,
+) -> None:
+    """The KEY-NORMALIZATION pin (DEC-FORM-WINNER-PERSIST-001 risk #1).
+
+    The metadata pull queries the vendor with SPELLING forms but must key the
+    ``&``-form memory by the PRIMARY F&O underlying — the durable row lands under
+    ``groww.form_winner.M&M`` — and the Phase-1 (expiries) ``%26`` win reorders
+    Phase-2's (contracts) very first call for the same underlying: zero wasted
+    plain fetch inside ONE pull, and a durable row for the NEXT pull.
+    """
+    from brutex.adapters.groww.symbol_form_preference import (
+        PersistentSymbolFormPreference,
+        form_winner_key,
+    )
+
+    sdk = _FakeSDK(
+        expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+        contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+    )
+    registry = _registry(tmp_path)
+    store = _MetaStore()
+    report = pull_expiries_contracts(
+        [_equity("M&M")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-form",
+        form_preference=PersistentSymbolFormPreference(store),
+    )
+    assert report.contracts_persisted == 1
+    # Phase 1 learned the hard way (plain empty → encoded win)…
+    assert sdk.expiry_underlying_forms == ["M&M", "M%26M"]
+    # …and Phase 2's FIRST contracts call was already the learned winner.
+    assert sdk.contract_underlying_forms == ["M%26M"]
+    # The durable row is keyed by the PRIMARY underlying, never a spelling form.
+    assert store.rows == {form_winner_key("M&M"): "M%26M"}
+    registry.close()
+
+
+def test_form_preference_default_none_keeps_the_fixed_order(tmp_path: Path) -> None:
+    """Default parity pin: no preference ⇒ plain-first on EVERY phase, every pull."""
+    for run_id in ("r-a", "r-b"):
+        sdk = _FakeSDK(
+            expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+            contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+        )
+        registry = _registry(tmp_path / run_id)
+        pull_expiries_contracts(
+            [_equity("M&M")],
+            registry=registry,
+            coverage_store=_CoverageSink(),
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id=run_id,
+        )
+        assert sdk.expiry_underlying_forms == ["M&M", "M%26M"]  # fixed plain-first
+        assert sdk.contract_underlying_forms == ["M&M", "M%26M"]
+        registry.close()
+
+
+def test_second_pull_over_the_same_store_issues_the_winner_first(tmp_path: Path) -> None:
+    """Cross-pull durability through the METADATA phase: pull 2 re-probes nothing."""
+    from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
+
+    store = _MetaStore()
+
+    def _one_pull(label: str) -> _FakeSDK:
+        sdk = _FakeSDK(
+            expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+            contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+        )
+        registry = _registry(tmp_path / label)
+        pull_expiries_contracts(
+            [_equity("M&M")],
+            registry=registry,
+            coverage_store=_CoverageSink(),
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id=label,
+            # A FRESH preference per pull (a fresh process) over the SAME store.
+            form_preference=PersistentSymbolFormPreference(store),
+        )
+        registry.close()
+        return sdk
+
+    sdk1 = _one_pull("pull-1")
+    assert sdk1.expiry_underlying_forms == ["M&M", "M%26M"]  # learned the hard way
+    sdk2 = _one_pull("pull-2")
+    assert sdk2.expiry_underlying_forms == ["M%26M"]  # the winner led — zero waste
+    assert sdk2.contract_underlying_forms == ["M%26M"]

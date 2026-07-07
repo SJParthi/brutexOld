@@ -18,14 +18,16 @@ scope for a single button (Golden Rule #1 — no invented automatic verdict).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Final, Protocol
 
 from brutex.adapters.groww.client import GrowwClient, GrowwClientProtocol
 from brutex.adapters.groww.constants import EARLIEST_HISTORY
+from brutex.adapters.groww.contracts import underlying_symbol_forms
 from brutex.adapters.groww.errors import GrowwError
+from brutex.models import Instrument, Segment
 
 
 class CandleFetcher(Protocol):
@@ -471,6 +473,323 @@ def probe_depth(
         )
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Ampersand (%26) symbol-form probe — DEC-FORM-WINNER-PERSIST-001
+# ────────────────────────────────────────────────────────────────────────
+
+#: Per-underlying probe verdicts (the ``&``-form evidence vocabulary). PLAIN_OK =
+#: only the plain ``&`` form returned data; ENCODED_ONLY = only the ``%26`` form
+#: did (the #898 hypothesis demonstrated for that name); BOTH_OK = both forms
+#: returned data; NEITHER = every call was a clean empty; ERROR = no data and at
+#: least one call raised. MIXED is an AGGREGATE-only verdict — a family whose
+#: per-underlying verdicts disagree (never assigned to a single underlying).
+AMP_VERDICT_PLAIN_OK: Final[str] = "PLAIN_OK"
+AMP_VERDICT_ENCODED_ONLY: Final[str] = "ENCODED_ONLY"
+AMP_VERDICT_BOTH_OK: Final[str] = "BOTH_OK"
+AMP_VERDICT_NEITHER: Final[str] = "NEITHER"
+AMP_VERDICT_ERROR: Final[str] = "ERROR"
+AMP_VERDICT_MIXED: Final[str] = "MIXED"
+
+#: The clear (decisive-capable) per-underlying verdicts — BOTH_OK counts
+#: decisive-for-plain (the vendor handles the raw ``&`` for that name).
+_AMP_CLEAR_VERDICTS: Final[frozenset[str]] = frozenset(
+    {AMP_VERDICT_PLAIN_OK, AMP_VERDICT_ENCODED_ONLY, AMP_VERDICT_BOTH_OK}
+)
+
+#: Form roles, positionally aligned with the CANONICAL
+#: :func:`~brutex.adapters.groww.contracts.underlying_symbol_forms` tuple.
+_AMP_ROLES: Final[tuple[str, str]] = ("plain", "encoded")
+
+
+class ProbeCallBudget(Protocol):
+    """The bounded vendor-call budget seam (a structural subset of
+    :class:`brutex.doctor_live.CallBudget`, so the kit's real budget satisfies it
+    without this leaf importing the kit — no cycle)."""
+
+    def spend(self, count: int = 1, *, label: str) -> None:
+        """Spend *count* calls, raising when the hard cap would be exceeded."""
+        raise NotImplementedError  # structural Protocol stub — never executed
+
+
+class ProbeTranscript(Protocol):
+    """The evidence-line seam (a structural subset of
+    :class:`brutex.doctor_live.Transcript` — canonical sorted-key JSON per event)."""
+
+    def event(self, name: str, /, **fields: object) -> None:
+        """Append one transcript event."""
+        raise NotImplementedError  # structural Protocol stub — never executed
+
+
+@dataclass(frozen=True, slots=True)
+class AmpersandFormCall:
+    """One physical probe call's evidence (also mirrored to the transcript).
+
+    Attributes
+    ----------
+    underlying
+        The ``&``-underlying being probed (e.g. ``"M&M"``).
+    form
+        The exact symbol form the call was ISSUED with (plain or ``%26``-encoded).
+    role
+        ``"plain"`` or ``"encoded"`` — the form's role in the canonical tuple.
+    api
+        ``"expiries"`` or ``"contracts"`` — which vendor surface was called.
+    count
+        Returned item count (``None`` when the call raised).
+    error
+        The neutral :class:`~brutex.adapters.groww.errors.GrowwError` shape
+        (``"Type: message"``), or ``None`` on a clean return.
+    """
+
+    underlying: str
+    form: str
+    role: str
+    api: str
+    count: int | None
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AmpersandProbeReport:
+    """The whole ``&``-family probe outcome (DEC-FORM-WINNER-PERSIST-001).
+
+    Attributes
+    ----------
+    results
+        Every physical call's :class:`AmpersandFormCall`, in issue order.
+    per_underlying
+        ``underlying → verdict`` (:data:`AMP_VERDICT_PLAIN_OK` /
+        :data:`AMP_VERDICT_ENCODED_ONLY` / :data:`AMP_VERDICT_BOTH_OK` /
+        :data:`AMP_VERDICT_NEITHER` / :data:`AMP_VERDICT_ERROR`).
+    winners
+        ``underlying → the winning FORM string`` for every underlying with a
+        CLEAR verdict (the rows the durable form-winner map is seeded with);
+        a NEITHER/ERROR underlying has no entry (nothing is fabricated).
+    overall
+        The family aggregate: the single shared verdict when every underlying
+        agrees, :data:`AMP_VERDICT_MIXED` when clear verdicts disagree or clear
+        and unclear mix, :data:`AMP_VERDICT_NEITHER` for an empty family.
+    decisive
+        ``True`` iff the family is non-empty and EVERY underlying's verdict is
+        CLEAR (:data:`_AMP_CLEAR_VERDICTS` — BOTH_OK counts decisive-for-plain).
+        Only a decisive report may write the machine-readable verdict stamp
+        (:data:`~brutex.adapters.groww.symbol_form_preference.FORM_PROBE_VERDICT_KEY`).
+    """
+
+    results: tuple[AmpersandFormCall, ...]
+    per_underlying: Mapping[str, str]
+    winners: Mapping[str, str]
+    overall: str
+    decisive: bool
+
+
+def ampersand_family(instruments: Iterable[Instrument]) -> tuple[str, ...]:
+    """The ``&``-underlyings to probe, DERIVED from the instrument master — never hardcoded.
+
+    Scans the FNO legs' ``underlying_symbol`` (the vendor's own contract set — the
+    proof the name is F&O-eligible) for ``&``, deduped + sorted for determinism.
+    DYNAMIC (CLAUDE.md §11): a future ``X&Y`` listing is auto-probed with zero code
+    change, exactly as :func:`~brutex.adapters.groww.contracts.underlying_symbol_forms`
+    auto-covers it in production.
+    """
+    family = {
+        instrument.underlying_symbol
+        for instrument in instruments
+        if instrument.segment is Segment.FNO
+        and instrument.underlying_symbol is not None
+        and "&" in instrument.underlying_symbol
+    }
+    return tuple(sorted(family))
+
+
+def _array_len(payload: object, key: str) -> int:
+    """Defensive item count of a ``{"expiries"|"contracts": [...]}`` payload."""
+    if not isinstance(payload, Mapping):
+        return 0
+    items = payload.get(key)
+    if not isinstance(items, (list, tuple)):
+        return 0
+    return len(items)
+
+
+def _nearest_expiry(payloads: Iterable[object]) -> str | None:
+    """The earliest parseable ISO expiry across *payloads* (``None`` when there is none).
+
+    Defensive: unparseable / non-string entries are SKIPPED (the probe records
+    counts, it never fail-louds on shape — a malformed expiry simply cannot seed
+    the ``get_contracts`` leg).
+    """
+    nearest: date | None = None
+    nearest_raw: str | None = None
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        items = payload.get("expiries")
+        if not isinstance(items, (list, tuple)):
+            continue
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            try:
+                parsed = date.fromisoformat(item)
+            except ValueError:
+                continue
+            if nearest is None or parsed < nearest:
+                nearest, nearest_raw = parsed, item
+    return nearest_raw
+
+
+def _emit_call(
+    transcript: ProbeTranscript,
+    results: list[AmpersandFormCall],
+    calls: list[AmpersandFormCall],
+    call: AmpersandFormCall,
+) -> None:
+    """Mirror one physical call to the transcript + both evidence lists.
+
+    The transcript event fires FIRST — BEFORE any verdict interpretation — so the
+    evidence line exists even if a later step aborts (the kit's "EVIDENCE OR IT
+    DID NOT HAPPEN" ordering pin).
+    """
+    transcript.event(
+        "amp.call",
+        underlying=call.underlying,
+        form=call.form,
+        role=call.role,
+        api=call.api,
+        count=call.count,
+        error=call.error,
+    )
+    results.append(call)
+    calls.append(call)
+
+
+def _amp_verdict(calls: Sequence[AmpersandFormCall]) -> str:
+    """Fold one underlying's calls into its verdict — data trumps errors."""
+    plain_data = any(c.role == "plain" and (c.count or 0) > 0 for c in calls)
+    encoded_data = any(c.role == "encoded" and (c.count or 0) > 0 for c in calls)
+    if plain_data and encoded_data:
+        return AMP_VERDICT_BOTH_OK
+    if plain_data:
+        return AMP_VERDICT_PLAIN_OK
+    if encoded_data:
+        return AMP_VERDICT_ENCODED_ONLY
+    if any(c.error is not None for c in calls):
+        return AMP_VERDICT_ERROR
+    return AMP_VERDICT_NEITHER
+
+
+def probe_ampersand_forms(
+    client: GrowwClientProtocol,
+    underlyings: Sequence[str],
+    *,
+    exchange: str = "NSE",
+    budget: ProbeCallBudget,
+    transcript: ProbeTranscript,
+) -> AmpersandProbeReport:
+    """Probe BOTH symbol forms of every ``&``-underlying against BOTH F&O APIs.
+
+    The live-evidence closure for the #898 UNVERIFIED ``%26`` hypothesis
+    (DEC-FORM-WINNER-PERSIST-001). Unlike production (first-non-empty
+    short-circuit, ``contracts._fetch_first_nonempty_form``), the probe calls BOTH
+    forms UNCONDITIONALLY — evidence for both directions — on ``get_expiries``,
+    then BOTH forms of ``get_contracts`` on the NEAREST expiry either form
+    returned (no expiry from either form ⇒ the contracts leg is skipped for that
+    name — never a fabricated expiry). ≤ 4 vendor calls per underlying, every one
+    spent against *budget* BEFORE it is issued (a
+    :class:`brutex.doctor_live.CallBudgetExceeded` aborts the run bounded, never
+    the account) and mirrored to *transcript* as ONE ``amp.call`` event with the
+    RAW count/error BEFORE any verdict interpretation ("EVIDENCE OR IT DID NOT
+    HAPPEN"). A raised :class:`~brutex.adapters.groww.errors.GrowwError` is
+    recorded as that call's evidence; a non-Groww exception propagates (a code
+    bug stays loud). A defensive single-form name (no ``&``) is SKIPPED — the
+    probe never invents a second form.
+    """
+    results: list[AmpersandFormCall] = []
+    per_underlying: dict[str, str] = {}
+    winners: dict[str, str] = {}
+    for underlying in underlyings:
+        forms = underlying_symbol_forms(underlying)
+        if len(forms) < len(_AMP_ROLES):
+            transcript.event("amp.skipped_single_form", underlying=underlying)
+            continue
+        calls: list[AmpersandFormCall] = []
+        expiry_payloads: list[object] = []
+        for role, form in zip(_AMP_ROLES, forms, strict=True):
+            budget.spend(label=f"amp.expiries.{underlying}")
+            try:
+                payload: object = client.expiries(exchange=exchange, underlying_symbol=form)
+            except GrowwError as exc:
+                call = AmpersandFormCall(
+                    underlying=underlying,
+                    form=form,
+                    role=role,
+                    api="expiries",
+                    count=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                expiry_payloads.append(payload)
+                call = AmpersandFormCall(
+                    underlying=underlying,
+                    form=form,
+                    role=role,
+                    api="expiries",
+                    count=_array_len(payload, "expiries"),
+                    error=None,
+                )
+            _emit_call(transcript, results, calls, call)
+        nearest = _nearest_expiry(expiry_payloads)
+        if nearest is not None:
+            for role, form in zip(_AMP_ROLES, forms, strict=True):
+                budget.spend(label=f"amp.contracts.{underlying}")
+                try:
+                    payload = client.contracts(
+                        exchange=exchange, underlying_symbol=form, expiry_date=nearest
+                    )
+                except GrowwError as exc:
+                    call = AmpersandFormCall(
+                        underlying=underlying,
+                        form=form,
+                        role=role,
+                        api="contracts",
+                        count=None,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                else:
+                    call = AmpersandFormCall(
+                        underlying=underlying,
+                        form=form,
+                        role=role,
+                        api="contracts",
+                        count=_array_len(payload, "contracts"),
+                        error=None,
+                    )
+                _emit_call(transcript, results, calls, call)
+        verdict = _amp_verdict(calls)
+        per_underlying[underlying] = verdict
+        if verdict in (AMP_VERDICT_PLAIN_OK, AMP_VERDICT_BOTH_OK):
+            winners[underlying] = forms[0]
+        elif verdict == AMP_VERDICT_ENCODED_ONLY:
+            winners[underlying] = forms[1]
+        transcript.event("amp.verdict", underlying=underlying, verdict=verdict)
+    distinct = set(per_underlying.values())
+    if not distinct:
+        overall = AMP_VERDICT_NEITHER
+    elif len(distinct) == 1:
+        overall = next(iter(distinct))
+    else:
+        overall = AMP_VERDICT_MIXED
+    decisive = bool(per_underlying) and distinct <= _AMP_CLEAR_VERDICTS
+    return AmpersandProbeReport(
+        results=tuple(results),
+        per_underlying=per_underlying,
+        winners=winners,
+        overall=overall,
+        decisive=decisive,
+    )
+
+
 def run_probe(client: GrowwClient) -> list[ProbeResult]:
     """Run the three LIVE Groww checks (vix + granularity + options) in order.
 
@@ -482,13 +801,25 @@ def run_probe(client: GrowwClient) -> list[ProbeResult]:
 
 
 __all__ = [
+    "AMP_VERDICT_BOTH_OK",
+    "AMP_VERDICT_ENCODED_ONLY",
+    "AMP_VERDICT_ERROR",
+    "AMP_VERDICT_MIXED",
+    "AMP_VERDICT_NEITHER",
+    "AMP_VERDICT_PLAIN_OK",
     "DEPTH_PROBE_MAX_CALLS",
     "VERDICT_ABSENT",
     "VERDICT_ERROR",
     "VERDICT_OK",
+    "AmpersandFormCall",
+    "AmpersandProbeReport",
     "CandleFetcher",
     "DepthProbeResult",
+    "ProbeCallBudget",
     "ProbeResult",
+    "ProbeTranscript",
+    "ampersand_family",
+    "probe_ampersand_forms",
     "probe_depth",
     "probe_granularity",
     "probe_options",
