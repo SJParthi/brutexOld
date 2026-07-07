@@ -61,7 +61,14 @@ the account pull single-flight gains its CROSS-HOST arm — an advisory
 heartbeat lease on shared lake storage (`.locks/pull_lease.json`, 30 s
 refresh, 180 s self-heal, kill switch `BRUTEX_PULL_LEASE=off`) refuses a
 start on a FRESH foreign-host lease; honestly DETECTION, NOT mutual
-exclusion (TOCTOU/clock-skew/hostname-collision limits stated); (8) the
+exclusion (TOCTOU/clock-skew/hostname-collision limits stated); every
+synchronous lease lake-I/O op (enter read + first refresh, exit clear —
+they run while BOTH flocks are held, and the exit clear runs BEFORE the
+flock releases) is deadline-BOUNDED under the COMMON `run_with_deadline`
+guard (`BRUTEX_PULL_LEASE_IO_DEADLINE_S`, default 5 s; round-1 review
+MAJOR fold — a wedged volume previously hung `clear()` forever and refused
+every future pull until restart; wedged op = one `pull_lease.io_wedged`
+WARN + stale-TTL self-heal, at most one zombie daemon per op); (8) the
 movers `PrebuildGate` honors the derive lock with HONEST attribution — a
 CLI-process derive yields the `gated:true` payload with
 `source="cross_process"`, and (round-1 review fold) the dashboard's OWN

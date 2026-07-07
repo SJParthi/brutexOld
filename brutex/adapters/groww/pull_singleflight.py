@@ -107,6 +107,14 @@ pull exists, hence any same-host lease is a crashed/finished pull's residue.
   is refused for at most ~3 min after a crash, never for the length of the dead pull.
 * **Best-effort writes.** A lease/heartbeat write failure WARNs once and degrades to
   today's behaviour (no cross-host detection) — it can NEVER fail or halt the pull.
+* **Bounded lease I/O.** The guard's synchronous lake-file ops (enter read + first
+  refresh, exit ``clear``) run under the COMMON ``run_with_deadline`` freeze guard
+  (:data:`PULL_LEASE_IO_DEADLINE_S`, env :data:`PULL_LEASE_IO_DEADLINE_ENV`) because
+  they execute while BOTH single-flight flocks are held — a WEDGED (non-raising)
+  volume would otherwise hold the flocks forever and refuse every future pull until
+  process restart (the round-1 review MAJOR). A wedged op is abandoned (one
+  ``pull_lease.io_wedged`` WARN, at most one zombie daemon per op — the #999 stance);
+  a leftover lease self-heals by going stale within the TTL.
 * **The boot-resume probe is lease-blind.**
   :func:`brutex.dashboard.pull_intent.probe_pull_singleflight` probes only the flock;
   worst case a resumed job is refused at ``start()`` by a fresh foreign lease — the
@@ -135,6 +143,7 @@ from typing import Final
 
 import structlog
 
+from brutex.config.deadline import DeadlineExceeded, resolve_env_seconds, run_with_deadline
 from brutex.data.atomic_io import atomic_write_simple, lake_write_guard
 from brutex.models import BruteXError
 
@@ -143,6 +152,8 @@ __all__ = [
     "PULL_LEASE_ENV",
     "PULL_LEASE_FILE_NAME",
     "PULL_LEASE_HEARTBEAT_S",
+    "PULL_LEASE_IO_DEADLINE_ENV",
+    "PULL_LEASE_IO_DEADLINE_S",
     "PULL_LEASE_SCHEMA",
     "PULL_LEASE_STALE_AFTER_S",
     "PULL_SINGLEFLIGHT_LOCK_NAME",
@@ -414,6 +425,27 @@ PULL_LEASE_ENV: Final[str] = "BRUTEX_PULL_LEASE"
 #: might still write is conditionally removed / goes stale), never joined forever.
 _LEASE_JOIN_TIMEOUT_S: Final[float] = 5.0
 
+#: Wall-clock bound for the lease guard's SYNCHRONOUS lake-file I/O (the enter
+#: read + first refresh, and the exit ``clear``) — the round-1 review MAJOR fix:
+#: these ran UNBOUNDED while BOTH single-flight flocks were held, and both
+#: release orders put the exit ``clear`` AHEAD of the flock releases, so a
+#: WEDGED (non-raising) lake volume — the exact scenario the sibling bounded
+#: daemon join exists for — hung ``clear()`` forever and every future pull was
+#: refused with ``PullAlreadyRunningError`` until process restart. Each op now
+#: runs under the COMMON :func:`~brutex.config.deadline.run_with_deadline`
+#: freeze guard; on expiry the op is ABANDONED with ONE WARN and the guard
+#: proceeds (enter: no cross-host detection this pull; exit: the leftover lease
+#: self-heals by going stale within :data:`PULL_LEASE_STALE_AFTER_S`) — the
+#: flocks are ALWAYS released promptly. 5 s: generous for a ~300-byte sidecar
+#: read/write, far under the lease TTL.
+PULL_LEASE_IO_DEADLINE_S: Final[float] = 5.0
+
+#: Env override for :data:`PULL_LEASE_IO_DEADLINE_S` (fail-loud parse via the
+#: COMMON :func:`~brutex.config.deadline.resolve_env_seconds` — an invalid /
+#: non-positive / non-finite value falls back to the audited default, so a bad
+#: value can never DISABLE the bound).
+PULL_LEASE_IO_DEADLINE_ENV: Final[str] = "BRUTEX_PULL_LEASE_IO_DEADLINE_S"
+
 
 class ForeignPullActiveError(PullAlreadyRunningError):
     """A FRESH pull lease from a DIFFERENT host was found on the shared lake storage.
@@ -632,6 +664,60 @@ def _lease_heartbeat_loop(
         refresh()
 
 
+def _bounded_lease_io[T](
+    fn: Callable[[], T],
+    *,
+    fallback: T,
+    deadline_s: float,
+    action: str,
+    lease_path: Path,
+) -> T:
+    """Run one synchronous lease I/O op under the COMMON freeze guard — never blocks.
+
+    The round-1 review MAJOR fix (the ``rate_bridge_cache`` precedent,
+    MIGRATION.md #1522): the lease guard's enter read / first refresh / exit
+    ``clear`` all touch the lake volume WHILE the two single-flight flocks are
+    held, and a wedged (non-raising) NFS/SSD volume would otherwise hang them
+    forever — permanently refusing every future pull because the flocks release
+    only after this I/O. Bounds *fn* by *deadline_s* via
+    :func:`~brutex.config.deadline.run_with_deadline`; on expiry
+    (:class:`~brutex.config.deadline.DeadlineExceeded`) OR a guard-thread spawn
+    failure under thread exhaustion (:class:`RuntimeError` from
+    ``Thread.start`` — the ``pull_lease.heartbeat_spawn_failed`` rationale)
+    logs ONE ``pull_lease.io_wedged`` WARN and returns *fallback* — the lease
+    machinery degrades (detection lost / a leftover lease that self-heals by
+    going stale within the TTL), the pull and the lock releases are UNAFFECTED.
+    HONEST (#999 stance): the abandoned worker is a daemon that cannot be
+    killed — at most one zombie per wedged op, dying with the process. The
+    wrapped ops never raise themselves (``foreign_pull_lease`` /
+    ``keeper.refresh`` / ``keeper.clear`` are all fail-soft), so only the
+    guard's own failure modes are caught here — a genuine code bug still
+    propagates through ``run_with_deadline``'s re-raise.
+    """
+    try:
+        return run_with_deadline(
+            fn,
+            deadline_s,
+            what=f"pull-lease {action}",
+            thread_name=f"brutex-pull-lease-{action}",
+        )
+    except (DeadlineExceeded, RuntimeError) as exc:
+        _LOG.warning(
+            "pull_lease.io_wedged",
+            action=action,
+            lease_path=str(lease_path),
+            deadline_s=deadline_s,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            detail=(
+                "lease I/O abandoned on a wedged volume; cross-host detection "
+                "degraded — a leftover lease self-heals by going stale within "
+                "the TTL, and the single-flight locks release normally"
+            ),
+        )
+        return fallback
+
+
 @contextmanager
 def pull_lease_guard(
     lake_root: Path,
@@ -656,6 +742,19 @@ def pull_lease_guard(
     exit: stops the heartbeat (bounded join — a wedged refresh write abandons the
     daemon, the #999 stance) and removes the lease iff still ours.
 
+    EVERY synchronous lake-file op here (the enter read + first refresh, the
+    exit ``clear``) is DEADLINE-BOUNDED under the COMMON
+    :func:`~brutex.config.deadline.run_with_deadline` freeze guard
+    (:data:`PULL_LEASE_IO_DEADLINE_S`, env
+    :data:`PULL_LEASE_IO_DEADLINE_ENV` — the round-1 review MAJOR fix): these
+    ops run while the caller already holds BOTH single-flight flocks and the
+    exit ``clear`` runs BEFORE the flock releases at both production sites, so
+    a WEDGED (non-raising) lake volume would otherwise hold the flocks forever
+    and refuse every future pull until process restart. A wedged op is
+    abandoned with ONE ``pull_lease.io_wedged`` WARN (enter: no cross-host
+    detection this pull; exit: the leftover lease goes stale within the TTL) —
+    the guard always enters/exits promptly and the pull is unaffected.
+
     Parameters are injection seams for tests (*host* defaults to
     :func:`socket.gethostname`, *now_fn* to :func:`time.time`); *env* feeds the
     :data:`PULL_LEASE_ENV` kill switch (an off-value ⇒ this guard is a pure no-op).
@@ -671,14 +770,31 @@ def pull_lease_guard(
         return
     resolved_host = socket.gethostname() if host is None else host
     lease_path = pull_lease_path(lake_root)
-    verdict = foreign_pull_lease(
-        lake_root, host=resolved_host, now_wall=now_fn(), stale_after_s=stale_after_s
+    io_deadline_s = resolve_env_seconds(PULL_LEASE_IO_DEADLINE_ENV, PULL_LEASE_IO_DEADLINE_S)
+    # Every SYNCHRONOUS lease I/O below runs while the caller already holds
+    # BOTH single-flight flocks, so it is deadline-bounded (the round-1 review
+    # MAJOR fix): a wedged read/write degrades detection with one WARN — it
+    # can never wedge the guard and leave the flocks held forever.
+    verdict = _bounded_lease_io(
+        lambda: foreign_pull_lease(
+            lake_root, host=resolved_host, now_wall=now_fn(), stale_after_s=stale_after_s
+        ),
+        fallback=None,
+        deadline_s=io_deadline_s,
+        action="read",
+        lease_path=lease_path,
     )
     if verdict is not None:
         lease, age_s = verdict
         raise ForeignPullActiveError(lease_path, lease, age_s)
     keeper = _PullLeaseKeeper(lease_path, host=resolved_host, now_fn=now_fn)
-    keeper.refresh()
+    _bounded_lease_io(
+        keeper.refresh,
+        fallback=None,
+        deadline_s=io_deadline_s,
+        action="refresh",
+        lease_path=lease_path,
+    )
     stop = threading.Event()
     spawned = threading.Thread(
         target=_lease_heartbeat_loop,
@@ -705,4 +821,16 @@ def pull_lease_guard(
         stop.set()
         if thread is not None:
             thread.join(timeout=_LEASE_JOIN_TIMEOUT_S)
-        keeper.clear()
+        # Bounded (the round-1 review MAJOR fix): this finally runs BEFORE the
+        # two flock releases at BOTH production sites (pull_jobs LIFO + the CLI
+        # ExitStack), so an unbounded clear() on a wedged volume would hold the
+        # flocks forever and refuse every future pull until process restart. A
+        # wedged clear is abandoned with one WARN; the leftover lease self-heals
+        # by going stale within the TTL.
+        _bounded_lease_io(
+            keeper.clear,
+            fallback=None,
+            deadline_s=io_deadline_s,
+            action="clear",
+            lease_path=lease_path,
+        )

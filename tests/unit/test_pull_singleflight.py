@@ -616,10 +616,18 @@ def test_lease_guard_heartbeat_actually_refreshes(tmp_path: Path) -> None:
 def test_lease_guard_heartbeat_spawn_failure_degrades_gracefully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _no_threads(_self: threading.Thread) -> None:
-        raise RuntimeError("can't start new thread")
+    real_start = threading.Thread.start
 
-    monkeypatch.setattr(threading.Thread, "start", _no_threads)
+    def _no_heartbeat_thread(self: threading.Thread) -> None:
+        # Surgical: fail ONLY the heartbeat daemon's spawn — the deadline
+        # guard's own workers (thread name "brutex-pull-lease-<action>",
+        # the round-1 review bounded-I/O fold) must keep running so the
+        # lease write itself still happens.
+        if self.name == "brutex-pull-lease":
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _no_heartbeat_thread)
     warned: list[str] = []
     monkeypatch.setattr(
         pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
@@ -631,3 +639,135 @@ def test_lease_guard_heartbeat_spawn_failure_degrades_gracefully(
         assert lease is not None and lease.host == "me"  # lease still written
     assert read_pull_lease(tmp_path) is None  # still cleared at exit
     assert warned == ["pull_lease.heartbeat_spawn_failed"]
+
+
+# ── deadline-bounded lease I/O (round-1 review MAJOR fix) ───────────────────
+
+
+class TestLeaseIoDeadline:
+    """The guard's synchronous lease I/O is BOUNDED — a wedged volume can never
+    hold the single-flight flocks forever (the round-1 review MAJOR: the exit
+    ``clear()`` ran unbounded BEFORE the flock releases at both production
+    sites, so a wedged non-raising volume refused every future pull until
+    process restart)."""
+
+    @staticmethod
+    def _wedge_read(
+        monkeypatch: pytest.MonkeyPatch, hang_when: threading.Event, release: threading.Event
+    ) -> None:
+        """Make the module-level lease-file read HANG (non-raising) while armed."""
+        real = pull_singleflight._read_lease_file  # pyright: ignore[reportPrivateUsage]
+
+        def _wedged(path: Path) -> object:
+            if hang_when.is_set():
+                release.wait(20.0)  # a wedged volume: blocks, never raises
+            return real(path)
+
+        monkeypatch.setattr(pull_singleflight, "_read_lease_file", _wedged)
+
+    def test_wedged_clear_does_not_block_guard_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FAILS BEFORE the fix: the exit hung ~20 s on the wedged read inside
+        # keeper.clear(); bounded now, the guard exits within the deadline and
+        # the flocks (held around this guard in production) release promptly.
+        monkeypatch.setenv("BRUTEX_PULL_LEASE_IO_DEADLINE_S", "0.2")
+        hang = threading.Event()
+        release = threading.Event()
+        self._wedge_read(monkeypatch, hang, release)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        try:
+            started = time.monotonic()
+            with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+                hang.set()  # the volume wedges AFTER a clean enter
+            exit_elapsed = time.monotonic() - started
+            assert exit_elapsed < 5.0, f"guard exit blocked {exit_elapsed:.1f}s on a wedged clear"
+            events = [(e, kw) for e, kw in warned if e == "pull_lease.io_wedged"]
+            assert len(events) == 1
+            assert events[0][1]["action"] == "clear"
+            assert events[0][1]["error_type"] == "DeadlineExceeded"
+            # The lease is left behind (abandoned clear) — the documented
+            # degrade: it self-heals by going stale within the TTL.
+            hang.clear()
+            lease = read_pull_lease(tmp_path)
+            assert lease is not None and lease.host == "me"
+        finally:
+            release.set()  # let the abandoned daemon die
+
+    def test_wedged_enter_read_degrades_and_pull_proceeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A wedged ENTER read (while both flocks are already held in
+        # production) degrades to "no cross-host detection" — never a hang,
+        # never a refusal of the pull itself.
+        monkeypatch.setenv("BRUTEX_PULL_LEASE_IO_DEADLINE_S", "0.2")
+        hang = threading.Event()
+        release = threading.Event()
+        hang.set()  # wedged from the very first read
+        self._wedge_read(monkeypatch, hang, release)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        try:
+            started = time.monotonic()
+            with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+                pass  # the pull runs — a wedged lease read never blocks it
+            assert time.monotonic() - started < 5.0
+            actions = [kw["action"] for e, kw in warned if e == "pull_lease.io_wedged"]
+            # Enter read wedged + exit clear wedged (same wedged volume).
+            assert actions == ["read", "clear"]
+        finally:
+            release.set()
+
+    def test_wedged_first_refresh_degrades_and_guard_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A wedged (non-raising) lease WRITE at enter is abandoned with one
+        # WARN — the pull proceeds without a lease (detection degraded).
+        monkeypatch.setenv("BRUTEX_PULL_LEASE_IO_DEADLINE_S", "0.2")
+        release = threading.Event()
+
+        def _wedged_write(*_a: object, **_kw: object) -> None:
+            release.wait(20.0)  # a wedged fsync: blocks, never raises
+
+        monkeypatch.setattr(pull_singleflight, "atomic_write_simple", _wedged_write)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        try:
+            started = time.monotonic()
+            with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+                pass
+            assert time.monotonic() - started < 5.0
+            actions = [kw["action"] for e, kw in warned if e == "pull_lease.io_wedged"]
+            # The refresh wedged; the exit clear reads a missing lease (the
+            # write never landed) and completes cleanly.
+            assert actions == ["refresh"]
+            assert read_pull_lease(tmp_path) is None
+        finally:
+            release.set()
+
+    def test_io_deadline_env_invalid_falls_back_to_default(self) -> None:
+        # The COMMON resolve_env_seconds contract: a bad value can never
+        # DISABLE the bound.
+        from brutex.config.deadline import resolve_env_seconds
+
+        assert (
+            resolve_env_seconds(
+                pull_singleflight.PULL_LEASE_IO_DEADLINE_ENV,
+                pull_singleflight.PULL_LEASE_IO_DEADLINE_S,
+                raw="not-a-number",
+            )
+            == pull_singleflight.PULL_LEASE_IO_DEADLINE_S
+        )
