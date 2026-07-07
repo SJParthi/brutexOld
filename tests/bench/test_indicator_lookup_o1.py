@@ -96,6 +96,11 @@ def _make_fib_days(n: int) -> dict[date, FibLevels]:
             retrace_62_paisa=2_019_100 + i,
             retrace_78_paisa=2_010_700 + i,
             retrace_level_at_pdl_paisa=2_000_000 + i,
+            # Bullish ladder (PDL-anchored, DEC-FIB-BULLISH-RETRACE-001).
+            retrace_bull_23_paisa=2_011_800 + i,
+            retrace_bull_38_paisa=2_019_100 + i,
+            retrace_bull_62_paisa=2_030_900 + i,
+            retrace_bull_78_paisa=2_039_300 + i,
             ext_up_127_paisa=2_063_600 + i,
             ext_up_162_paisa=2_080_900 + i,
             ext_up_200_paisa=2_100_000 + i,
