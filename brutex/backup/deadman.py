@@ -328,12 +328,36 @@ def _config_resolves_repo(cfg: BackupEnvConfig) -> bool:
     return cfg.repo is not None and (cfg.password_file is None) != (cfg.password_command is None)
 
 
+def _snapshot_ids_match(state_id: str | None, remote_id: str) -> bool:
+    """True iff the stamped and remote snapshot ids name the SAME snapshot.
+
+    ``parse_snapshots_latest`` prefers restic's 8-hex ``short_id`` while the
+    backup summary stamps the FULL id into ``state.last_snapshot_id``, so a
+    non-empty prefix match in EITHER direction is identity; an id-less state
+    (``None``/empty — pre-schema or forged) never matches and falls to the
+    time-gap test.
+    """
+    if not state_id:
+        return False
+    return state_id.startswith(remote_id) or remote_id.startswith(state_id)
+
+
 def _deep_divergence(
     cfg: BackupEnvConfig,
     state: BackupState,
     runner: ResticRunner,
 ) -> tuple[bool, bool, str]:
     """Run the F21 deep cross-check against the remote trust root.
+
+    Agreement is judged FIRST by snapshot identity (the remote latest id
+    matching ``state.last_snapshot_id`` — proof the remote's newest data IS
+    the stamped last success), and only for an id-less/forged state by the
+    time gap — measured against the NEARER of ``last_success_at`` and
+    ``last_attempt_at``, because restic stamps a snapshot's ``time`` at
+    backup START (≈ ``last_attempt_at``) while the success stamp lands at run
+    END: a success-only gap would equal the RUN DURATION and false-CRITICAL
+    any run longer than ``deadman_hours`` — the documented multi-day 8 TB
+    seed (round-3 MAJOR).
 
     Returns
     -------
@@ -362,7 +386,16 @@ def _deep_divergence(
         # Unreachable via the FRESH gate (FRESH implies a success stamp) —
         # kept as a defensive divergence, never an assert.
         return True, True, "state carries no success stamp to compare against"
-    gap_hours = abs((state.last_success_at - info.time_utc).total_seconds()) / _SECONDS_PER_HOUR
+    if _snapshot_ids_match(state.last_snapshot_id, info.snapshot_id):
+        return (
+            False,
+            True,
+            f"remote latest {info.snapshot_id} matches stamped last_snapshot_id",
+        )
+    gap_seconds = abs((state.last_success_at - info.time_utc).total_seconds())
+    if state.last_attempt_at is not None:
+        gap_seconds = min(gap_seconds, abs((state.last_attempt_at - info.time_utc).total_seconds()))
+    gap_hours = gap_seconds / _SECONDS_PER_HOUR
     if gap_hours > cfg.deadman_hours:
         return (
             True,
@@ -437,10 +470,16 @@ def run_deadman_check(
     # DEEP_CHECK_INTERVAL_HOURS on a COMPLETED comparison unless forced. A
     # FAILED metadata call does NOT stamp last_deep_check_at, so it retries
     # on the NEXT hourly tick — bounded to one call/hour during a remote
-    # outage (fail-toward-alarm; alerts stay realert-bounded).
+    # outage (fail-toward-alarm; alerts stay realert-bounded). A FUTURE
+    # last_deep_check_at (a botched ~/.brutex restore, a backward NTP step —
+    # the F14 vectors, the _should_alert guard's twin one field over) reads
+    # as "no prior deep check": deep is due NOW, and a completed comparison
+    # restamps with the CURRENT clock — self-healing, worst case one extra
+    # metadata call (fail-toward-alarm; never a muted forgery-detection lane).
     deep_due = (
         deep
         or sidecar.last_deep_check_at is None
+        or sidecar.last_deep_check_at > now
         or (now - sidecar.last_deep_check_at).total_seconds()
         >= DEEP_CHECK_INTERVAL_HOURS * _SECONDS_PER_HOUR
     )

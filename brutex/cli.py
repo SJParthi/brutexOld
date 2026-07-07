@@ -2093,7 +2093,9 @@ def _redact_backup_repo(repo: str | None) -> str:
     """Redact a restic repo URL to scheme+host for display (never the full path).
 
     ``s3:s3.ap-south-1.amazonaws.com/bucket/brutex`` → ``s3:s3.ap-south-1.amazonaws.com``;
-    a scheme-less local-path repo reads as ``local``; unset reads ``unset``.
+    the B2 colon form ``b2:bucketname:path/to/repo`` → ``b2:bucketname`` (the
+    colon-joined path is redacted like a ``/`` path — round-3 NIT); a
+    scheme-less local-path repo reads as ``local``; unset reads ``unset``.
     Any userinfo is stripped (``sftp://user:pass@host//srv`` → ``sftp:host``)
     so a mis-configured embedded credential is never echoed by ``status``.
     """
@@ -2102,7 +2104,7 @@ def _redact_backup_repo(repo: str | None) -> str:
     scheme, sep, rest = repo.partition(":")
     if not sep:
         return "local"
-    host = rest.lstrip("/").split("/", 1)[0].rsplit("@", 1)[-1]
+    host = rest.lstrip("/").split("/", 1)[0].rsplit("@", 1)[-1].split(":", 1)[0]
     return f"{scheme}:{host}"
 
 

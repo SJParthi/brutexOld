@@ -29,6 +29,7 @@ from brutex.backup.deadman import (
     _deep_divergence,
     _default_ping,
     _default_utc_clock,
+    _snapshot_ids_match,
     evaluate_deadman,
     run_deadman_check,
 )
@@ -617,6 +618,121 @@ class TestDeepTier:
         assert diverged is True
         assert completed is True
         assert "no success stamp" in detail
+
+    def test_deep_long_seed_matching_id_agrees(self, tmp_path: Path) -> None:
+        """Round-3 MAJOR pin: the first armed tick after a multi-day 8 TB seed
+        must NOT false-CRITICAL. restic stamps snapshot `time` at backup START
+        (seed start, 194 h ago) while last_success_at lands at run END (2 h
+        ago) — the gap IS the run duration, and the remote latest id equals
+        state.last_snapshot_id, so the deep tier must read AGREEMENT: exit 0,
+        plain healthcheck ping, deep gate stamped."""
+        cfg = _shell_cfg(
+            tmp_path, BRUTEX_BACKUP_HEALTHCHECK_URL="http://hc.local/p", **_repo_env(tmp_path)
+        )
+        save_state(
+            state_path(cfg),
+            _state(
+                last_attempt_at=NOW - timedelta(hours=194),
+                last_success_at=NOW - timedelta(hours=2),
+                last_snapshot_id="seed01",
+            ),
+        )
+        stamp = (NOW - timedelta(hours=194)).isoformat().replace("+00:00", "Z")
+        runner = FakeDeepRunner(f'[{{"short_id": "seed01", "time": "{stamp}"}}]')
+        fake = FakeNotifier()
+        pings: list[str] = []
+
+        def _ping(url: str) -> bool:
+            pings.append(url)
+            return True
+
+        with structlog.testing.capture_logs() as logs:
+            # No deep=True: the sidecar is unstamped after the seed (deep never
+            # ran pre-success), so the FIRST hourly tick auto-runs the deep tier.
+            code = run_deadman_check(
+                cfg,
+                alerter=SweepAlerter(notifier=fake),
+                clock=_clock,
+                runner_factory=_factory(runner),
+                ping=_ping,
+            )
+        assert code == EXIT_OK
+        assert fake.published == []
+        assert pings == ["http://hc.local/p"]  # plain — never /fail
+        assert runner.tags == ["brutex"]
+        ok = [e for e in logs if e["event"] == "backup.deadman.deep_ok"]
+        assert len(ok) == 1
+        assert "matches stamped last_snapshot_id" in ok[0]["detail"]
+        assert load_deadman(deadman_path(cfg)).last_deep_check_at == NOW
+
+    def test_deep_long_run_idless_state_nearer_attempt_stamp_agrees(self, tmp_path: Path) -> None:
+        """Round-3 MAJOR pin (time-fallback arm, 41 h run): an id-less state
+        whose success stamp sits a RUN DURATION (40 h > deadman 30 h) from the
+        remote snapshot time still agrees, because the gap is judged against
+        the NEARER of last_success_at and last_attempt_at (≈ backup START)."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        save_state(
+            state_path(cfg),
+            _state(
+                last_attempt_at=NOW - timedelta(hours=41),
+                last_success_at=NOW - timedelta(hours=1),
+                last_snapshot_id=None,
+            ),
+        )
+        stamp = (NOW - timedelta(hours=41)).isoformat().replace("+00:00", "Z")
+        runner = FakeDeepRunner(f'[{{"short_id": "run41h", "time": "{stamp}"}}]')
+        with structlog.testing.capture_logs() as logs:
+            code = run_deadman_check(
+                cfg,
+                deep=True,
+                alerter=SweepAlerter(resolver=lambda: None),
+                clock=_clock,
+                runner_factory=_factory(runner),
+            )
+        assert code == EXIT_OK
+        assert any(e["event"] == "backup.deadman.deep_ok" for e in logs)
+        assert load_deadman(deadman_path(cfg)).last_deep_check_at == NOW
+
+    def test_deep_divergence_idless_attemptless_state_still_fires(self, tmp_path: Path) -> None:
+        """The forged/id-less state fallback keeps its teeth: no snapshot id,
+        no attempt stamp, remote latest 200 h away → still CRITICAL."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        save_state(
+            state_path(cfg),
+            _state(last_attempt_at=None, last_snapshot_id=None),
+        )
+        code = run_deadman_check(
+            cfg,
+            deep=True,
+            alerter=SweepAlerter(resolver=lambda: None),
+            clock=_clock,
+            runner_factory=_factory(FakeDeepRunner(_diverging_snapshots_json())),
+        )
+        assert code == EXIT_DEADMAN_BREACH
+
+    def test_snapshot_ids_match_prefix_both_directions(self) -> None:
+        """short_id (remote) vs full id (state) match either way; id-less never."""
+        assert _snapshot_ids_match("seed01ffff", "seed01") is True  # remote short_id
+        assert _snapshot_ids_match("ab12", "ab12ffff") is True  # remote full id
+        assert _snapshot_ids_match("ab12", "ab12") is True
+        assert _snapshot_ids_match("ab12", "old1") is False
+        assert _snapshot_ids_match(None, "ab12") is False
+        assert _snapshot_ids_match("", "ab12") is False
+
+    def test_deep_future_last_deep_check_at_runs_deep_and_self_heals(self, tmp_path: Path) -> None:
+        """Round-3 MINOR pin: a FUTURE-stamped last_deep_check_at (botched
+        ~/.brutex restore / backward NTP step — the F14 vectors, the
+        _should_alert guard's twin) must read as 'no prior deep check', not
+        mute the daily forgery-detection lane until the wall clock catches up;
+        a completed comparison restamps with the CURRENT clock (self-heal)."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        save_state(state_path(cfg), _state())
+        save_deadman(deadman_path(cfg), DeadmanState(last_deep_check_at=NOW + timedelta(days=365)))
+        runner = FakeDeepRunner(_agreeing_snapshots_json())
+        code = run_deadman_check(cfg, clock=_clock, runner_factory=_factory(runner))
+        assert code == EXIT_OK
+        assert runner.tags == ["brutex"]  # deep RAN despite the future stamp
+        assert load_deadman(deadman_path(cfg)).last_deep_check_at == NOW  # healed
 
 
 @pytest.fixture(name="ping_server")

@@ -354,15 +354,23 @@ class TestRedaction:
         )
         assert _redact_backup_repo("b2:bucketname/prefix") == "b2:bucketname"
 
+    def test_redact_backup_repo_b2_colon_path(self) -> None:
+        """Round-3 finding 10 (NIT): the B2 colon form ``b2:bucket:path`` must
+        redact the colon-joined path too — never the full bucket:path echoed
+        (the runbook's own recommended B2 layout)."""
+        assert _redact_backup_repo("b2:bucketname:path/to/repo") == "b2:bucketname"
+        assert _redact_backup_repo("b2:bucket:path") == "b2:bucket"
+
     def test_redact_backup_repo_strips_userinfo(self) -> None:
         """Round-2 finding 10 (NIT): a direct scheme://user:pass@host form must
         never echo the userinfo — only the host survives; the nested-URL forms
-        keep their pre-fix redaction byte-identical."""
+        now also drop the dangling inner-scheme colon (round-3 colon split)."""
         assert _redact_backup_repo("sftp://user:pass@host//srv/restic") == "sftp:host"
         assert _redact_backup_repo("https://user:pass@host/repo") == "https:host"
-        # Nested forms unchanged (the inner scheme token carries no '@').
-        assert _redact_backup_repo("s3:http://key:secret@host/bucket") == "s3:http:"
-        assert _redact_backup_repo("rest:https://user:pass@host:8000/repo") == "rest:https:"
+        # Nested forms: the inner scheme token carries no '@'; the trailing
+        # ':' is now consumed by the colon-path split (still secret-free).
+        assert _redact_backup_repo("s3:http://key:secret@host/bucket") == "s3:http"
+        assert _redact_backup_repo("rest:https://user:pass@host:8000/repo") == "rest:https"
 
 
 class TestImportHygiene:

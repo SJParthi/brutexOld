@@ -155,7 +155,12 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   shallow dead-man verdict (0/1) with NO alert/ping/sidecar side effects.
 - `brutex backup check [--deep] [--dry-run]` — the dead-man tick. `--deep`
   forces the remote cross-check (`restic snapshots --json --latest 1 --tag
-  brutex` compared against the local stamp) this tick.
+  brutex` compared against the local stamp) this tick. Agreement = the
+  remote latest snapshot id matching the stamped `last_snapshot_id`; the
+  time-gap fallback (id-less state) is judged against the NEARER of the
+  attempt/success stamps — restic stamps a snapshot's time at backup START,
+  so a run longer than the dead-man threshold (the multi-day seed) never
+  reads as divergence.
 - Exit codes (from `brutex/backup/errors.py`): 0 OK · 1 dead-man breach ·
   2 config · 3 preflight (unmounted/phantom/empty lake) · 4 restic/state
   failure · 5 busy (benign overlap, no alert) · 6 corruption
