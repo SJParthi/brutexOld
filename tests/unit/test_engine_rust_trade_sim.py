@@ -1069,3 +1069,118 @@ class TestWidthOffenderNamedInWarning:
         assert events[0]["reason"] == "stop_loss_out_of_envelope"
         assert "offending_value" not in events[0]
         assert "offending_bit" not in events[0]
+
+
+# ── DEC-SWEEP-EXIT-INDEX-FASTPATH-001: exit-index-carrying batch ─────────────
+
+
+class TestSimulateMasksWithExitIndices:
+    """The pair-shaped batch spine + the double certification."""
+
+    def _sim(self) -> ResidentTradeSim:
+        bars = _feed()
+        return ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+
+    def test_rust_arm_indices_match_the_trade_exit_timestamps(self) -> None:
+        bars = _feed()
+        sim = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        assert sim.rust_active is True
+        pairs = sim.simulate_masks_with_exit_indices(
+            [0], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+        assert len(pairs) == 1
+        trades, exit_indices = pairs[0]
+        assert trades  # the mask-0 walk trades on this feed
+        assert exit_indices is not None
+        assert len(exit_indices) == len(trades)
+        for trade, idx in zip(trades, exit_indices, strict=True):
+            assert bars[idx].timestamp == trade.exit_ts
+        assert exit_indices == sorted(set(exit_indices))  # strictly increasing
+
+    def test_python_fallback_arm_emits_identical_pairs(self) -> None:
+        bars = _feed()
+        wired = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        fallback = ResidentTradeSim(bars, build_bar_bits(bars), tf_minutes=1)
+        fallback._rust = None  # pyright: ignore[reportPrivateUsage] — the forcing seam
+        assert wired.simulate_masks_with_exit_indices(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        ) == fallback.simulate_masks_with_exit_indices(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+
+    def test_simulate_masks_is_the_thin_delegate(self) -> None:
+        sim = self._sim()
+        pairs = sim.simulate_masks_with_exit_indices(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        )
+        assert sim.simulate_masks(
+            [0, 1], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+        ) == [trades for trades, _ in pairs]
+
+    def test_uncertified_window_withholds_indices_on_both_arms(self) -> None:
+        """A duplicate timestamp fails the construction certificate — trades
+        still simulate, indices are None (the dict path serves downstream)."""
+        bars = [*_feed(), _feed()[-1]]  # duplicate final timestamp
+        bar_bits = [*build_bar_bits(_feed()), 0]
+        for force_python in (False, True):
+            sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
+            if force_python:
+                sim._rust = None  # pyright: ignore[reportPrivateUsage]
+            pairs = sim.simulate_masks_with_exit_indices(
+                [0], direction=Side.BUY, stop_loss_paisa=200, take_profit_paisa=300
+            )
+            (trades, exit_indices) = pairs[0]
+            assert trades
+            assert exit_indices is None
+
+    def test_non_monotonic_kernel_stream_is_refused_with_one_warning(self) -> None:
+        """A kernel returning out-of-order records (an ordering regression)
+        gets its indices withheld LOUDLY — once per instance."""
+        sim = self._sim()
+
+        class _ShuffledKernel:
+            """Returns two well-formed records with REVERSED exit order."""
+
+            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+                record_late = (100, 100, 0, 2, 2, 3)
+                record_early = (50, 50, 0, 1, 1, 1)
+                return [[record_late, record_early], [record_early, record_late]]
+
+        sim._rust = _ShuffledKernel()  # pyright: ignore[reportPrivateUsage]
+        with capture_logs() as logs:
+            pairs = sim.simulate_masks_with_exit_indices([0, 1], direction=Side.BUY)
+        assert pairs[0][1] is None  # the non-monotonic mask: indices refused
+        assert pairs[1][1] == [1, 3]  # the well-ordered mask keeps its indices
+        events = [e for e in logs if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
+        assert len(events) == 1
+        assert events[0]["reason"] == "exit_indices_not_monotonic"
+        # Repeat call: already warned — silent refusal.
+        with capture_logs() as logs2:
+            sim.simulate_masks_with_exit_indices([0], direction=Side.BUY)
+        assert not [e for e in logs2 if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
+
+    def test_duplicate_exit_index_kernel_stream_is_refused_with_one_warning(self) -> None:
+        """EQUAL consecutive exit indices fail the STRICTNESS half of the
+        certificate (``idx <= prev``, not just ``idx < prev`` decreasing) —
+        the boundary the shuffled-kernel fixture never touches: a kernel
+        duplicate-record bug emitting the same exit index twice must be
+        refused exactly like a reversed stream (the ``<=`` → ``<`` hand-mutant
+        killer)."""
+        sim = self._sim()
+
+        class _DuplicateKernel:
+            """Returns two well-formed records sharing ONE exit index."""
+
+            def simulate_masks(self, *args: object) -> list[list[tuple[int, ...]]]:
+                record_a = (50, 50, 0, 1, 0, 1)
+                record_b = (60, 60, 0, 1, 1, 1)  # duplicate exit_idx 1
+                return [[record_a, record_b]]
+
+        sim._rust = _DuplicateKernel()  # pyright: ignore[reportPrivateUsage]
+        with capture_logs() as logs:
+            pairs = sim.simulate_masks_with_exit_indices([0], direction=Side.BUY)
+        assert pairs[0][1] is None  # equal-index stream: indices refused
+        assert len(pairs[0][0]) == 2  # the trades themselves still ship
+        events = [e for e in logs if e["event"] == "rust_trade_sim.exit_indices_uncertified"]
+        assert len(events) == 1
+        assert events[0]["reason"] == "exit_indices_not_monotonic"

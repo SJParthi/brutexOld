@@ -13,20 +13,51 @@ orchestration that mirrors ``build_equity_curve``'s exit-mapping/span
 semantics lives next to that function in :mod:`brutex.engine.sweep_driver`
 (``_metrics_from_trades_via_kernel``) — one file to review for bit-identity.
 
-## The flag — ``BRUTEX_SWEEP_RUST_METRICS``, default OFF
+## The flag — ``BRUTEX_SWEEP_RUST_METRICS`` over ``SWEEP_RUST_METRICS_DEFAULT``
 
 :func:`sweep_rust_metrics_enabled` reads the env per call, exactly like the
 sibling :func:`brutex.engine.sweep_lookahead.sweep_lookahead_guard_enabled`
-(whose ``_TRUTHY`` literal set is IMPORTED, not copied — CLAUDE.md §11
-COMMON). Per-call resolution (one ``os.environ`` dict probe, ~0.1 µs against
-a multi-ms per-mask tail; pinned by the OFF-cost A/B bench) was chosen over a
-once-per-process memo so that (a) there is no module-global FLAG state, and
-(b) every ``sweep_parallel`` worker process reads its OWN inherited
-environment at call time — workers can never arm inconsistently from a
-parent-only resolution. OFF (unset / empty / ``0`` / garbage) keeps the
-caller on the verbatim pre-#1186 Python path, byte-identical by construction.
-**The default stays OFF; flipping it ON by default is a SEPARATE later ADR,
-explicitly NOT this change.**
+(whose ``_TRUTHY`` / ``_FALSY`` literal sets are consumed through the
+PUBLIC :func:`~brutex.engine.sweep_lookahead.env_flag_tristate`
+classifier, not copied — CLAUDE.md §11 COMMON). Per-call resolution (one ``os.environ`` dict probe,
+~0.1 µs against a multi-ms per-mask tail; pinned by the OFF-cost A/B bench)
+was chosen over a once-per-process memo so that (a) there is no
+module-global FLAG state, and (b) every ``sweep_parallel`` worker process
+reads its OWN inherited environment at call time — workers can never arm
+inconsistently from a parent-only resolution. Resolution: a ``_TRUTHY``
+value forces ON, a ``_FALSY`` value forces OFF (the explicit operator kill
+switch), unset/whitespace-empty falls to
+:data:`SWEEP_RUST_METRICS_DEFAULT`, and any OTHER (unrecognised) value
+fails SAFE to OFF with one warn-once ``flag_unrecognised`` event — under a
+default-ON kernel a typo'd kill switch (``flase``, ``0ff``) must still
+KILL, never be silently ignored. OFF keeps the caller on the verbatim
+pre-#1186 Python path, byte-identical by construction. The default is the ONE constant
+:data:`SWEEP_RUST_METRICS_DEFAULT` — **ON since ADR-0017
+(DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001)**, the "separate later ADR" the
+DEC-SWEEP-RUST-METRICS-001 flag section deferred to; the revert is that one
+constant, and ``BRUTEX_SWEEP_RUST_METRICS=0`` is the per-process operator
+kill switch.
+
+## Burn-in self-check + autorevert latch (DEC-SWEEP-EXIT-INDEX-FASTPATH-001)
+
+The kernel arm additionally carries a per-process BURN-IN self-check, the
+safety net that makes a default-ON kernel honest: for the first
+:data:`SELF_CHECK_SAMPLES` kernel-served masks per process, the sweep-driver
+orchestration ALSO runs the Python oracle and bit-compares the two 4-tuples
+(:func:`drawdown_compare_key` — ints exact, floats by ``struct.pack`` bit
+pattern, signed zeros included). A mismatch — a kernel numerical bug the
+domain validation cannot see — SHIPS THE ORACLE VALUE (correctness first,
+never a wrong number persisted) and latches the kernel OFF for the rest of
+the process (:func:`disable_kernel`, one ``sweep_rust_metrics.
+kernel_autoreverted`` ERROR; every later call short-circuits to the Python
+oracle via the :func:`kernel_disabled` gate with a warn-once fallback). The
+latch and the remaining-samples counter are the same *documented exception*
+to the no-global-mutable-state rule as the observability memo — a genuine
+mismatch never changes RESULTS (the oracle value ships either way), only
+which engine computes them; :func:`reset_self_check_for_tests` restores a
+fresh process view. The counter/latch are plain writes (no lock): a racing
+worker thread can at worst run a handful of extra self-checks — never a
+wrong result.
 
 ## Bit-exactness envelope (Golden Rule #4) — why 2⁵²
 
@@ -64,10 +95,15 @@ instance at this stateless seam to hang it on).
 ## Honest envelope (Golden Rule #10)
 
 * Constant-factor win only: the per-tuple tail stays ``O(kept · N_bars)``.
-* The exit-timestamp→index map stays a per-mask ``O(N_bars)`` Python dict
-  build on the ON arm (``ClosedTrade`` carries timestamps, not indices, and
-  the fenced ``sweep_run`` call site hands this seam bars+trades — no
-  resident per-tuple state exists here).
+* The exit-timestamp→index dict build is a per-mask ``O(N_bars)`` cost ONLY
+  on the DEMOTED path now: the sweep spine hands the metrics tail each
+  mask's certified exit indices (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 — the
+  trade simulators return them alongside the trades), so the certified fast
+  path is ``O(trades)`` per mask; an uncertified/inconsistent stream demotes
+  to the historical dict build, never to the Python oracle.
+* The burn-in self-check runs the ``O(N_bars)`` Python oracle for the first
+  :data:`SELF_CHECK_SAMPLES` kernel-served masks per process — a bounded,
+  amortised-nil cost, excluded from the steady-state speedup bench.
 * A Rust-side allocation failure under the crate's ``panic=abort`` profile
   is a process abort the Python ``MemoryError`` contract cannot catch (the
   kernel's per-call scratch is ~8 bytes/bar — same envelope as Phase A's
@@ -80,15 +116,17 @@ from __future__ import annotations
 
 import math
 import os
+import struct
 from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
-# Intentional friend access (DEC-P0-017 per-site convention): the truthy
-# literal set is defined ONCE on the sibling sweep-flag module — importing it
-# keeps the two sweep env flags accepting the identical vocabulary
-# (CLAUDE.md §11 COMMON; reviewer-directed "import it, don't copy").
-from brutex.engine.sweep_lookahead import _TRUTHY  # pyright: ignore[reportPrivateUsage]
+# The truthy + falsy literal sets are defined ONCE on the sibling sweep-flag
+# module (their vocabulary home) and consumed through its PUBLIC
+# ``env_flag_tristate`` classifier — the sweep env flags accept the identical
+# vocabulary with zero copied strip/lower/membership logic (CLAUDE.md §11
+# COMMON; reviewer-directed "import it, don't copy").
+from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
@@ -97,9 +135,30 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 _LOG = structlog.get_logger("brutex.engine.rust_metrics")
 
-#: The opt-in env flag. Unset / falsy ⇒ the Rust metrics tail is OFF (the
-#: default) and the sweep metrics path is byte-identical and cost-unchanged.
+#: The env flag. A ``_TRUTHY`` value forces the Rust metrics tail ON, a
+#: ``_FALSY`` value forces it OFF (the operator kill switch), unset/empty
+#: falls to :data:`SWEEP_RUST_METRICS_DEFAULT`, and anything unrecognised
+#: fails SAFE to OFF with one warn-once ``flag_unrecognised`` event (a
+#: typo'd kill switch still kills under the default-ON kernel).
 SWEEP_RUST_METRICS_ENV: Final[str] = "BRUTEX_SWEEP_RUST_METRICS"
+
+#: The ONE default-arm constant (the DEC-SWEEP-RUST-METRICS-001 "flip to
+#: ON-by-default is a SEPARATE later ADR" lever — THAT ADR is ADR-0017,
+#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001): what
+#: :func:`sweep_rust_metrics_enabled` returns when the env flag is unset
+#: or whitespace-empty. ``True`` = the fused Rust drawdown
+#: kernel serves by default — bit-identical to the Python oracle inside the
+#: 2⁵² envelope, burn-in self-checked with the autorevert latch, and
+#: killable per process with ``BRUTEX_SWEEP_RUST_METRICS=0`` (the ``_FALSY``
+#: operator kill switch). Revert = this ONE constant.
+SWEEP_RUST_METRICS_DEFAULT: Final[bool] = True
+
+#: Kernel-served masks bit-compared against the Python oracle per process
+#: (the burn-in self-check — module docstring). Bounded so the double
+#: computation is an amortised-nil startup cost, large enough that a
+#: deterministic kernel numerical regression on real data is overwhelmingly
+#: likely to be exercised within the burn-in.
+SELF_CHECK_SAMPLES: Final[int] = 16
 
 #: Python mirror of the kernel's f64-exactness ceiling
 #: (``rust/fno-math/src/metrics.rs`` ``MAX_EXACT_EQUITY_PAISA = 1 << 52``).
@@ -131,19 +190,117 @@ _ENGAGED_KEY: Final[str] = "__engaged__"
 #: Arity of the ``_drawdown_stats`` result tuple the kernel mirrors.
 _DRAWDOWN_ARITY: Final[int] = 4
 
+#: Self-check samples still to run this process (single-cell mutable — the
+#: documented no-global-mutable-state exception, module docstring).
+_SELF_CHECK_REMAINING: Final[list[int]] = [SELF_CHECK_SAMPLES]
+
+#: The autorevert latch: the mismatch reason once the kernel is disabled for
+#: this process, else ``None`` (same documented exception as above).
+_KERNEL_DISABLED_REASON: Final[list[str | None]] = [None]
+
 
 def sweep_rust_metrics_enabled() -> bool:
-    """Return ``True`` iff ``BRUTEX_SWEEP_RUST_METRICS`` is set truthy.
+    """Resolve the Rust-metrics flag over :data:`SWEEP_RUST_METRICS_DEFAULT`.
 
-    Truthy literals are ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive,
-    surrounding whitespace ignored) — the SAME ``_TRUTHY`` vocabulary as the
-    sweep look-ahead guard flag. Anything else — including unset, empty,
-    ``0``, ``false`` or garbage — is OFF: an unrecognised value must never
-    silently enable a different engine (fail-safe default). Read per call —
-    see the module docstring for why (no global flag state; parallel workers
-    read their own env).
+    * a ``_TRUTHY`` value (``1`` / ``true`` / ``yes`` / ``on``,
+      case-insensitive, surrounding whitespace ignored) → ``True``;
+    * a ``_FALSY`` value (``0`` / ``false`` / ``no`` / ``off``) → ``False``
+      — the explicit operator kill switch, honoured regardless of the
+      default;
+    * unset or whitespace-empty → :data:`SWEEP_RUST_METRICS_DEFAULT` (the
+      one-constant flip lever);
+    * any OTHER value → ``False`` with one warn-once ``flag_unrecognised``
+      fallback event: the fail-safe is OFF — under a default-ON kernel a
+      typo'd kill switch (``flase``, ``0ff``) must still KILL, never be
+      silently ignored. The ``_FALSY`` vocabulary is the RECOGNISED
+      (silent) OFF; a garbage value's OFF is WARNED.
+
+    The vocabulary is the SAME ``_TRUTHY`` / ``_FALSY`` pair as the sweep
+    look-ahead guard flag, classified through the COMMON
+    :func:`brutex.engine.sweep_lookahead.env_flag_tristate` (this function
+    owns only the default + warn policy for the ``None`` verdict). Read per
+    call — see the module docstring for why (no global flag state; parallel
+    workers read their own env).
     """
-    return os.environ.get(SWEEP_RUST_METRICS_ENV, "").strip().lower() in _TRUTHY
+    raw = os.environ.get(SWEEP_RUST_METRICS_ENV, "")
+    verdict = env_flag_tristate(raw)
+    if verdict is not None:
+        return verdict
+    if raw.strip():
+        # An unrecognised NON-EMPTY value fails SAFE to OFF, loudly: under a
+        # default-ON kernel a typo'd kill switch ("flase", "0ff") must still
+        # KILL — never a silently-ignored operator intent (warn-once).
+        warn_fallback_once("flag_unrecognised", value=raw)
+        return False
+    return SWEEP_RUST_METRICS_DEFAULT
+
+
+def self_check_pending() -> bool:
+    """Return ``True`` while this process still owes burn-in self-check samples.
+
+    Consulted by the sweep-driver orchestration AFTER a successful kernel
+    call; ``True`` means "also run the Python oracle and bit-compare". The
+    budget never blocks results — it only decides whether the cross-check
+    runs (module docstring).
+    """
+    return _SELF_CHECK_REMAINING[0] > 0
+
+
+def consume_self_check_sample() -> None:
+    """Consume one burn-in sample after a PASSED kernel-vs-oracle bit-compare.
+
+    Clamped at zero so a racing extra call can never go negative. A FAILED
+    compare never consumes — it latches :func:`disable_kernel` instead.
+    """
+    if _SELF_CHECK_REMAINING[0] > 0:
+        _SELF_CHECK_REMAINING[0] -= 1
+
+
+def kernel_disabled() -> bool:
+    """Return ``True`` iff the autorevert latch has disabled the kernel this process."""
+    return _KERNEL_DISABLED_REASON[0] is not None
+
+
+def disable_kernel(reason: str, **context: object) -> None:
+    """Latch the kernel OFF for the remainder of the process (the autorevert).
+
+    Called by the sweep-driver self-check on a bit-compare MISMATCH — a
+    kernel numerical bug the domain validation cannot see. The first call
+    logs ``sweep_rust_metrics.kernel_autoreverted`` (ERROR — a genuine
+    kernel-wrongness signal, never throttled below the operator's view);
+    repeat calls are no-ops (the latch is already set). Every subsequent
+    :func:`drawdown_stats_via_kernel` call short-circuits to the Python
+    oracle, so a wrong kernel can poison at most the ONE mismatching mask —
+    and even that mask ships the ORACLE value (the caller's contract).
+    """
+    if _KERNEL_DISABLED_REASON[0] is None:
+        _KERNEL_DISABLED_REASON[0] = reason
+        _LOG.error("sweep_rust_metrics.kernel_autoreverted", reason=reason, **context)
+
+
+def drawdown_compare_key(stats: tuple[int, float, int, float]) -> tuple[int, bytes, int, bytes]:
+    """Map a drawdown 4-tuple to its BIT-exact comparison key.
+
+    Ints compare exactly under ``==``; the two floats are compared by their
+    IEEE-754 bit pattern (``struct.pack('<d', …)``) so a signed-zero or
+    payload difference can never hide behind float equality — the same
+    bit-compare discipline as the golden/property suites. Total for every
+    domain-valid tuple (ints are unbounded in Python — packing them could
+    raise on a poisoned huge value, so they are deliberately NOT packed).
+    """
+    max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = stats
+    return (max_dd_paisa, struct.pack("<d", max_dd_pct), max_dd_bars, struct.pack("<d", ulcer))
+
+
+def reset_self_check_for_tests(*, remaining: int = SELF_CHECK_SAMPLES) -> None:
+    """Reset the burn-in budget + autorevert latch (test isolation ONLY).
+
+    ``remaining=0`` puts the process in the post-burn-in steady state (used
+    by the speedup bench and the poison-flows-through gates); the default
+    restores a fresh-process view. Never called from production code paths.
+    """
+    _SELF_CHECK_REMAINING[0] = remaining
+    _KERNEL_DISABLED_REASON[0] = None
 
 
 def reset_observability_memo_for_tests() -> None:
@@ -259,7 +416,15 @@ def drawdown_stats_via_kernel(
     (:func:`exceeds_exact_equity_envelope`) and the exit indices (mapped
     from the same bar window), so the kernel's own boundary ``ValueError``
     arms are structurally unreachable belts on this path.
+
+    An autorevert-latched process (:func:`disable_kernel` fired on a burn-in
+    self-check mismatch) short-circuits HERE — one warn-once
+    ``kernel_disabled`` fallback, no FFI — so a kernel proven wrong once can
+    never serve another mask this process.
     """
+    if kernel_disabled():
+        warn_fallback_once("kernel_disabled")
+        return None
     kernel = _resolve_kernel()
     if kernel is None:
         return None
@@ -292,10 +457,18 @@ def drawdown_stats_via_kernel(
 __all__ = [
     "FLAT_DRAWDOWN_STATS",
     "MAX_EXACT_EQUITY_PAISA",
+    "SELF_CHECK_SAMPLES",
+    "SWEEP_RUST_METRICS_DEFAULT",
     "SWEEP_RUST_METRICS_ENV",
+    "consume_self_check_sample",
+    "disable_kernel",
+    "drawdown_compare_key",
     "drawdown_stats_via_kernel",
     "exceeds_exact_equity_envelope",
+    "kernel_disabled",
     "reset_observability_memo_for_tests",
+    "reset_self_check_for_tests",
+    "self_check_pending",
     "sweep_rust_metrics_enabled",
     "warn_fallback_once",
 ]
