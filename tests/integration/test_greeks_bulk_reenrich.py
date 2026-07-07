@@ -451,7 +451,8 @@ class TestDryRunInertness:
         published: list[TelegramEvent] = []
 
         class _CapturingAlerter:
-            def __init__(self, **kwargs: Any) -> None: ...
+            def __init__(self, **kwargs: Any) -> None:
+                del kwargs  # permissive stub ctor — accepted + ignored
 
             def greeks_backfill_complete(self, report: Any) -> bool:
                 published.append(report)
@@ -489,7 +490,8 @@ class TestTelegramExactlyOnce:
         published: list[Any] = []
 
         class _CapturingAlerter:
-            def __init__(self, **kwargs: Any) -> None: ...
+            def __init__(self, **kwargs: Any) -> None:
+                del kwargs  # permissive stub ctor — accepted + ignored
 
             def greeks_backfill_complete(self, report: Any) -> bool:
                 published.append(report)

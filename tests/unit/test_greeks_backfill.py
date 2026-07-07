@@ -1524,9 +1524,9 @@ class TestModuleDocstringHonesty:
         (``sweep_supervisor``/``sweep_parallel`` call ``load()``), so a sweep
         now aborts loudly where it previously resumed. The claim must stay
         honest, not absolute (Golden Rule #10)."""
-        import brutex.data.greeks_backfill as module
+        from brutex.data import greeks_backfill as greeks_backfill_module
 
-        doc = module.__doc__
+        doc = greeks_backfill_module.__doc__
         assert doc is not None
         flat = " ".join(doc.split())  # wrap-tolerant: claims span source lines
         assert "ZERO engine impact" not in flat
