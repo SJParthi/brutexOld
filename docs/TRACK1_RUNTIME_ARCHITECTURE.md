@@ -70,20 +70,20 @@
                                              ...
    POST /v2/charts/intraday               →  240m/.../05.parquet
      securityId: 25 (BANKNIFTY)              1d/all.parquet
-     IDX_I, INDEX, interval: 1               
+     IDX_I, INDEX, interval: 1
                                           (same layout for BANKNIFTY,
    POST /v2/charts/intraday               →  SENSEX, INDIAVIX)
-     securityId: 51 (SENSEX)             
+     securityId: 51 (SENSEX)
      IDX_I, INDEX, interval: 1            DuckDB catalog tracks every
                                           partition file with raw_hash
-   POST /v2/charts/intraday               →  
+   POST /v2/charts/intraday               →
      securityId: 21 (INDIAVIX)           DuckDB watermarks table
      IDX_I, INDEX, interval: 1            tracks last_bar_ts per
                                           (instrument, timeframe)
-   POST /v2/charts/historical             →  
+   POST /v2/charts/historical             →
      all 4, interval: daily               LMDB work_items per run_id
                                           (chunk dedup + state)
-                                          
+
    Resampler (single-pass, 09:15 IST)    Audit JSONL chain
      1m → 2m, 3m, 4m, ..., 15m,           (every material event)
      30m, 60m, 120m, 180m, 240m
@@ -630,4 +630,3 @@ These three are cheap NOW but expensive later. Should land in Phase 1 alongside 
 ---
 
 _Generated 2026-05-15 evening from 3-agent audit synthesis (common runtime + institutional comparison + table cohesion)._
-
