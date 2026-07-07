@@ -7,22 +7,32 @@
 # types is STRESS. This workflow runs the stress suite on a nightly
 # schedule (not on every push — they'd blow the per-PR budget).
 #
+# WHAT THIS JOB IS (honest reclassification — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1552)
+# --------------------------------------------------------------------------------------
+# This GitHub-hosted ubuntu-24.04 job is a **~5-minute REGRESSION GATE**, NOT a
+# soak: it proves the stress suite's invariants (audit-chain drift, per-event
+# memory-leak floor at ≥100K events, hot-path determinism, the short soak driver)
+# under a light load in a bounded nightly window. It is deliberately capped at
+# 60 minutes.
+#
+# The REAL multi-hour soak lives in ``.github/workflows/soak-selfhosted.yml`` on
+# the self-hosted M4-Pro, with a job timeout DERIVED from the requested duration.
+# The prior claim that a 10M-event ``STRESS_EVENTS`` dispatch here was a
+# "REACHABLE 24h soak" was FALSE (Golden Rule #10): a 10M run of
+# test_audit_chain_sustained alone linearly extrapolates to ~16.7 h and this
+# job's own 60-minute timeout hard-kills it at ~1/17th done (the honest #208
+# rewrite documents the trap). This job can no longer be handed an
+# un-completable event count — the guard step below REFUSES ``STRESS_EVENTS``
+# above a completable ceiling and points at soak-selfhosted.yml.
+#
 # Schedule
 # --------
 # * Nightly cron: 03:00 UTC ≈ 08:30 IST.
-# * Manual ``workflow_dispatch`` for on-demand 24h soak (set
-#   ``STRESS_EVENTS=10_000_000`` via input).
-# * Push-trigger only when stress test code itself changes —
-#   to avoid blocking unrelated PRs on a slow gate.
+# * Manual ``workflow_dispatch`` to scale the regression event count within the
+#   completable ceiling (NOT a soak lever — use soak-selfhosted.yml for that).
+# * Push-trigger only when stress test code itself changes.
 #
-# Honest envelope (Golden Rule #10)
-# ----------------------------------
-# The CI nightly is "light stress" (~30s, 5K events default). The
-# real 24h soak target named in CLAUDE.md §2 Rule #12 is REACHABLE
-# via ``workflow_dispatch`` with ``stress_events`` set to a large
-# value — but NOT run automatically because it would burn GHA hours.
-# This is the same pattern dep-freshness-nightly.yml + redteam-
-# nightly.yml use.
+# Same nightly-plus-manual pattern dep-freshness-nightly.yml + redteam-nightly.yml use.
 
 name: Stress / sustained-load tests (nightly)
 
@@ -32,7 +42,7 @@ on:
   workflow_dispatch:
     inputs:
       stress_events:
-        description: "Number of stress events per test (default 5000; soak: 10_000_000)"
+        description: "Stress events per test (default 5000; MAX 200000 — larger soaks: use soak-selfhosted.yml)"
         required: false
         default: "5000"
   push:
@@ -62,7 +72,9 @@ jobs:
   stress:
     name: Stress tests (audit chain + hot paths)
     runs-on: ubuntu-24.04
-    # Nightly default ~5 min; manual soak gets the full 60 min budget.
+    # ~5-minute regression gate; hard-capped at 60 min. This is NOT a soak
+    # budget — a real multi-hour soak runs on soak-selfhosted.yml with a
+    # duration-derived timeout (DEC-SOAK-REAL-TIER-001).
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -122,6 +134,65 @@ jobs:
             sleep 10
           done
 
+      - name: Guard — refuse an un-completable event count (DEC-SOAK-REAL-TIER-001)
+        # The ubuntu tier physically cannot finish a soak-scale event count under
+        # its 60-min timeout (a 10M run ≈ 16.7 h → self-kills at ~1/17th). REFUSE
+        # anything above the completable ceiling here and point at the real soak
+        # tier, so the #208 "REACHABLE soak" trap can never be re-launched on the
+        # tier that cannot complete it. 200000 stays comfortably inside 60 min.
+        env:
+          STRESS_EVENTS: ${{ github.event.inputs.stress_events || '5000' }}
+        run: |
+          max=200000
+          # STRICT numeric validation BEFORE the comparison. `[ -gt ]` cannot
+          # parse an underscore-grouped integer (the documented canonical soak
+          # value `10_000_000`), so the old `2>/dev/null`-suppressed comparison
+          # silently fell through to "passed" and let a 10M run launch on the
+          # tier that cannot finish it. Strip underscores (Python's int() accepts
+          # them, so the test would too), then REFUSE any non-numeric input
+          # outright rather than error-suppressing it (DEC-SOAK-REAL-TIER-001).
+          ev=${STRESS_EVENTS//_/}
+          case "$ev" in
+            ''|*[!0-9]*)
+              echo "::error::STRESS_EVENTS='$STRESS_EVENTS' is not a non-negative integer." >&2
+              echo "::error::Provide a plain integer event count (max $max); larger soaks: use soak-selfhosted.yml." >&2
+              exit 1
+              ;;
+          esac
+          # Magnitude fence BEFORE the `[ -gt ]` comparison (SEC7-1): the test
+          # builtin is int64 — a digits-only value ABOVE int64 makes it ERROR
+          # ("integer expression expected"), and inside an `if` condition that
+          # error evaluates FALSE, silently falling through to launch the
+          # un-completable run. Any value with more digits than $max already
+          # exceeds it, so refuse on LENGTH without ever parsing the number.
+          if [ "${#ev}" -gt "${#max}" ]; then
+            echo "::error::STRESS_EVENTS=$STRESS_EVENTS exceeds the ubuntu-tier ceiling ($max)." >&2
+            echo "::error::This job's 60-min timeout cannot complete a soak-scale run." >&2
+            echo "::error::Run a real multi-hour soak via .github/workflows/soak-selfhosted.yml (soak_minutes input)." >&2
+            exit 1
+          fi
+          # Base-10 coercion + lower bound (SOAK-R9-2 — mirrors the soak plan
+          # fence's SOAK-R7-3 + SOAK-R8-3, the round-8 bound this COMMON
+          # pattern's sibling gained and this one missed): '0'/'00'/'0_0'
+          # passed every fence above, and test_audit_chain_sustained then
+          # appends ZERO events — verify_chain over an empty chain returns 0
+          # and the run greens: a fake-green "audit-chain stress" that
+          # stressed nothing (reproduced live). The 10# coercion also removes
+          # the leading-zero ambiguity before the -gt compare (safe — the
+          # digits fence guarantees non-empty digits).
+          ev=$((10#$ev))
+          if [ "$ev" -lt 1 ]; then
+            echo "::error::STRESS_EVENTS must be >= 1 — a zero-event dispatch fake-greens the audit-chain stress test." >&2
+            exit 1
+          fi
+          if [ "$ev" -gt "$max" ]; then
+            echo "::error::STRESS_EVENTS=$STRESS_EVENTS exceeds the ubuntu-tier ceiling ($max)." >&2
+            echo "::error::This job's 60-min timeout cannot complete a soak-scale run." >&2
+            echo "::error::Run a real multi-hour soak via .github/workflows/soak-selfhosted.yml (soak_minutes input)." >&2
+            exit 1
+          fi
+          echo "STRESS_EVENTS=$STRESS_EVENTS is within the completable ceiling ($max)."
+
       - name: Run stress suite
         env:
           STRESS_EVENTS: ${{ github.event.inputs.stress_events || '5000' }}
@@ -143,9 +214,17 @@ jobs:
         # A silent nightly stress failure hides an audit-chain/hot-path
         # regression. Mirror safety.yml's proven alert step (COMMON, Golden
         # Rule #11): dedup-by-title (per-sha) then open a labelled issue.
-        # `failure()` fires on ANY earlier step failing (incl. the stress gate);
-        # scheduled runs only (an operator-watched dispatch/push needs no issue).
-        if: failure() && github.event_name == 'schedule'
+        # `failure()` fires on ANY earlier step failing (incl. the fence guard or
+        # the stress gate). Fires on a scheduled run AND a manual dispatch (a
+        # dispatched mini-run's failure — e.g. the fence refusing an oversized
+        # event count — must not be eyeball-only, DEC-SOAK-REAL-TIER-001 G5); a
+        # push is an operator-watched dev event and still needs no issue.
+        # `|| cancelled()` (SOAK-R7-2 / SEC7-3): a job killed by its own
+        # job-level `timeout-minutes: 60` reports CANCELLED, not FAILED, so a
+        # bare `failure()` step SKIPS and a hung/deadlocked nightly stress run
+        # would die silently — the exact DEC-MUTATION-ALERT-CANCELLED-001
+        # pathology, mirrored from soak-selfhosted.yml's AL-SOAK-1 fix.
+        if: (failure() || cancelled()) && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: actions/github-script@v9
         with:
           script: |
