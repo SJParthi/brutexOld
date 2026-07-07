@@ -14,8 +14,10 @@ from typing import Any, ClassVar
 import pytest
 from brutex.strategies.combo import (
     _MAX_CANONICALISE_DEPTH,
+    UNIT_SEPARATOR,
     canonicalise_params,
     combo_hash,
+    reject_unit_separator,
 )
 from brutex.strategies.errors import StrategyError
 
@@ -677,3 +679,53 @@ class TestWireLockedCanonical:
         as_tuple = canonicalise_params({"k": (0, 1, 2)})
         as_range = canonicalise_params({"k": range(3)})
         assert as_list == as_tuple == as_range == '{"k":[0,1,2]}'
+
+
+class TestRejectUnitSeparatorHelper:
+    """The COMMON reject-only guard itself (DEC-RUN-IDENTITY-GUARD-PARITY-001).
+
+    ``combo_hash`` + the three engine run-identity mirrors all delegate here;
+    these tests pin the helper's own contract: the injected error class fires
+    (both the combo arm and an engine-style arm), clean fields pass silently,
+    and the message reproduces the historical ``combo_hash`` bytes exactly.
+    """
+
+    def test_unit_separator_constant_is_x1f(self) -> None:
+        assert UNIT_SEPARATOR == "\x1f"
+
+    def test_raises_the_injected_strategy_error(self) -> None:
+        with pytest.raises(StrategyError, match="bad_field"):
+            reject_unit_separator("combo_hash", (("bad_field", "a\x1fb"),), error=StrategyError)
+
+    def test_raises_the_injected_value_error(self) -> None:
+        # The engine mirrors inject their OWN error classes — each call site
+        # keeps its error contract; the helper never hardcodes StrategyError.
+        with pytest.raises(ValueError, match="schedule_hash"):
+            reject_unit_separator(
+                "_walk_forward_run_hash",
+                (("schedule_hash", "x\x1fy"),),
+                error=ValueError,
+            )
+
+    def test_clean_fields_pass_silently(self) -> None:
+        reject_unit_separator(
+            "combo_hash",
+            (("a", "clean"), ("b", ""), ("c", "also-clean")),
+            error=StrategyError,
+        )  # no raise — REJECT-ONLY, legal inputs untouched
+
+    def test_first_offending_field_wins(self) -> None:
+        with pytest.raises(StrategyError, match="first"):
+            reject_unit_separator(
+                "ctx",
+                (("first", "x\x1fy"), ("second", "x\x1fy")),
+                error=StrategyError,
+            )
+
+    def test_message_reproduces_the_historical_combo_hash_bytes(self) -> None:
+        with pytest.raises(StrategyError) as exc_info:
+            reject_unit_separator("combo_hash", (("tf", "x\x1fy"),), error=StrategyError)
+        assert str(exc_info.value) == (
+            "combo_hash: tf must not contain the \\x1f "
+            "unit-separator byte (it is the field join delimiter)"
+        )
