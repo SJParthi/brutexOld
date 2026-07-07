@@ -16,8 +16,8 @@ The allowlist is FILE-level with a mandatory reason per entry; a stale entry
 
 Honest envelope (Golden Rule #10): the gate is TEXTUAL — a read spelled
 through an exotic indirection (a bare-path DuckDB ``FROM 'x.parquet'`` string
-literal, a pandas ``pd.read_parquet`` (pandas is banned from hot paths by
-CLAUDE.md §4 anyway), or an aliased/getattr-built call) cannot be caught by
+literal, a pandas ``pd.read_parquet`` (pandas is banned brutex/-wide by
+scan-banned-patterns.sh check #7), or an aliased/getattr-built call) cannot be caught by
 grep; those spellings are ALSO banned by this decision and are left to
 review. The five function names above cover every reader the repo actually
 uses (verified by the sweep that built this allowlist).

@@ -68,6 +68,9 @@ automatically — this checklist is a pre-flight, not the gate itself.
 
 ### Bug fixes
 - [ ] Regression test added that FAILS without the fix
+      (CI-enforced on `fix:`-titled PRs: `bugfix-reversion-check` reverts your
+      `brutex/` changes to merge-base and requires the shipped tests to fail —
+      DEC-TEST-APPARATUS-DEBTS-001(c))
 - [ ] Issue / DEC-ID referenced above
 
 ### Type / lint / security
