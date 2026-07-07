@@ -11,20 +11,28 @@ the suite polices itself. Synchronisation must be payload-driven
 (``page.expect_response`` wrappers, ``expect(locator)`` polling, ``page.clock``),
 never wall-clock sleeps, and every explicit LITERAL timeout — including a
 literal ``set_default_timeout``/``set_default_navigation_timeout`` argument,
-in ANY Python numeric-literal spelling (decimal, underscored, float,
-scientific ``6e4``, hex/octal/binary ``0x186A0``) — is VALUE-checked against
-:data:`MAX_TIMEOUT_MS`; a digit-leading token the parser cannot read is a
-violation OUTRIGHT (fail-closed, round-2 review fix — the previous
-digits-only capture read ``timeout=6e4`` as 6 and ``0x186A0`` as 0, silently
-passing 60 s / 100 s literals under the 10 s cap).
+in ANY digit- or dot-leading Python numeric-literal spelling (decimal,
+underscored, float incl. dot-leading ``.5e9``, scientific ``6e4``,
+hex/octal/binary ``0x186A0``), optionally paren-wrapped (``timeout=(60000)``),
+unary-plus-prefixed (``timeout=+600000``) or formatter-wrapped across lines
+(the ``oversized_*`` patterns scan each file's WHOLE text, so a line-split
+``set_default_timeout(\\n    60000\\n)`` is still seen) — is VALUE-checked
+against :data:`MAX_TIMEOUT_MS`; a captured token the parser cannot read is a
+violation OUTRIGHT (fail-closed; round-2 review fix — the digits-only capture
+read ``timeout=6e4`` as 6 and ``0x186A0`` as 0 — hardened again by the
+round-3 review, whose digit-leading capture + line scan never saw the
+dot-leading / unary-plus / paren-wrapped / line-split shapes at all).
 
-HONEST ENVELOPE (Golden Rule #10): the scan is a line-regex over the suite
-sources, not an AST/dataflow analysis — a timeout smuggled through a variable
-or arithmetic expression (``timeout=SLOW_MS``) is beyond its reach and is
-left to code review; the sleep-capable ``time`` import forms it CAN see
-(``from time import …``, ``import time as …``, ``getattr(time, …)``,
-``asyncio.sleep``) are banned wholesale so ``time.sleep`` cannot be smuggled
-past the direct-call pattern by renaming.
+HONEST ENVELOPE (Golden Rule #10): the scan is regex over the suite sources,
+not an AST/dataflow analysis — a timeout smuggled through a variable or an
+arithmetic expression (``timeout=SLOW_MS``, ``timeout=6 * 10_000``) is beyond
+its reach and is left to code review; the sleep-capable ``time`` import forms
+it CAN see (``from time import …``, ``import time as …``, ``getattr(time, …)``,
+``__import__("time")`` / ``import_module("time")``, ``asyncio.sleep``) are
+banned wholesale, so the LITERAL renaming routes around the direct
+``time.sleep`` pattern are closed — while a dynamically-CONSTRUCTED import
+string (``__import__("ti" "me")``) is likewise beyond a regex and left to
+review; the ban closes the literal smuggles, not every conceivable one.
 """
 
 from __future__ import annotations
@@ -51,20 +59,31 @@ def browser_suite_enabled() -> bool:
     return os.environ.get(ENABLE_ENV_VAR) == "1"
 
 
-#: A digit-leading literal token in a timeout position — deliberately BROAD
-#: (first digit through any ``[A-Za-z0-9_.]`` run) so float (``10.5``),
-#: scientific (``6e4`` / ``1e9``), underscored (``1_000_000``) and
-#: hex/octal/binary (``0x186A0``) spellings are all captured whole and
-#: VALUE-checked by :func:`_timeout_literal_violates`; anything captured that
-#: cannot be parsed is flagged fail-closed instead of silently passing.
-_NUMERIC_LITERAL: Final[str] = r"([0-9][\w.]*)"
+#: A digit- or dot-leading literal token in a timeout position — deliberately
+#: BROAD (first ``[0-9.]`` through any ``[A-Za-z0-9_.]`` run) so float
+#: (``10.5``), DOT-LEADING float (``.5e9`` — round-3 review), scientific
+#: (``6e4`` / ``1e9``), underscored (``1_000_000``) and hex/octal/binary
+#: (``0x186A0``) spellings are all captured whole and VALUE-checked by
+#: :func:`_timeout_literal_violates`; anything captured that cannot be parsed
+#: is flagged fail-closed instead of silently passing.
+_NUMERIC_LITERAL: Final[str] = r"([0-9.][\w.]*)"
 
-#: ``(name, regex, reason)`` triples scanned line-by-line over every
-#: ``tests/browser/*.py`` EXCEPT this module (which necessarily carries the
-#: pattern text itself). The ``oversized_*`` patterns are special-cased:
-#: their captured numeric literal is value-parsed and must exceed
-#: :data:`MAX_TIMEOUT_MS` to be a violation — except an unparseable
-#: digit-leading token, which is a violation OUTRIGHT (fail-closed).
+#: Tolerated junk BETWEEN a timeout position and its literal: parentheses
+#: (``timeout=(60000)``), unary plus (``timeout=+600000``) and ANY whitespace
+#: — including newlines, because the ``oversized_*`` patterns run over each
+#: file's WHOLE text (not line-by-line), so a formatter-wrapped
+#: ``set_default_timeout(\n    60000\n)`` is still captured (round-3 review;
+#: the prior line scan structurally could not see a split literal).
+_LITERAL_PREFIX: Final[str] = r"[(\s+]*"
+
+#: ``(name, regex, reason)`` triples scanned over every ``tests/browser/*.py``
+#: EXCEPT this module (which necessarily carries the pattern text itself).
+#: The ``oversized_*`` patterns are special-cased twice: they run over each
+#: file's WHOLE text (``\s`` spans newlines — a formatter-wrapped literal
+#: argument is still seen; every other pattern is a line scan), and their
+#: captured numeric literal is value-parsed and must exceed
+#: :data:`MAX_TIMEOUT_MS` to be a violation — except an unparseable captured
+#: token, which is a violation OUTRIGHT (fail-closed).
 FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "wait_for_timeout",
@@ -87,6 +106,12 @@ FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "time_getattr_evasion",
         r"getattr\s*\(\s*time\b",
         "dynamic time-member access defeats the time.sleep pattern — call members directly",
+    ),
+    (
+        "time_dynamic_import_evasion",
+        r"__import__\s*\(\s*[\"']time[\"']|import_module\s*\(\s*[\"']time[\"']",
+        "dynamic time import (__import__ / importlib.import_module) defeats "
+        "the time.sleep pattern — use plain `import time` and direct member calls",
     ),
     (
         "asyncio_sleep",
@@ -117,13 +142,13 @@ FORBIDDEN_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     ),
     (
         "oversized_timeout",
-        rf"timeout\s*=\s*{_NUMERIC_LITERAL}",
+        rf"timeout\s*=\s*{_LITERAL_PREFIX}{_NUMERIC_LITERAL}",
         f"explicit literal timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} cap "
-        "(an unparseable digit-leading literal is flagged fail-closed)",
+        "(an unparseable captured literal is flagged fail-closed)",
     ),
     (
         "oversized_default_timeout",
-        rf"set_default(?:_navigation)?_timeout\s*\(\s*{_NUMERIC_LITERAL}",
+        rf"set_default(?:_navigation)?_timeout\s*\(\s*{_LITERAL_PREFIX}{_NUMERIC_LITERAL}",
         f"literal set_default_timeout above the MAX_TIMEOUT_MS={MAX_TIMEOUT_MS} "
         "cap — it silently raises the effective cap for EVERY subsequent wait",
     ),
@@ -181,15 +206,16 @@ def _scan_targets() -> list[Path]:
 
 
 def _timeout_literal_violates(token: str) -> bool:
-    """True iff a captured digit-leading timeout literal breaks the cap.
+    """True iff a captured timeout literal breaks the cap.
 
     Parses every Python numeric-literal family: ``int(…, 0)`` covers decimal,
     underscored, and hex/octal/binary spellings; ``float`` covers float and
-    scientific notation (``6e4``). A digit-leading token NEITHER can read
-    (e.g. ``1j``, or a sign-split ``1e+9`` whose exponent the capture cannot
-    span) is a violation OUTRIGHT — fail-closed, never a silent pass
-    (round-2 review: the previous digits-only capture parsed ``6e4`` as 6 and
-    ``0x186A0`` as 0, positively validating 60 s / 100 s literals).
+    scientific notation (``6e4``), including dot-leading floats (``.5e9`` —
+    round-3 review). A captured token NEITHER can read (e.g. ``1j``, or a
+    sign-split ``1e+9`` whose exponent the capture cannot span) is a
+    violation OUTRIGHT — fail-closed, never a silent pass (round-2 review:
+    the previous digits-only capture parsed ``6e4`` as 6 and ``0x186A0`` as
+    0, positively validating 60 s / 100 s literals).
     """
     cleaned = token.replace("_", "")
     try:
@@ -206,17 +232,30 @@ def iter_violations() -> Iterator[str]:
     """Yield one human-readable line per forbidden-pattern hit in the suite.
 
     An empty iteration is the pass verdict. Deterministic order (sorted files,
-    ascending line numbers) so failures are stable + diffable.
+    ascending line numbers, pattern order within a line) so failures are
+    stable + diffable. The ``oversized_*`` timeout patterns run over each
+    file's WHOLE text (their ``\\s`` runs span newlines, so a
+    formatter-wrapped literal argument is still value-checked — round-3
+    review); every other pattern is a line scan.
     """
     for path in _scan_targets():
         allowed = FILE_ALLOWLIST.get(path.name, frozenset())
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            for name, pattern, reason in FORBIDDEN_PATTERNS:
-                if name in allowed:
-                    continue
-                for match in re.finditer(pattern, line):
-                    if name.startswith("oversized_") and not _timeout_literal_violates(
-                        match.group(1)
-                    ):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        hits: list[tuple[int, int, str]] = []
+        for order, (name, pattern, _reason) in enumerate(FORBIDDEN_PATTERNS):
+            if name in allowed:
+                continue
+            if name.startswith("oversized_"):
+                for match in re.finditer(pattern, text):
+                    if not _timeout_literal_violates(match.group(1)):
                         continue
-                    yield f"{path.name}:{lineno}: [{name}] {reason} :: {line.strip()}"
+                    lineno = text.count("\n", 0, match.start()) + 1
+                    hits.append((lineno, order, lines[lineno - 1].strip()))
+                continue
+            for lineno, line in enumerate(lines, start=1):
+                for _match in re.finditer(pattern, line):
+                    hits.append((lineno, order, line.strip()))
+        for lineno, order, snippet in sorted(hits):
+            name, _pattern, reason = FORBIDDEN_PATTERNS[order]
+            yield f"{path.name}:{lineno}: [{name}] {reason} :: {snippet}"

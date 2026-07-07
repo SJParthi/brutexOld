@@ -26,6 +26,12 @@ Chromium renders):
   request, and the ↻ Refresh click's response round-trip is the ordering
   barrier: the movers ledger grows by EXACTLY one (a still-armed gateTimer
   would give +2).
+* **Timer-disarm on a direct-load race** (round-3 review, mutation B2) — a
+  NON-timer-driven load (↻ Refresh) resolving non-gated while the 5 s gate
+  retry is STILL PENDING must ``clearTimeout`` it; without the non-gated
+  branch's disarm the stale timer fires a redundant duplicate load
+  (dedicated test — the recovery flow above consumes the timer by firing it,
+  so it cannot see this race).
 * **XSS inertness** — the lake-legal hostile symbol (:data:`XSS_NAME`,
   HTML-entity smuggling arm + single-quote attribute breakout with a real
   event handler) flows through the REAL server payload into the name cell as
@@ -163,6 +169,57 @@ def test_gate_paint_once_recovery_and_timer_disarm(
     with session.page.expect_response(_MOVERS_GLOB):
         session.page.locator("#refresh").click()
     assert session.request_count(_MOVERS_KEY) == 4, "gateTimer still armed after recovery"
+
+
+def test_gate_timer_disarm_on_direct_load_race(new_page: NewPageFactory, tmp_path: Path) -> None:
+    """A direct (non-timer) load landing while a gate retry is pending disarms it.
+
+    Round-3 review: mutation B2 — deleting the NON-gated branch's
+    ``clearTimeout(gateTimer)`` (movers.html ``load()``) — SURVIVED
+    :func:`test_gate_paint_once_recovery_and_timer_disarm`, because there the
+    recovery load arrives VIA the pending gate timer firing, which consumes
+    it either way. The disarm's only observable scenario is this race: the
+    gate is released server-side and a NON-timer-driven load (the ↻ Refresh
+    click — ``$("refresh").onclick = load``) resolves non-gated while the 5 s
+    gate retry is still pending. Without the disarm the stale timer later
+    fires a redundant duplicate movers load — this test's dead-advance +
+    barrier asserts read +2 instead of +1 (mutation B2 is verified KILLED).
+    """
+    fixture = build_movers_app(tmp_path)
+    session = new_page(fixture)
+    gate: PrebuildGate = fixture.ground["gate"]
+    gate.begin()
+    gate.set_phase("prebuild")
+    freeze_page_clock(session.page)
+    session.goto("/movers")
+
+    # Gated first paint arms the 5 s gate retry; the frozen clock keeps it
+    # PENDING (never fired) for the whole race below.
+    expect(session.page.locator("#asof")).to_have_text(_GATED_STATUS)
+    assert session.request_count(_MOVERS_KEY) == 1
+
+    # Release server-side, then land a DIRECT load via ↻ Refresh while the
+    # gate retry is still pending — the non-gated branch must DISARM it.
+    gate.release(ok=True)
+    with session.page.expect_response(_MOVERS_GLOB):
+        session.page.locator("#refresh").click()
+    expect(session.page.locator("#asof")).to_have_text(fixture.ground["asof_recovered"])
+    # Anti-vacuity: the real ranked render, not the catch-branch sample rows.
+    expect(session.page.locator(".preview-badge")).to_have_count(0)
+    assert session.request_count(_MOVERS_KEY) == 2
+
+    # A dead 6 s advance walks PAST the pending retry's 5 s deadline; the
+    # next ↻ Refresh round-trip is the ordering barrier — a stale still-armed
+    # gate timer (the B2 mutant) fires a redundant load and reads +2, not +1.
+    session.page.clock.fast_forward(6_000)
+    assert session.request_count(_MOVERS_KEY) == 2, (
+        "stale gateTimer fired after a direct non-gated load (clearTimeout disarm broken)"
+    )
+    with session.page.expect_response(_MOVERS_GLOB):
+        session.page.locator("#refresh").click()
+    assert session.request_count(_MOVERS_KEY) == 3, (
+        "stale gateTimer fired after a direct non-gated load (clearTimeout disarm broken)"
+    )
 
 
 def test_hostile_symbol_renders_inert(new_page: NewPageFactory, tmp_path: Path) -> None:

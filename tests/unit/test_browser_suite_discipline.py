@@ -75,7 +75,13 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
     read ``timeout=6e4`` as 6, ``timeout=1e9`` as 1 and ``timeout=0x186A0``
     as 0 — positively VALIDATING 60 s / 100 s literals under the 10 s cap —
     so the scientific/hex shapes (plus the unparseable-literal fail-closed
-    arm) are pinned here too. This pins every added pattern against a
+    arm) are pinned here too. Round-3 review finding: the digit-leading
+    capture + line scan never SAW a dot-leading float (``timeout=.5e9`` =
+    ~5.8 days), a unary-plus literal (``timeout=+600000``), a paren-wrapped
+    literal (``timeout=(60000)``), a formatter-split
+    ``set_default_timeout(\\n    60000\\n)``, or a dynamic
+    ``__import__("time")`` / ``import_module("time")`` sleep smuggle — all
+    five shapes are pinned here too. This pins every added pattern against a
     synthetic suite tree so a pattern regression fails the MAIN test job.
     """
     sneaky = {
@@ -91,6 +97,14 @@ def test_guard_patterns_catch_sneaky_evasion_forms(
         "t_hex_timeout.py": "page.goto(url, timeout=0x186A0)\n",
         "t_sci_default_timeout.py": "page.set_default_timeout(1e9)\n",
         "t_unparseable_timeout.py": "page.goto(url, timeout=1j)\n",
+        "t_dotfloat_timeout.py": "page.goto(url, timeout=.5e9)\n",
+        "t_dotfloat_default_timeout.py": "page.set_default_timeout(.9e7)\n",
+        "t_plus_timeout.py": "page.goto(url, timeout=+600000)\n",
+        "t_plus_default_timeout.py": "page.set_default_timeout(+60_000)\n",
+        "t_paren_timeout.py": 'page.wait_for_selector("#a", timeout=(60000))\n',
+        "t_split_default_timeout.py": "page.set_default_timeout(\n    60000\n)\n",
+        "t_dunder_import_time.py": '__import__("time").sleep(5)\n',
+        "t_import_module_time.py": 'importlib.import_module("time").sleep(5)\n',
     }
     for name, body in sneaky.items():
         (tmp_path / name).write_text(body, encoding="utf-8")
@@ -107,6 +121,9 @@ def test_guard_patterns_stay_clean_on_sanctioned_forms(
     Round-2 additions: under-cap scientific (``5e3`` = 5 000), float
     (``join(timeout=10.0)`` — the harness's own thread-join bound) and hex
     (``0x2328`` = 9 000) literals are VALUE-checked, not shape-banned.
+    Round-3 additions: under-cap paren-wrapped (``(5_000)``), unary-plus
+    (``+10000`` — exactly the cap) and formatter-split
+    (``set_default_timeout(\\n    9_000\\n)``) literals stay clean too.
     """
     (tmp_path / "t_clean.py").write_text(
         "import time\n"
@@ -117,6 +134,11 @@ def test_guard_patterns_stay_clean_on_sanctioned_forms(
         "page.wait_for_selector(sel, timeout=5e3)\n"
         "self._thread.join(timeout=10.0)\n"
         "page.goto(url, timeout=0x2328)\n"
+        "page.wait_for_selector(sel, timeout=(5_000))\n"
+        "page.goto(url, timeout=+10000)\n"
+        "page.set_default_timeout(\n"
+        "    9_000\n"
+        ")\n"
         "deadline = time.monotonic() + 15.0\n",
         encoding="utf-8",
     )
