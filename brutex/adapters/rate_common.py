@@ -56,7 +56,7 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: the recovery back up (``rate.stepup``) into the ``/logs`` stream so the
 #: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
 #: (Mutation-equivalent line: the logger NAME is a cosmetic namespace pinned by no
-#: behaviour — pragma per DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528.)
+#: behaviour — pragma per DEC-MUTATION-RUNTIME-003, MIGRATION.md #1533.)
 _LOG = structlog.get_logger("brutex.adapters.rate_common")  # pragma: no mutate
 
 # ── Deferred rate.* emission (DEC-RATE-LOG-OUTSIDE-LOCK-001) ────────────────
@@ -625,7 +625,7 @@ class RateController:
         # T8 scoped re-probe on this base enumerated the class (the alias
         # OBJECT itself is test-pinned instead, and ``None`` is not a mutmut
         # target, so nothing real hides on these lines).
-        # DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528.)
+        # DEC-MUTATION-RUNTIME-003, MIGRATION.md #1533.)
         pending: _PendingLog | None = None  # pragma: no mutate
         if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
             self._issues.clear()
@@ -703,7 +703,7 @@ class RateController:
         # ``max(wait, 0.0)`` — identical to ``wait if wait > 0.0 else 0.0`` (an
         # overdue/at-boundary wait clamps to exactly 0.0) but rephrased so the ONLY
         # generated mutant on this line is boundary-observable, never a silent
-        # tie-equivalent (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528).
+        # tie-equivalent (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1533).
         return max(wait, 0.0)
 
     def _advance_issue_ring_locked(self, sec: int) -> None:
@@ -724,7 +724,7 @@ class RateController:
         steps = sec - newest
         # ``steps < 1`` — int-identical to ``steps <= 0`` but rephrased so EVERY
         # generated mutant of this guard is boundary-observable (the ``<= 0 → < 0``
-        # tie-equivalent disappears; DEC-MUTATION-RUNTIME-003, MIGRATION.md #1528).
+        # tie-equivalent disappears; DEC-MUTATION-RUNTIME-003, MIGRATION.md #1533).
         # NEVER pragma this line: it also carries the REAL off-by-one boundary mutant.
         if steps < 1:
             return  # same second (or a tiny backward skew already gap-handled): no advance
@@ -787,7 +787,7 @@ class RateController:
         # The raw bucket span for ``(now - window, now]``: the ``+ 1`` closes the
         # inclusive ``floor(now - window) .. floor(now)`` range (split onto its own
         # line so its off-by-one mutants stay observable; DEC-MUTATION-RUNTIME-003,
-        # MIGRATION.md #1528).
+        # MIGRATION.md #1533).
         raw_span = head_sec - oldest_sec + 1
         # (Pragma: the ``max(…, 0)`` guard is unreachable for real windows ≥ 1 s —
         # ``head_sec >= oldest_sec`` always, so ``raw_span >= 1``; defensive only.)

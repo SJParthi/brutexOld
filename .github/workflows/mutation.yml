@@ -230,7 +230,7 @@ jobs:
           #    focused-runner subset argument as the rest of the loop).
           #
           # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
-          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1528) with a
+          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533) with a
           # per-pair hard pytest timeout: the module carries bounded fail-open spin
           # loops (_GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP) whose loop-counter mutants spin
           # forever; mutmut's internal timeout kills only the `sh` wrapper and the
@@ -366,7 +366,7 @@ jobs:
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
-  # there + in MIGRATION.md #1528 (Golden Rule #10 — out openly, not
+  # there + in MIGRATION.md #1533 (Golden Rule #10 — out openly, not
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
@@ -408,12 +408,12 @@ jobs:
           tool: cargo-mutants
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/5)
         run: |
-          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1528):
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 556 mutants measured
           #   2026-07-07 (`cargo mutants --list | wc -l`, post-reshape final tree).
-          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1528.
+          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1533.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
@@ -488,7 +488,7 @@ jobs:
           tool: cargo-mutants
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
         run: |
-          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1528):
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533):
           # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
           #   evaluator.rs + spec.rs + python.rs = 619 mutants measured 2026-07-07
           #   (`cargo mutants --list | wc -l`); features python,serde (python.rs is
@@ -624,7 +624,7 @@ jobs:
               }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issue.number,
-                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1528 / STANDARDS row 3.`,
+                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1533 / STANDARDS row 3.`,
               });
               await github.rest.issues.update({
                 owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',
