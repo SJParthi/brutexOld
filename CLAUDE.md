@@ -1725,7 +1725,7 @@ hostile-review pass._
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
-   #1527 — persisted finalist rows additionally carry the derived
+   #1535 — persisted finalist rows additionally carry the derived
    nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
    trade streams are the FOUR named DISCARDED/unobservable streams —
    the cascade Monte-Carlo permutation filter, `run_persisted_sweep`'s
