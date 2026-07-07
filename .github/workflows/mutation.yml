@@ -56,9 +56,15 @@ on:
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
 
+# Least privilege (DEC-CI-FORK-PR-HARDEN-001 convention; fixer round of
+# DEC-MUTATION-RUNTIME-003): the WORKFLOW default is read-only — the 12 Rust
+# shard jobs execute a broad third-party build surface (taiki-e/install-action,
+# hundreds of crates.io build.rs/proc-macros under cargo-mutants) and, since the
+# per-shard issue filers moved to the fan-in job, never touch issues at all.
+# Only the two jobs that actually FILE/CLOSE issues (python-mutation's in-job
+# filer + mutation-verdict) elevate to issues:write at JOB level.
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   # DEC-MUTATION-RUNTIME-002: the group is keyed by EVENT as well as ref —
@@ -107,16 +113,25 @@ jobs:
     # Budget (DEC-MUTATION-RUNTIME-003, measured): pass 1 (245 mutants x ~2.2 s CI)
     # ~= 9 min; compute.py (354) ~= 13 min; remaining 8 loop modules (~384) ~= 14 min
     # — reconciled to the 06-15 green step's 34m51s (run 27526937751);
-    # rate_common (347 measured after pragmas on the FINAL base — the probe's
-    # ~290 estimate predated the T8 re-probe's enumeration of the never-probed
-    # #1202 deferred-log mutants) at ~5-7 s CI (local 2.5-3.4 s x2 shared-GHA
-    # factor) ~= 29-40 min + 6 spin mutants x 20 s wrap ~= 2 min.
-    # Total ~= 69-80 min nominal, ~87 worst -> >= 33 min margin under 120.
+    # rate_common (360 measured on the fixer-round confirmation run — the T8
+    # count was 347 before the fixer round's pragma-removal restructure; the
+    # probe's ~290 estimate predated the T8 re-probe) at ~5-7 s CI (local
+    # 2.5-3.4 s x2 shared-GHA factor) ~= 30-42 min + 6 spin mutants x ~30-35 s
+    # wrap-kill ~= 3.5 min.
+    # Total ~= 70-82 min nominal, ~90 worst -> >= 30 min margin under 120.
     # (The OLD broad `pytest tests/unit` runner could never finish here —
     # 123/804 mutants at cancellation, DEC-MUTATION-RUNTIME-001.)
     timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write # the in-job failure/cancellation alert filer below
     steps:
+      # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention, cf.
+      # doctor-daily.yml): never persist the job token into .git/config while
+      # later steps execute a broad third-party build surface.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -236,15 +251,38 @@ jobs:
           # forever; mutmut's internal timeout kills only the `sh` wrapper and the
           # ORPHANED pytest grandchild holds the stdout pipe, wedging mutmut until the
           # 120-min job kill (measured 6x locally: mutants 194/195/199/209/210/213).
-          # `timeout -k 5 20` kills the pytest subtree INSIDE the sh, the pipe closes,
-          # and the spin mutant scores KILLED via `|| exit 1` (an infinite-loop mutant
-          # IS a caught defect). The wrap value is locally verified to fire BEFORE
-          # mutmut's own internal timeout so the mutant records KILLED, never TIMEOUT
-          # (timed-out ids are listed by `mutmut results` and would trip the
-          # zero-survivor grep below). The 9 proven pairs keep their exact historical
-          # runner (no spin constructs there; minimal diff — a wrap would change their
-          # verified timeout interplay for zero benefit). rate_common runs LAST so a
-          # survivor there never masks the 9 proven modules.
+          # `timeout -k 5 30` kills the pytest subtree INSIDE the sh, the pipe closes,
+          # and mutmut reads the `|| exit 1` as a kill (an infinite-loop mutant IS a
+          # caught defect). HONEST classifier arithmetic (fixer round, MIGRATION.md
+          # #1533 — the earlier "scores KILLED, never TIMEOUT, locally verified" claim
+          # was FALSE as written):
+          #   * Without `--test-time-base`, mutmut 2.5.1 reclassifies ANY killed
+          #     mutant slower than baseline x test-time-multiplier (default 2.0) as
+          #     OK_SUSPICIOUS (exit bit 8) — a ~30-35 s wrap-kill against the ~5-7 s
+          #     CI baseline is SUSPICIOUS deterministically, `mutmut results` lists
+          #     the id, and both `set -e` and the zero-survivor grep go red FOREVER.
+          #     `--test-time-base 45` lifts the suspicious threshold to
+          #     45 s + 2 x baseline > the ~35 s worst-case wrap-kill for EVERY
+          #     baseline >= 0, so a wrap-killed spin mutant records KILLED
+          #     deterministically w.r.t. that classifier (verified on the local
+          #     confirmation run: 6 spin mutants KILLED, 0 suspicious).
+          #   * The wrap beats mutmut's NON-configurable hard timeout (baseline x 10,
+          #     BAD_TIMEOUT, exit bit 4) only when baseline > ~3.5 s — TRUE at the
+          #     measured 5-7 s CI baseline (hard timer 50-70 s > the 30+5 s wrap),
+          #     FALSE on a fast local box (~1.5 s baseline -> 15 s hard timer fires
+          #     first). Local confirmations therefore use a proportionally smaller
+          #     wrap (e.g. 8 s) — same mechanism, regime-sized value.
+          #   * 30 s (raised from 20) also clears the worst-case LEGITIMATE pass:
+          #     a ~3x shared-runner degradation of the 5-7 s suite is ~21 s, which a
+          #     20 s wrap would have falsely converted into a kill-shaped exit (a
+          #     slow-but-passing SURVIVOR masked as killed — the false-green
+          #     direction) and would have wrap-killed the unmutated BASELINE run
+          #     itself (a hard "Tests don't run cleanly" red). A >30 s degraded pass
+          #     remains a loud baseline red — the honest residual envelope.
+          # The 9 proven pairs keep their exact historical runner + no
+          # --test-time-base (no spin constructs there; minimal diff — their verified
+          # interplay is unchanged). rate_common runs LAST so a survivor there never
+          # masks the 9 proven modules.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
@@ -255,21 +293,30 @@ jobs:
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
-            "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:20"; do
+            "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
             tmo="${pair##*:}"
             mid="${pair#*:}"
             tf="${mid%:*}"
             name="$(basename "$mod" .py)"
             if [ -n "$tmo" ]; then
+              # --test-time-base 45: keep a wrap-killed spin mutant BELOW the
+              # OK_SUSPICIOUS threshold (45 + 2 x baseline > the 30+5 s wrap for
+              # every baseline) so it records KILLED — see the classifier
+              # arithmetic above (DEC-MUTATION-RUNTIME-003 fixer round).
               runner="sh -c 'timeout -k 5 $tmo pytest $tf -x -q --no-header || exit 1'"
+              mutmut run \
+                --paths-to-mutate "$mod" \
+                --runner "$runner" \
+                --test-time-base 45 \
+                --simple-output
             else
               runner="sh -c 'pytest $tf -x -q --no-header || exit 1'"
+              mutmut run \
+                --paths-to-mutate "$mod" \
+                --runner "$runner" \
+                --simple-output
             fi
-            mutmut run \
-              --paths-to-mutate "$mod" \
-              --runner "$runner" \
-              --simple-output
             mutmut results | tee "mutmut-results-$name.txt"
             if grep -qE "^[0-9]+" "mutmut-results-$name.txt"; then
               echo "❌ Surviving mutants detected ($name)"
@@ -343,7 +390,17 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const title = `mutmut: surviving mutants on ${context.sha.substring(0, 7)}`;
+            // Cause-NEUTRAL title (DEC-MUTATION-RUNTIME-003 fixer round): the old
+            // `mutmut: surviving mutants on <sha>` headline asserted survivors even
+            // when the `if:` fired on `cancelled()` — a 120-min timeout kill with NO
+            // survivor verdict (the same #1207/#1211/#1216 mis-titling class the
+            // Rust fan-in filers already fixed). The body decodes the actual cause,
+            // exactly like the Rust filers; the `on <sha>` suffix stays — it is the
+            // auto-close ancestry key.
+            const title = `mutmut: mutation gate red on ${context.sha.substring(0, 7)}`;
+            const cause = '${{ job.status }}' === 'cancelled'
+              ? 'The job was CANCELLED — usually the 120-minute job timeout. This is a RUNTIME/budget regression: NO survivor verdict was reached, so this is NOT evidence of surviving mutants.'
+              : 'The job FAILED: surviving/suspicious/timed-out mutants in one of the passes, or a broken baseline ("Tests don\'t run cleanly without mutations"). The report step prints the in-flight cache\'s survivor IDs + diffs (up to 2000 lines).';
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -355,7 +412,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Python mutation testing failed or was cancelled on commit ${context.sha}. Job status at alert time: ${{ job.status }} — 'cancelled' usually means the 120-minute job timeout (no survivor verdict was reached); 'failure' means surviving mutants or a broken baseline. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for the survivor diffs (report step prints up to 2000 lines).`,
+              body: `${cause}\n\nCommit ${context.sha} — see the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-MUTATION-RUNTIME-003); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'python', 'critical'],
             });
 
@@ -387,7 +444,12 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
+      # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention): this
+      # job inherits the read-only workflow token AND never needs git auth after
+      # checkout, while cargo-mutants executes hundreds of third-party builds.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -403,9 +465,18 @@ jobs:
           # iteration cold-compiled the whole dep tree.
           cache-on-failure: true
       - name: Install cargo-mutants
+        # Version PINNED (fixer round of DEC-MUTATION-RUNTIME-003): the
+        # trading-core zero-exclusion python.rs design is LOAD-BEARING on
+        # cargo-mutants 27.1.0-specific behaviour (229 PyErr-wrapper mutants
+        # are UNVIABLE because 27.1.0 does not resolve the PyResult alias —
+        # rust/trading-core/src/python.rs + .cargo/mutants.toml document it),
+        # and both crates' measured shard budgets were derived under 27.1.0.
+        # An unpinned `latest` could silently flip those mutants to MISSED and
+        # red the gate with a mislabelled cause; version bumps are DELIBERATE
+        # (mirrors the pinned RUST_VERSION above).
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/5)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533):
@@ -469,7 +540,10 @@ jobs:
       run:
         working-directory: rust/trading-core
     steps:
+      # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -483,9 +557,11 @@ jobs:
           # a never-green job never saves its cache without this.
           cache-on-failure: true
       - name: Install cargo-mutants
+        # Version PINNED — see the fno-math twin (the 229-UNVIABLE python.rs
+        # PyResult-alias measurement + shard budgets are 27.1.0-specific).
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1533):
@@ -542,6 +618,9 @@ jobs:
     name: "Mutation verdict (fan-in alerts + auto-close on green schedule)"
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write # the fan-in filers + the scheduled-green auto-close below
     if: always()
     needs: [python-mutation, rust-mutation, rust-mutation-trading-core]
     steps:
