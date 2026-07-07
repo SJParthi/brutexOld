@@ -4700,3 +4700,132 @@ def test_audit_none_writes_nothing(tmp_path: Path) -> None:
         now_ist=_now,
     )
     assert not (tmp_path / "audit").exists()
+
+
+class TestRetryCounterSplitOption:
+    """DEC-RETRY-COUNTER-SPLIT-001 (F&O spine): the ledger rows carry the
+    empty/transient SPLIT of ``in_pull_fetches``. Unlike the spot spine this
+    ladder retries transients INLINE, so a clean tail can carry BOTH halves —
+    the exact conflation #924/#1355 could only relabel."""
+
+    def test_first_try_success_records_known_zero_split(self) -> None:
+        sdk = _FakeSDK()
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            now_ist=_now,
+        )
+        rec = ledger.records()[0]
+        assert rec.in_pull_fetches == 1
+        assert rec.empty_retries == 0  # a KNOWN zero — the ladder ran clean
+        assert rec.transient_retries == 0
+
+    def test_transient_then_data_carries_the_transient_half_on_success(self) -> None:
+        # One timeout absorbed inline, then bars: the SUCCESS row's split shows
+        # the transient the conflated total hid (in_pull_fetches=2 alone could
+        # equally have been an empty re-fetch).
+        sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall"), None])
+        ledger = WindowLedger()
+        report = ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=2,
+            backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        assert report.bars_appended > 0
+        rec = ledger.records()[-1]  # the final SUCCESS re-record of the window
+        assert rec.status == "SUCCESS"
+        assert rec.in_pull_fetches == 2
+        assert rec.empty_retries == 0
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries + 1 == rec.in_pull_fetches
+
+    def test_all_empty_run_records_the_empty_half(self) -> None:
+        sdk = _FakeSDK(payload=_EMPTY)
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            empty_retry_attempts=3,
+            empty_retry_backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        rec = ledger.records()[0]
+        assert rec.in_pull_fetches == 3
+        assert rec.empty_retries == 3  # every fetch was a clean empty
+        assert rec.transient_retries == 0
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+    def test_empty_then_ratelimit_exhaust_splits_the_failed_row(self) -> None:
+        # The #1355 conflation case made honest: empty (fetch 1) then a 429 that
+        # exhausts the budget (fetch 2) — the FAILED row's in_pull_fetches=2 now
+        # decomposes into one of each class.
+        sdk = _FakeSDK(script=[_EMPTY, GrowwAPIRateLimitException("429")])
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=0,  # 429 → immediate budget exhaustion
+            empty_retry_attempts=3,
+            empty_retry_backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == "FAILED"
+        assert rec.in_pull_fetches == 2
+        assert rec.empty_retries == 1
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+    def test_mixed_ladder_carries_both_halves_into_the_clean_tail(self) -> None:
+        # 429 (retried inline) → empty → empty → data: the SUCCESS row carries
+        # BOTH halves, proving the tail threads the producer's counters through
+        # the raw payload (empty=2, transient=1, +1 data fetch = 4 total).
+        sdk = _FakeSDK(
+            script=[GrowwAPIRateLimitException("429"), _EMPTY, _EMPTY, None],
+        )
+        ledger = WindowLedger()
+        report = ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=2,
+            backoff=lambda _a: None,
+            empty_retry_attempts=3,
+            empty_retry_backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        assert report.bars_appended > 0
+        assert sdk.calls == 4
+        rec = ledger.records()[-1]
+        assert rec.status == "SUCCESS"
+        assert rec.in_pull_fetches == 4
+        assert rec.empty_retries == 2
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries + 1 == rec.in_pull_fetches

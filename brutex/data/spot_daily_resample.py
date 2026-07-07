@@ -882,6 +882,10 @@ def reconcile_daily_from_minute(
                 bars_appended=result.bars_written,
                 now=now,
                 in_pull_fetches=0,  # a resample made ZERO vendor fetches (honest provenance)
+                # ... so its retry SPLIT is a KNOWN zero on both halves
+                # (DEC-RETRY-COUNTER-SPLIT-001 — mirrors in_pull_fetches=0).
+                empty_retries=0,
+                transient_retries=0,
             )
             filled += 1
             bars += result.bars_written

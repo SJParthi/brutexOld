@@ -6230,6 +6230,8 @@ def build_app(
             "empty_streak",
             "in_pull_fetches",
             "bars_net_new",
+            "empty_retries",
+            "transient_retries",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)
