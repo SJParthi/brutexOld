@@ -229,6 +229,38 @@ class TestResidentTradeSimStamping:
             )
             assert (p.entry_ts, p.exit_ts, p.direction) == (s.entry_ts, s.exit_ts, s.direction)
 
+    def test_pair_method_stamps_both_arms_and_keeps_exit_indices(self) -> None:
+        """The ADR-0017 merge-reconciliation pin: the exit-idx-native batch
+        spine (``simulate_masks_with_exit_indices``, the method the sweep's
+        chunk loop actually calls since DEC-SWEEP-EXIT-INDEX-FASTPATH-001)
+        routes through the STAMPED converter on BOTH arms — the Rust batch
+        post-stamps via ``_to_trade_and_exit`` and the fallback walker stamps
+        natively — with the pairs' trades bit-identical across arms AND the
+        certified exit-index stream intact and IDENTICAL to an unstamped run
+        (stamping is a pure trade-field decoration, never an index input).
+        """
+        bar_bits = build_bar_bits(_BARS)
+        rust_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        py_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        py_sim._rust = None  # force the pure-Python oracle arm
+        plain_sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1)
+        assert rust_sim.rust_active
+        ((rust_trades, rust_idx),) = rust_sim.simulate_masks_with_exit_indices(
+            [0], direction=Side.BUY, take_profit_paisa=50
+        )
+        ((py_trades, py_idx),) = py_sim.simulate_masks_with_exit_indices(
+            [0], direction=Side.BUY, take_profit_paisa=50
+        )
+        ((_, plain_idx),) = plain_sim.simulate_masks_with_exit_indices(
+            [0], direction=Side.BUY, take_profit_paisa=50
+        )
+        _assert_trades_stamped(rust_trades)
+        assert rust_trades == py_trades
+        # The certified window emits TRUE indices on both arms, unmoved by
+        # the stamper (byte-equal to the unstamped run's stream).
+        assert rust_idx is not None and rust_idx == py_idx == plain_idx
+        assert [t.exit_ts for t in rust_trades] == [_BARS[i].timestamp for i in rust_idx]
+
     def test_missing_vix_bar_stamps_none_never_fabricated(self) -> None:
         # A stamper covering only the FIRST bar: every real trade's instants
         # miss → both stamps None (Golden Rule #1 — never fabricated).
@@ -281,9 +313,13 @@ class TestOracleEqualsBatchStructural:
     ) -> None:
         bar_bits = build_bar_bits(_BARS)
         sim = ResidentTradeSim(_BARS, bar_bits, tf_minutes=1, reference_stamper=_STAMPER)
+        # The batch spine is `simulate_masks_with_exit_indices` since the
+        # ADR-0017 exit-idx-native rewrite (`simulate_masks` is a thin
+        # delegate over it) — the chunk loop calls the PAIR method, so the
+        # failure injection targets it directly.
         monkeypatch.setattr(
             ResidentTradeSim,
-            "simulate_masks",
+            "simulate_masks_with_exit_indices",
             lambda self, *a, **kw: (_ for _ in ()).throw(ValueError("boom")),
         )
         captured: list[object] = []
@@ -342,17 +378,23 @@ class TestSweepDriverSeam:
         )
 
     def test_metrics_for_mask_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             self._metrics(reference_stamper=_STAMPER)
         assert captured == [_STAMPER]
 
     def test_metrics_for_mask_default_is_unstamped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             self._metrics()
         assert captured == [None]
 
     def test_evaluate_combo_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             driver_mod.evaluate_combo(
                 _BARS,
                 0,
@@ -364,7 +406,9 @@ class TestSweepDriverSeam:
         assert captured == [_STAMPER]
 
     def test_sweep_masks_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             driver_mod.sweep_masks(
                 _BARS,
                 [0, 1 << BIT_BAR_BULLISH],
@@ -376,7 +420,9 @@ class TestSweepDriverSeam:
         assert captured == [_STAMPER, _STAMPER]
 
     def test_rank_sweep_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             driver_mod.rank_sweep(
                 _BARS,
                 [0],
@@ -403,7 +449,9 @@ class TestSweepDriverSeam:
 
     def test_walk_forward_paths_thread_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bars = _trending_bars(n_days=6, per_day=40)
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             driver_mod.evaluate_combo_walk_forward(
                 bars,
                 0,
@@ -419,7 +467,9 @@ class TestSweepDriverSeam:
 
     def test_walk_forward_sweep_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         bars = _trending_bars(n_days=6, per_day=40)
-        with _capture_kwarg(monkeypatch, driver_mod, "simulate_trades") as captured:
+        with _capture_kwarg(
+            monkeypatch, driver_mod, "simulate_trades_with_exit_indices"
+        ) as captured:
             driver_mod.walk_forward_sweep(
                 bars,
                 [0],
@@ -524,7 +574,7 @@ class TestSweepReportSeam:
         surface carries no VIX field, so a stamp there is provably
         unobservable. This is the actual byte-equality regression that claim
         rides on (round-3 panel: the claim shipped in cli.py / MIGRATION.md
-        #1535 / CLAUDE.md §2 Rule 3 citing a test that did not exist — the
+        #1537 / CLAUDE.md §2 Rule 3 citing a test that did not exist — the
         cascade ``serialize_wire_report`` A/B pinned a DIFFERENT surface).
         A future VIX column in the report text fails HERE and forces the
         conscious revert-lever decision (bind a stamper at ``cmd_sweep``).

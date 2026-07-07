@@ -18,7 +18,217 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
+_Last updated: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 —
+the CLI `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment
+pass the dashboard runs — post-drain Seam A (fetch lane drained + window
+ledger persisted FIRST, single-flight lock still HELD), default-ON with the
+fail-loud `BRUTEX_CLI_GREEKS_ENRICH` kill switch, inert under
+`--dry-run`/`--inspect` via `_no_persist`, halts (`LakeWriteHalt`/
+`GreeksEnrichPoolBroken`) alert-then-re-raise, a fenced failure NEVER fails
+the pull — and a NEW `brutex enrich-greeks` subcommand delivers the #1188
+bulk v1→v2 re-enrich (exit 0 iff fully clean — cron-visible). ONE COMMON
+wheel-free `brutex/data/greeks_enrich_pass.py` owns the fence (MOVED from
+`historical_pull`, whose `_enrich_greeks_from_minute` is now a thin
+delegator — dashboard behavior byte-identical, outcome types aliased to the
+SAME objects) + the chain-union lake-walk target discovery (CE/PE only,
+zero Parquet opens). HONEST: NOT O(1) — discovery is an O(option partition
+dirs) walk and the pass re-READS the scoped stored bars every run (the
+stamp-driven `already_current` gate makes re-runs cheap by skipping writes
++ solves, never reads); the CLI L2 heal seam landed INDEPENDENTLY on
+main as DEC-CLI-LAKE-HEAL-L2-001 (#1493) and the merged fetch path runs it
+BEFORE this enrich seam — the dashboard heal-L2-before-Greeks-enrich
+ordering law holds on the CLI too; the six-step strict gate
+(DEC-PULL-SIX-STEP-ORDER-001 #1527, merged in flight) sits BETWEEN the
+dashboard's own F&O L2 heal (`_heal_lake_after_pull`) and the enrich
+delegator inside `pull_contract_candles` — `_GREEKS_STRICT_WITHHELD` is a
+distinct instance of the COMMON `GreeksEnrichOutcome`; the CLI never calls
+that seam — its Seam A enrich invokes the COMMON fence directly, so the
+strict gate cannot touch it. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100%
+line+branch).
+Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
+the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
+on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
+STANDARDS_100PCT.md §11 P1 "benchmark baseline JSON + `--benchmark-compare
+--fail` gate" backlog item, the deviation from the literal flag ledgered): NEW
+pure-stdlib zero-brutex-import `brutex/observability/bench_baseline.py` (the
+comparator/schema/capture/governance core + the ONE hardware-key format law) +
+`hardware_fingerprint`/`hardware_key` on the COMMON `config/hardware_envelope.py`
++ the env-gated 6-entry measurement suite (`tests/bench/test_absolute_baseline.py`
+over `_abs_baseline_registry.py`, house best-of-N-MIN idiom) + committed
+baselines at `tests/bench/baselines/<hardware_key>.json` (`tolerance_pct`
+structurally capped so a 2x slowdown can NEVER pass any governed config; a
+MORE-than-4x speedup FAILS as SUSPICIOUS_SPEEDUP, more-than-2x WARNs "baseline
+stale") + `scripts/ci/bench_baseline_gate.py` (validate/compare/capture/govern/
+key; exit 0 ok-or-LOUD-abstain / 1 numeric with ONE bounded fresh-process
+re-measure / 2 structural never-retried). bench-m4pro gains
+measure→compare→capture→artifact + a GitHub-hosted `bless-baseline` job (the
+ONLY contents/PR-write holder — the candidate travels runner→artifact→verbatim
+API commit with no edit surface); ci.yml's REQUIRED `bench` job gains schema
+`validate` on every run + the `govern` entry-cell diff gate on PRs with LIVE
+`gh api` provenance-run verification pinned to THIS repository. GOVERNANCE LAW
+per cell class: a MODIFIED cell needs a NEW ledgered DEC id + the literal entry
+key + the literal value token + a FRESH live-verified run; an ADDED cell rides
+the standing bootstrap authorization; a REMOVED cell / top-level change needs a
+ledgered note; a DELETED file needs its filename in the added lines; NO
+override env. BOOTSTRAP: ZERO measured numbers ship (`tests/bench/baselines/`
+holds only README.md); the first baseline is measured by the REAL M4 Pro and
+auto-blessed via a bot PR the operator nudges + merges (GITHUB_TOKEN PRs do not
+trigger CI; NO PAT). HONEST: bench-m4pro stays NON-required (a regression is
+caught post-merge as a red run + issue, not a merge blocker); the gate is
+dormant until the runner is online AND the first bless merges; the gate catches
+strictly-GREATER-than-tolerance drift ONLY (strict `>` boundary law — a
+regression exactly AT tolerance passes, test-pinned) — at-or-below-tolerance
+drift accumulates until a ledgered
+re-bless (the 1.1x ratio tiers + the single-canary-op 50 M/s floor are
+complements, NOT a sub-tolerance net); a STANDING red — numeric
+SUSPICIOUS_SPEEDUP or STRUCTURAL alike — dies at compare before a dispatch
+capture can run, recovery is removal-first (`docs/runbooks/bench-baseline.md`).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+`bench_baseline.py` + the touched `hardware_envelope.py` 100% line+branch).
+Earlier: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
+mid-pull ledger-read O(page) discipline restored: (a) the /coverage/windows +
+pull-progress DuckDB fast paths now FOLD pending window-ledger deltas
+latest-wins IN SQL — NEW `lake_read.dedup_qualify_latest_sql`/
+`dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql`; bound
+base-path equality ordering, never LIKE — the `/deltas/`-path + `'l'>'d'`
+filename traps live-verified dead; demotions survive, filters apply OUTSIDE
+the fold so no ghost rows) assembled at ONE `db_view._ledger_scan_source`
+seam (per-attempt re-listing = the save-time prune-race self-heal); the count
+caches key on the composite (base-mtime + delta-name-set) stamp token at
+generation=0 (delta appends AND cross-process CLI writes invalidate;
+mark_dirty storms never thrash); the schema probe stays BASE-only (legacy
+12-col lakes defer wholesale — the union_by_name NULL-fill crash is
+unreachable; base-less delta-only lakes ride the fast path); a
+persistently-bad delta degrades to the legacy fold / Python-fold counts,
+never a 500 or blanked phases; SANCTIONED: mid-pull rows converge to the
+steady-state DuckDB order + counts_since_pull_start now appears mid-pull.
+(b) the three db_view ledger record caches collapse onto ONE reused
+`MoversSnapshotCache` (single-flight — 8 concurrent cold pollers pay 1 parse;
+the #920 adaptive floor EXTRACTED to `summary_cache.effective_adaptive_floor`
+and delegated byte-equal, cap 120 s; stale serves bounded + logged; the
+base-less delta-only /db grid now renders). (c) /results keys on NEW
+`lake_revision.sweep_results_revision` (sweeps dir digest + the audit chain's
+file stat — a SWEEP_START append now invalidates; probe-None computes fresh
+UNCACHED). (d) `build_sweep_leaderboard` splits into the revision-cached
+`load_sweep_scan` (frozen `SweepScan`, ALL honesty fields) + the
+byte-order-preserved rank (golden vs `ResultsStore.top_k`); `_snapshot_eras`
+streams `iter_entries` (O(1) memory; audit.py untouched). (e)
+`bx-rate-monitor.js` + `bx-liveproof.js` pause polling in hidden tabs (the
+v29 `document.hidden` guard + visibilitychange catch-up). (f) NEW
+`tests/bench/test_ledger_delta_o_page_o1.py` — 7 measured pins. HONEST: the
+fold is ONE O(total rows + delta-file footers) columnar QUALIFY per FRESH
+stamp — NOT literal O(page); delta compaction + the AuditCursor resume are
+NAMED future work. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; steady-state
+(zero-delta) SQL text + payloads byte-identical (spy-pinned); touched modules
+100% line+branch).
+Earlier: 2026-07-06 (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017,
+MIGRATION.md #1531–#1532 — the sweep-metrics Rust tail is now ON BY DEFAULT:
+`SWEEP_RUST_METRICS_DEFAULT=True` (the exact "separate later ADR" flip #1186
+deferred; revert = ONE constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the
+per-process operator kill switch — `_FALSY` beside `_TRUTHY` on
+`sweep_lookahead`, consumed via its public `env_flag_tristate`, never
+copied), licensed by TWO safety layers —
+ORIGINALLY authored + proven fully green under the prior default-OFF before
+the flip, though the pushed branch is ONE reconstructed post-wipe commit so
+no shipped-first commit boundary exists (see ADR-0017 Status / #1532): (a) the
+exit_idx-native FAST PATH (#1186's named follow-up, DONE) — both trade
+simulators return each mask's certified exit-bar indices
+(`simulate_trades_with_exit_indices` / `simulate_masks_with_exit_indices`
+over the NEW stdlib-only COMMON `brutex/engine/exit_index.py`:
+`build_ts_index` consolidating the three inline dict copies +
+`bars_strictly_increasing` producer certificate + `exit_indices_consistent`
+consumer belt) so the kernel arm consumes them O(trades) with NO per-mask
+O(N_bars) `exit_ts`→index dict build (an inconsistent stream DEMOTES to the
+dict, never to the Python oracle — results byte-identical; measured 6.1×
+sandbox tail ratio, bench-gated ≥1.15×; the sweep spine threads the pairs
+through the ONE `_iter_mask_metrics`; `_reattribute_chunk_failure` stays on
+the oracle); and (b) a per-process BURN-IN SELF-CHECK — the first 16
+kernel-served masks are bit-compared (`struct.pack` floats, signed zeros
+included) against the Python `_drawdown_stats` oracle; a mismatch SHIPS THE
+ORACLE VALUE and AUTOREVERTS the kernel for the process
+(`kernel_autoreverted` ERROR + latch; `kernel_disabled` short-circuit). The
+frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the default
+(no-env) arm reproduces them byte-for-byte with exactly ONE engaged event
+(golden-pinned; a burn-in-poisoned kernel lands on the pinned bytes with one
+autorevert event). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline).
+Earlier: 2026-07-06 (DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+MIGRATION.md #1529–#1530 — the pull-UI staleness pack, FRONTEND-ONLY (zero Python
+source change; tests + docs excepted): both poll surfaces (the site-wide
+`bx-rate-monitor.js` widget + the `/universe` pull-progress header) gain a
+CLIENT-clock "updated Xs ago" readout on a ~1 s ticker (amber → LOUD RED explicit
+"STALE" past justified thresholds — widget warn 10 s / red 30 s = 10× cadence =
+backoff cap; universe warn 5 s past the retained 600 ms quick-retry envelope /
+red 15 s) + a SELF-RECOVERING poll (fetch rejection AND non-ok AND malformed body
+all counted failures; quick retries then 3 s→30 s capped exponential backoff,
+NEVER gives up — the 2026-07-06 38-minute frozen-tab incident fix; the bounded
+give-up that painted "live progress feed dropped" via innerHTML and stopped
+polling forever is REMOVED, its pinned tokens kept with genuine semantics; a
+non-ok poll can no longer settle the header as "— nothing to pull"; the stale
+state clears automatically on the next successful poll), and the `/universe`
+header + a new `#subunit` counter show per-expiry sub-unit progress ("expiry
+30Sep25 · sub-unit N this unit") derived ENTIRELY client-side from
+`s.current`/`s.completed` transitions (distinct-label count per completed/total
+anchor, Set-capped 4096; the `data/fno_symbol.py` grammar mirrored right-anchored
+so hyphenated underlyings never confuse the parse; spot/empty labels degrade to
+omission, never garbage). textContent-only DOM; substring tests pin PRESENCE of
+the JS, not execution (honest envelope — no headless JS runner); ZERO backend
+change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX).
+Earlier: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
+preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
+cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
+interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
+rebuild always stamps the PRE-walk ledger token (mid-walk race → the stale-stamped base still LANDS — it is
+record_dataset's write-side convergence seed, the round-6 restore of an interim SKIP design — plus one
+observe-only db_view.manifest_rebuilt_stale INFO; the load-side token gate stays the freshness authority),
+welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
+tests/bench/_o1_tiers.py (robust 3–10× shared-CI / strict 1.1× M4-Pro via BRUTEX_M4PRO_STRICT=1 / measured 3×
+cache-tier — words only, NO gate weakened), and two new bench pins (u128 two-limb mask + orchestrator audit
+append). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527 —
+the operator's STRICT six-step pull order: every Groww pull executes
+INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES → STOCKS-FUTURES →
+INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO
+existing execution chokepoints with ONE pool/controller build each — an
+always-on `ingest_common.partition_spot_steps` group loop INSIDE
+`pull_all_spot` (the COMMON `PullStep` IntEnum, value==rank 1-6;
+`progress_counts(symbols=)` group-scoped until-clean) and a 4-key
+`(ledger-market, is_index)` F&O bucket sort with STEP-major until-clean
+(`_contract_market` KEPT verbatim — ledger namespaces byte-unchanged, no
+re-pull; unresolved underlyings order stock-side, WARNed + counted, never
+dropped); post-steps (Greeks → prebuild → movers) fire only after ALL
+applicable steps SETTLE (settle-based, never `bars > 0`) — cleanset default
+byte-compatible with DEC-PREBUILD-CLEANSET-001, NEW opt-in
+`BRUTEX_PIPELINE_STRICT_GATE=1` all-or-nothing barrier (fail-loud parse
+resolved once at launch → clean 400; pure `step_settle_verdict` +
+`PriorStepsVerdict` threaded to the Greeks seam — a withheld pass reads
+"withheld (strict gate) — re-attempted next pull", never FAILED). COMMON
+`pull.step.started/settled/halted` events + an observe-only thread-safe
+`StepOrderMonitor` (`raise_on_violation=True` is the test oracle); the
+2026-07-05 log-shaped ordering regression + a fetch-count parity bench pin
+"reorders, never re-fetches". HONEST: an ORDERING change, NOT a speedup —
+~seconds added per pull (bounded analysis, not measured); in async-pipeline
+mode a step's k→k+1 settle is PRODUCER-side (fetch-issue order strict; tail
+writes drain terminally but are INVISIBLE to the producer-fed
+`StepOrderMonitor` — `pull.step.late_write` observes only producer-side
+writes and stays 0 on a healthy async pull; submit-time step stamping
+through `FetchPipeline` is a named follow-up, NOT claimed)
+while the POST-step barrier is fully drain-guarded; the mass-empty
+breaker's trip evidence is now per-STEP-GROUP pass on BOTH spines — F&O
+per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a
+disclosed narrowing, #1527 R6+R9 — evidence resets at the group boundary;
+the ~4-series INDICES-SPOT group on an incremental pull is below every trip
+threshold, so throttle-poisoned ENGINE index windows can settle SKIPPED
+before the stocks group's breaker trips — remediation `brutex
+reopen-skipped`; thresholds/canary/bounded-settle machinery unchanged); the
+CLI `brutex fetch`
+spot path is the NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, NOT
+claimed. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
 rate>)` UNVERIFIED placeholder rows are DELETED and replaced by explicit
@@ -517,7 +727,219 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
+- **Active branch:** `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
+  `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
+  `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
+  DEC-GREEKS-CORRECTNESS-AUDIT-001 named follow-ups ("a CLI-pulled lake never enriches" + "bulk re-enrich"). ONE
+  COMMON wheel-free module `brutex/data/greeks_enrich_pass.py` (the MOVED dashboard fence `run_greeks_enrich_pass` +
+  `GreeksEnrichOutcome`/`GREEKS_NOT_RUN` + the wheel-free chain-union lake discovery
+  `discover_option_windows`/`lake_target_builder` + the `has_option_candles` pre-gate + the fail-loud
+  `resolve_cli_greeks_enrich` env gate); `historical_pull._enrich_greeks_from_minute` is now a thin delegator —
+  dashboard behavior BYTE-IDENTICAL (event names, the 13 `done` fields in order, logger name via `log=_LOG`, the halt
+  re-raise, outcome types aliased to the SAME objects; the existing dashboard suite passes unmodified). The fetch
+  seam is Seam A — post-drain, ledger persisted, single-flight lock still HELD, default-ON
+  (`BRUTEX_CLI_GREEKS_ENRICH=0` kill switch; a junk value fails loud pre-pull `EXIT_USER_ERROR`; inert under
+  `--dry-run`/`--inspect` via `_no_persist`), scoped pulled-underlyings × pulled-window, deliberately NOT gated on
+  `bars_appended > 0` (async-pipeline counts reconcile AFTER the seam); halts alert-then-re-raise via the COMMON
+  `emit_pull_halt_alert` (`_one_fetch_pass` pattern), any other failure is fenced and NEVER fails the pull; a
+  pure-spot lake skips in O(exchange dirs) with one DEBUG event. `brutex enrich-greeks` (whole lake or
+  `--underlying`/`--start`/`--end` slice, dates CLI-inclusive → half-open internally; `--dry-run` = wheel-free
+  discovery counts, no lock) takes the pull single-flight lock + `keep_awake` and exits `EXIT_OK` iff `ok is True
+  and errored_targets == 0` (the `lake audit-unique` cron-visible precedent — a deliberate, documented divergence
+  from the never-fail pull path). Discovery bounds year dirs via the canonical `brutex.data.partition` constants
+  (§11 COMMON — imported, never re-minted). Review round-1 fixes folded: discovery's year/month names are
+  ASCII-digit-gated (`_is_canonical_digits` — bare `isdigit()` admitted non-decimal Unicode digits like `²024` whose
+  `int()` raise killed the whole pass, and silently accepted Arabic-Indic decimals; both now skip per the
+  junk-tolerance contract); the fetch seam's `+1 day` widening SATURATES at `date.max` (`_next_day_saturating` — a
+  degenerate `--end 9999-12-31` pull previously died on an uncaught post-drain `OverflowError`); `enrich-greeks`
+  refuses `--end 9999-12-31` cleanly (`EXIT_USER_ERROR`, never a traceback) and refuses a nonexistent `--lake-root`
+  loudly via the COMMON `_require_lake_dir` (previously a green `errored_targets=0` illusion + a materialised
+  phantom `.locks/`). Review round-4 fix folded: the `enrich-greeks` clean-done summary echoes `contracts=N` (the
+  fenced build's actual target count, captured by wrapping the builder — never a second discovery walk; the `?` leg is
+  a DEFENSIVE belt only — with the real pass `ok=True` implies the build already ran and a pre-build failure takes the
+  FAILED branch, so it is production-unreachable and guards a future pass-contract change, never a fabricated 0) and
+  an explicit `--underlying` matching ZERO stored option contracts
+  prints one loud stderr WARNING naming the sorted tokens (matching is exact + case-sensitive — `nifty` never
+  matches stored `NIFTY`; exit 0 unchanged, the pass genuinely completed; a whole-lake zero stays quiet) — closing
+  the silent-green typo class one level below the `_require_lake_dir` guard. HONEST: NOT O(1) — discovery is
+  O(option partition dirs + month entries)
+  and the pass re-READS the scoped stored bars every run (`already_current` skips writes/solves, not reads; a
+  full-floor fetch over a dashboard-populated lake re-reads the whole stored index-options history inside the lock —
+  levers: window scoping, `BRUTEX_CLI_GREEKS_ENRICH=0`, `BRUTEX_GREEKS_WORKERS=1`); the CLI L2 heal seam landed INDEPENDENTLY on main as
+  DEC-CLI-LAKE-HEAL-L2-001 (#1493) while this change was in flight — the merge orders this enrich seam strictly
+  AFTER that heal (heal in `cmd_fetch`'s drain `finally` before `end_pull_ledger`, enrich after it; a heal-halt
+  `LakeWriteHalt` re-raises so the enrich never runs over an un-healed slice — the dashboard's
+  heal-L2-BEFORE-Greeks-enrich ordering law holds on the CLI path too); SIX-STEP RECONCILE (DEC-PULL-SIX-STEP-ORDER-001
+  #1527, merged in flight): the dashboard call-site law is preserved with main's strict gate BETWEEN heal and enrich —
+  `_mark_complete` → `_heal_lake_after_pull` (integrity, ALWAYS runs) → the opt-in `BRUTEX_PIPELINE_STRICT_GATE=1`
+  barrier (an unclean prior step / F&O phase WITHHOLDS the pass, `_GREEKS_STRICT_WITHHELD` — now a distinct instance of
+  the COMMON `GreeksEnrichOutcome`, identity-keyed so it never collides with `GREEKS_NOT_RUN`) →
+  `_enrich_greeks_from_minute` (still the thin delegator into the COMMON fence); the CLI never calls that seam
+  (`pull_contract_candles` — `prior_steps=None` covers the OTHER non-pipeline callers: the /db selection route,
+  tests) — its Seam A enrich invokes the COMMON fence directly, so the strict gate cannot touch it (the CLI spot
+  six-step path is
+  main's NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, not this change's); `futures_skipped` reads 0 on CLI passes (FUT filtered at discovery —
+  documented asymmetry); the bulk lever is manual (no cron). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+  REFERENCE_ONLY, no scope/vocab/rate change, zero vendor calls added; touched modules 100% line+branch;
+  ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
+  MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
+  gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
+  `brutex/observability/bench_baseline.py` (schema/comparator/capture/govern + the ONE
+  hardware-key format law) + `hardware_envelope.py` gains `cpu_model_string`/`HardwareFingerprint`/
+  `hardware_key` (the BRUTEX_* sizing overrides provably cannot move the fingerprint;
+  `BRUTEX_BENCH_BASELINE_KEY` is the one explicit, slug-validated key override) + the 6-entry measurement registry
+  (`tests/bench/_abs_baseline_registry.py`, best-of-N-MIN per DEC-CANARY-MINTIME-001) + per-hardware
+  baselines at `tests/bench/baselines/<key>.json` (`tolerance_pct` capped `[0,100)` + its failure
+  multiplier `1 + t/100` float-exactly < 2.0 — a 2x slowdown can NEVER pass; strict-`>` boundary;
+  > 4x speedup FAILS) + `scripts/ci/bench_baseline_gate.py`
+  (validate/compare/capture/govern/key; 0 ok-or-LOUD-abstain / 1 numeric-retry-once / 2
+  structural-never-retried). bench-m4pro gains measure→compare→capture→artifact + the GitHub-hosted
+  `bless-baseline` bot-PR job (the ONLY contents/PR-write holder — the self-hosted runner's inherited
+  token is issues:write only, for its alert steps; main-ref + schedule/dispatch pinned);
+  ci.yml's required `bench` job gains the always-on schema validate + the PR governance diff gate
+  (a blessed-cell bump needs a NEW human-written ledger entry quoting the entry key + literal value
+  token + a LIVE-verified fresh run). BOOTSTRAP fabrication-free: ZERO numbers ship — the first
+  baseline is measured on the real M4 Pro and blessed via one operator nudge+merge; until then
+  compare ABSTAINS green-but-loud. Ratio tiers + the 50 M/s floor UNTOUCHED (complements). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; new brutex modules 100%
+  line+branch; ruff/ruff-format/mypy --strict/pyright clean).
+  Earlier: `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
+  ledger-read O(page) discipline restored across (a)-(f): (a) the /coverage/windows + pull-progress DuckDB fast paths
+  fold pending window-ledger deltas latest-wins IN SQL via NEW `lake_read.dedup_qualify_latest_sql`/
+  `dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql` — `ORDER BY (filename = <bound base path>) ASC,
+  filename DESC, file_row_number DESC`, bound equality never LIKE; live-verified on the pinned DuckDB incl. the
+  `/deltas/`-lake-path + `'l'>'d'` filename traps, demotion survival and ghost-row safety), assembled at the ONE
+  `db_view._ledger_scan_source` seam (fresh delta listing per attempt — the existing retry-once machinery IS the
+  save-time flock-prune-race self-heal); the count caches re-key on the composite (base-mtime + delta-name-set) stamp
+  token at FIXED generation=0 (delta appends AND cross-process CLI writes invalidate; mid-pull mark_dirty storms never
+  thrash); the schema probe stays BASE-only (a legacy 12-col lake defers WHOLESALE — the union_by_name NULL-fill →
+  `int(None)` crash is structurally unreachable; a base-less delta-only first-pull checkpoint rides the fast path,
+  deltas writer-pinned at the full 14-column schema); a persistently-malformed delta degrades to the fold-aware legacy
+  pyarrow path (window payload) / the resilient Python-fold counts (phase progress — never blanked mid-pull);
+  `phase_progress_payload`'s O(records) Python delta branch DELETED; SANCTIONED mid-pull changes, pinned + ledgered:
+  rows converge to the steady-state DuckDB within-tier order, and counts_since_pull_start + pull_start_utc now ALSO
+  appear mid-pull. (b) `_WINDOW_CACHE`/`_WINDOW_ROWS_CACHE`/`_SPOT_ROLLUP_CACHE` collapse onto ONE reused
+  `MoversSnapshotCache` (`_LEDGER_READ_CACHE`: single-flight — 8 concurrent cold pollers pay exactly 1 parse; the #920
+  adaptive floor EXTRACTED to `summary_cache.effective_adaptive_floor` with `SummaryCache._plan` + `movers_cache`
+  delegating byte-equal — §11 COMMON, no second copy; floor cap 120 s, each stale serve bounded to min(max(2 s, the
+  serving entry's own compute duration), 120 s) of ledger movement — possibly spanning several ≥2 s delta flushes, a
+  TIME bound never a stamp-count bound — ALWAYS logged `movers_cache.stale_served` on the key that served it; a
+  derived rows/rollup family additionally ages under its OWN floor once the records floor passes, so its worst-case
+  staleness COMPOSES records floor + derived floor, each ≤ 120 s; NEW
+  `movers_cache.revision_generation` digest bridge (homed in the movers_cache LEAF — a db_view → lake_revision
+  edge closes a CodeQL py/cyclic-import cycle via lake_revision's lazy window_ledger_store →
+  coverage_reconcile → db_view imports; AST-pinned); the base-less delta-only /db grid inconsistency FIXED). (c)
+  `api_sweep_leaderboard` keys on NEW `lake_revision.sweep_results_revision` (the sweeps dir-mtime digest + the audit
+  chain's `(mtime_ns:size)` stat — a SWEEP_START append moves NO dir mtime, the stat closes that gap; a CLI `brutex
+  sweep-all` + a store delete + an audit-only append ALL invalidate; a probe outage computes fresh UNCACHED;
+  `on_success=mark_dirty` KEPT — redundant for /results, zero drift elsewhere). (d) `build_sweep_leaderboard` splits
+  into the revision-cached `load_sweep_scan` (NEW frozen `SweepScan` carrying EVERY payload-honesty field) + the
+  byte-order-preserved rank (two-pass sort moved verbatim; golden vs `ResultsStore.top_k` incl. the raw-int precision
+  teeth); a filter/rank click within one revision performs zero store loads + zero audit reads (spy-pinned);
+  `_snapshot_eras` streams `iter_entries` (O(1) memory; audit.py ZERO diff — `verify_chain` untouched; the AuditCursor
+  incremental resume is a NAMED follow-up). (e) `bx-rate-monitor.js` + `bx-liveproof.js` gain the v29
+  `if (document.hidden) return;` poll guard + the visibilitychange immediate catch-up (a hidden tab fires ZERO
+  fetches; never a stale pill on return; source-pinned, honestly not a browser run). (f) NEW
+  `tests/bench/test_ledger_delta_o_page_o1.py` — 7 pins, every number MEASURED 2026-07-06 in the docstrings: one-page
+  mid-pull poll flat-vs-depth 1.24× @ 1k→10k with 5 live deltas (cache_tier_ceiling — the page query is an ADMITTED
+  O(total-rows) columnar scan); ONE GROUP BY per stamp + ONE recount per real delta append + ZERO Python parses;
+  phase-progress 1.00× flat; the fresh-fold delta-file footer term measured 2.44× for 10× the files (compaction the
+  named future bound); 8-thread cold-stamp single-flight; the cold 12-store/200-audit-entry scan 21.8 ms vs a 2 s
+  ceiling + zero-rescan clicks + top_k order parity; /results polls flat under real delta + mark_dirty churn. HONEST
+  (Golden Rule #10): the fold is ONE O(total physical rows + delta-file footers) columnar QUALIFY hash-partition per
+  FRESH stamp — NOT literal O(page) (the `query_candles` envelope); the first Python parse per stamp stays O(rows);
+  each /results poll pays one O(dirs)+O(1-stat) probe. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+  REFERENCE_ONLY, no scope/vocab/rate change; steady-state (zero-delta) SQL text + payloads byte-identical
+  (spy-pinned); touched modules 100% line+branch; ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change
+  baseline).
+  Earlier: `claude/amazing-darwin-hb4caw` (**DEC-SWEEP-EXIT-INDEX-FASTPATH-001 +
+  DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 / ADR-0017, MIGRATION.md #1531–#1532** — the sweep-metrics Rust tail is now
+  ON BY DEFAULT (`SWEEP_RUST_METRICS_DEFAULT=True`, the exact "separate later ADR" flip #1186 deferred; revert = ONE
+  constant; `BRUTEX_SWEEP_RUST_METRICS=0` is the per-process kill switch), licensed by two safety layers — ORIGINALLY
+  authored + proven fully green under the prior default-OFF before the flip, though the pushed branch is ONE
+  reconstructed post-wipe commit so no shipped-first commit boundary exists (see ADR-0017 Status / #1532): the
+  exit_idx-native FAST PATH — both trade simulators return each
+  mask's certified exit-bar indices (NEW stdlib-only COMMON `brutex/engine/exit_index.py`: `build_ts_index`
+  consolidating the three inline dict copies + `bars_strictly_increasing` producer certificate +
+  `exit_indices_consistent` consumer belt) so the kernel arm consumes them O(trades) with NO per-mask O(N_bars)
+  `exit_ts`→index dict build (inconsistent stream DEMOTES to the dict, never to the Python oracle — results
+  byte-identical; measured 6.1× sandbox tail ratio, bench-gated ≥1.15×) — and a per-process BURN-IN SELF-CHECK: the
+  first 16 kernel-served masks are bit-compared (`struct.pack` floats, signed zeros) against the Python
+  `_drawdown_stats` oracle; a mismatch SHIPS THE ORACLE VALUE and AUTOREVERTS the kernel for the process (ERROR +
+  latch + `kernel_disabled` short-circuit). The frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` stay UNCHANGED — the
+  default (no-env) arm reproduces them byte-for-byte with exactly ONE engaged event (golden-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; whole-engine unit gate 100.00% line+branch (1928
+  tests); ruff/ruff-format clean, mypy `--strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/laughing-dirac-ytxj3k` (**DEC-PULL-UI-STALENESS-001 + DEC-PULL-HEADER-SUBUNIT-001,
+  MIGRATION.md #1529–#1530** — the pull-UI staleness pack, FRONTEND-ONLY (zero Python source change): the rate
+  widget + the `/universe` pull-progress header gain a client-clock "updated Xs ago" staleness readout (amber →
+  LOUD RED "STALE") + a self-recovering poll (every failure mode counted; quick retries then 3 s→30 s capped
+  exponential backoff, never gives up — the 38-minute frozen-tab incident fix; a non-ok poll can no longer settle
+  the header), and the `/universe` header + `#subunit` counter show per-expiry sub-unit progress derived entirely
+  client-side from `s.current` transitions (fno_symbol grammar mirrored right-anchored; spot/empty → omission).
+  textContent-only; substring tests pin presence not execution (honest envelope); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
+  Earlier: `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528** —
+  the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
+  COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by
+  `warm_discovery_memos` off its ONE unfiltered walk, `_MEMOS_SEEDED` 5→7; pullability tagging deliberately
+  live — the keyless `load-instruments` `master_revision` trap); `resolve_report_datasets` discovers FILTERED
+  at the source (`exclude_segments={FNO}` prunes the contract tree at walk descent + `intervals={required}`;
+  SANCTIONED: an F&O contract partition is no longer offered as a report symbol) with a NEW `datasets=`
+  pre-walked seam; the `db_view.list_candle_datasets` manifest rebuild always stamps the PRE-walk ledger token
+  (mid-walk race → the stale-stamped base still LANDS — it is `record_dataset`'s write-side convergence
+  seed, the round-6 review restore of an interim SKIP design — plus one observe-only
+  `db_view.manifest_rebuilt_stale` INFO; the load-side token gate stays the freshness authority); welcome.html + Golden Rule #5 reworded to the TRUE
+  two-tier O(1) enforcement of `tests/bench/_o1_tiers.py` (robust 3–10× shared-CI / strict 1.1× M4-Pro via
+  `BRUTEX_M4PRO_STRICT=1` / measured 3× cache-tier — words only, NO gate weakened); two NEW bench pins
+  (u128 two-limb mask + `AuditWriter.append` flat vs chain length, prefill via the COMMON
+  `tests/fakes/audit_chain.py`). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; dashboard read-side + docs +
+  bench only; touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  pre-change baseline).
+  Earlier: `claude/ecstatic-pascal-7vjsju` (**DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527** — the
+  operator's STRICT six-step pull order: every Groww pull executes INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES →
+  STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO existing execution
+  chokepoints with ONE pool/controller build each (the ONE `SessionRateController` + 500/min governor spans all steps
+  as today): (a) SPOT — always-on `ingest_common.partition_spot_steps` group loop INSIDE `pull_all_spot` (the COMMON
+  `PullStep` IntEnum, value==rank 1-6; rollup fold zero-change, proven; `WindowLedger.progress_counts(symbols=)`
+  group-scopes each until-clean — indices exit `stop_clean`, no wasted round); (b) F&O — 4-key
+  `(ledger-market, is_index)` bucket sort + STEP-major until-clean (`_contract_market` KEPT verbatim, ledger
+  namespaces byte-unchanged — no re-pull; write/read-symmetric `primary_fno_underlying` classification, unresolved →
+  stock-side + WARN + `class_unresolved`; `underlying_kinds=None` — the CLI, tests — degrades to the legacy 2-bucket
+  order byte-identically; REVIEW ROUND 1: the `/pull-historical` DIRECT-selection grammars now build + thread the
+  whole-universe kinds map, so BOTH production dashboard routes run the six-step order); metadata stays between
+  steps 2 and 3 (not a numbered step). POST-steps (Greeks → prebuild →
+  movers) fire only after ALL applicable steps SETTLE (settle-based, never `bars > 0`): cleanset default
+  byte-compatible with DEC-PREBUILD-CLEANSET-001; NEW opt-in `BRUTEX_PIPELINE_STRICT_GATE=1` literal all-or-nothing
+  barrier (fail-loud parse once at launch → clean 400; pure `step_settle_verdict` + `PriorStepsVerdict` threaded
+  sequencer → composite → `pull_contract_candles` so even the Greeks seam sees spot+metadata cleanliness — withheld
+  reads "withheld (strict gate) — re-attempted next pull", never FAILED; REVIEW ROUND 1: `spot_phase_ok` /
+  `historical_phase_ok` fold the MASS-EMPTY halt causes — a spot mass-empty halt now stops the chain like auth/quota
+  and can never read settled to the barrier — and the composite folds its phase-(a) re-run gate into the forwarded
+  verdict so Greeks/prebuild/movers agree). COMMON `pull.step.started/settled/halted`
+  events + observe-only `StepOrderMonitor` (test oracle `raise_on_violation=True`); the 2026-07-05 log-shaped
+  ordering regression + fetch-count parity bench pin "reorders, never re-fetches". HONEST: ~seconds added per pull,
+  NOT a speedup (bounded analysis, not measured); async-mode step settles are PRODUCER-side (tail writes drain
+  terminally but are INVISIBLE to the producer-fed `StepOrderMonitor` — `pull.step.late_write` observes only
+  producer-side writes, stays 0 on a healthy async pull; submit-time step stamping through `FetchPipeline` is a
+  named follow-up, NOT claimed; the settle events' `bars`/`clean` are producer-side counts, deferred
+  0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain; the
+  SPOT settle event's sync counts SUM every until-clean pass and its `clean` folds the group's terminal quarantines —
+  round-2 review, F&O-twin parity); the mass-empty breaker's trip evidence is per-STEP-GROUP pass on BOTH spines —
+  F&O per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a disclosed narrowing, #1527 R6+R9 — evidence
+  resets at the group boundary; the ~4-series INDICES-SPOT group on an incremental pull sits below every trip
+  threshold, so a vendor soft-throttle's clean empties can settle ENGINE index windows SKIPPED with no halt before
+  the stocks group's breaker trips — remediation `brutex reopen-skipped`; sharing one breaker across a phase's groups
+  deliberately NOT done, the groups run sequentially so cross-group evidence cannot protect the FIRST group;
+  thresholds/canary/bounded-settle machinery unchanged); `historical_pull.py` gains a dedicated STATIC ci.yml
+  per-module 100% gate (round-3 R10 — its suites are stem-inverted `test_pull_historical*.py`, so the discovery gate
+  warn-skips it; measured 100.00% over the curated five-file suite); on a
+  mid-pull global stop a never-started later group's symbols read honest unknown-ZEROS in the per-symbol rollup (not
+  synthesized FAILED — the ledger stays the retry authority); the CLI spot path is the NAMED follow-up
+  DEC-PULL-SIX-STEP-ORDER-CLI-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; every touched module 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/`pyright` clean).
+  Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
   carries its citation or its honest gap; import-time `validate_regime_table`); the ONE COMMON `rate_for_date`
@@ -672,8 +1094,12 @@ hostile-review pass._
   SPOTJOIN-3 2dp `round_money` spot snap (spot only, never a Greek), and `GREEKS_FORMULA_VERSION` 1→2
   (enrich golden regenerated — the diff is EXACTLY the formula bit, zero value drift). HONEST envelope:
   the v2 re-enrich reaches ONLY contracts inside a live pull window (expired contracts keep v1 stamps —
-  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up); rust/** kernel out of
-  scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
+  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up) [CLI-ENRICH RECONCILE —
+  DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536: BOTH follow-ups are now CLOSED — the CLI fetch path runs the
+  same fenced pass post-drain (default-ON, `BRUTEX_CLI_GREEKS_ENRICH` kill switch) and `brutex enrich-greeks`
+  is the bulk v1→v2 re-enrich lever; the CLI L2 heal seam is ALSO closed — DEC-CLI-LAKE-HEAL-L2-001 (#1493),
+  ordered BEFORE the CLI enrich seam];
+  rust/** kernel out of scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
   clean; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
   Prior merged: **DEC-CI-FORK-PR-HARDEN-001,
   MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
@@ -1725,7 +2151,7 @@ hostile-review pass._
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
-   #1535 — persisted finalist rows additionally carry the derived
+   #1537 — persisted finalist rows additionally carry the derived
    nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
    trade streams are the FOUR named DISCARDED/unobservable streams —
    the cascade Monte-Carlo permutation filter, `run_persisted_sweep`'s
@@ -1848,8 +2274,23 @@ hostile-review pass._
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
-   append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
-   for each hot path. Any regression fails CI.
+   append must all be O(1). The decree TARGET is
+   `p99(N=1M) / p99(N=1K) ≤ 1.1` per hot path; ENFORCEMENT is the
+   two-tier gate defined once in `tests/bench/_o1_tiers.py`
+   (DEC-O1-CLAIMS-HONESTY-001 wording reconcile — no gate value
+   changed): every O(1) bench asserts a robust/mean-based **3–10×**
+   ratio ceiling on the shared 2-core GitHub runners (DEC-P0-020 —
+   the raw 1.1× is too noisy to gate there without flaking), and the
+   decreed strict **1.1×** tier is enforced where
+   `BRUTEX_M4PRO_STRICT=1` on the dedicated self-hosted M4-Pro runner
+   (DEC-O1-STRICT-TIER-001; per `bench-m4pro.yml` that tier is DORMANT
+   until the operator registers the runner — the shared-CI tier is what
+   actually gates every push today), with a measured **3×** cache-tier
+   allowance for ratio tests whose big/small workloads cross a CPU
+   cache tier (DEC-O1-CACHE-TIER-001 — memory-tier physics, not an
+   algorithmic regression; `cache_tier_ceiling` never returns looser
+   than the shared default). Any regression past its tier's ceiling
+   fails CI.
 6. **Rate-limit safety.** Groww publishes type-level limits (the
    **"Live Data"** group — Market Quote / LTP / OHLC — is **10 r/s,
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
@@ -1992,7 +2433,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/zealous-maxwell-w257yf`
+- **Active feature branch:** `claude/intelligent-euler-dwf2ab`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -2169,7 +2610,7 @@ bruteX/
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
-| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146; the candle PULL ORDER is the strict six-step law — futures before options, indices before stocks within each: INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS, ledger namespaces byte-unchanged — DEC-PULL-SIX-STEP-ORDER-001 #1527) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |

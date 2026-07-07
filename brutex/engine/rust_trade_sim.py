@@ -96,6 +96,7 @@ from brutex.calendars.nse import (
     is_forced_exit_bar,
 )
 from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
+from brutex.engine.exit_index import bars_strictly_increasing
 
 # Intentional friend access (DEC-P0-017 per-site convention): ``_price_to_paisa``
 # is the canonical Decimal-rupees → int64-paisa seam — the SAME one
@@ -107,7 +108,7 @@ from brutex.engine.trade_sim import (
     FillPolicy,
     LevelFill,
     SameBarTie,
-    simulate_trades,
+    TradeSimWalker,
 )
 from brutex.strategies.types import Side
 
@@ -187,6 +188,26 @@ def _call_fallback_reason(
     return None
 
 
+def _monotonic(exit_indices: Sequence[int]) -> bool:
+    """Certify one mask's exit-index stream: non-negative + strictly increasing.
+
+    DEC-SWEEP-EXIT-INDEX-FASTPATH-001, the kernel-record certification: the
+    single-position walker (which the kernel mirrors bit-for-bit) closes at
+    most one trade per bar and emits trades in close order, so a well-formed
+    per-mask exit-index stream is strictly increasing and starts at ``>= 0``.
+    A stream failing this certificate signals a kernel ordering/marshalling
+    regression — the caller withholds the indices (the metrics tail then
+    serves the mask through the bit-identical timestamp-dict path) rather
+    than trusting them. ``O(trades)`` per mask, zero allocation.
+    """
+    prev = -1
+    for idx in exit_indices:
+        if idx <= prev:
+            return False
+        prev = idx
+    return True
+
+
 def _width_offender_fields(values: Sequence[int]) -> dict[str, str | int | None]:
     """Name the first value outside ``[0, U64_MASK]`` for a width-fallback WARNING.
 
@@ -246,7 +267,7 @@ class ResidentTradeSim:
         ``vix_at_entry`` / ``vix_at_exit`` (REFERENCE ONLY, never a signal
         input; a missing VIX bar stamps ``None``, never fabricated). The Rust
         kernel itself is UNTOUCHED: the stamp happens Python-side in the
-        :meth:`_to_trade` converter (an O(1) post-stamp per trade), so the
+        :meth:`_to_trade_and_exit` converter (an O(1) post-stamp per trade), so the
         kernel's trade tuples stay engine-blind and both arms stamp through
         the SAME :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp`.
         ``None`` (the default) leaves both VIX fields ``None`` — byte-identical
@@ -271,6 +292,7 @@ class ResidentTradeSim:
         "_reference_stamper",
         "_rust",
         "_tf_minutes",
+        "_ts_certified",
     )
 
     def __init__(
@@ -293,6 +315,12 @@ class ResidentTradeSim:
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
         self._reference_stamper = reference_stamper
+        # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the
+        # window's timestamps strictly increase ⇒ index↔timestamp is a
+        # bijection ⇒ a trade's TRUE exit index provably equals the metrics
+        # tail's last-wins dict lookup, so the indices may replace it. Paid
+        # ONCE here (the construction is already O(N_bars)), never per mask.
+        self._ts_certified: bool = bars_strictly_increasing(self._bars)
         # Per-(instance, reason) warn-once memo for the per-call fallback (module
         # docstring): the sweep chunks a tuple into up to thousands of
         # `simulate_masks` calls, so a per-CALL warning on a sticky reason (e.g.
@@ -416,11 +444,51 @@ class ResidentTradeSim:
     ) -> list[list[ClosedTrade]]:
         """Simulate a BATCH of masks over the resident window → per-mask trades.
 
-        ``out[j]`` is the round-trip trades for ``masks[j]`` (signal-only spot;
-        next-bar-open entry, SL/TP, 15:20 forced exit). Bit-identical to
-        ``[simulate_trades(bars, mask_to_entry_signals(bar_bits, m), ...) for m in
-        masks]`` — the Rust path and the fallback both honour the same fill policy
-        and direction. Empty ``masks`` → ``[]``.
+        Thin delegate over :meth:`simulate_masks_with_exit_indices` (ONE
+        batch spine, DEC-SWEEP-EXIT-INDEX-FASTPATH-001) that drops the
+        exit-index halves — byte-identical trades, same error contract,
+        same fallback/warn behaviour. See that method for the full contract.
+        """
+        return [
+            trades
+            for trades, _ in self.simulate_masks_with_exit_indices(
+                masks,
+                direction=direction,
+                stop_loss_paisa=stop_loss_paisa,
+                take_profit_paisa=take_profit_paisa,
+                policy=policy,
+            )
+        ]
+
+    def simulate_masks_with_exit_indices(
+        self,
+        masks: Sequence[int],
+        *,
+        direction: Side,
+        stop_loss_paisa: int | None = None,
+        take_profit_paisa: int | None = None,
+        policy: FillPolicy = DEFAULT_FILL_POLICY,
+    ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
+        """Simulate a BATCH of masks → per-mask ``(trades, exit_indices)`` pairs.
+
+        ``out[j]`` is ``(trades, exit_indices)`` for ``masks[j]`` (signal-only
+        spot; next-bar-open entry, SL/TP, 15:20 forced exit). The trades are
+        bit-identical to ``[simulate_trades(bars, mask_to_entry_signals(
+        bar_bits, m), ...) for m in masks]`` — the Rust path and the fallback
+        both honour the same fill policy and direction. Empty ``masks`` → ``[]``.
+
+        ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) is each trade's
+        exit BAR INDEX in the resident window, emitted only under a DOUBLE
+        certificate — the window's timestamps strictly increase (checked once
+        at construction) AND the mask's stream passes :func:`_monotonic` —
+        else ``None``, and the metrics tail serves that mask through the
+        bit-identical timestamp-dict path. A monotonicity failure on a
+        CERTIFIED window is a kernel ordering regression and is WARNed once
+        per instance (``rust_trade_sim.exit_indices_uncertified``); an
+        uncertified window withholds indices silently (the dict path is the
+        historical behaviour for such a malformed window, byte-unchanged).
+        The Python-fallback arm's walker indices ride the same window
+        certificate (the walker's stream is monotonic by construction).
 
         Parameters
         ----------
@@ -438,8 +506,9 @@ class ResidentTradeSim:
 
         Returns
         -------
-        list[list[ClosedTrade]]
-            One trade list per mask, positionally aligned with ``masks``.
+        list[tuple[list[ClosedTrade], list[int] | None]]
+            One ``(trades, exit_indices)`` pair per mask, positionally
+            aligned with ``masks``.
 
         Raises
         ------
@@ -484,14 +553,16 @@ class ResidentTradeSim:
                     )
                 rust = None
         if rust is None:
-            # Pure-Python fallback: the exact oracle, one mask at a time. The
-            # window's OWN stamper rides along, so a fallback-served window
-            # stamps identically to the kernel-served one (never a wheel-state
-            # divergence — DEC-VIX-STAMP-WIRE-001).
-            return [
-                simulate_trades(
-                    self._bars,
-                    mask_to_entry_signals(self._bar_bits, mask),
+            # Pure-Python fallback: the exact oracle (the SAME walker
+            # simulate_trades wraps), one mask at a time. The walker's exit
+            # indices are TRUE indices and monotonic by construction; they
+            # are emitted under the same window certificate as the kernel's.
+            # The window's OWN stamper rides into every walker, so a
+            # fallback-served window stamps identically to the kernel-served
+            # one (never a wheel-state divergence — DEC-VIX-STAMP-WIRE-001).
+            out: list[tuple[list[ClosedTrade], list[int] | None]] = []
+            for mask in masks:
+                walker = TradeSimWalker(
                     direction=direction,
                     tf_minutes=self._tf_minutes,
                     stop_loss_paisa=stop_loss_paisa,
@@ -499,8 +570,11 @@ class ResidentTradeSim:
                     policy=policy,
                     reference_stamper=self._reference_stamper,
                 )
-                for mask in masks
-            ]
+                trades, exit_indices = walker.run_with_exit_indices(
+                    self._bars, mask_to_entry_signals(self._bar_bits, mask)
+                )
+                out.append((trades, exit_indices if self._ts_certified else None))
+            return out
 
         # Rust path — map the FillPolicy to the kernel's three boolean flags.
         sl_next_open = policy.stop_loss is LevelFill.NEXT_OPEN
@@ -519,22 +593,50 @@ class ResidentTradeSim:
         # ONCE per batch call — not once per trade — and threaded into the
         # per-record converter, which post-stamps each Rust trade Python-side.
         stamper = self._reference_stamper
-        return [
-            [self._to_trade(record, direction, stamper) for record in mask_records]
-            for mask_records in raw
-        ]
+        pairs: list[tuple[list[ClosedTrade], list[int] | None]] = []
+        for mask_records in raw:
+            mask_trades: list[ClosedTrade] = []
+            mask_exit_indices: list[int] = []
+            for record in mask_records:
+                trade, exit_idx = self._to_trade_and_exit(record, direction, stamper)
+                mask_trades.append(trade)
+                mask_exit_indices.append(exit_idx)
+            if not self._ts_certified:
+                # Malformed (duplicate/reordered timestamp) window: withhold
+                # the indices — the dict path is the historical behaviour.
+                pairs.append((mask_trades, None))
+            elif not _monotonic(mask_exit_indices):
+                # A non-monotonic stream on a CERTIFIED window is a kernel
+                # ordering regression — refuse the indices LOUDLY (once per
+                # instance) and let the dict path serve the mask.
+                if "exit_indices_not_monotonic" not in self._call_fallback_warned:
+                    self._call_fallback_warned.add("exit_indices_not_monotonic")
+                    _LOG.warning(
+                        "rust_trade_sim.exit_indices_uncertified",
+                        reason="exit_indices_not_monotonic",
+                        n_trades=len(mask_trades),
+                    )
+                pairs.append((mask_trades, None))
+            else:
+                pairs.append((mask_trades, mask_exit_indices))
+        return pairs
 
-    def _to_trade(
+    def _to_trade_and_exit(
         self,
         record: tuple[int, int, int, int, int, int],
         direction: Side,
         stamper: TradeReferenceStamper | None,
-    ) -> ClosedTrade:
-        """Map one Rust trade tuple → a :class:`ClosedTrade` (idx→bar timestamps).
+    ) -> tuple[ClosedTrade, int]:
+        """Map one Rust trade tuple → ``(ClosedTrade, exit_idx)`` (idx→bar timestamps).
 
-        The POST-STAMP seam (DEC-VIX-STAMP-WIRE-001): when a *stamper* is bound
-        the trade's ``vix_at_entry`` / ``vix_at_exit`` are resolved HERE, at the
-        Python-side conversion, through the SAME
+        The exit bar index — which the kernel record already carries and the
+        pre-#1186 mapping discarded — is returned alongside the trade so the
+        metrics tail can skip its per-mask ``exit_ts``→index dict build
+        (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).
+
+        ALSO the POST-STAMP seam (DEC-VIX-STAMP-WIRE-001): when a *stamper* is
+        bound the trade's ``vix_at_entry`` / ``vix_at_exit`` are resolved HERE,
+        at the Python-side conversion, through the SAME
         :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp` the
         pure-Python walker uses — so Rust-batch trades and oracle trades stamp
         bit-identically, the kernel stays engine-blind, and a missing VIX bar
@@ -550,7 +652,7 @@ class ResidentTradeSim:
             vix_at_entry, vix_at_exit = stamper.stamp(entry_ts, exit_ts)
         else:
             vix_at_entry, vix_at_exit = None, None
-        return ClosedTrade(
+        trade = ClosedTrade(
             pnl_paisa=pnl,
             mfe_paisa=mfe,
             mae_paisa=mae,
@@ -561,3 +663,4 @@ class ResidentTradeSim:
             vix_at_entry=vix_at_entry,
             vix_at_exit=vix_at_exit,
         )
+        return trade, exit_idx

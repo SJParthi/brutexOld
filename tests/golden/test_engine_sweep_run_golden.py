@@ -302,12 +302,41 @@ def test_golden_sell_direction_wired_equals_fallback(
 
 # ────── DEC-SWEEP-RUST-METRICS-001 — Rust-metrics-tail dual-arm gates ──────
 #
-# The Phase-B flag (`BRUTEX_SWEEP_RUST_METRICS`, default OFF) swaps the
-# per-mask drawdown scan onto the fused Rust kernel. The pinned literals above
-# were generated on the pure-Python tail and stay UNCHANGED — the ON arm
-# reproducing them IS the dual-arm proof at the strongest (byte) level. The
-# default-OFF arm is every OTHER test in this file (byte-identical by
-# construction — the flag is never set there).
+# The Phase-B flag (`BRUTEX_SWEEP_RUST_METRICS`) swaps the per-mask drawdown
+# scan onto the fused Rust kernel — and since ADR-0017
+# (DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001) the DEFAULT arm IS the kernel, so
+# every no-env test in this file now runs it. The pinned literals above were
+# generated on the pure-Python tail and stay UNCHANGED — the default/ON arm
+# reproducing them IS the dual-arm proof at the strongest (byte) level; the
+# Python arm is pinned via the explicit "0" kill switch where a reference is
+# needed.
+
+
+def test_golden_default_arm_engages_the_kernel_and_reproduces_the_hash(
+    tmp_path: Path,
+) -> None:
+    """THE ADR-0017 flip gate: with NO env set, the sweep runs the Rust
+    metrics kernel (exactly one engaged event — the anti-vacuous-gate
+    signal) AND reproduces the frozen pre-kernel store hash byte-for-byte.
+    If this ever fails on the hash side, the flip must be reverted (the one
+    SWEEP_RUST_METRICS_DEFAULT constant) — parity is the flip's licence."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    import os
+
+    from brutex.engine.rust_metrics import (
+        reset_observability_memo_for_tests,
+        reset_self_check_for_tests,
+    )
+
+    assert os.environ.get("BRUTEX_SWEEP_RUST_METRICS") is None
+    reset_observability_memo_for_tests()
+    reset_self_check_for_tests()
+    with capture_logs() as logs:
+        summary = _run(tmp_path, "a")
+    engaged = [e for e in logs if e["event"] == "sweep_rust_metrics.engaged"]
+    assert len(engaged) == 1  # the DEFAULT arm genuinely served masks from Rust
+    assert not [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
 
 
 def test_golden_rust_metrics_on_arm_is_byte_identical_and_engages(
@@ -319,11 +348,16 @@ def test_golden_rust_metrics_on_arm_is_byte_identical_and_engages(
     on both arms — bit-identical results proving nothing about the kernel
     (the vacuous-gate trap, Golden Rule #10)."""
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
-    from brutex.engine.rust_metrics import reset_observability_memo_for_tests
+    from brutex.engine.rust_metrics import (
+        reset_observability_memo_for_tests,
+        reset_self_check_for_tests,
+    )
 
-    wired = _run(tmp_path, "a")  # default OFF — the reference bytes
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "0")
+    wired = _run(tmp_path, "a")  # explicit OFF — the reference bytes
     monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
     reset_observability_memo_for_tests()
+    reset_self_check_for_tests()
     with capture_logs() as logs:
         rust_arm = _run(tmp_path, "b")
     engaged = [e for e in logs if e["event"] == "sweep_rust_metrics.engaged"]
@@ -351,7 +385,10 @@ def test_golden_rust_metrics_domain_invalid_poison_is_refused_loudly(
     import math
 
     import fno_math
-    from brutex.engine.rust_metrics import reset_observability_memo_for_tests
+    from brutex.engine.rust_metrics import (
+        reset_observability_memo_for_tests,
+        reset_self_check_for_tests,
+    )
 
     monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
     monkeypatch.setattr(
@@ -360,6 +397,7 @@ def test_golden_rust_metrics_domain_invalid_poison_is_refused_loudly(
         lambda n_bars, start, exits: (0, math.nan, 0, 0.0),
     )
     reset_observability_memo_for_tests()
+    reset_self_check_for_tests()
     with capture_logs() as logs:
         summary = _run(tmp_path, "a")
     refused = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_result_refused"]
@@ -367,16 +405,22 @@ def test_golden_rust_metrics_domain_invalid_poison_is_refused_loudly(
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
 
 
-def test_golden_rust_metrics_domain_valid_poison_moves_the_hash(
+def test_golden_rust_metrics_domain_valid_poison_moves_the_hash_past_burn_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The inverted engagement teeth: a domain-VALID poisoned kernel result
-    flows into the persisted rows, so the store hash MOVES off the pinned
-    literal — proving the ON arm consumes the kernel output end-to-end (were
-    the seam secretly recomputing in Python, this test would fail)."""
+    """The inverted engagement teeth: PAST the burn-in self-check, a
+    domain-VALID poisoned kernel result flows into the persisted rows, so
+    the store hash MOVES off the pinned literal — proving the ON arm
+    consumes the kernel output end-to-end (were the seam secretly
+    recomputing in Python, this test would fail). The burn-in budget is
+    explicitly exhausted first — WITH samples pending the same poison is
+    caught + autoreverted (the sibling test below)."""
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     import fno_math
-    from brutex.engine.rust_metrics import reset_observability_memo_for_tests
+    from brutex.engine.rust_metrics import (
+        reset_observability_memo_for_tests,
+        reset_self_check_for_tests,
+    )
 
     monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
     monkeypatch.setattr(
@@ -385,5 +429,39 @@ def test_golden_rust_metrics_domain_valid_poison_moves_the_hash(
         lambda n_bars, start, exits: (77_777, 61.803, 3, 27.182),
     )
     reset_observability_memo_for_tests()
+    reset_self_check_for_tests(remaining=0)
     summary = _run(tmp_path, "a")
     assert summary.store_content_hash != _GOLDEN_CONTENT_HASH
+    reset_self_check_for_tests()  # never leak the exhausted budget to siblings
+
+
+def test_golden_rust_metrics_domain_valid_poison_in_burn_in_is_autoreverted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DURING the burn-in, the SAME domain-valid poison is caught by the
+    kernel-vs-oracle bit-compare: the sweep lands on the pinned Python-era
+    bytes (the oracle value ships — the poison never persists), one
+    kernel_autoreverted ERROR fires, and the kernel stays latched OFF
+    (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 — the default-ON safety net)."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    import fno_math
+    from brutex.engine.rust_metrics import (
+        reset_observability_memo_for_tests,
+        reset_self_check_for_tests,
+    )
+
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
+    monkeypatch.setattr(
+        fno_math,
+        "sweep_drawdown_stats",
+        lambda n_bars, start, exits: (77_777, 61.803, 3, 27.182),
+    )
+    reset_observability_memo_for_tests()
+    reset_self_check_for_tests()
+    with capture_logs() as logs:
+        summary = _run(tmp_path, "a")
+    reverted = [e for e in logs if e["event"] == "sweep_rust_metrics.kernel_autoreverted"]
+    assert len(reverted) == 1
+    assert reverted[0]["reason"] == "self_check_mismatch"
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+    reset_self_check_for_tests()  # never leak the latch to sibling tests

@@ -4,7 +4,8 @@ Per DEC-DEFINITION-OF-READY-001 (2026-06-05): every PR body must carry the 5
 plan-first sections (Scenarios covered / Failure modes / Real-run proof /
 Rollback plan / Out of scope). The guard fails closed (exit 1) when any
 section is missing. Operator override via env var bypass; bypass logged to
-scripts/ci/pre-merge-overrides.log. renovate/dependabot bots are author-exempt.
+scripts/ci/pre-merge-overrides.log. renovate/dependabot/github-actions bots are author-exempt
+(the last per DEC-BENCH-ABS-BASELINE-001 — the bless-baseline bot PR).
 
 This harness verifies the FAIL-CLOSED + OVERRIDE-AUDIT + BOT-EXEMPT contract.
 Mirrors tests/redteam/test_redteam_zplus_pr_guard.py.
@@ -179,9 +180,26 @@ class TestBotExemption:
         assert result.returncode == 1
 
     def test_arbitrary_bot_author_blocks(self) -> None:
-        """Only renovate[bot] / dependabot[bot] are allowed — not custom bots."""
+        """Only the pinned bot authors are allowed — not custom bots."""
         result = _run("Custom bot body.", pr_author="evil-bot[bot]")
         assert result.returncode == 1
+
+    def test_github_actions_bot_exempt(self, override_log_path: Path) -> None:
+        """DEC-BENCH-ABS-BASELINE-001: the bless-baseline bot PR carries no
+        human plan-first body — github-actions[bot] is author-exempt."""
+        result = _run(
+            "Bless-baseline bot PR body (measured candidate, no plan sections).",
+            pr_author="github-actions[bot]",
+            log_path=override_log_path,
+        )
+        assert result.returncode == 0
+        lines = override_log_path.read_text().splitlines()
+        assert any("EXEMPT=bot" in line and "github-actions[bot]" in line for line in lines)
+
+    def test_github_actions_lookalike_blocks(self) -> None:
+        """The exemption is EXACT — a lookalike author stays fail-closed."""
+        assert _run("Lookalike body.", pr_author="github-actions").returncode == 1
+        assert _run("Lookalike body.", pr_author="evil-github-actions[bot]").returncode == 1
 
 
 def _dor_job_block() -> str:

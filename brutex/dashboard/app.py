@@ -70,6 +70,11 @@ from brutex.dashboard.completeness import (
 )
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
+    # The ONE index/stock classification-map builder the six-step F&O order keys on
+    # (DEC-PULL-SIX-STEP-ORDER-001; CLAUDE.md §11 COMMON — the friend import is the
+    # established convention, pyproject reportPrivateUsage="warning" + per-site ignore
+    # at deliberate cross-module reuse sites — DEC-P0-017).
+    _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
 from brutex.dashboard.coverage_view import (
@@ -108,6 +113,8 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    latest_movers_minute_key,
+    preopen_datasets_key,
     warm_discovery_memos,
 )
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
@@ -124,7 +131,7 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
-from brutex.dashboard.lake_revision import lake_revision
+from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
@@ -145,6 +152,7 @@ from brutex.dashboard.movers_snapshot import (
     DEFAULT_TOP_N,
     build_snapshot_payload,
     compute_spot_candidates,
+    is_intraday_interval,
     parse_snapshot_date,
     pending_asset_payload,
 )
@@ -152,6 +160,7 @@ from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
+    latest_movers_minute,
     options_warm_grid,
     spot_warm_grid,
     warm_coordinate_label,
@@ -162,7 +171,11 @@ from brutex.dashboard.pipeline_prebuild import (
     PrebuildTarget,
     run_pipeline_prebuild_guarded,
 )
-from brutex.dashboard.pipeline_pull import run_full_pipeline
+from brutex.dashboard.pipeline_pull import (
+    PriorStepsVerdict,
+    run_full_pipeline,
+    strict_gate_enabled,
+)
 from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
 from brutex.dashboard.prebuild_parallel import resolve_prebuild_workers
 from brutex.dashboard.preopen_report import (
@@ -215,7 +228,9 @@ from brutex.dashboard.sweep_results_view import (
     MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
 )
 from brutex.dashboard.sweep_results_view import (
+    SweepScan,
     build_sweep_leaderboard,
+    load_sweep_scan,
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
@@ -1502,6 +1517,16 @@ def build_app(
     _latest_movers_date_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True
     )
+    # The DEFAULT-poll latest-MINUTE display resolver cache (DEC-MOVERS-ASOF-LATEST-DEFAULT-001):
+    # when no explicit `time` is sent AND the interval is intraday, the movers route resolves
+    # the latest available spot 1-minute (`latest_movers_minute`) for the ADDITIVE `latest_time`
+    # display echo — so the dropdown/label SHOW the real latest minute (e.g. `latest (15:29)`)
+    # while the cut stays whole-day (`cutoff_min=None`, identical latest close across every TF).
+    # An O(spot-1m-files) DuckDB MAX, so it is memoised per (write generation, latest date) —
+    # a repeat DEFAULT intraday poll on the same day is an O(1) handoff; a pull re-resolves.
+    _latest_movers_minute_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
     # The Options-tab AUTHORITATIVE expiry-calendar cache (DEC-MOVERS-CALENDAR-TIERS-001):
     # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL vendor expiry
     # calendar from `registry.duckdb` (`load_registry_expiries`), an O(expiries) DuckDB
@@ -1547,14 +1572,21 @@ def build_app(
     # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
     # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
     # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
-    # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001): the
-    # `<lake>/sweeps` discovery + per-tuple Parquet read is O(stores × rows); the
-    # ranked leaderboard for a given (instrument, tf, direction, rank_by, top_n) is a
-    # pure function of the sweep tree, so it is memoised behind the SAME write
-    # generation as the caches above (a sweep run / pull bumps `_summary_cache`'s
-    # generation → re-read; otherwise a repeat poll or a filter the operator already
-    # viewed is an O(1) handoff). REUSES the COMMON generation-stamped LRU
-    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON).
+    # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
+    # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
+    # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
+    # given (instrument, tf, direction, rank_by, top_n) is a pure function of the
+    # sweep tree, so it is memoised behind the `sweep_results_revision` CONTENT
+    # token folded into the KEY at a fixed `generation=0` (the `_nav_latency_key`
+    # precedent) — NOT the `_summary_cache` write generation, which the pull
+    # funnel's `mark_dirty` bumps per window tick and which a CLI
+    # `brutex sweep-all` (a separate process) never bumps at all. Two-level
+    # entries share this ONE instance: a `sweep_scan|rev=…` SweepScan per
+    # revision + a `sweep_leaderboard|rev=…|…` ranked payload per filter key, so
+    # a filter/rank click within one revision re-ranks the cached scan with zero
+    # store loads (see `api_sweep_leaderboard`). REUSES the COMMON LRU
+    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
+    # out old-revision keys.
     _sweep_leaderboard_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
@@ -2959,6 +2991,18 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
+        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
+        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
+        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
+        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
+        # before index options) on a real vendor pull. Build the classification map over
+        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
+        # composite uses; a selection whose underlying is somehow absent orders
+        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
+        # time (request thread), captured by the job closure below.
+        underlying_kinds = _underlying_kind_map(
+            _select_bulk_targets("index") + _select_bulk_targets("stock")
+        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -3008,6 +3052,9 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
+                    # grammars run the SAME strict steps 3-6 order as the composite.
+                    underlying_kinds=underlying_kinds,
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -3134,6 +3181,10 @@ def build_app(
         # window is recomputed inside the spot phase from the SAME strings — this
         # call is the fail-fast guard.
         try:
+            # The strict post-step gate (DEC-PULL-SIX-STEP-ORDER-001): resolved
+            # ONCE, EAGERLY, at launch — a garbage BRUTEX_PIPELINE_STRICT_GATE
+            # value is a clean 400 here, never a mid-pull 500 on the job thread.
+            strict_gate = strict_gate_enabled()
             resolve_candle_range(
                 from_date=from_date,
                 to_date=to_date,
@@ -3188,6 +3239,7 @@ def build_app(
             target_source=target_source,
             years=years,
             dry_run=dry_run,
+            strict_gate=strict_gate,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -3261,7 +3313,10 @@ def build_app(
                         on_progress=partial(_metadata_progress_sync, _pull_job),
                     )
 
-            def _run_historical() -> CompositePullReport:
+            def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
+                # DEC-PULL-SIX-STEP-ORDER-001: the sequencer's spot+metadata
+                # cleanliness verdict rides into the composite → the Greeks seam,
+                # so the strict barrier can withhold the enrichment there.
                 # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the historical F&O phase pulls
                 # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
                 # "historical" label is REFINED to futures-vs-options by the live ledger
@@ -3306,6 +3361,7 @@ def build_app(
                         scope_end=fno_scope_end,
                         on_bars=_pull_job.add_bars,
                         on_ledger_sync=_hist_ledger_sync,
+                        prior_steps=prior_steps,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3718,6 +3774,7 @@ def build_app(
                         warm_futures_movers=_warm_futures_movers,
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
+                        strict_gate=strict_gate,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -5036,6 +5093,23 @@ def build_app(
                     )
                 else:
                     date_str = parse_snapshot_date(date).isoformat()
+                # DEFAULT-poll latest-MINUTE display echo (DEC-MOVERS-ASOF-LATEST-DEFAULT-001):
+                # ONLY when no explicit `time` was sent AND the interval is intraday, resolve the
+                # latest available spot 1-minute of `date_str` for the ADDITIVE `latest_time`
+                # display field — so the dropdown/label SHOW the real latest minute while the CUT
+                # stays whole-day (`time` still threads `None` → identical latest close across
+                # every TF). Memoised per (generation, date); `None` (empty/unreadable lake) → the
+                # frontend shows a plain "latest" label and still cuts whole-day. Display-only —
+                # the ranked numbers are byte-unchanged (the cut is not touched).
+                latest_time: str | None = None
+                if time is None and is_intraday_interval(interval):
+                    latest_time = _latest_movers_minute_cache.get_or_compute(
+                        latest_movers_minute_key(date_str),
+                        generation=generation,
+                        compute=lambda: latest_movers_minute(
+                            lake_root, parse_snapshot_date(date_str)
+                        ),
+                    )
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -5117,6 +5191,7 @@ def build_app(
                         expiry_track=opt_cands.expiry_track,
                         min_volume=min_volume,
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
+                        latest_time=latest_time,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5155,6 +5230,7 @@ def build_app(
                         skipped=fut_cands.skipped,
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
+                        latest_time=latest_time,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5194,6 +5270,7 @@ def build_app(
                     min_volume=min_volume,
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
+                    latest_time=latest_time,
                 )
 
             payload = await run_in_threadpool(_resolve)
@@ -5265,15 +5342,34 @@ def build_app(
         READ-ONLY; empty when no lake.
 
         DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
-        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
-        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        (``resolve_report_datasets`` → ``list_candle_datasets``) + the
         store reads run on a threadpool worker, NEVER the event loop.
-        Forensically proven (2026-07-04 run): this route ran the walk
+        Forensically proven (2026-07-04 run — a PRE-DEC-O1-CLAIMS-HONESTY-001
+        measurement of the then-UNFILTERED full ``bars/`` tree walk, ~66k
+        dirs on a materialised options lake): this route ran that walk
         SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
         froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
         requests burst-flushed on release). The store connection is built +
         used inside the worker so its RLock stays on one thread
         (DEC-DASHBOARD-FASTREAD-001).
+
+        DEC-O1-CLAIMS-HONESTY-001: the cold-miss discovery is now STRICTLY
+        CHEAPER than that measured unfiltered walk — FNO-pruned at walk
+        DESCENT (``exclude_segments={FNO}``: the F&O contract tree, the bulk
+        of the ~66k dirs above, is never entered) + interval-bounded
+        (``intervals`` = the one partition the basis reads), and a
+        manifest-served lake pays an O(manifest-rows) read, no walk at all.
+        The discovery result (the triples ONLY) is additionally memoised in
+        the COMMON generation-keyed ``_db_datasets_cache`` (the #896 pattern,
+        key ``preopen_datasets_key(basis)`` — one memo per basis, seeded by
+        the post-pull ``warm_discovery_memos``), so a repeat open within one
+        write generation is an O(1) handoff and the pruned cold-miss walk is
+        paid at most once per generation per basis. The pullability tagging below
+        is DELIBERATELY NOT cached: it reads the instrument master, which
+        moves on a keyless ``load-instruments`` WITHOUT a generation bump
+        (the ``master_revision`` trap) — the three store SELECTs are bounded
+        + cheap and stay live. Mid-pull the adaptive floor may serve a
+        bounded-stale triple list (logged ``movers_cache.stale_served``).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
@@ -5281,10 +5377,15 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
+        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
-            """Walk the lake + tag pullability off the event loop (threadpool)."""
-            triples = resolve_report_datasets(lake, basis=report_basis)
+            """Tag pullability off the event loop; discovery is generation-memoised."""
+            triples = _db_datasets_cache.get_or_compute(
+                preopen_datasets_key(report_basis),
+                generation=gen,
+                compute=lambda: resolve_report_datasets(lake, basis=report_basis),
+            )
             # Tag each report symbol with option-pullability so /reports can badge
             # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
             # the SAME store calls + single-source predicate the /universe explorer
@@ -5622,12 +5723,15 @@ def build_app(
             """Background body: run the grid sweep; the live tick streams to the progress file."""
             return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
 
-        # On a SUCCESSFUL sweep, bump the dashboard write-generation so the next
-        # /results poll re-reads the new winners instead of serving the stale
-        # leaderboard cache (the sweep _work never reports per-bar progress, so the
-        # _on_progress mark_dirty funnel never fires for a sweep — MAJOR-1 fix,
-        # DEC-DASHBOARD-RESULTS-PAGE-001). Fires only on success, never on a failed
-        # sweep (see BackgroundPullJob._run).
+        # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
+        # _work never reports per-bar progress, so the _on_progress mark_dirty
+        # funnel never fires for a sweep — MAJOR-1, DEC-DASHBOARD-RESULTS-PAGE-001).
+        # Since DEC-LEDGER-DELTA-O-PAGE-001 this hook is REDUNDANT for /results
+        # itself (the leaderboard keys on the `sweep_results_revision` content
+        # token, which the store flush moves) — it is KEPT because every OTHER
+        # generation-keyed cache still rides `_summary_cache.generation` (zero
+        # drift). Fires only on success, never on a failed sweep (see
+        # BackgroundPullJob._run).
         started = _pull_job.start(
             _work,
             total=1,
@@ -5675,16 +5779,25 @@ def build_app(
         top
             Leaderboard depth (1..500; default 50).
 
-        **Latency (DEC-DASHBOARD-RESULTS-PAGE-001):** the ``<lake>/sweeps`` read is
-        a pure function of the sweep tree, so the projected leaderboard is memoised
-        behind the dashboard write-generation (``_summary_cache.generation``). It is
-        bumped by a pull (the write funnel's ``mark_dirty``) AND by a
-        SUCCESSFULLY-completed dashboard sweep (the ``on_success`` hook on
-        ``/api/v1/sweep/run`` — a failed sweep never bumps it), so a sweep's winners
-        appear on the next poll instead of behind a stale ``available: false``. A
-        repeat poll, or a filter the operator already viewed, is an O(1) cache hit;
-        the first read of a coordinate (or the first after a bump) still pays the
-        real ``O(stores × rows)`` scan (honest envelope, Golden Rule #10).
+        **Latency (DEC-DASHBOARD-RESULTS-PAGE-001, re-keyed by
+        DEC-LEDGER-DELTA-O-PAGE-001):** the ``<lake>/sweeps`` read is a pure
+        function of the sweep tree, so it is memoised behind the
+        ``sweep_results_revision`` CONTENT token (the sweeps directory-mtime
+        digest + the audit chain's file stat), folded into the cache KEY at a
+        fixed generation. A mid-pull window-ledger checkpoint (which bumps the
+        write generation via the ``pull_jobs`` ``mark_dirty`` funnel, per window
+        tick) no longer invalidates the leaderboard; a results-store flush from
+        the dashboard sweep OR a CLI ``brutex sweep-all`` (which never calls
+        ``mark_dirty`` — the case the old generation keying NEVER covered), a
+        store delete, and a ``SWEEP_START`` audit append ALL move the token.
+        Two-level caching: the rank-independent :class:`SweepScan` is cached
+        ONCE per revision, so a filter/rank/top_n click within one revision
+        re-pays only the rank + projection — zero store loads, zero audit
+        reads; a repeat poll of a viewed coordinate is an O(1) hit. Honest
+        envelope (Golden Rule #10): every poll pays one O(dirs)+O(1-stat)
+        revision probe; the first read per revision pays the real
+        ``O(stores × rows)`` scan; a probe outage (token ``None``) computes
+        fresh and caches NOTHING — never a stale serve, never a poisoned key.
 
         **Honest envelope (Golden Rule #10):** an empty / absent ``<lake>/sweeps``
         (no sweep run yet) returns ``available: false`` with zero rows — never a
@@ -5706,25 +5819,55 @@ def build_app(
             )
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
-        generation = _summary_cache.generation
-        # Casefold the filter axes in the cache key: build_sweep_leaderboard's
-        # _matches filters them case-insensitively, so ``NIFTY`` and ``nifty`` yield
-        # the SAME leaderboard and must share ONE cache slot (rank_by stays raw — it
-        # is matched exactly against RANKABLE_COLUMNS, not casefolded).
-        key = (
-            f"sweep_leaderboard|i={(instrument or '').casefold()}|tf={(tf or '').casefold()}"
-            f"|d={(direction or '').casefold()}|r={rank_by or ''}|n={top}"
-        )
 
         def _resolve() -> dict[str, Any]:
             """Cache-or-compute the projected leaderboard on a threadpool worker.
 
-            The ``compute=`` closure performs the real ``<lake>/sweeps`` scan ONLY on
-            a miss / post-write; a hit is an O(1) handoff (DEC-DASHBOARD-RESULTS-PAGE-001).
+            Runs OFF the event loop: the ``sweep_results_revision`` probe is
+            O(dirs)+O(1-stat) per poll, and the ``compute=`` closures perform
+            the real ``<lake>/sweeps`` scan / rank ONLY on a miss
+            (DEC-LEDGER-DELTA-O-PAGE-001).
             """
+            rev = sweep_results_revision(lake_root)
+
+            def _fresh() -> dict[str, Any]:
+                return build_sweep_leaderboard(
+                    lake_root,
+                    instrument=instrument,
+                    tf=tf,
+                    direction=direction,
+                    rank_by=rank_by,
+                    top_n=top,
+                ).to_dict()
+
+            if rev is None:
+                # No signal → no freshness decision: compute fresh, cache
+                # NOTHING (never a stale serve, never a poisoned key — Golden
+                # Rule #1; the lake_revision "None = no signal" doctrine).
+                return _fresh()
+            # Level 1: ONE rank-independent SweepScan per revision — the
+            # O(stores × rows) load + the audit era pass run once, then every
+            # filter/rank/top_n click within this revision re-ranks it.
+            scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_scan|rev={rev}",
+                generation=0,
+                compute=lambda: load_sweep_scan(lake_root),
+            )
+            # Level 2: the ranked payload per filter key. Casefold the filter
+            # axes: build_sweep_leaderboard's _matches filters them
+            # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
+            # leaderboard and must share ONE cache slot (rank_by stays raw — it
+            # is matched exactly against RANKABLE_COLUMNS, not casefolded). The
+            # revision rides in the KEY at a fixed generation=0 (the
+            # `_nav_latency_key` precedent); the LRU ages out old revisions.
+            key = (
+                f"sweep_leaderboard|rev={rev}|i={(instrument or '').casefold()}"
+                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
+                f"|r={rank_by or ''}|n={top}"
+            )
             return _sweep_leaderboard_cache.get_or_compute(
                 key,
-                generation=generation,
+                generation=0,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
                     instrument=instrument,
@@ -5732,6 +5875,7 @@ def build_app(
                     direction=direction,
                     rank_by=rank_by,
                     top_n=top,
+                    scan=scan,
                 ).to_dict(),
             )
 
