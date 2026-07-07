@@ -49,6 +49,24 @@ def _validate_price_bar(
     ValueError
         Naive timestamp, negative volume / open interest, or OHLC that is
         not ``low <= open, close <= high`` (``high >= low``).
+
+    Note
+    ----
+    Price POSITIVITY is deliberately NOT enforced here
+    (DEC-STORED-DATA-VALIDATION-001): a :class:`CandleBar` /
+    :class:`FnoGreeksBar` / :class:`OptionBar` is the general in-memory bar
+    container, and several legitimate CONSUMERS construct a non-positive-price
+    bar ON PURPOSE to feed their OWN corrupt-input classifier — the Greeks
+    engine's ``BAD_INPUT`` / ``BELOW_INTRINSIC`` stamping
+    (DEC-GREEKS-CORRECTNESS-AUDIT-001: "non-positive close → BAD_INPUT"), the
+    executor's ``require_tradeable_price`` guard, the Rust trade-sim
+    out-of-envelope fallback, and the columnar-writer round-trip. Rejecting a
+    non-positive price at CONSTRUCTION would turn every one of those downstream
+    guards into dead code. The corrupt-stored-bar defence the round-2 audit
+    demanded (L1-a) instead lives at the ENGINE READ BOUNDARY
+    (:func:`brutex.feed.replay.arrow_table_to_bars`) + the derived-TF prebuild
+    read boundary (:mod:`brutex.data.price_sanity`), the two seams that feed
+    Stage-1A / run identity — never the universal constructor.
     """
     if timestamp.tzinfo is None:
         raise ValueError(

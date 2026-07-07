@@ -57,8 +57,6 @@ wrap is one ``threading.Event.wait``, NOT per-bar.
 
 from __future__ import annotations
 
-import math
-import os
 import threading
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -67,6 +65,7 @@ import structlog
 
 from brutex.adapters.groww.constants import GROWW_WRITE_DEADLINE_S
 from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
+from brutex.config.deadline import resolve_env_seconds
 from brutex.data.errors import WriteDeadlineExceeded
 from brutex.data.partition_lock import resolve_partition_lock_timeout_seconds
 
@@ -147,24 +146,18 @@ def resolve_write_deadline_seconds(raw: str | None = None) -> float:
     DEFEAT the bound — a ``nan`` deadline makes ``done.wait(nan)`` ill-defined and an ``inf``
     deadline never expires, re-introducing the infinite block this fix removes). A bad value
     can therefore NEVER disable the bound (fail-safe to the audited default, Golden Rule #1).
-    Mirrors :func:`~brutex.data.partition_lock.resolve_partition_lock_timeout_seconds` so the
-    two pull deadlines share ONE validation shape (CLAUDE.md §11 COMMON shape). O(1).
+    Delegates to the ONE COMMON validation shape
+    :func:`~brutex.config.deadline.resolve_env_seconds` — shared byte-identically with
+    :func:`~brutex.data.partition_lock.resolve_partition_lock_timeout_seconds` and
+    :func:`~brutex.data.store_write_deadline.resolve_store_write_deadline_seconds`
+    (DEC-STORE-WRITE-DEADLINE-001; CLAUDE.md §11 COMMON). O(1).
 
     Parameters
     ----------
     raw
         The deadline value (``None`` reads :data:`WRITE_DEADLINE_ENV`); a test may pass one.
     """
-    value = os.environ.get(WRITE_DEADLINE_ENV) if raw is None else raw
-    if value is None or not value.strip():
-        return GROWW_WRITE_DEADLINE_S
-    try:
-        parsed = float(value)
-    except ValueError:
-        return GROWW_WRITE_DEADLINE_S
-    if not math.isfinite(parsed) or parsed <= 0.0:
-        return GROWW_WRITE_DEADLINE_S
-    return parsed
+    return resolve_env_seconds(WRITE_DEADLINE_ENV, GROWW_WRITE_DEADLINE_S, raw)
 
 
 def append_with_deadline(

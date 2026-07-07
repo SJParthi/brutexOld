@@ -38,6 +38,7 @@ __all__ = [
     "TradeOutcome",
     "TradeSide",
     "UnsupportedTradeOutcomeError",
+    "UnverifiedCostRegimeError",
 ]
 
 
@@ -64,6 +65,78 @@ class UnsupportedTradeOutcomeError(ValueError):
     type. NOT ``NotImplementedError`` — that is coverage-excluded and we
     require a real, tested branch.
     """
+
+
+#: The default remediation line carried by :class:`UnverifiedCostRegimeError`
+#: — a refusal is only useful if it tells the operator how to close it.
+_DEFAULT_REGIME_REMEDIATION: Final[str] = (
+    "source the superseding circular's predecessor and add ONE dated "
+    "RegimeRow(effective_date, rate_bps_x100, source) to the table with a "
+    "MIGRATION.md ledger citation — zero code change (COSTS_VERIFIED.md §20 row 1)"
+)
+
+
+class UnverifiedCostRegimeError(ValueError):
+    """Raised by ``rate_for_date`` when the regime row selected for a date is
+    an explicit UNVERIFIED refusal row (``RegimeRow.rate_bps_x100 is None``).
+
+    Per DEC-ETC-REGIME-HISTORY-001 (MIGRATION.md #1524) a statutory rate that
+    is not citation-grounded is NEVER fabricated (Golden Rule #1): the lookup
+    refuses loudly, carrying the refusal window, the identified-but-unverified
+    circulars (in ``source``), and the remediation path.
+
+    A ``ValueError`` subclass (the ``UnsupportedTradeOutcomeError`` precedent):
+    existing catch-``ValueError`` callers keep working; a caller — e.g. the
+    options executor's per-trade skip-and-count precheck — can pin this type.
+
+    Parameters
+    ----------
+    charge : str
+        Human name of the charge (e.g. ``"exchange transaction charge
+        (options premium)"``).
+    exchange : str
+        ``"NSE"`` / ``"BSE"``; may be ``""`` when the table is not
+        exchange-scoped.
+    on_date : date
+        The date whose rate was requested.
+    window_start : date
+        The refusal row's ``start`` (``date.min`` for a history-start anchor).
+    verified_from : date | None
+        The next verified row's ``start`` — the remediation horizon; ``None``
+        for an open-ended trailing refusal window.
+    source : str
+        The refusal row's citation-gap stamp (what was identified, what was
+        never retrieved).
+    remediation : str
+        How to close the window; defaults to
+        :data:`_DEFAULT_REGIME_REMEDIATION`.
+    """
+
+    def __init__(
+        self,
+        *,
+        charge: str,
+        exchange: str,
+        on_date: date,
+        window_start: date,
+        verified_from: date | None,
+        source: str,
+        remediation: str = _DEFAULT_REGIME_REMEDIATION,
+    ) -> None:
+        self.charge = charge
+        self.exchange = exchange
+        self.on_date = on_date
+        self.window_start = window_start
+        self.verified_from = verified_from
+        self.source = source
+        self.remediation = remediation
+        exchange_label = f" ({exchange})" if exchange else ""
+        window_end = verified_from.isoformat() if verified_from else "open"
+        super().__init__(
+            f"{charge}{exchange_label} is UNVERIFIED for {on_date}: window "
+            f"[{window_start} → {window_end}) — {source}. Refusing to fabricate "
+            f"a rate (Golden Rule #1). Remediation: {remediation}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────

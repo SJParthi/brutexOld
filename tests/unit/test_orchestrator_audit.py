@@ -1315,3 +1315,54 @@ class TestBufferedAuditCollector:
         is a pure widening — either impl is accepted by the shared runner)."""
         with AuditWriter.open(audit_path) as writer:
             assert isinstance(writer, AuditSink)
+
+
+# ---------------------------------------------------------------------------
+# open_ingest_audit — the ONE COMMON ingest-audit factory
+# (DEC-INGEST-AUDIT-WIRING-001, Golden Rule #8)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenIngestAudit:
+    """The COMMON ``<lake>/audit/<name>.jsonl`` factory every ingest entrypoint binds."""
+
+    def test_enabled_opens_fresh_writer_at_lake_convention_path(self, tmp_path: Path) -> None:
+        from brutex.orchestrator.audit import open_ingest_audit
+
+        with open_ingest_audit(tmp_path) as writer:
+            assert isinstance(writer, AuditWriter)
+            writer.append(action="INGEST_RUN_START", subject="pull:t", payload={"jobs": 1})
+        path = tmp_path / "audit" / "spot-ingest.jsonl"
+        assert path.exists()
+        assert verify_chain(path) == 1
+
+    def test_enabled_resumes_the_existing_chain(self, tmp_path: Path) -> None:
+        """A second open CONTINUES the chain (resume) — never restarts / overwrites."""
+        from brutex.orchestrator.audit import open_ingest_audit
+
+        with open_ingest_audit(tmp_path) as writer:
+            assert writer is not None
+            writer.append(action="INGEST_RUN_START", subject="pull:a", payload={})
+        with open_ingest_audit(tmp_path) as writer:
+            assert writer is not None
+            entry = writer.append(action="INGEST_RUN_COMPLETE", subject="pull:b", payload={})
+        assert entry.seq == 1  # continued, not restarted
+        path = tmp_path / "audit" / "spot-ingest.jsonl"
+        assert verify_chain(path) == 2
+
+    def test_name_selects_the_fno_trail(self, tmp_path: Path) -> None:
+        from brutex.orchestrator.audit import open_ingest_audit
+
+        with open_ingest_audit(tmp_path, name="fno-ingest") as writer:
+            assert writer is not None
+            writer.append(action="INGEST_RUN_START", subject="pull:f", payload={})
+        assert verify_chain(tmp_path / "audit" / "fno-ingest.jsonl") == 1
+        assert not (tmp_path / "audit" / "spot-ingest.jsonl").exists()
+
+    def test_disabled_yields_none_and_touches_nothing(self, tmp_path: Path) -> None:
+        """A dry-run / inspect pull gets the null context — no file, no directory."""
+        from brutex.orchestrator.audit import open_ingest_audit
+
+        with open_ingest_audit(tmp_path, enabled=False) as writer:
+            assert writer is None
+        assert not (tmp_path / "audit").exists()
