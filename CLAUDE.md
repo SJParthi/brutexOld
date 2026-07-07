@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1527 — the O(1)-claims honesty +
+_Last updated: 2026-07-06 (DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528 — the O(1)-claims honesty +
 preopen-discovery pack: the /reports preopen symbol discovery rides the COMMON #896 generation-keyed dataset
 cache (per-basis keys, warmed post-pull off the warm's one walk, pullability deliberately live), FNO pruned +
 interval-bounded at walk descent (sanctioned: F&O contract partitions no longer report symbols), the manifest
@@ -29,6 +29,46 @@ welcome.html + Golden Rule #5 reworded to the TRUE two-tier O(1) enforcement of
 tests/bench/_o1_tiers.py (robust 3–10× shared-CI / strict 1.1× M4-Pro via BRUTEX_M4PRO_STRICT=1 / measured 3×
 cache-tier — words only, NO gate weakened), and two new bench pins (u128 two-limb mask + orchestrator audit
 append). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527 —
+the operator's STRICT six-step pull order: every Groww pull executes
+INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES → STOCKS-FUTURES →
+INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO
+existing execution chokepoints with ONE pool/controller build each — an
+always-on `ingest_common.partition_spot_steps` group loop INSIDE
+`pull_all_spot` (the COMMON `PullStep` IntEnum, value==rank 1-6;
+`progress_counts(symbols=)` group-scoped until-clean) and a 4-key
+`(ledger-market, is_index)` F&O bucket sort with STEP-major until-clean
+(`_contract_market` KEPT verbatim — ledger namespaces byte-unchanged, no
+re-pull; unresolved underlyings order stock-side, WARNed + counted, never
+dropped); post-steps (Greeks → prebuild → movers) fire only after ALL
+applicable steps SETTLE (settle-based, never `bars > 0`) — cleanset default
+byte-compatible with DEC-PREBUILD-CLEANSET-001, NEW opt-in
+`BRUTEX_PIPELINE_STRICT_GATE=1` all-or-nothing barrier (fail-loud parse
+resolved once at launch → clean 400; pure `step_settle_verdict` +
+`PriorStepsVerdict` threaded to the Greeks seam — a withheld pass reads
+"withheld (strict gate) — re-attempted next pull", never FAILED). COMMON
+`pull.step.started/settled/halted` events + an observe-only thread-safe
+`StepOrderMonitor` (`raise_on_violation=True` is the test oracle); the
+2026-07-05 log-shaped ordering regression + a fetch-count parity bench pin
+"reorders, never re-fetches". HONEST: an ORDERING change, NOT a speedup —
+~seconds added per pull (bounded analysis, not measured); in async-pipeline
+mode a step's k→k+1 settle is PRODUCER-side (fetch-issue order strict; tail
+writes drain terminally but are INVISIBLE to the producer-fed
+`StepOrderMonitor` — `pull.step.late_write` observes only producer-side
+writes and stays 0 on a healthy async pull; submit-time step stamping
+through `FetchPipeline` is a named follow-up, NOT claimed)
+while the POST-step barrier is fully drain-guarded; the mass-empty
+breaker's trip evidence is now per-STEP-GROUP pass on BOTH spines — F&O
+per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a
+disclosed narrowing, #1527 R6+R9 — evidence resets at the group boundary;
+the ~4-series INDICES-SPOT group on an incremental pull is below every trip
+threshold, so throttle-poisoned ENGINE index windows can settle SKIPPED
+before the stocks group's breaker trips — remediation `brutex
+reopen-skipped`; thresholds/canary/bounded-settle machinery unchanged); the
+CLI `brutex fetch`
+spot path is the NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, NOT
+claimed. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+touched modules 100% line+branch).
 Earlier: 2026-07-06 (DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524 —
 the options exchange-transaction-charge (ETC) regime tables STOP charging a
 fabricated rate in the pre-2024-10-01 window: the two `(date.min, <current
@@ -528,7 +568,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1527** —
+- **Active branch:** `claude/kind-goldberg-wln56a` (**DEC-O1-CLAIMS-HONESTY-001, MIGRATION.md #1528** —
   the O(1)-claims honesty + preopen-discovery pack: the `/reports` preopen symbol discovery memoised in the
   COMMON #896 generation-keyed `_db_datasets_cache` (per-basis `preopen_datasets_key`, seeded post-pull by
   `warm_discovery_memos` off its ONE unfiltered walk, `_MEMOS_SEEDED` 5→7; pullability tagging deliberately
@@ -545,6 +585,48 @@ hostile-review pass._
   `tests/fakes/audit_chain.py`). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; dashboard read-side + docs +
   bench only; touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
+  Earlier: `claude/ecstatic-pascal-7vjsju` (**DEC-PULL-SIX-STEP-ORDER-001, MIGRATION.md #1527** — the
+  operator's STRICT six-step pull order: every Groww pull executes INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES →
+  STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS (empty groups skipped), enforced at the TWO existing execution
+  chokepoints with ONE pool/controller build each (the ONE `SessionRateController` + 500/min governor spans all steps
+  as today): (a) SPOT — always-on `ingest_common.partition_spot_steps` group loop INSIDE `pull_all_spot` (the COMMON
+  `PullStep` IntEnum, value==rank 1-6; rollup fold zero-change, proven; `WindowLedger.progress_counts(symbols=)`
+  group-scopes each until-clean — indices exit `stop_clean`, no wasted round); (b) F&O — 4-key
+  `(ledger-market, is_index)` bucket sort + STEP-major until-clean (`_contract_market` KEPT verbatim, ledger
+  namespaces byte-unchanged — no re-pull; write/read-symmetric `primary_fno_underlying` classification, unresolved →
+  stock-side + WARN + `class_unresolved`; `underlying_kinds=None` — the CLI, tests — degrades to the legacy 2-bucket
+  order byte-identically; REVIEW ROUND 1: the `/pull-historical` DIRECT-selection grammars now build + thread the
+  whole-universe kinds map, so BOTH production dashboard routes run the six-step order); metadata stays between
+  steps 2 and 3 (not a numbered step). POST-steps (Greeks → prebuild →
+  movers) fire only after ALL applicable steps SETTLE (settle-based, never `bars > 0`): cleanset default
+  byte-compatible with DEC-PREBUILD-CLEANSET-001; NEW opt-in `BRUTEX_PIPELINE_STRICT_GATE=1` literal all-or-nothing
+  barrier (fail-loud parse once at launch → clean 400; pure `step_settle_verdict` + `PriorStepsVerdict` threaded
+  sequencer → composite → `pull_contract_candles` so even the Greeks seam sees spot+metadata cleanliness — withheld
+  reads "withheld (strict gate) — re-attempted next pull", never FAILED; REVIEW ROUND 1: `spot_phase_ok` /
+  `historical_phase_ok` fold the MASS-EMPTY halt causes — a spot mass-empty halt now stops the chain like auth/quota
+  and can never read settled to the barrier — and the composite folds its phase-(a) re-run gate into the forwarded
+  verdict so Greeks/prebuild/movers agree). COMMON `pull.step.started/settled/halted`
+  events + observe-only `StepOrderMonitor` (test oracle `raise_on_violation=True`); the 2026-07-05 log-shaped
+  ordering regression + fetch-count parity bench pin "reorders, never re-fetches". HONEST: ~seconds added per pull,
+  NOT a speedup (bounded analysis, not measured); async-mode step settles are PRODUCER-side (tail writes drain
+  terminally but are INVISIBLE to the producer-fed `StepOrderMonitor` — `pull.step.late_write` observes only
+  producer-side writes, stays 0 on a healthy async pull; submit-time step stamping through `FetchPipeline` is a
+  named follow-up, NOT claimed; the settle events' `bars`/`clean` are producer-side counts, deferred
+  0s in the default async mode — disclosed on the event as `bars_deferred=true`, real totals land post-drain; the
+  SPOT settle event's sync counts SUM every until-clean pass and its `clean` folds the group's terminal quarantines —
+  round-2 review, F&O-twin parity); the mass-empty breaker's trip evidence is per-STEP-GROUP pass on BOTH spines —
+  F&O per-(market, index/stock) BUCKET, SPOT per indices/stocks group (a disclosed narrowing, #1527 R6+R9 — evidence
+  resets at the group boundary; the ~4-series INDICES-SPOT group on an incremental pull sits below every trip
+  threshold, so a vendor soft-throttle's clean empties can settle ENGINE index windows SKIPPED with no halt before
+  the stocks group's breaker trips — remediation `brutex reopen-skipped`; sharing one breaker across a phase's groups
+  deliberately NOT done, the groups run sequentially so cross-group evidence cannot protect the FIRST group;
+  thresholds/canary/bounded-settle machinery unchanged); `historical_pull.py` gains a dedicated STATIC ci.yml
+  per-module 100% gate (round-3 R10 — its suites are stem-inverted `test_pull_historical*.py`, so the discovery gate
+  warn-skips it; measured 100.00% over the curated five-file suite); on a
+  mid-pull global stop a never-started later group's symbols read honest unknown-ZEROS in the per-symbol rollup (not
+  synthesized FAILED — the ledger stays the retry authority); the CLI spot path is the NAMED follow-up
+  DEC-PULL-SIX-STEP-ORDER-CLI-001. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; every touched module 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/`pyright` clean).
   Earlier: `claude/relaxed-noether-7k30p2` (**DEC-ETC-REGIME-HISTORY-001, MIGRATION.md #1524** — the
   pre-2024-10-01 options ETC fix: the two `(date.min, <current rate>)` UNVERIFIED placeholder rows are replaced by
   explicit rate-less REFUSAL rows on the NEW `RegimeRow` model (frozen slots; `rate_bps_x100: int | None`; every row
@@ -2195,7 +2277,7 @@ bruteX/
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
 | Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
-| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
+| Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146; the candle PULL ORDER is the strict six-step law — futures before options, indices before stocks within each: INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS, ledger namespaces byte-unchanged — DEC-PULL-SIX-STEP-ORDER-001 #1527) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
 | Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
