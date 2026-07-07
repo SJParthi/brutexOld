@@ -112,7 +112,7 @@ takes a partition lock while holding a shard lock. Readers take NO lock
 Kill switch: env :data:`STATS_MANIFEST_ENV` = ``off`` ⇒ every writer hook AND
 every reader consult no-ops ⇒ byte-identical legacy SCAN behaviour — modulo
 the pagers' sanctioned deterministic ORDER BY tie-order pin, which applies
-unconditionally (MIGRATION.md #1542: an options CE/PE same-minute tie renders
+unconditionally (MIGRATION.md #1543: an options CE/PE same-minute tie renders
 in ONE pinned order either way; the pre-manifest tie order was engine-plan
 whim, the row SET is identical). Default ON.
 
@@ -355,7 +355,7 @@ def stats_manifest_enabled() -> bool:
     Disabled means every writer hook AND every reader consult no-ops, so the
     pagers run the byte-identical legacy SCAN — modulo the sanctioned
     deterministic ORDER BY tie-order pin, which applies unconditionally
-    (MIGRATION.md #1542: an options CE/PE same-minute tie renders in ONE
+    (MIGRATION.md #1543: an options CE/PE same-minute tie renders in ONE
     pinned order with the switch on OR off; the pre-manifest tie order was
     engine-plan whim, the row SET is identical).
     """

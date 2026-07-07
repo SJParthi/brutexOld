@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1542 —
+_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1543 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -864,7 +864,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1542** — the
+- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1543** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
   O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
@@ -925,7 +925,7 @@ hostile-review pass._
   landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
   48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
   capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
-  overclaim softened; the #1542 GATES counts refreshed.
+  overclaim softened; the #1543 GATES counts refreshed.
   ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
   closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
   (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`

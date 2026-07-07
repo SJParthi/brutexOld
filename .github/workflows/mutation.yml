@@ -213,7 +213,7 @@ jobs:
           #    data/lake_stats_manifest.py (the /db paging stats manifest —
           #    a silent mutant here wrong-pages or wrong-totals the viewer)
           #    joined per DEC-LAKE-STATS-MANIFEST-001 review round 8: the
-          #    round-8 refuter caught MIGRATION #1542 claiming the module
+          #    round-8 refuter caught MIGRATION #1543 claiming the module
           #    "rides the weekly Mutation workflow" while NO --paths-to-mutate
           #    named it (an unwired gate presented as a deferred one, Golden
           #    Rule #10). Wired + EXECUTED in-session (mutmut 2.5.1,
