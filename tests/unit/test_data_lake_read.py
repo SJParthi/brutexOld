@@ -28,6 +28,8 @@ from brutex.data.lake_read import (
     bars_by_ts_first,
     dedup_bars,
     dedup_bars_frame,
+    dedup_latest_source_sql,
+    dedup_qualify_latest_sql,
     dedup_qualify_sql,
     distinct_count_sql,
     log_read_duplicates,
@@ -311,3 +313,114 @@ class TestSqlFragments:
             [glob],
         ).fetchone()
         assert total is not None and int(total[0]) == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# keep-LAST twins — dedup_qualify_latest_sql / dedup_latest_source_sql
+# (DEC-LEDGER-DELTA-O-PAGE-001: the WAL fold for the window-ledger deltas)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLatestWinsSqlFragments:
+    def test_qualify_latest_fragment_shape(self) -> None:
+        assert dedup_qualify_latest_sql(("market", "security_id")) == (
+            ' QUALIFY row_number() OVER (PARTITION BY "market", "security_id" '
+            "ORDER BY (filename = ?) ASC, filename DESC, file_row_number DESC) = 1"
+        )
+
+    def test_source_composition_reuses_the_common_fragments(self) -> None:
+        source = dedup_latest_source_sql(("k",))
+        assert source == (
+            f"(SELECT {DEDUP_STAR_SELECT_SQL} FROM {DEDUP_PARQUET_SOURCE_SQL}"  # noqa: S608 — expected-text fixture, never executed as a query here
+            f"{dedup_qualify_latest_sql(('k',))})"
+        )
+
+    def test_empty_keys_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            dedup_qualify_latest_sql(())
+        with pytest.raises(ValueError, match="non-empty"):
+            dedup_latest_source_sql(())
+
+    def test_non_identifier_key_rejected(self) -> None:
+        with pytest.raises(ValueError, match="not a bare SQL identifier"):
+            dedup_qualify_latest_sql(('k"; DROP TABLE x; --',))
+        with pytest.raises(ValueError, match="not a bare SQL identifier"):
+            dedup_latest_source_sql(("a b",))
+
+    @staticmethod
+    def _write(directory: object, name: str, keys: list[str], values: list[int]) -> str:
+        import pathlib
+
+        path = pathlib.Path(str(directory)) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"k": keys, "v": values}).write_parquet(path)
+        return path.as_posix()
+
+    def test_latest_wins_on_the_pinned_duckdb_base_must_lose(self, tmp_path: object) -> None:
+        """The forever-pin for the bound-equality ordering: DuckDB must echo the
+        bound path VERBATIM in ``filename`` so the base ranks LAST. The fixture is
+        built so BOTH traps are armed: the lake path contains a ``deltas`` segment
+        AND the base filename lexicographically outsorts the delta paths ('l' > 'd')
+        — a future DuckDB upgrade that normalizes paths fails this loudly.
+        """
+        import duckdb
+
+        base = self._write(tmp_path, "deltas/ledger.parquet", ["A", "B"], [1, 2])
+        d1 = self._write(tmp_path, "deltas/deltas/00000000000000000001-1.parquet", ["A"], [10])
+        d2 = self._write(
+            tmp_path, "deltas/deltas/00000000000000000002-1.parquet", ["A", "C"], [20, 30]
+        )
+        assert base > d1  # the lexicography trap is REAL in this fixture
+        conn = duckdb.connect()
+        rows = conn.execute(
+            f"SELECT k, v FROM {dedup_latest_source_sql(('k',))} ORDER BY k",  # noqa: S608
+            [[base, d1, d2], base],
+        ).fetchall()
+        # A: newest delta (d2) beats d1 beats the base; B: base-only; C: delta-only.
+        assert rows == [("A", 20), ("B", 2), ("C", 30)]
+
+    def test_latest_wins_base_less_marker_matches_nothing(self, tmp_path: object) -> None:
+        """A base-less delta set binds the (absent) base path anyway — it matches
+        nothing and the deltas order among themselves (ONE code path)."""
+        import pathlib
+
+        import duckdb
+
+        d1 = self._write(tmp_path, "deltas/00000000000000000001-1.parquet", ["A"], [10])
+        d2 = self._write(tmp_path, "deltas/00000000000000000002-1.parquet", ["A"], [20])
+        absent_base = (pathlib.Path(str(tmp_path)) / "ledger.parquet").as_posix()
+        conn = duckdb.connect()
+        rows = conn.execute(
+            f"SELECT k, v FROM {dedup_latest_source_sql(('k',))} ORDER BY k",  # noqa: S608
+            [[d1, d2], absent_base],
+        ).fetchall()
+        assert rows == [("A", 20)]
+
+    def test_exclude_keeps_the_outer_schema_identical(self, tmp_path: object) -> None:
+        """``SELECT *`` over the fold subquery carries NO synthetic columns —
+        byte-identical schema to a plain ``read_parquet`` read."""
+        import duckdb
+
+        base = self._write(tmp_path, "ledger.parquet", ["A"], [1])
+        cursor = duckdb.connect().execute(
+            f"SELECT * FROM {dedup_latest_source_sql(('k',))}",  # noqa: S608
+            [[base], base],
+        )
+        assert [d[0] for d in cursor.description or []] == ["k", "v"]
+
+    def test_within_file_dup_last_written_row_wins(self, tmp_path: object) -> None:
+        """The ``file_row_number DESC`` determinism belt: keys are unique within a
+        ledger file by construction, but a malformed within-file dup resolves to
+        the LAST written row, deterministically."""
+        import duckdb
+
+        base = self._write(tmp_path, "ledger.parquet", ["A", "A"], [1, 2])
+        rows = (
+            duckdb.connect()
+            .execute(
+                f"SELECT k, v FROM {dedup_latest_source_sql(('k',))}",  # noqa: S608
+                [[base], base],
+            )
+            .fetchall()
+        )
+        assert rows == [("A", 2)]
