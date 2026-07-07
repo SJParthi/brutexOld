@@ -254,6 +254,20 @@ class TestMonthGrammar:
     def test_month_bounds_junk_is_none(self) -> None:
         assert lsm.rel_month_bounds(lsm.KIND_BARS, "junk.parquet") is None
 
+    def test_month_bounds_year_9999_december_fails_closed(self) -> None:
+        """A year-9999 December rel's next-month bound is year 10000 —
+        unrepresentable by ``datetime`` — and previously RAISED ``ValueError:
+        year 10000 is out of range`` straight out of the read path's clause-4
+        loop (review round 3). Fail-closed ``None`` instead: the caller treats
+        the row invalid (only a CRAFTED shard names such a rel)."""
+        assert lsm.rel_month_bounds(lsm.KIND_BARS, "9999/12.parquet") is None
+        assert lsm.rel_month_bounds(lsm.KIND_OPTIONS, "9999-12.parquet") is None
+
+    def test_month_bounds_year_9999_november_still_representable(self) -> None:
+        """Only the December→year-10000 rollover is unrepresentable."""
+        bounds = lsm.rel_month_bounds(lsm.KIND_BARS, "9999/11.parquet")
+        assert bounds == (datetime(9999, 11, 1, tzinfo=UTC), datetime(9999, 12, 1, tzinfo=UTC))
+
     def test_pinned_against_partition_builder(self, tmp_path: Path) -> None:
         """The local bars grammar accepts exactly ``build_partition_path``'s tail."""
         from brutex.data.partition import BAR_DIR_NAME, build_partition_path
@@ -417,6 +431,21 @@ class TestRowValidation:
     def test_require_ts_rejects_non_timestamp(self) -> None:
         with pytest.raises(ValueError, match="must be a timestamp"):
             lsm._require_ts(42, field="x")
+
+    def test_require_ts_extreme_offset_overflow_is_value_error(self) -> None:
+        """An extreme-but-parseable offset timestamp overflows ``astimezone(UTC)``
+        with ``OverflowError`` — neither a ``ValueError`` nor an ``OSError``, so
+        it previously ESCAPED both the clause-1 parser and the hooks'
+        best-effort envelope (review round 3: raised into the pull / 500'd a
+        /db read). It must map to the module's fail-closed ``ValueError`` at
+        its source — for the string form AND the aware-datetime form."""
+        with pytest.raises(ValueError, match="out of datetime range"):
+            lsm._require_ts("0001-01-01T00:00:00+05:30", field="min_ts")
+        with pytest.raises(ValueError, match="out of datetime range"):
+            lsm._require_ts(
+                datetime(9999, 12, 31, 23, 0, tzinfo=timezone(timedelta(hours=-5))),
+                field="max_ts",
+            )
 
     def test_normalized_row_rejects_empty_rel(self) -> None:
         row = lsm.StatsFileRow(
@@ -681,6 +710,57 @@ class TestStructuralClauses:
         with capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["parse"]
+
+    def test_huge_int_shard_is_parse_clause_not_a_crash(self, tmp_path: Path) -> None:
+        """CPython's >4300-digit int-conversion limit raises a PLAIN
+        ``ValueError`` out of ``json.loads`` — NOT a ``JSONDecodeError`` — so
+        it previously escaped the old ``(JSONDecodeError, RecursionError)``
+        catch and turned every /db paging click on the dataset into a 400
+        with NO fallback and NO reseed (review round 3). Fail closed to the
+        ``parse`` clause like every other arbitrary-shard-bytes input."""
+        shard = _seed_bars(tmp_path)
+        shard.write_text("9" * 5000, encoding="utf-8")
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is None and clause == "parse"
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["parse"]
+
+    def test_invalid_utf8_shard_is_parse_clause_not_a_crash(self, tmp_path: Path) -> None:
+        """Invalid-UTF-8 shard bytes raise ``UnicodeDecodeError`` from
+        ``read_text`` — a ``ValueError`` subclass, NOT an ``OSError`` — so it
+        previously slipped past BOTH read handlers and escaped raw (review
+        round 3). Same fail-closed ``parse`` clause."""
+        shard = _seed_bars(tmp_path)
+        shard.write_bytes(b"\xff\xfe{}")
+        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is None and clause == "parse"
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["parse"]
+
+    def test_overflow_timestamp_row_is_row_malformed_not_a_crash(self, tmp_path: Path) -> None:
+        """The ``astimezone(UTC)`` ``OverflowError`` on a row timestamp
+        (e.g. ``0001-01-01T00:00:00+05:30``) previously escaped the parser
+        as a raw raise — the round-1 RecursionError CLASS, not just the name
+        (review round 3); it must read as a malformed row."""
+        _seed_bars(tmp_path)
+
+        def _mutate(obj: dict[str, Any]) -> None:
+            obj["files"][0]["min_ts"] = "0001-01-01T00:00:00+05:30"
+
+        assert self._clause(tmp_path, _mutate) == "row_malformed"
+
+    def test_overflow_timestamp_aggregate_is_aggregate_bounds_not_a_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """The same overflow on the AGGREGATE bound maps to ``aggregate_bounds``."""
+        _seed_bars(tmp_path)
+
+        def _mutate(obj: dict[str, Any]) -> None:
+            obj["min_ts"] = "9999-12-31T23:00:00-05:00"
+
+        assert self._clause(tmp_path, _mutate) == "aggregate_bounds"
 
     def test_old_version(self, tmp_path: Path) -> None:
         _seed_bars(tmp_path)
@@ -1034,6 +1114,25 @@ class TestLoadValidDatasetStats:
             )
         assert _fallback_clauses(logs) == ["month_bounds"]
 
+    def test_year_9999_december_rel_falls_back_month_bounds(self, tmp_path: Path) -> None:
+        """A CRAFTED year-9999 December rel with a matching on-disk file passes
+        clauses 1–3, then clause 4's ``rel_month_bounds`` previously RAISED
+        ``ValueError: year 10000 is out of range`` straight out of
+        ``load_valid_dataset_stats`` — a /db 400 with NO fallback (review
+        round 3). It must fail closed to the ``month_bounds`` clause."""
+        self._options_shard_with(
+            tmp_path,
+            rel="9999-12.parquet",
+            min_ts="9999-12-01T00:00:00+00:00",
+            max_ts="9999-12-02T00:00:00+00:00",
+        )
+        with capture_logs() as logs:
+            assert (
+                lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_OPTIONS, key=OPTIONS_KEY)
+                is None
+            )
+        assert _fallback_clauses(logs) == ["month_bounds"]
+
     def test_options_happy_path(self, tmp_path: Path) -> None:
         self._options_shard_with(
             tmp_path,
@@ -1214,6 +1313,46 @@ class TestRecordPartitionStats:
             assert self._record(tmp_path, dest) is False
         assert not shard.exists()
         assert any(e["event"] == "lake.stats_manifest.corrupt_unlinked" for e in logs)
+
+    def test_overflow_shard_timestamp_unlinked_never_raises_into_the_pull(
+        self, tmp_path: Path
+    ) -> None:
+        """The OverflowError shard class inside the WRITER hook: an
+        extreme-but-parseable stamped timestamp previously raised RAW into
+        ``ParquetWriter.write`` and hence the production pull — and, being no
+        ``BruteXError``, would have tripped the whole async fetch pool (review
+        round 3). It must take the corrupt-shard unlink path instead."""
+        shard = _seed_bars(tmp_path)
+
+        def _mutate(obj: dict[str, Any]) -> None:
+            obj["files"][0]["min_ts"] = "0001-01-01T00:00:00+05:30"
+
+        _mutate_shard(shard, _mutate)
+        dest = self._dest(tmp_path)
+        with capture_logs() as logs:
+            assert self._record(tmp_path, dest) is False
+        assert not shard.exists()
+        assert any(e["event"] == "lake.stats_manifest.corrupt_unlinked" for e in logs)
+
+    def test_future_overflow_error_degrades_best_effort(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defence-in-depth: ``OverflowError`` is in ``_BEST_EFFORT_ERRORS``,
+        so a future datetime-arithmetic overflow ANYWHERE inside the locked
+        section degrades (log + unlink + ``False``) — never into the pull."""
+        assert OverflowError in lsm._BEST_EFFORT_ERRORS
+        shard = _seed_bars(tmp_path)
+        dest = self._dest(tmp_path)
+        monkeypatch.setattr(
+            lsm,
+            "partition_write_lock",
+            lambda *a, **k: _raising_lock(OverflowError("future datetime overflow")),
+        )
+        with capture_logs() as logs:
+            assert self._record(tmp_path, dest) is False
+        assert not shard.exists()
+        failed = [e for e in logs if e["event"] == "lake.stats_manifest.record_failed"]
+        assert failed and failed[0]["error_type"] == "OverflowError"
 
     def test_old_version_shard_unlinked(self, tmp_path: Path) -> None:
         shard = _seed_bars(tmp_path)

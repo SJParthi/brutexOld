@@ -77,8 +77,9 @@ Write side (best-effort · incremental · lazily accreted)
 Every writer hook (:func:`record_partition_stats` /
 :func:`remove_partition_stats` / :func:`remove_dataset_stats`) is BEST-EFFORT
 — it logs, best-effort unlinks the shard, and returns; it NEVER raises into
-the pull (the caught set is exactly ``(OSError, PartitionLockTimeout,
-ValueError)``; a :class:`~brutex.data.errors.LakeWriteHalt` raised by
+the pull (the caught set is exactly ``(OSError, OverflowError,
+PartitionLockTimeout, ValueError)``; a
+:class:`~brutex.data.errors.LakeWriteHalt` raised by
 ``partition_write_lock``'s ``.locks/`` creation on a genuinely full disk is
 deliberately NOT swallowed). Each upsert is INCREMENTAL: ONE file-row upsert +
 an in-memory aggregate refold — never a dataset rescan.
@@ -127,7 +128,7 @@ import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import MAXYEAR, UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -218,11 +219,17 @@ _OPTIONS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})-(\d{2})\.parque
 
 #: The write-side best-effort catch set: a shard failure logs + unlinks +
 #: returns, NEVER raising into the pull. ``json.JSONDecodeError`` is a
-#: ``ValueError`` subclass. :class:`~brutex.data.errors.LakeWriteHalt` is
-#: deliberately ABSENT — a genuinely full disk at ``.locks/`` creation must
-#: still halt the pull (the ``partition_write_lock`` contract).
+#: ``ValueError`` subclass. ``OverflowError`` is defence-in-depth for the
+#: arbitrary-shard-bytes class (review round 3): every KNOWN member is already
+#: mapped to ``ValueError`` at its source (:func:`_require_ts` wraps the
+#: ``astimezone`` overflow; the clause-1 parser fails closed), but a future
+#: datetime-arithmetic overflow must degrade best-effort, never raise into the
+#: pull. :class:`~brutex.data.errors.LakeWriteHalt` is deliberately ABSENT — a
+#: genuinely full disk at ``.locks/`` creation must still halt the pull (the
+#: ``partition_write_lock`` contract).
 _BEST_EFFORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
     OSError,
+    OverflowError,
     PartitionLockTimeout,
     ValueError,
 )
@@ -501,6 +508,13 @@ def rel_month_bounds(kind: str, rel: str) -> tuple[datetime, datetime] | None:
     if parsed is None:
         return None
     year, month = parsed
+    if year == MAXYEAR and month == _MONTHS_PER_YEAR:
+        # The half-open window's next-month bound would be year 10000 —
+        # unrepresentable by ``datetime`` (``ValueError: year 10000 is out of
+        # range``), which previously escaped the read path's clause-4 loop as
+        # a raw raise (review round 3). Only a CRAFTED shard rel reaches this
+        # (the real writers never stamp year-9999 partitions) — fail closed.
+        return None
     start = datetime(year, month, 1, tzinfo=UTC)
     if month == _MONTHS_PER_YEAR:
         nxt = datetime(year + 1, 1, 1, tzinfo=UTC)
@@ -587,7 +601,18 @@ def _require_ts(value: object, *, field: str) -> datetime:
         raise ValueError(f"{field} must be a timestamp, got {value!r}")
     if parsed.tzinfo is None:
         raise ValueError(f"{field} must be timezone-aware, got naive {value!r}")
-    return parsed.astimezone(UTC)
+    try:
+        return parsed.astimezone(UTC)
+    except OverflowError as exc:
+        # An extreme-but-parseable offset timestamp (e.g. a crafted shard's
+        # "0001-01-01T00:00:00+05:30") passes ``fromisoformat`` but overflows
+        # datetime's representable range during UTC normalization.
+        # ``OverflowError`` is neither a ``ValueError`` nor an ``OSError``, so
+        # unmapped it escaped BOTH the clause-1 parser and the hooks'
+        # best-effort envelope — raising into the pull and 500ing a ``/db``
+        # read (review round 3, the round-1 RecursionError CLASS, not just the
+        # name). Map it to the module's fail-closed ``ValueError``.
+        raise ValueError(f"{field} timestamp out of datetime range: {value!r}") from exc
 
 
 def _normalized_row(row: StatsFileRow) -> StatsFileRow:
@@ -759,18 +784,26 @@ def _load_shard_with_clause(
         text = shard_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None, "absent"
+    except UnicodeDecodeError:
+        # Invalid-UTF-8 shard bytes raise out of the DECODE — a ``ValueError``
+        # subclass, NOT an ``OSError``, so it slipped past the two handlers
+        # below and escaped the read path as a raw raise (review round 3):
+        # arbitrary shard bytes, the ``parse`` fail-closed clause.
+        return None, "parse"
     except OSError:
         return None, "shard_read"
     try:
         obj = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
-        # RecursionError: a shard replaced out-of-band with deeply-nested JSON
-        # (e.g. 100k nested arrays) blows the C scanner's recursion limit —
-        # a RuntimeError subclass, OUTSIDE both this handler's old
-        # ``JSONDecodeError`` and the hooks' ``_BEST_EFFORT_ERRORS``
-        # ``ValueError`` net, so without this it would raise into the pull /
-        # 500 the read route. The clause-1 parser exists precisely to fail
-        # CLOSED on arbitrary shard bytes; this input class is no different.
+    except (ValueError, RecursionError):
+        # ValueError covers ``json.JSONDecodeError`` (its subclass) AND the
+        # plain-``ValueError`` escapes a bare JSONDecodeError catch missed —
+        # e.g. CPython's >4300-digit int-conversion limit raises a plain
+        # ``ValueError`` from ``json.loads`` (review round 3). RecursionError:
+        # a shard replaced out-of-band with deeply-nested JSON (e.g. 100k
+        # nested arrays) blows the C scanner's recursion limit — a
+        # RuntimeError subclass, OUTSIDE every other net here (review
+        # round 1). The clause-1 parser exists precisely to fail CLOSED on
+        # arbitrary shard bytes; both input classes are no different.
         return None, "parse"
     if not isinstance(obj, dict):
         return None, "parse"
@@ -1066,7 +1099,8 @@ def record_partition_stats(
     (corrupt / old-version ⇒ unlink, NEVER merge into garbage), upsert the one
     row keyed by ``rel``, refold the aggregates in memory, and atomically
     rewrite. Any best-effort failure (``OSError`` / lock timeout /
-    ``ValueError``) logs ``lake.stats_manifest.record_failed``, unlinks the
+    ``ValueError`` / ``OverflowError``) logs
+    ``lake.stats_manifest.record_failed``, unlinks the
     shard (the reader falls back + reseeds), and returns ``False`` — it NEVER
     raises into the pull. A
     :class:`~brutex.data.errors.LakeWriteHalt` from the ``.locks/`` creation

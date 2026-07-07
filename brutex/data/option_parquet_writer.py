@@ -221,7 +221,13 @@ class OptionParquetWriter:
     def _merge_partition(
         self, dest: Path, coordinate: OptionSeriesCoordinate, new_bars: list[OptionBar]
     ) -> int:
-        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows.
+        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new DISTINCT keys.
+
+        The return is the count of genuinely NEW ``(side, timestamp)`` keys —
+        post-``unique`` distinct minus the EXISTING file's distinct count,
+        never a physical-row delta (review round 3: the physical baseline
+        under-counted on a physically-duplicated partition and silently
+        dropped new bars). ``added == 0`` (pure re-pull) writes nothing.
 
         The existence-check → read → union → atomic-rename below is a
         read-modify-write, so it runs under this partition's shared lock
@@ -264,11 +270,22 @@ class OptionParquetWriter:
                     existing = pl.read_parquet(dest)
                 except parquet_read_skip_errors() as exc:
                     raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
-                # int() coercion keeps the return concretely int even in the CI
+                # ``before`` counts DISTINCT ``(side, timestamp)`` keys — NEVER
+                # the physical height: on a pre-uniqueness-era poisoned
+                # partition (physical duplicate keys) the physical count
+                # exceeds the distinct count, so the old
+                # ``combined.height - physical_before`` went non-positive even
+                # when genuinely NEW keys arrived and the merge silently
+                # SKIPPED the write — dropping the new bars for that pull
+                # (review round 3; a clean partition has physical == distinct,
+                # byte-identical). When new keys DO arrive on a poisoned file,
+                # the rewrite keep-first-collapses the physical dups exactly as
+                # ``heal_partition`` would (same ``unique`` key + keep rule).
+                # int() coercion keeps the value concretely int even in the CI
                 # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
-                # — there `.height` is Any (ignore_missing_imports) and an un-coerced
-                # return would trip mypy --strict's no-any-return.
-                before = int(existing.height)
+                # — there the polars return is Any (ignore_missing_imports) and an
+                # un-coerced value would trip mypy --strict's no-any-return.
+                before = int(existing.n_unique(subset=["side", "timestamp"]))
                 combined = (
                     pl.concat([existing, new_df])
                     .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
