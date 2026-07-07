@@ -164,6 +164,21 @@ option-tree log events' `partition=` field embedded the raw
 attacker-influenceable series dir name unescaped — now repr()'d (#907
 log-injection guard; the HealAction/audit copies stay raw JSON-encoded
 machine surfaces; bars partition fields stay catalogued relpaths).
+ROUND 8 (refuter-confirmed MINOR + NITs): the round-7 repr() guard covered
+the option FINDING events but NOT the sibling skip events carrying the
+SAME vendor-influenceable series name — the five option-tree
+`symlink_skipped`/`scan_skip` sites (series dir, partition file, the two
+targeted canonical-sibling reads) now log `path=repr(str(…))`, and the
+option writer's `lake.partition.dedup_healed` `partition=` joins the
+convention (superseding round-7's deliberate raw-`str(dest)` exclusion
+for the OPTION writer ONLY — its dest embeds the series dir; the BARS
+writer's twin emission, the `<lake>/options` ROOT skip and the bars-tree
+skips stay raw: catalogued/operator-controlled paths, raw shape pinned).
+NIT: the census OPTIONS row now folds by finding TYPE, never the
+"OPTIONS" label — a rogue bars finding whose `coords.segment` read
+"OPTIONS" (`PartitionCoords` is unvalidated; census input is any report)
+previously merged into the row and drove `clean` NEGATIVE; all 4 new
+regressions verified failing pre-fix.
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -660,10 +675,27 @@ hostile-review pass._
   `series=` field already rode `repr()` — the LOG `partition` fields now ride `repr()` too (all four
   test-pinned); the `HealAction.partition` / audit-subject copies deliberately stay RAW (JSON-encoded machine
   surfaces, byte-pinned) and the bars `partition` fields stay raw (catalogued `PartitionCoords.relpath()`
-  coordinates, not vendor-derived dir names; the shared `lake.partition.dedup_healed` writer event keeps its
-  bars-twin `str(dest)` shape). Remaining
+  coordinates, not vendor-derived dir names; the round-7 "the shared `lake.partition.dedup_healed` writer event
+  keeps its bars-twin `str(dest)` shape" exclusion is SUPERSEDED by round 8 for the OPTION writer's emission only).
+  ROUND 8 (refuter-confirmed MINOR + NITs; all 4 regressions verified failing pre-fix): (R8-1·MINOR, log-injection
+  completeness) round 7 guarded the option FINDING events but left the SIBLING skip events embedding the SAME
+  vendor-influenceable series dir name un-repr'd — the five option-tree `lake.invariant.symlink_skipped` /
+  `lake.invariant.scan_skip` sites (series dir · partition file · the targeted canonical-sibling read, symlink AND
+  unreadable arms) now log `path=repr(str(…))`, and the option writer's `lake.partition.dedup_healed` `partition=`
+  joins the convention (`repr(str(dest))` — its dest embeds the series dir, `_safe_segment` strips no control
+  chars; event name + field names unchanged). Deliberately still RAW + pinned: the `<lake_root>/options` ROOT skip
+  (operator-configured root + fixed literal, no vendor component), the BARS writer's `dedup_healed` twin
+  (catalogued-coordinate dest) and the bars-tree skips (validated `parse_partition_path` coordinates). En-route
+  honesty note: a `[`-carrying series name makes `pl.read_parquet` raise "invalid glob pattern" (polars treats the
+  path as a glob) — already gracefully scan-skipped, now repr()-rendered. (R8-2·NIT, census cross-contamination)
+  `build_lake_census` keyed the option findings into the SHARED per-segment dicts under the `"OPTIONS"` sentinel
+  label, so a BARS finding whose `coords.segment` read `"OPTIONS"` (`PartitionCoords` is unvalidated; census input
+  is ANY `LakeScanReport`, even though `parse_partition_path` rejects that segment at today's scan boundary) merged
+  into the OPTIONS row — inflating dup/foreign/overlap and driving `clean` NEGATIVE (1 − 3 = −2 pre-fix); the
+  OPTIONS accumulators are now TYPE-keyed (`isinstance`, dedicated sets), a rogue-segment bars finding lands in NO
+  segment row while staying counted in `findings_total`. Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (446/152) + `option_parquet_writer.py`
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (447/152) + `option_parquet_writer.py`
   (161/32) + `lake_heal.py` (594/166) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory

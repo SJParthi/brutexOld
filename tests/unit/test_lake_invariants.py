@@ -982,7 +982,8 @@ class TestOptionForeignScan:
         assert report.option_files_scanned == 0
         skips = _events(logs, "lake.invariant.symlink_skipped")
         assert len(skips) == 1
-        assert skips[0]["path"] == str(lake / "options" / "LINKED")
+        # repr() — the path embeds the series dir name (round-8 fold, #907).
+        assert skips[0]["path"] == repr(str(lake / "options" / "LINKED"))
 
     def test_symlinked_options_root_skipped(self, tmp_path: Path) -> None:
         """Round-2 MAJOR regression (Vector 1, empirically reproduced pre-fix):
@@ -1008,6 +1009,9 @@ class TestOptionForeignScan:
         assert report.option_files_scanned == 0
         skips = _events(logs, "lake.invariant.symlink_skipped")
         assert len(skips) == 1
+        # Deliberately RAW (no repr): <lake_root>/options is the
+        # operator-configured root + a fixed literal — no vendor-derived
+        # component (the round-8 fold guards only series-embedding paths).
         assert skips[0]["path"] == str(lake / "options")
 
     def test_symlinked_partition_file_skipped(self, tmp_path: Path) -> None:
@@ -1034,7 +1038,7 @@ class TestOptionForeignScan:
         assert report.option_files_scanned == 1  # the REAL sibling only
         assert report.option_files_skipped == 1  # counted, mass-rail honest
         skips = _events(logs, "lake.invariant.symlink_skipped")
-        assert [s["path"] for s in skips] == [str(series / "2021-01.parquet")]
+        assert [s["path"] for s in skips] == [repr(str(series / "2021-01.parquet"))]
 
     def test_out_of_scope_symlinked_file_silently_scope_skipped(self, tmp_path: Path) -> None:
         """Round-5 NIT: the months-scope bound (a pure filename parse) runs
@@ -1057,7 +1061,7 @@ class TestOptionForeignScan:
         assert scoped_july.option_files_scanned == 0  # June scope-skipped silently
         assert scoped_july.option_files_skipped == 1  # the in-scope symlink counted
         skips = _events(logs_in_scope, "lake.invariant.symlink_skipped")
-        assert [s["path"] for s in skips] == [str(_opt_dest(tmp_path, "2024-07"))]
+        assert [s["path"] for s in skips] == [repr(str(_opt_dest(tmp_path, "2024-07")))]
 
     def test_symlinked_canonical_sibling_abstains_unread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1090,8 +1094,9 @@ class TestOptionForeignScan:
         assert foreigns[0].overlap_rows is None  # honest abstain, never a guess
         assert calls == [july]  # the linked canonical was NEVER read
         skips = _events(logs, "lake.invariant.symlink_skipped")
-        # Once from the glob loop, once from the targeted canonical read.
-        assert [s["path"] for s in skips] == [str(june), str(june)]
+        # Once from the glob loop, once from the targeted canonical read —
+        # both repr()-guarded (round-8 fold).
+        assert [s["path"] for s in skips] == [repr(str(june)), repr(str(june))]
 
     def test_no_scope_unparsable_name_still_dup_scanned(self, tmp_path: Path) -> None:
         # Today's behaviour pinned: without a months scope an unparsable-name
@@ -1127,6 +1132,72 @@ class TestOptionForeignScan:
         frame = _option_key_frame([("CE", None), ("PE", _ts(1, month=7, day=1))])
         keys = li._option_foreign_keys((2024, 6), frame)
         assert keys == {("PE", _ts(1, month=7, day=1))}
+
+    def test_option_skip_event_paths_repr_guarded_control_char_series(self, tmp_path: Path) -> None:
+        """Round-8 log-injection regression (refuter-confirmed MINOR): the
+        option-tree ``symlink_skipped`` / ``scan_skip`` events embed
+        ``str(<...>/<series>/<file>)`` where the SERIES component is
+        vendor-influenceable (``_safe_segment`` strips no control chars), so
+        every such path now rides ``repr()`` exactly like the option finding
+        events (round-7): an ANSI-escape series name renders escaped, never
+        verbatim into a literal-rendering log sink."""
+        lake = tmp_path / "lake"
+        # (a) A SYMLINKED series dir carrying an ESC in its name (dir probe).
+        outside_dir = tmp_path / "outside" / "series"
+        _plant_option_raw(outside_dir / "2024-06.parquet", [("CE", _ts(1))])
+        (lake / "options").mkdir(parents=True)
+        linked_dir = lake / "options" / "SER\x1bIES"
+        linked_dir.symlink_to(outside_dir, target_is_directory=True)
+        # (b) A REAL ESC-named series dir with a symlinked partition FILE
+        # (per-file probe) and a corrupt file (the read skip).
+        outside_file = tmp_path / "outside" / "2024-07.parquet"
+        _plant_option_raw(outside_file, [("CE", _ts(1, month=7, day=1))])
+        series2 = lake / "options" / "S\x1bERIES2"
+        series2.mkdir()
+        (series2 / "2024-07.parquet").symlink_to(outside_file)
+        (series2 / "2024-08.parquet").write_bytes(b"not a parquet file")
+        with capture_logs() as logs:
+            report = scan_lake_invariants(lake)
+        assert report.findings == ()
+        assert report.option_files_skipped == 2  # the symlink + the corrupt file
+        sym = _events(logs, "lake.invariant.symlink_skipped")
+        assert {str(e["path"]) for e in sym} == {
+            repr(str(linked_dir)),
+            repr(str(series2 / "2024-07.parquet")),
+        }
+        skips = _events(logs, "lake.invariant.scan_skip")
+        assert [e["path"] for e in skips] == [repr(str(series2 / "2024-08.parquet"))]
+        # The load-bearing property: ESC never reaches the rendered value raw.
+        assert all("\x1b" not in str(e["path"]) for e in [*sym, *skips])
+
+    def test_canonical_sibling_skip_paths_repr_guarded(self, tmp_path: Path) -> None:
+        """The round-8 twin for the TARGETED canonical-sibling reads: a
+        symlinked June sibling (``symlink_skipped``) and a corrupt May sibling
+        (``scan_skip``) inside an ESC-named series dir both render their paths
+        ``repr()``-escaped — from the glob loop AND the targeted read."""
+        series = tmp_path / "options" / "SER\x1bIES"
+        # The July file carries a May stray AND a June stray.
+        _plant_option_raw(
+            series / "2024-07.parquet",
+            [("PE", _ts(1, month=5, day=2)), ("CE", _ts(2)), ("PE", _ts(3, month=7, day=1))],
+        )
+        may = series / "2024-05.parquet"
+        may.write_bytes(b"not a parquet file at all")
+        outside = tmp_path / "outside" / "2024-06.parquet"
+        _plant_option_raw(outside, [("CE", _ts(2))])
+        june = series / "2024-06.parquet"
+        june.symlink_to(outside)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].overlap_rows is None  # honest abstain on both months
+        # Glob-loop event first, targeted-read event second — both repr()'d.
+        skips = _events(logs, "lake.invariant.scan_skip")
+        assert [e["path"] for e in skips] == [repr(str(may))] * 2
+        sym = _events(logs, "lake.invariant.symlink_skipped")
+        assert [e["path"] for e in sym] == [repr(str(june))] * 2
+        assert all("\x1b" not in str(e["path"]) for e in [*sym, *skips])
 
 
 class TestScanIncludeBars:
@@ -1388,6 +1459,61 @@ class TestCensus:
         assert index.foreign_files == 1
         assert index.overlap_files == 0
         assert index.dup_files == 0
+
+    def test_census_options_row_immune_to_bars_segment_named_options(self, tmp_path: Path) -> None:
+        """Round-8 NIT regression: the OPTIONS census row folds by finding
+        TYPE (``isinstance``), never by the ``"OPTIONS"`` label — a BARS
+        finding whose ``coords.segment`` reads ``"OPTIONS"``
+        (:class:`PartitionCoords` is unvalidated and census input is any
+        :class:`LakeScanReport`, even though ``parse_partition_path`` rejects
+        that segment at the scan boundary today) must never cross-contaminate
+        the OPTIONS row. Pre-fix the shared label-keyed dicts merged them:
+        dup_files read 2, foreign/overlap leaked in, and ``clean`` went
+        NEGATIVE (1 − 3 = −2)."""
+        rogue = PartitionCoords(
+            exchange="NSE",
+            segment="OPTIONS",
+            symbol="X",
+            interval="1minute",
+            year=2024,
+            month=6,
+        )
+        bars_dup = IntraFileDup(
+            path=tmp_path / "b1.parquet", coords=rogue, physical_rows=2, unique_keys=1
+        )
+        bars_foreign = ForeignMonthRows(
+            path=tmp_path / "b2.parquet", coords=rogue, foreign_rows=1, overlap_rows=1
+        )
+        opt_dup = OptionIntraFileDup(
+            path=tmp_path / "options" / "S" / "2024-06.parquet",
+            series="S",
+            physical_rows=2,
+            unique_keys=1,
+        )
+        report = LakeScanReport(
+            findings=(bars_dup, bars_foreign, opt_dup),
+            files_scanned=2,
+            files_skipped=0,
+            series_scanned=1,
+            option_files_scanned=1,
+            option_files_skipped=0,
+            duration_s=0.0,
+            files_by_segment=(("OPTIONS", 2),),
+            engine_files=0,
+        )
+        census = build_lake_census(report)
+        by_segment = {row.segment: row for row in census.segments}
+        assert set(by_segment) == {"INDEX", "CASH", "FNO", "OPTIONS"}
+        options = by_segment["OPTIONS"]
+        assert options.files == 1  # option_files_scanned — never the rogue bars count
+        assert options.dup_files == 1  # the REAL option dup ONLY (pre-fix: 2)
+        assert options.foreign_files == 0  # the rogue bars foreign never leaks in
+        assert options.overlap_files == 0
+        assert options.clean == 0  # pre-fix: 1 − 3 = −2
+        # The rogue-segment bars findings get NO segment row (fixed
+        # _BAR_SEGMENTS) but stay honestly counted in the total.
+        assert census.findings_total == 3
+        assert census.engine_clean is True
 
     def test_engine_relevant_option_foreign_is_false(self, tmp_path: Path) -> None:
         # The G5 totality pin: without the widened isinstance branch the

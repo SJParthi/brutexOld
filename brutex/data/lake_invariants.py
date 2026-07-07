@@ -676,14 +676,18 @@ def _canonical_option_keys(
     """
     canonical = series_dir / f"{year:04d}-{month:02d}.parquet"
     if canonical.is_symlink():
-        _LOG.warning("lake.invariant.symlink_skipped", path=str(canonical))
+        # repr() — the path embeds the vendor-influenceable series dir name
+        # (round-8 log-injection fold; the #907 convention the option finding
+        # events already ride).
+        _LOG.warning("lake.invariant.symlink_skipped", path=repr(str(canonical)))
         return None
     if not canonical.exists():
         return set()
     try:
         frame = _read_key_columns(canonical, UNIQUE_KEY_OPTIONS)
     except parquet_read_skip_errors() as exc:
-        _LOG.warning("lake.invariant.scan_skip", path=str(canonical), error=str(exc))
+        # repr() on the path — same round-8 log-injection fold as above.
+        _LOG.warning("lake.invariant.scan_skip", path=repr(str(canonical)), error=str(exc))
         _pause(per_file_pause)
         return None
     _pause(per_file_pause)
@@ -961,7 +965,14 @@ def scan_lake_invariants(
             # escapes ``<lake_root>/options/``, at heal time.
             for series_dir in sorted(p for p in options_root.iterdir() if p.is_dir()):
                 if series_dir.is_symlink():
-                    _LOG.warning("lake.invariant.symlink_skipped", path=str(series_dir))
+                    # repr() — the SERIES component is a vendor-influenceable
+                    # dir name (``_safe_segment`` strips no control chars), so
+                    # every option-tree skip event's path rides repr() (the
+                    # round-8 log-injection fold, #907 convention). The
+                    # options-ROOT skip above stays raw: ``<lake_root>/options``
+                    # is the operator-configured root + a fixed literal, with
+                    # no vendor-derived component.
+                    _LOG.warning("lake.invariant.symlink_skipped", path=repr(str(series_dir)))
                     continue
                 option_canonical_cache: dict[
                     tuple[int, int], set[tuple[str | None, datetime]] | None
@@ -992,13 +1003,18 @@ def scan_lake_invariants(
                         # finding. Never scanned ⇒ never healed; skipped
                         # loudly like the dir probes (the writer's
                         # read/mutation containment is the TOCTOU-safe rail).
-                        _LOG.warning("lake.invariant.symlink_skipped", path=str(path))
+                        # repr() — the path embeds the vendor-influenceable
+                        # series dir name (round-8 log-injection fold).
+                        _LOG.warning("lake.invariant.symlink_skipped", path=repr(str(path)))
                         option_files_skipped += 1
                         continue
                     try:
                         frame = _read_key_columns(path, UNIQUE_KEY_OPTIONS)
                     except parquet_read_skip_errors() as exc:
-                        _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
+                        # repr() on the path — the round-8 log-injection fold.
+                        _LOG.warning(
+                            "lake.invariant.scan_skip", path=repr(str(path)), error=str(exc)
+                        )
                         option_files_skipped += 1
                         _pause(per_file_pause)
                         continue
@@ -1115,22 +1131,36 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
     (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 closed the #1175 named follow-up);
     ``drift_dirs`` stays 0 for it — honestly N/A, no legacy-key-drift concept
     exists for vendor-coordinate-derived series dirs.
+
+    The OPTIONS accumulators are TYPE-keyed (``isinstance`` on the option
+    finding kinds), never label-keyed (round-8 NIT fold): keying them into the
+    shared per-segment dicts under the ``"OPTIONS"`` sentinel let a BARS
+    finding whose ``coords.segment`` happened to read ``"OPTIONS"`` (findings
+    are freely constructible — :class:`PartitionCoords` is unvalidated even
+    though :func:`~brutex.data.partition.parse_partition_path` rejects that
+    segment at the scan boundary today) cross-contaminate the OPTIONS row's
+    counts and drive ``clean`` negative. Such a rogue-segment bars finding now
+    lands in NO segment row (``_BAR_SEGMENTS`` is fixed) while still counting
+    in ``findings_total``.
     """
     seg_files = dict(report.files_by_segment)
     dup_paths: dict[str, set[str]] = {}
     foreign_paths: dict[str, set[str]] = {}
     overlap_paths: dict[str, set[str]] = {}
+    option_dup_paths: set[str] = set()
+    option_foreign_paths: set[str] = set()
+    option_overlap_paths: set[str] = set()
     drift_dirs: dict[str, int] = {}
     engine_findings: list[LakeFinding] = []
     for finding in report.findings:
         if _engine_relevant(finding):
             engine_findings.append(finding)
         if isinstance(finding, OptionForeignMonthRows):
-            foreign_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
+            option_foreign_paths.add(str(finding.path))
             if (finding.overlap_rows or 0) > 0:
-                overlap_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
+                option_overlap_paths.add(str(finding.path))
         elif isinstance(finding, OptionIntraFileDup):
-            dup_paths.setdefault(OPTIONS_SEGMENT, set()).add(str(finding.path))
+            option_dup_paths.add(str(finding.path))
         elif isinstance(finding, LegacyKeyDrift):
             drift_dirs[finding.segment] = drift_dirs.get(finding.segment, 0) + 1
         elif isinstance(finding, IntraFileDup):
@@ -1155,16 +1185,14 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
                 drift_dirs=drift_dirs.get(seg, 0),
             )
         )
-    option_dups = dup_paths.get(OPTIONS_SEGMENT, set())
-    option_foreigns = foreign_paths.get(OPTIONS_SEGMENT, set())
     rows.append(
         SegmentCensus(
             segment=OPTIONS_SEGMENT,
             files=report.option_files_scanned,
-            clean=report.option_files_scanned - len(option_dups | option_foreigns),
-            dup_files=len(option_dups),
-            foreign_files=len(option_foreigns),
-            overlap_files=len(overlap_paths.get(OPTIONS_SEGMENT, set())),
+            clean=report.option_files_scanned - len(option_dup_paths | option_foreign_paths),
+            dup_files=len(option_dup_paths),
+            foreign_files=len(option_foreign_paths),
+            overlap_files=len(option_overlap_paths),
             drift_dirs=0,  # honestly N/A — no legacy-key-drift concept for series dirs
         )
     )

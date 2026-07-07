@@ -480,10 +480,16 @@ class OptionParquetWriter:
                 # (rows are keep-first-dropped, never value-edited; the next scan
                 # sees the file clean). Only a dup finding healed with NO same-batch
                 # reassignment touching its file goes through heal_partition's
-                # quarantine-copy path.
+                # quarantine-copy path. partition= rides repr() (round-8
+                # log-injection fold, superseding the round-7 "keeps its
+                # bars-twin str(dest) shape" exclusion): dest embeds the
+                # vendor-influenceable SERIES dir name (``_safe_segment``
+                # strips no control chars), unlike the bars writer's
+                # catalogued-coordinate dest, which stays raw. Event name +
+                # field names are unchanged — only this value's escaping.
                 _LOG.warning(
                     "lake.partition.dedup_healed",
-                    partition=str(dest),
+                    partition=repr(str(dest)),
                     kept=before,
                     dropped=dedup_dropped,
                 )

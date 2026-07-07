@@ -895,7 +895,9 @@ class TestMergePartitionFrame:
         assert after["close"].to_list() == [1.0, 2.0]
         healed = [e for e in logs if e["event"] == "lake.partition.dedup_healed"]
         assert len(healed) == 1  # the collapse is OBSERVABLE (the bars twin's event)
-        assert healed[0]["partition"] == str(dest)
+        # repr() — dest embeds the vendor-influenceable series dir name
+        # (round-8 log-injection fold; the bars writer's stays raw).
+        assert healed[0]["partition"] == repr(str(dest))
         assert healed[0]["kept"] == 1
         assert healed[0]["dropped"] == 1
 
@@ -920,6 +922,28 @@ class TestMergePartitionFrame:
         assert len(healed) == 1
         assert healed[0]["kept"] == 1
         assert healed[0]["dropped"] == 1
+
+    def test_dedup_healed_partition_field_repr_guarded(self, tmp_path: Path) -> None:
+        """Round-8 log-injection regression (refuter-confirmed MINOR): the
+        option writer's ``lake.partition.dedup_healed`` ``partition=`` field
+        embeds the vendor-influenceable SERIES dir name (``_safe_segment``
+        rejects only ``/``, ``\\``, ``..`` and replaces ``|`` — control chars
+        and ANSI escapes ride through), so the value rides ``repr()`` like the
+        option finding events: an ESC-carrying series name renders escaped,
+        never verbatim. The BARS writer's twin emission stays raw — its dest
+        is built from catalogued coordinates, not vendor-derived dir names."""
+        w = _writer(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        dest = tmp_path / "options" / "SER\x1bIES" / "2021-01.parquet"
+        w.merge_partition_frame(dest, self._frame([("CE", ts0, 1.0)]))
+        stored = pl.read_parquet(dest)
+        pl.concat([stored, stored[0:1]]).write_parquet(dest)  # raw dup poison
+        with capture_logs() as logs:
+            w.merge_partition_frame(dest, self._frame([("CE", ts0, 999.0)]))
+        healed = [e for e in logs if e["event"] == "lake.partition.dedup_healed"]
+        assert len(healed) == 1
+        assert healed[0]["partition"] == repr(str(dest))
+        assert "\x1b" not in str(healed[0]["partition"])  # ESC escaped, never raw
 
     def test_merge_enospc_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
