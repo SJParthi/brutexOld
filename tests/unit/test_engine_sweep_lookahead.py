@@ -22,6 +22,7 @@ from brutex.data.models import CandleBar
 from brutex.engine.sweep_lookahead import (
     SWEEP_LOOKAHEAD_GUARD_ENV,
     GuardedBarWindow,
+    env_flag_tristate,
     maybe_guard_bars,
     sweep_lookahead_guard_enabled,
 )
@@ -69,6 +70,27 @@ class TestGuardEnabledFlag:
     def test_unset_is_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(SWEEP_LOOKAHEAD_GUARD_ENV, raising=False)
         assert sweep_lookahead_guard_enabled() is False
+
+
+class TestEnvFlagTristate:
+    """The COMMON vocabulary classifier every sweep env flag rides on."""
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", " yes ", "On"])
+    def test_truthy_literals_are_true(self, value: str) -> None:
+        assert env_flag_tristate(value) is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "FALSE", " no ", "Off"])
+    def test_falsy_literals_are_false(self, value: str) -> None:
+        # The explicit kill-switch vocabulary — the default-ON sibling flag
+        # (brutex.engine.rust_metrics) relies on this arm to honour an
+        # operator OFF regardless of its default.
+        assert env_flag_tristate(value) is False
+
+    @pytest.mark.parametrize("value", ["", "   ", "2", "garbage", "flase", "0ff"])
+    def test_everything_else_is_none(self, value: str) -> None:
+        # Unset/empty AND unrecognised both classify None — the CALLER owns
+        # the default + warn policy for those (fail-safe by construction).
+        assert env_flag_tristate(value) is None
 
 
 # ────── maybe_guard_bars — the ONE wiring seam ──────
