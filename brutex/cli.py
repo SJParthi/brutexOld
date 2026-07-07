@@ -5095,6 +5095,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 cascade_config=cascade_config_for_sweep(sweep_id),
                 stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                 leaderboard_trials=leaderboard_trials,
+                # ADR-0012 (review round-1): the SAME resolved schedule map the
+                # grid swept under drives the Stage-4 futures pools' hard
+                # resets AND is recorded in the manifest for the MANUAL replay
+                # — never a schedule-blind re-score of a futures winner.
+                roll_schedule_by_instrument=roll_schedule_by_instrument,
             )
             print(
                 f"[brutex] cascade — pools={len(cascade_report.groups)} "
@@ -5892,6 +5897,18 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     f"roll_schedule[{fut_symbol}]: recorded {list(recorded_schedule)!r} "
                     f"vs re-derived {list(derived_schedule or ())!r} — the lake's "
                     "futures contract set changed since the recorded run"
+                )
+            elif recorded_schedule is None:
+                # Evidence honesty (review round-1 finding 23): with the audit
+                # absent/rotated there is NO recorded schedule to compare — say
+                # so explicitly instead of leaving only a bare snapshot diff
+                # (informational, not a context mismatch: the snapshot-hash +
+                # sha/indicator gates above still own the refusal ladder).
+                print(
+                    f"[brutex] sweep-verify --recount: no RECORDED roll_schedule for "
+                    f"{fut_symbol} (audit/sweep-all.jsonl absent or rotated) — recount "
+                    f"identities derive from the CURRENT lake's schedule "
+                    f"{list(derived_schedule or ())!r} only"
                 )
         context_match = not mismatches
         if mismatches:
@@ -6715,6 +6732,22 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
     if row is None:
         print(
             f"[brutex] options-sim: run-id {run_id!r} not found under {results_root}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    # A futures-series winner cannot be options-simmed yet: the AUTOMATIC
+    # winners hook skips such rows via its per-row net, but this MANUAL path
+    # had none, so `OptionsUnderlying(row.instrument)` deep in the replay
+    # raised a raw ValueError traceback (review round-1 finding 9). Refuse
+    # with the DEC-CLI-USER-ERROR-HYGIENE-001 one-liner instead.
+    from brutex.data.futures_series import is_futures_series_symbol
+
+    if is_futures_series_symbol(row.instrument):
+        print(
+            f"[brutex] options-sim: run-id {run_id[:12]}… is a NIFTY-futures series "
+            f"winner ({row.instrument}) — futures→options translation is the "
+            "ADR-0012 PR-6 named follow-up (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) "
+            "and is not supported yet",
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
