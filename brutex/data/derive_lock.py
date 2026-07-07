@@ -73,6 +73,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DERIVE_LOCK_FILENAME",
     "derive_in_progress",
+    "derive_lock_held_by_this_process",
     "derive_lock_path",
     "derive_write_lock",
 ]
@@ -205,6 +206,41 @@ def derive_write_lock(
         # Closing the fd releases the advisory lock (flock is tied to the open
         # file description) on every exit — success or error.
         os.close(fd)
+
+
+def derive_lock_held_by_this_process(lake_root: Path) -> bool:
+    """``True`` iff THIS process currently holds *lake_root*'s derive write lock.
+
+    A pure O(1) read of the process-local reentrancy registry — ZERO
+    filesystem I/O (unlike :func:`derive_in_progress`, which probes the flock
+    on the lake volume). The registry is bumped by every
+    :func:`derive_write_lock` holder in this process (outermost AND nested),
+    so this answers "is one of OUR OWN threads mid-derive?" — the dashboard's
+    in-process lake-heal recall, the parallel prebuild, etc.
+
+    WHY it exists (the DEC-DERIVE-LOCK-VISIBILITY-001 attribution fix):
+    ``fcntl.flock`` contends across OPEN FILE DESCRIPTIONS, so
+    :func:`derive_in_progress` reads ``True`` for a holder in the SAME process
+    too — a probe alone cannot tell "another process is deriving" from "this
+    process's own background heal is deriving". The movers ``PrebuildGate``
+    consults THIS predicate first (cheap, no I/O) and only attributes the gate
+    to a foreign process when it reads ``False``, so the operator-facing
+    provenance is never a fabricated "another process" claim (Golden Rule #1).
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+
+    Returns
+    -------
+    bool
+        ``True`` while any thread of THIS process holds the derive write lock
+        for *lake_root*.
+    """
+    key = str(derive_lock_path(lake_root))
+    with _REENTRANT_MUTEX:
+        return _HELD_DEPTHS.get(key, 0) > 0
 
 
 def derive_in_progress(lake_root: Path) -> bool:

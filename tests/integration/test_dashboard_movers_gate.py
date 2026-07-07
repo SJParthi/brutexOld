@@ -193,20 +193,28 @@ class TestMoversGatePhaseNote:
 
 
 class TestCrossProcessDeriveGate:
-    """Cross-process derive-lock VISIBILITY end-to-end (DEC-DERIVE-LOCK-VISIBILITY-001).
+    """Derive-lock VISIBILITY + honest ATTRIBUTION end-to-end
+    (DEC-DERIVE-LOCK-VISIBILITY-001 + the round-1 review fold).
 
-    The DEFAULT (un-injected) gate built by ``build_app`` wires the
-    ``derive_in_progress`` probe over the store's lake root, so a derive
-    holding the fixed ``<lake_root>/.locks/derive.lock`` — e.g. a CLI-launched
-    pipeline / lake heal in a SEPARATE process — yields the honest
-    ``gated: true`` movers payload with ``source: "cross_process"`` and ZERO
-    candidate computation, then releases the moment the lock does. The
-    exclusive flock is held here from a second file description, which is
-    exactly what a foreign process's holder looks like to the probe
-    (``fcntl.flock`` is per open file description).
+    The DEFAULT (un-injected) gate built by ``build_app`` wires BOTH probes
+    over the store's lake root: the same-process reentrancy-registry read
+    (``derive_lock_held_by_this_process`` — consulted FIRST, zero I/O) and
+    the cross-process flock probe (``derive_in_progress``). A derive holding
+    the fixed ``<lake_root>/.locks/derive.lock`` yields the honest
+    ``gated: true`` movers payload with ZERO candidate computation either
+    way, ATTRIBUTED per holder: this process's own ``derive_write_lock`` (the
+    lake-heal recall shape) reads ``source: "local_derive"``; a raw flock
+    taken WITHOUT the registry (exactly what a foreign process's holder looks
+    like — ``fcntl.flock`` is per open file description, and a foreign
+    process never touches OUR registry) reads ``source: "cross_process"``.
     """
 
-    def test_held_derive_lock_gates_movers_then_releases(self, store: InstrumentStore) -> None:
+    def test_same_process_derive_lock_gates_as_local_derive_then_releases(
+        self, store: InstrumentStore
+    ) -> None:
+        # The round-1 review regression: pre-fix this read source="cross_process"
+        # with a note claiming "another process" — a false provenance claim for
+        # the dashboard's OWN lake-heal recall (Golden Rule #1).
         from brutex.data.derive_lock import derive_write_lock
 
         # NO injected gate — the production default (probe-wired) gate.
@@ -221,11 +229,11 @@ class TestCrossProcessDeriveGate:
                     "/api/v1/movers", params={"asset": "spot", "date": "2024-06-13"}
                 ).json()
                 assert body["gated"] is True
-                assert body["source"] == "cross_process"
+                assert body["source"] == "local_derive"
                 assert body["phase"] == "derive"
-                assert "another process" in body["note"]
-                assert "cross-process derive lock" in body["note"]
-                # Honest unknowns — the foreign holder's start is unknowable.
+                assert "this dashboard process" in body["note"]
+                assert "another process" not in body["note"]
+                # Honest unknowns — a lock probe cannot know the holder's start.
                 assert body["started_at"] is None
                 assert body["gated_for_s"] is None
                 assert calls == []  # zero candidate computation while gated
@@ -233,6 +241,35 @@ class TestCrossProcessDeriveGate:
             body = client.get("/api/v1/movers", params={"date": "2024-06-13"}).json()
             assert "gated" not in body
             assert "price_gainers" in body
+
+    def test_foreign_style_derive_lock_gates_as_cross_process(self, store: InstrumentStore) -> None:
+        # A raw exclusive flock taken WITHOUT the process-local registry is
+        # indistinguishable from a SEPARATE process's holder (the registry is
+        # per-process; a foreign process never touches ours) — the honest
+        # cross_process attribution survives the fold.
+        import fcntl
+        import os
+
+        app = build_app(DashboardState(), instrument_store=store)
+        lake_root = store.path.parent
+        lock_path = lake_root / ".locks" / "derive.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with TestClient(app) as client, pytest.MonkeyPatch.context() as mp:
+                calls = _spy_compute(mp)
+                body = client.get(
+                    "/api/v1/movers", params={"asset": "spot", "date": "2024-06-13"}
+                ).json()
+                assert body["gated"] is True
+                assert body["source"] == "cross_process"
+                assert body["phase"] == "derive"
+                assert "another process" in body["note"]
+                assert "cross-process derive lock" in body["note"]
+                assert calls == []
+        finally:
+            os.close(fd)  # releases the flock
 
     def test_no_lake_root_store_never_probes_never_gates(self) -> None:
         # The probe's no-real-Path arm: a store without a lake root has nothing

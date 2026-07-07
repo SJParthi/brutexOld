@@ -62,10 +62,15 @@ heartbeat lease on shared lake storage (`.locks/pull_lease.json`, 30 s
 refresh, 180 s self-heal, kill switch `BRUTEX_PULL_LEASE=off`) refuses a
 start on a FRESH foreign-host lease; honestly DETECTION, NOT mutual
 exclusion (TOCTOU/clock-skew/hostname-collision limits stated); (8) the
-movers `PrebuildGate` honors the cross-process derive lock — a CLI-process
-derive now yields the honest `gated:true` payload with
-`source="cross_process"` (probe OSError fails OPEN, one WARN per outage;
-closes the #1288 follow-up); (9) the intent-resume `ResumeBanner` auto-clears
+movers `PrebuildGate` honors the derive lock with HONEST attribution — a
+CLI-process derive yields the `gated:true` payload with
+`source="cross_process"`, and (round-1 review fold) the dashboard's OWN
+out-of-pipeline derive (the lake-heal L2/L3 recall — flock contends across
+open file descriptions, so the flock probe alone could not tell it apart)
+reads `source="local_derive"` via the zero-I/O
+`derive_lock_held_by_this_process` registry probe consulted FIRST, never a
+fabricated "another process" claim (probe OSError fails OPEN, one WARN per
+outage; closes the #1288 follow-up); (9) the intent-resume `ResumeBanner` auto-clears
 on the next REAL pull launch (it had NO production clear path — a stale
 CRITICAL banner survived its own remediation); (10) the #889 verdict-driven
 quota phone-alert follow-up is CLOSED AS MOOT (Groww backtesting has NO

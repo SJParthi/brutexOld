@@ -5,17 +5,22 @@ The pure :mod:`brutex.dashboard.prebuild_gate` state holder + the honest gated
 without begin — a failed pull can never wedge the movers shut), the
 monotonically-increasing run counter, the ``last_ok`` provenance, a
 thread-safety smoke, the payload shape / note / logs, and the
-malformed-date → ``ValueError`` (route-400) contract. No I/O anywhere.
+malformed-date → ``ValueError`` (route-400) contract. No I/O anywhere except
+the one same-process derive-write-lock attribution regression (a real flock
+on ``tmp_path`` — the round-1 review fold).
 """
 
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 from brutex.dashboard.prebuild_gate import (
     CROSS_PROCESS_PHASE,
+    DERIVE_PHASE,
     SOURCE_CROSS_PROCESS,
+    SOURCE_LOCAL_DERIVE,
     SOURCE_PIPELINE,
     STATE_BLOCKING,
     STATE_IDLE,
@@ -634,3 +639,117 @@ class TestCrossProcessVisibility:
         events = [e for e in logs if e["event"] == "movers.gate.blocked"]
         assert len(events) == 1
         assert events[0]["source"] == SOURCE_CROSS_PROCESS
+
+
+# ── same-process derive-holder attribution (round-1 review fold) ──────────
+
+
+class TestLocalDeriveAttribution:
+    """The gate's ``local_derive_probe`` — a SAME-process derive is never
+    mislabelled "another process".
+
+    The round-1 hostile review proved ``fcntl.flock`` contends across open
+    file descriptions, so the flock ``cross_probe`` reads ``True`` for a
+    holder in THIS process too (the dashboard's own lake-heal recall). The
+    registry probe is consulted FIRST and yields the honest
+    ``source="local_derive"`` (Golden Rule #1 wording fix); gating direction
+    is unchanged — a mid-derive lake is still never ranked.
+    """
+
+    def test_local_probe_true_gates_local_derive_and_skips_flock_probe(self) -> None:
+        cross_calls: list[bool] = []
+
+        def cross_probe() -> bool:
+            cross_calls.append(True)
+            return True
+
+        gate = PrebuildGate(cross_probe=cross_probe, local_derive_probe=lambda: True)
+        snap = gate.snapshot()
+        assert snap.blocking is True
+        assert snap.source == SOURCE_LOCAL_DERIVE
+        assert snap.phase == DERIVE_PHASE == CROSS_PROCESS_PHASE == "derive"
+        # A lock probe cannot know the holder's start — honest None stamps.
+        assert snap.started_at is None
+        assert snap.started_at_epoch is None
+        assert snap.elapsed_s is None and snap.gated_for_s is None
+        # The registry probe answered — the lake-volume flock probe never ran.
+        assert cross_calls == []
+
+    def test_local_probe_false_falls_through_to_cross_probe(self) -> None:
+        # Ordering pin: registry first, flock second — a lock this process
+        # does NOT hold genuinely reads cross_process.
+        gate = PrebuildGate(cross_probe=lambda: True, local_derive_probe=lambda: False)
+        snap = gate.snapshot()
+        assert snap.source == SOURCE_CROSS_PROCESS
+
+    def test_both_probes_false_stays_idle(self) -> None:
+        gate = PrebuildGate(cross_probe=lambda: False, local_derive_probe=lambda: False)
+        assert gate.snapshot() == GateSnapshot(state=STATE_IDLE, runs=0, last_ok=None)
+
+    def test_local_pipeline_blocking_wins_over_local_probe(self) -> None:
+        local_calls: list[bool] = []
+
+        def local_probe() -> bool:
+            local_calls.append(True)
+            return True
+
+        gate = PrebuildGate(local_derive_probe=local_probe)
+        gate.begin()
+        snap = gate.snapshot()
+        assert snap.source == SOURCE_PIPELINE
+        assert local_calls == []  # probes consulted ONLY while locally idle
+
+    def test_end_to_end_same_process_derive_write_lock_reads_local(self, tmp_path: Path) -> None:
+        # The regression the round-1 review proved: with the REAL derive
+        # write lock held by THIS process (the lake-heal recall shape) and
+        # the REAL probes wired the way build_app wires them, the snapshot
+        # attributes the gate to this process — NOT "another process".
+        from brutex.data.derive_lock import (
+            derive_in_progress,
+            derive_lock_held_by_this_process,
+            derive_write_lock,
+        )
+
+        gate = PrebuildGate(
+            cross_probe=lambda: derive_in_progress(tmp_path),
+            local_derive_probe=lambda: derive_lock_held_by_this_process(tmp_path),
+        )
+        with derive_write_lock(tmp_path):
+            snap = gate.snapshot()
+            assert snap.blocking is True
+            assert snap.source == SOURCE_LOCAL_DERIVE  # pre-fix: cross_process
+        assert gate.snapshot().state == STATE_IDLE  # released → transparent
+
+    def test_gated_payload_local_derive_note_names_this_process(self) -> None:
+        gate = PrebuildGate(local_derive_probe=lambda: True)
+        payload = gated_movers_payload(
+            gate.snapshot(), asset="spot", interval="1day", date="2024-06-13", time=None, top_n=100
+        )
+        assert payload["gated"] is True
+        assert payload["source"] == SOURCE_LOCAL_DERIVE
+        assert payload["phase"] == "derive"
+        # The note names THIS process's own heal — never "another process".
+        assert "this dashboard process" in payload["note"]
+        assert "lake-heal" in payload["note"]
+        assert "another process" not in payload["note"]
+        assert "pull pipeline running" not in payload["note"]
+        assert "retries automatically" in payload["note"]
+        # Honest unknowns + the gated contract (zero ranked lists).
+        assert payload["started_at"] is None
+        assert payload["elapsed_s"] is None
+        assert "price_gainers" not in payload
+
+    def test_blocked_log_carries_local_source(self) -> None:
+        gate = PrebuildGate(local_derive_probe=lambda: True)
+        with capture_logs() as logs:
+            gated_movers_payload(
+                gate.snapshot(),
+                asset="spot",
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                top_n=5,
+            )
+        events = [e for e in logs if e["event"] == "movers.gate.blocked"]
+        assert len(events) == 1
+        assert events[0]["source"] == SOURCE_LOCAL_DERIVE

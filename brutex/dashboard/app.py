@@ -227,7 +227,7 @@ from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revisi
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
-from brutex.data.derive_lock import derive_in_progress
+from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
@@ -1405,10 +1405,29 @@ def build_app(
             return False
         return derive_in_progress(path.parent)
 
+    def _local_derive_probe() -> bool:
+        """``True`` iff THIS process holds the lake's derive lock — pure, zero I/O.
+
+        The gate's same-process attribution probe (the round-1 review fold on
+        DEC-DERIVE-LOCK-VISIBILITY-001): ``fcntl.flock`` contends across open
+        file descriptions, so ``_cross_derive_probe`` alone reads ``True`` for
+        this process's OWN background derive too (the lake-heal L2 post-pull /
+        L3 startup recall, which derives while the gate is idle). The gate
+        consults THIS registry read FIRST
+        (:func:`~brutex.data.derive_lock.derive_lock_held_by_this_process` —
+        O(1), no filesystem I/O) and labels such a holder
+        ``source="local_derive"`` instead of fabricating an "another process"
+        claim (Golden Rule #1). No store / no real ``Path`` → ``False``.
+        """
+        path = getattr(instrument_store, "path", None)
+        if not isinstance(path, Path):
+            return False
+        return derive_lock_held_by_this_process(path.parent)
+
     _prebuild_gate = (
         prebuild_gate
         if prebuild_gate is not None
-        else PrebuildGate(cross_probe=_cross_derive_probe)
+        else PrebuildGate(cross_probe=_cross_derive_probe, local_derive_probe=_local_derive_probe)
     )
 
     def _pull_live() -> bool:
