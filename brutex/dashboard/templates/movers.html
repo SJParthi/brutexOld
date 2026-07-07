@@ -385,6 +385,15 @@ function renderRows() {
       else if (v==="?"||v==="—") cls = "muted";
       if (row.strike_step_confidence === "observed" && v!=="?" && v!=="—") v += " ~";
     }
+    /* Baseline-contiguity HONESTY MARKER (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001),
+       the " ~" precedent's twin: when the backend PROVED the row's prev-close /
+       prev-OI baseline is NOT the immediately-preceding NSE session (a lake
+       hole — the EMIT-ON-FALSE keys arrive only then, STRICT === false), the
+       change/%-change (and OI-change) cells gain a trailing " *" so the number
+       is never presented as an ordinary day-over-day move. Appended BEFORE the
+       esc(v) return — the marker rides the same escape as the value. */
+    if ((field==="change"||field==="pct_change") && row.prev_close_contiguous === false && v!=="—" && v!=="?") v += " *";
+    if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false && v!=="—" && v!=="?") v += " *";
     return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>").join("");
 }
@@ -480,7 +489,12 @@ async function load() {
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
     $("asof").textContent = `as-of ${(j.date||"")} ${j.time||"(daily)"} · ${j.interval||""}`;
-    $("noteText").textContent = (j.note||"");
+    /* Baseline-contiguity legend (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001): when any
+       rendered row carries a strictly-false contiguity flag (the EMIT-ON-FALSE
+       keys), explain the " *" marker in the note. textContent only — never
+       innerHTML for server strings (DEC-DASHBOARD-XSS-HARDENING-001). */
+    const staleBaseline = rowsData.some(r => r && (r.prev_close_contiguous === false || r.oi_baseline_contiguous === false));
+    $("noteText").textContent = (j.note||"") + (staleBaseline ? " · * baseline is not the immediately-preceding NSE session (nearest-prior shown)" : "");
   } catch (e) {
     lastPayload = null;  /* preview/failed: a pill switch falls back to a real fetch. */
     lastRenderSig = null;  /* a recovered fetch must always repaint over the preview. */
