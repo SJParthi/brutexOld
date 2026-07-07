@@ -189,12 +189,22 @@ def test_rate_widget_success_resets_cadence_and_stamps_client_clock() -> None:
     assert "setInterval(poll, POLL_MS)" not in js, (
         "the fixed interval must be replaced by the self-scheduling chain"
     )
+    # schedulePoll's BODY is the primitive ALL three pinned call sites ride
+    # (refuter finding, round 5: the call sites were pinned but the body was not —
+    # a no-op body polls exactly ONCE at start() and never again, the exact
+    # frozen-widget class this PR fixes, with the whole suite green; the universe
+    # twin's reschedule was already pinned verbatim, so this closes the asymmetry).
+    assert "function schedulePoll(delayMs)" in js, "the schedulePoll definition is missing"
+    assert "pollTimer = setTimeout(poll, delayMs);" in js, (
+        "schedulePoll's setTimeout body is the self-scheduling chain's teeth"
+    )
 
 
 def test_rate_widget_age_readout_and_thresholds() -> None:
     """The ~1 s client ticker renders "updated Xs ago"; amber past 10 s (~3 missed
     3 s polls + margin), LOUD RED explicit-STALE past 30 s (10x the poll cadence ==
-    the backoff cap, so "retrying" reads literally true). Presence pins only.
+    the backoff cap, so "retrying" — shown only when a failure was COUNTED, round 5
+    — reads literally true). Presence pins only.
     """
     js = _widget_js()
     assert "var STALE_WARN_MS = 10000;" in js
@@ -202,21 +212,49 @@ def test_rate_widget_age_readout_and_thresholds() -> None:
     assert "var AGE_TICK_MS = 1000;" in js
     assert "function renderAge()" in js
     assert "setInterval(renderAge, AGE_TICK_MS);" in js, "the ~1 s age ticker is missing"
-    assert '"STALE — " + base + " — retrying"' in js, "the explicit STALE wording is missing"
+    assert '"STALE — " + base + tail' in js, "the explicit STALE wording is missing"
     # BOTH escalation branches pinned — the red tier AND the amber warn tier
     # (refuter finding: the warn BRANCH itself was unpinned; deleting it kept
     # every test green while killing the ~3-missed-polls amber requirement).
+    # Round 5: both branches render the ONE failure-gated computed tail (see
+    # test_regression_rate_widget_claimed_retrying_during_slow_successful_poll).
+    assert 'if (age >= STALE_RED_MS) { text = "STALE — " + base + tail; cls = "bxrm-stale"; }' in js
     assert (
-        'if (age >= STALE_RED_MS) { text = "STALE — " + base + " — retrying"; cls = "bxrm-stale"; }'
-        in js
-    )
-    assert (
-        'else if (age >= STALE_WARN_MS) { text = base + " — retrying"; cls = "bxrm-stale-warn"; }'
-        in js
+        'else if (age >= STALE_WARN_MS) { text = base + tail; cls = "bxrm-stale-warn"; }' in js
     ), "the amber warn tier branch is missing"
     assert '"no data yet (" + ageS + "s)"' in js, "the never-succeeded boot wording is missing"
     assert 'pillRow("updated", "bxrmAge", null)' in js, "the age pill row is missing"
     assert 'ageRow.id = "bxrmAgeRow"' in js
+
+
+def test_regression_rate_widget_claimed_retrying_during_slow_successful_poll() -> None:
+    """REGRESSION (refuter-confirmed, round 5): ``renderAge`` appended " — retrying"
+    to EVERY warn/red readout purely off age. A merely SLOW but SUCCESSFUL poll —
+    a 7-10 s response inside the 10 s abort bound — pushes the age past
+    STALE_WARN_MS mid-flight with ``pollFailures === 0``: no failure was ever
+    counted, no backoff retry exists (the normal-cadence poll is simply in
+    flight), yet the pill flashed amber "updated 10s ago — retrying", implying a
+    failure that had not occurred. The age figure itself was always TRUE and the
+    state self-clears when the slow poll settles — only the action word
+    overstated. The tail is now FAILURE-gated: "retrying" only when
+    ``pollFailures > 0``; at zero failures it reads the in-flight truth,
+    "awaiting response". Substring-presence pins (no headless JS runner)."""
+    js = _widget_js()
+    assert 'var tail = pollFailures > 0 ? " — retrying" : " — awaiting response";' in js, (
+        "the failure-gated tail ternary is missing"
+    )
+    # BOTH escalation branches render the ONE computed tail …
+    assert 'if (age >= STALE_RED_MS) { text = "STALE — " + base + tail; cls = "bxrm-stale"; }' in js
+    assert 'else if (age >= STALE_WARN_MS) { text = base + tail; cls = "bxrm-stale-warn"; }' in js
+    # … the failure-blind hardcoded literals are gone (the regression pin) …
+    assert '"STALE — " + base + " — retrying"' not in js, (
+        "the unconditional red '— retrying' literal must be gone"
+    )
+    assert 'text = base + " — retrying"' not in js, (
+        "the unconditional amber '— retrying' literal must be gone"
+    )
+    # … and the gated ternary is the ONE executable "— retrying" site.
+    assert js.count('" — retrying"') == 1, "exactly ONE executable site — the gated ternary"
 
 
 def test_rate_widget_stale_css_classes() -> None:
@@ -722,8 +760,10 @@ def test_regression_universe_stale_chip_claimed_retrying_during_hung_start_post(
     pipeline button is greyed out and an in-page re-click is impossible. The tail
     now names the actionable remedy: RELOAD the page, then re-click (a fresh
     page's enabled button re-attaches safely through the single-flight route);
-    only a LIVE poll chain claims "retrying". Substring-presence pins (no
-    headless JS runner)."""
+    only a LIVE poll chain WITH a counted failure claims "retrying" (the round-5
+    failure gate — see
+    test_regression_universe_claimed_retrying_during_slow_successful_poll).
+    Substring-presence pins (no headless JS runner)."""
     html = _render_universe_html()
     feed_age = _render_feed_age_src(html)
     assert "const tail = (lastPollLabel === null)" in feed_age, (
@@ -732,8 +772,8 @@ def test_regression_universe_stale_chip_claimed_retrying_during_hung_start_post(
     assert "? 'start request pending — reload the page, then re-click to re-attach'" in feed_age
     assert (
         ": (pollFeedRetries > POLL_MAX_FEED_RETRIES"
-        " ? 'live progress feed dropped — retrying' : 'retrying');" in feed_age
-    ), "a live poll chain keeps the retrying/feed-dropped tails"
+        " ? 'live progress feed dropped — retrying' : 'retrying'));" in feed_age
+    ), "a live poll chain with counted failures keeps the retrying/feed-dropped tails"
     # BOTH escalation branches carry the computed tail — never a hardcoded
     # "retrying" that could overstate again.
     assert (
@@ -749,6 +789,40 @@ def test_regression_universe_stale_chip_claimed_retrying_during_hung_start_post(
         "the unactionable bare-re-click remedy must be gone — the pipeline button is"
         " disabled while the start POST is wedged"
     )
+
+
+def test_regression_universe_claimed_retrying_during_slow_successful_poll() -> None:
+    """REGRESSION (refuter-confirmed, round 5 — the universe twin of the widget's
+    slow-poll finding): the live-chain tail arm read 'retrying' for EVERY
+    ``pollFeedRetries <= POLL_MAX_FEED_RETRIES`` — including ``0``. Scenario: a
+    poll issued at t=0 responds successfully at t=8 s (inside the 10 s abort
+    bound, past the 5 s warn threshold) — from t=5 to t=8 the chip read
+    "updated Xs ago — retrying" while the attempt was still IN FLIGHT and
+    nothing had failed or retried. (The widget needs a 7-10 s response to hit
+    its 10 s warn; the universe's 5 s warn opens the wider 5-10 s band.) The
+    tail now carries a third state-honest arm: ZERO counted failures =>
+    'awaiting response' (the in-flight truth); the quick-retry 'retrying' and
+    'live progress feed dropped — retrying' arms survive unchanged BEHIND the
+    failure gate. Escalation itself was always honest (the data IS that old) —
+    this pins the honest action word. Substring-presence pins (no headless JS
+    runner)."""
+    html = _render_universe_html()
+    feed_age = _render_feed_age_src(html)
+    # The zero-failure in-flight arm …
+    assert ": (pollFeedRetries === 0" in feed_age, (
+        "the tail must gate 'retrying' on a counted failure"
+    )
+    assert "? 'awaiting response'" in feed_age, "the zero-failure in-flight arm is missing"
+    # … the retrying/feed-dropped arms survive BEHIND the gate …
+    assert (
+        ": (pollFeedRetries > POLL_MAX_FEED_RETRIES"
+        " ? 'live progress feed dropped — retrying' : 'retrying'));" in feed_age
+    ), "the quick-retry + feed-dropped arms must survive behind the failure gate"
+    # … and the failure-blind two-arm tail is gone (the regression pin: its
+    # closing `: 'retrying');` cannot match the gated `: 'retrying'));` form).
+    assert (
+        "POLL_MAX_FEED_RETRIES ? 'live progress feed dropped — retrying' : 'retrying');" not in html
+    ), "the failure-blind two-arm live tail must be gone"
 
 
 def test_universe_stale_clears_on_success_and_settle() -> None:

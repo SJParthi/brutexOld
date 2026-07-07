@@ -1947,6 +1947,10 @@ function feedRetryDelayMs() {
    before that the watch-start baseline reads the honest no-payload-yet form,
    mirroring the widget's "no data yet" split; and the action tail claims
    "retrying" ONLY while the poll chain is actually live (lastPollLabel non-null)
+   AND a poll failure was actually COUNTED (pollFeedRetries > 0 — round-5
+   refuter-confirmed fix: a merely SLOW in-flight successful response in the
+   5-10 s latency band crosses the 5 s warn with zero failures and nothing
+   retrying, so that band reads the in-flight truth "awaiting response")
    — during a hung/wedged start POST nothing retries, so the tail names the
    real state + the real remedy instead: RELOAD, then re-click. NOT a bare
    re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
@@ -1969,7 +1973,9 @@ function renderFeedAge() {
   chip.classList.toggle('red', red);
   const tail = (lastPollLabel === null)
     ? 'start request pending — reload the page, then re-click to re-attach'
-    : (pollFeedRetries > POLL_MAX_FEED_RETRIES ? 'live progress feed dropped — retrying' : 'retrying');
+    : (pollFeedRetries === 0
+        ? 'awaiting response'
+        : (pollFeedRetries > POLL_MAX_FEED_RETRIES ? 'live progress feed dropped — retrying' : 'retrying'));
   if (red) {
     chip.textContent = '⚠ STALE — no live update for ' + ageS + 's · ' + tail;
   } else if (warn) {

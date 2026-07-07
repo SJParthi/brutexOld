@@ -339,8 +339,15 @@
       if (wallRef !== null) { age = Math.max(age, Date.now() - wallRef); }
       var ageS = Math.max(0, Math.round(age / 1000));
       var base = lastPollOkMs !== null ? ageS + "s ago" : "no data yet (" + ageS + "s)";
-      if (age >= STALE_RED_MS) { text = "STALE — " + base + " — retrying"; cls = "bxrm-stale"; }
-      else if (age >= STALE_WARN_MS) { text = base + " — retrying"; cls = "bxrm-stale-warn"; }
+      // FAILURE-gated action tail (refuter-confirmed, round 5): a merely SLOW
+      // successful poll — a 7-10 s response inside the 10 s abort bound — pushes
+      // the age past STALE_WARN_MS mid-flight with ZERO counted failures: no
+      // backoff retry exists, the normal-cadence poll is simply in flight. So
+      // "retrying" is claimed ONLY when a counted failure actually scheduled one;
+      // at zero failures the tail reads the in-flight truth, "awaiting response".
+      var tail = pollFailures > 0 ? " — retrying" : " — awaiting response";
+      if (age >= STALE_RED_MS) { text = "STALE — " + base + tail; cls = "bxrm-stale"; }
+      else if (age >= STALE_WARN_MS) { text = base + tail; cls = "bxrm-stale-warn"; }
       else { text = base; }
     }
     if (pill) { pill.textContent = text; pill.className = cls; }
