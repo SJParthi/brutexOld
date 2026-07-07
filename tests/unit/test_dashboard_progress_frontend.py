@@ -86,6 +86,28 @@ def test_rate_monitor_eta_format_matches_universe() -> None:
     assert 'return h > 0 ? "~" + h + "h " + m + "m" : "~" + m + "m";' in js
 
 
+def test_rate_monitor_js_obs_claim_removed() -> None:
+    """The C4 pin (FAILS on pre-#1482 HEAD): the false "obs rendered beside it" claim
+    + the dead ``.bxrm-obs`` CSS are gone (DEC-RATE-METER-LIFECYCLE-001; the refuter
+    proved ``req_per_hour_observed`` was never rendered at any commit).
+
+    Positive controls keep the test honest: the MEASURED req/hour is still rendered
+    (an emptied ``render()`` cannot pass) and the wire-only back-compat note names
+    the observed field explicitly.
+    """
+    js = _RATE_MONITOR_JS.read_text(encoding="utf-8")
+    # The false claim + its dead CSS are GONE.
+    assert "bxrm-obs" not in js
+    assert "extrapolation beside" not in js
+    assert '"obs" tag' not in js
+    # Positive controls — the measured figure is still rendered…
+    assert "bxrmHour" in js
+    assert "req_per_hour_measured" in js
+    # …and the docs now state the truth: observed is wire-only, deliberately NOT rendered.
+    assert "req_per_hour_observed" in js
+    assert "deliberately NOT" in js
+
+
 # ── the route — additive snapshot keys ──────────────────────────────────────────
 
 

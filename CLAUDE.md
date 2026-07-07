@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
+_Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1482 —
+the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
+pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
+`dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
+unpaced CallMeter, so the old "no `.meter` no-op" claims were FALSE) and (b)
+`BackgroundPullJob(on_run_end=SessionRateController.clear_meter)` in the job's
+identity-gated finally — so "no job running ⇒ no meter registered" is a process
+invariant (the 96-agent audit's C0 cross-pull leak + the dry-run fabricated
+"flowing" closed). Plus: per-spine mutant-killing wiring tests (all four
+register sites — the audit's C1/C2 surviving-mutant gap); a kind-aware
+`/api/v1/pull/rate` probe (`BackgroundPullJob.start(job_kind=)` — a 2-4-day
+dashboard SWEEP reads honest idle, never a site-wide red "stalled"; the
+`_pull_live` duty-degrade probe DELIBERATELY stays sweep-inclusive, #920); a
+900 s `BRIDGE_MAX_AGE_S` TTL in the merged projection (a SIGKILLed CLI's stuck
+`pull_active=True` bridge file decays to idle instead of a permanent red; the
+12 s-900 s died-mid-run alert window preserved); the false bx-rate-monitor.js
+"obs rendered" claim + dead CSS removed; six stale pre-#1056 doc passages
+reconciled. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
+ruff/ruff-format/mypy --strict/pyright clean).
+Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
 fallback UNVERIFIED-on-real-macOS, any failure → the honest `0` = "unknown"
@@ -317,7 +337,38 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
+- **Active branch:** `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1482** — the #1056
+  pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
+  set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
+  `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
+  single-flight release; job-lock → controller-lock order pinned) so "no job running ⇒ no meter registered" is a
+  process invariant — a dead pull's meter is unreadable in every later process state; the intra-pull
+  `register_meter(None)`-keeps-prior guard byte-unchanged + re-pinned. (b) the dry-run finding —
+  `register_pull_meter(…, dry_run=)` clears-and-never-registers at ALL FOUR build sites (the metadata/F&O dry-run
+  GrowwClients carry a REAL unpaced CallMeter, `client.py` `default_factory=CallMeter`, so the #1056 "no `.meter`
+  silent no-op" in-code/ledger claims were FALSE and are rewritten); a warm-process dry-run reads the same honest
+  `meter_present=False` as a cold one, never a fabricated MEASURED "flowing". (c) C1/C2 — per-spine mutant-killing
+  wiring tests drive the REAL `pull_all_spot`/`pull_candles`/`pull_expiries_contracts`/`pull_contract_candles` and
+  assert `peek_meter() is` the exact injected CallMeter + dry-run eviction twins (every severed site / dropped kwarg
+  now fails a named test; each mutant re-applied + captured failing). (d) C5 — `BackgroundPullJob.start(job_kind=)`
+  (`JOB_KIND_PULL`/`JOB_KIND_SWEEP`) + the atomic `running_job_kind` property; the `/api/v1/pull/rate` probe is
+  kind-aware so a 2-4-day dashboard sweep reads honest idle, never a site-wide red "stalled";
+  `_pull_active_probe`/`_pull_live` DELIBERATELY stay sweep-INCLUSIVE (the #920 duty-degrade floors still engage —
+  comment-pinned + regression-tested). (e) C3 — `BRIDGE_MAX_AGE_S=900.0` in `build_pull_rate_view_merged`: a bridge
+  older than 15 min (or non-finite-aged) is DEAD EVIDENCE ≡ absent, so a SIGKILLed CLI's stuck `pull_active=True`
+  stamp can't fabricate a permanent red on an idle dashboard; `<=` keeps the 12 s-900 s died-mid-run alert window;
+  fresh-bridge projection pinned field-for-field byte-identical. (f) C4 — bx-rate-monitor.js's false "obs rendered
+  beside it" claim rewritten (`req_per_hour_observed` is wire-only back-compat, deliberately NOT rendered) + the dead
+  `.bxrm-obs` CSS deleted. (g) C6 — six stale pre-#1056 doc passages + `register_pull_meter`'s "silent NO-OP"
+  docstring rewritten to registered-meter-lifecycle semantics; `build_app` gains an injectable `session_rate` test
+  seam (default byte-identical, pinned). HONEST: the sampler stays contractually observe-only; a dry-run <60 s after
+  a real pull can still read the decaying `recent_minute` as "flowing" ≤60 s (admission fallback — documented, not
+  mechanised); the job-finish clear can lose to at most ONE final ≤2 s sampler snapshot (pull_active flips False in
+  the same path); a wedged-but-alive CLI beyond 900 s also decays to idle (Telegram pull-health + the pull journal
+  remain the persistent alarm); the CLI bridge still carries no `failed_rps` (#1211 named follow-up). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright`
+  clean).
+  Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env
   override wins fail-loud, sentinel → floor EXACTLY, detected → `int(total × fraction / workers)`, never clamped to
@@ -1681,7 +1732,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/nice-wright-qmb2bz`
+- **Active feature branch:** `claude/upbeat-tesla-mfrovq`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`

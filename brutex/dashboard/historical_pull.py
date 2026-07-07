@@ -1740,13 +1740,17 @@ def pull_contract_candles(
     # (DEC-RATE-WIDGET-FNO-MEASURED-001) so the observe-only RatePanelSampler — which holds
     # only the session controller, NOT this deep-in-the-spine pool — can read the transport
     # CallMeter's real ``effective_rps`` during the long F&O phase and push the TRUE completed
-    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). Best-effort +
-    # observe-only: a dry-run / no-``session_rate`` pull, or a client with no ``.meter``
-    # (the empty-candle dry-run client), is a silent no-op. The lazy import avoids any
-    # module-load ordering coupling with pull_controller.
+    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). The
+    # empty-candle dry-run GrowwClient DOES carry a real CallMeter (``client.py``
+    # ``default_factory=CallMeter``), so honesty comes from the explicit ``dry_run=True``
+    # gate, which DEREGISTERS (clears any stale prior-pull meter, never registers the
+    # synthetic one) — never from a meterless client (the pre-#1482 "no ``.meter`` silent
+    # no-op" claim here was factually FALSE; DEC-RATE-METER-LIFECYCLE-001). Best-effort +
+    # observe-only. The lazy import avoids any module-load ordering coupling with
+    # pull_controller.
     from brutex.dashboard.pull_controller import register_pull_meter
 
-    register_pull_meter(session_rate, client)
+    register_pull_meter(session_rate, client, dry_run=dry_run)
     # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) for the F&O
     # (futures + options) pull — the F&O TWIN of the spot spine's wiring
     # (DEC-FNO-ASYNC-PIPELINE-WIRE-001). When built (DEFAULT ON; ``None`` for a dry-run / the

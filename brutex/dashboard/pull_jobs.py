@@ -81,6 +81,15 @@ SuccessHook = Callable[[], None]
 #: raising hook is logged + swallowed (the release still happens).
 FinallyHook = Callable[[], None]
 
+#: Job-kind labels for :meth:`BackgroundPullJob.start` (DEC-RATE-METER-LIFECYCLE-001).
+#: The single-flight job runs BOTH vendor pulls AND the zero-vendor-call brute-force
+#: sweep; the kind lets the ``/api/v1/pull/rate`` probe distinguish them so a 2-4-day
+#: sweep reads an honest "idle" on the PULL RATE widget instead of a site-wide red
+#: "stalled" (the #1482 C5 fix). Every pull-shaped ``start`` keeps the default
+#: :data:`JOB_KIND_PULL`; only the sweep route passes :data:`JOB_KIND_SWEEP`.
+JOB_KIND_PULL: Final[str] = "pull"
+JOB_KIND_SWEEP: Final[str] = "sweep"
+
 #: The injected thread spawner — runs *fn* off the caller's thread. The default
 #: spawns a daemon thread; tests inject a synchronous runner for determinism.
 Spawner = Callable[[Callable[[], None]], None]
@@ -322,6 +331,17 @@ class BackgroundPullJob:
         ``None`` from the resolver SKIPS the account lock gracefully (logged) — a
         credential-less run makes no vendor calls, so there is no account rate to
         protect; the lake-root lock still guards same-lake peers.
+    on_run_end
+        Optional zero-arg completion hook (DEC-RATE-METER-LIFECYCLE-001) fired ONCE per
+        run — EVERY kind: success, failure, dry-run, sweep — inside :meth:`_run`'s
+        identity-gated ``finally``, strictly AFTER the per-start ``on_finally`` and
+        strictly BEFORE ``_release_singleflight()``. It runs while ``self._lock`` is
+        HELD (non-reentrant) — the hook must NEVER call back into this job. Best-effort
+        (its own ``try/except`` — a raising hook never skips the single-flight release,
+        and a raising ``on_finally`` never skips this hook). The production wiring is
+        ``SessionRateController.clear_meter`` (a controller-lock LEAF; lock order
+        job → controller, pinned), so "no job running ⇒ no meter registered" holds.
+        ``None`` (the default) disables it.
 
     journal_heartbeat_interval_s
         Minimum seconds between two DURABLE pull-journal heartbeat records
@@ -350,6 +370,7 @@ class BackgroundPullJob:
         singleflight_factory: SingleflightFactory = pull_singleflight_lock,
         account_singleflight_factory: AccountSingleflightFactory = account_pull_singleflight_lock,
         account_key_resolver: AccountKeyResolver | None = None,
+        on_run_end: FinallyHook | None = None,
         journal_heartbeat_interval_s: float = ALIVE_LOG_MIN_INTERVAL_S,
         journal_clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -392,8 +413,19 @@ class BackgroundPullJob:
         #: disk must never serialise the progress hooks behind a held lock).
         self._journal_lock = threading.Lock()
         self._last_journal_heartbeat = float("-inf")
+        #: Per-JOB (not per-start) completion hook (DEC-RATE-METER-LIFECYCLE-001): fired
+        #: once per run in :meth:`_run`'s identity-gated ``finally``, after ``on_finally``
+        #: and before the single-flight release, in its OWN try/except. Production wiring:
+        #: ``SessionRateController.clear_meter`` (the C0 cross-pull meter-leak fix).
+        self._on_run_end = on_run_end
         self._lock = threading.Lock()
         self._running = False
+        #: The CURRENT run's job kind (DEC-RATE-METER-LIFECYCLE-001) — :data:`JOB_KIND_PULL`
+        #: (the default; every vendor pull) or :data:`JOB_KIND_SWEEP` (the sweep route).
+        #: Initialised here so :attr:`running_job_kind` on a never-started job can never
+        #: AttributeError; stamped in :meth:`start` under the claim lock, strictly AFTER
+        #: the single-flight refusal (a refused start never overwrites the running kind).
+        self._job_kind: str = JOB_KIND_PULL
         #: The CURRENT run's account-wide single-flight lock context manager (entered in
         #: :meth:`start`, exited in :meth:`_run`'s ``finally``). ``None`` between runs and
         #: when the guard is disabled (no resolvable lake root). Held for the WHOLE pull so
@@ -433,6 +465,7 @@ class BackgroundPullJob:
         ledger_synced: bool = False,
         on_success: SuccessHook | None = None,
         on_finally: FinallyHook | None = None,
+        job_kind: str = JOB_KIND_PULL,
     ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
@@ -478,6 +511,14 @@ class BackgroundPullJob:
         when this ``start`` is refused (single-flight contention — no worker runs)
         nor after a SIGKILL (the durable-intent survival that powers the resume).
         A raising hook is logged + swallowed; the release still happens.
+
+        *job_kind* (DEC-RATE-METER-LIFECYCLE-001) labels WHAT runs on this shared
+        single-flight job: :data:`JOB_KIND_PULL` (the default — every vendor pull,
+        dry-run included) or :data:`JOB_KIND_SWEEP` (the zero-vendor-call brute-force
+        sweep route). Read via :attr:`running_job_kind` by the ``/api/v1/pull/rate``
+        probe so a 2-4-day sweep reads an honest "idle", never a site-wide red
+        "stalled" (the #1482 C5 fix). It changes NOTHING else — ``running``, the
+        progress feed and the single-flight are byte-identical for either kind.
         """
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):
         # the worker beats it on real progress (per window / per post-fetch unit via the
@@ -502,6 +543,10 @@ class BackgroundPullJob:
             # unlocked ``self._watchdog = watchdog``, still see ``self._watchdog is wd_A`` →
             # clear ``_running`` → admit a third pull concurrently (the residual race).
             self._watchdog = watchdog
+            # Stamp THIS run's job kind under the SAME lock, strictly AFTER the
+            # ``self._running`` refusal above — a refused start never overwrites the
+            # running job's kind (DEC-RATE-METER-LIFECYCLE-001).
+            self._job_kind = job_kind
         # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
         # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
         # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
@@ -865,6 +910,23 @@ class BackgroundPullJob:
                             _LOG.exception(
                                 "pull_job.on_finally failed; the single-flight release continues"
                             )
+                    # Fire the per-JOB run-end hook (DEC-RATE-METER-LIFECYCLE-001 — the
+                    # production wiring clears the session's registered CallMeter, the C0
+                    # cross-pull leak fix) INSIDE the identity gate — a superseded stale
+                    # worker never clears a NEWER run's meter (the scoped-token property
+                    # for free) — strictly AFTER on_finally and BEFORE the single-flight
+                    # release, in its OWN try/except so a raising on_finally never skips
+                    # this clear and a raising clear never skips the release. Lock-order
+                    # note: self._lock is HELD here; the hook must be a LEAF (the wired
+                    # clear_meter takes only the controller lock — job → controller,
+                    # never the reverse) and must never call back into this job.
+                    if self._on_run_end is not None:
+                        try:
+                            self._on_run_end()
+                        except Exception:  # pylint: disable=broad-exception-caught — best-effort, never crash the worker
+                            _LOG.exception(
+                                "pull_job.on_run_end failed; the single-flight release continues"
+                            )
                     # Release the account-wide cross-process single-flight lock under the
                     # SAME identity gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001), so a peer
                     # process can start the next pull — released HERE and only here, when
@@ -997,6 +1059,22 @@ class BackgroundPullJob:
             return self._running
 
     @property
+    def running_job_kind(self) -> str | None:
+        """The RUNNING job's kind, else ``None`` — one lock, atomic, O(1).
+
+        DEC-RATE-METER-LIFECYCLE-001. Returns :data:`JOB_KIND_PULL` /
+        :data:`JOB_KIND_SWEEP` while the matching :meth:`start` is in flight and
+        ``None`` when idle. Reads ``_running`` AND ``_job_kind`` under the ONE
+        ``self._lock`` acquisition so the pair can never tear (a probe can never see
+        a stale kind against a fresh running flag). The ``/api/v1/pull/rate``
+        production probe compares this against :data:`JOB_KIND_PULL`, so a running
+        sweep honestly reads "no PULL active" while :attr:`running` (which every
+        duty-degrade consumer keeps using) stays sweep-INCLUSIVE.
+        """
+        with self._lock:
+            return self._job_kind if self._running else None
+
+    @property
     def counters(self) -> CoverageCounters:
         """The incremental coverage counters fed by the write funnel — O(1)."""
         return self._counters
@@ -1059,6 +1137,8 @@ class BackgroundPullJob:
 
 
 __all__ = [
+    "JOB_KIND_PULL",
+    "JOB_KIND_SWEEP",
     "BackgroundPullJob",
     "FinallyHook",
     "LakeRootResolver",

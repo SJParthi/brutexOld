@@ -1068,6 +1068,29 @@ class TestSessionRateControllerMeter:
         holder.register_meter(second)
         assert holder.peek_meter() is second
 
+    def test_clear_meter_evicts_and_is_idempotent(self) -> None:
+        """``clear_meter`` — the paired DEATH of the register lifecycle (the C0 fix).
+
+        DEC-RATE-METER-LIFECYCLE-001. MUTANT KILLED: the ``clear_meter`` body
+        severed (``self._meter = None`` dropped) → the registered meter would
+        survive the clear and a later sampler tick reads the DEAD pull's meter.
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        holder.clear_meter()  # idempotent on an EMPTY holder — a no-op, never raises
+        assert holder.peek_meter() is None
+        meter = CallMeter()
+        holder.register_meter(meter)
+        assert holder.peek_meter() is meter
+        holder.clear_meter()
+        assert holder.peek_meter() is None, "the clear must evict the registered handle"
+        holder.clear_meter()  # idempotent on an already-cleared holder
+        assert holder.peek_meter() is None
+        # The holder stays usable — a later pull re-registers as normal.
+        holder.register_meter(meter)
+        assert holder.peek_meter() is meter
+
     def test_concurrent_register_peek_and_meter_writes_never_tear(self) -> None:
         """Racing register_meter/peek_meter against live meter start/stop is torn-read-free.
 
@@ -1186,6 +1209,163 @@ class TestRegisterPullMeter:
 
         holder = SessionRateController()
         register_pull_meter(holder, _Bare())
+        assert holder.peek_meter() is None
+
+    def test_dry_run_clears_stale_and_never_registers(self) -> None:
+        """A dry-run DEREGISTERS — even against a REAL-metered source (the D1 fix).
+
+        DEC-RATE-METER-LIFECYCLE-001. MUTANTS KILLED: the ``if dry_run:`` branch
+        severed → the metered source would register (peek non-None); the
+        ``clear_meter()`` dropped from the branch → the stale prior-pull meter
+        would persist (peek is the stale meter).
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        class _Client:
+            def __init__(self) -> None:
+                self.meter = CallMeter()
+
+        holder = SessionRateController()
+        stale = CallMeter()
+        holder.register_meter(stale)  # a prior real pull's meter, never evicted pre-#1482
+        register_pull_meter(holder, _Client(), dry_run=True)
+        assert holder.peek_meter() is None, (
+            "a dry-run must evict the stale meter AND never register the synthetic one"
+        )
+
+    def test_dry_run_with_none_session_is_noop(self) -> None:
+        """``dry_run=True`` with no session holder returns without touching anything."""
+        from brutex.adapters.call_meter import CallMeter
+
+        class _Client:
+            meter = CallMeter()
+
+        register_pull_meter(None, _Client(), dry_run=True)  # must simply return
+
+    def test_live_meterless_source_keeps_prior_and_metered_registers(self) -> None:
+        """The LIVE path is byte-unchanged: meterless keeps prior; metered registers.
+
+        Re-pins the hard constraint: the intra-pull ``register_meter(None)``
+        ignore-guard survives the dry-run gate. MUTANTS KILLED: the clear widened
+        onto the live path (``if meter is None: clear_meter()`` — the prior meter
+        would vanish); the gate inverted (``if not dry_run: clear``).
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        class _Bare:
+            pass
+
+        holder = SessionRateController()
+        prior = CallMeter()
+        holder.register_meter(prior)
+        register_pull_meter(holder, _Bare(), dry_run=False)
+        assert holder.peek_meter() is prior, "a live meterless source must KEEP the prior meter"
+
+        fresh = CallMeter()
+
+        class _Pool:
+            def __init__(self) -> None:
+                self.meter = fresh
+
+        register_pull_meter(holder, _Pool(), dry_run=False)
+        assert holder.peek_meter() is fresh, "a live metered source registers as before"
+
+
+# ── the pull build sites' register_pull_meter WIRING (DEC-RATE-METER-LIFECYCLE-001,
+#    audit C1/C2: all four sites severed left 1,329 tests green — these kill the
+#    two SPOT-spine mutants by driving the REAL pull functions) ─────────────────
+
+
+class _MeteredClient:
+    """A minimal ``.meter``-carrying client stub (the ClientPool/GrowwClient shape)."""
+
+    def __init__(self, meter: object) -> None:
+        self.meter = meter
+
+
+class _MeteredSpotAdapter:
+    """A synthetic spot adapter whose ``.client.meter`` is a KNOWN CallMeter.
+
+    Delegates every protocol call to a wrapped :class:`SyntheticSpotAdapter`
+    (a slotted dataclass that cannot grow a ``client`` attribute) while carrying
+    the live-adapter ``.client.meter`` shape ``register_pull_meter`` probes.
+    """
+
+    def __init__(self, meter: object) -> None:
+        self._inner = SyntheticSpotAdapter()
+        self.client = _MeteredClient(meter)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+class TestPullMeterWiring:
+    """The spot spines' ``register_pull_meter`` call sites, driven END-TO-END."""
+
+    def test_pull_all_spot_registers_exact_adapter_meter(self, tmp_path: Path) -> None:
+        """MUTANT KILLED: ``register_pull_meter(...)`` at the ``pull_all_spot`` build
+        site severed to ``pass`` → ``peek_meter()`` stays ``None`` (audit C1 spine 1)."""
+        from brutex.adapters.call_meter import CallMeter
+
+        meter = CallMeter()
+        adapter = cast(MarketAdapter, _MeteredSpotAdapter(meter))
+        holder = SessionRateController()
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (adapter, NullBarSink()),
+            session_rate=holder,
+        )
+        assert holder.peek_meter() is meter, (
+            "the bulk-spot build site must register the adapter's EXACT client meter"
+        )
+
+    def test_pull_candles_registers_exact_adapter_meter(self, tmp_path: Path) -> None:
+        """MUTANT KILLED: the ``pull_candles`` build-site call severed (C1 spine 2)."""
+        from brutex.adapters.call_meter import CallMeter
+
+        meter = CallMeter()
+        adapter = cast(MarketAdapter, _MeteredSpotAdapter(meter))
+        holder = SessionRateController()
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            year=2024,
+            dry_run=False,
+            adapter_factory=lambda _root, _inst: (adapter, NullBarSink()),
+            session_rate=holder,
+        )
+        assert holder.peek_meter() is meter
+
+    def test_spot_dry_run_clears_stale_meter(self, tmp_path: Path) -> None:
+        """The C0 headline pin (FAILS on pre-#1482 HEAD): a spot dry-run with the
+        DEFAULT synthetic adapter EVICTS a prior real pull's registered meter.
+
+        MUTANT KILLED: the ``dry_run=dry_run`` kwarg dropped at the ``pull_all_spot``
+        site — the meterless synthetic adapter would then ride the
+        ``register_meter(None)`` ignore-guard and KEEP the stale meter readable.
+        """
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        stale = CallMeter()
+        holder.register_meter(stale)  # pull #1's meter, job long finished
+        pull_all_spot(
+            [_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW, session_rate=holder
+        )
+        assert holder.peek_meter() is None, (
+            "the dry-run bulk pull must deregister — never leave a dead pull's meter"
+        )
+
+    def test_pull_candles_dry_run_clears_stale_meter(self, tmp_path: Path) -> None:
+        """The ``pull_candles`` twin of the C0 pin (kwarg-dropped mutant, spine 2)."""
+        from brutex.adapters.call_meter import CallMeter
+
+        holder = SessionRateController()
+        holder.register_meter(CallMeter())
+        pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True, session_rate=holder)
         assert holder.peek_meter() is None
 
 
