@@ -4,6 +4,9 @@
 
 * :func:`read_rss_kib` — Linux ``/proc`` primary, ``ru_maxrss`` fallback (with
   the macOS bytes→KiB normalisation), ``None`` when both abstain.
+* :func:`read_rss_kib_current` — the slope-safe reader: ``/proc`` current value
+  ONLY, ``None`` off-``/proc`` (the ``ru_maxrss`` PEAK is never consulted, so a
+  before/after-delta consumer can never gate on a peak).
 * :func:`read_fd_count` — ``/proc/self/fd`` primary, ``/dev/fd`` fallback,
   ``None`` when neither lists.
 
@@ -82,6 +85,28 @@ class TestReadRssKib:
         monkeypatch.setattr(process_probe, "_read_rss_kib_proc", lambda: None)
         monkeypatch.setattr(process_probe, "_read_rss_kib_rusage", lambda: 9001)
         assert process_probe.read_rss_kib() == 9001
+
+
+class TestReadRssKibCurrent:
+    """The slope-safe reader: /proc current-value ONLY, never the peak fallback."""
+
+    def test_returns_proc_current_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(process_probe, "_read_rss_kib_proc", lambda: 1337)
+        assert process_probe.read_rss_kib_current() == 1337
+
+    def test_abstains_off_proc_never_falls_into_peak(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Off-/proc the reader returns None — the ru_maxrss PEAK is never consulted.
+
+        A before/after-DELTA consumer (test_memory_growth's RSS backstop) rides
+        this contract: a peak can never masquerade as a growth slope.
+        """
+        monkeypatch.setattr(process_probe, "_read_rss_kib_proc", lambda: None)
+        monkeypatch.setattr(
+            process_probe,
+            "_read_rss_kib_rusage",
+            lambda: pytest.fail("the PEAK fallback must never serve a slope consumer"),
+        )
+        assert process_probe.read_rss_kib_current() is None
 
 
 class TestReadFdCount:

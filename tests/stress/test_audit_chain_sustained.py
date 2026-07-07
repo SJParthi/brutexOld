@@ -12,16 +12,25 @@ Invariants verified under load:
 3. No exception, no flush stall, no entry loss under ``N_EVENTS``
    sustained appends.
 
-Budget
-------
-* CI nightly: ``N_EVENTS = 5_000`` (default, ~30s on GHA).
-* Local 24h soak: ``STRESS_EVENTS=10_000_000`` via
-  ``workflow_dispatch`` — NOT run automatically.
+Budget (three-tier model — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1512)
+----------------------------------------------------------------------
+* CI nightly (``stress-nightly.yml``, the ~5-min ubuntu regression gate):
+  ``N_EVENTS = 5_000`` (default, ~30s on GHA); the workflow's guard step
+  REFUSES ``STRESS_EVENTS > 200_000``, so this count-bounded test can never
+  be handed a soak-scale count on the tier whose 60-min timeout cannot
+  complete one.
+* The REAL multi-hour soak is NOT an event-count dispatch of this test — it
+  is the DURATION-bounded ``test_soak_sustained.py::test_soak_sustained``
+  (the ``soak`` marker, ``STRESS_DURATION_S``) on the self-hosted
+  ``soak-selfhosted.yml`` tier. The prior "24h soak via ``workflow_dispatch``
+  with ``STRESS_EVENTS=10_000_000``" route once documented here was retracted
+  as FALSE per Golden Rule #10 (a 10M run ≈ ~16.7 h vs the 60-min timeout;
+  see tests/stress/__init__.py for the tier model).
 
 The CI default is deliberately on the low side — DEC-P0-005 documents
 shared-GHA flake risk for any test that takes > 60s. The CI nightly
-provides regression coverage; the manual soak provides the real
-24h soak target named in CLAUDE.md §2 rule #12.
+provides regression coverage; the real soak tier provides the sustained
+wall-clock target named in CLAUDE.md §2 rule #12.
 
 Note on memory profiling
 ------------------------
@@ -52,7 +61,9 @@ def test_audit_chain_sustained_burst(tmp_path: Path) -> None:
     """Burst-write N events to an audit log and re-verify the chain.
 
     Defaults to 5_000 events (~30s on GHA). Override via ``STRESS_EVENTS``
-    env var for local 24h soak runs.
+    env var to scale the regression count (the nightly tier's guard caps it
+    at 200_000; the real multi-hour soak is the DURATION-bounded soak tier,
+    not this count knob — DEC-SOAK-REAL-TIER-001).
     """
     n_events = int(os.environ.get("STRESS_EVENTS", "5000"))
     log_path = tmp_path / "stress_audit.jsonl"

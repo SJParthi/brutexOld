@@ -25,6 +25,19 @@
 # NOR the CI gate, visible only via structlog + the brutex_soak_p99_ratio gauge
 # (DEC-SOAK-REAL-TIER-001).
 #
+# DERIVED TIMING VIA THE `plan` JOB (SOAK-R6-1 / OH6-1 fix)
+# ---------------------------------------------------------
+# GitHub Actions expressions have NO arithmetic operators (the supported set is
+# exactly `( ) [ ] . ! < <= > >= == != && ||`), so an in-expression `+ 30` /
+# `* 60` is INVALID — a workflow using one fails startup validation and NO job
+# (including the failure watchdog) ever runs.
+# The derivation therefore happens in SHELL arithmetic inside a tiny `plan`
+# job, whose validated numeric outputs feed the soak job's `timeout-minutes`
+# (`fromJSON()` of a precomputed needs-output IS a valid expression) and
+# `STRESS_DURATION_S`. The claim "timeout DERIVED from the requested duration"
+# stands — only the computation site moved from an (impossible) expression to
+# the plan job's shell.
+#
 # RUNNER + TRIGGER PRECEDENT (verify-m4pro.yml / bench-m4pro.yml)
 # --------------------------------------------------------------
 # `runs-on: [self-hosted, macos, m4pro]`, NO `pull_request` trigger — a runner
@@ -41,7 +54,10 @@
 # and only for the `soak_minutes` you dispatch. The default weekly cron soaks for
 # 6 h (`soak_minutes` default 360). ru_maxrss on macOS is a PEAK not a slope, so
 # the RSS rule is an absolute ceiling backstop, not a growth gate (see
-# process_probe.py).
+# process_probe.py). A garbage `soak_minutes` dispatch fails the `plan` job
+# (operator-watched — a dispatch is interactive) and the soak job is SKIPPED;
+# the issue watchdog covers the SOAK job's failure/cancellation, which is the
+# unattended (cron) risk the watchdog exists for.
 
 name: Real soak (self-hosted M4-Pro)
 
@@ -72,17 +88,51 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
+  plan:
+    name: Derive soak timing (shell arithmetic)
+    # GHA expressions cannot add or multiply (see header), so the duration
+    # derivation runs here in POSIX shell. Cheap GitHub-hosted job — it must
+    # never queue behind an asleep self-hosted Mac.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      timeout_minutes: ${{ steps.derive.outputs.timeout_minutes }}
+      duration_s: ${{ steps.derive.outputs.duration_s }}
+    steps:
+      - name: Validate soak_minutes and derive timeout + duration
+        id: derive
+        # Same env-indirection + strict digits-only fence as stress-nightly's
+        # stress_events guard (COMMON pattern): the input is DATA not code, an
+        # underscore-grouped value is normalised, anything non-numeric is
+        # REFUSED (never error-suppressed into shell arithmetic).
+        env:
+          SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '360' }}
+        run: |
+          m=${SOAK_MINUTES//_/}
+          case "$m" in
+            ''|*[!0-9]*)
+              echo "::error::soak_minutes='$SOAK_MINUTES' is not a non-negative integer." >&2
+              exit 1
+              ;;
+          esac
+          echo "timeout_minutes=$((m + 30))" >> "$GITHUB_OUTPUT"
+          echo "duration_s=$((m * 60))" >> "$GITHUB_OUTPUT"
+          echo "Soak plan: soak_minutes=$m timeout_minutes=$((m + 30)) duration_s=$((m * 60))"
+
   soak:
     name: Real multi-hour soak (drift-gated)
+    needs: plan
     # Gated to the registered self-hosted M4-Pro. If no runner with this label
     # set is online the job sits "queued" indefinitely — harmless (no PR to
     # block). Same precedent as verify-m4pro.yml / bench-m4pro.yml.
     runs-on: [self-hosted, macos, m4pro]
     # SELF-KILL FIX (DEC-SOAK-REAL-TIER-001): the job timeout is DERIVED from the
-    # requested duration (+30 min for install/teardown), NOT a fixed 60. A
-    # scheduled run reads the '360' default → 390. This is the structural fix for
-    # the #208 trap where a soak could never fit its own fixed-60 timeout.
-    timeout-minutes: ${{ fromJSON(github.event.inputs.soak_minutes || '360') + 30 }}
+    # requested duration (+30 min for install/teardown), NOT a fixed 60 — computed
+    # by the `plan` job (GHA expressions have no arithmetic; fromJSON of a
+    # precomputed needs-output is valid). A scheduled run reads the '360'
+    # default → 390. This is the structural fix for the #208 trap where a soak
+    # could never fit its own fixed-60 timeout.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
 
     env:
       PYTHONHASHSEED: "0"
@@ -96,8 +146,7 @@ jobs:
         # Never interpolate the dispatch input into the script text: pass it via
         # env and reference the shell variable, so a value with shell
         # metacharacters is DATA not code (same pattern as stress-nightly.yml's
-        # stress_events). The fromJSON()-guarded uses (job/step timeout, duration)
-        # are already injection-safe; this raw echo was the one exception.
+        # stress_events). The plan-job outputs are already digits-validated.
         env:
           SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '360' }}
         run: |
@@ -149,23 +198,30 @@ jobs:
         # G2 belt-and-suspenders: the SAME derived bound is ALSO applied as a
         # per-step timeout, so even if the job-level expression silently
         # no-op'd the run still cannot outrun `soak_minutes + 30`.
-        timeout-minutes: ${{ fromJSON(github.event.inputs.soak_minutes || '360') + 30 }}
+        # --basetemp pins pytest's temp root to the JOB-scoped $RUNNER_TEMP
+        # (SOAK-R6-2 / SEC6-1): on this persistent macOS runner the default
+        # basetemp lives under TMPDIR (`/var/folders/.../T/`, NOT `/tmp`), so a
+        # `/tmp/pytest-*` artifact glob matched NOTHING — and an unset-TMPDIR
+        # daemon config would instead have matched OTHER local pytest runs'
+        # temp trees and uploaded them to a PUBLIC-repo artifact. RUNNER_TEMP
+        # is job-scoped and cleaned between runs — both hazards closed.
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
         env:
-          # DYNAMIC duration knob: minutes → seconds for STRESS_DURATION_S, which
+          # DYNAMIC duration knob: minutes → seconds for STRESS_DURATION_S
+          # (derived by the plan job — GHA expressions have no `* 60`), which
           # test_soak_sustained honours. `-m 'stress or soak'` selects the short
           # nightly driver AND the full sustained soak.
-          STRESS_DURATION_S: ${{ fromJSON(github.event.inputs.soak_minutes || '360') * 60 }}
+          STRESS_DURATION_S: ${{ needs.plan.outputs.duration_s }}
         run: |
           echo "Soaking for STRESS_DURATION_S=$STRESS_DURATION_S seconds"
-          pytest tests/stress -m 'stress or soak' --tb=short
+          pytest tests/stress -m 'stress or soak' --tb=short --basetemp "$RUNNER_TEMP/soak-tmp"
 
       - name: Upload soak drift artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: soak-drift-logs
-          path: |
-            /tmp/pytest-*
+          path: ${{ runner.temp }}/soak-tmp/**
           if-no-files-found: ignore
           retention-days: 14
 

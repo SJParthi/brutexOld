@@ -56,10 +56,20 @@ wall-clock runner:
 3. **self-hosted soak tier** — NEW `.github/workflows/soak-selfhosted.yml` on the
    registered M4-Pro (`runs-on: [self-hosted, macos, m4pro]`), weekly cron +
    `workflow_dispatch(soak_minutes)`, with **`timeout-minutes` DERIVED from the
-   requested duration** (`fromJSON(soak_minutes || '360') + 30`, applied at BOTH
-   the job level and the pytest step) so it can never outrun its own clock. It
-   runs `pytest tests/stress -m 'stress or soak'` with `STRESS_DURATION_S =
-   soak_minutes × 60`, driving the DURATION-based `test_soak_sustained`.
+   requested duration** (`soak_minutes + 30`, applied at BOTH the job level and
+   the pytest step) so it can never outrun its own clock. The derivation runs as
+   SHELL arithmetic in a tiny GitHub-hosted `plan` job whose digits-validated
+   outputs feed `fromJSON(needs.plan.outputs.…)` — NOT as expression arithmetic,
+   because GitHub Actions expressions have NO arithmetic operators (an
+   in-expression `+ 30` fails workflow-file validation and no job, watchdog
+   included, ever runs — the SOAK-R6-1/OH6-1 BLOCKER this replaced). It runs
+   `pytest tests/stress -m 'stress or soak'` with `STRESS_DURATION_S =
+   soak_minutes × 60` (same plan-job derivation), driving the DURATION-based
+   `test_soak_sustained`, under `--basetemp "$RUNNER_TEMP/soak-tmp"` so the
+   drift-log artifact is JOB-scoped (the default macOS basetemp lives under
+   `/var/folders/.../T/`, where a `/tmp/pytest-*` glob matches nothing — and an
+   unscoped glob on a PERSISTENT runner could upload unrelated local pytest
+   temp trees to a public-repo artifact).
 
 The drift detector reuses the EXISTING rails (`SLADetector` hysteresis,
 `MetricRegistry` gauges, guarded callbacks → `SweepAlerter.soak_drift`), mirroring

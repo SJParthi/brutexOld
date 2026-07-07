@@ -25,6 +25,11 @@ so the RSS/fd drift gates actually gate on the long tier.
   reason. This revives the resource-ceiling signal class the removed PR-#99
   ``ru_maxrss`` gate abandoned, without its flakiness (it is a backstop, not a
   tight per-test gate).
+* **Slope consumers** — a consumer that computes a before/after DELTA (the
+  memory-growth harness's RSS-growth backstop) must call
+  :func:`read_rss_kib_current`, which consults ONLY the ``/proc`` current-value
+  path and returns ``None`` elsewhere — so the peak fallback can never
+  masquerade as a slope (it honestly abstains off-Linux instead).
 
 ## fd — descriptor-leak detection
 
@@ -50,7 +55,7 @@ from __future__ import annotations
 import os
 import sys
 
-__all__ = ["read_fd_count", "read_rss_kib"]
+__all__ = ["read_fd_count", "read_rss_kib", "read_rss_kib_current"]
 
 
 def _read_rss_kib_proc() -> int | None:
@@ -105,6 +110,20 @@ def read_rss_kib() -> int | None:
     if proc is not None:
         return proc
     return _read_rss_kib_rusage()
+
+
+def read_rss_kib_current() -> int | None:
+    """Return the CURRENT resident-set size in KiB, or ``None`` off-``/proc``.
+
+    The slope-safe reader: ONLY the ``/proc/self/status`` ``VmRSS`` path (a
+    genuine current value) is consulted — the ``ru_maxrss`` PEAK fallback is
+    deliberately NOT taken, because the module contract above forbids using a
+    process-lifetime peak as a growth slope. A before/after-DELTA consumer
+    (``tests/stress/test_memory_growth.py``'s RSS-growth backstop) must use
+    THIS reader, so off-Linux it honestly abstains (the backstop is skipped)
+    instead of gating on peak-deltas.
+    """
+    return _read_rss_kib_proc()
 
 
 def read_fd_count() -> int | None:
