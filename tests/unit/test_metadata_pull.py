@@ -793,10 +793,10 @@ def test_live_pull_registers_exact_client_meter(tmp_path: Path) -> None:
 
 
 def test_dry_run_never_registers_and_clears_stale_meter(tmp_path: Path) -> None:
-    """The D1 pin (FAILS on pre-#1534 HEAD): the metadata DRY-RUN never registers.
+    """The D1 pin (FAILS on pre-#1544 HEAD): the metadata DRY-RUN never registers.
 
     The real ``_build_dry_run_client`` GrowwClient carries a REAL ``CallMeter``
-    (``client.py`` ``default_factory=CallMeter`` — the pre-#1534 in-code "no
+    (``client.py`` ``default_factory=CallMeter`` — the pre-#1544 in-code "no
     ``.meter``" claim was FALSE), so without the gate the dry-run would register
     its own synthetic meter (a fabricated MEASURED "flowing" in a warm process)
     AND overwrite a prior real pull's meter. MUTANT KILLED: the ``dry_run=dry_run``

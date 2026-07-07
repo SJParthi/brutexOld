@@ -1016,7 +1016,7 @@ class SessionRateController:
         #: means exactly "no meter registered: the pre-registration window at pull start,
         #: a dry-run, or after a finished pull's clear", and the sampler falls back to its
         #: honest ``meter_present=False``. A dead pull's meter can never linger into a
-        #: later pull / dry-run (the #1534 C0 fix + its round-2 direct-route residual).
+        #: later pull / dry-run (the #1544 C0 fix + its round-2 direct-route residual).
         self._meter: CallMeter | None = None
         self._lock = threading.Lock()
 
@@ -1099,7 +1099,7 @@ class SessionRateController:
         registered, success AND failure — round 4) — so "no in-process pull
         running ⇒ no meter registered" is a process invariant and a dead pull's
         never-evicted meter can never be sampled by a later dry-run / idle poll (the
-        #1534 C0 cross-pull leak fix + its round-2/round-4 direct-route residuals).
+        #1544 C0 cross-pull leak fix + its round-2/round-4 direct-route residuals).
 
         *expected* (round 4) makes the clear an identity-gated COMPARE-AND-CLEAR: with a
         non-``None`` handle the stored handle is evicted ONLY when it ``is`` that exact
@@ -1151,7 +1151,7 @@ GrowwClient` (its own ``.meter``) OR a :class:`~brutex.adapters.protocol.MarketA
 
     ``dry_run=True`` with a live *session_rate* now actively **DEREGISTERS**
     (:meth:`SessionRateController.clear_meter`) and never registers — NOT a no-op
-    (DEC-RATE-METER-LIFECYCLE-001, correcting the false pre-#1534 "silently a NO-OP"
+    (DEC-RATE-METER-LIFECYCLE-001, correcting the false pre-#1544 "silently a NO-OP"
     claim): the metadata / F&O dry-run ``GrowwClient``\\ s carry a REAL unpaced
     ``CallMeter`` (``client.py`` ``default_factory=CallMeter``), so registering it would
     fabricate a MEASURED "flowing" rate during a synthetic pull, and the clear also evicts

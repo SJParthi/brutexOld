@@ -719,7 +719,7 @@ class TestFailingVerdictEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# DEC-RATE-METER-LIFECYCLE-001 (MIGRATION.md #1534): the meter lifecycle + the
+# DEC-RATE-METER-LIFECYCLE-001 (MIGRATION.md #1544): the meter lifecycle + the
 # kind-aware rate probe, end to end through the REAL routes + REAL job.
 # ---------------------------------------------------------------------------
 
@@ -833,7 +833,7 @@ class TestSweepKindAwareRateProbe:
     def test_sweep_on_shared_job_reads_idle_not_stalled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The C5 repro pin (FAILS on pre-#1534 HEAD — it read a red ``stalled``).
+        """The C5 repro pin (FAILS on pre-#1544 HEAD — it read a red ``stalled``).
 
         MUTANTS KILLED: ``job_kind=JOB_KIND_SWEEP`` dropped from the sweep route's
         ``start`` (the default pull kind → stalled); the default rate probe left as
@@ -1228,7 +1228,7 @@ class TestDirectPullRouteMeterLifecycle:
 
         MUTANT KILLED: the pre-round-4 route-level unconditional
         ``finally: _session_rate.clear_meter()`` re-introduced — it evicted the live
-        meter here (there was no stale handle to shorten; the #1534 'only shortens
+        meter here (there was no stale handle to shorten; the #1544 'only shortens
         how long the stale handle lives' framing was false for this case).
         """
         import importlib

@@ -693,7 +693,7 @@ def pull_expiries_contracts(
     # (``client.py`` ``default_factory=CallMeter`` — the empty-chain SDK ticks it at unpaced
     # speed), so honesty comes from the explicit ``dry_run=True`` gate, which DEREGISTERS
     # (clears any stale prior-pull meter, never registers the synthetic one) — never from a
-    # meterless client (the pre-#1534 "no ``.meter`` silent no-op" claim here was factually
+    # meterless client (the pre-#1544 "no ``.meter`` silent no-op" claim here was factually
     # FALSE; DEC-RATE-METER-LIFECYCLE-001). Best-effort + observe-only. Lazy import avoids
     # any module-load ordering coupling with pull_controller.
     from brutex.dashboard.pull_controller import register_pull_meter

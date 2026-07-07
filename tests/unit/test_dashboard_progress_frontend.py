@@ -99,7 +99,7 @@ def test_rate_monitor_eta_format_matches_universe() -> None:
 
 
 def test_rate_monitor_js_obs_claim_removed() -> None:
-    """The C4 pin (FAILS on pre-#1534 HEAD): the false "obs rendered beside it" claim
+    """The C4 pin (FAILS on pre-#1544 HEAD): the false "obs rendered beside it" claim
     + the dead ``.bxrm-obs`` CSS are gone (DEC-RATE-METER-LIFECYCLE-001; the refuter
     proved ``req_per_hour_observed`` was never rendered at any commit).
 

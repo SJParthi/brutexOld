@@ -1469,11 +1469,11 @@ def test_contract_pull_registers_exact_pool_meter(registry: RegistryStore, tmp_l
 
 
 def test_dry_run_contract_pull_clears_and_never_registers(registry: RegistryStore) -> None:
-    """The D1 pin (FAILS on pre-#1534 HEAD): the F&O DRY-RUN never registers.
+    """The D1 pin (FAILS on pre-#1544 HEAD): the F&O DRY-RUN never registers.
 
     The real default ``_build_dry_run_client`` returns a ``GrowwClient`` whose
     ``CallMeter`` is REAL (``client.py`` ``default_factory=CallMeter`` — the
-    pre-#1534 "empty-candle client with no ``.meter``" claim here was FALSE), so
+    pre-#1544 "empty-candle client with no ``.meter``" claim here was FALSE), so
     without the gate the dry-run would register its own synthetic meter AND
     overwrite a prior real pull's. MUTANT KILLED: the ``dry_run=dry_run`` kwarg
     dropped at the site / the dry-run branch severed → ``peek_meter()`` non-None.
