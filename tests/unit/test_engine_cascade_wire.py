@@ -946,6 +946,25 @@ class TestFuturesRollScheduleCarriage:
         assert warned[0]["instrument"] == _FUT_ALIAS
         assert "sweep-all" in str(warned[0]["remedy"])
 
+    def test_spot_pool_with_a_schedule_entry_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Round-3 finding 2, the POSITIVE invariant direction at the shared
+        # core: a schedule entry for a NON-alias pool must never be applied
+        # silently (pre-fix `roll_schedules.get(instrument)` threaded it into
+        # candidates_for_spec → build_bar_bits(roll_schedule=...), breaking
+        # the replay's byte-identity contract, then dying on Stage-1A's raw
+        # beyond-schedule ValueError for a short schedule).
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        with pytest.raises(cw.CascadeWireError, match="non-futures instrument 'NIFTY'"):
+            cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+                roll_schedules={"NIFTY": _FUT_SCHEDULE},
+            )
+        assert calls == []  # the schedule never reached a spot bar_bits build
+
     def test_auto_path_records_schedules_and_replay_threads_them(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1242,6 +1261,34 @@ class TestManifestSerialisation:
         payload = json.loads(cw.manifest_to_json(_manifest()))
         payload["roll_schedules"] = [["NSE-NIFTY-FUT", ["not-an-ordinal"]]]
         with pytest.raises(cw.CascadeWireError, match="invalid roll_schedules"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_spot_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
+        # Round-3 finding 2: the manifest has no integrity digest, so a
+        # hand-edited/corrupt `roll_schedules` entry for a SPOT instrument
+        # was trusted verbatim and silently rebuilt that pool's bar_bits
+        # WITH per-contract hard resets. The presence ⟺ alias invariant is
+        # now enforced at the parse boundary.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NIFTY", [738000, 738100]]]
+        with pytest.raises(cw.CascadeWireError, match="not.*the NIFTY-futures series alias"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [[], [738100, 738000], [738000, 738000], [-5]],
+        ids=["empty", "decreasing", "duplicate", "negative"],
+    )
+    def test_shape_violating_roll_schedule_refused_at_parse(self, schedule: list[int]) -> None:
+        # The SweepRunConfig shape law (non-empty, strictly increasing,
+        # non-negative ordinals), mirrored at the manifest parse boundary.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", schedule]]
+        with pytest.raises(cw.CascadeWireError, match="strictly increasing"):
             cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
 
     def test_bad_json_raises(self) -> None:

@@ -903,7 +903,10 @@ def run_cascade_over_specs(
         available (a pre-carriage manifest) is loudly SKIPPED — re-scoring
         it schedule-blind would silently violate the D11 roll-reset law
         (Golden Rule #1; review round-1). Spot pools ignore this (``None``
-        schedule is the byte-identical spot path).
+        schedule is the byte-identical spot path); a schedule entry for a
+        NON-alias pool is REFUSED (:class:`CascadeWireError` — the positive
+        direction of the presence ⟺ alias invariant, review round-3
+        finding 2).
 
     Returns
     -------
@@ -958,6 +961,22 @@ def run_cascade_over_specs(
         if not bars:
             continue
         roll_schedule = None if roll_schedules is None else roll_schedules.get(instrument)
+        if roll_schedule is not None and not is_futures_series_symbol(instrument):
+            # The POSITIVE direction of the presence ⟺ alias invariant
+            # (review round-3 finding 2): a schedule entry for a SPOT
+            # instrument would rebuild the pool's bar_bits WITH per-contract
+            # hard resets — silently breaking the replay's "byte-identical to
+            # the sweep's report" contract, then (for a schedule ending before
+            # the window's last bar day) dying on Stage-1A's raw
+            # beyond-schedule ValueError misattributed as a code bug. Refuse
+            # loudly instead; every other consumer already enforces both
+            # directions (SweepRunConfig.__post_init__).
+            raise CascadeWireError(
+                f"roll_schedules carries an entry for non-futures instrument "
+                f"{instrument!r} — only the NIFTY-futures series alias may carry a "
+                "roll schedule (presence ⟺ alias); the manifest/mapping is corrupt — "
+                "re-run `brutex sweep-all` to mint a fresh one"
+            )
         if roll_schedule is None and is_futures_series_symbol(instrument):
             # A futures pool with NO schedule (a pre-carriage manifest replay)
             # must never be re-scored schedule-blind: the bar_bits would cross
@@ -1445,20 +1464,45 @@ def _roll_schedules_from_payload(
 ) -> tuple[tuple[str, tuple[int, ...]], ...] | None:
     """Parse the additive ``roll_schedules`` manifest key (absent/None → None).
 
+    The manifest carries no integrity digest, so a hand-edited/corrupted file
+    is otherwise trusted verbatim — the presence ⟺ alias invariant
+    (``SweepRunConfig.__post_init__``) and the schedule SHAPE law (non-empty,
+    strictly increasing, non-negative ordinals) are therefore enforced HERE at
+    the parse boundary (review round-3 finding 2): a ``roll_schedules`` entry
+    for a SPOT instrument would silently rebuild that pool's ``bar_bits`` with
+    per-contract hard resets, breaking the replay's byte-identity contract.
+
     Raises
     ------
     CascadeWireError
-        On a malformed entry (non-pair rows, non-int ordinals, …).
+        On a malformed entry (non-pair rows, non-int ordinals, …), an entry
+        whose instrument is not the NIFTY-futures series alias, or a schedule
+        violating the shape law.
     """
     if raw is None:
         return None
     try:
-        return tuple(
+        parsed = tuple(
             (str(instrument), tuple(int(ordinal) for ordinal in schedule))
             for instrument, schedule in cast("Sequence[Any]", raw)
         )
     except (TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid roll_schedules in manifest: {exc}") from exc
+    for instrument, schedule in parsed:
+        if not is_futures_series_symbol(instrument):
+            raise CascadeWireError(
+                f"invalid roll_schedules in manifest: instrument {instrument!r} is not "
+                "the NIFTY-futures series alias — a roll schedule may exist for (and "
+                "only for) the futures alias (presence ⟺ alias); the manifest is "
+                "corrupt — re-run `brutex sweep-all` to mint a fresh one"
+            )
+        if not schedule or list(schedule) != sorted(set(schedule)) or schedule[0] < 0:
+            raise CascadeWireError(
+                f"invalid roll_schedules in manifest: schedule for {instrument!r} must "
+                "be a non-empty strictly increasing tuple of non-negative day "
+                f"ordinals, got {list(schedule)}"
+            )
+    return parsed
 
 
 def manifest_to_json(manifest: CascadeManifest) -> bytes:
