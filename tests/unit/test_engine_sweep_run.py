@@ -2180,6 +2180,40 @@ class TestResidentKernelRollScheduleMismatch:
         summary = _run_sweep(tmp_path, "ok", bars, cfg, kernel=kernel)
         assert summary.evaluated > 0
 
+    def test_kernel_built_with_other_1day_mask_flag_raises(self, tmp_path: Path) -> None:
+        # The D12 twin (review round-1 finding 5): a hand-built kernel whose
+        # ``apply_1day_mask`` flag disagrees with the tuple's derived flag
+        # carries bar_bits with the intraday-only bits (ToD 44-47 / VWAP
+        # 52-53) wrongly set/cleared — fail-fast, exactly like the schedule
+        # guard (unreachable via the production cache, whose key contains
+        # instrument+tf, the flag's only inputs).
+        from brutex.engine.stage1a import apply_1day_mask_for
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        assert apply_1day_mask_for(cfg.instrument, cfg.tf) is False
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            apply_1day_mask=True,
+        )
+        assert kernel.n_bars == len(bars)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built with apply_1day_mask"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
 
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 — the wired resident Rust trade-sim ──────
 

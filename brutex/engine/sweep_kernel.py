@@ -105,7 +105,9 @@ class ResidentSweepKernel:
         is the byte-identical spot path.
     apply_1day_mask
         D12 honesty flag (see :func:`brutex.engine.stage1a.build_bar_bits`).
-        Default False (byte-identical).
+        Default False (byte-identical). Recorded so the sweep can fail-fast
+        when a kernel is reused under a DIFFERENT flag (the D12 twin of the
+        anchor/schedule guards — review round-1 finding 5).
 
     Raises
     ------
@@ -113,7 +115,14 @@ class ResidentSweepKernel:
         If ``bars`` is empty.
     """
 
-    __slots__ = ("_bar_bits", "_bars", "_fib_anchor", "_resident", "_roll_schedule")
+    __slots__ = (
+        "_apply_1day_mask",
+        "_bar_bits",
+        "_bars",
+        "_fib_anchor",
+        "_resident",
+        "_roll_schedule",
+    )
 
     def __init__(
         self,
@@ -130,6 +139,7 @@ class ResidentSweepKernel:
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._fib_anchor: FibAnchorKind = fib_anchor
         self._roll_schedule: tuple[int, ...] | None = roll_schedule
+        self._apply_1day_mask: bool = apply_1day_mask
         self._bar_bits: list[int] = build_bar_bits(
             self._bars,
             proximity,
@@ -154,6 +164,11 @@ class ResidentSweepKernel:
     def roll_schedule(self) -> tuple[int, ...] | None:
         """The roll schedule this kernel's ``bar_bits`` were built against (roll guard)."""
         return self._roll_schedule
+
+    @property
+    def apply_1day_mask(self) -> bool:
+        """The D12 flag this kernel's ``bar_bits`` were built against (D12 guard)."""
+        return self._apply_1day_mask
 
     @property
     def bar_bits(self) -> list[int]:

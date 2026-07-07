@@ -191,6 +191,14 @@ class TestResidentSweepKernel:
         wide = ResidentSweepKernel(bars, proximity=ProximityParams(50, 50, 50), prior_n=4)
         assert tight.n_bars == wide.n_bars == len(bars)
 
+    def test_apply_1day_mask_flag_is_recorded(self) -> None:
+        # Review round-1 finding 5: the D12 flag is recorded on the kernel so
+        # run_persisted_sweep can fail-fast on a hand-built mismatched kernel
+        # (the symmetry twin of the fib_anchor / roll_schedule records).
+        bars = _trending_bars(n_days=1, per_day=20)
+        assert ResidentSweepKernel(bars).apply_1day_mask is False
+        assert ResidentSweepKernel(bars, apply_1day_mask=True).apply_1day_mask is True
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # ResidentKernelCache

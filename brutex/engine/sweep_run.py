@@ -1459,6 +1459,19 @@ def run_persisted_sweep(
                 f"{kernel.roll_schedule!r} but the tuple sweeps "
                 f"{cfg.roll_schedule!r} — the kernel must match this tuple's schedule"
             )
+        # D12 twin (review round-1 finding 5): a kernel built under the wrong
+        # ``apply_1day_mask`` flag carries intraday-only bits (ToD 44-47 /
+        # VWAP 52-53) on a futures ``1day`` grid — unreachable through the
+        # production cache (the flag is a pure function of instrument+tf,
+        # both in its key) but guarded for a hand-built kernel, exactly like
+        # the schedule twin above.
+        if kernel.apply_1day_mask != apply_1day_mask_for(cfg.instrument, cfg.tf):
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built with apply_1day_mask="
+                f"{kernel.apply_1day_mask!r} but the tuple requires "
+                f"{apply_1day_mask_for(cfg.instrument, cfg.tf)!r} — the kernel "
+                f"must match this tuple's D12 flag"
+            )
         bar_bits = kernel.bar_bits
 
     # Sentinel-authoritative redo (DEC-MARK-MANY-SENTINEL-001): with a digest
