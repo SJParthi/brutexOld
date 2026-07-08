@@ -30,6 +30,7 @@ from brutex.calendars.nse import (
     HolidayDataUnavailableError,
     SessionType,
     daily_derive_cutoff,
+    daily_derive_cutoff_grounded,
     expected_bars_per_day_for_tf,
     forced_exit_seconds_for_session,
     forced_exit_time_for_session,
@@ -47,7 +48,9 @@ from brutex.calendars.nse import (
     is_trading_day_checked,
     is_weekend,
     nifty_rebalance_event_on,
+    now_ist,
     previous_trading_session,
+    session_last_bar_complete,
     session_minutes_per_day,
     trading_days_between,
     trading_days_between_checked,
@@ -1016,6 +1019,160 @@ class TestDailyDeriveCutoff:
         assert daily_derive_cutoff(
             self._at(d, (datetime.combine(d, close_t) + timedelta(minutes=15)).time())
         ) == d + timedelta(days=1)
+
+
+class TestNowIst:
+    """The ONE production IST clock leaf (DEC-DAILY-CUTOFF-GROUNDED-001)."""
+
+    def test_now_ist_is_ist_aware_and_current(self) -> None:
+        from datetime import UTC
+
+        before = datetime.now(UTC)
+        instant = now_ist()
+        after = datetime.now(UTC)
+        assert instant.tzinfo is not None
+        assert "Kolkata" in str(instant.tzinfo)
+        assert before <= instant <= after  # aware comparison — same instant, IST label
+
+
+class TestSessionLastBarComplete:
+    """The +1min completeness predicate (DEC-DAILY-CUTOFF-GROUNDED-001):
+    the ingest filter is half-open [open, close), so a COMPLETE regular
+    session's LAST stored 1m bar is 15:29:00 — completeness must be tested
+    as ``last_bar + 1min >= close``, never ``last_bar >= close``."""
+
+    @staticmethod
+    def _at(d: date, t: time) -> datetime:
+        return datetime.combine(d, t, tzinfo=IST)
+
+    def test_regular_session_last_bar_1529_is_complete(self) -> None:
+        d = date(2026, 7, 1)  # regular Wednesday
+        session = get_session(d)
+        assert session is not None
+        last = self._at(d, time(15, 29))
+        # The +1min rule is LOAD-BEARING: the raw >= comparison never fires.
+        assert last < self._at(d, SESSION_CLOSE_IST)
+        assert session_last_bar_complete(session, last)
+
+    def test_regular_session_last_bar_1528_is_incomplete(self) -> None:
+        d = date(2026, 7, 1)
+        session = get_session(d)
+        assert session is not None
+        assert not session_last_bar_complete(session, self._at(d, time(15, 28)))
+
+    def test_sub_minute_label_within_final_minute_is_complete(self) -> None:
+        # A 15:29:30-labelled bar: +1min = 15:30:30 >= 15:30 ⇒ complete.
+        d = date(2026, 7, 1)
+        session = get_session(d)
+        assert session is not None
+        assert session_last_bar_complete(session, self._at(d, time(15, 29, 30)))
+
+    def test_muhurat_close_honored(self) -> None:
+        # 2025-10-21 Muhurat 13:45-14:45: the final stored bar is 14:44.
+        d = date(2025, 10, 21)
+        session = get_session(d)
+        assert session is not None
+        assert session.session_type is SessionType.MUHURAT
+        assert session_last_bar_complete(session, self._at(d, time(14, 44)))
+        assert not session_last_bar_complete(session, self._at(d, time(14, 43)))
+
+
+class TestDailyDeriveCutoffGrounded:
+    """The DEFER-only data-grounded cutoff (DEC-DAILY-CUTOFF-GROUNDED-001):
+    ``result ∈ {clock, run_day}`` and ``result <= clock`` always — it can
+    demote a post-close "run day closed" clock verdict when the frame's own
+    last bar proves the session incomplete, never promote past it."""
+
+    @staticmethod
+    def _at(d: date, t: time) -> datetime:
+        return datetime.combine(d, t, tzinfo=IST)
+
+    # ── abstentions: every unknown falls back to the clock verdict ──────
+
+    def test_none_last_bar_is_clock_parity(self) -> None:
+        now = self._at(date(2026, 7, 1), time(16, 0))  # post-close
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=None) == daily_derive_cutoff(now)
+
+    def test_mid_session_clock_verdict_short_circuits(self) -> None:
+        # clock <= today ⇒ the run day is already excluded — grounding never
+        # evaluates the frame (byte-identical mid-session by construction),
+        # even for a provably-incomplete run-day last bar.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(12, 0))
+        assert daily_derive_cutoff(now) == d
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(10, 0))) == d
+
+    def test_exactly_at_close_keeps_clock_today(self) -> None:
+        # The strict-`>` at-close pin rides through the grounded arm unchanged.
+        d = date(2026, 7, 1)
+        now = self._at(d, SESSION_CLOSE_IST)
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(15, 29))) == d
+
+    def test_prior_day_last_bar_pre_and_post_close_is_clock_parity(self) -> None:
+        # Run-day-only scoping: yesterday's (even incomplete) last bar never
+        # re-opens history — no permanent-deferral spiral.
+        d = date(2026, 7, 1)
+        stale = self._at(d - timedelta(days=1), time(12, 0))
+        post_close = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(post_close, last_bar_ist=stale) == d + timedelta(days=1)
+        mid = self._at(d, time(12, 0))
+        assert daily_derive_cutoff_grounded(mid, last_bar_ist=stale) == d
+
+    def test_future_dated_last_bar_is_clock_parity(self) -> None:
+        # Clock skew / corruption escaping drop_bars_after: abstain, never defer.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(16, 0))
+        future = self._at(d + timedelta(days=1), time(10, 0))
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=future) == d + timedelta(days=1)
+
+    def test_run_day_bar_on_non_trading_date_is_clock_parity(self) -> None:
+        # Bars stored on a calendar-None date are filter-impossible — defensive.
+        d = date(2026, 7, 5)  # Sunday, no special session
+        assert get_session(d) is None
+        now = self._at(d, time(12, 0))
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(10, 0))) == (
+            d + timedelta(days=1)
+        )
+
+    # ── the grounded verdicts on the run day, post-close ─────────────────
+
+    def test_complete_run_day_session_keeps_clock(self) -> None:
+        # Last bar 15:29 (+1min == the 15:30 close) ⇒ the clock's today+1 stands.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(
+            now, last_bar_ist=self._at(d, time(15, 29))
+        ) == d + timedelta(days=1)
+
+    def test_incomplete_run_day_session_defers_to_today(self) -> None:
+        # The sanctioned defer: a pull died mid-day (last bar 12:xx / 15:28) —
+        # never finalize a partial daily bar. Kills the >=-vs-> and
+        # +1min-dropped mutations together with the 15:29-complete pin above.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(15, 28))) == d
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(12, 0))) == d
+
+    def test_muhurat_grounding_against_its_own_close(self) -> None:
+        # 2025-10-21 Muhurat 13:45-14:45: complete = last bar 14:44; a 14:43
+        # last bar defers — the close comes from get_session, never 15:30.
+        d = date(2025, 10, 21)
+        now = self._at(d, time(20, 0))
+        assert daily_derive_cutoff_grounded(
+            now, last_bar_ist=self._at(d, time(14, 44))
+        ) == d + timedelta(days=1)
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(14, 43))) == d
+
+    def test_budget_sunday_special_weekend_grounding(self) -> None:
+        # 2026-02-01 Sunday Budget session (09:15-15:30): the special-weekend
+        # close drives the predicate on a date a plain weekend rule would skip.
+        d = date(2026, 2, 1)
+        assert d in SPECIAL_WEEKEND_TRADING_SESSIONS
+        now = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(
+            now, last_bar_ist=self._at(d, time(15, 29))
+        ) == d + timedelta(days=1)
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(11, 0))) == d
 
 
 class TestExchangeSplit:

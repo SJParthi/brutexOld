@@ -309,3 +309,81 @@ def test_skip_non_daily_ignores_cutoffs() -> None:
         )
         is True
     )
+
+
+# ── grounded-stamp interplay (DEC-DAILY-CUTOFF-GROUNDED-001 — NO rule change:
+#    the EFFECTIVE-cutoff stamp rides the existing clauses; these adversarial
+#    permutations pin that no combination yields a WRONG skip) ────────────────
+
+
+class TestGroundedStampInterplay:
+    def test_deferred_stamp_never_fast_path_skips_on_the_clock_verdict(self) -> None:
+        # A grounded run DEFERRED the run day: it stamps the EFFECTIVE cutoff
+        # (= the run day) with the data ending that same day. Every later run's
+        # clock verdict (run day + 1, or beyond) fails BOTH clauses — the
+        # equality (07-04 != 07-05) AND the data-final escape (07-04 < 07-04 is
+        # False) — so the deferred day is honestly re-derived, never stranded.
+        deferred = _stamp(daily_before="2026-07-04", last_1m_ist_date="2026-07-04")
+        for later_clock in ("2026-07-05", "2026-07-06"):
+            assert (
+                should_skip_derive(
+                    deferred,
+                    token="tok",
+                    tfs=("15m", "5m"),
+                    include_daily=True,
+                    daily_before=later_clock,
+                )
+                is False
+            )
+
+    def test_deferred_stamp_with_kill_switch_flip_still_rederives(self) -> None:
+        # Grounding switched OFF after a deferred stamp: the next run compares
+        # the pure clock iso against the deferred stamp — unequal, escape fails
+        # → re-derive under the clock law (the graceful-revert path).
+        deferred = _stamp(daily_before="2026-07-04", last_1m_ist_date="2026-07-04")
+        assert (
+            should_skip_derive(
+                deferred,
+                token="tok",
+                tfs=("15m", "5m"),
+                include_daily=True,
+                daily_before="2026-07-05",
+            )
+            is False
+        )
+
+    def test_old_clock_stamp_read_by_a_grounded_run_skips_byte_correctly(self) -> None:
+        # An OLD pre-grounding stamp finalized the day under the clock law
+        # (daily_before = run day + 1, data ending the run day) and the source
+        # is UNCHANGED: the grounded run's PRE-read skip check compares the
+        # SAME clock iso → equality → skip. Byte-correct even if the stamped
+        # run wrote a partial bar: a grounded re-derive would DEFER (write 0
+        # daily bars) and deletes nothing, so skip and re-derive leave the
+        # identical lake; the partial bar heals when the re-pull moves the
+        # token (which invalidates this stamp).
+        old_clock = _stamp(daily_before="2026-07-05", last_1m_ist_date="2026-07-04")
+        assert (
+            should_skip_derive(
+                old_clock,
+                token="tok",
+                tfs=("15m", "5m"),
+                include_daily=True,
+                daily_before="2026-07-05",
+            )
+            is True
+        )
+
+    def test_completed_data_token_move_always_rederives(self) -> None:
+        # The re-pull that completes a deferred day MOVES the source token —
+        # the stamp is dead regardless of any cutoff arithmetic.
+        deferred = _stamp(daily_before="2026-07-04", last_1m_ist_date="2026-07-04")
+        assert (
+            should_skip_derive(
+                deferred,
+                token="tok-moved",
+                tfs=("15m", "5m"),
+                include_daily=True,
+                daily_before="2026-07-04",
+            )
+            is False
+        )

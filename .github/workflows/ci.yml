@@ -1363,11 +1363,16 @@ jobs:
           #          line+branch via tests/unit/test_timeframe_materialize.py
           #          (the SPOT core, injected read/write fakes) +
           #          tests/unit/test_timeframe_materialize_segment.py (the
-          #          segment routing + OPTIONS guard). The raw lake I/O glue lives
-          #          behind # pragma: no cover and is integration-tested by
+          #          segment routing + OPTIONS guard) +
+          #          tests/integration/test_timeframe_materialize_grounded_cutoff.py (the
+          #          DEC-DAILY-CUTOFF-GROUNDED-001 data-grounded daily-cutoff
+          #          arm — defer/complete/kill-switch/dense/explicit-law/
+          #          future-bar-anomaly over a real tmp lake). The raw lake I/O
+          #          glue lives behind # pragma: no cover and is
+          #          integration-tested by
           #          tests/integration/test_timeframe_materialize_roundtrip.py.
           if compgen -G "tests/unit/test_timeframe_materialize.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py
+            pytest --cov=brutex.data.timeframe_materialize --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframe_materialize.py tests/unit/test_timeframe_materialize_segment.py tests/integration/test_timeframe_materialize_roundtrip.py tests/integration/test_timeframe_materialize_grounded_cutoff.py
           else
             echo "(brutex.data.timeframe_materialize test file not present yet — gate inactive)"
           fi

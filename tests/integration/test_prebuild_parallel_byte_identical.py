@@ -224,3 +224,56 @@ def test_kill_switch_workers_one_matches_sequential(tmp_path: Path) -> None:
         incremental=False,
     )
     assert _derived_parquets(seq_root) == _derived_parquets(par_root)
+
+
+def test_grounded_cutoff_parallel_matches_sequential_with_complete_and_truncated_days(
+    tmp_path: Path,
+) -> None:
+    """DEC-DAILY-CUTOFF-GROUNDED-001 × M1: ONE pinned post-close INSTANT per
+    run; each DENSE symbol's grounded verdict is a pure function of
+    ``(instant, own frame)`` — order/concurrency-independent, so the parallel
+    lake stays byte-identical to the sequential one even with a COMPLETE
+    run-day symbol (finalized same-run) next to a TRUNCATED one (deferred)."""
+    seq_root = tmp_path / "seq"
+    par_root = tmp_path / "par"
+    for root in (seq_root, par_root):
+        _seed_symbol(root, "NIFTY", base=100.0, n=375)  # 09:15…15:29 — COMPLETE
+        _seed_symbol(root, "BANKNIFTY", base=400.0, n=200)  # truncated mid-day
+
+    from brutex.calendars.nse import IST
+
+    pinned = datetime(2021, 1, 4, 16, 0, tzinfo=IST)  # post-close on the run day
+    instruments = [_spot("NIFTY"), _spot("BANKNIFTY")]
+    cascade = build_fno_cascade([])
+
+    def _seq_materialize(target: PrebuildTarget) -> MaterializeResult:
+        return materialize_lake_timeframes(
+            lake_root=seq_root,
+            exchange=target.exchange,
+            segment=target.segment,
+            symbol=target.symbol,
+            kind=target.kind,
+            include_daily=True,
+            daily_cutoff_now=pinned,
+            incremental=False,
+            dense_symbol=target.dense,
+        )
+
+    seq_outcome = run_pipeline_prebuild(
+        instruments=instruments, cascade=cascade, materialize=_seq_materialize
+    )
+    par_outcome = run_pipeline_prebuild_parallel(
+        instruments=instruments,
+        cascade=cascade,
+        lake_root=par_root,
+        workers=3,
+        include_daily=True,
+        daily_cutoff_now=pinned,
+        incremental=False,
+    )
+    assert seq_outcome.ok and par_outcome.ok
+    seq_files = _derived_parquets(seq_root)
+    assert seq_files == _derived_parquets(par_root)
+    # The complete symbol's run-day 1day bar landed; the truncated one deferred.
+    assert any(rel.startswith("NSE/INDEX/NIFTY/1day/") for rel in seq_files)
+    assert not any(rel.startswith("NSE/INDEX/BANKNIFTY/1day/") for rel in seq_files)
