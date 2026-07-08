@@ -18,7 +18,41 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 —
+_Last updated: 2026-07-07 (DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md #1612 —
+the R9 nightly zero-click chain: ONE `brutex nightly run` executes COLLISION →
+DISK → BACKUP → PULL → PREBUILD → SWEEP over EXISTING public entry points only
+(a headless `run_full_pipeline` binding mirroring the dashboard closures; the
+sweep via `cmd_sweep_all` on the daemon key-list precedent, the three
+unattended escape flags structurally absent AND dispatch-hard-refused —
+STRICTER than the daemon, which refuses only `--allow-out-of-scope`), under a
+NEW nightly flock + acquire-and-HELD pull locks (the LAKE pull lock held
+through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical;
+holder-note honesty on refusals — a pull refused mid-nightly reads
+"(holder: nightly:<id>)"), with the R42 break law (first failing link stops;
+later links BLOCKED-because-<link>; tripwires — link-transition, DURABLE-audit
+read-back reconcile, pull coherence, snapshot re-read, sweep-count identity —
+⇒ SUSPECT ⇒ cron-RED exit 2) and the R50 sealed-snapshot backup
+(hash-of-DESTINATION manifest written LAST, full pre-seal verify,
+`.partial`→one-rename seal; restore = verify-EVERYTHING-then-write, destination
+ledger deltas CLEARED of manifest-extraneous files, `ledger.parquet` strictly
+LAST, `--yes` gated, CI-drilled every push) + launchd install with the
+MANDATORY `launchctl list` verification (installed-but-unverified FAILS — the
+TickVault lesson) + the morning Telegram summary/refusal (per-run dedupe keys;
+unknown counts read "?", never 0). HONEST: R48 decay diff deferred to v1.1 by
+operator directive — a recorded DIVERGENCE from the living requirements (R48
+homes in P6; the v1.1 item is R49; the P3 top100.json probe is the seam);
+sweep-liveness is a dual-mtime HEURISTIC until P2's results-root flock; the
+first post-deploy nightly re-sweeps everything (`code_commit_sha` re-key,
+documented not fixed); `bars/` stays OUT of the automated backup (the manual
+rsync/Time-Machine path retained) and night-N sweep results are captured night
+N+1 (≤24 h exposure); launchd cannot wake a sleeping Mac (next-wake catch-up;
+pmset opt-in documented, never run); backup/restore honestly O(files+bytes) —
+probes bench-gated flat, backup bench-asserted LINEAR; `--dry-run` runs probes
+ONLY (no pipeline even in spine dry-run mode — those write synthetic bars),
+tree-oracle-pinned zero mutation. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate change; every new module + the
+three touched COMMON modules 100% line+branch).
+Earlier: 2026-07-08 (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 —
 two surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the
 one-click-sweep gap register): (1) a Muhurat-safe prev-day anchor at the
 Stage-1A roll seam — `_roll_to_new_day` rolled `_prev_day_ohlc = self._today_ohlc`
@@ -1253,7 +1287,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617** (renumbered
+- **Active branch:** `claude/intelligent-hamilton-qf3w38` (**DEC-SWEEP-NIGHTLY-AUTOMATION-001,
+  MIGRATION.md #1612** — the R9 nightly zero-click chain + R50 backup/restore + launchd scheduling:
+  NEW `brutex/nightly/` package (chain/probes/pipeline_binding/sweep_binding/backup/restore/report/
+  schedule/run) driving ONLY existing public entry points; `brutex nightly
+  run/backup/restore/install/uninstall/status`; the nightly single-flight flock + holder-note seams on
+  the ONE `_flock_singleflight` core (existing callers byte-identical); two SweepAlerter methods
+  (`nightly_summary` INFO/WARN/CRITICAL + the instant `nightly_refused` CRITICAL, per-run dedupe keys,
+  "?" for unknown counts); the R42 break law property-pinned over every failure position; SUSPECT ⇒
+  exit 2 (cron-red); the CI restore drill (real-writer lake → snapshot → mutilate + extra post-snapshot
+  delta → restore → byte-parity + deltas-clear + ledger-LAST + audit chain green) on every push; the
+  headless pipeline binding parity-pinned against the dashboard closures (ONE shared
+  SessionRateController; `nightly_metadata_years` ≡ `app._resolve_metadata_years`); the sweep leg's
+  kwargs signature-drift-pinned vs `cmd_sweep_all` with the escape-flag trio structurally absent.
+  HONEST: R48 decay diff deferred to v1.1 by operator directive (recorded divergence — R48 homes in P6,
+  the file's v1.1 item is R49); liveness heuristic until P2's flock; post-deploy full re-sweep
+  (`code_commit_sha` re-key) documented not fixed; `bars/` excluded from the automated backup; ≤24 h
+  snapshot exposure (backup runs PRE-pull — the rollback point); launchd wake limits + pmset opt-in
+  documented; backup honestly O(files+bytes). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the 39-error pre-change baseline, 0 new).
+  Earlier: `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617** (renumbered
   #1538→#1557→#1581→#1598→#1610→#1617 — the first three hops across the 2026-07-08 origin/main merges (main's #1538 is DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, main's #1557 is DEC-DASHBOARD-BROWSER-TRUTH-001), the fourth to the then-fresh tail #1598, the fifth to the then-reserved PR-#1275 band number #1610, and the final hop to #1617 = main-max(#1616, DEC-SWEEP-DATA-EDGE-GUARDS-001) + 1 on merge round 5 of the 2026-07-08 conflict-resolution treadmill) — Phase-3
   "results depth" for the one-click institutional sweep, delivered as ONE fenced RUN-END post-hoc pass
   (`brutex/engine/results_depth_pass.py`) that re-simulates ONLY the persisted finalists on the pure-Python oracle
@@ -3595,7 +3649,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4310-4311` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4515-4516` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
