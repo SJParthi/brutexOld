@@ -86,6 +86,7 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -94,12 +95,13 @@ import blake3
 import structlog
 
 from brutex.engine.sweep_cache import SweepCache, combo_digest
-from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+from brutex.engine.sweep_checkpoint import SweepCheckpointError, SweepCheckpointStore
 from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
     count_sweep_tuples,
+    gate_identity_fields,
     iter_sweep_tuples,
     run_one_tuple,
 )
@@ -282,8 +284,14 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     plus the shared context, the reproducibility hashes, and the honest guards —
     so two grids that differ in ANY knob produce different digests. ``None`` legs
     and proximity tolerances are flattened to JSON-native scalars (Golden Rule #4).
+
+    The GATE config (``overfit`` / ``stage3``) is folded under ``gate_config``
+    ONLY when active (:func:`~brutex.engine.sweep_orchestrator.gate_identity_fields`),
+    so a GATED re-run gets a distinct checkpoint id and never silently RESUMES an
+    ungated light-run's high-water mark (gap #3, DEC-SWEEP-UNKILLABLE-CORE-001);
+    an ungated grid's descriptor stays byte-identical to the pre-fix value.
     """
-    return {
+    descriptor: dict[str, Any] = {
         "instruments": list(grid.instruments),
         "timeframes": [[tf.label, tf.minutes] for tf in grid.timeframes],
         "directions": [d.value for d in grid.directions],
@@ -311,6 +319,10 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
         "top_k": grid.top_k,
         "min_hits": grid.min_hits,
     }
+    gate_config = gate_identity_fields(grid)
+    if gate_config:
+        descriptor["gate_config"] = gate_config
+    return descriptor
 
 
 def grid_identity(grid: SweepGridConfig) -> str:
@@ -368,7 +380,7 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
             tuple_.proximity.fib_proximity_bps,
         ]
     )
-    return {
+    params: dict[str, Any] = {
         "k": tuple_.k,
         "condition_bits": sorted(set(grid.condition_bits)),
         "tf_minutes": tuple_.tf.minutes,
@@ -388,6 +400,15 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
         "min_hits": grid.min_hits,
         "max_combos": grid.max_combos,
     }
+    # gap #3 (DEC-SWEEP-UNKILLABLE-CORE-001): fold the GATE config into the cache
+    # key when active so a gated re-run's cache-skip path never FALSELY skips an
+    # ungated light-run tuple as already-done (the false-skip served UNGATED rows
+    # as institutional winners). Folded ONLY when non-empty → an ungated grid's
+    # cache key stays byte-identical to the pre-fix value.
+    gate_config = gate_identity_fields(grid)
+    if gate_config:
+        params["gate_config"] = gate_config
+    return params
 
 
 def tuple_cache_key(tuple_: SweepTuple, grid: SweepGridConfig) -> bytes:
@@ -450,6 +471,56 @@ def tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, A
     without importing the private ``_tuple_cache_params`` — ONE source of truth.
     """
     return _tuple_cache_params(tuple_, grid)
+
+
+def load_checkpoint_resilient(checkpoint: SweepCheckpointStore) -> None:
+    """Load *checkpoint* for resume; a CORRUPT one is QUARANTINED, not fatal.
+
+    DEC-SWEEP-UNKILLABLE-CORE-001 (MIGRATION.md #1605), closing the
+    ``sweep-gap-register-jul8`` "corrupt-checkpoint fatal at resume" gap: the
+    authoritative resume load was an UNGUARDED ``guards.checkpoint.load()`` — a
+    truncated / malformed / foreign-shaped checkpoint file raised out of
+    :meth:`SweepCheckpointStore.load` and CRASHED the whole resume, so a single
+    torn write (a kill mid-``fsync`` on a stalled volume) turned a resumable run
+    into a hard failure.
+
+    This wraps the load so any corruption (:class:`SweepCheckpointError` — which
+    already maps the read/JSON/``from_dict`` failures — plus a broadened
+    ``KeyError`` / ``ValueError`` / ``OSError`` belt for a future edge that
+    escapes that mapping) is QUARANTINED: the bad file is moved aside to a
+    ``<name>.corrupt-<ns>`` sibling (forensic evidence, never deleted) and the
+    run starts FRESH (the store's in-memory high-water mark stays ``-1`` because
+    :meth:`SweepCheckpointStore.load` only adopts it AFTER all validation, so a
+    raise leaves ``next_index == 0``). A fresh start re-runs from the top — safe
+    by construction: the keep-first idempotent sink + the durable per-tuple
+    checkpoint that ``record`` rebuilds make a re-pull of already-stored work a
+    no-op. If the quarantine MOVE itself fails, that is logged and the run still
+    starts fresh (the next ``record`` atomically overwrites the bad file anyway).
+
+    A clean or absent checkpoint loads exactly as before (byte-identical resume).
+    """
+    try:
+        checkpoint.load()
+    except (SweepCheckpointError, KeyError, ValueError, OSError) as exc:
+        path = checkpoint.path
+        quarantine = path.with_name(f"{path.name}.corrupt-{time.time_ns()}")
+        moved: str | None = None
+        try:
+            if path.exists():
+                path.rename(quarantine)
+                moved = str(quarantine)
+        except OSError as move_exc:
+            _LOG.warning(
+                "sweep_supervisor.checkpoint_quarantine_move_failed",
+                path=str(path),
+                error=repr(move_exc),
+            )
+        _LOG.warning(
+            "sweep_supervisor.checkpoint_corrupt_quarantined",
+            path=str(path),
+            quarantined_to=moved,
+            error=repr(exc),
+        )
 
 
 def _drive_watchdog(
@@ -598,7 +669,7 @@ def run_supervised_grid(
     total = count_sweep_tuples(grid)
     subject = f"sweep:{sweep_id[:16]}"
 
-    guards.checkpoint.load()
+    load_checkpoint_resilient(guards.checkpoint)
     resume_from = guards.checkpoint.next_index
 
     guards.progress.start(enumerated=total, detail=subject)

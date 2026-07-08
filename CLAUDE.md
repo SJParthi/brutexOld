@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+_Last updated: 2026-07-08 (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1605 —
+the sweep RUN-CORE (P2, gap #4) built FROM SCRATCH as additive infrastructure,
+closing the largest OPEN sweep BLOCKER (the "unkillable run-core / PR #1557" was
+NEVER built — PR #1557 does not exist): NEW `brutex/engine/run_layout.py` (the ONE
+owner of the per-run artifact dir — a SIBLING root `<results_root>.parent/
+sweep_runs/<run_id>/`, NEVER inside the `.parquet`-globbed sweeps tree, path-safe
+`run_id` allowlist, atomic JSON writes + `<artifact>.stamp.json` sha256 stage-stamp
+sidecars) + NEW `brutex/observability/run_manifest.py` (the per-run forensic
+`manifest.json` — the nine contract keys + additive fields, honoring D-7 scalar
+`dedup_skips`+detail and D-8 `per_door_kills` ABSENT-key law, `estimate` honest-null,
+damage⇒rebuild) + the gap-#3 cache-identity fix (`gate_identity_fields` folds
+`overfit`/`stage3` into `_tuple_digest`/`_grid_descriptor`/`_tuple_cache_params`
+ONLY when active — an ungated grid stays BYTE-IDENTICAL, a gated re-run gets a
+DISTINCT identity so it never cache-skips an ungated light-run tree and serves
+UNGATED rows as institutional winners) + the corrupt-checkpoint quarantine-not-fatal
+guard (`load_checkpoint_resilient` moves a corrupt checkpoint aside + starts fresh
+instead of crashing the resume). DEFERRED follow-up (noted, not skipped): the
+flight-recorder events JSONL + exit-status/chain-map writers + the cross-process
+sweep flock. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; frozen goldens + P-06/
+suffix-independence pass UNMODIFIED; `brutex.engine` 100% line+branch incl.
+`run_layout.py`, `brutex.observability.run_manifest` 100% line+branch; ruff/
+ruff-format/`mypy --strict` clean, pyright at the pre-change baseline).
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
 the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
 pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL

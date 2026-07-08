@@ -909,6 +909,17 @@ jobs:
           else
             echo "(brutex.observability.monitor test file not present yet — gate inactive)"
           fi
+          # DEC-SWEEP-UNKILLABLE-CORE-001 (MIGRATION.md #1605): the sweep
+          # run-core manifest (the per-run forensic summary — the nine
+          # contract keys + the D-7 scalar-dedup / D-8 per-door ABSENT-key
+          # laws) ships at 100% line+branch. Its run-layout sibling leaf
+          # brutex/engine/run_layout.py is measured under the whole-package
+          # --cov=brutex.engine gate above (test_engine_run_layout.py).
+          if compgen -G "tests/unit/test_observability_run_manifest.py" > /dev/null; then
+            pytest --cov=brutex.observability.run_manifest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_run_manifest.py
+          else
+            echo "(brutex.observability.run_manifest test file not present yet — gate inactive)"
+          fi
           # DEC-STANDARD-MONITOR-001 (2026-05-25, MIGRATION entry #243):
           # ratchet brutex.observability.standard_monitor (production
           # composer wiring Telegram + SLA + Watchdog + L3 replay into a

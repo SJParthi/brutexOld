@@ -65,7 +65,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import blake3
 import structlog
@@ -214,7 +214,11 @@ class SweepGridConfig:
         every tuple's :class:`~brutex.engine.sweep_run.SweepRunConfig` so the
         Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
         leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
-        own backtested-combo count is its authoritative trial count ``N``.
+        own backtested-combo count is its authoritative trial count ``N``. When
+        NON-``None`` it enters the tuple identity (:func:`gate_identity_fields`
+        under ``gate_config``) so a gated re-run never cache-skips an ungated
+        tree (gap #3, DEC-SWEEP-UNKILLABLE-CORE-001); ``None`` keeps every digest
+        byte-identical to the pre-fix value.
     unsafe_allow_out_of_scope_instruments
         Layer-1 engine-scope escape hatch (DEC-ENGINE-SCOPE-GUARD-001; default
         ``False``): when False, every instrument must satisfy
@@ -259,7 +263,11 @@ class SweepGridConfig:
     #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
     #: leaderboard's top-`stage3_top_k` survivors on the lockbox-excluded
     #: training slice (ADR-0007 Amendment A1) and merges every evaluation into
-    #: the same results tree as its own per-quantized-cell file.
+    #: the same results tree as its own per-quantized-cell file. When ENABLED it
+    #: enters the tuple identity (:func:`gate_identity_fields` under
+    #: ``gate_config``) so a refined re-run never cache-skips an un-refined tree
+    #: (gap #3, DEC-SWEEP-UNKILLABLE-CORE-001); the default-OFF keeps every digest
+    #: byte-identical to the pre-fix value.
     stage3_enable: bool = False
     stage3_top_k: int = 10_000
     stage3_max_fevals: int = 200
@@ -661,6 +669,57 @@ def bloom_capacity_hint(grid: SweepGridConfig) -> int:
     return max(1, masks_per_tuple * other_axes)
 
 
+def gate_identity_fields(grid: SweepGridConfig) -> dict[str, Any]:
+    """Return the canonical GATE-CONFIG identity fields of *grid* — the gap #3 key.
+
+    DEC-SWEEP-UNKILLABLE-CORE-001 (MIGRATION.md #1605), closing gap #3 of
+    ``sweep-gap-register-jul8``: the tuple/grid cache identity previously omitted
+    ``grid.overfit`` and the Stage-3 knobs, so a GATED re-run over an existing
+    LIGHT-run tree resumed as "already complete" — the DSR/overfit gate never
+    applied and ``/results`` served UNGATED rows as institutional winners
+    (a compute-side false-skip). Both gates genuinely change the PERSISTED rows
+    (the overfit gate is forwarded to every tuple's ``SweepRunConfig`` and
+    filters/re-ranks the stored leaderboard; ``stage3_enable`` merges refinement
+    evaluations into the results tree), so a gate change MUST re-key the tuple
+    identity that addresses its store / checkpoint / cache.
+
+    DEFAULT-PRESERVATION (Golden Rule #4 house style): the returned dict is
+    **EMPTY** when both gates are at their legacy-off defaults
+    (``overfit is None`` AND ``not stage3_enable``). Every caller
+    (:func:`_tuple_digest`, ``_grid_descriptor``, ``_tuple_cache_params``) folds
+    it under the ``"gate_config"`` key ONLY when non-empty, so an ungated grid's
+    digest / checkpoint id / cache key / store path stays **byte-identical** to
+    the pre-fix value (existing goldens + resumes unaffected), while a gated grid
+    gets a DISTINCT identity that can never alias the ungated tree.
+
+    Parameters
+    ----------
+    grid
+        The grid config.
+
+    Returns
+    -------
+    dict[str, Any]
+        The JSON-native gate-config fields — empty iff both gates are off.
+    """
+    fields: dict[str, Any] = {}
+    if grid.overfit is not None:
+        fields["overfit"] = {
+            "dsr_min": grid.overfit.dsr_min,
+            "weight": grid.overfit.weight,
+            "default_skew": grid.overfit.default_skew,
+            "default_excess_kurtosis": grid.overfit.default_excess_kurtosis,
+        }
+    if grid.stage3_enable:
+        fields["stage3"] = {
+            "enable": True,
+            "top_k": grid.stage3_top_k,
+            "max_fevals": grid.stage3_max_fevals,
+            "max_restarts": grid.stage3_max_restarts,
+        }
+    return fields
+
+
 def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     """Return the BLAKE3 hex digest of *tuple_*'s full canonical identity under *grid*.
 
@@ -679,7 +738,7 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
             tuple_.proximity.fib_proximity_bps,
         ]
     )
-    descriptor = {
+    descriptor: dict[str, Any] = {
         "instrument": tuple_.instrument,
         "tf": tuple_.tf.label,
         "tf_minutes": tuple_.tf.minutes,
@@ -701,6 +760,13 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
         "indicator_version": grid.indicator_version,
         "code_commit_sha": grid.code_commit_sha,
     }
+    # gap #3 (DEC-SWEEP-UNKILLABLE-CORE-001): a GATED tuple addresses a DISTINCT
+    # store than the same UNGATED tuple, so a gated re-run over a light-run tree
+    # never overwrites/aliases the ungated Parquet. Folded ONLY when non-empty so
+    # an ungated grid's store path stays byte-identical to the pre-fix value.
+    gate_config = gate_identity_fields(grid)
+    if gate_config:
+        descriptor["gate_config"] = gate_config
     canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
     # str(...) keeps this typed str where the blake3 stubs are absent (the
     # isolated pre-commit mypy env — the #575 hook-portability precedent).
