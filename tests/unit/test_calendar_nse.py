@@ -30,6 +30,7 @@ from brutex.calendars.nse import (
     HolidayDataUnavailableError,
     SessionType,
     daily_derive_cutoff,
+    daily_derive_cutoff_grounded,
     expected_bars_per_day_for_tf,
     forced_exit_seconds_for_session,
     forced_exit_time_for_session,
@@ -47,10 +48,14 @@ from brutex.calendars.nse import (
     is_trading_day_checked,
     is_weekend,
     nifty_rebalance_event_on,
+    now_ist,
+    previous_trading_session,
+    session_last_bar_complete,
     session_minutes_per_day,
     trading_days_between,
     trading_days_between_checked,
 )
+from structlog.testing import capture_logs
 
 
 class TestHolidays:
@@ -1016,6 +1021,160 @@ class TestDailyDeriveCutoff:
         ) == d + timedelta(days=1)
 
 
+class TestNowIst:
+    """The ONE production IST clock leaf (DEC-DAILY-CUTOFF-GROUNDED-001)."""
+
+    def test_now_ist_is_ist_aware_and_current(self) -> None:
+        from datetime import UTC
+
+        before = datetime.now(UTC)
+        instant = now_ist()
+        after = datetime.now(UTC)
+        assert instant.tzinfo is not None
+        assert "Kolkata" in str(instant.tzinfo)
+        assert before <= instant <= after  # aware comparison — same instant, IST label
+
+
+class TestSessionLastBarComplete:
+    """The +1min completeness predicate (DEC-DAILY-CUTOFF-GROUNDED-001):
+    the ingest filter is half-open [open, close), so a COMPLETE regular
+    session's LAST stored 1m bar is 15:29:00 — completeness must be tested
+    as ``last_bar + 1min >= close``, never ``last_bar >= close``."""
+
+    @staticmethod
+    def _at(d: date, t: time) -> datetime:
+        return datetime.combine(d, t, tzinfo=IST)
+
+    def test_regular_session_last_bar_1529_is_complete(self) -> None:
+        d = date(2026, 7, 1)  # regular Wednesday
+        session = get_session(d)
+        assert session is not None
+        last = self._at(d, time(15, 29))
+        # The +1min rule is LOAD-BEARING: the raw >= comparison never fires.
+        assert last < self._at(d, SESSION_CLOSE_IST)
+        assert session_last_bar_complete(session, last)
+
+    def test_regular_session_last_bar_1528_is_incomplete(self) -> None:
+        d = date(2026, 7, 1)
+        session = get_session(d)
+        assert session is not None
+        assert not session_last_bar_complete(session, self._at(d, time(15, 28)))
+
+    def test_sub_minute_label_within_final_minute_is_complete(self) -> None:
+        # A 15:29:30-labelled bar: +1min = 15:30:30 >= 15:30 ⇒ complete.
+        d = date(2026, 7, 1)
+        session = get_session(d)
+        assert session is not None
+        assert session_last_bar_complete(session, self._at(d, time(15, 29, 30)))
+
+    def test_muhurat_close_honored(self) -> None:
+        # 2025-10-21 Muhurat 13:45-14:45: the final stored bar is 14:44.
+        d = date(2025, 10, 21)
+        session = get_session(d)
+        assert session is not None
+        assert session.session_type is SessionType.MUHURAT
+        assert session_last_bar_complete(session, self._at(d, time(14, 44)))
+        assert not session_last_bar_complete(session, self._at(d, time(14, 43)))
+
+
+class TestDailyDeriveCutoffGrounded:
+    """The DEFER-only data-grounded cutoff (DEC-DAILY-CUTOFF-GROUNDED-001):
+    ``result ∈ {clock, run_day}`` and ``result <= clock`` always — it can
+    demote a post-close "run day closed" clock verdict when the frame's own
+    last bar proves the session incomplete, never promote past it."""
+
+    @staticmethod
+    def _at(d: date, t: time) -> datetime:
+        return datetime.combine(d, t, tzinfo=IST)
+
+    # ── abstentions: every unknown falls back to the clock verdict ──────
+
+    def test_none_last_bar_is_clock_parity(self) -> None:
+        now = self._at(date(2026, 7, 1), time(16, 0))  # post-close
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=None) == daily_derive_cutoff(now)
+
+    def test_mid_session_clock_verdict_short_circuits(self) -> None:
+        # clock <= today ⇒ the run day is already excluded — grounding never
+        # evaluates the frame (byte-identical mid-session by construction),
+        # even for a provably-incomplete run-day last bar.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(12, 0))
+        assert daily_derive_cutoff(now) == d
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(10, 0))) == d
+
+    def test_exactly_at_close_keeps_clock_today(self) -> None:
+        # The strict-`>` at-close pin rides through the grounded arm unchanged.
+        d = date(2026, 7, 1)
+        now = self._at(d, SESSION_CLOSE_IST)
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(15, 29))) == d
+
+    def test_prior_day_last_bar_pre_and_post_close_is_clock_parity(self) -> None:
+        # Run-day-only scoping: yesterday's (even incomplete) last bar never
+        # re-opens history — no permanent-deferral spiral.
+        d = date(2026, 7, 1)
+        stale = self._at(d - timedelta(days=1), time(12, 0))
+        post_close = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(post_close, last_bar_ist=stale) == d + timedelta(days=1)
+        mid = self._at(d, time(12, 0))
+        assert daily_derive_cutoff_grounded(mid, last_bar_ist=stale) == d
+
+    def test_future_dated_last_bar_is_clock_parity(self) -> None:
+        # Clock skew / corruption escaping drop_bars_after: abstain, never defer.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(16, 0))
+        future = self._at(d + timedelta(days=1), time(10, 0))
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=future) == d + timedelta(days=1)
+
+    def test_run_day_bar_on_non_trading_date_is_clock_parity(self) -> None:
+        # Bars stored on a calendar-None date are filter-impossible — defensive.
+        d = date(2026, 7, 5)  # Sunday, no special session
+        assert get_session(d) is None
+        now = self._at(d, time(12, 0))
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(10, 0))) == (
+            d + timedelta(days=1)
+        )
+
+    # ── the grounded verdicts on the run day, post-close ─────────────────
+
+    def test_complete_run_day_session_keeps_clock(self) -> None:
+        # Last bar 15:29 (+1min == the 15:30 close) ⇒ the clock's today+1 stands.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(
+            now, last_bar_ist=self._at(d, time(15, 29))
+        ) == d + timedelta(days=1)
+
+    def test_incomplete_run_day_session_defers_to_today(self) -> None:
+        # The sanctioned defer: a pull died mid-day (last bar 12:xx / 15:28) —
+        # never finalize a partial daily bar. Kills the >=-vs-> and
+        # +1min-dropped mutations together with the 15:29-complete pin above.
+        d = date(2026, 7, 1)
+        now = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(15, 28))) == d
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(12, 0))) == d
+
+    def test_muhurat_grounding_against_its_own_close(self) -> None:
+        # 2025-10-21 Muhurat 13:45-14:45: complete = last bar 14:44; a 14:43
+        # last bar defers — the close comes from get_session, never 15:30.
+        d = date(2025, 10, 21)
+        now = self._at(d, time(20, 0))
+        assert daily_derive_cutoff_grounded(
+            now, last_bar_ist=self._at(d, time(14, 44))
+        ) == d + timedelta(days=1)
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(14, 43))) == d
+
+    def test_budget_sunday_special_weekend_grounding(self) -> None:
+        # 2026-02-01 Sunday Budget session (09:15-15:30): the special-weekend
+        # close drives the predicate on a date a plain weekend rule would skip.
+        d = date(2026, 2, 1)
+        assert d in SPECIAL_WEEKEND_TRADING_SESSIONS
+        now = self._at(d, time(16, 0))
+        assert daily_derive_cutoff_grounded(
+            now, last_bar_ist=self._at(d, time(15, 29))
+        ) == d + timedelta(days=1)
+        assert daily_derive_cutoff_grounded(now, last_bar_ist=self._at(d, time(11, 0))) == d
+
+
 class TestExchangeSplit:
     """DEC-CALENDAR-EXCHANGE-SPLIT-001: per-exchange NSE/BSE holiday sets over
     ONE common per-year core, with a keyword-only ``exchange`` selector on every
@@ -1263,3 +1422,69 @@ class TestMuhuratClampGuard:
             if d < self._PIVOT and close_t > self._REGULAR_CLOSE
         ]
         assert len(evening) == 5  # 2020–2024, all evening sessions
+
+
+class TestPreviousTradingSession:
+    """DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the COMMON previous-session primitive."""
+
+    def test_plain_weekday_before(self) -> None:
+        # Wed 2024-07-10 → Tue 2024-07-09 (a plain trading Tuesday).
+        assert previous_trading_session(date(2024, 7, 10)) == date(2024, 7, 9)
+
+    def test_weekend_steps_back_to_friday(self) -> None:
+        # Mon 2025-09-29 → Fri 2025-09-26 (Sat/Sun stepped over) — the exact
+        # snapshot geometry of the confirmed /movers prev-close defect repro.
+        assert previous_trading_session(date(2025, 9, 29)) == date(2025, 9, 26)
+
+    def test_steps_over_a_listed_holiday(self) -> None:
+        # Mon 2024-03-25 is Holi (HOLIDAYS_2024); Tue 2024-03-26 walks over the
+        # holiday AND the weekend to Fri 2024-03-22.
+        assert previous_trading_session(date(2024, 3, 26)) == date(2024, 3, 22)
+
+    def test_special_weekend_budget_session_is_the_prior_session(self) -> None:
+        # Sat 2025-02-01 is a special Budget trading session — Mon 2025-02-03's
+        # previous session is that SATURDAY, not Fri 2025-01-31.
+        assert previous_trading_session(date(2025, 2, 3)) == date(2025, 2, 1)
+        # The 2026 Sunday Budget session twin (2026-02-01 → Mon 2026-02-02).
+        assert previous_trading_session(date(2026, 2, 2)) == date(2026, 2, 1)
+
+    def test_muhurat_day_is_a_non_session_honest_limit(self) -> None:
+        # HONEST LIMIT (Golden Rule #10): the 2025 Diwali Muhurat day
+        # (2025-10-21, a listed holiday carrying a ~1h special session) is a
+        # NON-session for this primitive — the walk from Thu 2025-10-23 steps
+        # over BOTH holiday days (10-22 Balipratipada + 10-21 Muhurat) to Mon
+        # 2025-10-20, never returning the Muhurat date.
+        got = previous_trading_session(date(2025, 10, 23))
+        assert got == date(2025, 10, 20)
+        assert got != date(2025, 10, 21)  # the Muhurat day is never returned
+
+    def test_out_of_coverage_abstains_none_with_one_warning(self) -> None:
+        # 2020-01-01's walk immediately probes 2019-12-31 — an out-of-coverage
+        # WEEKDAY — so the strict calendar refuses and the primitive ABSTAINS
+        # (None, never a guessed session) with ONE named warning.
+        with capture_logs() as logs:
+            assert previous_trading_session(date(2020, 1, 1)) is None
+        events = [e for e in logs if e["event"] == "calendar.previous_session_coverage_exhausted"]
+        assert len(events) == 1
+        assert events[0]["requested_date"] == "2020-01-01"
+        assert events[0]["probe_date"] == "2019-12-31"
+
+    def test_out_of_coverage_weekend_start_still_abstains(self) -> None:
+        # Mon 2019-06-03: the walk crosses Sun/Sat (data-complete non-sessions,
+        # no raise) then hits the out-of-coverage Friday weekday → abstain.
+        with capture_logs() as logs:
+            assert previous_trading_session(date(2019, 6, 3)) is None
+        events = [e for e in logs if e["event"] == "calendar.previous_session_coverage_exhausted"]
+        assert len(events) == 1
+        assert events[0]["probe_date"] == "2019-05-31"
+
+    @pytest.mark.parametrize("exchange", [None, "NSE", "BSE"])
+    def test_exchange_parity(self, exchange: str | None) -> None:
+        # NSE ≡ BSE ≡ None for every covered year (the holiday sets are
+        # identical 2020-2026), so the exchange arg is inert parity plumbing.
+        for d in (date(2024, 7, 10), date(2025, 9, 29), date(2024, 3, 26), date(2025, 2, 3)):
+            assert previous_trading_session(d, exchange=exchange) == previous_trading_session(d)
+
+    def test_bad_exchange_raises_value_error_eagerly(self) -> None:
+        with pytest.raises(ValueError, match="unknown exchange"):
+            previous_trading_session(date(2024, 7, 10), exchange="LSE")

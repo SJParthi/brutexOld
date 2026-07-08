@@ -1368,3 +1368,103 @@ class TestResolveWriteBatchEnabled:
         assert resolve_write_batch_enabled() is False
         monkeypatch.setenv("BRUTEX_WRITE_BATCH", "1")
         assert resolve_write_batch_enabled() is True
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Run correlation on the consumer threads (DEC-PULL-BEAT-PERRUN-001 fix round)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _ContextProbeSink:
+    """A sink fake recording the ambient ``pull_id`` seen by each ``append``."""
+
+    seen_ids: list[str] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        from brutex.observability.correlation import current_pull_id
+
+        del exchange, segment, symbol, interval, merge_mode
+        with self._lock:
+            self.seen_ids.append(current_pull_id())
+        return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+
+
+class TestConsumerThreadRunBinding:
+    """The consumer threads re-bind the run id captured at construction, so the
+    durable write's seam beats (partition lock-wait) attribute to the run's KEYED
+    progress-beat channel — never dropped as an unattributed foreign beat."""
+
+    def test_sharded_consumer_thread_carries_the_construction_run_id(self) -> None:
+        from brutex.observability.correlation import pull_id_scope
+
+        sink = _ContextProbeSink()
+        with pull_id_scope("abc123def456"):
+            consumer = ShardedWriteConsumer(sink=sink, workers=2)
+        consumer.submit(_make_request(symbol="NSE-NIFTY"))
+        consumer.submit(_make_request(symbol="NSE-BANKNIFTY"))
+        consumer.drain()
+        assert sink.seen_ids == ["abc123def456"] * 2
+
+    def test_batching_consumer_thread_carries_the_construction_run_id(self) -> None:
+        from brutex.observability.correlation import pull_id_scope
+
+        sink = _ContextProbeSink()
+        with pull_id_scope("abc123def456"):
+            consumer = BatchingWriteConsumer(sink=sink)
+        consumer.submit(_batch_request(symbol="NSE-NIFTY"))
+        consumer.drain()
+        assert sink.seen_ids == ["abc123def456"]
+
+    def test_no_ambient_scope_binds_the_legacy_empty_id(self) -> None:
+        """The CLI path (no run scope) captures "" — byte-identical legacy routing."""
+        sink = _ContextProbeSink()
+        consumer = ShardedWriteConsumer(sink=sink, workers=1)
+        consumer.submit(_make_request())
+        consumer.drain()
+        assert sink.seen_ids == [""]
+
+    def test_sharded_consumer_write_beat_reaches_the_runs_keyed_channel(self) -> None:
+        """End-to-end mechanism pin: a beat emitted DURING the consumer's durable
+        write routes to the run's keyed channel (the GAP #15 flock-wait shape)."""
+        from brutex.observability.correlation import current_pull_id, pull_id_scope
+        from brutex.observability.progress_beat import (
+            emit_progress_beat,
+            register_progress_beat,
+            reset_progress_beats,
+        )
+
+        @dataclass
+        class _BeatingSink(_ContextProbeSink):
+            def append(self, **kw: object) -> SinkAppendResult:
+                emit_progress_beat()  # the partition lock-wait poll shape
+                with self._lock:
+                    self.seen_ids.append(current_pull_id())
+                bars = kw["bars"]
+                assert isinstance(bars, Sequence)
+                return SinkAppendResult(
+                    bars_appended=len(bars), partitions_written=1, write_results=()
+                )
+
+        reset_progress_beats()
+        beats: list[int] = []
+        register_progress_beat(lambda: beats.append(1), pull_id="abc123def456")
+        try:
+            sink = _BeatingSink()
+            with pull_id_scope("abc123def456"):
+                consumer = ShardedWriteConsumer(sink=sink, workers=1)
+            consumer.submit(_make_request())
+            consumer.drain()
+            assert beats == [1]  # delivered on the run's channel, never dropped
+        finally:
+            reset_progress_beats()

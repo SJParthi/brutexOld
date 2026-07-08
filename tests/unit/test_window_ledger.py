@@ -661,6 +661,8 @@ class TestPruneSuperseded:
                     0,
                     0,
                     None,
+                    None,
+                    None,
                 )
             ]
         )
@@ -1249,6 +1251,98 @@ class TestProgressCounts:
         assert (nothing.total, nothing.bars, nothing.current) == (0, 0, "")
 
 
+class TestProgressCountsSymbols:
+    """`progress_counts(symbols=…)` — the per-group scope filter
+    (DEC-PULL-SIX-STEP-ORDER-001), congruent with `markets`/`intervals`."""
+
+    def test_symbols_filter_counts_only_matching_rows(self) -> None:
+        ledger = WindowLedger()
+        nifty = _k("NIFTY", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        sensex = _k("SENSEX", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        adani = _k("ADANIENT", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.record(nifty, raw_bars=100, error_type=None, bars_appended=100, now=_NOW)
+        ledger.record(sensex, raw_bars=50, error_type=None, bars_appended=50, now=_LATER)
+        ledger.record(adani, raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        scoped = ledger.progress_counts(symbols=frozenset({"NIFTY", "SENSEX"}))
+        assert scoped.total == 2
+        assert scoped.settled == 2
+        assert scoped.bars == 150  # never ADANIENT's 7
+        assert scoped.current == "SENSEX 1minute"
+
+    def test_symbols_none_is_byte_identical_to_unfiltered(self) -> None:
+        ledger = WindowLedger()
+        a = _k("NIFTY", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        b = _k("ADANIENT", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.record(a, raw_bars=10, error_type=None, bars_appended=10, now=_NOW)
+        ledger.plan(b, now=_NOW)
+        assert ledger.progress_counts(symbols=None) == ledger.progress_counts()
+
+    def test_symbols_filter_matching_nothing_is_all_zero(self) -> None:
+        ledger = WindowLedger()
+        key = _k("NIFTY", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.record(key, raw_bars=10, error_type=None, bars_appended=10, now=_NOW)
+        nothing = ledger.progress_counts(symbols=frozenset({"NO-SUCH-SYMBOL"}))
+        assert (nothing.total, nothing.bars, nothing.current) == (0, 0, "")
+
+    def test_indices_group_reads_clean_despite_planned_stock_rows(self) -> None:
+        """The ledger-wide-pollution regression (DEC-PULL-SIX-STEP-ORDER-001).
+
+        The six-step spot pull settles the INDICES group first while the STOCKS
+        group's windows are still PLANNED in the SAME shared ledger. Unfiltered,
+        the indices group's until-clean outstanding read
+        (``total - settled > 0``) would see the stock PLANNED rows and burn one
+        vendor-call-free ``stop_no_progress`` round; scoped to its own symbols
+        it reads outstanding == 0 → ``stop_clean`` honestly.
+        """
+        ledger = WindowLedger()
+        nifty = _k("NIFTY", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        adani = _k("ADANIENT", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        tcs = _k("TCS", "1minute", date(2020, 1, 1), date(2020, 6, 29))
+        ledger.record(nifty, raw_bars=100, error_type=None, bars_appended=100, now=_NOW)
+        ledger.plan(adani, now=_NOW)
+        ledger.plan(tcs, now=_NOW)
+        # Unfiltered: the stock PLANNED rows pollute the indices denominator.
+        unfiltered = ledger.progress_counts()
+        assert unfiltered.total - unfiltered.settled == 2
+        # Group-scoped: the indices group is honestly CLEAN.
+        indices = ledger.progress_counts(symbols=frozenset({"NIFTY"}))
+        assert indices.total - indices.settled == 0
+        assert indices.planned == 0
+        # And the stocks group sees exactly its own outstanding rows.
+        stocks = ledger.progress_counts(symbols=frozenset({"ADANIENT", "TCS"}))
+        assert stocks.total == stocks.planned == 2
+
+    def test_symbols_composes_with_markets_and_intervals(self) -> None:
+        ledger = WindowLedger()
+        spot = WindowKey(
+            market="groww",
+            security_id="NIFTY",
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        option = WindowKey(
+            market="groww-option",
+            security_id="NSE-NIFTY-25Jan24-21000-CE",
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2020, 6, 29),
+        )
+        ledger.record(spot, raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        ledger.record(option, raw_bars=4, error_type=None, bars_appended=4, now=_NOW)
+        scoped = ledger.progress_counts(
+            markets=frozenset({"groww"}),
+            intervals=("1minute",),
+            symbols=frozenset({"NIFTY"}),
+        )
+        assert (scoped.total, scoped.bars) == (1, 9)
+        # The same symbol under a non-matching market folds to nothing.
+        cross = ledger.progress_counts(
+            markets=frozenset({"groww-option"}), symbols=frozenset({"NIFTY"})
+        )
+        assert cross.total == 0
+
+
 class TestStreakTotal:
     """`streak_total` — the O(N) summed empty_streak fold (DEC-UNTIL-CLEAN-ALL-OUTSTANDING-001)."""
 
@@ -1272,6 +1366,64 @@ class TestStreakTotal:
         assert ledger.streak_total() == 1
         ledger.record(k, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)  # SUCCESS
         assert ledger.streak_total() == 0
+
+    def test_symbols_filter_scopes_the_fold(self) -> None:
+        """`symbols=` folds ONLY the member security_ids (DEC-PULL-SIX-STEP-ORDER-001)."""
+        ledger = WindowLedger()
+        a = _key("NIFTY", "1minute")
+        b = _key("ADANIENT", "1minute")
+        # NIFTY EMPTY twice → streak 2; ADANIENT EMPTY once → streak 1.
+        ledger.record(a, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(a, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(b, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=frozenset({"NIFTY"})) == 2
+        assert ledger.streak_total(symbols=frozenset({"ADANIENT"})) == 1
+        assert ledger.streak_total(symbols=frozenset({"NIFTY", "ADANIENT"})) == 3
+
+    def test_none_is_byte_identical_to_unfiltered(self) -> None:
+        """``symbols=None`` (the default) folds everything — byte-identical to today."""
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(_key("TCS"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=None) == ledger.streak_total() == 2
+
+    def test_empty_collection_folds_nothing(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key("NIFTY"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=frozenset()) == 0
+
+    def test_foreign_group_late_tail_never_perturbs_the_scoped_total(self) -> None:
+        """The group-scoped until-clean regression (DEC-PULL-SIX-STEP-ORDER-001).
+
+        In the default async-pipeline mode a PRIOR group's consumer tails can
+        still drain while the current group's until-clean loop runs: a foreign
+        late EMPTY tail bumps that group's streak (+1) and a foreign late
+        SUCCESS tail RESETS one to 0 — so the LEDGER-WIDE fold moved between
+        the current group's rounds (masking a stall / faking progress). The
+        GROUP-scoped fold must be INVARIANT under any foreign-record churn.
+        """
+        ledger = WindowLedger()
+        indices = frozenset({"NIFTY"})
+        nifty = _key("NIFTY", "1minute")
+        adani = _key("ADANIENT", "1minute")
+        # Current (indices) group: one EMPTY round so far → scoped streak 1.
+        ledger.record(nifty, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        # Foreign (stocks) group already carries a streak of 1.
+        ledger.record(adani, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        scoped_before = ledger.streak_total(symbols=indices)
+        wide_before = ledger.streak_total()
+        assert (scoped_before, wide_before) == (1, 2)
+        # Foreign late EMPTY tail drains → ADANIENT streak bumps to 2.
+        ledger.record(adani, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=indices) == scoped_before
+        assert ledger.streak_total() == wide_before + 1  # the wide fold DID move
+        # Foreign late SUCCESS tail drains → ADANIENT streak RESETS to 0.
+        ledger.record(adani, raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        assert ledger.streak_total(symbols=indices) == scoped_before
+        assert ledger.streak_total() == scoped_before  # wide collapsed with the reset
+        # The scoped fold still tracks the CURRENT group's own progress.
+        ledger.record(nifty, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.streak_total(symbols=indices) == 2
 
 
 class TestSuppressSettle:
@@ -1937,6 +2089,140 @@ class TestLedgerRecordRow:
         records = ledger.records()
         assert ledger.to_rows() == [ledger_record_row(r) for r in records]
         row = ledger_record_row(records[0])
-        assert len(row) == 14
+        assert len(row) == 16
         assert row[0] == records[0].market
-        assert row[13] == 3  # bars_net_new is the LAST field (back-compat append order)
+        assert row[13] == 3  # bars_net_new (back-compat append order)
+        # empty_retries / transient_retries are the LAST two fields
+        # (DEC-RETRY-COUNTER-SPLIT-001 append-LAST back-compat order); this
+        # caller did not observe the fetch ladder, so both read honest None.
+        assert row[14] is None
+        assert row[15] is None
+
+
+class TestRetryCounterSplit:
+    """``empty_retries`` / ``transient_retries`` — the ``in_pull_fetches`` SPLIT
+    (DEC-RETRY-COUNTER-SPLIT-001, accepting the #924/#1355 named follow-up)."""
+
+    def test_record_stores_the_split_as_given(self) -> None:
+        # The ledger stores the spine's split verbatim (overwrite-per-pull, like
+        # in_pull_fetches) — no derivation, no accumulation.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            in_pull_fetches=4,
+            empty_retries=2,
+            transient_retries=1,
+        )
+        rec = ledger.records()[0]
+        assert rec.empty_retries == 2
+        assert rec.transient_retries == 1
+        # The spine invariant the split decomposes: empties + transients + the
+        # one data-bearing fetch == the conflated total.
+        assert (rec.empty_retries or 0) + (rec.transient_retries or 0) + 1 == rec.in_pull_fetches
+
+    def test_record_default_is_honest_unknown_never_zero(self) -> None:
+        # A caller that did not observe the fetch ladder records None (the
+        # bars_net_new honest-unknown template) — a fabricated 0 would claim
+        # "no retries of that class fired".
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+
+    def test_record_overwrites_the_split_per_pull(self) -> None:
+        # Overwrite, not accumulate — a re-run of the SAME pull is bit-identical
+        # (Golden Rule #7), mirroring in_pull_fetches.
+        ledger = WindowLedger()
+        for _ in range(2):
+            ledger.record(
+                _key(),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                in_pull_fetches=3,
+                empty_retries=3,
+                transient_retries=0,
+            )
+        rec = ledger.records()[0]
+        assert rec.empty_retries == 3
+        assert rec.transient_retries == 0
+
+    def test_planned_row_is_a_known_zero_split(self) -> None:
+        # A never-fetched PLANNED row KNOWS its split is zero (mirrors
+        # in_pull_fetches=0) — this is not an unknown.
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.status == PLANNED
+        assert rec.empty_retries == 0
+        assert rec.transient_retries == 0
+
+    def test_lake_seed_is_honest_unknown(self) -> None:
+        # A cold-start seed proves data exists but never observed the historical
+        # fetch ladder — the split is None, never a fabricated 0.
+        ledger = WindowLedger()
+        assert ledger.seed_lake_success(_key(), bars=7, now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+
+    def test_settle_known_gap_is_honest_unknown(self) -> None:
+        # The known-gap settle seam carries no ladder observation either.
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        rec = ledger.records()[0]
+        assert rec.status == SKIPPED
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+
+    def test_reopen_preserves_the_split(self) -> None:
+        # An operator re-open demotes SKIPPED → FAILED without a fetch — the
+        # last pull's split rides along untouched (like bars/bars_net_new).
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=3,
+            empty_retries=3,
+            transient_retries=0,
+            settle_empty=True,
+            old_window=True,
+        )
+        assert ledger.records()[0].status == SKIPPED
+        assert ledger.reopen_skipped() == 1
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.empty_retries == 3
+        assert rec.transient_retries == 0
+
+    def test_round_trip_preserves_ints_and_nones(self) -> None:
+        # to_rows/from_rows is a fixed point for BOTH a real split and the
+        # honest-unknown Nones (the back-compat load path's contract).
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=2,
+            empty_retries=1,
+            transient_retries=1,
+        )
+        ledger.record(_key("SENSEX"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.to_rows() == ledger.to_rows()
+        by_symbol = {r.security_id: r for r in restored.records()}
+        assert by_symbol["NIFTY"].empty_retries == 1
+        assert by_symbol["NIFTY"].transient_retries == 1
+        assert by_symbol["SENSEX"].empty_retries is None
+        assert by_symbol["SENSEX"].transient_retries is None

@@ -505,7 +505,7 @@ def resolve_fib_anchor_levels(
     Returns
     -------
     FibLevels | None
-        The 17 Fib levels for *today*, or ``None`` on a cold-start (no prior
+        The 21 Fib levels for *today*, or ``None`` on a cold-start (no prior
         daily candle for prev-day; fewer than 5 prior sessions for rolling-weekly;
         no completed prior ISO week for weekly-static — combo INELIGIBLE per
         ADR-0012 §4.5 #6, never a crash or a fabricated level).
@@ -549,7 +549,7 @@ def resolve_fib_levels(
     Returns
     -------
     FibLevels | None
-        The 17 Fib levels for *today*, or ``None`` on a cold-start (delegated to
+        The 21 Fib levels for *today*, or ``None`` on a cold-start (delegated to
         :func:`resolve_fib_anchor_levels`).
 
     Raises

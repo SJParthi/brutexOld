@@ -53,12 +53,13 @@ import structlog
 
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
+from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
 from brutex.adapters.ingest_common import (
     gate_pull_credentials,
     label_synthetic,
     verdict_message,
 )
-from brutex.calendars.nse import IST
+from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
@@ -70,6 +71,11 @@ from brutex.dashboard.completeness import (
 )
 from brutex.dashboard.composite_pull import (
     CompositePullReport,
+    # The ONE index/stock classification-map builder the six-step F&O order keys on
+    # (DEC-PULL-SIX-STEP-ORDER-001; CLAUDE.md §11 COMMON — the friend import is the
+    # established convention, pyproject reportPrivateUsage="warning" + per-site ignore
+    # at deliberate cross-module reuse sites — DEC-P0-017).
+    _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
 from brutex.dashboard.coverage_view import (
@@ -108,6 +114,8 @@ from brutex.dashboard.discovery_warm import (
     SPOT_CASCADE_KEY,
     build_db_datasets_payload,
     filter_spot_datasets,
+    latest_movers_minute_key,
+    preopen_datasets_key,
     warm_discovery_memos,
 )
 from brutex.dashboard.economics_integrity_csv import economics_integrity_to_csv
@@ -124,7 +132,7 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
-from brutex.dashboard.lake_revision import lake_revision
+from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
@@ -145,6 +153,7 @@ from brutex.dashboard.movers_snapshot import (
     DEFAULT_TOP_N,
     build_snapshot_payload,
     compute_spot_candidates,
+    is_intraday_interval,
     parse_snapshot_date,
     pending_asset_payload,
 )
@@ -152,6 +161,7 @@ from brutex.dashboard.movers_warm import (
     MoversWarmResult,
     futures_warm_grid,
     latest_movers_date,
+    latest_movers_minute,
     options_warm_grid,
     spot_warm_grid,
     warm_coordinate_label,
@@ -162,7 +172,11 @@ from brutex.dashboard.pipeline_prebuild import (
     PrebuildTarget,
     run_pipeline_prebuild_guarded,
 )
-from brutex.dashboard.pipeline_pull import run_full_pipeline
+from brutex.dashboard.pipeline_pull import (
+    PriorStepsVerdict,
+    run_full_pipeline,
+    strict_gate_enabled,
+)
 from brutex.dashboard.prebuild_gate import PrebuildGate, gated_movers_payload
 from brutex.dashboard.prebuild_parallel import resolve_prebuild_workers
 from brutex.dashboard.preopen_report import (
@@ -189,10 +203,16 @@ from brutex.dashboard.pull_controller import (
 from brutex.dashboard.pull_intent import (
     PullIntent,
     PullIntentStore,
+    clear_banner_after_start,
     persist_intent_for_launch,
     run_auto_resume,
 )
-from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.pull_jobs import (
+    JOB_KIND_PULL,
+    JOB_KIND_SWEEP,
+    BackgroundPullJob,
+    ProgressHook,
+)
 from brutex.dashboard.rate_bridge_cache import (
     BRIDGE_SOURCE_UNWIRED,
     BridgeReadResult,
@@ -215,7 +235,9 @@ from brutex.dashboard.sweep_results_view import (
     MAX_TOP_N as SWEEP_LEADERBOARD_MAX_TOP_N,
 )
 from brutex.dashboard.sweep_results_view import (
+    SweepScan,
     build_sweep_leaderboard,
+    load_sweep_scan,
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
@@ -227,6 +249,7 @@ from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revisi
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
+from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
@@ -245,6 +268,7 @@ from brutex.data.mapping_integrity import (
 )
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
+from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.doctor_autorun import LiveProofAutorun
@@ -351,14 +375,6 @@ class RateLimitPanel:
     latency_ms_p95: float = 0.0
     rps_1s: int = 0
     rps_1s_max: int = 0
-    #: The mandatory daily vendor quota gauge (DEC-AUTO-RESUME-QUOTA-001): calls spent
-    #: today, calls remaining, and the 100,000/day ceiling — straight from the
-    #: shared persisted ``DailyQuotaTracker`` via the controller snapshot. ``-1``
-    #: ``quota_limit`` means "no tracker wired" (dry-run / no live pull) so the panel
-    #: hides the gauge rather than showing a false 0.
-    quota_used: int = 0
-    quota_remaining: int = 0
-    quota_limit: int = -1
     #: The controller's MEASURED rolling-60s ISSUE count (``recent_minute``) and the HARD
     #: per-minute governor cap (``ceiling_per_min``) — straight from the controller
     #: snapshot (DEC-GROWW-RATE-PERMIN-001). Feed the live-pull-rate monitor's req/min
@@ -383,12 +399,16 @@ class RateLimitPanel:
     #: Golden Rule #1). Monotonic (not wall-clock) so it is immune to clock adjustments.
     last_update_monotonic: float = float("-inf")
     #: Whether the panel's :attr:`effective_rps` is a REAL measured completed-rate from the
-    #: transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001).
-    #: ``True`` for a spot-phase tick (the meter is wired); ``False`` for a metadata/F&O-phase
-    #: tick from the admission-only :class:`~brutex.dashboard.rate_sampler.RatePanelSampler`,
-    #: whose meter is unreachable — so the live-rate view keeps "achieved" an honest 0 that phase
-    #: and bases the stall verdict on the controller's admission signal. Defaults ``True`` (the
-    #: pre-decision meter-fed contract; an idle panel never reports a fabricated completed-rate).
+    #: transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001,
+    #: reachable across the metadata + F&O phases since DEC-RATE-WIDGET-FNO-MEASURED-001's
+    #: registered-meter lifecycle). ``True`` for any tick fed by the REGISTERED pool meter's
+    #: real snapshot — the spot per-window observe AND the sampler's metadata/F&O ticks once
+    #: the build site registered the meter; ``False`` means exactly "no meter registered" —
+    #: the pre-registration window at pull start, a dry-run (which explicitly DEREGISTERS,
+    #: DEC-RATE-METER-LIFECYCLE-001), or after the job-finish clear — so the live-rate view
+    #: keeps "achieved" an honest 0 and bases the stall verdict on the controller's admission
+    #: signal. Defaults ``True`` (the meter-fed contract; an idle panel never reports a
+    #: fabricated completed-rate).
     meter_present: bool = True
     #: The transport meter's MEASURED rolling failed-calls rate (the ``CallMeter`` snapshot's
     #: ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001): failed attempts per second over the
@@ -619,9 +639,6 @@ class DashboardState:
         current_rps: float,
         available_tokens: float,
         recent_429_count: int,
-        quota_used: int = 0,
-        quota_remaining: int = 0,
-        quota_limit: int = -1,
         recent_minute: int = 0,
         ceiling_per_min: int = -1,
         recent_1s: int = 0,
@@ -630,10 +647,11 @@ class DashboardState:
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
-        ``quota_used`` / ``quota_remaining`` / ``quota_limit`` are the daily vendor
-        quota gauge (DEC-AUTO-RESUME-QUOTA-001), defaulting to the "no tracker
-        wired" sentinel (``quota_limit=-1``) so a caller that has no quota snapshot
-        leaves the gauge hidden rather than showing a false 0.
+        The daily-quota gauge fields the panel once carried are GONE
+        (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no daily quota
+        (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6) and no
+        production controller wires a ``DailyQuotaTracker``, so the snapshot never
+        carried ``quota_*`` keys — the fields were a constant ``(0, 0, -1)``.
 
         ``recent_minute`` / ``ceiling_per_min`` are the controller's rolling-60s issue
         count + the HARD per-minute governor cap (DEC-GROWW-RATE-PERMIN-001), feeding the
@@ -651,9 +669,6 @@ class DashboardState:
             self.rate_limit.current_rps = current_rps
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
-            self.rate_limit.quota_used = quota_used
-            self.rate_limit.quota_remaining = quota_remaining
-            self.rate_limit.quota_limit = quota_limit
             self.rate_limit.recent_minute = recent_minute
             self.rate_limit.ceiling_per_min = ceiling_per_min
             self.rate_limit.recent_1s = recent_1s
@@ -691,12 +706,15 @@ class DashboardState:
         is the real-time proof the 5 r/s cap held (``<= 5`` ⇒ no breach, ever).
 
         ``meter_present`` (DEC-RATE-WIDGET-FNO-HONEST-001) records whether ``effective_rps``
-        is a REAL measured completed-rate (``True`` — a spot-phase tick whose
-        :class:`~brutex.adapters.call_meter.CallMeter` is wired) or honestly absent (``False``
-        — a metadata/F&O-phase tick from the admission-only sampler, which pushes no measured
-        completed-rate). The ``/api/v1/pull/rate`` view reads it to keep "achieved" an honest 0
+        is a REAL measured completed-rate (``True`` — a tick fed by the REGISTERED pool
+        meter's real :class:`~brutex.adapters.call_meter.CallMeter` snapshot: the spot
+        per-window observe AND, since DEC-RATE-WIDGET-FNO-MEASURED-001, the sampler's
+        metadata/F&O ticks) or honestly absent (``False`` — no meter registered: the
+        pre-registration window at pull start, a dry-run — which explicitly DEREGISTERS,
+        DEC-RATE-METER-LIFECYCLE-001 — or after the job-finish clear). The
+        ``/api/v1/pull/rate`` view reads it to keep "achieved" an honest 0
         + use the controller's admission signal for the stall verdict during the meter-less
-        phases, instead of fabricating a completed-rate.
+        window, instead of fabricating a completed-rate.
 
         ``failed_rps`` (DEC-PULL-TELEMETRY-TRIAD-001) is the meter snapshot's MEASURED
         rolling failed-calls rate — the evidence the ``/api/v1/pull/rate`` view needs to
@@ -868,9 +886,10 @@ def make_rate_observer(
 
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
         """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
-        # Quota gauge (DEC-AUTO-RESUME-QUOTA-001): the controller snapshot carries
-        # ``quota_*`` only when a DailyQuotaTracker is wired (the live path); absent
-        # → ``quota_limit=-1`` sentinel so the panel hides the gauge, not a false 0.
+        # The controller snapshot's conditional ``quota_*`` keys (a wired
+        # DailyQuotaTracker only) are deliberately NOT mapped: no production
+        # controller wires one (DEC-QUOTA-VERDICT-MOOT-001 — Groww has no daily
+        # quota) and the panel's gauge fields are deleted with the /universe gauge.
         # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired
         # (DEC-GROWW-RATE-PERMIN-001) — map that to the ``-1`` "no cap" panel sentinel so
         # the live-rate monitor shows no per-minute limit rather than a false 0.
@@ -879,9 +898,6 @@ def make_rate_observer(
             current_rps=float(rate.get("current_rps", 0.0)),
             available_tokens=float(rate.get("available_tokens", 0.0)),
             recent_429_count=int(rate.get("recent_hits", 0)),
-            quota_used=int(rate.get("quota_used", 0)),
-            quota_remaining=int(rate.get("quota_remaining", 0)),
-            quota_limit=int(rate.get("quota_limit", -1)),
             recent_minute=int(rate.get("recent_minute", 0)),
             ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
             # OBSERVE-ONLY trailing-window real issue counts (DEC-RATE-MONITOR-EXPAND-001):
@@ -896,9 +912,12 @@ def make_rate_observer(
             latency_ms_p95=float(meter.get("latency_ms_p95", 0.0)),
             rps_1s=int(meter.get("rps_1s", 0)),
             rps_1s_max=int(meter.get("rps_1s_max", 0)),
-            # DEC-RATE-WIDGET-FNO-HONEST-001: the admission-only sampler (metadata + F&O phases)
-            # pushes ``meter_present=False`` (no measured completed-rate this phase); a REAL spot
-            # CallMeter snapshot carries no such key → defaults ``True`` (the meter-fed contract).
+            # DEC-RATE-WIDGET-FNO-HONEST-001 / DEC-RATE-METER-LIFECYCLE-001: the sampler
+            # pushes ``meter_present=False`` ONLY when no meter is registered (the
+            # pre-registration window, a dry-run — which deregisters — or after the
+            # job-finish clear); a REAL CallMeter snapshot (the spot observe or the
+            # sampler's registered-meter metadata/F&O ticks) carries no such key →
+            # defaults ``True`` (the meter-fed contract).
             meter_present=bool(meter.get("meter_present", True)),
             # The meter's MEASURED rolling failed-calls rate (DEC-PULL-TELEMETRY-TRIAD-001);
             # absent on an older snapshot / the admission-only sampler sentinel → an honest 0.0.
@@ -1096,12 +1115,12 @@ def build_app(
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
     prebuild_gate: PrebuildGate | None = None,
-    quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
+    session_rate: SessionRateController | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1164,17 +1183,6 @@ def build_app(
         route gates; a ``dry_run`` pipeline does not. Injected so tests drive
         the gated/released transitions deterministically; ``None`` (the
         default) builds a fresh production gate.
-    quota_tracker
-        Optional read-only daily-quota source for the ``/api/v1/quota``
-        endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
-        ``current_count() -> int``, ``remaining() -> int`` and a
-        ``daily_limit`` int satisfies it (the live
-        :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`). When
-        ``None`` (the default) a real tracker is built lazily on first poll,
-        reading the IST-midnight LMDB counter the pulls write — so the
-        ``/universe`` gauge shows today's PERSISTED usage on page-load, before
-        any pull in this session reports onto the live rate panel. Injected so
-        tests drive a deterministic fake (no LMDB).
     pull_active_probe
         Optional pull-run signal for the ``/api/v1/pull/rate`` stall gate
         (DEC-RATE-STALL-PULL-GATE-001). A zero-arg callable returning ``True``
@@ -1233,6 +1241,16 @@ def build_app(
         ``None`` (the default — unit tests / bare apps) disables all of it;
         ``build_app`` itself never fires a resume (the launcher seam does), so
         constructing an app stays side-effect-free.
+    session_rate
+        Optional :class:`~brutex.dashboard.pull_controller.SessionRateController`
+        — the ONE per-session rate holder every pull shares
+        (DEC-DHAN-PERSIST-RATE-001) and the registered-CallMeter home of
+        DEC-RATE-WIDGET-FNO-MEASURED-001 / DEC-RATE-METER-LIFECYCLE-001.
+        Injected so tests drive the meter register/clear lifecycle
+        deterministically (pre-warm a controller, pre-register a meter, then
+        assert the dry-run / job-end eviction through the REAL routes); ``None``
+        (the default) builds a fresh production holder — byte-identical to the
+        pre-seam construction (mirrors the ``summary_cache`` injection pattern).
 
     Returns
     -------
@@ -1402,13 +1420,59 @@ def build_app(
     # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
+
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
     # partitions must never be ranked); the pipeline job releases it in a
     # try/finally so a failed/stopped pull can never wedge the movers shut. Owned
     # by this app instance (no module-global mutable state — CLAUDE.md §4).
-    _prebuild_gate = prebuild_gate if prebuild_gate is not None else PrebuildGate()
+    def _cross_derive_probe() -> bool:
+        """``True`` iff a derive holds this lake's cross-process derive lock — O(1).
+
+        The gate's cross-process visibility probe
+        (DEC-DERIVE-LOCK-VISIBILITY-001, closing the named PrebuildGate
+        follow-up of DEC-ENGINE-MISC-PACK-001): resolves the lake root lazily
+        from the injected instrument store (its DuckDB file lives at
+        ``<lake_root>/instruments.duckdb`` — the same ``store.path.parent``
+        the movers route reads from) and takes the NON-BLOCKING shared-flock
+        probe of the fixed ``<lake_root>/.locks/derive.lock``
+        (:func:`~brutex.data.derive_lock.derive_in_progress` — never waits,
+        never writes). No store / no real ``Path`` → ``False`` (a bare app has
+        nothing to probe). Lake-volume I/O: the gate only consults it off the
+        event loop (the movers route snapshots via ``run_in_threadpool``), and
+        a probe ``OSError`` fails OPEN inside the gate with one WARN per
+        outage.
+        """
+        path = getattr(instrument_store, "path", None)
+        if not isinstance(path, Path):
+            return False
+        return derive_in_progress(path.parent)
+
+    def _local_derive_probe() -> bool:
+        """``True`` iff THIS process holds the lake's derive lock — pure, zero I/O.
+
+        The gate's same-process attribution probe (the round-1 review fold on
+        DEC-DERIVE-LOCK-VISIBILITY-001): ``fcntl.flock`` contends across open
+        file descriptions, so ``_cross_derive_probe`` alone reads ``True`` for
+        this process's OWN background derive too (the lake-heal L2 post-pull /
+        L3 startup recall, which derives while the gate is idle). The gate
+        consults THIS registry read FIRST
+        (:func:`~brutex.data.derive_lock.derive_lock_held_by_this_process` —
+        O(1), no filesystem I/O) and labels such a holder
+        ``source="local_derive"`` instead of fabricating an "another process"
+        claim (Golden Rule #1). No store / no real ``Path`` → ``False``.
+        """
+        path = getattr(instrument_store, "path", None)
+        if not isinstance(path, Path):
+            return False
+        return derive_lock_held_by_this_process(path.parent)
+
+    _prebuild_gate = (
+        prebuild_gate
+        if prebuild_gate is not None
+        else PrebuildGate(cross_probe=_cross_derive_probe, local_derive_probe=_local_derive_probe)
+    )
 
     def _pull_live() -> bool:
         """``True`` iff a dashboard pull is running IN THIS PROCESS — O(1), never raises.
@@ -1502,6 +1566,16 @@ def build_app(
     _latest_movers_date_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True
     )
+    # The DEFAULT-poll latest-MINUTE display resolver cache (DEC-MOVERS-ASOF-LATEST-DEFAULT-001):
+    # when no explicit `time` is sent AND the interval is intraday, the movers route resolves
+    # the latest available spot 1-minute (`latest_movers_minute`) for the ADDITIVE `latest_time`
+    # display echo — so the dropdown/label SHOW the real latest minute (e.g. `latest (15:29)`)
+    # while the cut stays whole-day (`cutoff_min=None`, identical latest close across every TF).
+    # An O(spot-1m-files) DuckDB MAX, so it is memoised per (write generation, latest date) —
+    # a repeat DEFAULT intraday poll on the same day is an O(1) handoff; a pull re-resolves.
+    _latest_movers_minute_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
     # The Options-tab AUTHORITATIVE expiry-calendar cache (DEC-MOVERS-CALENDAR-TIERS-001):
     # the Near/Next/Far + Weekly/Monthly tier classification reads the FULL vendor expiry
     # calendar from `registry.duckdb` (`load_registry_expiries`), an O(expiries) DuckDB
@@ -1547,19 +1621,27 @@ def build_app(
     # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
     # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
     # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
-    # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001): the
-    # `<lake>/sweeps` discovery + per-tuple Parquet read is O(stores × rows); the
-    # ranked leaderboard for a given (instrument, tf, direction, rank_by, top_n) is a
-    # pure function of the sweep tree, so it is memoised behind the SAME write
-    # generation as the caches above (a sweep run / pull bumps `_summary_cache`'s
-    # generation → re-read; otherwise a repeat poll or a filter the operator already
-    # viewed is an O(1) handoff). REUSES the COMMON generation-stamped LRU
-    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON).
+    # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
+    # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
+    # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
+    # given (instrument, tf, direction, rank_by, top_n) is a pure function of the
+    # sweep tree, so it is memoised behind the `sweep_results_revision` CONTENT
+    # token folded into the KEY at a fixed `generation=0` (the `_nav_latency_key`
+    # precedent) — NOT the `_summary_cache` write generation, which the pull
+    # funnel's `mark_dirty` bumps per window tick and which a CLI
+    # `brutex sweep-all` (a separate process) never bumps at all. Two-level
+    # entries share this ONE instance: a `sweep_scan|rev=…` SweepScan per
+    # revision + a `sweep_leaderboard|rev=…|…` ranked payload per filter key, so
+    # a filter/rank click within one revision re-ranks the cached scan with zero
+    # store loads (see `api_sweep_leaderboard`). REUSES the COMMON LRU
+    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
+    # out old-revision keys.
     _sweep_leaderboard_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
-    # pull restarting at the 5 r/s ceiling and re-storming the vendor.
-    _session_rate = SessionRateController()
+    # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
+    # (DEC-RATE-METER-LIFECYCLE-001 test seam); ``None`` builds the production holder.
+    _session_rate = session_rate if session_rate is not None else SessionRateController()
     # The Greeks-enrichment consecutive-failure health counter
     # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
     # NEVER fail a pull, so a persistently broken enrichment used to be one
@@ -1726,7 +1808,10 @@ def build_app(
             # reads "done"/"idle", never a red "stalled". The CLI bridge carries its
             # OWN flag since schema v3 (DEC-CLI-BRIDGE-PULL-ACTIVE-001) — a pre-v3 /
             # flagless file reads None (the honest tick-freshness fallback).
-            panel_pull_active=_pull_active_probe(),
+            # KIND-AWARE since DEC-RATE-METER-LIFECYCLE-001: a running SWEEP on the
+            # shared job reads False here (honest "idle" — zero vendor calls by
+            # design), while _pull_live's duty-degrade probe stays sweep-inclusive.
+            panel_pull_active=_rate_pull_active_probe(),
             # DEC-PIPELINE-PHASE-UI-HONESTY-001: the pipeline's current phase label —
             # the PANEL side only (the CLI bridge is a separate process with no
             # pipeline phase). During the zero-vendor-call LOCAL stages
@@ -1749,29 +1834,13 @@ def build_app(
         stamp_bridge_freshness(payload, bridge_result)
         return JSONResponse(payload)
 
-    @app.get("/api/v1/quota")
-    async def api_quota() -> JSONResponse:
-        """GET /api/v1/quota — today's PERSISTED vendor daily-quota usage (read-only).
-
-        The live vendor (Groww) has **no daily quota** for backtesting
-        (``GROWW_DAILY_QUOTA_UNVERIFIED=None``; the binding limit is the 500 req/min
-        governor — CLAUDE.md §6 / DEC-GROWW-RATE-PERMIN-001). So when no daily-quota
-        tracker is injected this returns the ``quota_limit=-1`` "no daily quota"
-        sentinel and the ``/universe`` gauge stays hidden — never a fabricated
-        ``X / 100,000`` (Golden Rule #1), and the route never constructs an LMDB
-        tracker. When a tracker IS wired (a vendor that genuinely caps calls/day) it
-        serves that tracker's IST-midnight ``used / limit / remaining`` (one O(1)
-        LMDB read; DEC-DASHBOARD-QUOTA-PERSISTED-001). Never touches the lake/store.
-        """
-        if quota_tracker is None:
-            return JSONResponse({"quota_used": 0, "quota_limit": -1, "quota_remaining": 0})
-        return JSONResponse(
-            {
-                "quota_used": quota_tracker.current_count(),
-                "quota_limit": quota_tracker.daily_limit,
-                "quota_remaining": quota_tracker.remaining(),
-            }
-        )
+    # The former ``GET /api/v1/quota`` route (DEC-DASHBOARD-QUOTA-PERSISTED-001)
+    # is DELETED (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no
+    # daily quota (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6),
+    # no production caller ever injected a tracker (``brutex serve`` passes
+    # none), so the route only ever returned the constant ``quota_limit=-1``
+    # sentinel — a second, divergent quota surface with no consumer beyond the
+    # /universe gauge deleted alongside it.
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
@@ -2212,7 +2281,26 @@ def build_app(
                 intervals=resolve_fetch_intervals(spot_interval),
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
-                session_rate=_session_rate,
+                # Meter lifecycle on this DIRECT (off-job) route — DEC-RATE-METER-
+                # LIFECYCLE-001 round 2: a dry-run passes NO holder, so an operator's
+                # ``?dry_run=true`` fired WHILE a live job pull runs (this route
+                # bypasses the single-flight ``_pull_job``) can never evict that
+                # pull's registered meter through ``register_pull_meter``'s dry-run
+                # gate. The synthetic dry-run needs no session controller either
+                # (``_live_rate_runtime`` ignores it when ``use_live_rate`` is
+                # False), so the ``None`` arm is byte-identical apart from the
+                # eviction it avoids. The REAL arm's register/clear pairing lives
+                # INSIDE ``pull_candles`` (round 4 — ``_pull_meter_scope``): the
+                # spine compare-and-clears the EXACT handle it registered, success
+                # AND failure, so this route needs NO clear of its own. The prior
+                # route-level unconditional ``finally: clear_meter()`` is REMOVED —
+                # it evicted a concurrent JOB pull's LIVE meter whenever this route
+                # 400'd BEFORE ``pull_candles`` ever registered (a malformed date),
+                # leaving the job's F&O phase meterless for its remainder (the
+                # round-4 MAJOR; its "a concurrent job pull re-registers at its own
+                # build sites" claim was false — registration is once per phase
+                # START, never periodic).
+                session_rate=None if dry_run else _session_rate,
                 floor_store=instrument_store,
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
@@ -2276,8 +2364,20 @@ def build_app(
     # with the app's SummaryCache so each window write invalidates the coverage
     # summary (the next eligible poll refreshes), and owns the incremental
     # CoverageCounters that back the O(1) coverage headline
-    # (DEC-DASHBOARD-FASTREAD-001).
-    _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
+    # (DEC-DASHBOARD-FASTREAD-001). ``on_run_end`` clears the session's registered
+    # CallMeter in the worker's identity-gated finally (DEC-RATE-METER-LIFECYCLE-001 —
+    # the C0 cross-pull leak fix; the clear is UNCONDITIONAL, so a job finish CAN
+    # evict a concurrent off-job direct pull's live meter — the widget degrades to
+    # meter_present=False, never fabricates; blast radius disclosed at the
+    # ``on_run_end`` param doc); together with ``pull_candles``' own paired
+    # identity-gated clear (the direct ``/universe/pull`` route runs OFF-job — the
+    # spine compare-and-clears the exact handle it registered, rounds 2/4),
+    # "no in-process
+    # pull running ⇒ no meter registered" is a process invariant, so a dead pull's
+    # meter can never feed a later sampler tick.
+    _pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache, on_run_end=_session_rate.clear_meter
+    )
 
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
     # the production default reads THIS app's own single-flight job (`running` is an O(1)
@@ -2285,6 +2385,20 @@ def build_app(
     # tests inject a deterministic probe. Resolved at request time via the route closure.
     _pull_active_probe: Callable[[], bool | None] = (
         pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
+
+    # RATE-ROUTE-ONLY pull signal (DEC-RATE-METER-LIFECYCLE-001): kind-aware so a
+    # brute-force SWEEP on the shared single-flight job reads honest "idle" on the
+    # PULL RATE widget instead of a red "stalled" for its 2-4-day run (audit C5).
+    # _pull_active_probe / _pull_live DELIBERATELY stay sweep-INCLUSIVE — a sweep IS
+    # a heavy in-process job and the cache duty-degrade floors (#920) must still
+    # engage; "unifying" the two probes would resurrect either C5 or the #920
+    # starvation. An injected pull_active_probe is used verbatim (bool | None
+    # pass-through — the test seam bypasses the kind gate by design).
+    _rate_pull_active_probe: Callable[[], bool | None] = (
+        pull_active_probe
+        if pull_active_probe is not None
+        else (lambda: _pull_job.running_job_kind == JOB_KIND_PULL)
     )
 
     # The pipeline-phase probe (DEC-PIPELINE-PHASE-UI-HONESTY-001): the production
@@ -2466,8 +2580,8 @@ def build_app(
             pass the leftover failed windows are re-pulled in bounded rounds (over
             the SHARED coverage ledger — only the still-failed windows hit the vendor
             again, rate-safe) until ONE terminal state is reached: ``stop_clean``
-            (every window fetched — the normal exit), ``stop_quota`` (the day's
-            100,000-call vendor quota is spent — resume after the IST-midnight reset),
+            (every window fetched — the normal exit), ``stop_quota`` (dormant under
+            Groww — no daily quota, no tracker wired; DEC-QUOTA-VERDICT-MOOT-001),
             ``stop_dead`` (the token died — re-auth), or ``stop_no_progress`` /
             budget backstop. So the one-click pull DRIVES ITSELF to a clean lake with
             zero manual "Re-pull to finish" clicks (CLAUDE.md §11 AUTOMATED), bounded
@@ -2705,6 +2819,12 @@ def build_app(
                     dry_run=dry_run,
                     session_rate=_session_rate,
                     on_progress=partial(_metadata_progress_sync, _pull_job),
+                    # Durable &-form winner map (DEC-FORM-WINNER-PERSIST-001):
+                    # keyed by the PRIMARY underlying inside the pull; a dry-run
+                    # threads store=None (base-identical, nothing persisted).
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             return report.to_dict()
 
@@ -2826,6 +2946,11 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # ONE durable &-form winner map shared by BOTH composite phases
+                    # (DEC-FORM-WINNER-PERSIST-001); dry-run threads store=None.
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             return report.to_dict()
 
@@ -2959,6 +3084,18 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
+        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
+        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
+        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
+        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
+        # before index options) on a real vendor pull. Build the classification map over
+        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
+        # composite uses; a selection whose underlying is somehow absent orders
+        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
+        # time (request thread), captured by the job closure below.
+        underlying_kinds = _underlying_kind_map(
+            _select_bulk_targets("index") + _select_bulk_targets("stock")
+        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -3008,6 +3145,16 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
+                    # grammars run the SAME strict steps 3-6 order as the composite.
+                    underlying_kinds=underlying_kinds,
+                    # Durable &-form winner map on the direct-selection grammars too
+                    # (DEC-FORM-WINNER-PERSIST-001 review round-2 fix: this seam was
+                    # MISSED, so ?underlying=M&M re-paid the wasted plain-form fetch
+                    # and never read/persisted a winner); dry-run threads store=None.
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -3134,6 +3281,10 @@ def build_app(
         # window is recomputed inside the spot phase from the SAME strings — this
         # call is the fail-fast guard.
         try:
+            # The strict post-step gate (DEC-PULL-SIX-STEP-ORDER-001): resolved
+            # ONCE, EAGERLY, at launch — a garbage BRUTEX_PIPELINE_STRICT_GATE
+            # value is a clean 400 here, never a mid-pull 500 on the job thread.
+            strict_gate = strict_gate_enabled()
             resolve_candle_range(
                 from_date=from_date,
                 to_date=to_date,
@@ -3188,6 +3339,7 @@ def build_app(
             target_source=target_source,
             years=years,
             dry_run=dry_run,
+            strict_gate=strict_gate,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -3205,6 +3357,13 @@ def build_app(
             # spot/metadata early stop or a raised phase (ok stays False), so the
             # movers are NEVER left blocked by a failed pull.
             prebuild_ok = False
+
+            # ONE durable &-form winner map for the WHOLE pipeline run
+            # (DEC-FORM-WINNER-PERSIST-001): the metadata phase's %26 win reorders
+            # the historical phase's very first fetch for that underlying (both key
+            # by the PRIMARY underlying), and the schema_meta rows survive across
+            # pulls/processes. A dry-run threads store=None (base-identical).
+            form_preference = PersistentSymbolFormPreference(None if dry_run else instrument_store)
 
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
@@ -3259,9 +3418,13 @@ def build_app(
                         dry_run=dry_run,
                         session_rate=_session_rate,
                         on_progress=partial(_metadata_progress_sync, _pull_job),
+                        form_preference=form_preference,
                     )
 
-            def _run_historical() -> CompositePullReport:
+            def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
+                # DEC-PULL-SIX-STEP-ORDER-001: the sequencer's spot+metadata
+                # cleanliness verdict rides into the composite → the Greeks seam,
+                # so the strict barrier can withhold the enrichment there.
                 # DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the historical F&O phase pulls
                 # FUTURES before OPTIONS (DEC-FNO-PULL-ORDER-LOOKBACK-001); the coarse
                 # "historical" label is REFINED to futures-vs-options by the live ledger
@@ -3306,6 +3469,8 @@ def build_app(
                         scope_end=fno_scope_end,
                         on_bars=_pull_job.add_bars,
                         on_ledger_sync=_hist_ledger_sync,
+                        form_preference=form_preference,
+                        prior_steps=prior_steps,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3596,12 +3761,21 @@ def build_app(
                 _pull_job.set_phase("prebuild")
                 _prebuild_gate.set_phase("prebuild")
 
-                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001): resolve the forming-session
-                # daily cutoff ONCE per prebuild run and pin it into BOTH paths
-                # (the sequential closure below AND the threaded path via the
-                # guard) — so a run straddling midnight IST derives the same
-                # `1day` set regardless of path or symbol order.
-                prebuild_cutoff = datetime.now(UTC).astimezone(IST).date()
+                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001) × DEC-DAILY-CUTOFF-
+                # GROUNDED-001: pin the forming-session cutoff's IST INSTANT
+                # ONCE per prebuild run and thread it into BOTH paths (the
+                # sequential closure below AND the threaded path via the
+                # guard) — one instant, so a run straddling midnight IST (or
+                # the session close) derives the same `1day` set regardless of
+                # path or symbol order. Pinning the INSTANT (not a plain
+                # today-IST DATE, the #1401 M1 regression this corrects) keeps
+                # the session-close-aware daily_derive_cutoff default LIVE on
+                # this production path — a POST-CLOSE pipeline run derives the
+                # run day's own 1day bar (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001,
+                # restored) — and keeps the dense symbols' data-grounded arm
+                # reachable (an explicit daily_before date would be LAW and
+                # suppress both).
+                prebuild_cutoff_now = now_ist()
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -3611,7 +3785,7 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
-                        daily_before=prebuild_cutoff,
+                        daily_cutoff_now=prebuild_cutoff_now,
                         # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
                         # substitution WARNs only for a SPOT INDEX target
                         # (PrebuildTarget.dense = Instrument.is_index).
@@ -3640,7 +3814,7 @@ def build_app(
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
                         workers=prebuild_workers,
-                        daily_before=prebuild_cutoff,
+                        daily_cutoff_now=prebuild_cutoff_now,
                         # PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001):
                         # skip the whole prebuild gracefully when the lake
                         # volume can't hold the estimated derived writes
@@ -3718,6 +3892,7 @@ def build_app(
                         warm_futures_movers=_warm_futures_movers,
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
+                        strict_gate=strict_gate,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -3785,6 +3960,10 @@ def build_app(
             # Best-effort write (a failed write is logged, never blocks the
             # pull); the clear hook is wired for EVERY real pull regardless —
             # a completing real pull supersedes any lingering older intent.
+            # NOTE: the resume red-banner auto-clear does NOT live here — it
+            # fires AFTER start() below, gated on `started`
+            # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
+            # a refused start launches nothing and must not drop the banner).
             persist_intent_for_launch(
                 pull_intent_store,
                 dry_run=dry_run,
@@ -3802,6 +3981,14 @@ def build_app(
             ledger_synced=True,
             on_finally=on_finally,
         )
+        if pull_intent_store is not None:
+            # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
+            # stale resume red banner ONLY when the real pull actually started
+            # — start() acquired the in-process + cross-process guards and
+            # spawned the worker. A refused start (contention / foreign-host
+            # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
+            # touches it (both gates live inside the helper).
+            clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
         return {
             "started": started,
             "targets": len(targets),
@@ -3826,14 +4013,28 @@ def build_app(
         semantics docstring): the launch body is shared with the boot-time
         intent resume (DEC-PULL-INTENT-RESUME-001), so the operator's POST and
         a resumed pull can never drift onto two different launch paths.
+
+        Offloaded via ``run_in_threadpool`` (the app.py offload doctrine — the
+        round-1 review fold on DEC-ACCOUNT-LEASE-CROSSHOST-001): the launch
+        acquires the cross-process pull guards synchronously
+        (``BackgroundPullJob.start`` → ``_acquire_singleflight`` — two flock
+        opens, the lease read and an fsync'd lease write, ALL on the lake
+        volume), so running it on the event loop would freeze the WHOLE
+        dashboard at launch time on a wedged/stalled external volume — the
+        exact event-loop-freeze class DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001
+        (#1522) removed for ``/pull/rate``. ``HTTPException``s raised inside
+        the offloaded body propagate unchanged (the 400/503 contracts are
+        byte-identical).
         """
         return JSONResponse(
-            _launch_pipeline(
-                symbols=symbols,
-                symbol=symbol,
-                from_date=from_date,
-                to_date=to_date,
-                dry_run=dry_run,
+            await run_in_threadpool(
+                lambda: _launch_pipeline(
+                    symbols=symbols,
+                    symbol=symbol,
+                    from_date=from_date,
+                    to_date=to_date,
+                    dry_run=dry_run,
+                )
             )
         )
 
@@ -4930,7 +5131,12 @@ def build_app(
             # payload and ZERO lake reads — a half-filled lake / mid-overwrite
             # derived partitions must never be ranked. The page keeps polling and
             # recovers by itself the moment the pipeline job releases the gate.
-            gate = _prebuild_gate.snapshot()
+            # The snapshot ALSO consults the cross-process derive-lock probe
+            # (DEC-DERIVE-LOCK-VISIBILITY-001 — a CLI-process derive gates too),
+            # which is one flock syscall on the lake volume, so it runs on a
+            # threadpool worker — never on the event loop (the app.py offload
+            # doctrine, DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
+            gate = await run_in_threadpool(_prebuild_gate.snapshot)
             if gate.blocking:
                 return JSONResponse(
                     gated_movers_payload(
@@ -5036,6 +5242,23 @@ def build_app(
                     )
                 else:
                     date_str = parse_snapshot_date(date).isoformat()
+                # DEFAULT-poll latest-MINUTE display echo (DEC-MOVERS-ASOF-LATEST-DEFAULT-001):
+                # ONLY when no explicit `time` was sent AND the interval is intraday, resolve the
+                # latest available spot 1-minute of `date_str` for the ADDITIVE `latest_time`
+                # display field — so the dropdown/label SHOW the real latest minute while the CUT
+                # stays whole-day (`time` still threads `None` → identical latest close across
+                # every TF). Memoised per (generation, date); `None` (empty/unreadable lake) → the
+                # frontend shows a plain "latest" label and still cuts whole-day. Display-only —
+                # the ranked numbers are byte-unchanged (the cut is not touched).
+                latest_time: str | None = None
+                if time is None and is_intraday_interval(interval):
+                    latest_time = _latest_movers_minute_cache.get_or_compute(
+                        latest_movers_minute_key(date_str),
+                        generation=generation,
+                        compute=lambda: latest_movers_minute(
+                            lake_root, parse_snapshot_date(date_str)
+                        ),
+                    )
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -5117,6 +5340,8 @@ def build_app(
                         expiry_track=opt_cands.expiry_track,
                         min_volume=min_volume,
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
+                        pcr=opt_cands.pcr,
+                        latest_time=latest_time,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5155,6 +5380,7 @@ def build_app(
                         skipped=fut_cands.skipped,
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
+                        latest_time=latest_time,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5194,10 +5420,26 @@ def build_app(
                     min_volume=min_volume,
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
+                    latest_time=latest_time,
                 )
 
             payload = await run_in_threadpool(_resolve)
             return JSONResponse(payload)
+        except PcrCorruptionError as exc:
+            # Lake VALUE corruption (an out-of-band negative OI/volume cell —
+            # the ingest boundary clamps negatives and CandleBar rejects them,
+            # so only a tampered/bit-rotted Parquet reaches here) is a
+            # SERVER-side fault, never a client error: the PCR fold stays
+            # fail-loud per the DEC-MOVERS-OPTIONS-PCR-001 design (edge 5), but
+            # it must surface as an honest 500 with a corruption-specific
+            # detail — NOT ride the malformed-date/time 400 mapping below
+            # (round-1 hostile-review fold). Checked BEFORE ValueError (it is a
+            # ValueError subclass, so ordering is load-bearing). ONE structlog
+            # WARN so the corruption (named by the adapter-enriched
+            # underlying/expiry group key, round-7 fold) reaches the log even
+            # when nobody is watching the wire.
+            _LOG.warning("movers.pcr_corruption", error=str(exc))
+            raise HTTPException(status_code=500, detail=f"lake corruption: {exc}") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -5265,15 +5507,34 @@ def build_app(
         READ-ONLY; empty when no lake.
 
         DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001: the dataset discovery
-        (``resolve_report_datasets`` → ``list_candle_datasets`` — a full
-        ``bars/`` tree walk, ~66k dirs on a materialised options lake) + the
+        (``resolve_report_datasets`` → ``list_candle_datasets``) + the
         store reads run on a threadpool worker, NEVER the event loop.
-        Forensically proven (2026-07-04 run): this route ran the walk
+        Forensically proven (2026-07-04 run — a PRE-DEC-O1-CLAIMS-HONESTY-001
+        measurement of the then-UNFILTERED full ``bars/`` tree walk, ~66k
+        dirs on a materialised options lake): this route ran that walk
         SYNCHRONOUSLY on the uvicorn loop during the prebuild write storm and
         froze EVERY dashboard request for 6 minutes (361,596 ms; 38 queued
         requests burst-flushed on release). The store connection is built +
         used inside the worker so its RLock stays on one thread
         (DEC-DASHBOARD-FASTREAD-001).
+
+        DEC-O1-CLAIMS-HONESTY-001: the cold-miss discovery is now STRICTLY
+        CHEAPER than that measured unfiltered walk — FNO-pruned at walk
+        DESCENT (``exclude_segments={FNO}``: the F&O contract tree, the bulk
+        of the ~66k dirs above, is never entered) + interval-bounded
+        (``intervals`` = the one partition the basis reads), and a
+        manifest-served lake pays an O(manifest-rows) read, no walk at all.
+        The discovery result (the triples ONLY) is additionally memoised in
+        the COMMON generation-keyed ``_db_datasets_cache`` (the #896 pattern,
+        key ``preopen_datasets_key(basis)`` — one memo per basis, seeded by
+        the post-pull ``warm_discovery_memos``), so a repeat open within one
+        write generation is an O(1) handoff and the pruned cold-miss walk is
+        paid at most once per generation per basis. The pullability tagging below
+        is DELIBERATELY NOT cached: it reads the instrument master, which
+        moves on a keyless ``load-instruments`` WITHOUT a generation bump
+        (the ``master_revision`` trap) — the three store SELECTs are bounded
+        + cheap and stay live. Mid-pull the adaptive floor may serve a
+        bounded-stale triple list (logged ``movers_cache.stale_served``).
         """
         report_basis = _report_basis_literal(basis)
         store = _require_store()
@@ -5281,10 +5542,15 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         lake = lake_root.parent
+        gen = _summary_cache.generation
 
         def _resolve() -> dict[str, Any]:
-            """Walk the lake + tag pullability off the event loop (threadpool)."""
-            triples = resolve_report_datasets(lake, basis=report_basis)
+            """Tag pullability off the event loop; discovery is generation-memoised."""
+            triples = _db_datasets_cache.get_or_compute(
+                preopen_datasets_key(report_basis),
+                generation=gen,
+                compute=lambda: resolve_report_datasets(lake, basis=report_basis),
+            )
             # Tag each report symbol with option-pullability so /reports can badge
             # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
             # the SAME store calls + single-source predicate the /universe explorer
@@ -5615,17 +5881,26 @@ def build_app(
             """Background body: run the grid sweep; the live tick streams to the progress file."""
             return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
 
-        # On a SUCCESSFUL sweep, bump the dashboard write-generation so the next
-        # /results poll re-reads the new winners instead of serving the stale
-        # leaderboard cache (the sweep _work never reports per-bar progress, so the
-        # _on_progress mark_dirty funnel never fires for a sweep — MAJOR-1 fix,
-        # DEC-DASHBOARD-RESULTS-PAGE-001). Fires only on success, never on a failed
-        # sweep (see BackgroundPullJob._run).
+        # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
+        # _work never reports per-bar progress, so the _on_progress mark_dirty
+        # funnel never fires for a sweep — MAJOR-1, DEC-DASHBOARD-RESULTS-PAGE-001).
+        # Since DEC-LEDGER-DELTA-O-PAGE-001 this hook is REDUNDANT for /results
+        # itself (the leaderboard keys on the `sweep_results_revision` content
+        # token, which the store flush moves) — it is KEPT because every OTHER
+        # generation-keyed cache still rides `_summary_cache.generation` (zero
+        # drift). Fires only on success, never on a failed sweep (see
+        # BackgroundPullJob._run).
+        # job_kind=SWEEP (DEC-RATE-METER-LIFECYCLE-001): the kind-aware rate probe
+        # reads a running sweep as "no PULL active" so the site-wide PULL RATE widget
+        # stays honest dark "idle" for the sweep's 2-4-day wall time — never a red
+        # "stalled" off the (correctly) zero vendor rate. Single-flight, progress and
+        # the duty-degrade probes are unchanged (they stay sweep-inclusive).
         started = _pull_job.start(
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
             on_success=_summary_cache.mark_dirty,
+            job_kind=JOB_KIND_SWEEP,
         )
         payload = request.to_dict()
         payload["started"] = started
@@ -5668,16 +5943,25 @@ def build_app(
         top
             Leaderboard depth (1..500; default 50).
 
-        **Latency (DEC-DASHBOARD-RESULTS-PAGE-001):** the ``<lake>/sweeps`` read is
-        a pure function of the sweep tree, so the projected leaderboard is memoised
-        behind the dashboard write-generation (``_summary_cache.generation``). It is
-        bumped by a pull (the write funnel's ``mark_dirty``) AND by a
-        SUCCESSFULLY-completed dashboard sweep (the ``on_success`` hook on
-        ``/api/v1/sweep/run`` — a failed sweep never bumps it), so a sweep's winners
-        appear on the next poll instead of behind a stale ``available: false``. A
-        repeat poll, or a filter the operator already viewed, is an O(1) cache hit;
-        the first read of a coordinate (or the first after a bump) still pays the
-        real ``O(stores × rows)`` scan (honest envelope, Golden Rule #10).
+        **Latency (DEC-DASHBOARD-RESULTS-PAGE-001, re-keyed by
+        DEC-LEDGER-DELTA-O-PAGE-001):** the ``<lake>/sweeps`` read is a pure
+        function of the sweep tree, so it is memoised behind the
+        ``sweep_results_revision`` CONTENT token (the sweeps directory-mtime
+        digest + the audit chain's file stat), folded into the cache KEY at a
+        fixed generation. A mid-pull window-ledger checkpoint (which bumps the
+        write generation via the ``pull_jobs`` ``mark_dirty`` funnel, per window
+        tick) no longer invalidates the leaderboard; a results-store flush from
+        the dashboard sweep OR a CLI ``brutex sweep-all`` (which never calls
+        ``mark_dirty`` — the case the old generation keying NEVER covered), a
+        store delete, and a ``SWEEP_START`` audit append ALL move the token.
+        Two-level caching: the rank-independent :class:`SweepScan` is cached
+        ONCE per revision, so a filter/rank/top_n click within one revision
+        re-pays only the rank + projection — zero store loads, zero audit
+        reads; a repeat poll of a viewed coordinate is an O(1) hit. Honest
+        envelope (Golden Rule #10): every poll pays one O(dirs)+O(1-stat)
+        revision probe; the first read per revision pays the real
+        ``O(stores × rows)`` scan; a probe outage (token ``None``) computes
+        fresh and caches NOTHING — never a stale serve, never a poisoned key.
 
         **Honest envelope (Golden Rule #10):** an empty / absent ``<lake>/sweeps``
         (no sweep run yet) returns ``available: false`` with zero rows — never a
@@ -5699,25 +5983,55 @@ def build_app(
             )
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
-        generation = _summary_cache.generation
-        # Casefold the filter axes in the cache key: build_sweep_leaderboard's
-        # _matches filters them case-insensitively, so ``NIFTY`` and ``nifty`` yield
-        # the SAME leaderboard and must share ONE cache slot (rank_by stays raw — it
-        # is matched exactly against RANKABLE_COLUMNS, not casefolded).
-        key = (
-            f"sweep_leaderboard|i={(instrument or '').casefold()}|tf={(tf or '').casefold()}"
-            f"|d={(direction or '').casefold()}|r={rank_by or ''}|n={top}"
-        )
 
         def _resolve() -> dict[str, Any]:
             """Cache-or-compute the projected leaderboard on a threadpool worker.
 
-            The ``compute=`` closure performs the real ``<lake>/sweeps`` scan ONLY on
-            a miss / post-write; a hit is an O(1) handoff (DEC-DASHBOARD-RESULTS-PAGE-001).
+            Runs OFF the event loop: the ``sweep_results_revision`` probe is
+            O(dirs)+O(1-stat) per poll, and the ``compute=`` closures perform
+            the real ``<lake>/sweeps`` scan / rank ONLY on a miss
+            (DEC-LEDGER-DELTA-O-PAGE-001).
             """
+            rev = sweep_results_revision(lake_root)
+
+            def _fresh() -> dict[str, Any]:
+                return build_sweep_leaderboard(
+                    lake_root,
+                    instrument=instrument,
+                    tf=tf,
+                    direction=direction,
+                    rank_by=rank_by,
+                    top_n=top,
+                ).to_dict()
+
+            if rev is None:
+                # No signal → no freshness decision: compute fresh, cache
+                # NOTHING (never a stale serve, never a poisoned key — Golden
+                # Rule #1; the lake_revision "None = no signal" doctrine).
+                return _fresh()
+            # Level 1: ONE rank-independent SweepScan per revision — the
+            # O(stores × rows) load + the audit era pass run once, then every
+            # filter/rank/top_n click within this revision re-ranks it.
+            scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
+                f"sweep_scan|rev={rev}",
+                generation=0,
+                compute=lambda: load_sweep_scan(lake_root),
+            )
+            # Level 2: the ranked payload per filter key. Casefold the filter
+            # axes: build_sweep_leaderboard's _matches filters them
+            # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
+            # leaderboard and must share ONE cache slot (rank_by stays raw — it
+            # is matched exactly against RANKABLE_COLUMNS, not casefolded). The
+            # revision rides in the KEY at a fixed generation=0 (the
+            # `_nav_latency_key` precedent); the LRU ages out old revisions.
+            key = (
+                f"sweep_leaderboard|rev={rev}|i={(instrument or '').casefold()}"
+                f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
+                f"|r={rank_by or ''}|n={top}"
+            )
             return _sweep_leaderboard_cache.get_or_compute(
                 key,
-                generation=generation,
+                generation=0,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
                     instrument=instrument,
@@ -5725,6 +6039,7 @@ def build_app(
                     direction=direction,
                     rank_by=rank_by,
                     top_n=top,
+                    scan=scan,
                 ).to_dict(),
             )
 
@@ -6221,6 +6536,8 @@ def build_app(
             "empty_streak",
             "in_pull_fetches",
             "bars_net_new",
+            "empty_retries",
+            "transient_retries",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)

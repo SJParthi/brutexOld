@@ -29,6 +29,10 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
+from brutex.adapters.groww.symbol_form_preference import (
+    PersistentSymbolFormPreference,
+    form_winner_key,
+)
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.greeks_health import DEFAULT_GREEKS_FAILURE_THRESHOLD
@@ -135,6 +139,13 @@ def _patch_historical(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any])
         captured["intervals"] = kwargs["intervals"]
         captured["until_clean"] = kwargs["until_clean"]
         captured["dry_run"] = kwargs["dry_run"]
+        # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection route now
+        # threads the index/stock classification map — captured for assertion.
+        captured["underlying_kinds"] = kwargs["underlying_kinds"]
+        # DEC-FORM-WINNER-PERSIST-001 (review round-2 fix): the direct-selection
+        # route now threads the DURABLE form-winner map too — captured for
+        # assertion (fail-loud key access: dropping the wiring fails every test).
+        captured["form_preference"] = kwargs["form_preference"]
         return HistoricalPullReport(
             dry_run=kwargs["dry_run"],
             intervals=tuple(kwargs["intervals"]),
@@ -196,6 +207,82 @@ def test_underlying_form_resolves_whole_chain(
         "NSE-NIFTY-25Jan24-21000-PE",
         "NSE-NIFTY-25Jan24-FUT",
     }
+
+
+def test_direct_selection_threads_six_step_underlying_kinds(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct-selection grammars run the six-step order (review fix).
+
+    DEC-PULL-SIX-STEP-ORDER-001 round 1 MAJOR: this route's
+    ``?contract/?contracts/?underlying/?kind/?all`` paths passed NO
+    ``underlying_kinds``, so a real vendor pull over a mixed index+stock
+    selection ran the pre-change legacy 2-bucket FUT-then-OPT order —
+    reproducing the motivating 2026-07-05 inversion. The route now builds the
+    classification map over every admitted underlying (index + stock kinds via
+    the SAME resolved-key builder the composite uses) and threads it into
+    ``pull_contract_candles``. The seeded store admits ONE index (NIFTY), so
+    the map classifies it index-side.
+    """
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert captured["underlying_kinds"] == {"NIFTY": True}
+
+
+def test_direct_selection_threads_durable_form_preference(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct-selection grammars thread the DURABLE form-winner map (round-2 fix).
+
+    DEC-FORM-WINNER-PERSIST-001 review round-2 MAJOR: round 1 wired the
+    ``?symbols=`` composite branch + the metadata route but MISSED this
+    ``?contract/?contracts/?underlying/?kind/?all`` call — the default ``None``
+    let the spine build a fresh amnesiac ``SymbolFormPreference`` per pass, so
+    on this real production surface a learned ``%26`` winner was never read
+    back (an operator's ``?underlying=M&M`` re-paid the full wasted plain-form
+    fetch), new wins were never persisted, and the within-one-pull amnesia
+    across market buckets / until-clean rounds persisted here. The FUNCTIONAL
+    pin: a winner recorded through the ROUTED preference lands in the wired
+    ``InstrumentStore``'s ``schema_meta`` (never a fresh store-less map).
+    """
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store
+
+
+def test_direct_selection_dry_run_form_preference_is_store_less(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dry-run arm threads ``store=None`` — synthetic runs never persist a row."""
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post(
+        "/api/v1/universe/pull-historical",
+        params={"underlying": "NIFTY", "dry_run": "true"},
+    )
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True  # in-memory learning only
+    assert store.get_meta(form_winner_key("M&M")) is None  # store=None: no durable row
 
 
 def test_pull_historical_work_feeds_greeks_health_counter(
@@ -691,6 +778,10 @@ def _patch_composite(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) 
         captured["skipped"] = skipped
         captured["intervals"] = kwargs["intervals"]
         captured["until_clean"] = kwargs["until_clean"]
+        # DEC-FORM-WINNER-PERSIST-001 (round-5 pin): the composite route threads
+        # the DURABLE form-winner map — captured for assertion (fail-loud key
+        # access: dropping the wiring fails every composite-route test).
+        captured["form_preference"] = kwargs["form_preference"]
         return _composite_report(names=names, skipped=skipped, dry_run=kwargs["dry_run"])
 
     monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake)
@@ -716,6 +807,32 @@ def test_composite_symbols_starts_job(
     # only NIFTY reached the composite; INDIAVIX was partitioned out.
     assert captured["names"] == ["NIFTY"]
     assert captured["skipped"] == ["INDIAVIX"]
+
+
+def test_composite_threads_durable_form_preference(
+    ref_client: TestClient, ref_store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``?symbols=`` composite branch wires the DURABLE form-winner map.
+
+    The round-5 regression pin (the direct-selection route's round-2
+    discipline, mirrored): this route's ``form_preference=...`` kwarg was
+    asserted by ZERO tests, so deleting the wiring — silently degrading the
+    composite back to the fresh-per-pass amnesiac default — passed every
+    suite. The FUNCTIONAL pin: a winner recorded through the ROUTED
+    preference lands in the wired ``InstrumentStore``'s ``schema_meta``
+    (never a fresh store-less map) on a non-dry-run.
+    """
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_composite(monkeypatch, captured)
+    resp = ref_client.post("/api/v1/universe/pull-historical", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(ref_client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert ref_store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store
 
 
 def test_composite_enumerate_flag_without_symbols_400(

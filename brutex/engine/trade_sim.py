@@ -13,14 +13,15 @@ the rest of the result row.
 It is a **signal-only** spot simulator (``TRACK1_BACKTEST_SPEC.md`` lines
 640-657, §9 finding C2 of ``docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md``):
 the index has no order book, so there is **no slippage, no brokerage, no STT**
-and money stays in **int64 paisa** end-to-end. It deliberately does **not**
-import :class:`brutex.execution.simulator.ExecutionSimulator` (which fills at
-bar CLOSE and applies 5 bps slippage + ₹20 brokerage in ``Decimal`` via the
-dormant, stale ``brutex.execution.costs`` model — wrong for spot, and NOT the
-Track-2 cost authority either: the authoritative options cost model is
-:func:`brutex.costs.calculator.compute_trade_cost` per DEC-COST-001; the stale
-execution-costs model is deprecated). P&L is the per-unit directional
-price move in paisa (no position sizing — spot is research, not execution).
+and money stays in **int64 paisa** end-to-end. Historical note: it
+deliberately never imported the old ``ExecutionSimulator`` (which filled at
+bar CLOSE and applied 5 bps slippage + ₹20 brokerage in ``Decimal`` via the
+dormant, stale ``execution.costs`` model — wrong for spot, and NOT the
+Track-2 cost authority either); that deprecated trio was DELETED per
+DEC-EXECUTION-TRIO-DELETE-001, and the authoritative options cost model is
+:func:`brutex.costs.calculator.compute_trade_cost` per DEC-COST-001. P&L is
+the per-unit directional price move in paisa (no position sizing — spot is
+research, not execution).
 
 ## Fill conventions (configurable — :class:`FillPolicy`)
 
@@ -89,6 +90,7 @@ from brutex.calendars.nse import (
     get_session_checked,
     is_forced_exit_bar,
 )
+from brutex.engine.exit_index import bars_strictly_increasing
 
 # Intentional friend access (DEC-P0-017 per-site convention): ``_price_to_paisa``
 # is the canonical Decimal-rupees → int64-paisa seam (one source of truth,
@@ -309,6 +311,12 @@ class TradeSimWalker:
         # hits on every bar after the first of each day).
         self._fe_cache_date: date | None = None
         self._fe_cache_seconds: int | None = None
+        # Bar index of the most recently CLOSED trade — recorded by ``_close``
+        # (the one seam every exit flows through), read by
+        # ``run_with_exit_indices`` right after a push/finish returns a trade.
+        # ``-1`` = no trade has closed yet; never read before a close by
+        # construction (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).
+        self._last_exit_idx: int = -1
 
     # ── Batch path ────────────────────────────────────────────────────────
 
@@ -342,6 +350,36 @@ class TradeSimWalker:
             If ``entry_signals`` (or a supplied ``exit_signals``) length does
             not match ``bars``.
         """
+        trades, _ = self.run_with_exit_indices(bars, entry_signals, exit_signals)
+        return trades
+
+    def run_with_exit_indices(
+        self,
+        bars: Sequence[CandleBar],
+        entry_signals: Sequence[bool],
+        exit_signals: Sequence[bool] | None = None,
+    ) -> tuple[list[ClosedTrade], list[int]]:
+        """Walk a whole feed; return the closed trades AND each trade's exit bar index.
+
+        The index-carrying batch walk (DEC-SWEEP-EXIT-INDEX-FASTPATH-001):
+        identical to :meth:`run` — same state machine, same trades in the
+        same order — plus a positionally aligned list of each trade's exit
+        bar INDEX within *bars* (the value ``_close`` already knew and then
+        discarded). :meth:`run` is a thin delegate over this method, so the
+        two batch entries can never drift.
+
+        The returned indices are the walker's TRUE exit indices. Whether
+        they may substitute for the ``exit_ts`` dict lookup downstream is a
+        separate certification (:func:`~brutex.engine.exit_index.bars_strictly_increasing`)
+        the module-level :func:`simulate_trades_with_exit_indices` applies —
+        this method just reports what happened.
+
+        Raises
+        ------
+        ValueError
+            If ``entry_signals`` (or a supplied ``exit_signals``) length does
+            not match ``bars``.
+        """
         if len(entry_signals) != len(bars):
             raise ValueError(
                 f"entry_signals length {len(entry_signals)} != bars length {len(bars)}"
@@ -349,15 +387,18 @@ class TradeSimWalker:
         if exit_signals is not None and len(exit_signals) != len(bars):
             raise ValueError(f"exit_signals length {len(exit_signals)} != bars length {len(bars)}")
         trades: list[ClosedTrade] = []
+        exit_indices: list[int] = []
         for i, bar in enumerate(bars):
             exit_signal = exit_signals[i] if exit_signals is not None else False
             closed = self.push(bar, entry_signal=entry_signals[i], exit_signal=exit_signal)
             if closed is not None:
                 trades.append(closed)
+                exit_indices.append(self._last_exit_idx)
         final = self.finish()
         if final is not None:
             trades.append(final)
-        return trades
+            exit_indices.append(self._last_exit_idx)
+        return trades, exit_indices
 
     # ── Session-aware forced-exit boundary ─────────────────────────────────
 
@@ -672,6 +713,7 @@ class TradeSimWalker:
             vix_at_exit=vix_at_exit,
         )
         self._position = None
+        self._last_exit_idx = exit_idx
         _LOG.debug(
             "trade_sim.exit",
             exit_idx=exit_idx,
@@ -737,6 +779,54 @@ def simulate_trades(
     return walker.run(bars, entry_signals, exit_signals)
 
 
+def simulate_trades_with_exit_indices(
+    bars: Sequence[CandleBar],
+    entry_signals: Sequence[bool],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
+    exit_signals: Sequence[bool] | None = None,
+    policy: FillPolicy = DEFAULT_FILL_POLICY,
+    reference_stamper: TradeReferenceStamper | None = None,
+) -> tuple[list[ClosedTrade], list[int] | None]:
+    """Walk a feed into closed trades PLUS their certified exit bar indices.
+
+    The index-carrying twin of :func:`simulate_trades`
+    (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the trades are byte-identical to
+    :func:`simulate_trades` on the same inputs (both ride ONE
+    :meth:`TradeSimWalker.run_with_exit_indices` walk). The second element
+    is each trade's exit bar index, returned iff the window is CERTIFIED —
+    :func:`~brutex.engine.exit_index.bars_strictly_increasing` — so that the
+    index provably equals the last-wins ``exit_ts`` dict lookup the metrics
+    tail would otherwise perform; an uncertified (duplicate/reordered
+    timestamp) window returns ``None`` and the consumer stays on the
+    bit-identical dict path. Honest cost note: the certification is ONE
+    extra ``O(N_bars)`` timestamp scan on top of the already-``O(N_bars)``
+    Python walk — a small constant, paid only by callers that WANT indices.
+
+    Parameters are exactly :func:`simulate_trades`'s.
+
+    Returns
+    -------
+    tuple[list[ClosedTrade], list[int] | None]
+        ``(trades, exit_indices)`` — positionally aligned; ``exit_indices``
+        is ``None`` for an uncertified window.
+    """
+    certified = bars_strictly_increasing(bars)
+    walker = TradeSimWalker(
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+        policy=policy,
+        reference_stamper=reference_stamper,
+    )
+    trades, exit_indices = walker.run_with_exit_indices(bars, entry_signals, exit_signals)
+    return trades, exit_indices if certified else None
+
+
 __all__ = [
     "DEFAULT_FILL_POLICY",
     "FillPolicy",
@@ -744,4 +834,5 @@ __all__ = [
     "SameBarTie",
     "TradeSimWalker",
     "simulate_trades",
+    "simulate_trades_with_exit_indices",
 ]

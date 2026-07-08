@@ -26,6 +26,10 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
+from brutex.adapters.groww.symbol_form_preference import (
+    PersistentSymbolFormPreference,
+    form_winner_key,
+)
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.composite_pull import CompositePullReport
@@ -240,6 +244,42 @@ def test_pull_pipeline_single_symbol_scopes_to_one(
     assert body["targets"] == 1
     assert body["target_source"] == "single"
     assert _wait_for_job(client)["state"] == "done"
+
+
+def test_pull_pipeline_launch_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Round-1 review fold (the #1522 event-loop-freeze class): the launch body
+    # acquires the cross-process pull guards SYNCHRONOUSLY (two flock opens +
+    # the lease read + an fsync'd lease write, all lake-volume I/O), so it must
+    # run on an AnyIO worker via run_in_threadpool — never on the uvicorn event
+    # loop, where a wedged external volume would freeze the WHOLE dashboard.
+    # FAILS BEFORE the fix: the route called _launch_pipeline inline in the
+    # coroutine, so get_running_loop() succeeded inside start().
+    import asyncio
+
+    from brutex.dashboard.pull_jobs import BackgroundPullJob
+
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    on_loop: list[bool] = []
+
+    def _recording_start(self: BackgroundPullJob, *args: Any, **kwargs: Any) -> bool:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)  # executing ON the event loop — the freeze hazard
+        except RuntimeError:
+            on_loop.append(False)  # a threadpool worker — offloaded correctly
+        return True
+
+    monkeypatch.setattr(BackgroundPullJob, "start", _recording_start)
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert on_loop == [False], (
+        "the pull launch (singleflight flock + lease lake I/O) must be offloaded "
+        "via run_in_threadpool, never executed on the event loop"
+    )
 
 
 def test_pull_pipeline_unknown_selection_fails_closed_400(
@@ -1280,3 +1320,134 @@ def test_pull_pipeline_wedged_warm_times_out_and_job_completes(
         assert gate_snap.last_ok is True
     finally:
         release.set()  # let the abandoned daemon workers exit promptly
+
+
+# ── the strict post-step gate env knob (DEC-PULL-SIX-STEP-ORDER-001) ──────────
+
+
+def test_pull_pipeline_garbage_strict_gate_env_is_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A garbage BRUTEX_PIPELINE_STRICT_GATE is a clean 400 AT LAUNCH.
+
+    The knob is resolved ONCE, eagerly, inside ``_launch_pipeline``'s
+    validation try — never a mid-pull 500 on the job thread; the detail
+    names the variable (fail-loud, Golden Rule #1).
+    """
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.setenv("BRUTEX_PIPELINE_STRICT_GATE", "banana")
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 400
+    assert "BRUTEX_PIPELINE_STRICT_GATE" in resp.json()["detail"]
+
+
+def test_pull_pipeline_strict_gate_enabled_launches_and_logs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``BRUTEX_PIPELINE_STRICT_GATE=1`` launches normally + is logged on the request."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.setenv("BRUTEX_PIPELINE_STRICT_GATE", "1")
+    with capture_logs() as logs:
+        resp = client.post("/api/v1/universe/pull-pipeline")
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+        assert _wait_for_job(client)["state"] == "done"
+    requested = [e for e in logs if e["event"] == "universe.pull_pipeline.requested"]
+    assert len(requested) == 1
+    assert requested[0]["strict_gate"] is True
+
+
+def test_pull_pipeline_default_strict_gate_is_false(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset knob ⇒ strict_gate=False on the request log (the cleanset default)."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    monkeypatch.delenv("BRUTEX_PIPELINE_STRICT_GATE", raising=False)
+    with capture_logs() as logs:
+        assert client.post("/api/v1/universe/pull-pipeline").status_code == 200
+        assert _wait_for_job(client)["state"] == "done"
+    requested = [e for e in logs if e["event"] == "universe.pull_pipeline.requested"]
+    assert len(requested) == 1
+    assert requested[0]["strict_gate"] is False
+
+
+# ── durable &-form winner wiring (DEC-FORM-WINNER-PERSIST-001, round-5 pin) ──
+
+
+def _patch_spines_capturing_form_preference(
+    monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]
+) -> None:
+    """Wire spine fakes that record each phase's ``form_preference`` kwarg.
+
+    Fail-loud key access (the round-2 direct-selection discipline): deleting
+    the ``form_preference=...`` kwarg at either phase call site in the
+    /pull-pipeline ``_work`` closure KeyErrors these fakes, failing the tests
+    below instead of passing silently.
+    """
+
+    def _metadata(*args: Any, **kwargs: Any) -> MetadataPullReport:
+        captured["metadata_form_preference"] = kwargs["form_preference"]
+        return _fake_metadata(*args, **kwargs)
+
+    def _historical(*args: Any, **kwargs: Any) -> CompositePullReport:
+        captured["historical_form_preference"] = kwargs["form_preference"]
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _historical)
+
+
+def test_pull_pipeline_threads_one_durable_form_preference_to_both_phases(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ONE durable form-winner map per pipeline run, shared by BOTH phases.
+
+    The round-5 regression pin for the headline DEC-FORM-WINNER-PERSIST-001
+    claim "ONE instance per /pull-pipeline run shared by the metadata +
+    historical phases" — previously asserted by ZERO tests, so reverting the
+    pipeline to per-phase fresh instances (silently re-breaking the
+    cross-phase amnesia this decision fixes) passed every suite. Drives the
+    REAL route + ``run_full_pipeline`` with fakes one level down and pins:
+    (a) the wired preference is a ``PersistentSymbolFormPreference`` whose
+    winners persist into the REAL wired ``InstrumentStore`` on a non-dry-run,
+    and (b) the metadata and historical phases receive the SAME instance (a
+    metadata-phase %26 win must reorder the candle phase's first fetch).
+    """
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_spines_capturing_form_preference(monkeypatch, captured)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["metadata_form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    # (b) IDENTITY sharing — the historical phase got the SAME object, so a
+    # metadata-phase win is visible to the candle phase within one run.
+    assert captured["historical_form_preference"] is pref
+    # (a) the preference is wired over the REAL InstrumentStore: a winner
+    # recorded through the routed instance lands in its schema_meta.
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store
+
+
+def test_pull_pipeline_dry_run_form_preference_is_store_less(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(c) a dry-run pipeline threads ``store=None`` — synthetic runs never persist."""
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_spines_capturing_form_preference(monkeypatch, captured)
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["metadata_form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    assert captured["historical_form_preference"] is pref  # still ONE shared instance
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True  # in-memory learning only
+    assert store.get_meta(form_winner_key("M&M")) is None  # store=None: no durable row

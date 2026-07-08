@@ -129,6 +129,15 @@ def option_bar_key(
         quarantinable :class:`~brutex.data.candle_fields.CandleParseError` (a
         :class:`~brutex.models.BruteXError`).
 
+        This guard is DELIBERATELY NOT migrated onto the run-identity helper
+        :func:`brutex.strategies.combo.reject_unit_separator`
+        (DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001): the digests here are
+        content-addressed keys persisted by the LMDB exact tier, and the
+        pinned error contract is this quarantinable ``CandleParseError``
+        ("reserved unit separator" message — the per-window quarantine path),
+        not the run-identity guard's per-caller error + message format.
+        Reject-only semantics are identical; only the contracts differ.
+
     Returns
     -------
     bytes
@@ -209,6 +218,25 @@ class OptionDedupIndex:
     one atomic O(1) critical section, so a given content key is admitted exactly
     once across all workers. No I/O is done under the lock (the in-memory Bloom +
     ``set`` tiers; an injected LMDB exact backing has its own internal locking).
+
+    Probe ordering (VERIFIED + PINNED — DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001).
+    The membership probe is **Bloom FIRST, exact-confirm second**: a Bloom
+    NEGATIVE answers "definitely new" from the fixed-width bit array without
+    ever touching the exact backing — the only ordering that keeps the fresh-bar
+    common case free of an exact-tier read (an LMDB exact backing would
+    otherwise pay one storage lookup per new bar; §2 Rule 11 SCALABLE) — while a
+    Bloom POSITIVE (real or false) is ALWAYS confirmed against the exact tier,
+    so a false positive can never phantom-drop a genuinely-new bar (Golden Rule
+    #1 / §2 Rule 7). Regression-pinned: a spy exact tier proves the negative
+    short-circuit; an always-true Bloom proves the no-phantom fall-through at
+    every public probe entry (``add_if_new`` / :func:`unique_option_bars`).
+    The production consumer of this verified ordering is the engine sweep's
+    ``ComboDedup`` dedup tier — ``engine/sweep_launch.py::plan_launch_dedup``
+    builds ``ComboDedup(OptionDedupIndex(...))`` on the legacy no-digest arm
+    (the default digest path substitutes the no-alloc ``DigestPathNoDedup``
+    and provably never consults dedup — R2-SL-F1); the prior-vendor-era
+    ``OptionBarSink`` orchestration that also rode it was deleted as dead code
+    by DEC-INGEST-AUDIT-WIRING-001 (MIGRATION.md #1500).
     """
 
     def __init__(
@@ -228,7 +256,12 @@ class OptionDedupIndex:
         self._lock = threading.Lock()
 
     def _seen_locked(self, key: bytes) -> bool:
-        """Membership probe — caller MUST hold ``self._lock`` (the shared logic)."""
+        """Membership probe, Bloom FIRST then exact-confirm — caller MUST hold ``self._lock``.
+
+        The pinned bloom-before-exact ordering (see the class docstring):
+        a negative short-circuits without an exact probe; a positive is
+        always exact-confirmed.
+        """
         if not self._bloom.might_contain(key):
             return False
         return key in self._exact

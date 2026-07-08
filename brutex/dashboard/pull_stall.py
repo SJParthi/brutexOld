@@ -190,6 +190,13 @@ class PullWatchdog:
         self._timeout = (
             resolve_stall_timeout_seconds() if timeout_seconds is None else timeout_seconds
         )
+        #: The owning run's 12-hex ``pull_id`` (DEC-PULL-BEAT-PERRUN-001). Assigned
+        #: POST-construction by the job (mirrors ``on_recovery`` / ``on_wedged`` /
+        #: ``revision_probe`` so the injected ``watchdog_factory`` signature stays
+        #: ``(on_hung) -> PullWatchdog``). ``""`` = unstamped (a bare/test watchdog).
+        #: Additive correlation only — stamped onto the ``pull_stall.watchdog_alive``
+        #: event; every event NAME + the stdlib printf lines are byte-unchanged.
+        self.run_id: str = ""
         self._spawn = spawn
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -525,6 +532,9 @@ class PullWatchdog:
             "state": state,
             "timeout_seconds": self._timeout,
             "interval_seconds": self._alive_interval,
+            # Additive run correlation (DEC-PULL-BEAT-PERRUN-001) — the event name and
+            # every other field are byte-unchanged.
+            "pull_id": self.run_id,
         }
 
     def stop(self) -> None:
