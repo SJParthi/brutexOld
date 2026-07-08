@@ -49,6 +49,31 @@ registered" wording swept across every remaining claim site and locked by a
 grep doc-pin test. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
 ruff/ruff-format/mypy --strict/pyright clean).
+Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
+the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
+trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
+executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
+order lot_size → cost_regime → no_contract → no_data → stale_bar[opt-in] and
+the two pure date gates BEFORE any I/O; registry-calendar front-month
+resolution via the SHARED `select_near_month` — never a last-Thursday formula,
+lake-discovery fallback; exact-minute lake source with keep-FIRST dedup +
+corrupt-partition quarantine-skip; R4 disk-verified preflight naming missing
+months, no Phase-1 file edited; R45 independent Decimal-pipeline reference sim
++ per-run differential; R13 annotation-never-reranks projection + R42
+content-hash-stamped atomic sidecar) + `brutex/costs/futures_costs.py`
+(VERIFIED-rates-only: Groww min(₹20, 0.03%) futures brokerage + futures STT
+0.02%@2024-10-01/0.05%@2026-04-01 encoded; futures ETC/NSE-IPFT/stamp + the
+pre-2024-10-01 futures STT are explicit REFUSAL windows — the
+DEC-ETC-REGIME-HISTORY-001 precedent, no runtime escape hatch; INDEX futures
+COST-FREE per DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001, net == gross). R15
+OPTIMISTIC=PRECISE fill only (open ± one tick adverse; volume-0 printed bars
+FILL by default; gap-opens fill at the REAL open; the worst leg is DEFERRED,
+structurally absent); STOCK winners gracefully DEFERRED naming the future
+scope decree; a missing minute bar is a counted NO_DATA — never a nearest-bar
+substitute. HONEST: not yet wired into cmd_sweep_all/the dashboard (the seams
+are exposed; binding is the orchestrator's later step); R47 margin-ROI not
+built (no in-repo SPAN history). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+options path untouched (R12); 197 tests, all 8 new modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
 DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
 MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
@@ -980,6 +1005,48 @@ hostile-review pass._
   remain the persistent alarm); the CLI bridge still carries no `failed_rps` (#1211 named follow-up). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright`
   clean).
+  Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
+  the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
+  twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
+  futures contract (nearest UNEXPIRED monthly as of each trade's ENTRY date, resolved from the REAL `registry.duckdb`
+  calendar via the SHARED `movers_futures.select_near_month` — NEVER a computed last-Thursday formula; graceful
+  lake-partition-discovery fallback; expiry-day trades stay on the EXPIRING contract, post-expiry tail → M+1, M/M+1
+  co-trading = deterministic earliest-expiry-≥-entry, never liquidity-picked). NEW `brutex/futures/` (executor ·
+  contract_resolver · lake_source · preflight · reference_sim · leaderboard) + `brutex/costs/futures_costs.py`. R15
+  fills are OPTIMISTIC = PRECISE ONLY — minute-bar OPEN ± one tick ADVERSE per side (the LONG arm golden-pinned
+  byte-equal to `calculator._apply_slippage(...,"long")`; the SHORT arm computed adverse-both-sides, NOT inheriting
+  the documented `# CHECK SIGN` ambiguity), gap-opens fill at the REAL open (never an SL/TP fantasy), volume-0
+  PRINTED bars are REAL + TRADABLE (STALE_BAR strictly opt-in), a missing entry/exit minute is a counted NO_DATA
+  (never a nearest-bar substitute), the pessimistic/worst leg is DEFERRED — structurally absent. PINNED reject order
+  lot_size → cost_regime → no_contract → no_data → stale_bar with both pure DATE gates before any registry/lake I/O
+  (never-called-seam pinned); count-dict tally projected 1:1 onto `n_rejected_*` (no catch-all). COSTS are
+  VERIFIED-rates-only (the DEC-ETC-REGIME-HISTORY-001 refusal precedent, NO runtime escape hatch): Groww futures
+  brokerage min(₹20, 0.03%×turnover) (PLAN_FINALIZATION §8.1 row 2) + futures STT 0.02% eff. 2024-10-01 / 0.05% eff.
+  2026-04-01 (TAX_HANDLING §8.1 + DEC-COST-003) are encoded; EVERY futures-ETC window + NSE futures IPFT + futures
+  stamp + pre-2024-10-01 futures STT ship as rate-less REFUSAL rows (figures live in source TEXT only — the §14
+  proposal block is not a verification) ⇒ a cost-bearing stock future counts COST_REGIME_UNVERIFIED (exercised via
+  the SYNTHETIC cited-regime/lot test fixture — no NATURAL input reaches the gate today: index futures are cost-free
+  and skip it, a natural stock future trips LOT_SIZE_UNKNOWN first; the designed forward path, naturally reachable
+  only once a cost-bearing stock-futures scope decree + cited RegimeRows land); INDEX futures
+  are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 — net == gross; the ±tick is R15 fill realism, not a statutory
+  cost). Lots via the ONE date-keyed derivative-lot history (2020-dated / stock signals ⇒ counted LOT_SIZE_UNKNOWN,
+  never invented). STOCK winners → ExecutionKind.STOCK_SPOT_DEFERRED with an honest note NAMING the future scope
+  decree (R11); routing lives ABOVE the instrument-agnostic executor. R22 MAE/MFE from the contract's OWN minute
+  path; R31 VIX passthrough (missing = honest None, counted); R45 differential vs an independent naive
+  Decimal-pipeline reference (AST-pinned to share only the primitive readers; run_id-seeded deterministic sample;
+  mismatch ⇒ SUSPECT + loud); R42 content-hash-stamped atomic sidecar (an UNKEYED sha256 integrity checksum —
+  corrupted/torn fails its stamp, rebuilt byte-identical; NOT tamper-evidence: no secret key, a rewriter could
+  restamp); R4 preflight disk-verifies each trade month's front-month partition(s) across the roll seam and
+  refuses naming exact months — no Phase-1 file edited (the pure helper is exposed for the shim). ROLL-9
+  suffix-independence property-gated (fills+MAE/MFE bit-identical under absent/mutated/extreme post-exit suffixes);
+  R13/R30 rank-independence property-gated (annotation additive-only under ONE `futures_exec` key). O(1) honest
+  (R29): per-trade resolve+fill flat vs signal AND contract count (bench-pinned at the `_o1_tiers` ceiling); first
+  loads O(contracts)/O(bars-in-contract) + MAE/MFE O(bars-in-trade) STATED, never hidden. HONEST: NOT yet wired into
+  `cmd_sweep_all`/the dashboard (deliberate no-existing-file-edit boundary — the orchestrator binds later); R47
+  margin-ROI not built (no in-repo date-keyed SPAN history — nothing rendered, nothing invented). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; options path untouched (R12); F&O lake REFERENCE_ONLY; no scope/vocab/rate change; 197
+  tests (unit/integration/property/golden/bench/chaos), all 8 new modules 100.00% line+branch (760/194);
+  ruff/ruff-format clean; `mypy --strict` clean; pyright at the 38-error pre-change baseline, 0 new).
   Earlier: `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
   DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
