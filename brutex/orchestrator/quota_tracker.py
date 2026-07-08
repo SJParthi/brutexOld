@@ -1,8 +1,19 @@
-"""Daily quota tracker for the vendor Data API (100,000 calls/day).
+"""Daily quota tracker — a VENDOR-NEUTRAL primitive, DORMANT under Groww.
 
-Per CLAUDE.md §2 rule 6 (vendor Data APIs: 5 req/s + 100,000/day) and
-MIGRATION.md item 91 (quota is global to the vendor API key, not per-run, hence
-persisted at ``~/.brutex/quota/quota.lmdb/``).
+DEC-QUOTA-VERDICT-MOOT-001: the live vendor (Groww) has **no daily quota** for
+backtesting (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, operator-confirmed
+2026-06-13 — CLAUDE.md §2 Rule 6 / §6), so ZERO production sites construct this
+tracker (AST-pinned in ``tests/unit/test_quota_verdict_moot.py``). The class is
+KEPT as the single injection seam for a hypothetical future capped vendor —
+wire one instance into ``RateController(quota_tracker=...)`` at the two
+controller build sites and the whole enforcement chain (the bucket's
+``acquire_or_raise``, the ``stop_quota`` until-clean brake, the
+``quota_exhausted`` verdict, and the raise-path Telegram halt alert) lights up
+with zero new code. The 100,000/day figure cited by the historical decisions
+below was the PRIOR vendor's documented limit, not a Groww fact.
+
+Historically per MIGRATION.md item 91 (quota is global to the vendor API key,
+not per-run, hence persisted at ``~/.brutex/quota/quota.lmdb/``).
 
 The IST-midnight day-boundary policy is locked by DEC-P0-028 (PR #50a
 foundation, MIGRATION.md entry #166): counter resets at ``00:00:00 IST``
@@ -57,9 +68,11 @@ import lmdb
 
 from brutex.models import BruteXError
 
-#: Vendor Data API daily quota from the vendor rate-limit reference
-#: (``docs/groww/api-reference/01-introduction.md``). Locked in
-#: CLAUDE.md §2 rule 6 + §6.
+#: LEGACY vendor-neutral DEFAULT daily limit — the PRIOR vendor's documented
+#: 100,000/day figure, NOT a Groww fact (Groww backtesting has no daily quota:
+#: ``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6 / §6;
+#: DEC-QUOTA-VERDICT-MOOT-001). Only reachable when a future capped vendor
+#: constructs a tracker without an explicit ``daily_limit``.
 DAILY_QUOTA_LIMIT: Final[int] = 100_000
 
 #: Threshold percentages (0.0..1.0) that emit a categorical audit entry
@@ -93,12 +106,16 @@ _DEFAULT_MAP_SIZE_BYTES: Final[int] = 1 * 1024 * 1024
 #: LMDB forbids opening the same environment twice within one process
 #: (``lmdb.Error: ... is already open in this process``), so EVERY
 #: :class:`DailyQuotaTracker` on the same ``store_path`` must share ONE
-#: cached env (DEC-QUOTA-ENV-SINGLE-OPEN-001). Discovered in a live
-#: operator run: the dashboard's ``/api/v1/quota`` lazy tracker
+#: cached env (DEC-QUOTA-ENV-SINGLE-OPEN-001). HISTORICAL discovery, in a
+#: live operator run: the dashboard's then-lazy ``/api/v1/quota`` tracker
 #: (DEC-DASHBOARD-QUOTA-PERSISTED-001) collided with the pull
 #: controller's tracker (DEC-AUTO-RESUME-QUOTA-001) inside one uvicorn
-#: process — every 3 s gauge poll raised and 500'd; in the reverse
-#: construction order the FIRST PULL would have crashed instead.
+#: process — every 3 s gauge poll raised and 500'd. BOTH construction
+#: sites have since been removed (the lazy route build by
+#: DEC-GROWW-NO-DAILY-QUOTA-UI-001 #718, the route itself + the controller
+#: wiring per DEC-QUOTA-VERDICT-MOOT-001 / DEC-GROWW-NO-DAILY-QUOTA-001);
+#: the registry stays — it guards the process-level LMDB constraint for
+#: any future multi-instance use.
 #:
 #: This is deliberate module-level state: the uniqueness constraint is a
 #: property of the PROCESS (LMDB's), so the share point must live at
@@ -243,8 +260,9 @@ class DailyQuotaTracker:
     ----------
     daily_limit
         Maximum API calls allowed per IST calendar day. Default is the
-        vendor Data API documented limit (100,000). Lower values useful in
-        tests.
+        LEGACY vendor-neutral :data:`DAILY_QUOTA_LIMIT` (100,000 — the prior
+        vendor's figure, not a Groww fact; DEC-QUOTA-VERDICT-MOOT-001).
+        Lower values useful in tests.
     store_path
         Filesystem path for the LMDB env (a directory because
         ``subdir=True``). Default is ``~/.brutex/quota/quota.lmdb/`` per
@@ -285,9 +303,9 @@ class DailyQuotaTracker:
 
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         # One env per path per PROCESS (DEC-QUOTA-ENV-SINGLE-OPEN-001):
-        # a second tracker on the same path (e.g. the /api/v1/quota gauge
-        # next to the pull controller's) shares the cached env instead of
-        # crashing on LMDB's already-open-in-this-process rule.
+        # a second tracker on the same path shares the cached env instead
+        # of crashing on LMDB's already-open-in-this-process rule (the
+        # historical gauge-vs-pull collision — see _ENV_REGISTRY above).
         self._env_key = str(self.store_path.resolve())
         self._env = _open_shared_env(self._env_key, self.store_path, self.map_size_bytes)
         self._closed = False

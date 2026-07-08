@@ -18,7 +18,7 @@ the route uses.
 from __future__ import annotations
 
 import threading
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -175,17 +175,48 @@ def test_dense_flag_set_for_index_spot_only(patched: _FakeMaterialize, tmp_path:
 def test_m1_daily_cutoff_resolved_once_and_identical(
     patched: _FakeMaterialize, tmp_path: Path
 ) -> None:
-    # daily_before=None → the orchestrator resolves today-IST ONCE and threads it
-    # into EVERY worker (byte-identity across midnight IST).
-    today_ist = datetime.now(UTC).astimezone(IST).date()
+    # daily_before=None → the orchestrator pins the run's IST INSTANT ONCE and
+    # threads it into EVERY worker as daily_cutoff_now (byte-identity across
+    # midnight IST). REPOINTED by DEC-DAILY-CUTOFF-GROUNDED-001: the pinned
+    # value is the INSTANT (each worker resolves the session-close-aware
+    # daily_derive_cutoff from it), no longer a plain today-IST DATE — the
+    # #1401 M1 regression this corrects; daily_before stays None so the dense
+    # symbols' data-grounded arm remains reachable.
+    from brutex.calendars.nse import daily_derive_cutoff
+
+    before = datetime.now(UTC).astimezone(IST)
     run_pipeline_prebuild_parallel(
         instruments=[_spot("NSE-NIFTY")],
         cascade=_cascade(),
         lake_root=tmp_path,
         workers=3,
     )
-    cutoffs = {c["daily_before"] for c in patched.calls}
-    assert cutoffs == {today_ist}
+    after = datetime.now(UTC).astimezone(IST)
+    assert {c["daily_before"] for c in patched.calls} == {None}
+    instants = {c["daily_cutoff_now"] for c in patched.calls}
+    assert len(instants) == 1  # ONE instant per run — the M1 invariant, kept
+    (instant,) = instants
+    assert isinstance(instant, datetime)
+    assert before <= instant <= after
+    # The cutoff every worker derives from the pinned instant is the
+    # session-close-aware law — well-defined and identical across workers.
+    assert daily_derive_cutoff(instant) in {instant.date(), instant.date() + timedelta(days=1)}
+
+
+def test_m1_explicit_instant_threaded_unchanged(patched: _FakeMaterialize, tmp_path: Path) -> None:
+    # A caller-pinned daily_cutoff_now (the route pins ONE instant for BOTH
+    # the sequential closure and this parallel path) is threaded verbatim —
+    # the orchestrator never re-pins over it.
+    pinned = datetime(2026, 7, 1, 16, 0, tzinfo=IST)
+    run_pipeline_prebuild_parallel(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        lake_root=tmp_path,
+        workers=2,
+        daily_cutoff_now=pinned,
+    )
+    assert {c["daily_cutoff_now"] for c in patched.calls} == {pinned}
+    assert {c["daily_before"] for c in patched.calls} == {None}
 
 
 def test_m1_explicit_cutoff_threaded_unchanged(patched: _FakeMaterialize, tmp_path: Path) -> None:
@@ -391,6 +422,31 @@ def test_guard_routes_to_parallel_when_workers_gt_1(
     )
     assert outcome.symbols_built == 4  # parallel path ran
     assert sentinel_called["seq"] is False  # the injected sequential fake was NOT used
+
+
+def test_guard_forwards_pinned_cutoff_instant_to_parallel_workers(
+    patched: _FakeMaterialize, tmp_path: Path
+) -> None:
+    # The route seam (DEC-DAILY-CUTOFF-GROUNDED-001): app.py pins ONE
+    # post-close instant and threads it via the guard — every parallel worker
+    # sees the SAME daily_cutoff_now with daily_before=None (grounding
+    # reachable), so a post-close pipeline run's cutoff is session-close-aware
+    # (daily_derive_cutoff(pinned) = run day + 1, no longer today's date).
+    from brutex.calendars.nse import daily_derive_cutoff
+
+    pinned = datetime(2026, 7, 1, 16, 0, tzinfo=IST)  # post-close Wednesday
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=_cascade,
+        materialize=lambda _t: MaterializeResult(written={}, skipped=()),
+        lake_root=tmp_path,
+        workers=3,
+        daily_cutoff_now=pinned,
+    )
+    assert outcome.ok is True
+    assert {c["daily_cutoff_now"] for c in patched.calls} == {pinned}
+    assert {c["daily_before"] for c in patched.calls} == {None}
+    assert daily_derive_cutoff(pinned) == date(2026, 7, 2)
 
 
 def test_guard_routes_to_sequential_when_workers_none(tmp_path: Path) -> None:

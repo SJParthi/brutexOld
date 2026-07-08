@@ -186,6 +186,21 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
       before close the intraday bound is clamped to ``today`` too; from
       15:30 IST the full session exists and ``today + 1 day`` is allowed.
 
+    At-close boundary (DEC-SESSION-CLOSE-BOUNDARY-PIN-001, pinned by
+    ``tests/unit/test_session_close_boundary_pin.py``): exactly 15:30:00
+    counts as CLOSED here (``>=``) — DELIBERATELY the OPPOSITE of the
+    finalize-side :func:`brutex.calendars.nse.daily_derive_cutoff` (strict
+    ``>``, at-close = still forming). Request-side vs finalize-side rationale:
+    ALLOWING the ``today + 1`` end-exclusive bound at 15:30:00 is safe — no
+    bar at/after 15:30 can exist under the half-open ``[open, close)`` ingest
+    session filter, and the partial-window detector + keep-first sink guard
+    downstream — while FINALIZING a daily bar at 15:30:00 could bake in a
+    15:29 bar not yet pulled. The two verdicts are a pinned, cross-referenced
+    pair (the #1267 drift-pin pattern), not hidden duplication. The date-blind
+    hardcoded 15:30 here remains defended by the #1492 G2 Muhurat enumeration
+    pin; calendar-awareness on this pull-planning side is a separate decision,
+    explicitly NOT claimed.
+
     Pure + clock-injected — every branch unit-testable offline.
     """
     today = now_ist.date()

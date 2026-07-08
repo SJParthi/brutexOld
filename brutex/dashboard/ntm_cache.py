@@ -31,14 +31,33 @@ Design (CLAUDE.md §11 COMMON + Golden Rule #10):
 
 from __future__ import annotations
 
+import fcntl
+import os
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final, Literal
 
 from brutex.data.atomic_io import atomic_write_simple
 
 #: The cache filename under the cache dir. One file, the raw last-good CSV text.
 _CACHE_FILENAME = "ntm_constituents.csv"
+
+#: Sidecar lock file for the CROSS-PROCESS revalidation single-flight
+#: (DEC-NTM-REVALIDATE-CROSSPROC-001). Dot-prefixed so no cache reader ever
+#: mistakes it for content; it is only ever opened + ``flock``-ed, never replaced,
+#: so the inode is stable (the DEC-LAKE-PARTITION-FLOCK-001 sidecar precedent).
+REVALIDATE_LOCK_FILENAME: Final[str] = ".ntm_revalidate.lock"
+
+#: The tri-state outcome of :func:`revalidate_lock` — ``"acquired"`` (this process
+#: holds the exclusive cross-process lock; run the refresh), ``"held_elsewhere"``
+#: (a PEER process is refreshing right now; skip — its atomic save lands for
+#: everyone), or ``"unavailable"`` (the lock file could not even be created —
+#: read-only/odd cache dir; the caller fails OPEN to the pre-fix unguarded refresh,
+#: which is idempotent-harmless, so the guard can never make things worse).
+RevalidateLockVerdict = Literal["acquired", "held_elsewhere", "unavailable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,10 +199,75 @@ def load_cached_constituent_with_age(
     return CachedConstituents(csv_text=text, age_seconds=age if age > 0.0 else 0.0)
 
 
+@contextmanager
+def revalidate_lock(*, cache_dir: Path) -> Generator[RevalidateLockVerdict, None, None]:
+    """Try the NON-BLOCKING cross-process NTM revalidation lock; yield the verdict.
+
+    DEC-NTM-REVALIDATE-CROSSPROC-001 — the cross-process arm of the revalidation
+    single-flight (the named follow-up of DEC-NTM-STALE-WHILE-REVALIDATE-001, whose
+    in-flight flag is PROCESS-local: multiple uvicorn workers could each spawn one
+    refresh against the slow niftyindices host). An advisory exclusive
+    :func:`fcntl.flock` is attempted ONCE, non-blocking, on the stable sidecar
+    ``<cache_dir>/.ntm_revalidate.lock``:
+
+    * ``"acquired"`` — this process holds the lock for the ``with`` block; run the
+      refresh. Released by closing the fd on exit (the kernel also releases it on
+      process death — no stale-lock recovery needed, the
+      DEC-LAKE-PARTITION-FLOCK-001 precedent).
+    * ``"held_elsewhere"`` — a peer process is refreshing RIGHT NOW; the caller
+      skips (never queues — the refresh outcome is shared via the peer's atomic
+      cache save, so waiting would only double the fetch).
+    * ``"unavailable"`` — the lock file could not be created/opened (read-only
+      cache dir, exotic FS). The caller fails OPEN to the pre-fix unguarded
+      refresh: the guard is an optimisation, and an unguarded double-refresh is
+      idempotent-harmless (atomic save) — never worse than before the guard.
+
+    NEVER raises (same best-effort contract as every other function here); O(1) —
+    one ``mkdir`` + ``open`` + ``flock`` attempt, no polling, no waiting.
+    ``fcntl.flock`` is POSIX (Linux + macOS — the Track-1 hardware envelope);
+    Windows is out of scope, exactly like the lake partition lock.
+
+    Parameters
+    ----------
+    cache_dir
+        The NTM cache directory (created if absent); the sidecar lives inside it.
+
+    Yields
+    ------
+    RevalidateLockVerdict
+        The tri-state outcome; the lock (when acquired) is held for the block.
+    """
+    fd: int | None = None
+    verdict: RevalidateLockVerdict = "acquired"
+    try:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            # 0o600 — owner-only: a private coordination sidecar, never
+            # world-readable (the partition-lock permission precedent).
+            fd = os.open(cache_dir / REVALIDATE_LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # The peer holds it (EWOULDBLOCK). BlockingIOError is an OSError
+            # subclass, so this arm MUST precede the general one below.
+            verdict = "held_elsewhere"
+        except OSError:
+            verdict = "unavailable"
+        yield verdict
+    finally:
+        # Closing the fd releases the advisory lock (when held) and frees the fd in
+        # one step, on every (success or error) exit. A ``held_elsewhere`` open fd
+        # is closed too — it never carried the lock.
+        if fd is not None:
+            os.close(fd)
+
+
 __all__ = [
+    "REVALIDATE_LOCK_FILENAME",
     "CachedConstituents",
+    "RevalidateLockVerdict",
     "default_cache_dir",
     "load_cached_constituent_csv",
     "load_cached_constituent_with_age",
+    "revalidate_lock",
     "save_constituent_csv",
 ]
