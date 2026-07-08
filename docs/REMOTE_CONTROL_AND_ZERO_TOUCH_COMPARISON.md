@@ -374,7 +374,7 @@ O(1) gates. Honest enforcement status (single source of truth:
 | Static analysis | ruff · pylint · bandit · vulture · gitleaks | 🟢 ENFORCED |
 | O(1) hot-path NFR | `p99(1M)/p99(1K) ≤ 1.1` | 🟢 ENFORCED |
 | Audit hash-chain | every material action | 🟢 ENFORCED |
-| Conventional commits + CI-every-push + nightly soak | — | 🟢 ENFORCED |
+| Conventional commits + CI-every-push + nightly stress gate + weekly self-hosted soak (#1580) | — | 🟢 ENFORCED |
 
 > **Honest headline:** ~**76%** of the 21 standards sub-rows are fully
 > 🟢 ENFORCED, + 1 🟡 partial + roadmap/manual rows. Per Golden Rule #10 this
