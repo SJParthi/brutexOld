@@ -358,8 +358,7 @@ class TestBestEffortBackfill:
         _write_month(lake, interval="1minute", year=2021, month=1, n=5)
         from structlog.testing import capture_logs
 
-        cat = _StatWriteFailingCatalog.open(lake / "catalog.duckdb")
-        try:
+        with _StatWriteFailingCatalog.open(lake / "catalog.duckdb") as cat:
             with capture_logs() as logs:
                 first = reconcile_catalog_from_lake(
                     lake_root=lake,
@@ -386,8 +385,6 @@ class TestBestEffortBackfill:
                 stat_cache=True,
             )
             assert second.partitions_reconciled == 1 and second.stat_cache_hits == 0
-        finally:
-            cat.close()
 
 
 def _plant_dup(lake: Path, *, year: int, month: int, timestamps: Sequence[datetime]) -> Path:
