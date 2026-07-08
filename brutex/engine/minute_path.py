@@ -262,27 +262,22 @@ class EquityTradeLike(Protocol):
     @property
     def entry_ts(self) -> datetime:
         """The trade's entry instant (UTC, tz-aware)."""
-        ...
 
     @property
     def exit_ts(self) -> datetime:
         """The trade's exit instant (UTC, tz-aware, ``>= entry_ts``)."""
-        ...
 
     @property
     def direction(self) -> Side:
         """``Side.BUY`` or ``Side.SELL``."""
-        ...
 
     @property
     def pnl_paisa(self) -> int:
         """The trade's realized P&L (signed int64 paisa)."""
-        ...
 
     @property
     def entry_px(self) -> Decimal:
         """The exact entry fill price (2dp Decimal rupees)."""
-        ...
 
 
 @dataclass(frozen=True, slots=True)
