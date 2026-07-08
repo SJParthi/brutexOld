@@ -5925,6 +5925,15 @@ def build_app(
         # identity+brief reason visible regardless of how verbose any ONE
         # group's exception message is.
         per_group_detail_max = 80
+        # Cap on how many failing groups are NAMED explicitly in the note
+        # (round-8 finding): even with every individual detail capped above,
+        # enough FAILING GROUPS (today structurally at most 2 — NIFTY/
+        # BANKNIFTY→NSE, SENSEX→BSE — but never assume that stays true) could
+        # still push the joined note past the framework's overall length cap,
+        # silently dropping later groups the same way round 7's bug did.
+        # Naming at most this many keeps the joined note comfortably inside
+        # that cap regardless of how many exchange groups ever exist.
+        max_named_failed_groups = 4
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: run every exchange group's engine run, sequentially.
@@ -5995,7 +6004,11 @@ def build_app(
                 else:
                     any_group_succeeded = True
             if failed:
-                summary = ", ".join(f"{exchange} ({detail})" for exchange, detail in failed)
+                shown = failed[:max_named_failed_groups]
+                summary = ", ".join(f"{exchange} ({detail})" for exchange, detail in shown)
+                omitted = len(failed) - len(shown)
+                if omitted:
+                    summary += f", +{omitted} more"
                 return {
                     "note": (
                         f"oneclick sweep {plan.sweep_run_id}: "

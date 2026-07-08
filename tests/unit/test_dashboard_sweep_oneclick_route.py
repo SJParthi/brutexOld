@@ -389,6 +389,75 @@ def test_run_route_long_exception_from_one_group_does_not_hide_the_other(
     assert "exit 2" in final["detail"]
 
 
+def test_run_route_many_failing_groups_stays_within_the_finish_detail_cap(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-8 adversarial-refuter finding: capping each per-group detail
+    (round 7) bounds ONE verbose group, but nothing bounded the NUMBER of
+    failing groups named — with today's real 2-group ceiling this can never
+    fire, but the round-7 fix's own docstring warned "never assume that
+    stays true". This directly constructs a fake plan with 8 exchange
+    groups (bypassing ``resolve_oneclick_sweep_plan``, which cannot produce
+    more than 2 groups today) to prove the note stays informative and
+    within the job framework's overall length cap regardless of how many
+    groups ever exist."""
+    from brutex.dashboard.pull_jobs import _FINISH_DETAIL_MAX
+    from brutex.dashboard.sweep_runner import DEFAULT_MODE, OneClickSweepPlan, SweepRunRequest
+
+    _CAPTURED.clear()
+    today = date.today().isoformat()
+    many_groups = OneClickSweepPlan(
+        sweep_run_id="many-groups-id",
+        requests=tuple(
+            SweepRunRequest(
+                symbols="NIFTY",
+                intervals="1minute",
+                directions="BUY",
+                k="1",
+                sl="50",
+                tp="100",
+                exchange=f"EXCH{i:02d}",
+                segment="INDEX",
+                start=today,
+                end=today,
+                mode=DEFAULT_MODE,
+                top=10,
+            )
+            for i in range(8)
+        ),
+    )
+
+    def _all_raise(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        raise RuntimeError("x" * 100)
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _all_raise)
+    monkeypatch.setattr(app_module, "resolve_oneclick_sweep_plan", lambda **kw: many_groups)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+        resp = c.post("/api/v1/sweep/oneclick/run", params={"symbols": "NIFTY"})
+        assert resp.status_code == 200
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert "8/8 exchange group(s) FAILED" in final["detail"]
+    assert "+4 more" in final["detail"]
+    assert len(final["detail"]) <= _FINISH_DETAIL_MAX
+
+
 def test_run_route_second_click_while_running_is_a_noop(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
