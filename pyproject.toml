@@ -59,6 +59,14 @@ ui = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
 ]
+# DEC-DASHBOARD-BROWSER-TRUTH-001 (2026-07-07): the headless-browser dashboard
+# truth suite (tests/browser/) drives the REAL templates + static JS in a real
+# Chromium via Playwright. Kept behind an OPTIONAL extra so the main test job
+# and unit-test runners never install it; ONLY the dedicated CI `browser` job
+# (and an operator opting in via BRUTEX_BROWSER_TESTS=1) installs this extra.
+browser = [
+    "playwright>=1.55,<2.0",
+]
 # DEC-STAGE3-OPTIMIZE-EXTRA-001 (ADR-0007 condition 9, Stage-3 slice 1): the
 # BIPOP-CMA-ES refinement optimizer (pycma — PyPI name `cma`, numpy-only).
 # EXACT pin, deliberately violating the DEC-P0-012 "always latest" range
@@ -345,6 +353,19 @@ disallow_untyped_decorators = false
 
 [tool.pyright]
 pythonVersion = "3.12"
+# DEC-MOVERS-OPTIONS-PCR-001 gate-determinism fix: pin the repo venv so a bare
+# `pyright brutex tests` (no shell activation) resolves the SAME interpreter
+# the gates are defined against. Without this, pyright falls back to the
+# system `python3` on PATH, sees hypothesis/numpy/etc. as Unknown, and the
+# ignored-untyped-decorator fallback resurfaces every `@st.composite`
+# strategy's ORIGINAL signature — 37 phantom "Argument missing for parameter
+# 'draw'" errors that vanish the moment the venv is on PATH (verified A/B on
+# this exact tree: activated → 0 errors, bare → 37). When `.venv` does not
+# exist (CI installs into the setup-python interpreter), pyright prints ONE
+# console note and falls back to the default PATH search — verified exit 0,
+# so CI resolution is byte-unchanged.
+venvPath = "."
+venv = ".venv"
 # DEC-P0-001 (2026-05-17): bumped from "standard" to "strict" per Golden Rule
 # #12 honest standards. Stylistic divergences from mypy are narrowed to the
 # specific report-codes below (everything else fires as a real error).
@@ -439,6 +460,7 @@ markers = [
     "smoke: opt-in smoke tests that hit external services (gated by env var)",
     "stress: sustained-load stress tests (DEC-STRESS-001); run nightly via .github/workflows/stress-nightly.yml — NOT in default unit test run",
     "chaos: randomized-schedule + crash/restart + concurrent-reader chaos tests (DEC-CHAOS-RACE-001); run on every PR via the chaos-race CI job — NOT in default unit test run",
+    "browser: headless-browser dashboard truth tests (Playwright + Chromium, DEC-DASHBOARD-BROWSER-TRUTH-001); opt-in via BRUTEX_BROWSER_TESTS=1 — run by the dedicated CI browser job, NOT the main test job",
 ]
 filterwarnings = [
     "error",

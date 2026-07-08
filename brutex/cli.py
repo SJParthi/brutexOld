@@ -5865,9 +5865,10 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     """MANUAL feed-ordering + cursor-invariant recheck over a lake slice.
 
     The hand-trigger counterpart of the barrier that
-    :class:`~brutex.strategies.runner.StrategyRunner` /
-    :class:`~brutex.execution.driver.BacktestDriver` build on every sweep eval
-    (DEC-LOOKAHEAD-BARRIER-001). It loads one ``(symbol, interval)`` window
+    :class:`~brutex.strategies.runner.StrategyRunner` builds on every
+    sweep eval (DEC-LOOKAHEAD-BARRIER-001; the deleted ``BacktestDriver``
+    built the same barrier until DEC-EXECUTION-TRIO-DELETE-001). It loads
+    one ``(symbol, interval)`` window
     from the lake via the SAME ``Catalog`` / ``ReplayFeed`` path the engine
     uses, then walks those bars **forward** through a recording
     :class:`~brutex.feed.lookahead.LookAheadBarrier` — advancing the cursor to

@@ -263,6 +263,12 @@ Operator explicitly locked BUY-only via DEC-EXEC-009. This is a
 scope decision, not a flaw. Documented as deliberate in the
 execution simulator spec. No patch needed; preserved for clarity.
 
+[CORRECTION 2026-07-06, DEC-TRACK2-COSTS-SPEC-RECONCILE-001: the
+BUY-only lock is **DEC-EXEC-008** (MIGRATION.md #111); DEC-EXEC-009
+(#112) is the strict CE/PE direction-mapping decision. The paragraph
+above is preserved as the original record; §7 below already cites
+DEC-EXEC-008 correctly.]
+
 ---
 
 ## 4. Agent C — 2024-2026 methodology upgrades (3)

@@ -30,7 +30,7 @@ the pyramid.** No single point of failure.
 | Layer | Tool | CI gate | Run time |
 |---|---|---|---|
 | 1 — Unit | pytest + cargo test | line 100% / branch 100% Python; line 100% / branch 95% Rust | <90s/PR |
-| 2 — Property | hypothesis + proptest | 500 examples × 24 invariants | <5 min/PR |
+| 2 — Property | hypothesis + proptest | per-test budgets (10–200 examples) × 24 invariants, derandomised via the `ci` profile | <5 min/PR |
 | 3 — Golden | byte-equality SHA256 | hardcoded fixtures match | <60s/PR |
 | 4 — Integration | pytest tests/integration | all pass | <5 min/PR |
 | 5 — Benchmark | pytest-benchmark + criterion | O(1) ratio ≤ 1.1 at N=1K..1M | <8 min/PR |
@@ -43,8 +43,29 @@ the pyramid.** No single point of failure.
 
 ## 3. The 24 Property Invariants
 
-Each invariant runs with 500 random examples (hypothesis derandomised
-via `HYPOTHESIS_SEED` env var for CI replay).
+Each invariant runs with its per-test `max_examples` budget (typically
+10–200; hypothesis default 100). CI loads the repo-registered `ci`
+hypothesis profile (`derandomize=True, print_blob=True, deadline=None,
+database=None, suppress_health_check=(too_slow,)` — fully explicit, so
+environment-invariant: a local `HYPOTHESIS_PROFILE=ci` run is
+field-identical to CI; registered in `tests/conftest.py` and selected
+via the `HYPOTHESIS_PROFILE` env var), so example generation is a pure
+function of each test and a CI failure reproduces on every re-run.
+Honesty (DEC-TEST-APPARATUS-DEBTS-001(b), round-2 reconcile): the old
+"500 examples / `HYPOTHESIS_SEED`" claim here was false (that env var
+never existed) — but GHA property runs were nonetheless ALREADY
+implicitly derandomized, because hypothesis ≥6.113 auto-loads its own
+built-in `ci` profile whenever a CI env var (`CI`/`GITHUB_ACTIONS`) is
+set. The pack's real deltas are therefore: the EXPLICIT env-selectable
+in-repo profile (upstream-drift-independent, pinned by
+`tests/unit/test_hypothesis_ci_profile.py` incl. a CI-env-stripped
+subprocess selection pin) + `HYPOTHESIS_PROFILE=ci` coverage on
+verify-m4pro/mutation — NOT first-time PR-path determinism. The
+sanctioned behavior change is the REVERSE flip: a CI-env run that does
+not set `HYPOTHESIS_PROFILE` (stress-nightly and the other scheduled
+arms) now loads the random `default` profile, OVERRIDING hypothesis's
+auto-load — deliberate exploration off the PR path (currently vacuous:
+no `@given` tests live in those suites today).
 
 | # | Invariant | Where | Proves |
 |---|---|---|---|
@@ -57,9 +78,9 @@ via `HYPOTHESIS_SEED` env var for CI replay).
 | P-07 | Entry fill price ≥ bar.high (BUY) or ≤ bar.low (SELL) — pessimistic mode (held in reserve for Phase 2) | simulator | G4 |
 | P-08 | Resample (1m→Tm) is associative: `resample(resample(x,2),3) ≡ resample(x,6)` when 09:15 anchor aligns | resampler | G4 |
 | P-09 | Forced-exit invariant: no trade survives 15:20 IST | simulator | G4 |
-| P-10 | STT applied only on SELL leg (Phase 2 — currently asserts no STT in Track 1) | costs | G4 |
+| P-10 | STT applied only on SELL leg | costs | G4 |
 | P-11 | Bitwise mask AND on u64 vocabulary is commutative & associative | signal | G6 |
-| P-12 | Brokerage formula (Phase 2): `min(₹20, 0.03% notional)` is monotone non-decreasing in notional until floor, then flat | costs | G4 |
+| P-12 | Brokerage is flat ₹20 per executed order (₹40 round-trip), invariant in notional/lots — the degenerate flat case of "monotone non-decreasing until floor, then flat" (the old `min(₹20, 0.03% notional)` wording here was the stale equity-delivery formula; the verified F&O law is flat per order — `docs/track2/CALCULATOR_SPEC.md` §4 Step 4, `docs/track2/COSTS_VERIFIED.md` §8.1-8.2) | costs | G4 |
 | P-13 | EMA(α, x) is a contraction: `‖EMA(α,x)−EMA(α,y)‖∞ ≤ ‖x−y‖∞` | indicators | G4 |
 | P-14 | Pivot/Fib levels are pure functions of (PDH, PDL, PDC) — no intraday state leak | indicators | G3 |
 | P-15 | Continuous-futures back-adjustment (held in reserve for Phase 2) is multiplicative & invertible: round-trip ratio == 1.0 ± 1 tick | data | G4 |
@@ -136,7 +157,7 @@ output: results.parquet — must be byte-identical (SHA256 equal) to
 
 ```
 input:  1 day of NIFTY 1m bars, 50 brute-force combos, mode A and B
-action: 
+action:
   - Run via naive pure-Python reference engine (slow, obviously correct,
     ~50 lines of code, no optimisations, hand-readable)
   - Run via Rust engine (production hot path)
@@ -204,7 +225,9 @@ Coverage gates raised from current `fail_under = 90` to `fail_under =
 2. **`tests/integration/test_replay_audit_log.py`** green
 3. **`tests/integration/test_python_rust_parity.py`** green
 4. **`tests/bench/test_hotpath_o1.py`** with all 6 ratios < 1.1 at 1M
-5. **Property test count ≥ 24** with seeds derandomised in CI
+5. **Property test count ≥ 24**, derandomised in CI via the `ci`
+   hypothesis profile (`HYPOTHESIS_PROFILE=ci` → `derandomize=True`,
+   registered in `tests/conftest.py`)
 6. **`cargo fuzz` corpora** for all 7 fuzz targets, seeded from real Groww responses
 7. **Coverage gates raised** in `pyproject.toml` to `fail_under = 100`
 8. **Mutation 85% gates** wired in `.github/workflows/mutation.yml`

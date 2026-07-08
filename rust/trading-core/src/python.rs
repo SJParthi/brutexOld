@@ -32,7 +32,21 @@ use crate::spec::{Direction, StrategySpec};
 /// PR-2 R5/S5 levels appended (never renumbered; DEC-NIFTY-INDICATORS-001).
 const PIVOT_LEVELS_LEN: usize = 12;
 /// Number of `fib_levels` entries [`evaluate_with_levels`] expects.
+///
+/// FROZEN evaluator ABI — deliberately DISTINCT from [`FIB_COMPUTE_LIST_LEN`]:
+/// before DEC-FIB-BULLISH-RETRACE-001 both surfaces happened to be 15-tuples
+/// (an accidental pun, two different lists); only the COMPUTE projection grew
+/// when the four `retrace_bull_*` fields landed. The evaluator never reads
+/// the bull fields, so this stays 15.
 const FIB_LEVELS_LEN: usize = 15;
+/// Number of entries [`py_compute_fib_levels`] returns (the compute-FFI
+/// projection of [`FibLevels`]).
+///
+/// The original 15 (`retrace_23..ext_down_424`, order UNTOUCHED) plus the four
+/// `retrace_bull_23/38/62/78` APPENDED last (DEC-FIB-BULLISH-RETRACE-001).
+/// Deliberately DISTINCT from the frozen [`FIB_LEVELS_LEN`] evaluator ABI —
+/// see its doc comment.
+const FIB_COMPUTE_LIST_LEN: usize = 19;
 
 /// Overflow-safe magnitude ceiling for a previous-day anchor (paisa).
 ///
@@ -54,7 +68,9 @@ const FIB_LEVELS_LEN: usize = 15;
 /// `4·(p − pdl) ≤ 16M/3 + 4`; therefore
 /// `|r5| ≤ M + 16M/3 + 4 = 19M/3 + 4 ≈ 6.34·M < i64::MAX` (symmetrically for
 /// `s5` via `pdh − p ≤ ⅔·(pdh − pdl) + 1`). The largest fib intermediate is
-/// `pdh + 3.236·range ≤ M + 3.236·2M < 7.5·M` and the pivot sum
+/// `pdh + 3.236·range ≤ M + 3.236·2M < 7.5·M` (the bullish retracements add
+/// nothing new: their max `pdl + 0.786·range < pdh + 3.236·range`, so the
+/// bound is unchanged by DEC-FIB-BULLISH-RETRACE-001) and the pivot sum
 /// `pdh + pdl + pdc` is bounded by `3·M`, so ALL intermediates stay strictly
 /// below `8·M ≤ i64::MAX`: STILL provably overflow-free at coefficient 4 with
 /// the SAME ceiling — the constant did NOT need lowering. A hostile/garbage
@@ -621,6 +637,12 @@ fn evaluate_with_levels_impl(
         range_paisa: 0,
         ext_up_424_paisa: 0,
         ext_down_424_paisa: 0,
+        // The bullish retracement ladder is never read by the conditions
+        // (DEC-FIB-BULLISH-RETRACE-001) — zeroed like the other unread fields.
+        retrace_bull_23_paisa: 0,
+        retrace_bull_38_paisa: 0,
+        retrace_bull_62_paisa: 0,
+        retrace_bull_78_paisa: 0,
     };
     let snapshot = IndicatorSnapshot {
         tod_seconds,
@@ -937,10 +959,14 @@ fn py_compute_pivot_levels_impl(
 /// single-source indicator math BruteX's `compute_fib_levels` wrapper packs into
 /// its `FibLevels` dataclass.
 ///
-/// Returns a 15-element list of the COMPUTED levels (int64 paisa), in order:
+/// Returns a 19-element list ([`FIB_COMPUTE_LIST_LEN`]) of the COMPUTED levels
+/// (int64 paisa), in order:
 /// `[retrace_23, retrace_38, retrace_50, retrace_62, retrace_78,
 ///   ext_up_127, ext_up_162, ext_up_200, ext_up_262, ext_up_424,
-///   ext_down_127, ext_down_162, ext_down_200, ext_down_262, ext_down_424]`.
+///   ext_down_127, ext_down_162, ext_down_200, ext_down_262, ext_down_424,
+///   retrace_bull_23, retrace_bull_38, retrace_bull_62, retrace_bull_78]` —
+/// the original 15 order UNTOUCHED, the four PDL-anchored bullish retracements
+/// APPENDED last (DEC-FIB-BULLISH-RETRACE-001).
 /// `retrace@pdh = pdh`, `retrace@pdl = pdl`, and `range = pdh - pdl` are derived
 /// by the caller. `pdh < pdl` (or an overflow-prone magnitude) is REJECTED at the
 /// boundary with a clean `ValueError` — so a direct FFI caller can never trip the
@@ -958,7 +984,7 @@ fn py_compute_fib_levels(pdh_paisa: i64, pdl_paisa: i64) -> PyResult<Vec<i64>> {
 fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>, String> {
     check_prev_day_hl(pdh_paisa, pdl_paisa)?;
     let f = compute_fib_levels(pdh_paisa, pdl_paisa);
-    Ok(vec![
+    let out = vec![
         f.retrace_23_paisa,
         f.retrace_38_paisa,
         f.retrace_50_paisa,
@@ -974,7 +1000,15 @@ fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>
         f.ext_down_200_paisa,
         f.ext_down_262_paisa,
         f.ext_down_424_paisa,
-    ])
+        // The bullish retracement ladder, APPENDED last so every pre-existing
+        // index is byte-stable (DEC-FIB-BULLISH-RETRACE-001).
+        f.retrace_bull_23_paisa,
+        f.retrace_bull_38_paisa,
+        f.retrace_bull_62_paisa,
+        f.retrace_bull_78_paisa,
+    ];
+    debug_assert_eq!(out.len(), FIB_COMPUTE_LIST_LEN);
+    Ok(out)
 }
 
 /// Compute the full EMA series from a list of `f64` closes — the shared
@@ -1309,14 +1343,16 @@ impl PyVwapState {
     /// volume) sit orders of magnitude below the ceiling, so the golden
     /// VWAP output is byte-unchanged.
     ///
-    /// `typical_paisa` is additionally required NON-NEGATIVE: the documented
-    /// bit-for-bit twin identity with BruteX's Python `VwapState` holds only
-    /// for non-negative operands (the native i128 `/` truncates toward zero;
-    /// Python's `//` floors — a negative `cum_pv` would silently diverge by
-    /// one paisa). A negative typical is not a real price (HLC3 of positive
-    /// prices), so BOTH twins reject it with `ValueError` instead of silently
-    /// disagreeing — the domain hole is CLOSED at the boundary, mirrored by
-    /// the Python twin's identical guard (`brutex/indicators/vwap.py`).
+    /// `typical_paisa` is additionally required NON-NEGATIVE: the bit-for-bit
+    /// twin identity that was documented against the now-DELETED Python
+    /// `VwapState` (`brutex/indicators/vwap.py`, removed by
+    /// DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001) held only for non-negative
+    /// operands (the native i128 `/` truncates toward zero; Python's `//`
+    /// floors — a negative `cum_pv` would have silently diverged by one
+    /// paisa). A negative typical is not a real price (HLC3 of positive
+    /// prices), so the guard REMAINS at this now-single-source boundary: it
+    /// raises `ValueError` exactly as both twins did while the twin lived,
+    /// keeping the domain hole CLOSED.
     #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
     fn update(
         &mut self,
@@ -1393,6 +1429,31 @@ impl PyMarketStructureState {
             sig.choch_bullish,
             sig.choch_bearish,
         )
+    }
+
+    /// The most recent CONFIRMED swing high (int64 paisa), or `None` before any
+    /// swing high has been confirmed.
+    ///
+    /// Read-only introspection delegating to the EXISTING core accessor
+    /// [`CoreMarketStructureState::last_swing_high`] (the core is untouched —
+    /// TickVault-safe). Exposed so the Python side (the P-06 look-ahead property
+    /// suite + the frozen twin-state golden replay) can assert the confirmed
+    /// swing levels directly on the PRODUCTION state now that the hand-synced
+    /// Python twin is deleted (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001).
+    #[getter]
+    fn last_swing_high(&self) -> Option<i64> {
+        self.inner.last_swing_high()
+    }
+
+    /// The most recent CONFIRMED swing low (int64 paisa), or `None` before any
+    /// swing low has been confirmed.
+    ///
+    /// Read-only introspection delegating to the EXISTING core accessor
+    /// [`CoreMarketStructureState::last_swing_low`] — see
+    /// [`PyMarketStructureState::last_swing_high`] for the rationale.
+    #[getter]
+    fn last_swing_low(&self) -> Option<i64> {
+        self.inner.last_swing_low()
     }
 }
 
@@ -1611,9 +1672,13 @@ mod tests {
                 f.ext_down_200_paisa,
                 f.ext_down_262_paisa,
                 f.ext_down_424_paisa,
+                f.retrace_bull_23_paisa,
+                f.retrace_bull_38_paisa,
+                f.retrace_bull_62_paisa,
+                f.retrace_bull_78_paisa,
             ]
         );
-        assert_eq!(got.len(), 15);
+        assert_eq!(got.len(), FIB_COMPUTE_LIST_LEN);
     }
 
     #[test]
@@ -2528,6 +2593,51 @@ mod tests {
         assert!(vwap_update_guard(24_000_00, 100).is_ok());
     }
 
+    // ── PyMarketStructureState swing-level getters ─────────────────────
+    // (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — the additive read-only
+    // introspection the Python-side P-06 + golden-replay suites consume.)
+
+    #[test]
+    fn ms_getters_are_none_before_any_confirmed_swing() {
+        // The `None` arm of both getters: a fresh detector (and one fed fewer
+        // than 2k+1 bars) has confirmed nothing, so both levels read `None`.
+        let mut state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        assert_eq!(state.last_swing_high(), None);
+        assert_eq!(state.last_swing_low(), None);
+        for (h, l, c) in [(100, 90, 95), (110, 100, 105), (130, 80, 125)] {
+            state.update(h, l, c);
+        }
+        // 3 bars < 2k+1 = 5 — still nothing confirmable.
+        assert_eq!(state.last_swing_high(), None);
+        assert_eq!(state.last_swing_low(), None);
+    }
+
+    #[test]
+    fn ms_getters_expose_confirmed_swing_levels() {
+        // The `Some` arm: bar 2 is BOTH a strict local-max high (130) and a
+        // strict local-min low (80) over its 2k=4 neighbours, confirmed once
+        // the 5th bar lands. The getters must expose EXACTLY the core levels.
+        let mut state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        for (h, l, c) in [
+            (100, 90, 95),
+            (110, 100, 105),
+            (130, 80, 125),
+            (115, 105, 110),
+            (112, 102, 108),
+        ] {
+            state.update(h, l, c);
+        }
+        assert_eq!(state.last_swing_high(), Some(130));
+        assert_eq!(state.last_swing_low(), Some(80));
+        // Delegation is verbatim: getter == the existing core accessor.
+        assert_eq!(state.last_swing_high(), state.inner.last_swing_high());
+        assert_eq!(state.last_swing_low(), state.inner.last_swing_low());
+    }
+
     // ── property layer ─────────────────────────────────────────────────────
     use proptest::prelude::*;
 
@@ -2564,7 +2674,19 @@ mod tests {
             );
 
             let got_f = py_compute_fib_levels_impl(pdh, pdl).unwrap();
-            prop_assert_eq!(got_f.len(), FIB_LEVELS_LEN);
+            // The COMPUTE projection is 19 (bull tail appended) while the frozen
+            // evaluator ABI stays 15 (DEC-FIB-BULLISH-RETRACE-001).
+            prop_assert_eq!(got_f.len(), FIB_COMPUTE_LIST_LEN);
+            let f = compute_fib_levels(pdh, pdl);
+            prop_assert_eq!(
+                &got_f[FIB_LEVELS_LEN..],
+                &[
+                    f.retrace_bull_23_paisa,
+                    f.retrace_bull_38_paisa,
+                    f.retrace_bull_62_paisa,
+                    f.retrace_bull_78_paisa,
+                ]
+            );
         }
 
         /// `pdh < pdl` is ALWAYS rejected (both validators) and never panics —

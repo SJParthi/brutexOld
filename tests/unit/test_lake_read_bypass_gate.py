@@ -16,8 +16,8 @@ The allowlist is FILE-level with a mandatory reason per entry; a stale entry
 
 Honest envelope (Golden Rule #10): the gate is TEXTUAL — a read spelled
 through an exotic indirection (a bare-path DuckDB ``FROM 'x.parquet'`` string
-literal, a pandas ``pd.read_parquet`` (pandas is banned from hot paths by
-CLAUDE.md §4 anyway), or an aliased/getattr-built call) cannot be caught by
+literal, a pandas ``pd.read_parquet`` (pandas is banned brutex/-wide by
+scan-banned-patterns.sh check #7), or an aliased/getattr-built call) cannot be caught by
 grep; those spellings are ALSO banned by this decision and are left to
 review. The five function names above cover every reader the repo actually
 uses (verified by the sweep that built this allowlist).
@@ -78,6 +78,10 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "candidate-discovery aggregate over symbols (ranking warm), not a bar-serving read"
     ),
     "brutex/options/lake_source.py": "wired: _contract_bars dedups before the bar map build",
+    "brutex/futures/lake_source.py": (
+        "wired: _contract_bars dedups (keep-FIRST) before the bar map build — "
+        "the futures twin of options/lake_source (DEC-FUTURES-EXEC-TRANSLATION-001)"
+    ),
     # DEC-SUSPICION-SWEEP-FIXES-001 (G1): the doctor's freshness `_read` moved into
     # the COMMON tf_autoderive.read_lake_bars_frame (shared by the doctor probe AND
     # the sweep-preflight freshness gate) — the raw read feeds dedup_bars_frame

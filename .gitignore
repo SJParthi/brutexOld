@@ -149,3 +149,7 @@ scratchpad/
 # DEC-BENCH-ABS-BASELINE-001: runner-local absolute-bench fragments/candidate
 # working dir; committed baselines live ONLY under tests/bench/baselines/.
 abs-bench/
+
+# Headless-browser truth-suite failure artifacts (DEC-DASHBOARD-BROWSER-TRUTH-001):
+# Playwright traces/screenshots/ledgers saved on test FAILURE only — never committed.
+test-artifacts/

@@ -207,6 +207,40 @@ class TestGuards:
         with pytest.raises(Stage3RefineError, match="64-char"):
             seed_from_mask_run_id("abc")
 
+    def test_refinement_run_id_rejects_unit_separator_in_mask_run_id(self) -> None:
+        """A ``\\x1f``-carrying mask_run_id could forge another identity's payload
+        (DEC-RUN-IDENTITY-GUARD-PARITY-001) — rejected before any digest byte."""
+        with pytest.raises(Stage3RefineError, match="mask_run_id"):
+            refinement_run_id(
+                mask_run_id="ab" * 15 + "\x1f" + "ab" * 16,
+                budget=RefineBudget(),
+                seed=7,
+                pycma_version="4.0.0",
+                numpy_version="2.1.0",
+            )
+
+    def test_refinement_run_id_rejects_unit_separator_in_pycma_version(self) -> None:
+        """The injectable pycma_version token rides the same reject-only guard."""
+        with pytest.raises(Stage3RefineError, match="pycma_version"):
+            refinement_run_id(
+                mask_run_id=_MASK_RUN_ID,
+                budget=RefineBudget(),
+                seed=7,
+                pycma_version="4.0.0\x1fX",
+                numpy_version="2.1.0",
+            )
+
+    def test_refinement_run_id_rejects_unit_separator_in_numpy_version(self) -> None:
+        """The injectable numpy_version token rides the same reject-only guard."""
+        with pytest.raises(Stage3RefineError, match="numpy_version"):
+            refinement_run_id(
+                mask_run_id=_MASK_RUN_ID,
+                budget=RefineBudget(),
+                seed=7,
+                pycma_version="4.0.0",
+                numpy_version="2.1.0\x1fX",
+            )
+
     def test_budget_guards(self) -> None:
         with pytest.raises(Stage3RefineError, match="max_fevals"):
             RefineBudget(max_fevals=0)

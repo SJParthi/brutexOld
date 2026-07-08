@@ -6,7 +6,13 @@
 PR ships the Lambda handler + Terraform IaC + docs; the operator deploys to their
 AWS account (this session has NO AWS access — see §7 Honesty envelope). Per Golden
 Rule #9 an independent 4-agent hostile review runs on this PR before merge; it is
-opened as a DRAFT pending that adversarial verification.
+opened as a DRAFT pending that adversarial verification. SUPERSEDED-IN-PART
+(2026-07-06, DEC-BROKER-DOCS-AWSONLY-RECONCILE-001): the §8 "#909 remains as a
+per-app fallback until the read-side PR points every app at the centralized token"
+bullet is superseded — that read-side PR LANDED (DEC-TOKEN-BROKER-AWS-001 #1064,
+then AWS-only by DEC-AWS-ONLY-CREDS-001 #1065); production BruteX is read-only
+fail-fast and NEVER mints (DEC-REAUTH-COLDSTART-READONLY-001 #1092); body preserved
+as the historical record.
 **Author:** operator-directed (option C: centralized minter, adapted to existing AWS infra)
 **Builds on:** DEC-GROWW-TOKEN-REAUTH-001 (MIGRATION.md #909 — the in-process
 auto-re-mint), DEC-GROWW-REAUTH-DEADLINE-001 (#910 — the re-mint deadline guard),
