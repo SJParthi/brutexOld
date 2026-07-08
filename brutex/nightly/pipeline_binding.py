@@ -75,6 +75,7 @@ class NightlyCapabilityError(BruteXError):
 
 
 def _utcnow() -> datetime:
+    """Return the current timezone-aware UTC timestamp."""
     return datetime.now(UTC)
 
 

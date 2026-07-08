@@ -4760,7 +4760,7 @@ def _launchctl_runner(argv: Sequence[str]) -> tuple[int, str, str]:
     import subprocess  # nosec B404 — fixed launchctl argv, no shell/user input
 
     try:
-        completed = subprocess.run(  # noqa: S603 — fixed launchctl argv, no shell/user input
+        completed = subprocess.run(  # noqa: S603  # nosec B603 — fixed launchctl argv, no shell/user input
             list(argv), capture_output=True, text=True, check=False, timeout=30.0
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -4769,6 +4769,7 @@ def _launchctl_runner(argv: Sequence[str]) -> tuple[int, str, str]:
 
 
 def _default_plist_dir() -> Path:
+    """Return the default LaunchAgents directory for the nightly plist."""
     return Path.home() / "Library" / "LaunchAgents"
 
 

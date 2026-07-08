@@ -225,6 +225,7 @@ class RestoreResult:
 
 
 def _default_copy(source: Path, dest: Path) -> None:
+    """Copy ``source`` to ``dest`` using the default filesystem copier."""
     import shutil
 
     shutil.copyfile(source, dest)
@@ -241,6 +242,7 @@ def _fsync_file(path: Path) -> None:
 
 
 def _mismatch_message(prefix: str, mismatches: tuple[str, ...]) -> str:
+    """Build the human-readable message describing verification mismatches."""
     named = ", ".join(mismatches[:_VERIFY_NAME_CAP])
     more = (
         f" (+{len(mismatches) - _VERIFY_NAME_CAP} more)"

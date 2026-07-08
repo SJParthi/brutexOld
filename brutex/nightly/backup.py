@@ -221,6 +221,7 @@ class BackupEntry:
     restore_order: int
 
     def to_dict(self) -> dict[str, object]:
+        """Return this backup entry as a JSON-serializable dict."""
         return {
             "namespace": self.namespace,
             "relpath": self.relpath,
@@ -231,6 +232,7 @@ class BackupEntry:
 
 
 def _restore_order(namespace: str, relpath: str) -> int:
+    """Return the restore-ordering rank for a namespace/relpath pair."""
     key = f"{namespace}/{relpath}"
     if key == LEDGER_REL:
         return 2
@@ -256,6 +258,7 @@ class BackupManifest:
     excluded_by_law: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
+        """Return this backup manifest as a JSON-serializable dict."""
         return {
             "schema_version": self.schema_version,
             "snapshot_id": self.snapshot_id,
@@ -317,6 +320,7 @@ class BackupManifest:
 
 
 def _as_list(data: Mapping[str, object], key: str) -> list[object]:
+    """Return the value at ``key`` coerced to a list, empty when absent."""
     value = data[key]
     if not isinstance(value, list):
         raise BackupManifestError(f"manifest {key!r} must be a list, got {value!r}")
@@ -442,6 +446,7 @@ class BackupResult:
 
 
 def _default_copy(source: Path, dest: Path) -> None:
+    """Copy ``source`` to ``dest`` using the default filesystem copier."""
     shutil.copyfile(source, dest)
 
 

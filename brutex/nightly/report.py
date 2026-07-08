@@ -23,7 +23,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 — fixed constant argv, no shell (see run() below)
 import sys
 import time
 from collections.abc import Callable, Mapping
@@ -237,6 +237,7 @@ def _count_text(value: int | None) -> str:
 
 
 def _verdict(report: NightlyReport) -> str:
+    """Derive the terminal verdict label for the nightly report."""
     breaker = first_breaker(report.links)
     if breaker is not None:
         return "REFUSED" if breaker.status is LinkStatus.REFUSED else "FAILED"

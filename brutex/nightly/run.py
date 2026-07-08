@@ -134,6 +134,7 @@ class NightlyPlan:
 
 
 def _default_keep_awake(reason: str) -> AbstractContextManager[None]:
+    """Return a no-op keep-awake context manager for the given reason."""
     return keep_awake(reason)
 
 
@@ -152,6 +153,7 @@ class NightlySeams:
 
 
 def _resolve_alerter(seams: NightlySeams) -> SweepAlerter:
+    """Resolve the SweepAlerter from the nightly seams."""
     if seams.alerter is not None:
         return seams.alerter
     from brutex.notifications.sweep_alerts import SweepAlerter
@@ -160,6 +162,7 @@ def _resolve_alerter(seams: NightlySeams) -> SweepAlerter:
 
 
 def _resolve_run_sweep(seams: NightlySeams) -> Callable[..., int]:
+    """Resolve the sweep-runner callable from the nightly seams."""
     if seams.run_sweep is not None:
         return seams.run_sweep
     from brutex.cli import cmd_sweep_all
@@ -190,6 +193,7 @@ def _counts_from_links(
 
 
 def _link_verdicts(outcomes: tuple[LinkOutcome, ...]) -> dict[str, str]:
+    """Map each chain link name to its verdict string."""
     verdicts: dict[str, str] = {}
     for outcome in outcomes:
         text = outcome.status.value
@@ -310,6 +314,7 @@ def _run_locked(
     nightly_id: str,
     started: float,
 ) -> NightlyReport:
+    """Run the nightly chain while holding the required single-flight locks."""
     from brutex.adapters.groww.pull_singleflight import pull_singleflight_lock
     from brutex.dashboard.pull_jobs import is_pull_halt
     from brutex.notifications.sweep_alerts import emit_pull_halt_alert
@@ -641,12 +646,14 @@ def _own_audit_events(path: Path, nightly_id: str) -> list[tuple[str, str | None
 
 
 def _resolve_credentials() -> Any:
+    """Resolve Groww credentials for the nightly pull, if configured."""
     from brutex.config.credentials import resolve_groww_aws_credentials
 
     return resolve_groww_aws_credentials()
 
 
 def _bundle_env() -> Mapping[str, str]:
+    """Return the allowlisted environment snapshot for the run bundle."""
     return dict(os.environ)
 
 
@@ -662,6 +669,7 @@ def _assemble_report(
     absent_artifacts: tuple[str, ...],
     extra_notes: tuple[str, ...],
 ) -> NightlyReport:
+    """Assemble the NightlyReport from the collected link outcomes."""
     notes = [R48_DIVERGENCE_NOTE, *extra_notes]
     return NightlyReport(
         schema_version=REPORT_SCHEMA_VERSION,

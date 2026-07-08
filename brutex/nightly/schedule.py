@@ -143,6 +143,7 @@ def render_launchd_plist(
 
 
 def _xml_escape(text: str) -> str:
+    """Return ``text`` XML-escaped for embedding in a plist body."""
     return (
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )
@@ -254,6 +255,7 @@ class StatusReport:
     lock_note: str  # existence ≠ held — flocks cannot be observed without acquiring
 
     def lines(self) -> list[str]:
+        """Return the human-readable status lines for this report."""
         plist = "present" if self.plist_present else "ABSENT"
         listed = "listed" if self.launchd_listed else "NOT listed"
         fire = f" · next fire {self.next_fire}" if self.next_fire else ""
