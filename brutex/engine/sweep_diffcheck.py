@@ -541,7 +541,7 @@ def sample_masks(
         return ()
     material = f"diffcheck|{sweep_id}|{tuple_digest}|{data_snapshot_hash}"
     seed = int(blake3.blake3(material.encode("utf-8")).hexdigest()[:16], 16)
-    rng = random.Random(seed)  # noqa: S311 — deterministic identity-seeded sampling, not crypto
+    rng = random.Random(seed)  # noqa: S311  # nosec B311 — deterministic identity-seeded sampling, not crypto
     picked = sorted(rng.sample(range(len(masks)), min(k, len(masks))))
     return tuple(masks[i] for i in picked)
 
@@ -653,6 +653,7 @@ class _TimeframeLike(Protocol):
 
     @property
     def minutes(self) -> int:
+        """Bar length of the tuple's timeframe, in minutes."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -661,6 +662,7 @@ class _DirectionLike(Protocol):
 
     @property
     def value(self) -> str:
+        """Direction token — ``"BUY"`` or ``"SELL"``."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -669,22 +671,27 @@ class DiffCheckTupleLike(Protocol):
 
     @property
     def k(self) -> int:
+        """Number of active condition bits in the tuple's mask."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def sl_paisa(self) -> int | None:
+        """Stop-loss distance in paisa, or ``None`` when unset."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def tp_paisa(self) -> int | None:
+        """Take-profit distance in paisa, or ``None`` when unset."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def tf(self) -> _TimeframeLike:
+        """The tuple's timeframe surface."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def direction(self) -> _DirectionLike:
+        """The tuple's trade direction surface."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -693,14 +700,17 @@ class DiffCheckGridLike(Protocol):
 
     @property
     def condition_bits(self) -> Sequence[int]:
+        """The grid's active condition bit indices."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def data_snapshot_hash(self) -> str:
+        """Full-content snapshot digest of the loaded bars."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def start_equity_paisa(self) -> int:
+        """Starting equity for the simulation, in paisa."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -709,26 +719,32 @@ class ProductionTradeLike(Protocol):
 
     @property
     def pnl_paisa(self) -> int:
+        """Realised profit-and-loss of the trade, in paisa."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def mfe_paisa(self) -> int:
+        """Maximum favourable excursion of the trade, in paisa."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def mae_paisa(self) -> int:
+        """Maximum adverse excursion of the trade, in paisa."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def holding_bars(self) -> int:
+        """Number of bars the trade was held."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def entry_ts(self) -> datetime:
+        """Entry timestamp of the trade."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def exit_ts(self) -> datetime:
+        """Exit timestamp of the trade."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 

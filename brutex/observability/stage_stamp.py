@@ -44,13 +44,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
-import structlog
-
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.models import BruteXError
 from brutex.observability.flight_recorder import FlightRecorder
-
-_LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "SNAPSHOT_EXTRA_KEY",

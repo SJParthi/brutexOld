@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
@@ -150,7 +150,7 @@ def _core(
     *,
     diffcheck_k: int = 0,
     **kw: Any,
-) -> Iterator[tuple[RunCoreHandles, _SpyAlerter]]:
+) -> Generator[tuple[RunCoreHandles, _SpyAlerter], None, None]:
     """Enter a run core over *root* with deterministic (env-free) knobs."""
     g = grid if grid is not None else _grid()
     spy = _spy()
@@ -503,7 +503,7 @@ def test_g09_keep_awake_entered_once(tmp_path: Path, monkeypatch: pytest.MonkeyP
     entered: list[str] = []
 
     @contextmanager
-    def _fake_keep_awake(reason: str) -> Iterator[None]:
+    def _fake_keep_awake(reason: str) -> Generator[None, None, None]:
         entered.append(reason)
         yield
 
@@ -1727,7 +1727,7 @@ def test_run_sweep_grid_threads_both_seams(tmp_path: Path) -> None:
             dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
             audit=audit,
             diffcheck=lambda **kw: calls.append("diffcheck"),
-            store_quarantine=lambda t, exc: calls.append("quarantine"),
+            store_quarantine=lambda tuple_, exc: calls.append("quarantine"),
         )
     assert summary.tuples_run == 1
     assert calls == ["diffcheck"]  # a clean store never quarantines
@@ -1769,7 +1769,7 @@ def test_run_supervised_grid_threads_both_seams(tmp_path: Path) -> None:
                 ingest_audit=ingest,
                 guards=guards,
                 diffcheck=lambda **kw: calls.append("diffcheck"),
-                store_quarantine=lambda t, exc: calls.append("quarantine"),
+                store_quarantine=lambda tuple_, exc: calls.append("quarantine"),
             )
     finally:
         sup.close()
@@ -1779,7 +1779,7 @@ def test_run_supervised_grid_threads_both_seams(tmp_path: Path) -> None:
 
 
 def test_g03_parallel_driver_streams_progress(tmp_path: Path) -> None:
-    from brutex.data.option_dedup import OptionDedupIndex  # noqa: F401 — parity import
+    from brutex.data.option_dedup import OptionDedupIndex  # parity import
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_parallel import run_parallel_grid
@@ -1788,6 +1788,7 @@ def test_g03_parallel_driver_streams_progress(tmp_path: Path) -> None:
     from brutex.engine.sweep_watchdog import SweepWatchdog
     from brutex.orchestrator.audit import AuditWriter
 
+    assert OptionDedupIndex is not None  # parity: the dedup module must stay importable
     grid = _grid(directions=[Side.BUY, Side.SELL])
     seen: list[int] = []
     sup = SweepAuditWriter.open(tmp_path / "sup.jsonl")

@@ -63,7 +63,7 @@ _GOLDEN_LINES: Final[tuple[str, ...]] = (
 
 def _record_golden_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Drive the REAL recorder under the pinned wall clock."""
-    import brutex.orchestrator.audit as audit_mod
+    from brutex.orchestrator import audit as audit_mod
 
     monkeypatch.setattr(audit_mod, "time", lambda: _TS)
     recorder = FlightRecorder.open(tmp_path, run_id=_RUN_ID, attempt=1)

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 — list-argv detached launch, no shell
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -222,7 +222,7 @@ def spawn_detached_sweep(
     base_env = os.environ if env is None else env
     child_env = {**base_env, DETACHED_ENV_SENTINEL: "1"}
     with log.open("ab") as log_file:
-        proc = subprocess.Popen(  # noqa: S603 — argv is caller-built, never shell-parsed
+        proc = subprocess.Popen(  # noqa: S603  # nosec B603 — argv is caller-built, never shell-parsed
             cmdline,
             start_new_session=True,
             stdin=subprocess.DEVNULL,

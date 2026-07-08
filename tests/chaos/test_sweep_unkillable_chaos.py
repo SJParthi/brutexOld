@@ -309,7 +309,7 @@ def test_r42_kill_after_flush_before_sentinel_resume_bit_identical(
 ) -> None:
     """Boundary 2: store flushed, process dies BEFORE the sentinel lands →
     the un-sentineled tuple REDOES on resume (sentinel-last ordering law)."""
-    import brutex.engine.sweep_run as sweep_run_mod
+    from brutex.engine import sweep_run as sweep_run_mod
     from brutex.engine.tuple_complete import write_completion_sentinel as real
 
     grid = _grid()
@@ -494,7 +494,7 @@ def test_r42_enospc_during_store_flush_aborts_loudly_earlier_tuple_intact(
     halts = [r for r in records if r["kind"] == "HALT"]
     assert len(halts) == 1
     # Recovery starts at N: the relaunch completes and tuple 1's bytes never moved.
-    _result, _core = _one_life(root, grid, life_no=1)
+    _one_life(root, grid, life_no=1)
     for path, digest in first_tuple_files.items():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
 
@@ -509,7 +509,7 @@ def test_g12_corrupt_checkpoint_quarantined_fresh_start_no_crash_loop(
     grid = _grid()
     golden = _golden(tmp_path)
     root = tmp_path / "chaos"
-    _result, _core = _one_life(root, grid, life_no=0)
+    _one_life(root, grid, life_no=0)
     ckpt = root / "state" / "ckpt.json"
     ckpt.write_bytes(garbage)
     _result2, core2 = _one_life(root, grid, life_no=1)
@@ -555,7 +555,7 @@ def test_r42_stage3_cell_torn_between_stamp_and_consume_discarded_and_rerun(
 ) -> None:
     """A cell torn AFTER stamping fails validation → discard + ONE idempotent
     re-run; the discarded artifact is KEPT and unrelated files never move."""
-    import brutex.engine.sweep_run_core as core_mod
+    from brutex.engine import sweep_run_core as core_mod
 
     grid = _grid()
     out = tmp_path / "out"

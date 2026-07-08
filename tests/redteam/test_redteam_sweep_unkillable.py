@@ -180,7 +180,7 @@ def test_r28_flight_chain_break_plant_turns_the_rehearsal_verifier_red(
 def test_r28_cli_chain_break_plant_turns_the_rehearsal_verifier_red(
     tmp_path: Path,
 ) -> None:
-    _run_id, _store = _run_one(tmp_path, diffcheck_k=0)
+    _run_one(tmp_path, diffcheck_k=0)
     chain = tmp_path / "out" / "audit" / "sweep-all.jsonl"
     clean_count = auto_verify(chain).entry_count
     assert clean_count > 2

@@ -81,7 +81,7 @@ def test_g7_torn_manifest_stamp_refuses_the_replay(tmp_path: Path) -> None:
 
 def test_g7_changed_lake_refuses_the_replay_naming_both_hashes(tmp_path: Path) -> None:
     """A silently-changed lake can never re-mint a wrong-provenance report."""
-    _bars, _report = _auto_run(tmp_path)
+    _auto_run(tmp_path)
     session = _session_bars()
     drifted = session[:-1]  # one bar vanished from the lake
     with pytest.raises(cw.CascadeWireError, match="data_snapshot_hash"):
