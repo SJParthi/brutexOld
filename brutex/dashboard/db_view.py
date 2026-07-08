@@ -4526,9 +4526,12 @@ def _build_window_payload_duckdb(
         # legacy base's missing columns until the int() projection below crashed. A wrong-shape
         # Parquet (missing a core column) also fails the subset → defers. When the base is
         # ABSENT (a first pull's delta-only checkpoint) the probe is SKIPPED — every delta is
-        # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
-        # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
-        # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
+        # written by `append_ledger_delta` with the full 15-column schema (writer-pinned;
+        # DEC-STREAK-PROVENANCE-001 appended the trailing `streak_provenance`), so the residual
+        # union NULL-fill is the two optional trailing columns — `bars_net_new` +
+        # `streak_provenance` — on a base that predates them, each equal to the Python fold's
+        # honest ``None`` (`bars_net_new` is never fed to ``int()``; the provenance cell is
+        # read via ``cell.get``).
         available = {
             str(col[0])
             for col in (
@@ -4628,7 +4631,8 @@ def _build_window_payload_duckdb(
         # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
         # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
         # delta-only scan reads files `append_ledger_delta` writes with the full
-        # 14-column schema (writer-pinned) — so read them directly.
+        # 15-column schema (writer-pinned; trailing `streak_provenance`,
+        # DEC-STREAK-PROVENANCE-001) — so read them directly.
         cell = dict(zip(out_columns, raw, strict=True))
         record = SimpleNamespace(
             market=cell["market"],

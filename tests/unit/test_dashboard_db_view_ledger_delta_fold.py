@@ -30,7 +30,8 @@ so demotions survive). This suite pins:
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
   SQL fold ≡ the reference Python dict fold, record-for-record;
 * drift pins: ``_WINDOW_KEY_COLUMNS == window_ledger_store._COLUMNS[:5]`` and
-  ``append_ledger_delta`` writing the full 14-column schema (the base-less
+  ``append_ledger_delta`` writing the full 15-column schema — trailing
+  ``streak_provenance`` per DEC-STREAK-PROVENANCE-001 (the base-less
   probe-skip's safety precondition).
 
 Tests MAY import ``window_ledger_store`` (the module itself must not — the
