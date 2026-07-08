@@ -1281,6 +1281,23 @@ class TestManifestSerialisation:
         with pytest.raises(cw.CascadeWireError, match="non-int roll_schedule ordinal"):
             cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
 
+    def test_duplicate_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
+        # Round-7 finding 8: the parse boundary validated each entry's alias
+        # + shape but never UNIQUENESS — both `dict(manifest.roll_schedules)`
+        # consumers silently adopted whichever contradictory entry sorted
+        # LAST, while the audit twin `_schedules_from_entries` refuses the
+        # same per-instrument disagreement. The parse boundary now refuses
+        # identically.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [
+            ["NSE-NIFTY-FUT", [738000, 738030]],
+            ["NSE-NIFTY-FUT", [738000, 738031]],
+        ]
+        with pytest.raises(cw.CascadeWireError, match="duplicate entry for instrument"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
     def test_spot_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
         # Round-3 finding 2: the manifest has no integrity digest, so a
         # hand-edited/corrupt `roll_schedules` entry for a SPOT instrument

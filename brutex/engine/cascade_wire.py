@@ -1475,8 +1475,10 @@ def _roll_schedules_from_payload(
     Raises
     ------
     CascadeWireError
-        On a malformed entry (non-pair rows, non-int ordinals, …), an entry
-        whose instrument is not the NIFTY-futures series alias, or a schedule
+        On a malformed entry (non-pair rows, non-int ordinals, …), a
+        DUPLICATE instrument (two contradictory schedules — ``dict()`` would
+        silently last-win; review round-7 finding 8), an entry whose
+        instrument is not the NIFTY-futures series alias, or a schedule
         violating the shape law.
     """
     if raw is None:
@@ -1498,7 +1500,23 @@ def _roll_schedules_from_payload(
         )
     except (TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid roll_schedules in manifest: {exc}") from exc
+    seen: set[str] = set()
     for instrument, schedule in parsed:
+        # Duplicate-instrument refusal (review round-7 finding 8): both
+        # `dict(manifest.roll_schedules)` consumers silently adopt the LAST
+        # entry, so an internally contradictory hand-edited manifest carrying
+        # two schedules for one instrument replayed under whichever sorted
+        # last — while the audit twin `_schedules_from_entries` refuses the
+        # same per-instrument disagreement. Refuse identically HERE, at the
+        # parse boundary this docstring claims owns the enforcement.
+        if instrument in seen:
+            raise CascadeWireError(
+                f"invalid roll_schedules in manifest: duplicate entry for instrument "
+                f"{instrument!r} — an internally contradictory manifest cannot pick a "
+                "schedule (dict() would silently adopt the last); the manifest is "
+                "corrupt — re-run `brutex sweep-all` to mint a fresh one"
+            )
+        seen.add(instrument)
         if not is_futures_series_symbol(instrument):
             raise CascadeWireError(
                 f"invalid roll_schedules in manifest: instrument {instrument!r} is not "
