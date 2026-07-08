@@ -3,7 +3,9 @@
 100% line + branch coverage of the spike / fat-finger / vendor-scaling guard at
 the engine read boundary (DEC-SWEEP-DATA-EDGE-GUARDS-001, D-MAJ-2). The
 end-to-end wiring through :func:`arrow_table_to_bars` is exercised in
-``tests/integration/test_feed_bad_tick_screen.py``.
+``tests/integration/test_feed_replay_bad_tick_screen.py`` (stem-named
+``test_feed_replay*`` so the coverage-gate discovery maps it to
+``brutex/feed/replay.py``).
 """
 
 from __future__ import annotations
