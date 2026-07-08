@@ -784,8 +784,16 @@ def _canonical_option_keys(
     try:
         frame = _read_key_columns(canonical, UNIQUE_KEY_OPTIONS)
     except parquet_read_skip_errors() as exc:
-        # repr() on the path — same round-8 log-injection fold as above.
-        _LOG.warning("lake.invariant.scan_skip", path=repr(str(canonical)), error=str(exc))
+        # repr() on the path — same round-8 log-injection fold as above. The
+        # error payload rides repr() too (round-17 fold): a polars read error
+        # MESSAGE embeds the RAW vendor-influenceable path (a polars-raised
+        # FileNotFoundError and the ColumnNotFoundError plan dump both
+        # interpolate it un-repr'd — empirically verified), so a newline/ESC
+        # series name forged log lines through the escaped ``path=`` field's
+        # own sibling — the identical channel round-16 closed at
+        # ``lake_heal.partition_error``. The bars scan_skip stays raw
+        # (catalogued coordinates), as do the path-free dtype-gate verdicts.
+        _LOG.warning("lake.invariant.scan_skip", path=repr(str(canonical)), error=repr(str(exc)))
         _pause(per_file_pause)
         return None
     _pause(per_file_pause)
@@ -1116,9 +1124,12 @@ def scan_lake_invariants(
                     try:
                         frame = _read_key_columns(path, UNIQUE_KEY_OPTIONS)
                     except parquet_read_skip_errors() as exc:
-                        # repr() on the path — the round-8 log-injection fold.
+                        # repr() on the path — the round-8 log-injection fold;
+                        # repr() on the error too (round-17): the polars read
+                        # error message embeds the RAW vendor-influenceable
+                        # path (see `_canonical_option_keys` — the same fold).
                         _LOG.warning(
-                            "lake.invariant.scan_skip", path=repr(str(path)), error=str(exc)
+                            "lake.invariant.scan_skip", path=repr(str(path)), error=repr(str(exc))
                         )
                         option_files_skipped += 1
                         _pause(per_file_pause)

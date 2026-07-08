@@ -306,6 +306,30 @@ stay raw — operator-controlled/catalogued subjects; regression verified
 failing pre-fix); the reassignment audit/log `months` list was a FIFTH
 `YYYY-MM` f-string copy bypassing the round-15 `option_partition_stem`
 COMMON helper — collapsed onto it (byte-identical output).
+ROUND 17 (refuter-confirmed 2 MINORs + NITs): MINOR — the quarantine
+BEFORE-image write was the ONE heal-side mutation OUTSIDE the
+rounds-2/4/6 symlink-containment program: `<lake>/.quarantine`
+pre-planted as a symlink sent every AUTO-ON batch's forensic
+before-image outside the lake root BEFORE the in-lake source was
+rewritten/unlinked (voiding the "the quarantine copy IS the forensic
+before-image" guarantee; pre-existing #1175 machinery — this change
+set's own containment program made the asymmetry a gap);
+`heal_findings` now refuses the WHOLE batch untouched on a symlinked
+`.quarantine` (loud refusal event + audit line + alert; every finding
+counted an error so the L3 sentinel never stamps and the next boot
+re-attempts; zero-finding batches unaffected) and the `-NN` serial
+loop also serials past a DANGLING symlink at the stamp path; a
+probe→write swap inside ONE batch stays the documented TOCTOU
+envelope, not claimed closed. MINOR — the round-16 error-repr fold
+missed the two options-tree `scan_skip` sites: a polars read error
+MESSAGE embeds the RAW vendor-influenceable `options/<series>/` path
+(ColumnNotFoundError plan dump + polars-raised FileNotFoundError,
+empirically verified), so `error=` now rides `repr(str(exc))` at the
+glob-loop AND targeted-sibling read skips (bars/dtype-verdict fields
+stay raw); the claimed `token_stat_skipped` third site was REFUTED
+(CPython OSError.__str__ reprs its filename) but joins the convention
+as belt-and-braces. NIT: the L2 seam test comment's "never even read"
+overclaim reworded to its honest bytes+mtime envelope.
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -970,11 +994,47 @@ hostile-review pass._
   extends to pin the repr'd error text (repr shape, no raw `\n`/`\x1b` — verified failing pre-fix). (R16-3·NIT) the
   reassignment audit/log `months` list was a FIFTH `YYYY-MM` stem f-string copy bypassing the round-15
   `partition.option_partition_stem` COMMON helper — collapsed onto the helper (byte-identical output, the existing
-  months-list pins unchanged).
+  months-list pins unchanged). HOSTILE-REVIEW FOLDS (round 17, refuter-confirmed 2 MINORs + NITs; every regression
+  verified failing pre-fix): (R17-1·MINOR, quarantine containment) the quarantine BEFORE-image write was the ONE
+  heal-side mutation outside the rounds-2/4/6 symlink-containment program — `heal_findings` derived
+  `quarantine_root` with only an `exists()` probe and the writers' heal legs mkdir+`atomic_write_via`'d through
+  whatever `<lake>/.quarantine` pointed at, so pre-planting `.quarantine` as a symlink (the round-2 V1 lake-write
+  capability class) sent EVERY default-AUTO-ON batch's forensic before-image OUTSIDE the lake root BEFORE the
+  in-lake source was rewritten/unlinked — voiding the "the quarantine copy IS the forensic before-image" guarantee
+  that justifies the options no-raw_hash decision (and `os.replace` could clobber files under the link target);
+  pre-existing DEC-LAKE-HEAL-001 machinery shared with the bars healer — this change set's own containment program
+  made the asymmetry a gap. FIXED at the ONE batch chokepoint: `heal_findings` refuses the WHOLE batch untouched
+  when `<lake>/.quarantine` `is_symlink()` (loud `lake_heal.quarantine_symlink_refused` — path raw,
+  operator-controlled root + fixed literal — plus an `AUDIT_HEAL_BATCH` `refused_quarantine_symlink` line, the
+  on_report alert seam still fires; EVERY finding counts an error so the L3 sentinel never stamps (`heal_errors`)
+  and the next boot re-attempts; a ZERO-finding batch is deliberately NOT refused — no before-image is ever
+  written, the `ordered` gate test-pinned), and the `-NN` serial loop also serials past a DANGLING symlink at the
+  stamp path (`exists()` alone read False and the before-images would have written THROUGH the link). Honest
+  envelope: a probe→write swap inside ONE batch is the same sub-call TOCTOU class as the documented same-second
+  cross-process quarantine race — not claimed closed; `OptionParquetWriter.heal_partition` still writes wherever
+  its *quarantine_to* points (docstring states it — the batch-level refusal is the rail for every production
+  caller, all of which derive *quarantine_to* inside `heal_findings`). 3 regressions (whole-batch refusal over
+  bars+option poison: nothing lands outside, sources byte-untouched, errors==findings, alert+audit fire,
+  idempotent no-seam re-run · the zero-finding no-refusal gate pin · the dangling-stamp `-01` serial with the link
+  untouched and its target never created), ALL verified failing pre-fix. (R17-2·MINOR, log-injection completeness)
+  the round-16 error-repr fold missed the two options-tree `lake.invariant.scan_skip` sites still logging
+  `error=str(exc)` where the exception MESSAGE embeds the SAME vendor-influenceable `options/<series>/` path RAW —
+  a polars `ColumnNotFoundError` dumps the resolved plan (`Parquet SCAN [<path>]`) and a polars-raised
+  `FileNotFoundError` interpolates the path un-repr'd (both empirically verified) — so a newline/ESC series name
+  forged log lines through the escaped `path=` field's own SIBLING at the glob-loop read skip AND the targeted
+  canonical-sibling read skip; both now log `error=repr(str(exc))` (path-free dtype-gate verdicts + the bars
+  scan_skip stay raw — our-own/catalogued subjects). The finding's claimed THIRD site
+  (`lake_heal.token_stat_skipped`) was REFUTED as a demonstrated forge channel (CPython's `OSError.__str__`
+  repr()s its filename — refuter-verified) but joins the escaped convention as belt-and-braces, the comment
+  stating the refutation honestly; 2 new regressions (keyless-parquet fixtures in a newline+ESC series dir pin the
+  escaped error payload at both sites) verified failing pre-fix. NIT: the L2 seam integration-test comment
+  overclaimed "never even read" for assertions pinning only bytes+mtime — reworded to the honest envelope
+  (bytes+mtime prove never WRITTEN; the never-read claim rides the pure-filename months bound, pinned by the
+  census call-shape spy + the read-spy scanner units).
   Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (472/166) + `option_parquet_writer.py`
-  (165/34) + `lake_heal.py` (603/170) + `partition.py` (83/24) ALL 100% line+branch; ruff/ruff-format clean, mypy
+  (165/34) + `lake_heal.py` (611/174) + `partition.py` (83/24) ALL 100% line+branch; ruff/ruff-format clean, mypy
   `--strict` + pyright at the pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

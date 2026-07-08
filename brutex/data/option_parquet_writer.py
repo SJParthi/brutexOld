@@ -608,7 +608,12 @@ class OptionParquetWriter:
         quarantine_to
             Where the ORIGINAL bytes are copied before the rewrite. Required
             whenever the heal would change the file
-            (:class:`OptionWriterError` otherwise).
+            (:class:`OptionWriterError` otherwise). Honest envelope
+            (round-17): this method writes the before-image WHEREVER
+            *quarantine_to* points — the containment rail here guards *dest*
+            only; the batch-level symlinked-``.quarantine`` refusal lives in
+            :func:`brutex.data.lake_heal.heal_findings`, which derives every
+            *quarantine_to* the production healer passes.
 
         Returns
         -------

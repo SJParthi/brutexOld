@@ -368,8 +368,12 @@ class TestFnoPullSeam:
         assert events[0]["moved"] == 1
 
     def test_options_scan_month_bounded(self, registry: RegistryStore, tmp_lake: Path) -> None:
-        """An options poison OUTSIDE the pulled span is never even read
-        (bytes + mtime pinned) — the L2 bound covers options too."""
+        """An options poison OUTSIDE the pulled span is left byte-untouched
+        (bytes + mtime pinned) — the L2 months bound covers options too.
+        Honest scope of THESE assertions: bytes+mtime prove never WRITTEN;
+        the stronger "clean out-of-scope file is never even read" claim
+        rides the pure-FILENAME months bound and is pinned by the census
+        call-shape spy + the read-spy scanner unit tests, not here."""
         dest = _seed_option_tree_foreign(
             tmp_lake,
             home_ts=datetime(2022, 6, 15, 4, 16, tzinfo=UTC),

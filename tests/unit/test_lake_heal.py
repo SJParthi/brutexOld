@@ -2707,6 +2707,133 @@ class TestQuarantineRootCollision:
         assert second_image.read_bytes() != first_bytes
 
 
+class TestQuarantineSymlinkContainment:
+    """Round-17 fold (refuter-confirmed MINOR): the quarantine BEFORE-image
+    write was the ONE heal-side mutation outside the rounds-2/4/6 symlink-
+    containment program — ``<lake>/.quarantine`` pre-planted as a symlink
+    (the round-2 V1 capability class) sent every batch's forensic
+    before-image OUTSIDE the lake root before the in-lake source was
+    rewritten/unlinked, voiding the "the quarantine copy IS the forensic
+    before-image" guarantee. ``heal_findings`` now refuses the WHOLE batch
+    untouched at batch start, and the ``-NN`` serial loop also serials past
+    a DANGLING symlink at the stamp path (``exists()`` alone missed it)."""
+
+    def test_symlinked_quarantine_root_refuses_whole_batch_untouched(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        dest = _dest(lake)
+        _poison(dest, [(_ts(1), 100.0, 10), (_ts(1), 100.0, 10)])
+        opt_dest = _poison_option_lake(lake)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (lake / ".quarantine").symlink_to(outside, target_is_directory=True)
+        bars_bytes = dest.read_bytes()
+        opt_bytes = opt_dest.read_bytes()
+        audit = _FakeAudit()
+        reports: list[HealReport] = []
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2  # one bars dup + one option dup
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned + scan.option_files_scanned,
+                mode="auto",
+                audit=audit,
+                on_report=reports.append,
+                recall=False,
+                now=_now,
+            )
+        # The WHOLE batch refused: every finding an error, zero mutation.
+        assert report.healed == 0
+        assert report.skipped == 0
+        assert report.errors == 2
+        assert report.findings == 2
+        assert report.actions == ()
+        assert report.quarantine_root is None
+        assert dest.read_bytes() == bars_bytes  # pre-fix: healed + copied out
+        assert opt_dest.read_bytes() == opt_bytes
+        assert list(outside.rglob("*")) == []  # nothing landed outside the lake
+        assert (lake / ".quarantine").is_symlink()  # the link left in place
+        (refusal,) = _events(logs, "lake_heal.quarantine_symlink_refused")
+        assert refusal["quarantine"] == str(lake / ".quarantine")
+        assert refusal["findings"] == 2
+        assert reports == [report]  # the alert seam still fired
+        (line,) = audit.lines
+        assert line[0] == AUDIT_HEAL_BATCH
+        payload = line[2]
+        assert payload is not None
+        assert payload["refused_quarantine_symlink"] is True
+        assert payload["errors"] == 2
+        # errors > 0 ⇒ the L3 sentinel is never stamped — next boot re-attempts.
+        assert lake_heal._sentinel_skip_reason(report) == "heal_errors"
+        # A re-run refuses identically with NO seams wired (idempotent, and
+        # the refusal never requires an on_report/audit consumer).
+        again = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned + scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert again.errors == 2
+        assert again.healed == 0
+        assert dest.read_bytes() == bars_bytes
+        assert list(outside.rglob("*")) == []
+
+    def test_zero_finding_batch_with_symlinked_quarantine_not_refused(self, tmp_path: Path) -> None:
+        """The ``ordered`` gate pinned: a CLEAN batch never writes a
+        before-image, so a pre-existing ``.quarantine`` symlink does not turn
+        a clean sweep into a refusal (the sentinel may still stamp)."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        (lake / ".quarantine").symlink_to(tmp_path / "elsewhere")
+        scan = scan_lake_invariants(lake)
+        assert scan.findings == ()
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.errors == 0
+        assert report.findings == 0
+        assert _events(logs, "lake_heal.quarantine_symlink_refused") == []
+        assert lake_heal._sentinel_skip_reason(report) is None
+
+    def test_dangling_symlink_at_stamp_dir_serialed_past(self, tmp_path: Path) -> None:
+        """A DANGLING symlink pre-planted at ``.quarantine/<stamp>`` reads
+        ``exists() == False``, so the pre-fix serial loop picked it and the
+        batch's before-images were written THROUGH the link; the
+        ``is_symlink()`` arm now serials past it to ``<stamp>-01``."""
+        lake = tmp_path / "lake"
+        dest = _dest(lake)
+        _poison(dest, [(_ts(1), 100.0, 10), (_ts(1), 100.0, 10)])
+        (lake / ".quarantine").mkdir(parents=True)
+        planted = lake / ".quarantine" / _QUARANTINE_TS
+        target = tmp_path / "link-target-never-created"
+        planted.symlink_to(target)
+        assert not planted.exists()  # dangling — the exists() arm alone misses it
+        scan = scan_lake_invariants(lake)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1
+        assert report.quarantine_root == str(lake / ".quarantine" / f"{_QUARANTINE_TS}-01")
+        image = lake / ".quarantine" / f"{_QUARANTINE_TS}-01" / dest.relative_to(lake)
+        assert image.exists()
+        assert planted.is_symlink()  # untouched
+        assert not target.exists()  # never written through
+
+
 # ── heal order + idempotent re-run + failure envelopes ─────────────────────
 
 
@@ -3658,6 +3785,10 @@ class TestLakeContentToken:
             skipped_token = lake_content_token(lake)  # pre-fix: raises
         (skip,) = _events(logs, "lake_heal.token_stat_skipped")
         assert skip["path"] == repr(str(june))
+        # Round-17: error= joins the escaped-payload convention (repr()'d) —
+        # belt-and-braces here, since CPython's OSError.__str__ already
+        # repr()s its filename component.
+        assert skip["error"] == repr(str(FileNotFoundError(2, "raced away", str(june))))
         monkeypatch.undo()
         june.unlink()
         assert lake_content_token(lake) == skipped_token

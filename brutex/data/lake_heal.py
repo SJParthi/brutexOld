@@ -24,7 +24,15 @@ flags, per the operator's default-AUTO-ON decision.
 **Safety rails:** a batch that would rewrite more than
 :data:`MASS_HEAL_FRACTION` of ≥ :data:`MASS_HEAL_MIN_FILES` scanned files is
 REFUSED (the ``sweep_heal`` C7 twin — a scanner bug / mount mix-up must never
-machine-rewrite half a lake); :class:`~brutex.data.errors.LakeWriteHalt`
+machine-rewrite half a lake); a SYMLINKED ``<lake>/.quarantine`` refuses the
+whole batch untouched (round-17, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 — the
+quarantine BEFORE-image write is a heal-side mutation too, so it must never
+follow a pre-planted link outside the lake root; every finding counts an
+error so the L3 sentinel never stamps and the next boot re-attempts; a
+DANGLING symlink at the stamp dir is serialed past like an existing dir;
+honest envelope: a probe→write swap inside ONE batch is the same TOCTOU
+class as the same-second cross-process race below — not claimed closed);
+:class:`~brutex.data.errors.LakeWriteHalt`
 propagates untouched (disk-full/OOM = pull-wide stop); every other per-finding
 failure is isolated (counted ``errors``, logged, the batch continues).
 Quarantined originals are NEVER auto-deleted — restore = stop pulls, copy the
@@ -1346,7 +1354,10 @@ def heal_findings(
     — sorted by path within each class. Observe mode short-circuits with ZERO
     file mutation of any kind (no quarantine dir, no locks, no catalog writes,
     no stats bump — byte-pinned); the mass-heal rail refuses a
-    ``≥ MASS_HEAL_MIN_FILES ∧ > MASS_HEAL_FRACTION`` batch untouched. Each
+    ``≥ MASS_HEAL_MIN_FILES ∧ > MASS_HEAL_FRACTION`` batch untouched; a
+    SYMLINKED ``<lake>/.quarantine`` refuses the whole batch untouched too
+    (round-17 — the before-image write must never land outside the lake; a
+    dangling symlink at the stamp dir is serialed past). Each
     finding heals in per-finding isolation (a vanished/corrupt file / lock
     timeout counts ``errors`` and the batch continues);
     :class:`~brutex.data.errors.LakeWriteHalt` propagates untouched. After the
@@ -1449,10 +1460,61 @@ def heal_findings(
         if on_report is not None:
             on_report(report)
         return report
+    quarantine_base = lake_root / QUARANTINE_DIRNAME
+    if ordered and quarantine_base.is_symlink():
+        # Round-17 fold (refuter-confirmed MINOR): the quarantine BEFORE-image
+        # write was the ONE heal-side mutation outside the rounds-2/4/6
+        # containment program — ``.quarantine`` pre-planted as a symlink (the
+        # same lake-write capability class as the round-2 V1 symlinked-
+        # options-root vector) sent every batch's forensic before-image
+        # OUTSIDE the lake root BEFORE the in-lake source was rewritten /
+        # unlinked (and ``atomic_write_via``'s ``os.replace`` could clobber
+        # files under the link target) — silently voiding the "the quarantine
+        # copy IS the forensic before-image" guarantee that justifies the
+        # options no-raw_hash decision. Refuse the WHOLE batch untouched
+        # (zero mutation of any kind); every finding counts as an error so
+        # the L3 sentinel is never stamped (``heal_errors``) and the next
+        # boot re-attempts once the operator removes the link. The path is
+        # logged raw — lake root + a fixed literal, operator-controlled, no
+        # vendor component (the options-ROOT skip convention). Honest
+        # envelope: a swap AFTER this probe (inside one batch) is the same
+        # sub-call TOCTOU class as the documented same-second cross-process
+        # quarantine race — not claimed closed.
+        _LOG.error(
+            "lake_heal.quarantine_symlink_refused",
+            quarantine=str(quarantine_base),
+            findings=len(ordered),
+        )
+        report = HealReport(
+            mode=resolved,
+            findings=len(ordered),
+            healed=0,
+            skipped=0,
+            errors=len(ordered),
+            refused_mass_heal=False,
+            actions=(),
+            quarantine_root=None,
+            recall=None,
+        )
+        _audit_append(
+            audit,
+            action=AUDIT_HEAL_BATCH,
+            subject="lake-heal",
+            payload={
+                "mode": resolved,
+                "findings": len(ordered),
+                "healed": 0,
+                "errors": len(ordered),
+                "refused_quarantine_symlink": True,
+            },
+        )
+        if on_report is not None:
+            on_report(report)
+        return report
     stamp = now_fn().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    quarantine_root = lake_root / QUARANTINE_DIRNAME / stamp
+    quarantine_root = quarantine_base / stamp
     serial = 0
-    while quarantine_root.exists():
+    while quarantine_root.exists() or quarantine_root.is_symlink():
         # Round-5 NIT fold (pre-existing DEC-LAKE-HEAL-001 machinery): the
         # stamp is second-granular, so a SECOND batch in the same second
         # reused the dir and its atomic quarantine copy OVERWROTE the earlier
@@ -1460,11 +1522,15 @@ def heal_findings(
         # forensic original the quarantine exists to preserve. A ``-NN``
         # serial picks the first unused dir; the probe only fires when the
         # earlier batch actually quarantined something (a no-op batch never
-        # creates its dir). Best-effort: an exists()-then-use race between
-        # two same-second PROCESSES remains theoretically possible — honest
-        # envelope, not claimed closed.
+        # creates its dir). The ``is_symlink()`` arm (round-17): a DANGLING
+        # symlink pre-planted at the stamp path reads ``exists() == False``
+        # yet would redirect the batch's before-images through the link —
+        # serialed past like an existing dir (an EXISTING-target symlink
+        # already takes the ``exists()`` arm). Best-effort: an
+        # exists()-then-use race between two same-second PROCESSES remains
+        # theoretically possible — honest envelope, not claimed closed.
         serial += 1
-        quarantine_root = lake_root / QUARANTINE_DIRNAME / f"{stamp}-{serial:02d}"
+        quarantine_root = quarantine_base / f"{stamp}-{serial:02d}"
     state = _BatchState(
         lake_root=lake_root,
         quarantine_root=quarantine_root,
@@ -1720,7 +1786,15 @@ def lake_content_token(lake_root: Path) -> str:
             except OSError as exc:
                 # Deleted between glob and stat — the same lake content minus
                 # the vanished entry hashes identically (deterministic skip).
-                _LOG.warning("lake_heal.token_stat_skipped", path=repr(str(path)), error=str(exc))
+                # error= repr()'d for the rounds-8/9/16/17 escaped-payload
+                # convention — belt-and-braces here: CPython's OSError.__str__
+                # already repr()s its filename (refuter-verified, so THIS site
+                # was not a demonstrated forge channel), but the message is
+                # vendor-path-derived like the options scan_skip siblings
+                # round-17 escaped, so it joins the convention.
+                _LOG.warning(
+                    "lake_heal.token_stat_skipped", path=repr(str(path)), error=repr(str(exc))
+                )
                 continue
             lines.append(
                 f"{path.relative_to(lake_root).as_posix()}|{stat.st_size}|{stat.st_mtime_ns}"

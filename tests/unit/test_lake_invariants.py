@@ -1292,6 +1292,69 @@ class TestOptionForeignScan:
         assert [e["path"] for e in sym] == [repr(str(june))] * 2
         assert all("\x1b" not in str(e["path"]) for e in [*sym, *skips])
 
+    def test_option_scan_skip_error_payload_repr_guarded(self, tmp_path: Path) -> None:
+        """Round-17 log-injection regression (refuter-confirmed MINOR): the
+        option-tree ``scan_skip`` ERROR payload embeds the RAW
+        vendor-influenceable path too — a polars ``ColumnNotFoundError``
+        dumps the resolved plan (``Parquet SCAN [<path>]``) and a
+        polars-raised ``FileNotFoundError`` interpolates the path un-repr'd
+        (both empirically verified) — so a newline/ESC series name forged
+        log lines through ``error=`` while the paired ``path=`` field was
+        already escaped (the round-16 ``partition_error`` channel). The
+        ``error=`` field now rides ``repr()`` at the glob-loop site."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        bad = tmp_path / "options" / "SER\x1b\nIES" / "2024-06.parquet"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        # A VALID parquet with neither key column: the 2-key-column read
+        # raises ColumnNotFoundError whose message embeds the raw path.
+        pq.write_table(pa.table({"x": pa.array([1], type=pa.int64())}), bad)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+        assert report.option_files_skipped == 1
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        error = skip["error"]
+        assert isinstance(error, str)
+        # Pre-fix: the raw ESC + newline from the path rode into the payload.
+        assert "\x1b" not in error
+        assert "\n" not in error
+        # The path IS in the message — escaped by repr(), never dropped.
+        assert "\\x1b" in error
+
+    def test_canonical_sibling_scan_skip_error_payload_repr_guarded(self, tmp_path: Path) -> None:
+        """The round-17 twin for the TARGETED canonical-sibling read
+        (``_canonical_option_keys``): an unreadable July sibling inside a
+        newline/ESC-named series dir renders its read-error message
+        ``repr()``-escaped on BOTH ``scan_skip`` emissions (the glob loop's
+        and the targeted read's), and the finding still abstains honestly."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        series = tmp_path / "options" / "SER\x1b\nIES2"
+        _plant_option_raw(
+            series / "2024-06.parquet", [("CE", _ts(1)), ("CE", _ts(2, month=7, day=1))]
+        )
+        july = series / "2024-07.parquet"
+        # Keyless valid parquet — the sibling read fails with the raw path
+        # embedded in the ColumnNotFoundError plan dump.
+        pq.write_table(pa.table({"x": pa.array([1], type=pa.int64())}), july)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        assert len(foreigns) == 1
+        assert foreigns[0].overlap_rows is None  # honest abstain preserved
+        skips = _events(logs, "lake.invariant.scan_skip")
+        # One from the main glob loop, one from the targeted sibling read.
+        assert [s["path"] for s in skips] == [repr(str(july))] * 2
+        for skip in skips:
+            error = skip["error"]
+            assert isinstance(error, str)
+            assert "\x1b" not in error
+            assert "\n" not in error
+            assert "\\x1b" in error
+
 
 class TestOptionKeyDtypeGate:
     """Round-12 fold: non-hashable option key dtypes are gated BEFORE classification.
