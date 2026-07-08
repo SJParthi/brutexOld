@@ -260,6 +260,15 @@ class SupervisedGridSummary:
         DELIBERATELY not recorded, so a resume/cache re-runs it (the sweep_heal
         "C5" lesson — a failed tuple must never be permanently skipped). NOT
         counted as run, skipped-no-bars, cache, or resume.
+    tuples_quarantined_prior
+        Tuples a PRIOR parallel run's broken worker pool QUARANTINED (a worker
+        OOM — DEC-SWEEP-STALL-OOM-GUARDS-001) that THIS run therefore skipped.
+        Recorded in the durable quarantine sidecar
+        (:func:`brutex.engine.sweep_parallel.quarantine_sidecar_path`) and counted
+        DISTINCTLY — never folded into ``skipped_cache`` — so the completeness
+        hole is always visible; delete the sidecar entries (after relieving the
+        memory pressure) and resume to genuinely recompute them. Always ``0`` on
+        the sequential path (only the parallel driver quarantines).
     """
 
     sweep_id: str
@@ -275,6 +284,7 @@ class SupervisedGridSummary:
     ranked: int
     persisted: int
     tuples_failed: int
+    tuples_quarantined_prior: int = 0
 
 
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
