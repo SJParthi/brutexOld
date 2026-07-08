@@ -23,6 +23,7 @@ tests are deliberately wheel-free.
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from dataclasses import FrozenInstanceError
 from datetime import date
@@ -464,6 +465,90 @@ class TestRunGreeksEnrichPass:
             )
         assert outcome.ok is False
         assert [(m, e) for m, e, _ in recorder.calls] == [("error", "fno.greeks_enrich.error")]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# run_greeks_enrich_pass — the shared Greeks-overlay freshness marker
+# (DEC-GREEKS-BULK-REENRICH-001 fix round 8, refuter-confirmed)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRevisionMarkerTouch:
+    """A bar-writing pass moves the cross-process ``lake_revision`` token.
+
+    Refuter-confirmed (fix round 8): the merge-absorbed
+    DEC-CLI-GREEKS-ENRICH-001 pass — ``brutex enrich-greeks`` + the ``brutex
+    fetch`` post-ledger tail, both through :func:`run_greeks_enrich_pass` —
+    rewrote option iv/delta overlays while EVERY component of the composite
+    ``lake_revision`` token (ledger stat | sweeps digest | Greeks marker)
+    stayed byte-identical, so a concurrently-running dashboard kept serving
+    the PRE-enrich Greeks from its generation-keyed caches indefinitely — the
+    exact staleness class fix round 2 closed for the sibling ``brutex
+    greeks-backfill``. The pass now touches the SHARED marker
+    (:mod:`brutex.data.greeks_revision`) whenever it wrote bars.
+    """
+
+    def test_bar_writing_pass_touches_the_marker_and_moves_the_lake_revision_token(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("trading_core")
+        from brutex.dashboard.lake_revision import lake_revision
+        from brutex.data import greeks_enrich as ge
+        from brutex.data.greeks_revision import revision_marker_path
+
+        monkeypatch.setattr(ge, "resolve_risk_free_source", object)
+        monkeypatch.setattr(
+            ge,
+            "enrich_greeks_for_targets",
+            lambda **_kwargs: _report(enriched=1, bars_written=3, bars_solved=3),
+        )
+        before = lake_revision(tmp_path)
+        outcome = run_greeks_enrich_pass(build_targets=_no_targets, lake_root=tmp_path)
+        assert outcome.ok is True
+        marker = revision_marker_path(tmp_path)
+        assert marker.is_file()
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        assert payload["writer"] == "greeks_enrich_pass"
+        assert payload["bars_written"] == 3
+        after = lake_revision(tmp_path)
+        assert before is not None and after is not None
+        assert after != before  # the dashboard probe sees the write on its next poll
+
+    def test_zero_write_pass_fabricates_no_freshness_signal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An all-reused / no-bars pass (``bars_written == 0``) leaves NO marker."""
+        pytest.importorskip("trading_core")
+        from brutex.data import greeks_enrich as ge
+        from brutex.data.greeks_revision import revision_marker_path
+
+        monkeypatch.setattr(ge, "resolve_risk_free_source", object)
+        monkeypatch.setattr(
+            ge, "enrich_greeks_for_targets", lambda **_kwargs: _report(already_current=2)
+        )
+        outcome = run_greeks_enrich_pass(build_targets=_no_targets, lake_root=tmp_path)
+        assert outcome.ok is True
+        assert not revision_marker_path(tmp_path).exists()
+
+    def test_marker_failure_is_best_effort_and_never_flips_a_completed_pass(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A stray FILE at the sidecar dir warns ONCE and the pass stays ok=True
+        (the marker is a freshness signal, never data — the backfill posture)."""
+        pytest.importorskip("trading_core")
+        from brutex.data import greeks_enrich as ge
+        from brutex.data.greeks_revision import GREEKS_SIDECAR_DIR_NAME
+
+        monkeypatch.setattr(ge, "resolve_risk_free_source", object)
+        monkeypatch.setattr(
+            ge, "enrich_greeks_for_targets", lambda **_kwargs: _report(bars_written=5)
+        )
+        (tmp_path / GREEKS_SIDECAR_DIR_NAME).write_text("stray", encoding="utf-8")
+        with capture_logs() as logs:
+            outcome = run_greeks_enrich_pass(build_targets=_no_targets, lake_root=tmp_path)
+        assert outcome == GreeksEnrichOutcome(ok=True, error=None, errored_targets=0)
+        assert len(_events(logs, "fno.greeks_enrich.revision_marker_failed")) == 1
+        assert _events(logs, "fno.greeks_enrich.error") == []
 
 
 # ────────────────────────────────────────────────────────────────────────

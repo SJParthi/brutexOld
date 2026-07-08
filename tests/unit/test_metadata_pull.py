@@ -1688,13 +1688,28 @@ def _wedge_registry(
     return proxy
 
 
-def _wait_registry_healed(registry: RegistryStore, *, timeout: float = 10.0) -> None:
-    """Poll the wedge latch until the zombie completes (never hangs the suite)."""
+def _wait_registry_healed(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, *, timeout: float = 10.0
+) -> None:
+    """Poll the wedge latch until the zombie completes, then restore the deadline.
+
+    The ``_wedge_registry`` 0.2 s deadline shrink exists ONLY to trip the wedge
+    deterministically in the test's FIRST phase. The guard re-reads the env on
+    EVERY write batch (``resolve_store_write_deadline_seconds``), so leaving the
+    shrink in force for the RECOVERY pull lets a healthy-but-contended DuckDB
+    write (> 0.2 s on a loaded 2-core shared CI runner) fabricate a genuine
+    deferral in run 2 and fail the ``store_write_deferrals == 0`` recovery pin —
+    the 2026-07-08 CI flake (run 28924020943). Restoring the generous 90 s
+    default keeps every tooth: all wedge/defer assertions already ran under
+    0.2 s, and the recovery pin now asserts the PRODUCTION posture (a healed
+    volume defers nothing) instead of racing an artificial micro-deadline.
+    """
     deadline_at = time.monotonic() + timeout
     while registry._write_guard.wedged:
         if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
             pytest.fail("registry did not self-heal within the watchdog bound")
         time.sleep(0.005)
+    monkeypatch.delenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S")
 
 
 def test_phase1_expiry_write_defer_completes_pull_and_defers_cell(
@@ -1757,11 +1772,8 @@ def test_phase1_expiry_write_defer_completes_pull_and_defers_cell(
     finally:
         proxy.gate.set()
     # RE-ATTEMPT ON THE NEXT PULL (the #999 recovery pin): the volume heals, the
-    # failed cell is re-pulled, and everything lands + settles. Restore the
-    # generous default deadline first — the 0.2 s wedge deadline was for pull 1
-    # ONLY; a loaded CI runner must never spuriously defer the healed re-pull.
-    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
-    _wait_registry_healed(registry)
+    # failed cell is re-pulled, and everything lands + settles.
+    _wait_registry_healed(registry, monkeypatch)
     report2 = pull_expiries_contracts(
         [_instrument("NIFTY")],
         registry=registry,
@@ -1831,10 +1843,7 @@ def test_phase2_contract_write_defer_fails_job_latches_sibling_and_repulls(
         proxy.gate.set()
     # RE-ATTEMPT: the healed registry re-pulls the un-persisted job (the breached
     # job's zombie batch landed late + idempotently — harmless by construction).
-    # Restore the generous default deadline first — the 0.2 s wedge deadline was
-    # for pull 1 ONLY; a loaded CI runner must never spuriously defer the re-pull.
-    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
-    _wait_registry_healed(registry)
+    _wait_registry_healed(registry, monkeypatch)
     report2 = pull_expiries_contracts(
         [_instrument("NIFTY")],
         registry=registry,

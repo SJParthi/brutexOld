@@ -534,6 +534,7 @@ class BackgroundPullJob:
         total: int,
         detail: str = "",
         ledger_synced: bool = False,
+        cross_process_lock: bool = True,
         on_success: SuccessHook | None = None,
         on_finally: FinallyHook | None = None,
         job_kind: str = JOB_KIND_PULL,
@@ -549,6 +550,17 @@ class BackgroundPullJob:
 
         Single-flight: returns ``True`` and starts the job when idle; returns
         ``False`` (a no-op) when a pull is already running. O(1).
+
+        When *cross_process_lock* is ``False`` the cross-process guards (layer 2
+        below) are SKIPPED for this run — the sanctioned use is a ZERO-WRITE run
+        (the dashboard's dry-run Greeks-backfill scan,
+        DEC-GREEKS-BULK-REENRICH-001 fix round 2): a read-only report has no
+        writes to protect and no vendor calls to rate-guard, so it must never
+        exclude a REAL pull on the same lake for its whole O(files) scan (the
+        CLI ``--dry-run`` lock-free posture, kept behaviourally equal across the
+        two surfaces). The IN-process single-flight (layer 1) still applies — a
+        second click on the same job is refused either way. Default ``True``
+        keeps every existing caller byte-identical.
 
         Two single-flight layers (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001):
 
@@ -653,27 +665,36 @@ class BackgroundPullJob:
         # A resolver returning None DISABLES the guard (dry-run / test). Done outside
         # ``self._lock`` — it does (fast, non-blocking) filesystem I/O, and the flag is
         # already claimed so no other start can race in.
-        if not self._acquire_singleflight():
-            with self._lock:
-                # Roll back the in-process flag we just claimed. No identity gate is needed
-                # here (unlike _run / _on_hung): _acquire_singleflight runs SYNCHRONOUSLY in
-                # this same start() call and never spawns / publishes a worker, so no other
-                # run can have superseded this one's watchdog between claiming the flag and
-                # here — this run unconditionally still owns it. ALSO RESTORE the pre-claim
-                # identity state captured above (review fold NIT-2, superseding the fix
-                # round's unconditional wipe to ``(None, "")``): the refused run never
-                # existed, so ``job.pull_id`` must not report a phantom id, a stale timer
-                # edge must never stamp one, AND a PRIOR finished run's deliberately
-                # RETAINED identity token (the ``pull_id`` property contract; the
-                # ``_on_hung`` / ``_beat`` between-runs gates key on it) must survive the
-                # refusal untouched — including its once-per-run WARN throttle and its
-                # empty-ambient tally.
-                self._running = False
-                self._watchdog = prior_watchdog
-                self._pull_id = prior_pull_id
-                self._foreign_beat_warned = prior_foreign_beat_warned
-                self._empty_ambient_beats = prior_empty_ambient_beats
-            return False
+        if cross_process_lock:
+            if not self._acquire_singleflight():
+                with self._lock:
+                    # Roll back the in-process flag we just claimed. No identity gate is needed
+                    # here (unlike _run / _on_hung): _acquire_singleflight runs SYNCHRONOUSLY in
+                    # this same start() call and never spawns / publishes a worker, so no other
+                    # run can have superseded this one's watchdog between claiming the flag and
+                    # here — this run unconditionally still owns it. ALSO RESTORE the pre-claim
+                    # identity state captured above (review fold NIT-2, superseding the fix
+                    # round's unconditional wipe to ``(None, "")``): the refused run never
+                    # existed, so ``job.pull_id`` must not report a phantom id, a stale timer
+                    # edge must never stamp one, AND a PRIOR finished run's deliberately
+                    # RETAINED identity token (the ``pull_id`` property contract; the
+                    # ``_on_hung`` / ``_beat`` between-runs gates key on it) must survive the
+                    # refusal untouched — including its once-per-run WARN throttle and its
+                    # empty-ambient tally.
+                    self._running = False
+                    self._watchdog = prior_watchdog
+                    self._pull_id = prior_pull_id
+                    self._foreign_beat_warned = prior_foreign_beat_warned
+                    self._empty_ambient_beats = prior_empty_ambient_beats
+                return False
+        else:
+            # ZERO-WRITE run (see the docstring): neither cross-process lock is
+            # taken, so a concurrent REAL pull on the same lake is unaffected.
+            # Both guard slots are pinned to None so _run's finally release is a
+            # no-op for this run (they are already None between runs; this makes
+            # the skip explicit rather than incidental).
+            self._singleflight = None
+            self._account_singleflight = None
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
         self._progress.start(total=total, detail=detail)
