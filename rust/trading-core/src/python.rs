@@ -2745,4 +2745,123 @@ mod tests {
             prop_assert!(mask.is_ok());
         }
     }
+
+    // ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597): wrapper delegation-parity
+    // kills — the LINKABLE subset. MEASURED boundary (rust-lld, 2026-07-07): a
+    // `#[pyfunction]`/`#[pymethods]` wrapper whose body constructs a `PyErr`
+    // (`.map_err(PyValueError::new_err)` / a `PyResult` reject arm) cannot be
+    // REFERENCED by any test in this crate — under pyo3's `extension-module`
+    // the libpython symbols (`PyExc_ValueError`, `PyUnicode_FromStringAndSize`,
+    // …) are unresolved at test-link time, so merely calling such a wrapper
+    // fails the link. No mutants.toml exclusion is needed for them, because
+    // cargo-mutants 27.1.0 does not resolve the `PyResult` alias to `Result`
+    // and fabricates only non-compiling replacements (`PyResult::new(…)` /
+    // `::from(…)` / `::from_iter([…])` — every one of the 229 such mutants is
+    // UNVIABLE; verified 8/8 on `py_greeks` + `_trading_core`), so none can
+    // ever be MISSED. Their logic is gated through the `*_impl`/`check_*` twin
+    // tests above and the glue end-to-end by the Python wheel suites in ci.yml.
+    // The wrappers below have PLAIN return types (no PyErr construction in the
+    // call graph), ARE Rust-callable, and DO generate viable constant-value
+    // replacement mutants — each output is pinned to its core twin on values
+    // OUTSIDE every cargo-mutants replacement constant (never 0, 1, -1, empty,
+    // or default).
+
+    #[test]
+    fn wrapper_ema_step_delegates_byte_identically() {
+        // Kills `py_ema_step -> f64 with 0.0 | 1.0 | -1.0`.
+        let step = py_ema_step(0.5, 10.0, 20.0);
+        assert_eq!(step, ema_step(0.5, 10.0, 20.0));
+        assert_eq!(step, 15.0);
+    }
+
+    #[test]
+    fn wrapper_resolve_near_month_delegates_byte_identically() {
+        // Kills `py_resolve_near_month -> i64 with 0 | 1 | -1`: the on-expiry-day
+        // resolve returns the expiring candidate ordinal itself, and the rolled
+        // case returns the next-month ordinal — neither is a small constant.
+        let on_expiry = py_resolve_near_month(739_797, 739_797, 739_825);
+        assert_eq!(
+            on_expiry,
+            crate::indicators::metadata::resolve_near_month(739_797, 739_797, 739_825)
+        );
+        assert_eq!(on_expiry, 739_797);
+        let rolled = py_resolve_near_month(739_798, 739_797, 739_825);
+        assert_eq!(
+            rolled,
+            crate::indicators::metadata::resolve_near_month(739_798, 739_797, 739_825)
+        );
+        assert_eq!(rolled, 739_825);
+    }
+
+    #[test]
+    fn wrapper_vwap_state_plain_surface_delegates_byte_identically() {
+        // `PyVwapState::new` (returns Self) and `current` (returns Option<i64>)
+        // are PyErr-free and Rust-callable; `update` returns `PyResult` and is
+        // link-untestable (see the section header), so both states are warmed
+        // through the SAME native core math and `current` is pinned. Kills
+        // `current -> None | Some(0) | Some(1) | Some(-1)`.
+        let mut py_state = PyVwapState::new();
+        let mut core = CoreVwapState::new();
+        assert_eq!(
+            py_state.inner.update(10_000, 100, false, 1, 1, 34_200),
+            core.update(10_000, 100, false, 1, 1, 34_200)
+        );
+        assert_eq!(
+            py_state.inner.update(20_000, 300, false, 1, 1, 34_260),
+            core.update(20_000, 300, false, 1, 1, 34_260)
+        );
+        // (10_000·100 + 20_000·300) / 400 = 17_500 — outside every constant.
+        assert_eq!(py_state.current(), core.current());
+        assert_eq!(py_state.current(), Some(17_500));
+    }
+
+    #[test]
+    fn wrapper_market_structure_update_delegates_byte_identically() {
+        // `PyMarketStructureState::update` returns a PLAIN 4-bool tuple and is
+        // Rust-callable (`new` returns PyResult — the handle is built via the
+        // module-private struct literal instead). The exact core
+        // `bullish_bos_after_confirmed_swing_high` sequence: pre-break updates
+        // return (false, false, false, false) and the break bar returns
+        // (true, false, false, false) — together they kill every constant
+        // 4-bool tuple replacement of `update`.
+        let mut py_state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        let mut core = CoreMarketStructureState::new(2);
+        let bars = [
+            (100, 90, 95),
+            (110, 100, 105),
+            (130, 120, 125), // swing-high candidate
+            (115, 105, 110),
+            (112, 102, 108), // confirms the swing high (130)
+        ];
+        let mut last = (false, false, false, false);
+        for (h, l, c) in bars {
+            last = py_state.update(h, l, c);
+            let sig = core.update(h, l, c);
+            assert_eq!(
+                last,
+                (
+                    sig.bos_bullish,
+                    sig.bos_bearish,
+                    sig.choch_bullish,
+                    sig.choch_bearish
+                )
+            );
+        }
+        assert_eq!(last, (false, false, false, false));
+        // Close 135 breaks the confirmed swing high 130 → bullish BOS.
+        let broke = py_state.update(140, 120, 135);
+        let sig = core.update(140, 120, 135);
+        assert_eq!(
+            broke,
+            (
+                sig.bos_bullish,
+                sig.bos_bearish,
+                sig.choch_bullish,
+                sig.choch_bearish
+            )
+        );
+        assert_eq!(broke, (true, false, false, false));
+    }
 }
