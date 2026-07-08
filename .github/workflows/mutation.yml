@@ -221,14 +221,31 @@ jobs:
           #    with 84 pending (83 survived + 1 suspicious-timing FIFO-hang
           #    classification); the TestMutationHardening pins (literal /
           #    exact-message / boundary / log-event-name kills incl. an
-          #    os.open O_NONBLOCK flag spy) + documented per-line in-module
-          #    `# pragma: no mutate` markers on the provably-equivalent
-          #    residue (fd sentinels, discarded-message field names, the
-          #    bounded-read off-by-K) drove the final enumeration to 456
-          #    mutants / ZERO survived / ZERO suspicious. The dedicated file
-          #    runs in seconds (same focused-runner subset argument as the
-          #    rest of the loop) and TestMutationWorkflowWiring fails the
-          #    unit suite if this pair is ever dropped.
+          #    os.open O_NONBLOCK flag spy) drove the round-8 enumeration to
+          #    456 mutants / ZERO survived / ZERO suspicious. ENDGAME round 2
+          #    (DEC-LAKE-STATS-MANIFEST-001, MIGRATION #1543) then PURGED the
+          #    round-8 fd-sentinel / bounded-read / dead-"unknown" line
+          #    pragmas — the refuter proved they suppressed killable,
+          #    NON-equivalent mutants, so calling that residue
+          #    "provably-equivalent" here was an overstatement — by
+          #    restructuring the lines into fully killable shapes (union
+          #    return type, owned-flag fd handoff + os.close spy — NOT an
+          #    fd: int|None sentinel, whose annotation-only `int & None`
+          #    mutant is runtime-unevaluated [PEP 526] and provably
+          #    survives, as the first re-enumeration itself demonstrated —
+          #    cap-read + 1-byte over-cap probe + inside-the-JSON at-cap
+          #    boundary test); re-enumeration measured 462 enumerated
+          #    (196 machine-verified killed in-session, 0 survivors, before
+          #    the session budget stopped the run — THIS weekly gate
+          #    enforces the full zero-survivor law on every scheduled run;
+          #    every restructured-line mutant was also hand-applied and
+          #    KILLED)
+          #    with the ONLY remaining pragmas the discarded-message
+          #    `field=` names (genuinely equivalent).
+          #    The dedicated file runs in seconds (same focused-runner
+          #    subset argument as the rest of the loop) and
+          #    TestMutationWorkflowWiring fails the unit suite if this pair
+          #    is ever dropped.
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py" \

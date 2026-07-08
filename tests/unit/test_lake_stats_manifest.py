@@ -712,9 +712,14 @@ class TestMutationHardening:
     surviving mutants, so every behavioural literal the module persists or
     exposes — kind tags, env-var names, the shard-path digest recipe, the
     canonical render, error messages, boundary comparisons, log event
-    names — is pinned EXACTLY here. Provably-equivalent mutants (fd
-    sentinels, discarded-message field names, the bounded-read off-by-K)
-    carry documented ``# pragma: no mutate`` markers in the module instead.
+    names — is pinned EXACTLY here. The only remaining provably-equivalent
+    mutants (the ``field=`` names feeding messages the loader's ``except``
+    clauses DISCARD) carry documented ``# pragma: no mutate`` markers in the
+    module instead; endgame round 2 removed the round-8 fd-sentinel /
+    bounded-read / dead-``"unknown"`` pragmas by restructuring their lines
+    into fully killable shapes (see ``test_loader_fd_close_discipline`` +
+    ``test_shard_exactly_at_cap_still_loads`` — several suppressed mutants
+    were NOT equivalent, the refuter-confirmed Golden-Rule-#10 gap).
     Placed BEFORE ``TestStructuralClauses`` so ``pytest -x`` under mutmut
     fails FAST on flag mutants whose only later symptom is a 5 s watchdog
     alarm (a "suspicious"-timing classification, not a clean kill).
@@ -986,19 +991,99 @@ class TestMutationHardening:
             return real_open(path, flags, *args, **kwargs)
 
         monkeypatch.setattr(os, "open", _spy)
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is not None and clause is None
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert isinstance(loaded, lsm.DatasetStats)
         assert seen and all(flags & os.O_NONBLOCK for flags in seen)
 
     def test_shard_exactly_at_cap_still_loads(self, tmp_path: Path) -> None:
         """The oversized guard is STRICTLY greater-than: a shard of exactly
-        ``MAX_SHARD_BYTES`` (valid JSON + trailing-space padding) must load."""
+        ``MAX_SHARD_BYTES`` must load — padded INSIDE the JSON (whitespace
+        before the final ``}``), so the document's LAST byte is the closing
+        brace and any read bound short of the full cap truncates it into a
+        ``parse`` failure. Endgame round 2: the prior trailing-space padding
+        could NOT kill a shortened-read-bound mutant (truncating a trailing
+        space still parses), which is exactly why the round-8 read line
+        needed its ``# pragma: no mutate``; this padding shape makes the
+        boundary a real mutation tooth (the pragma is gone)."""
         shard = _seed_bars(tmp_path)
         body = shard.read_bytes()
-        shard.write_bytes(body + b" " * (lsm.MAX_SHARD_BYTES - len(body)))
+        assert body.endswith(b"}")
+        pad = lsm.MAX_SHARD_BYTES - len(body)
+        shard.write_bytes(body[:-1] + b" " * pad + b"}")
         assert shard.stat().st_size == lsm.MAX_SHARD_BYTES
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert clause is None and stats is not None
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert isinstance(loaded, lsm.DatasetStats)
+
+    def test_loader_fd_close_discipline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fd ownership handoff is a REAL contract, pinned via an
+        ``os.close`` spy (endgame round 2 — kills every mutant of the
+        ``owned`` handoff flag; the round-8 ``fd = -1`` line pragmas used to
+        suppress this surface, and several suppressed mutants were NOT
+        equivalent: a ``+1`` sentinel closes STDOUT on the absent path; a
+        clobbered handoff double-closes a descriptor the ``BufferedReader``
+        already owns — the classic reused-fd corruption bug. The flag is a
+        plain boolean, NOT an ``fd: int | None`` sentinel, because a local
+        annotation is never evaluated at runtime [PEP 526] and its
+        ``int & None`` annotation-only mutant provably SURVIVES — the first
+        endgame-round-2 re-enumeration caught exactly that):
+
+        * ABSENT shard — ``os.open`` raised, nothing was opened, the
+          ``finally`` must close NOTHING;
+        * SERVED shard — ``os.fdopen`` took ownership, the ``finally`` must
+          close NOTHING (the reader closes its own fd internally);
+        * NOT-REGULAR shard (FIFO) — opened but never handed off, the
+          ``finally`` must close EXACTLY the fd ``os.open`` returned.
+        """
+        closed: list[int] = []
+        opened: list[int] = []
+        real_open, real_close = os.open, os.close
+
+        def _open_spy(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            fd = real_open(path, flags, *args, **kwargs)
+            opened.append(fd)
+            return fd
+
+        def _close_spy(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(os, "open", _open_spy)
+        monkeypatch.setattr(os, "close", _close_spy)
+
+        # Absent: no fd exists, so no close may happen.
+        assert lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) == "absent"
+        assert closed == []
+
+        # Served: ownership moved to the BufferedReader — the loader's own
+        # finally must not (double-)close it. The reader's internal close is
+        # C-level, not os.close, so the spy stays silent. (The seeding writer
+        # may legitimately close fds of its own — reset both ledgers so only
+        # the LOADER's behaviour is measured.)
+        shard = _seed_bars(tmp_path)
+        opened.clear()
+        closed.clear()
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert isinstance(loaded, lsm.DatasetStats)
+        assert closed == []
+
+        # Not-regular (FIFO): opened, never handed off — closed exactly once.
+        shard.unlink()
+        os.mkfifo(shard)
+        opened.clear()
+        with _hang_watchdog():
+            result = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert result == "not_regular"
+        assert len(opened) == 1 and closed == opened
+
+    def test_load_shard_stats_corrupt_shard_is_none(self, tmp_path: Path) -> None:
+        """The clause-1-only public loader maps ANY clause to an honest
+        ``None`` — never a truthy sentinel (pins the union-return adapter
+        added in endgame round 2)."""
+        shard = _seed_bars(tmp_path)
+        shard.write_text("{truncated", encoding="utf-8")
+        assert lsm.load_shard_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
 
     def test_loaded_stats_preserve_updated_utc(self, tmp_path: Path) -> None:
         """The observability stamp round-trips verbatim (never re-derived)."""
@@ -1204,17 +1289,17 @@ class TestMutationHardening:
 class TestStructuralClauses:
     """Clause-1 fail-closed matrix — every structural violation individually."""
 
-    def _clause(self, lake: Path, mutate: Any) -> str | None:
+    def _clause(self, lake: Path, mutate: Any) -> str:
         shard = lsm.stats_shard_path(lake, lsm.KIND_BARS, BARS_KEY)
         if mutate is not None:
             _mutate_shard(shard, mutate)
-        stats, clause = lsm._load_shard_with_clause(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None
-        return clause
+        loaded = lsm._load_shard_with_clause(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert isinstance(loaded, str), f"expected a clause name, got {loaded!r}"
+        return loaded
 
     def test_absent(self, tmp_path: Path) -> None:
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "absent"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "absent"
 
     def test_shard_read_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         shard = _seed_bars(tmp_path)
@@ -1226,8 +1311,33 @@ class TestStructuralClauses:
             return real(path, flags, *args, **kwargs)
 
         monkeypatch.setattr(os, "open", _boom)
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "shard_read"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "shard_read"
+
+    def test_failure_after_open_is_shard_read_and_closes_the_fd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ``OSError`` AFTER a successful ``os.open`` (fstat / fdopen /
+        read on the OPEN descriptor) maps to ``shard_read`` via the SECOND
+        handler of the endgame-round-2 owned-flag split (the
+        FileNotFoundError→``absent`` mapping applies only to the ``os.open``
+        itself), and the still-owned descriptor is closed exactly once."""
+        _seed_bars(tmp_path)
+        closed: list[int] = []
+        real_close = os.close
+
+        def _close_spy(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        def _fstat_boom(fd: int) -> os.stat_result:
+            raise PermissionError("fstat denied")
+
+        monkeypatch.setattr(os, "close", _close_spy)
+        monkeypatch.setattr(os, "fstat", _fstat_boom)
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "shard_read"
+        assert len(closed) == 1
 
     def test_fifo_shard_is_fail_closed_not_regular_clause(self, tmp_path: Path) -> None:
         """A FIFO planted at the shard path fails CLOSED as ``not_regular`` —
@@ -1244,8 +1354,8 @@ class TestStructuralClauses:
         shard.unlink()
         os.mkfifo(shard)
         with _hang_watchdog():
-            stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "not_regular"
+            loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "not_regular"
         with _hang_watchdog(), capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["not_regular"]
@@ -1265,8 +1375,8 @@ class TestStructuralClauses:
         shard = _seed_bars(tmp_path)
         shard.write_bytes(shard.read_bytes() + b" " * 4096)
         monkeypatch.setattr(lsm, "MAX_SHARD_BYTES", 1024)
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "oversized"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "oversized"
         with capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["oversized"]
@@ -1275,13 +1385,14 @@ class TestStructuralClauses:
         """End-to-end at the REAL 16 MiB cap: a valid-JSON shard padded to
         ``MAX_SHARD_BYTES + 1`` bytes reads ``oversized``; the loader read at
         most ``MAX_SHARD_BYTES + 1`` bytes by construction (the bound is the
-        read call itself, race-free — not a ``stat`` pre-check)."""
+        read calls themselves — a cap-sized read plus a ONE-byte over-cap
+        probe, race-free — not a ``stat`` pre-check)."""
         shard = _seed_bars(tmp_path)
         body = shard.read_bytes()
         shard.write_bytes(body + b" " * (lsm.MAX_SHARD_BYTES + 1 - len(body)))
         assert shard.stat().st_size == lsm.MAX_SHARD_BYTES + 1
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "oversized"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "oversized"
 
     def test_shard_size_cap_is_pinned(self) -> None:
         """The cap is ~1000× a real ~16 KB shard — a deliberate constant pin."""
@@ -1290,14 +1401,14 @@ class TestStructuralClauses:
     def test_corrupt_json(self, tmp_path: Path) -> None:
         shard = _seed_bars(tmp_path)
         shard.write_text("{truncated", encoding="utf-8")
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "parse"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "parse"
 
     def test_non_object_json(self, tmp_path: Path) -> None:
         shard = _seed_bars(tmp_path)
         shard.write_text("[1, 2]", encoding="utf-8")
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "parse"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "parse"
 
     def test_deep_nested_json_is_parse_clause_not_a_crash(self, tmp_path: Path) -> None:
         """A shard replaced with deeply-nested JSON raises ``RecursionError``
@@ -1307,8 +1418,8 @@ class TestStructuralClauses:
         shard = _seed_bars(tmp_path)
         depth = 100_000
         shard.write_text("[" * depth + "]" * depth, encoding="utf-8")
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "parse"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "parse"
         with capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["parse"]
@@ -1322,8 +1433,8 @@ class TestStructuralClauses:
         ``parse`` clause like every other arbitrary-shard-bytes input."""
         shard = _seed_bars(tmp_path)
         shard.write_text("9" * 5000, encoding="utf-8")
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "parse"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "parse"
         with capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["parse"]
@@ -1335,8 +1446,8 @@ class TestStructuralClauses:
         round 3). Same fail-closed ``parse`` clause."""
         shard = _seed_bars(tmp_path)
         shard.write_bytes(b"\xff\xfe{}")
-        stats, clause = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
-        assert stats is None and clause == "parse"
+        loaded = lsm._load_shard_with_clause(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert loaded == "parse"
         with capture_logs() as logs:
             assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY) is None
         assert _fallback_clauses(logs) == ["parse"]

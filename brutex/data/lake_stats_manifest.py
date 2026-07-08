@@ -794,8 +794,8 @@ def _row_from_json(obj: object) -> StatsFileRow:
 
 def _load_shard_with_clause(
     lake_root: Path, *, kind: str, key: Mapping[str, str]
-) -> tuple[DatasetStats | None, str | None]:
-    """Read + structurally validate the shard → ``(stats, None)`` or ``(None, clause)``.
+) -> DatasetStats | str:
+    """Read + structurally validate the shard → ``DatasetStats`` or the clause name.
 
     Clause 1 of the read-time validation: a REGULAR-file-only open
     (``O_NONBLOCK`` + ``S_ISREG`` on the open descriptor — a FIFO / device /
@@ -806,16 +806,16 @@ def _load_shard_with_clause(
     memory, review round 4) + parse + version + kind/key echo + identity-key
     echo + well-formed rows + sorted files + sum invariant + aggregate-bounds
     consistency. Takes NO lock (``os.replace`` atomicity — a read sees a
-    complete old or new shard). Raises :class:`ValueError` only for a
-    malformed *kind*/*key* argument (a programming error, not bad data).
+    complete old or new shard). Returns the parsed :class:`DatasetStats` on
+    success, or the fail-closed clause NAME (a ``str``) — exactly one of the
+    two, STRUCTURALLY in the return type (endgame round 2: the prior
+    ``(stats, clause)`` tuple forced a defensive dead ``"unknown"`` literal at
+    the ``load_valid_dataset_stats`` call site). Raises :class:`ValueError`
+    only for a malformed *kind*/*key* argument (a programming error, not bad
+    data).
     """
     canonical = _canonical_key(kind, key)
     shard_path = stats_shard_path(lake_root, kind, key)
-    # Sentinel fd: any negative value is provably equivalent (nothing to
-    # close), and a real fd is always > 0 here — the three pragmas below mark
-    # that equivalent-mutant surface (review round 8); the open/close
-    # BEHAVIOUR is pinned by TestMutationHardening's O_NONBLOCK flag spy.
-    fd = -1  # pragma: no mutate
     try:
         # O_NONBLOCK: POSIX ``open(2)`` with O_RDONLY on a FIFO blocks until
         # a writer opens it — BEFORE any fail-closed clause below could fire —
@@ -826,33 +826,58 @@ def _load_shard_with_clause(
         # member of the rounds-3/4 "shard replaced out-of-band" tamper class).
         # A regular file ignores the flag, so the bounded read is unchanged.
         fd = os.open(shard_path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "shard_read"
+    # fd ownership handoff: ``owned`` is True exactly while THIS frame must
+    # close the descriptor; ``os.fdopen`` transfers ownership to the
+    # BufferedReader, which closes it internally. Every mutant of the flag is
+    # KILLABLE (TestMutationHardening's os.close spy: a stuck-True flag
+    # double-closes on the served path, a stuck-False flag leaks the fd on
+    # the not-regular path) — unlike the round-8 ``fd = -1`` integer sentinel
+    # (its ``-2`` mutant was equivalent and needed line pragmas) AND unlike
+    # an ``fd: int | None = None`` sentinel, whose annotation-only
+    # ``int & None`` mutant is never evaluated at runtime (PEP 526 — a local
+    # annotation is unexecuted) and provably survives (endgame round 2; the
+    # first re-enumeration caught exactly that survivor).
+    owned = True
+    try:
         if not S_ISREG(os.fstat(fd).st_mode):
             # ``fstat`` on the OPEN descriptor — no check-to-read race. The
             # write hooks corrupt-unlink this clause (healing the inode); the
             # read side falls back + the seed's ``os.replace`` restores a
             # regular file.
-            return None, "not_regular"
+            return "not_regular"
         with os.fdopen(fd, "rb") as handle:
-            # The file object now owns (and closes) the descriptor; the read
-            # bound only needs to be STRICTLY past the cap — any +K variant
-            # is provably equivalent (the ``len(raw) > MAX_SHARD_BYTES`` gate
-            # below is the mutable, test-pinned boundary).
-            fd = -1  # pragma: no mutate
-            raw = handle.read(MAX_SHARD_BYTES + 1)  # pragma: no mutate
-    except FileNotFoundError:
-        return None, "absent"
+            # The file object now owns (and closes) the descriptor.
+            owned = False
+            # The bound stays the READ CALLS themselves (race-free — a file
+            # growing after any pre-check cannot defeat it): read exactly the
+            # cap, then probe ONE byte past it. A non-empty probe = content
+            # strictly past the cap = oversized (checked below, outside the
+            # ``finally``). Total bytes read ≤ MAX_SHARD_BYTES + 1, exactly
+            # as before; the split replaces the round-8 pragma'd
+            # ``read(MAX_SHARD_BYTES + 1)`` literal with fully KILLABLE
+            # mutation surfaces (endgame round 2 — the exact-at-cap boundary
+            # is pinned by test_shard_exactly_at_cap_still_loads).
+            raw = handle.read(MAX_SHARD_BYTES)
+            over = handle.read(1)
     except OSError:
-        return None, "shard_read"
+        # A failure on the OPEN descriptor (fstat / fdopen / read) — the
+        # FileNotFoundError→``absent`` mapping above applies only to the
+        # ``os.open`` itself (an open fd cannot "vanish").
+        return "shard_read"
     finally:
-        if fd >= 0:  # pragma: no mutate
+        if owned:
             os.close(fd)
-    if len(raw) > MAX_SHARD_BYTES:
+    if len(over) == 1:
         # A shard replaced out-of-band with a huge file: the bytes past the
-        # cap were never read, so neither this read thread nor the writers'
-        # partition-locked hooks can MemoryError on it (review round 4 —
-        # MemoryError is deliberately NOT in _BEST_EFFORT_ERRORS; the bound
-        # removes the vector instead of swallowing genuine OOM).
-        return None, "oversized"
+        # cap (+1 probe) were never read, so neither this read thread nor the
+        # writers' partition-locked hooks can MemoryError on it (review
+        # round 4 — MemoryError is deliberately NOT in _BEST_EFFORT_ERRORS;
+        # the bound removes the vector instead of swallowing genuine OOM).
+        return "oversized"
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -860,7 +885,7 @@ def _load_shard_with_clause(
         # subclass, NOT an ``OSError``, so it previously slipped past the two
         # read handlers and escaped the read path as a raw raise (review
         # round 3): arbitrary shard bytes, the ``parse`` fail-closed clause.
-        return None, "parse"
+        return "parse"
     try:
         obj = json.loads(text)
     except (ValueError, RecursionError):
@@ -873,32 +898,32 @@ def _load_shard_with_clause(
         # RuntimeError subclass, OUTSIDE every other net here (review
         # round 1). The clause-1 parser exists precisely to fail CLOSED on
         # arbitrary shard bytes; both input classes are no different.
-        return None, "parse"
+        return "parse"
     if not isinstance(obj, dict):
-        return None, "parse"
+        return "parse"
     version = obj.get("version")
     if isinstance(version, bool) or version != STATS_MANIFEST_VERSION:
-        return None, "version"
+        return "version"
     if obj.get("kind") != kind:
-        return None, "kind"
+        return "kind"
     if obj.get("key") != canonical:
-        return None, "key_echo"
+        return "key_echo"
     if obj.get("identity_key") != list(STATS_IDENTITY_KEYS[kind]):
-        return None, "identity_key"
+        return "identity_key"
     files_raw = obj.get("files")
     if not isinstance(files_raw, list):
-        return None, "row_malformed"
+        return "row_malformed"
     if not files_raw:
-        return None, "files_empty"
+        return "files_empty"
     rows: list[StatsFileRow] = []
     for entry in files_raw:
         try:
             rows.append(_row_from_json(entry))
         except ValueError:
-            return None, "row_malformed"
+            return "row_malformed"
     rels = [row.rel for row in rows]
     if rels != sorted(rels) or len(set(rels)) != len(rels):
-        return None, "files_unsorted"
+        return "files_unsorted"
     # The ``field=`` names in the three guarded checks below feed messages the
     # ``except`` clauses DISCARD (only the clause tag survives) — a provably-
     # equivalent mutant surface, pragma'd PER LINE so the values and minima on
@@ -910,9 +935,9 @@ def _load_shard_with_clause(
             minimum=1,
         )
     except ValueError:
-        return None, "sum_invariant"
+        return "sum_invariant"
     if row_count != sum(row.rows for row in rows):
-        return None, "sum_invariant"
+        return "sum_invariant"
     try:
         min_ts = _require_ts(
             obj.get("min_ts"),
@@ -923,11 +948,11 @@ def _load_shard_with_clause(
             field="max_ts",  # pragma: no mutate
         )
     except ValueError:
-        return None, "aggregate_bounds"
+        return "aggregate_bounds"
     if min_ts != min(row.min_ts for row in rows) or max_ts != max(row.max_ts for row in rows):
-        return None, "aggregate_bounds"
+        return "aggregate_bounds"
     updated_utc = obj.get("updated_utc")
-    stats = DatasetStats(
+    return DatasetStats(
         kind=kind,
         key=canonical,
         identity_key=STATS_IDENTITY_KEYS[kind],
@@ -937,7 +962,6 @@ def _load_shard_with_clause(
         files=tuple(rows),
         updated_utc=updated_utc if isinstance(updated_utc, str) else "",
     )
-    return stats, None
 
 
 def load_shard_stats(lake_root: Path, *, kind: str, key: Mapping[str, str]) -> DatasetStats | None:
@@ -956,8 +980,8 @@ def load_shard_stats(lake_root: Path, *, kind: str, key: Mapping[str, str]) -> D
     """
     if not stats_manifest_enabled():
         return None
-    stats, _clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
-    return stats
+    loaded = _load_shard_with_clause(lake_root, kind=kind, key=key)
+    return None if isinstance(loaded, str) else loaded
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1041,19 +1065,16 @@ def load_valid_dataset_stats(
     if not stats_manifest_enabled():
         return None
     canonical = _canonical_key(kind, key)
-    stats, clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
-    if stats is None:
-        # ``clause`` is always set when ``stats`` is None (the parser returns
-        # exactly one of the two) — the ``else`` arm is a defensive dead
-        # literal kept for the type checker, hence the line pragma (review
-        # round 8; a mutated live ``clause`` is pinned by the clause-name
-        # asserts throughout the suite).
-        _log_fallback(
-            kind,
-            canonical,
-            clause if clause is not None else "unknown",  # pragma: no mutate
-        )
+    loaded = _load_shard_with_clause(lake_root, kind=kind, key=key)
+    if isinstance(loaded, str):
+        # The parser returns EXACTLY one of (stats, clause) — structurally,
+        # in its return type (endgame round 2: the prior tuple contract
+        # forced a defensive dead ``"unknown"`` literal + line pragma here;
+        # the live clause is pinned by the clause-name asserts throughout
+        # the suite).
+        _log_fallback(kind, canonical, loaded)
         return None
+    stats = loaded
     root = dataset_dir(lake_root, kind, key)
     try:
         on_disk = scan_dataset_rels(lake_root, kind, key)
@@ -1276,20 +1297,20 @@ def record_partition_stats(
         )
         timeout = resolve_stats_lock_timeout_seconds()
         with partition_write_lock(lake_root, shard_path, timeout_seconds=timeout):
-            stats, clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
-            if stats is None:
-                if clause == "absent":
+            loaded = _load_shard_with_clause(lake_root, kind=kind, key=key)
+            if isinstance(loaded, str):
+                if loaded == "absent":
                     # Unlinked between the probe and the lock — stay lazy.
                     return False
                 _LOG.warning(
                     "lake.stats_manifest.corrupt_unlinked",
                     kind=kind,
-                    clause=clause,
+                    clause=loaded,
                     shard=str(shard_path),
                 )
                 _unlink_shard(shard_path)
                 return False
-            merged = [row for row in stats.files if row.rel != rel]
+            merged = [row for row in loaded.files if row.rel != rel]
             merged.append(new_row)
             rebuilt = build_dataset_stats(kind=kind, key=key, files=merged)
             _write_shard(shard_path, rebuilt)
@@ -1347,20 +1368,20 @@ def remove_partition_stats(
         rel = dest_rel(kind, dest)
         timeout = resolve_stats_lock_timeout_seconds()
         with partition_write_lock(lake_root, shard_path, timeout_seconds=timeout):
-            stats, clause = _load_shard_with_clause(lake_root, kind=kind, key=key)
-            if stats is None:
-                if clause == "absent":
+            loaded = _load_shard_with_clause(lake_root, kind=kind, key=key)
+            if isinstance(loaded, str):
+                if loaded == "absent":
                     return False
                 _LOG.warning(
                     "lake.stats_manifest.corrupt_unlinked",
                     kind=kind,
-                    clause=clause,
+                    clause=loaded,
                     shard=str(shard_path),
                 )
                 _unlink_shard(shard_path)
                 return False
-            remaining = [row for row in stats.files if row.rel != rel]
-            if len(remaining) == len(stats.files):
+            remaining = [row for row in loaded.files if row.rel != rel]
+            if len(remaining) == len(loaded.files):
                 _LOG.debug("lake.stats_manifest.remove_noop", kind=kind, rel=rel)
                 return True
             if not remaining:

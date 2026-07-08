@@ -250,3 +250,27 @@ class TestBenchWorkflowWiring:
             assert any(bench in line for line in pytest_lines), (
                 f"{bench} is not invoked by any pytest step in bench-m4pro.yml"
             )
+
+    def test_workflow_names_the_real_paging_ceiling(self) -> None:
+        """The workflow's comments must describe the paging gate's ACTUAL
+        strict tier (endgame round 2): ``test_db_paging_o_page.py`` routes
+        through ``metadata_sweep_ceiling`` (``METADATA_SWEEP_STRICT_CEILING``
+        = 3.0x, recalibrated off run 28888100079's measured 1.53x) and never
+        calls ``ratio_ceiling()`` — the pre-fix comments told a reader the
+        decreed 1.1x strict gate runs there ("BRUTEX_M4PRO_STRICT 1.1x tier" /
+        "ratio_ceiling() tightened by BRUTEX_M4PRO_STRICT=1"), the same
+        claims-vs-reality drift class prior rounds fixed elsewhere."""
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert "metadata_sweep_ceiling" in text, (
+            "bench-m4pro.yml no longer names metadata_sweep_ceiling — the paging-gate "
+            "comments have drifted from tests/bench/test_db_paging_o_page.py's real tier"
+        )
+        for stale in (
+            "BRUTEX_M4PRO_STRICT 1.1x tier",
+            "ratio_ceiling() tightened by BRUTEX_M4PRO_STRICT",
+        ):
+            assert stale not in text, (
+                f"bench-m4pro.yml resurrected the stale paging-gate claim {stale!r} — "
+                "the /db O(page) gate enforces METADATA_SWEEP_STRICT_CEILING (3.0x), "
+                "not the decreed 1.1x (MIGRATION.md #1543 CALIBRATION)"
+            )

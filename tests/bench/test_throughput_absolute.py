@@ -125,9 +125,11 @@ def _make_bar_bits_array(n: int) -> np.ndarray:
 class TestM4ProAbsoluteThroughput:
     """Gates ONLY active under ``BRUTEX_M4PRO_ABS=1``.
 
-    Otherwise every test in this class skips. This keeps the file
-    safe to land in shared CI today — the gate sits dormant until
-    the M4 Pro self-hosted runner is registered.
+    Otherwise every test in this class skips, which keeps the file safe
+    on shared CI (the env var is set only by ``bench-m4pro.yml``). The
+    M4 Pro self-hosted runner is REGISTERED and LIVE since 2026-07-07 (the
+    workflow header's "RUNNER IS LIVE" note), so these gates genuinely
+    execute there on that workflow's triggers.
     """
 
     @skip_unless_m4pro
