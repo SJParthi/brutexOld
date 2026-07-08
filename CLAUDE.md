@@ -41,10 +41,14 @@ out `brutex/dashboard/sweep_runner.py`; two NEW dashboard routes
 (`GET/POST /api/v1/sweep/oneclick/{preflight,run}`) — the existing
 `/api/v1/sweep/run` single-exchange surface stays contract-unchanged.
 DISCOVERED CONSTRAINT (honestly flagged, not routed around): `stage3_enable=True`
-structurally forbids a `None` SL/TP leg (`SweepGridConfig.__post_init__`,
+structurally forbids a `None`/off-Mode-A-grid SL/TP leg (`SweepGridConfig.__post_init__`,
 ADR-0007 condition 3) — R19's 4th (NONE/signal-to-signal) arm is therefore
 incompatible with the institutional default as it exists today; an open
-question for the operator/coordinator. VWAP exclude-vs-flag and the exact
+question for the operator/coordinator. An 11th-round adversarial-refuter pass
+found this was only DISCLOSED, not ENFORCED — `resolve_sweep_request` now
+REFUSES any `None`/off-grid SL/TP leg with a clear 400 before any background
+job starts, so an unrunnable launch can no longer preflight `ok: true`
+(R16's "provably runnable" promise). VWAP exclude-vs-flag and the exact
 multi-exchange run semantics stay DEFAULT flag-and-run per the two pre-declared
 operator UNDECIDED items. P1 ownership zone ONLY — zero P2/P3/P4/P5/P6 files
 touched (calls P5's shipped `brutex/futures/preflight.py`, never edits it).

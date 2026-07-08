@@ -102,8 +102,8 @@ def test_custom_values_are_normalised() -> None:
         intervals="1minute, 5minute",
         directions="buy , sell",
         k="1, 3 ,5",
-        sl="1500,3000",
-        tp="2500",
+        sl="150,100",
+        tp="200",
         top=50,
         mode="B",
         exchange=" BSE ",
@@ -116,8 +116,8 @@ def test_custom_values_are_normalised() -> None:
     assert req.intervals == "1minute,5minute"
     assert req.directions == "BUY,SELL"  # upper-cased
     assert req.k == "1,3,5"
-    assert req.sl == "1500,3000"
-    assert req.tp == "2500"
+    assert req.sl == "150,100"
+    assert req.tp == "200"
     assert req.top == 50
     assert req.mode == "B"
     # Non-blank passthrough is trimmed; case must be lake-exact (a lowercase
@@ -233,10 +233,32 @@ def test_out_of_engine_scope_symbol_raises_the_scope_refusal() -> None:
     assert "NIFTY/BANKNIFTY/SENSEX" in message  # the law + remedy tail
 
 
-def test_explicit_none_leg_passes_through() -> None:
-    req = resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
-    assert req.sl == "none"
-    assert req.tp == "none"
+def test_explicit_none_leg_now_refused() -> None:
+    """Round-11 adversarial-refuter finding: ``sl="none"``/``tp="none"`` used
+    to pass through cleanly (the OLD light-research default's shape) — but
+    ``build_sweep_kwargs`` now unconditionally launches every dashboard
+    sweep with ``stage3_enable=True`` (R5's institutional flip), and
+    ``SweepGridConfig.__post_init__`` REJECTS a ``None`` SL/TP leg whenever
+    ``stage3_enable=True``. Letting ``"none"`` through here meant the R4/R20
+    preflight would report ``ok: true`` for a launch that was guaranteed to
+    fail deterministically inside the background job with no
+    operator-visible reason — refuse it HERE instead, loudly, before any
+    background job starts."""
+    with pytest.raises(ValueError, match="incompatible with the institutional Stage-3"):
+        resolve_sweep_request(sl="NONE", tp="none", today=_TODAY)
+
+
+def test_off_grid_sl_now_refused() -> None:
+    """Same round-11 finding, the other failure shape: a syntactically-valid
+    but off-Mode-A-grid paisa value (not a multiple of the 5-paisa SL tick)
+    used to pass preflight and only fail deep inside engine construction."""
+    with pytest.raises(ValueError, match="off the locked Mode-A grid"):
+        resolve_sweep_request(sl="51", today=_TODAY)
+
+
+def test_off_grid_tp_now_refused() -> None:
+    with pytest.raises(ValueError, match="off the locked Mode-A grid"):
+        resolve_sweep_request(tp="1500", today=_TODAY)
 
 
 # ── path helpers ──────────────────────────────────────────────────────────────

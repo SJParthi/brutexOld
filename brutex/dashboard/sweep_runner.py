@@ -266,6 +266,55 @@ def _normalise_leg(value: str | None, default: str, *, label: str) -> str:
     return ",".join(out)
 
 
+def _validate_mode_a_legs(sl: str, tp: str) -> None:
+    """Refuse an SL/TP leg the institutional Stage-3 CMA-ES grid cannot use.
+
+    ``build_sweep_kwargs`` now unconditionally launches EVERY dashboard
+    sweep with ``stage3_enable=True`` (R5's institutional flip) —
+    :meth:`~brutex.engine.sweep_orchestrator.SweepGridConfig.__post_init__`
+    (ADR-0007 condition 3) then rejects any ``"none"`` or off-Mode-A-grid
+    SL/TP value at ENGINE construction time, deep inside the background
+    job, well after preflight/request-resolution already reported the
+    launch as runnable. A round-11 adversarial-refuter review reproduced
+    this live: ``sl="none"`` (accepted by :func:`_normalise_leg`, and the
+    OLD light-research default before this PR's flip) or any off-grid
+    paisa value passed the ENTIRE R4/R20 preflight with ``ok: true``,
+    launched, then failed deterministically inside `cmd_sweep_all` with no
+    reason ever surfaced to the dashboard — directly contradicting R16's
+    "a run that starts is provably runnable" promise. Refuse HERE, loudly,
+    before any background job ever starts (Golden Rule #10).
+
+    Parameters
+    ----------
+    sl, tp
+        The ALREADY :func:`_normalise_leg`-validated (syntax-clean) leg
+        strings — either ``"none"`` or a CSV of positive paisa integers.
+
+    Raises
+    ------
+    ValueError
+        If either leg is ``"none"`` or contains a value off its locked
+        Mode-A grid.
+    """
+    from brutex.engine.stage3_grid import MODE_A_SL_AXIS, MODE_A_TP_AXIS, Stage3GridError
+
+    for label, axis, value in (("sl", MODE_A_SL_AXIS, sl), ("tp", MODE_A_TP_AXIS, tp)):
+        if value == "none":
+            raise ValueError(
+                f"{label}='none' is incompatible with the institutional Stage-3 CMA-ES "
+                f"grid (stage3_enable=True is mandatory for every dashboard sweep launch) "
+                f"— provide on-grid {label} paisa value(s) instead"
+            )
+        for token in value.split(","):
+            try:
+                axis.normalize(int(token))
+            except Stage3GridError as exc:
+                raise ValueError(
+                    f"{label}={token!r} is off the locked Mode-A grid required by the "
+                    f"institutional Stage-3 default: {exc}"
+                ) from exc
+
+
 def _normalise_nonblank(value: str | None, default: str) -> str:
     """Strip *value*; fall back to *default* when it is ``None`` or blank."""
     if value is None:
@@ -338,7 +387,11 @@ def resolve_sweep_request(
     ------
     ValueError
         On any unknown interval, non-BUY/SELL direction, out-of-range / non-integer
-        K, malformed SL/TP leg, non-positive ``top``, unparseable date,
+        K, malformed SL/TP leg, an SL/TP leg that is ``"none"`` or off the
+        locked Mode-A grid (see :func:`_validate_mode_a_legs` — the
+        institutional Stage-3 default this route always launches under
+        cannot use either shape; a round-11 adversarial-refuter finding),
+        non-positive ``top``, unparseable date,
         ``end < start``, or an out-of-engine-scope launch coordinate (the
         :func:`brutex.engine.sweep_scope.check_sweep_scope` refusal —
         DEC-ENGINE-SCOPE-GUARD-001 + its corporate-action extension
@@ -370,13 +423,16 @@ def resolve_sweep_request(
     )
     if not scope.ok:
         raise ValueError(scope.refusal_message())
+    resolved_sl = _normalise_leg(sl, DEFAULT_SL, label="sl")
+    resolved_tp = _normalise_leg(tp, DEFAULT_TP, label="tp")
+    _validate_mode_a_legs(resolved_sl, resolved_tp)
     return SweepRunRequest(
         symbols=resolved_symbols,
         intervals=_normalise_intervals(intervals),
         directions=_normalise_directions(directions),
         k=_normalise_k(k),
-        sl=_normalise_leg(sl, DEFAULT_SL, label="sl"),
-        tp=_normalise_leg(tp, DEFAULT_TP, label="tp"),
+        sl=resolved_sl,
+        tp=resolved_tp,
         exchange=resolved_exchange,
         segment=resolved_segment,
         start=resolved_start,
