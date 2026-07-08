@@ -50,6 +50,22 @@ fan-out that wraps N per-exchange verdicts is composed by
 :mod:`brutex.dashboard.sweep_runner` (the entry-point wiring layer) — DEFAULT
 flag-and-run: every exchange group is preflighted and estimated
 independently and a refusal in ANY group refuses the WHOLE logical run.
+
+## Honest envelope (Golden Rule #10)
+
+Every arm here is cheap EXCEPT two, both honestly documented at their call
+site rather than falsely claimed O(1): the derived-freshness reuse
+(:func:`brutex.data.tf_autoderive.lake_derived_freshness_verdicts`) is
+``O(bars)`` — it re-derives from 1-minute to compare, the G1 gate's own
+pre-existing cost; and :func:`brutex.data.lake_footprint.evaluate_disk_guard`
+internally measures the footprint of the WHOLE lake
+(``O(files in the lake)``, an unscoped ``rglob``), NOT just the requested
+symbols/months. A multi-exchange-group caller MUST compute the disk decision
+ONCE per logical plan and pass it via :func:`run_oneclick_preflight`'s
+*disk_decision* parameter — never once per group — or one click pays a
+full-lake scan N times over (:func:`brutex.dashboard.sweep_runner.oneclick_preflight_for_plan`
+does this correctly). Every other arm is ``O(symbols × months)`` disk-exists
+probes or ``O(1)`` arithmetic/lock-probes.
 """
 
 from __future__ import annotations
@@ -64,7 +80,7 @@ from brutex.calendars.nse import (
     trading_days_between_checked,
 )
 from brutex.dashboard.pull_intent import probe_pull_singleflight
-from brutex.data.lake_footprint import evaluate_disk_guard
+from brutex.data.lake_footprint import DiskGuardDecision, evaluate_disk_guard
 from brutex.data.lake_invariants import scan_lake_invariants
 from brutex.data.partition import build_partition_path
 from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
@@ -240,10 +256,28 @@ def clamp_sweep_window(start: date, end: date, *, today: date) -> WindowClamp:
             )
         )
 
-    # A pathological fully-clamped range (e.g. a request entirely inside a
-    # future-only window) — clamp start down to end so the zero-session check
-    # below refuses it honestly rather than raising on an inverted range.
-    applied_start = min(applied_start, applied_end)
+    # A pathological fully-clamped range (e.g. a request entirely AFTER the
+    # future/ceiling clamp, such as start=2026-08-01/end=2026-09-01 clamped to
+    # today=2026-07-08): clamp start down to end too, so the window is never
+    # inverted — and ALWAYS disclose it as its own Clamp entry (a hostile
+    # review confirmed the prior silent collapse was a false-OK: the window
+    # could land on a real trading day, so the zero-session refusal below
+    # never fires, and a caller reading `clamps` would see only the `end`
+    # move and wrongly infer `start` was honored as requested).
+    if applied_start > applied_end:
+        clamps.append(
+            Clamp(
+                field="start",
+                requested=applied_start.isoformat(),
+                applied=applied_end.isoformat(),
+                reason=(
+                    "requested window starts after the clamped end (the entire "
+                    "request lies beyond the last verifiable session) — collapsed "
+                    "to a single-day window at the clamped end"
+                ),
+            )
+        )
+        applied_start = applied_end
 
     return WindowClamp(start=applied_start, end=applied_end, clamps=tuple(clamps))
 
@@ -323,6 +357,7 @@ def run_oneclick_preflight(
     acknowledge_sla_overrun: bool,
     check_vix_coverage: bool,
     free_bytes: int | None = None,
+    disk_decision: DiskGuardDecision | None = None,
 ) -> OneClickPreflightVerdict:
     """Compose the full one-click institutional preflight verdict.
 
@@ -366,7 +401,20 @@ def run_oneclick_preflight(
     free_bytes
         Injectable override for the free-disk-space check (tests); ``None``
         reads the real ``shutil.disk_usage`` via
-        :func:`~brutex.data.lake_footprint.evaluate_disk_guard`.
+        :func:`~brutex.data.lake_footprint.evaluate_disk_guard`. Ignored when
+        *disk_decision* is given.
+    disk_decision
+        A pre-computed :class:`~brutex.data.lake_footprint.DiskGuardDecision`
+        — when given, skips calling :func:`~brutex.data.lake_footprint.evaluate_disk_guard`
+        internally. **Cost honesty (Golden Rule #10):** that function's
+        :func:`~brutex.data.lake_footprint.measure_lake_footprint` call is
+        O(files in the WHOLE lake) — an unscoped ``rglob("*.parquet")`` under
+        ``bars/``, NOT O(1) and NOT scoped to *symbols*/*intervals* — so a
+        multi-exchange-group caller (:func:`brutex.dashboard.sweep_runner.oneclick_preflight_for_plan`)
+        MUST compute this ONCE per logical plan and pass it here, never
+        per-group, or a single one-click launch pays the full-lake scan N
+        times over. ``None`` (the single-call/test default) computes it
+        fresh, once, for this call only.
     """
     refusals: list[Refusal] = []
     clamps: list[Clamp] = []
@@ -525,7 +573,11 @@ def run_oneclick_preflight(
                 )
 
     # ── 8. Free-disk-space preflight (gap-hunt ruling #22) ────────────────
-    disk = evaluate_disk_guard(lake_root, observed_multiplier=None, free_bytes=free_bytes)
+    disk = (
+        disk_decision
+        if disk_decision is not None
+        else evaluate_disk_guard(lake_root, observed_multiplier=None, free_bytes=free_bytes)
+    )
     if disk.blocked:
         refusals.append(
             Refusal(symbol=_WILDCARD, tf=_WILDCARD, missing_spans=(), reason=disk.detail)

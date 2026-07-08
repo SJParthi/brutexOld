@@ -612,6 +612,21 @@ def resolve_oneclick_sweep_plan(
     return OneClickSweepPlan(sweep_run_id=run_id, requests=requests)
 
 
+def _dedup_axis(value: str) -> list[str]:
+    """Split *value* on commas and de-duplicate, order-preserving.
+
+    Mirrors :func:`brutex.engine.sweep_orchestrator`'s private ``_dedup_seq``
+    (every :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig` axis is
+    de-duplicated at construction — ``k_values=[2, 2]`` is ONE tuple, not
+    two). A hostile review confirmed the estimator previously counted raw
+    (non-deduplicated) CSV tokens, over-counting trials/tuples relative to
+    what the engine actually executes whenever a caller repeats a token
+    (e.g. ``symbols="NIFTY,NIFTY"``) — deduping here keeps the R20 estimate
+    honestly equal to the real grid size.
+    """
+    return list(dict.fromkeys(tok for tok in value.split(",")))
+
+
 def _axes_counts(request: SweepRunRequest) -> tuple[list[int], int, int]:
     """Return ``(k_values, other_axes_product, tuple_count)`` for *request* — pure arithmetic.
 
@@ -622,15 +637,17 @@ def _axes_counts(request: SweepRunRequest) -> tuple[list[int], int, int]:
     :func:`brutex.engine.sweep_orchestrator.count_sweep_tuples`'s own product
     definition, without constructing a full
     :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig` — no data
-    snapshot exists yet at preflight time).
+    snapshot exists yet at preflight time). Every axis is de-duplicated
+    first (:func:`_dedup_axis`) so a repeated CSV token never inflates the
+    estimate beyond what the engine will actually grid.
     """
-    k_values = [int(tok) for tok in request.k.split(",")]
+    k_values = [int(tok) for tok in _dedup_axis(request.k)]
     other_axes_product = (
-        len(request.symbols.split(","))
-        * len(request.intervals.split(","))
-        * len(request.directions.split(","))
-        * len(request.sl.split(","))
-        * len(request.tp.split(","))
+        len(_dedup_axis(request.symbols))
+        * len(_dedup_axis(request.intervals))
+        * len(_dedup_axis(request.directions))
+        * len(_dedup_axis(request.sl))
+        * len(_dedup_axis(request.tp))
     )
     return k_values, other_axes_product, other_axes_product * len(k_values)
 
@@ -649,6 +666,15 @@ def oneclick_preflight_for_plan(
     WHOLE logical run; the estimator sums trials/seconds/bytes across
     groups — ``O(#groups)``, at most 2 today).
 
+    Cost honesty (Golden Rule #10, hostile-review fix): the free-disk-space
+    check (:func:`~brutex.data.lake_footprint.evaluate_disk_guard`) measures
+    the WHOLE lake's footprint — ``O(files in the lake)``, not scoped to any
+    one exchange group — so it is computed EXACTLY ONCE here (never inside
+    the per-group loop) and threaded into every
+    :func:`~brutex.engine.sweep_oneclick_preflight.run_oneclick_preflight`
+    call via its ``disk_decision`` parameter; a naive per-group call would
+    pay the full-lake scan N times over for one click.
+
     Parameters
     ----------
     plan
@@ -664,18 +690,26 @@ def oneclick_preflight_for_plan(
     -------
     dict[str, Any]
         ``{sweep_run_id, ok, refusals, clamps, estimator}`` — the contract
-        shape plus the one logical run id threading every group.
+        shape plus the one logical run id threading every group. The
+        ``estimator`` sub-dict additionally carries ``nominal_condition_count``
+        (always :data:`~brutex.vocabulary.bits.TOTAL_CONDITIONS`) and
+        ``effective_condition_count`` (the MINIMUM across groups — the
+        honest worst-case VWAP dead-bits annotation, gap-hunt #8).
     """
+    from brutex.data.lake_footprint import evaluate_disk_guard
     from brutex.engine.sweep_estimator import CALIBRATED_BASIS, PROVISIONAL_BASIS
     from brutex.engine.sweep_oneclick_preflight import run_oneclick_preflight
 
     results_root = default_results_root(lake_root)
+    disk_decision = evaluate_disk_guard(lake_root, observed_multiplier=None, free_bytes=free_bytes)
     all_refusals: list[dict[str, Any]] = []
     all_clamps: list[dict[str, Any]] = []
     total_trials = 0
     total_seconds = 0.0
     total_bytes = 0
     any_provisional = False
+    nominal_condition_count = 0
+    effective_condition_count: int | None = None
     for request in plan.requests:
         k_values, other_axes_product, tuple_count = _axes_counts(request)
         verdict = run_oneclick_preflight(
@@ -695,7 +729,7 @@ def oneclick_preflight_for_plan(
             allow_missing_slices=False,
             acknowledge_sla_overrun=request.acknowledge_sla_overrun,
             check_vix_coverage=True,
-            free_bytes=free_bytes,
+            disk_decision=disk_decision,
         )
         all_refusals.extend(r.to_dict() for r in verdict.refusals)
         all_clamps.extend(c.to_dict() for c in verdict.clamps)
@@ -704,6 +738,12 @@ def oneclick_preflight_for_plan(
         total_bytes += verdict.estimator.est_bytes
         if verdict.estimator.estimate_basis != CALIBRATED_BASIS:
             any_provisional = True
+        nominal_condition_count = verdict.estimator.nominal_condition_count
+        effective_condition_count = (
+            verdict.estimator.effective_condition_count
+            if effective_condition_count is None
+            else min(effective_condition_count, verdict.estimator.effective_condition_count)
+        )
 
     return {
         "sweep_run_id": plan.sweep_run_id,
@@ -715,6 +755,8 @@ def oneclick_preflight_for_plan(
             "est_seconds_provisional": total_seconds,
             "est_bytes": total_bytes,
             "estimate_basis": PROVISIONAL_BASIS if any_provisional else CALIBRATED_BASIS,
+            "nominal_condition_count": nominal_condition_count,
+            "effective_condition_count": effective_condition_count,
         },
     }
 

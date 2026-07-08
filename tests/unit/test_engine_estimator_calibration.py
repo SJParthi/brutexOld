@@ -132,6 +132,12 @@ def test_negative_sample_trials_resolves_to_uncalibrated(tmp_path: Path) -> None
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
 
 
+def test_zero_sample_trials_resolves_to_uncalibrated(tmp_path: Path) -> None:
+    """A real smoke run cannot measure over zero trials (R23) — reject, don't fabricate."""
+    _write(tmp_path, {**_VALID_PAYLOAD, "sample_trials": 0})
+    assert load_estimator_calibration(tmp_path) == UNCALIBRATED
+
+
 def test_non_int_sample_trials_resolves_to_uncalibrated(tmp_path: Path) -> None:
     _write(tmp_path, {**_VALID_PAYLOAD, "sample_trials": "many"})
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED

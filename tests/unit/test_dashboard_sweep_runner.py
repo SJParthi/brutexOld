@@ -433,6 +433,26 @@ def test_resolve_oneclick_sweep_plan_threads_acknowledge_sla_overrun() -> None:
     assert all(req.acknowledge_sla_overrun is True for req in plan.requests)
 
 
+def test_axes_counts_dedupes_repeated_csv_tokens() -> None:
+    """Hostile-review fix: a repeated token must not inflate the estimate.
+
+    The real engine dedupes every :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`
+    axis at construction — the estimator must count the SAME de-duplicated
+    size, or the R20 "true" trial/tuple count silently diverges from what
+    actually runs.
+    """
+    from brutex.dashboard.sweep_runner import _axes_counts
+
+    req = resolve_sweep_request(
+        symbols="NIFTY,NIFTY", k="2,2,3", sl="50,50", tp="100", today=_TODAY
+    )
+    k_values, other_axes_product, tuple_count = _axes_counts(req)
+    assert k_values == [2, 3]  # deduped, order-preserving
+    # symbols(1 unique) * intervals(3) * directions(2) * sl(1 unique) * tp(1)
+    assert other_axes_product == 1 * 3 * 2 * 1 * 1
+    assert tuple_count == other_axes_product * len(k_values)
+
+
 def test_oneclick_preflight_for_plan_aggregates_across_groups(tmp_path: Path) -> None:
     plan = resolve_oneclick_sweep_plan(
         symbols="NIFTY,SENSEX", today=_TODAY, run_id_factory=lambda: "agg-id"

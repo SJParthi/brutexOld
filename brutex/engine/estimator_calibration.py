@@ -116,10 +116,14 @@ def estimator_calibration_path(results_root: Path) -> Path:
     return results_root / CALIBRATION_FILENAME
 
 
-def _is_positive_finite(value: object) -> bool:
-    """``True`` iff *value* is an ``int``/``float`` (not ``bool``) and finite ``> 0``."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
+def _is_positive_finite(value: int | float) -> bool:
+    """``True`` iff *value* is finite and ``> 0``.
+
+    Callers MUST exclude ``bool``/non-numeric types first (Python's ``bool``
+    is an ``int`` subclass) — this helper only checks magnitude/finiteness,
+    kept separate so the type-narrowing ``isinstance`` guard lives once, at
+    each call site, where mypy can actually narrow the argument type.
+    """
     return value > 0 and value not in (float("inf"), float("-inf")) and value == value  # noqa: PLR0124 — nan check
 
 
@@ -147,7 +151,7 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
     path = estimator_calibration_path(results_root)
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return UNCALIBRATED
     try:
         payload = json.loads(raw)
@@ -155,7 +159,12 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
         return UNCALIBRATED
     if not isinstance(payload, dict):
         return UNCALIBRATED
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != SCHEMA_VERSION
+    ):
         return UNCALIBRATED
 
     seconds_per_trial = payload.get("seconds_per_trial")
@@ -175,9 +184,7 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
     ):
         return UNCALIBRATED
     if not (
-        isinstance(sample_trials, int)
-        and not isinstance(sample_trials, bool)
-        and sample_trials >= 0
+        isinstance(sample_trials, int) and not isinstance(sample_trials, bool) and sample_trials > 0
     ):
         return UNCALIBRATED
     if measured_at_utc is not None and not isinstance(measured_at_utc, str):
