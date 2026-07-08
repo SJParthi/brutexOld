@@ -140,6 +140,33 @@ class TestResetConfiguration:
         # If we got here without error, reset path is exercised.
         assert len(logging.getLogger().handlers) == 1
 
+    def test_reset_unfreezes_capture_logs_for_module_loggers(self) -> None:
+        """A module logger frozen under first-use caching is re-observable by
+        ``capture_logs`` after ``reset_configuration`` — the isolation contract
+        the sweep path-observability tests rely on (DEC-SWEEP-LOG-VOLUME-GUARD-001).
+
+        Sequence reproducing the exact leak: (1) ``configure_logging`` binds with
+        ``cache_logger_on_first_use=True`` and the module logger emits → its
+        ``bind`` freezes against that processors list; (2) ``reset_configuration``
+        installs a fresh list — WITHOUT the cache clear the frozen proxy is
+        orphaned; (3) a later ``capture_logs`` (which mutates the CURRENT list in
+        place) would then see ZERO events from that proxy. The cache clear makes
+        the proxy re-assemble against the current config, so the event is
+        captured.
+        """
+        from structlog.testing import capture_logs
+
+        # A distinct name so this proxy is unambiguously the one under test.
+        log = structlog.get_logger("brutex.test.frozen_module_logger")
+        configure_logging(level="INFO", json_renderer=False)
+        log.info("prime")  # freeze the proxy against the current processors list
+        reset_configuration()  # swaps the list AND clears the first-use cache
+        with capture_logs() as logs:
+            log.info("sweep_run.trade_sim_path", rust_active=True)
+        events = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert len(events) == 1  # 0 without the cache clear (the regression)
+        assert events[0]["rust_active"] is True
+
 
 class TestResolveEnvLogLevel:
     """$BRUTEX_LOG_LEVEL resolution — DEC-SWEEP-LOG-VOLUME-GUARD-001.

@@ -447,10 +447,60 @@ def _level_to_int(level: str) -> int:
     return mapping[upper]
 
 
+def _clear_structlog_first_use_cache() -> None:
+    """Un-freeze structlog's first-use logger cache so a re-config is observable.
+
+    :func:`configure_logging` binds structlog with
+    ``cache_logger_on_first_use=True`` — a deliberate production choice so a
+    sweep's engine loggers assemble their processor chain exactly once.
+    structlog implements that cache by overwriting each
+    ``BoundLoggerLazyProxy``'s ``bind`` method (an INSTANCE attribute) with a
+    closure returning the concrete logger it assembled on first use — a logger
+    that CAPTURED the processors list current AT THAT MOMENT.
+
+    :func:`reset_configuration` below then calls ``structlog.reset_defaults()``,
+    which installs a FRESH default-processors list — but it cannot reach the
+    already-frozen module-level proxies (e.g. ``brutex.engine.sweep_run._LOG``):
+    they keep pointing at the OLD list. Since ``structlog.testing.capture_logs``
+    captures by mutating the CURRENT config's processors list IN PLACE
+    (deliberately, "to not break references held by bound loggers"), a later
+    ``capture_logs`` can no longer observe a proxy frozen against a now-orphaned
+    list — the proxy's events silently bypass the capture sink.
+
+    This is a TEST-ISOLATION hazard only: any test that configures structlog
+    in-process (e.g. an in-process ``sweep_parallel._worker_init`` /
+    ``cli._configure_sweep_logging`` call) and then emits from a shared module
+    logger freezes that logger for the rest of the process. Dropping ONLY the
+    overridden ``bind`` instance attribute (never the class method, never
+    ``_logger``) makes every proxy re-assemble against the CURRENT config on its
+    next use, so ``capture_logs`` works again. Production is unaffected — only
+    :func:`reset_configuration` (a test-only helper) calls this.
+    """
+    import gc
+
+    # Resolve the proxy class without importing structlog's private ``_config``
+    # module: an unconfigured ``get_logger()`` returns a ``BoundLoggerLazyProxy``.
+    proxy_cls = type(structlog.get_logger())
+    for obj in gc.get_objects():
+        if isinstance(obj, proxy_cls):
+            # ``bind`` sits in ``__dict__`` ONLY when first-use caching froze it;
+            # removing it restores the lazy class-level ``bind`` (re-binds per
+            # call). ``pop(..., None)`` is a no-op for a never-frozen proxy.
+            obj.__dict__.pop("bind", None)
+
+
 def reset_configuration() -> None:
-    """Reset the idempotence guard and release any file handler. Test-only helper."""
+    """Reset the idempotence guard and release any file handler. Test-only helper.
+
+    Also clears structlog's first-use logger cache
+    (:func:`_clear_structlog_first_use_cache`) so a subsequent re-configuration —
+    or a ``structlog.testing.capture_logs`` in a later test — is fully
+    observable, never silently bypassed by a module logger frozen against the
+    pre-reset processors list.
+    """
     root_logger = logging.getLogger()
     _close_handlers(root_logger.handlers)
     root_logger.handlers = []
     _ConfigState.last = None
     structlog.reset_defaults()
+    _clear_structlog_first_use_cache()
