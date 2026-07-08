@@ -1237,22 +1237,22 @@ class TestStage3WireSeam:
 # ────────────────────────── cascade_wire seam ──────────────────────────
 
 
-def _cascade_spec(winners: tuple[tuple[str, int], ...]) -> cw.CascadeTupleSpec:
-    return cw.CascadeTupleSpec(
-        instrument="NIFTY",
-        tf_label="1minute",
-        tf_minutes=1,
-        direction_label="bull",
-        sl_paisa=None,
-        tp_paisa=50,
-        prior_n=3,
-        proximity_bps=None,
-        start_equity_paisa=10_000_000,
-        winners=winners,
-    )
+class TestCascadeStreamsUnstamped:
+    """The cascade chain carries NO stamper seam (round-6 review).
 
+    Both cascade trade streams are DISCARDED: the candidate re-simulation's
+    trades survive only as the :class:`CandidateInput` scalars/returns tuples
+    (no trade object, and no VIX field, crosses the conversion) and the
+    filter-#9 Monte-Carlo permutations are the thrown-away null distribution.
+    Stamping either was pure wasted work with zero observable output — the
+    manual replays even paid a full window-bounded VIX lake read per
+    replay/click to feed it. These tests pin the deletion: every cascade
+    ``simulate_trades`` call is an EXPLICIT literal-``None`` (the AST pin owns
+    the exact counts) and no cascade entry point accepts a stamper kwarg, so
+    the seam cannot silently return without a conscious review (the revert
+    lever: add a VIX surface to the cascade report FIRST).
+    """
 
-class TestCascadeWireSeam:
     def _candidate_kwargs(self) -> dict[str, Any]:
         return {
             "run_id": "0" * 64,
@@ -1266,114 +1266,48 @@ class TestCascadeWireSeam:
             "start_equity_paisa": 10_000_000,
         }
 
-    def test_build_candidate_input_binds_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_candidate_re_sim_is_explicitly_unstamped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         with _capture_kwarg(monkeypatch, trade_sim_mod, "simulate_trades") as captured:
-            cw.build_candidate_input(**self._candidate_kwargs(), reference_stamper=_STAMPER)
-        assert captured == [_STAMPER]
+            cw.build_candidate_input(**self._candidate_kwargs())
+        # An explicit literal None — never an OMITTED silent default.
+        assert captured == [None]
 
-    def test_mc_permutation_stream_stays_unstamped_even_when_candidate_is_stamped(
+    def test_mc_permutation_stream_is_explicitly_unstamped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Build INSIDE the capture: the MC closure binds simulate_trades at
         # construction, so the spy must already be in place.
         with _capture_kwarg(monkeypatch, trade_sim_mod, "simulate_trades") as captured:
-            candidate = cw.build_candidate_input(
-                **self._candidate_kwargs(), reference_stamper=_STAMPER
-            )
+            candidate = cw.build_candidate_input(**self._candidate_kwargs())
             candidate.mc_evaluate(np.array([0, 3, 6], dtype=np.intp))
-        # The candidate's own re-simulation bound the stamper; the discarded
-        # Monte-Carlo null stream is EXPLICITLY unstamped.
-        assert captured == [_STAMPER, None]
+        assert captured == [None, None]
 
-    def test_candidates_for_spec_threads_the_stamper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        spec = _cascade_spec((("0" * 64, 0),))
-        with _capture_kwarg(monkeypatch, cw, "build_candidate_input") as captured:
-            cw.candidates_for_spec(spec, _BARS, reference_stamper=_STAMPER)
-        assert captured == [_STAMPER]
+    def test_no_cascade_entry_point_accepts_a_stamper_kwarg(self) -> None:
+        """Re-adding the dead seam (or a partial re-add) fails loudly here."""
+        import inspect
 
-    def test_run_cascade_over_specs_threads_the_stamper(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        spec = _cascade_spec((("0" * 64, 0),))
-        with _capture_kwarg(monkeypatch, cw, "candidates_for_spec") as captured:
-            cw.run_cascade_over_specs(
-                [spec],
-                bars_for=lambda _i, _t: _BARS,
-                config=cw.cascade_config_for_sweep("a" * 64),
-                sweep_id="a" * 64,
-                reference_stamper=_STAMPER,
-            )
-        assert captured == [_STAMPER]
+        for fn in (
+            cw.build_candidate_input,
+            cw.candidates_for_spec,
+            cw.run_cascade_over_specs,
+            cw.run_and_write_from_specs,
+            cw.run_and_write_from_manifest,
+        ):
+            params = inspect.signature(fn).parameters
+            assert "reference_stamper" not in params, fn.__qualname__
+            assert "stamper_for" not in params, fn.__qualname__
 
-    def test_run_and_write_from_specs_threads_the_stamper(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        spec = _cascade_spec((("0" * 64, 0),))
-        with _capture_kwarg(monkeypatch, cw, "run_cascade_over_specs") as captured:
-            cw.run_and_write_from_specs(
-                tmp_path,
-                sweep_id="a" * 64,
-                specs=[spec],
-                bars_for=lambda _i, _t: _BARS,
-                bars_context=cw.BarsContext(
-                    exchange="NSE", segment="INDEX", start="2026-01-01", end="2026-02-01"
-                ),
-                cascade_config=cw.cascade_config_for_sweep("a" * 64),
-                reference_stamper=_STAMPER,
-            )
-        assert captured == [_STAMPER]
-
-    def test_run_and_write_from_manifest_threads_the_stamper(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        spec = _cascade_spec((("0" * 64, 0),))
-        cw.write_manifest(
-            tmp_path,
-            cw.CascadeManifest(
-                version=cw.MANIFEST_VERSION,
-                sweep_id="a" * 64,
-                cascade_config=cw.cascade_config_for_sweep("a" * 64),
-                bars_context=cw.BarsContext(
-                    exchange="NSE", segment="INDEX", start="2026-01-01", end="2026-02-01"
-                ),
-                specs=(spec,),
-            ),
-        )
-        with _capture_kwarg(monkeypatch, cw, "run_cascade_over_specs") as captured:
-            cw.run_and_write_from_manifest(
-                tmp_path, bars_for=lambda _i, _t: _BARS, reference_stamper=_STAMPER
-            )
-        assert captured == [_STAMPER]
-
-    def test_stamped_report_bytes_equal_unstamped_report_bytes(self) -> None:
-        """The auto==manual golden contract survives the stamper (report bytes)."""
-        spec = _cascade_spec((("0" * 64, 0),))
-        config = cw.cascade_config_for_sweep("a" * 64)
-        plain = cw.run_cascade_over_specs(
-            [spec], bars_for=lambda _i, _t: _BARS, config=config, sweep_id="a" * 64
-        )
-        stamped = cw.run_cascade_over_specs(
-            [spec],
-            bars_for=lambda _i, _t: _BARS,
-            config=config,
-            sweep_id="a" * 64,
-            reference_stamper=_STAMPER,
-        )
-        assert cw.serialize_wire_report(stamped) == cw.serialize_wire_report(plain)
+    def test_deleted_manifest_stamper_builder_stays_deleted(self) -> None:
+        """``vix_stamper_for_manifest`` (a full VIX lake read per manual
+        replay/click, feeding provably-discarded stamps) must not resurrect
+        under the same name without a conscious review."""
+        assert not hasattr(cw, "vix_stamper_for_manifest")
+        assert "vix_stamper_for_manifest" not in cw.__all__
 
 
-class TestVixStamperForManifest:
-    def _manifest(self) -> cw.CascadeManifest:
-        return cw.CascadeManifest(
-            version=cw.MANIFEST_VERSION,
-            sweep_id="a" * 64,
-            cascade_config=cw.cascade_config_for_sweep("a" * 64),
-            bars_context=cw.BarsContext(
-                exchange="NSE", segment="INDEX", start="2026-01-05", end="2026-01-10"
-            ),
-            specs=(_cascade_spec((("0" * 64, 0),)),),
-        )
-
+class TestManifestWindowDt:
     def test_manifest_window_dt_naive_is_utc(self) -> None:
         parsed = cw._manifest_window_dt("2026-01-05")
         assert parsed == datetime(2026, 1, 5, tzinfo=UTC)
@@ -1381,33 +1315,3 @@ class TestVixStamperForManifest:
     def test_manifest_window_dt_aware_is_preserved(self) -> None:
         parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
         assert parsed.utcoffset() == timedelta(hours=5, minutes=30)
-
-    def test_vixless_lake_degrades_to_none_with_zero_catalog_io(self, tmp_path: Path) -> None:
-        with capture_logs() as logs:
-            stamper = cw.vix_stamper_for_manifest(self._manifest(), lake_root=tmp_path)
-        assert stamper is None
-        assert any(e["event"] == "reference_wire.vix_lake_missing" for e in logs)
-        assert not (tmp_path / "catalog.duckdb").exists()
-
-    def test_vix_lake_builds_a_window_bounded_stamper(self, tmp_path: Path) -> None:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        vix_dir = tmp_path / "bars" / "NSE" / "INDEX" / "INDIAVIX" / "1minute" / "2026"
-        vix_dir.mkdir(parents=True)
-        ts = datetime(2026, 1, 5, 9, 16, tzinfo=_IST).astimezone(UTC)
-        table = pa.table(
-            {
-                "timestamp": pa.array([ts], type=pa.timestamp("us", tz="UTC")),
-                "open": pa.array([14.0], type=pa.float64()),
-                "high": pa.array([14.5], type=pa.float64()),
-                "low": pa.array([13.5], type=pa.float64()),
-                "close": pa.array([14.25], type=pa.float64()),
-                "volume": pa.array([0], type=pa.int64()),
-                "open_interest": pa.array([None], type=pa.int64()),
-            }
-        )
-        pq.write_table(table, vix_dir / "01.parquet")
-        stamper = cw.vix_stamper_for_manifest(self._manifest(), lake_root=tmp_path)
-        assert stamper is not None
-        assert stamper.vix.level_at(ts) == Decimal("14.25")

@@ -51,7 +51,15 @@ import brutex
 #: ``_options_sim_for_row`` carried the seam in Stage B and were REMOVED from
 #: it by the round-2 review — their stamps were provably discarded at the
 #: SpotSignal conversion, so the seam now ends at the sanctioned literal-None
-#: ``simulate_trades`` call inside the replay helper.)
+#: ``simulate_trades`` call inside the replay helper. The round-6 review
+#: applied the SAME surgery to the cascade chain — ``build_candidate_input`` /
+#: ``candidates_for_spec`` / ``run_cascade_over_specs`` /
+#: ``run_and_write_from_specs`` / ``run_and_write_from_manifest`` — whose
+#: candidate re-simulation stamps were provably discarded at the
+#: CandidateInput scalar conversion; its seam now ends at the sanctioned
+#: literal-None ``simulate_trades`` call inside ``build_candidate_input``,
+#: and the two manual-replay ``vix_stamper_for_manifest`` builds that paid a
+#: full VIX lake read per replay/click for zero output were DELETED.)
 _SEAM_CALLEES: Final[frozenset[str]] = frozenset(
     {
         # trade-sim core
@@ -91,12 +99,6 @@ _SEAM_CALLEES: Final[frozenset[str]] = frozenset(
         # stage-3 wiring
         "run_stage3_pass",
         "_make_evaluator",
-        # cascade wiring
-        "build_candidate_input",
-        "candidates_for_spec",
-        "run_cascade_over_specs",
-        "run_and_write_from_specs",
-        "run_and_write_from_manifest",
     }
 )
 
@@ -111,8 +113,10 @@ _SEAM_KWARGS: Final[frozenset[str]] = frozenset({"reference_stamper", "stamper_f
 _ALLOWED_LITERAL_NONE: Final[dict[tuple[str, str], int]] = {
     # The K-of-N inner mask stream — trades discarded after the metrics tail.
     ("brutex/engine/sweep_run.py", "_build_trade_sim"): 1,
-    # The Monte-Carlo permutation filter — the discarded null distribution.
-    ("brutex/engine/cascade_wire.py", "simulate_trades"): 1,
+    # The Monte-Carlo permutation filter (the discarded null distribution) +
+    # the cascade candidate re-simulation (stamps provably discarded at the
+    # CandidateInput scalar conversion — round-6 review).
+    ("brutex/engine/cascade_wire.py", "simulate_trades"): 2,
     # The options-sim replay — stamps would be discarded at the SpotSignal
     # conversion (signals_from_spot_trades reads only entry/exit/direction).
     ("brutex/cli.py", "simulate_trades"): 1,
@@ -131,22 +135,23 @@ _ALLOWED_OMITTED: Final[dict[tuple[str, str], int]] = {}
 #: non-``None``-literal expression, with exact per-(module, callee) counts:
 #: cli.py — cmd_sweep_all's parallel + supervised grids, its stage-3 pass AND
 #: the sweep-verify recount's stage-3 pass (2), the recount's shadow
-#: run_sweep_grid, the automatic cascade, cmd_cascade's manifest replay;
-#: app.py — the dashboard cascade route.
+#: run_sweep_grid. (The cascade entry points dropped out with the round-6
+#: seam removal — the cascade chain carries no stamper kwarg at all.)
 _REQUIRED_BOUND_ENTRYPOINTS: Final[dict[tuple[str, str], int]] = {
     ("brutex/cli.py", "run_parallel_grid"): 1,
     ("brutex/cli.py", "run_supervised_grid"): 1,
     ("brutex/cli.py", "run_stage3_pass"): 2,
     ("brutex/cli.py", "run_sweep_grid"): 1,
-    ("brutex/cli.py", "run_and_write_from_specs"): 1,
-    ("brutex/cli.py", "run_and_write_from_manifest"): 1,
-    ("brutex/dashboard/app.py", "run_and_write_from_manifest"): 1,
 }
 
 #: The entry-point modules whose BOUND seam calls the positive law enumerates.
 _ENTRYPOINT_MODULES: Final[frozenset[str]] = frozenset({"brutex/cli.py", "brutex/dashboard/app.py"})
 
 #: The VIX-lake-reading stamper BUILDERS (each call is one full lake read).
+#: ``vix_stamper_for_manifest`` was DELETED by the round-6 review (the two
+#: manual-replay builds it fed were dead cost — stamps discarded at the
+#: CandidateInput conversion); a resurrection is a new build site and fails
+#: the exact-count law below.
 _BUILDER_CALLEES: Final[frozenset[str]] = frozenset(
     {"build_vix_stamper", "vix_stamper_for_manifest"}
 )
@@ -164,12 +169,6 @@ _BUILDER_CALLEES: Final[frozenset[str]] = frozenset(
 _REQUIRED_BUILDER_CALLS: Final[dict[tuple[str, str], int]] = {
     # cmd_sweep_all's single launch build + the sweep-verify recount's build.
     ("brutex/cli.py", "build_vix_stamper"): 2,
-    # cmd_cascade's manifest replay.
-    ("brutex/cli.py", "vix_stamper_for_manifest"): 1,
-    # The dashboard cascade route.
-    ("brutex/dashboard/app.py", "vix_stamper_for_manifest"): 1,
-    # vix_stamper_for_manifest's own delegation to the ONE builder.
-    ("brutex/engine/cascade_wire.py", "build_vix_stamper"): 1,
     # The lazy vix_stamper_provider closure (no production consumer today).
     ("brutex/engine/reference_wire.py", "build_vix_stamper"): 1,
 }

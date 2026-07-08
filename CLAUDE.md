@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+_Last updated: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1561 —
+India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
+every OBSERVABLE production trade + the persisted nullable
+`vix_mean`/`vix_min`/`vix_max` finalist trio (REFERENCE ONLY — never in the
+60-vocab, `_RANKABLE_FIELDS`, or the BLAKE3 run identity; a missing VIX bar
+stamps `None`, never fabricated); the FIVE sanctioned unstamped
+DISCARDED-stream sites are literal `reference_stamper=None`, AST-pinned with
+exact counts (the round-6 review unstamped the cascade candidate
+re-simulation — stamps provably discarded at the CandidateInput scalar
+conversion — and DELETED the two manual-replay `vix_stamper_for_manifest`
+builds that paid a full VIX lake read per replay/click for zero output);
+redo-honest trio (None→value backfill · the typed tuple-skip
+`VixTrioConflictError` · `sweep-verify --recount` stamps like the launcher and
+attributes VIX-only divergences non-corrupt via `results_store.VIX_FIELDS`,
+the ONE public trio-column source, + `dataclasses.fields()`-driven re-pair
+gates). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100%
+line+branch).
+Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
 the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
 fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
 the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
@@ -954,7 +971,32 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+- **Active branch:** `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1561** — the
+  dormant India-VIX trade stamping WOKEN end-to-end: the lake's `NSE/INDEX/INDIAVIX` series (1-minute ∪ derived 1-day,
+  ONE window-bounded read per launch via NEW `brutex/engine/lake_slice.py::load_lake_slice` +
+  `brutex/engine/reference_wire.py::build_vix_stamper`) stamps `vix_at_entry`/`vix_at_exit` on EVERY OBSERVABLE production trade, and
+  persisted finalist rows gain the derived nullable `vix_mean`/`vix_min`/`vix_max` trio (`aggregate_trade_vix`, the
+  ONE fsum-overflow-safe fold; results_store's PUBLIC `VIX_FIELDS` is the one cross-module column source) — VIX stays
+  REFERENCE ONLY: never in the 60-vocab, never in `_RANKABLE_FIELDS`, never in the BLAKE3 run identity; a missing VIX
+  bar stamps `None`, NEVER fabricated. The stamper seam is threaded/bound across every production trade-sim site
+  (`ResidentTradeSim.reference_stamper` + the hoisted Rust-batch post-stamp converter — kernel byte-untouched; spawn
+  pools carry a picklable stamper, sequential ≡ parallel bytes pinned); the ONLY unstamped trade streams are the FIVE
+  named DISCARDED/unobservable streams (§2 Rule 3), each an explicit literal `reference_stamper=None` enumerated by
+  the exact-count AST pin (`tests/unit/test_vix_stamper_binding_pin.py`) that also REFUSES silently-omitted kwargs +
+  positively pins the entry-point binds AND the once-per-launch builder-call counts. The trio survives redo honestly:
+  None→value backfills, a value-vs-value clash raises the typed tuple-skip `VixTrioConflictError` (the VIX lake moved,
+  NOT non-determinism — grid drivers tuple-skip, stage-3 cell-skips), and `sweep-verify --recount` stamps like the
+  launcher + attributes a VIX-only divergence as the non-corrupt `recount_vix_divergence` (moved/backfill/pre-VIX-
+  schema shapes; the sentinel/sidecar re-pair gates are `dataclasses.fields()`-driven — drift-proof, never a hand
+  list). Round-6 review fixes: the cascade candidate re-simulation's stamps were provably DISCARDED at the
+  CandidateInput scalar conversion (report bytes pinned identical either way), so the cascade chain's dead stamper
+  seam was DELETED along with the two manual-replay `vix_stamper_for_manifest` builds that paid a full window-bounded
+  VIX lake read per `brutex cascade` run / dashboard click for zero observable output (the fifth sanctioned
+  literal-None site now lives inside `build_candidate_input`; revert lever = add a VIX surface to the cascade report
+  FIRST); miss-WARNs are memoised + capped (cap+1 log lines, exact `miss_count` tally). ENGINE semantics UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 new vs the pre-change baseline).
+  Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
   23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
@@ -2550,13 +2592,18 @@ hostile-review pass._
    every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
    #1561 — persisted finalist rows additionally carry the derived
    nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
-   trade streams are the FOUR named DISCARDED/unobservable streams —
-   the cascade Monte-Carlo permutation filter, `run_persisted_sweep`'s
+   trade streams are the FIVE named DISCARDED/unobservable streams —
+   the Stage-4 cascade candidate re-simulation (stamps would be dropped
+   at the CandidateInput scalar conversion; report bytes pinned
+   identical — the round-6 review DELETED the cascade chain's dead
+   stamper seam plus the two manual-replay `vix_stamper_for_manifest`
+   builds that paid a full VIX lake read per replay/click for zero
+   output), its Monte-Carlo permutation filter, `run_persisted_sweep`'s
    K-of-N inner stream, the CLI options-sim replay (stamps would be
    dropped at the SpotSignal conversion) and `brutex sweep`'s
    text-report replay (report bytes pinned identical) — each an
    explicit literal `reference_stamper=None` enumerated by an AST pin
-   whose three exact-count laws also REFUSE a silently-omitted kwarg
+   whose exact-count laws also REFUSE a silently-omitted kwarg
    and positively pin the entry-point binds (round-2 panel hardening);
    the trio survives redo honestly — `None → value` backfills, a
    value-vs-value clash raises the typed tuple-skip
@@ -2830,7 +2877,12 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/peaceful-wright-r7l8l9`
+- **Active feature branch:** `claude/peaceful-hamilton-kyeu07`
+  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1561 — India-VIX trade stamping wired
+  end-to-end: `vix_at_entry`/`vix_at_exit` on every OBSERVABLE trade + the
+  persisted nullable `vix_mean`/`vix_min`/`vix_max` finalist trio, REFERENCE
+  ONLY; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
   retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
   fields replace the wrong bearish alias; ENGINE UNCHANGED —

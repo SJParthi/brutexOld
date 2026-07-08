@@ -1,23 +1,30 @@
-"""Bind-capture tests for the cascade VIX-stamper entry points (DEC-VIX-STAMP-WIRE-001).
+"""No-stamper-build pins for the cascade replay entry points (DEC-VIX-STAMP-WIRE-001).
 
-Round-2 panel MAJOR: ``cmd_cascade`` and the dashboard ``/api/v1/cascade/run``
-route are ``# pragma: no cover`` shims whose ``reference_stamper`` binds had
-ZERO executing coverage — a deleted kwarg kept every gate green. These tests
-EXECUTE both shims with the heavy lake/manifest internals monkeypatched at
-their source module (both shims import them locally at call time), capturing
-the exact seam crossing:
+Round-6 review: the manual cascade replays (``cmd_cascade`` and the dashboard
+``/api/v1/cascade/run`` route) each built a manifest-window VIX stamper via
+``vix_stamper_for_manifest`` — a full window-bounded VIX lake read per
+replay/click — to stamp trades that are provably DISCARDED at the
+``CandidateInput`` scalar conversion (the tree's own contract: the cascade
+report bytes are identical with or without a stamper). That is the exact
+dead-build class the round-2 review deleted at the two options-sim sites, so
+the round-6 fix deleted the builder AND the whole cascade stamper seam; the
+sanctioned literal-``None`` now lives at the ``simulate_trades`` call inside
+``build_candidate_input`` (AST-pinned).
 
-* the manifest-derived stamper (``vix_stamper_for_manifest`` over the resolved
-  lake root) is the object handed to ``run_and_write_from_manifest`` — not a
-  default ``None``;
-* the options-sim helpers build NO stamper at all after the round-2 fix (their
-  stamps were provably discarded at the SpotSignal conversion — the sanctioned
-  literal-``None`` site in ``_replay_spot_signals_for_row``), so the wasted
-  per-invocation VIX lake read is pinned gone.
+These tests EXECUTE both ``# pragma: no cover`` shims with the heavy
+lake/manifest internals monkeypatched at their source module (both shims
+import them locally at call time), pinning the seam crossing:
+
+* neither shim builds ANY stamper (the wasted per-replay VIX lake read is
+  gone), and neither passes a stamper kwarg into
+  ``run_and_write_from_manifest`` — the callable no longer accepts one;
+* the options-sim helpers likewise carry no stamper build (the round-2 fix,
+  kept pinned here).
 
 The static twin lives in ``tests/unit/test_vix_stamper_binding_pin.py`` (the
-positive-presence entry-point map); the real-lake end-to-end twin in
-``tests/integration/test_cli_sweep_all_vix_stamp.py``.
+builder-call exact-count law — a resurrected ``vix_stamper_for_manifest``
+call anywhere in ``brutex/`` fails it); the engine-side twin in
+``tests/unit/test_engine_vix_stamper_wiring.py::TestCascadeStreamsUnstamped``.
 """
 
 from __future__ import annotations
@@ -36,9 +43,7 @@ def _stub_report() -> SimpleNamespace:
     return SimpleNamespace(groups={}, n_input=0, n_survived=0)
 
 
-def _patch_cascade_seams(
-    monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any], sentinel: object
-) -> None:
+def _patch_cascade_seams(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:
     """Patch the cascade internals at their source module (call-time imports)."""
     manifest = SimpleNamespace(sweep_id="cafe" * 4)
     monkeypatch.setattr(cascade_wire, "load_manifest", lambda root: manifest)
@@ -48,41 +53,38 @@ def _patch_cascade_seams(
         lambda *args, **kwargs: lambda _i, _t: [],
     )
 
-    def _fake_stamper_for_manifest(mani: Any, **kwargs: Any) -> object:
-        captured["stamper_manifest"] = mani
-        captured["stamper_kwargs"] = kwargs
-        return sentinel
-
     def _fake_run(root: Path, **kwargs: Any) -> SimpleNamespace:
         captured["run_root"] = root
         captured["run_kwargs"] = kwargs
         return _stub_report()
 
-    monkeypatch.setattr(cascade_wire, "vix_stamper_for_manifest", _fake_stamper_for_manifest)
     monkeypatch.setattr(cascade_wire, "run_and_write_from_manifest", _fake_run)
 
 
-class TestCmdCascadeBind:
-    def test_cmd_cascade_binds_the_manifest_stamper(
+class TestCmdCascadeBuildsNoStamper:
+    def test_cmd_cascade_replays_without_any_stamper(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         captured: dict[str, Any] = {}
-        sentinel = object()
-        _patch_cascade_seams(monkeypatch, captured, sentinel)
+        _patch_cascade_seams(monkeypatch, captured)
 
         rc = cli.cmd_cascade(lake_root=tmp_path, results_root=None, catalog_path=None, run_id=None)
 
         assert rc == 0
-        # The stamper is built FROM the manifest over the resolved lake …
-        assert captured["stamper_manifest"].sweep_id == "cafe" * 4
-        assert captured["stamper_kwargs"]["lake_root"] == tmp_path
-        # … and that exact object crosses the seam — never a defaulted None.
-        assert captured["run_kwargs"]["reference_stamper"] is sentinel
         assert captured["run_root"] == tmp_path / "sweeps"
+        # The replay crosses the seam WITHOUT any stamper kwarg — the dead
+        # per-replay VIX lake read is gone, not merely defaulted.
+        assert "reference_stamper" not in captured["run_kwargs"]
+
+    def test_cmd_cascade_carries_no_stamper_build(self) -> None:
+        source = inspect.getsource(cli.cmd_cascade)
+        assert "build_vix_stamper" not in source
+        # (mentioned only in the honest-envelope comment, never called)
+        assert "vix_stamper_for_manifest(" not in source
 
 
-class TestDashboardCascadeRouteBind:
-    def test_api_cascade_run_binds_the_manifest_stamper(
+class TestDashboardCascadeRouteBuildsNoStamper:
+    def test_api_cascade_run_replays_without_any_stamper(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pytest.importorskip("fastapi")
@@ -90,8 +92,7 @@ class TestDashboardCascadeRouteBind:
         from fastapi.testclient import TestClient
 
         captured: dict[str, Any] = {}
-        sentinel = object()
-        _patch_cascade_seams(monkeypatch, captured, sentinel)
+        _patch_cascade_seams(monkeypatch, captured)
 
         store = SimpleNamespace(path=tmp_path / "instruments.duckdb")
         app = build_app(DashboardState(), instrument_store=store)
@@ -100,11 +101,8 @@ class TestDashboardCascadeRouteBind:
 
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        # The route derives the lake from the wired store and binds the
-        # manifest stamper into the replay — never a defaulted None.
-        assert captured["stamper_kwargs"]["lake_root"] == tmp_path
-        assert captured["run_kwargs"]["reference_stamper"] is sentinel
         assert captured["run_root"] == tmp_path / "sweeps"
+        assert "reference_stamper" not in captured["run_kwargs"]
 
 
 class TestOptionsSimBuildsNoStamper:

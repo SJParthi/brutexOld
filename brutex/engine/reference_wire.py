@@ -17,8 +17,8 @@ missing production pieces:
   #935/#1014 dormant-surface class): production's once-per-run property is
   owned by the launchers' SINGLE EAGER :func:`build_vix_stamper` call
   (``cmd_sweep_all`` / the sweep-verify recount build once and thread the
-  one object everywhere; cascade + dashboard build once via
-  ``vix_stamper_for_manifest``) — the lazy cached
+  one object everywhere; the cascade replay builds NOTHING — its candidate
+  re-simulations are discarded streams, round-6) — the lazy cached
   :func:`vix_stamper_provider` is a LIBRARY-level convenience with NO
   production consumer today (see its docstring).
 * :func:`aggregate_trade_vix` — the ONE pure fold from a combo's stamped
@@ -379,9 +379,9 @@ def vix_stamper_provider(
     routes through this provider today. Every production launcher binds
     EAGERLY — ``cmd_sweep_all`` and the sweep-verify recount call
     :func:`build_vix_stamper` once at launch and hand stage-3 a
-    ``stamper_for=lambda: reference_stamper`` over that already-built object;
-    cascade/dashboard build once via
-    :func:`~brutex.engine.cascade_wire.vix_stamper_for_manifest` — so the
+    ``stamper_for=lambda: reference_stamper`` over that already-built object
+    (the cascade/dashboard manifest replay builds NOTHING since round-6
+    deleted its dead ``vix_stamper_for_manifest`` seam) — so the
     production once-per-run property is owned by those single builds, NOT by
     this closure, and the lazy never-read-if-never-simulating benefit is
     unrealised in production (a library-level convenience for embedders).

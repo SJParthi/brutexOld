@@ -5469,7 +5469,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 cascade_config=cascade_config_for_sweep(sweep_id),
                 stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                 leaderboard_trials=leaderboard_trials,
-                reference_stamper=reference_stamper,
+                # No stamper seam: the cascade candidate re-simulations are
+                # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
+                # see cascade_wire.build_candidate_input's sanctioned
+                # literal-None), so the launch stamper deliberately does NOT
+                # ride into Stage-4.
             )
             print(
                 f"[brutex] cascade — pools={len(cascade_report.groups)} "
@@ -5813,7 +5817,6 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         load_manifest,
         report_path,
         run_and_write_from_manifest,
-        vix_stamper_for_manifest,
     )
 
     resolved_lake = _resolve_lake_root(lake_root)
@@ -5833,15 +5836,11 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
         return EXIT_USER_ERROR
 
     bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
-    # The manual replay binds the SAME window-bounded India-VIX stamper the
-    # automatic path bound (DEC-VIX-STAMP-WIRE-001; None-degrade on a VIX-less
-    # lake — the replayed report bytes are identical either way).
-    reference_stamper = vix_stamper_for_manifest(
-        manifest, lake_root=resolved_lake, catalog_path=catalog
-    )
-    report = run_and_write_from_manifest(
-        root, bars_for=bars_for, reference_stamper=reference_stamper
-    )
+    # NO VIX stamper build here (DEC-VIX-STAMP-WIRE-001 round-6): the replayed
+    # candidates' trades are DISCARDED streams (report bytes identical either
+    # way), so the old per-replay vix_stamper_for_manifest build paid a full
+    # window-bounded VIX lake read for zero observable output.
+    report = run_and_write_from_manifest(root, bars_for=bars_for)
     print(
         f"[brutex] cascade done — sweep={manifest.sweep_id[:16]} pools={len(report.groups)} "
         f"candidates={report.n_input} survivors={report.n_survived}"
