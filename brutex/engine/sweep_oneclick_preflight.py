@@ -204,80 +204,109 @@ class OneClickPreflightVerdict:
 
 
 def clamp_sweep_window(start: date, end: date, *, today: date) -> WindowClamp:
-    """Apply the pre-2020 floor clamp + the future/last-verifiable-session clamp.
+    """Clamp ``[start, end]`` into the published holiday-coverage span ``[floor, ceiling]``.
 
     Clamps are applied BEFORE any calendar lookup so every date handed to
     :func:`~brutex.calendars.nse.trading_days_between_checked` sits inside
     the published holiday-coverage span — the walk never raises
     :class:`~brutex.calendars.nse.HolidayDataUnavailableError`.
 
+    This is an interval-INTERSECTION, not two independent one-sided clamps
+    (a hostile review caught the earlier one-sided version: clamping only
+    ``start`` up to the floor and only ``end`` down to the ceiling left a
+    request that lies ENTIRELY before the floor — e.g. ``start=2015-01-01,
+    end=2016-01-01`` — with its unclamped, pre-floor ``end`` surviving
+    untouched, which then crashed the calendar walk below with
+    :class:`~brutex.calendars.nse.HolidayDataUnavailableError` instead of
+    the honest clamp this function promises). The fix: compute the valid
+    span ``[floor, ceiling]`` first; if the request doesn't overlap it at
+    all, collapse the WHOLE window to the single nearest boundary (never a
+    stray unclamped endpoint); otherwise clamp each side independently
+    (the two clamps can never invert each other once the overlap check has
+    passed).
+
     Parameters
     ----------
     start, end
-        The requested window bounds.
+        The requested window bounds. Precondition: ``start <= end`` —
+        enforced upstream by :func:`brutex.dashboard.sweep_runner.resolve_sweep_request`'s
+        ``end < start`` refusal at the request-validation boundary, before
+        this internal engine function is ever reached. Given that
+        precondition, whichever side of ``[floor, ceiling]`` the whole
+        window falls outside of, BOTH endpoints necessarily differ from the
+        single collapse point (see below) — there is no partial-collapse
+        case to guard against.
     today
         The injected "now" date (never read from the clock here — Golden
         Rule #4 reproducibility).
     """
     clamps: list[Clamp] = []
     floor = date(HOLIDAY_COVERAGE_FIRST_YEAR, 1, 1)
-    applied_start = start
-    if start < floor:
-        applied_start = floor
+    ceiling = min(date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31), today)
+    floor_reason = (
+        f"pre-{HOLIDAY_COVERAGE_FIRST_YEAR} floor clamp — no published "
+        f"NSE holiday-calendar coverage before {HOLIDAY_COVERAGE_FIRST_YEAR}"
+    )
+    ceiling_reason = (
+        "future-to-date clamp — the window may not extend past today"
+        if today < date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31)
+        else (
+            f"post-{HOLIDAY_COVERAGE_LAST_YEAR} coverage-ceiling clamp — no "
+            f"published NSE holiday-calendar coverage after {HOLIDAY_COVERAGE_LAST_YEAR}"
+        )
+    )
+
+    if end < floor or start > ceiling:
+        # No overlap at all between [start, end] and [floor, ceiling] — the
+        # WHOLE window collapses to the single nearest boundary point, never
+        # a stray unclamped endpoint on the other side.
+        collapse_to = floor if end < floor else ceiling
+        collapse_reason = (
+            f"requested window lies entirely before the coverage floor ({floor_reason})"
+            if end < floor
+            else f"requested window lies entirely after the clamped ceiling ({ceiling_reason})"
+        )
+        # Under the `start <= end` precondition (see docstring), the whole
+        # window lying outside [floor, ceiling] means BOTH endpoints differ
+        # from `collapse_to` — never just one — so both clamps always apply.
         clamps.append(
             Clamp(
                 field="start",
                 requested=start.isoformat(),
-                applied=applied_start.isoformat(),
-                reason=(
-                    f"pre-{HOLIDAY_COVERAGE_FIRST_YEAR} floor clamp — no published "
-                    f"NSE holiday-calendar coverage before {HOLIDAY_COVERAGE_FIRST_YEAR}"
-                ),
-            )
-        )
-
-    ceiling = date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31)
-    applied_end = min(end, today, ceiling)
-    if applied_end != end:
-        reason = (
-            "future-to-date clamp — the window may not extend past today"
-            if end > today
-            else (
-                f"post-{HOLIDAY_COVERAGE_LAST_YEAR} coverage-ceiling clamp — no "
-                f"published NSE holiday-calendar coverage after {HOLIDAY_COVERAGE_LAST_YEAR}"
+                applied=collapse_to.isoformat(),
+                reason=f"{collapse_reason} — collapsed to a single-day window",
             )
         )
         clamps.append(
             Clamp(
                 field="end",
                 requested=end.isoformat(),
-                applied=applied_end.isoformat(),
-                reason=reason,
+                applied=collapse_to.isoformat(),
+                reason=f"{collapse_reason} — collapsed to a single-day window",
             )
         )
+        return WindowClamp(start=collapse_to, end=collapse_to, clamps=tuple(clamps))
 
-    # A pathological fully-clamped range (e.g. a request entirely AFTER the
-    # future/ceiling clamp, such as start=2026-08-01/end=2026-09-01 clamped to
-    # today=2026-07-08): clamp start down to end too, so the window is never
-    # inverted — and ALWAYS disclose it as its own Clamp entry (a hostile
-    # review confirmed the prior silent collapse was a false-OK: the window
-    # could land on a real trading day, so the zero-session refusal below
-    # never fires, and a caller reading `clamps` would see only the `end`
-    # move and wrongly infer `start` was honored as requested).
-    if applied_start > applied_end:
+    applied_start = max(start, floor)
+    if applied_start != start:
         clamps.append(
             Clamp(
                 field="start",
-                requested=applied_start.isoformat(),
-                applied=applied_end.isoformat(),
-                reason=(
-                    "requested window starts after the clamped end (the entire "
-                    "request lies beyond the last verifiable session) — collapsed "
-                    "to a single-day window at the clamped end"
-                ),
+                requested=start.isoformat(),
+                applied=applied_start.isoformat(),
+                reason=floor_reason,
             )
         )
-        applied_start = applied_end
+    applied_end = min(end, ceiling)
+    if applied_end != end:
+        clamps.append(
+            Clamp(
+                field="end",
+                requested=end.isoformat(),
+                applied=applied_end.isoformat(),
+                reason=ceiling_reason,
+            )
+        )
 
     return WindowClamp(start=applied_start, end=applied_end, clamps=tuple(clamps))
 
@@ -418,6 +447,13 @@ def run_oneclick_preflight(
     """
     refusals: list[Refusal] = []
     clamps: list[Clamp] = []
+    # De-duplicate, order-preserving (a hostile review found a repeated
+    # symbol, e.g. "NIFTY,NIFTY", made the lake-invariants arm below append
+    # the SAME finding twice and re-paid its O(files) scan twice — the
+    # estimator already dedupes its own axis counts via
+    # brutex.dashboard.sweep_runner._dedup_axis; every per-symbol arm here
+    # must see the same de-duplicated set).
+    symbols = tuple(dict.fromkeys(symbols))
 
     # ── 1. Window clamps + all-holiday zero-session refusal ──────────────
     window = clamp_sweep_window(start, end, today=today)

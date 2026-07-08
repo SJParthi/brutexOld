@@ -64,6 +64,24 @@ _FALLBACK_SECONDS_PER_TRIAL: Final[float] = 5e-5
 #: over-estimate so the byte projection over-warns rather than under-warns.
 _FALLBACK_BYTES_PER_ROW: Final[int] = 512
 
+#: Sanity ceiling on the on-disk file size (bytes) before it is even read —
+#: this is a small fixed-shape JSON object; anything past this is refused as
+#: malformed rather than fully read into memory (a hostile review found an
+#: unbounded ``read_text()`` could raise an uncaught ``MemoryError`` for an
+#: adversarially large file, breaking the "NEVER raises" contract).
+_MAX_FILE_BYTES: Final[int] = 64 * 1024
+
+#: Sanity ceiling on ``seconds_per_trial`` — anything past this is refused
+#: (a hostile review found an unbounded value lets ``estimate_sweep_cost``
+#: overflow ``trials * seconds_per_trial`` to ``inf``, which then raises
+#: inside FastAPI's ``JSONResponse`` at serialize time, an unhandled 500).
+#: A real trial has never measured anywhere near one hour each.
+_MAX_SECONDS_PER_TRIAL: Final[float] = 3_600.0
+
+#: Sanity ceiling on ``bytes_per_row`` — same overflow rationale; no real
+#: persisted-row shape is anywhere near 1 GiB.
+_MAX_BYTES_PER_ROW: Final[int] = 1024**3
+
 
 @dataclass(frozen=True, slots=True)
 class EstimatorCalibration:
@@ -130,13 +148,22 @@ def _is_positive_finite(value: int | float) -> bool:
 def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
     """Read ``<results_root>/estimator_calibration.json``; fail-closed to :data:`UNCALIBRATED`.
 
-    NEVER raises: a missing file, a directory instead of a file, unreadable
-    permissions, malformed JSON, a non-object top level, a schema-version
-    mismatch, or any required field that is missing / wrong-typed /
-    non-positive / non-finite all resolve to :data:`UNCALIBRATED` — an
+    NEVER raises: a missing file, a non-regular file (directory, FIFO,
+    socket, device — anything that could block forever or isn't a plain
+    file), an oversized file, unreadable permissions, non-UTF-8 content,
+    malformed JSON, a non-object top level, a schema-version mismatch, or
+    any required field that is missing / wrong-typed / non-positive /
+    non-finite / absurdly large all resolve to :data:`UNCALIBRATED` — an
     unbenchmarked estimate must never crash the preflight click (Golden Rule
-    #10: honest fallback, not a fabricated hard failure). O(1): one small
-    fixed-shape JSON file, no lake I/O.
+    #10: honest fallback, not a fabricated hard failure). The upper-bound
+    sanity caps (:data:`_MAX_SECONDS_PER_TRIAL`/:data:`_MAX_BYTES_PER_ROW`)
+    exist because a hostile review found an unbounded value lets
+    :func:`~brutex.engine.sweep_estimator.estimate_sweep_cost` overflow its
+    ``trials * seconds_per_trial`` multiply to ``inf`` — which then raises
+    inside FastAPI's JSON encoder at serialize time (Starlette's
+    ``JSONResponse`` calls ``json.dumps(..., allow_nan=False)``), an
+    unhandled 500 one layer downstream of this "never raises" promise. O(1):
+    one small fixed-shape JSON file, no lake I/O.
 
     Parameters
     ----------
@@ -150,6 +177,10 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
     """
     path = estimator_calibration_path(results_root)
     try:
+        if not path.is_file():
+            return UNCALIBRATED
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            return UNCALIBRATED
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return UNCALIBRATED
@@ -177,10 +208,13 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
         not isinstance(seconds_per_trial, (int, float))
         or isinstance(seconds_per_trial, bool)
         or not _is_positive_finite(seconds_per_trial)
+        or seconds_per_trial > _MAX_SECONDS_PER_TRIAL
     ):
         return UNCALIBRATED
     if not (
-        isinstance(bytes_per_row, int) and not isinstance(bytes_per_row, bool) and bytes_per_row > 0
+        isinstance(bytes_per_row, int)
+        and not isinstance(bytes_per_row, bool)
+        and 0 < bytes_per_row <= _MAX_BYTES_PER_ROW
     ):
         return UNCALIBRATED
     if not (

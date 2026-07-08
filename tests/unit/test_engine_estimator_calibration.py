@@ -69,6 +69,22 @@ def test_non_object_json_resolves_to_uncalibrated(tmp_path: Path) -> None:
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
 
 
+def test_oversized_file_resolves_to_uncalibrated(tmp_path: Path) -> None:
+    """A hostile review found an unbounded ``read_text()`` could raise
+    ``MemoryError`` for an adversarially large file — the size cap must
+    refuse before ever reading the bytes."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    oversized_payload = json.dumps({**_VALID_PAYLOAD, "source": "x" * (64 * 1024 + 1)})
+    (tmp_path / CALIBRATION_FILENAME).write_text(oversized_payload, encoding="utf-8")
+    assert load_estimator_calibration(tmp_path) == UNCALIBRATED
+
+
+def test_non_utf8_file_resolves_to_uncalibrated(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / CALIBRATION_FILENAME).write_bytes(b"\xff\xfe\x00not utf-8")
+    assert load_estimator_calibration(tmp_path) == UNCALIBRATED
+
+
 def test_wrong_schema_version_resolves_to_uncalibrated(tmp_path: Path) -> None:
     _write(tmp_path, {**_VALID_PAYLOAD, "schema_version": 999})
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
@@ -112,6 +128,14 @@ def test_bool_seconds_per_trial_resolves_to_uncalibrated(tmp_path: Path) -> None
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
 
 
+def test_absurdly_large_seconds_per_trial_resolves_to_uncalibrated(tmp_path: Path) -> None:
+    """A hostile review found an unbounded value overflows
+    ``estimate_sweep_cost``'s multiply to ``inf``, which then breaks
+    ``JSONResponse``'s ``allow_nan=False`` encoder — refuse before that."""
+    _write(tmp_path, {**_VALID_PAYLOAD, "seconds_per_trial": 1e302})
+    assert load_estimator_calibration(tmp_path) == UNCALIBRATED
+
+
 def test_non_int_bytes_per_row_resolves_to_uncalibrated(tmp_path: Path) -> None:
     _write(tmp_path, {**_VALID_PAYLOAD, "bytes_per_row": 480.5})
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
@@ -119,6 +143,11 @@ def test_non_int_bytes_per_row_resolves_to_uncalibrated(tmp_path: Path) -> None:
 
 def test_zero_bytes_per_row_resolves_to_uncalibrated(tmp_path: Path) -> None:
     _write(tmp_path, {**_VALID_PAYLOAD, "bytes_per_row": 0})
+    assert load_estimator_calibration(tmp_path) == UNCALIBRATED
+
+
+def test_absurdly_large_bytes_per_row_resolves_to_uncalibrated(tmp_path: Path) -> None:
+    _write(tmp_path, {**_VALID_PAYLOAD, "bytes_per_row": 1024**3 + 1})
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
 
 

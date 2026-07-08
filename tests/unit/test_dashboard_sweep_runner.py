@@ -461,9 +461,66 @@ def test_oneclick_preflight_for_plan_aggregates_across_groups(tmp_path: Path) ->
     assert result["sweep_run_id"] == "agg-id"
     assert result["ok"] is False  # empty fake lake ⇒ every group has coverage gaps
     assert len(result["refusals"]) > 0
-    assert isinstance(result["estimator"]["trials"], int)
-    assert result["estimator"]["trials"] > 0
+    # Exact per-group trial counts, summed — not just "some positive number" —
+    # so a regression that doubles/halves the aggregate cannot slip through
+    # (round-3 adversarial-refuter finding: the prior assertion only checked
+    # `> 0`).
+    from brutex.dashboard.sweep_runner import _axes_counts
+    from brutex.engine.sweep_estimator import count_true_trials
+
+    expected_trials = 0
+    for request in plan.requests:
+        k_values, other_axes_product, _ = _axes_counts(request)
+        expected_trials += count_true_trials(k_values, other_axes_product=other_axes_product)
+    assert result["estimator"]["trials"] == expected_trials
     assert result["estimator"]["estimate_basis"] == "provisional"
+
+
+def test_oneclick_preflight_for_plan_effective_condition_count_is_min_across_groups(
+    tmp_path: Path,
+) -> None:
+    """Round-3 adversarial finding: every real fan-out shares one ``segment``
+    across groups, so the ``min()`` aggregation in ``oneclick_preflight_for_plan``
+    (vs. e.g. ``max()``) was correct but unreached/unproven by any test. Build
+    a plan with two groups on DIFFERING segments directly (bypassing
+    ``resolve_oneclick_sweep_plan``, which only accepts one ``segment`` for
+    the whole plan) to pin that the aggregate is the worst-case (smallest)
+    effective condition count, not the largest."""
+    index_request = SweepRunRequest(
+        symbols="NIFTY",
+        intervals=DEFAULT_INTERVALS,
+        directions=DEFAULT_DIRECTIONS,
+        k="1",
+        sl="50",
+        tp="100",
+        exchange="NSE",
+        segment="INDEX",
+        start=_TODAY.isoformat(),
+        end=_TODAY.isoformat(),
+        mode=DEFAULT_MODE,
+        top=10,
+    )
+    fno_request = SweepRunRequest(
+        symbols="SENSEX",
+        intervals=DEFAULT_INTERVALS,
+        directions=DEFAULT_DIRECTIONS,
+        k="1",
+        sl="50",
+        tp="100",
+        exchange="BSE",
+        segment="FNO",
+        start=_TODAY.isoformat(),
+        end=_TODAY.isoformat(),
+        mode=DEFAULT_MODE,
+        top=10,
+    )
+    plan = OneClickSweepPlan(sweep_run_id="mixed-segment-id", requests=(index_request, fno_request))
+    result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
+    nominal = result["estimator"]["nominal_condition_count"]
+    # INDEX's VWAP-dead-bits annotation (2 fewer) is strictly smaller than
+    # FNO's full nominal count — the aggregate MUST report the smaller value.
+    assert result["estimator"]["effective_condition_count"] == nominal - 2
+    assert result["estimator"]["effective_condition_count"] < nominal
 
 
 def test_oneclick_preflight_for_plan_calibrated_basis_when_calibration_file_present(

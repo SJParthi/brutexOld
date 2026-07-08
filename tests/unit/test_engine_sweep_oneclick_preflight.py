@@ -115,6 +115,26 @@ def test_clamp_degenerate_fully_clamped_range() -> None:
     assert result.end == date(2026, 7, 8)
 
 
+def test_clamp_window_entirely_before_floor_collapses_without_crashing() -> None:
+    """Regression pin for a hostile-review-found crash: a window entirely
+    before the pre-2020 floor (both endpoints pre-floor) used to clamp only
+    ``start`` up to the floor while leaving the unclamped, still-pre-floor
+    ``end`` to reach the calendar walk, raising
+    ``HolidayDataUnavailableError``. The interval-intersection rewrite must
+    collapse the WHOLE window to the floor and disclose both clamps."""
+    result = clamp_sweep_window(date(2015, 1, 1), date(2016, 1, 1), today=_TODAY)
+    assert result.start == result.end == date(2020, 1, 1)
+    assert {c.field for c in result.clamps} == {"start", "end"}
+    assert all("coverage floor" in c.reason for c in result.clamps)
+
+
+def test_clamp_window_entirely_after_ceiling_collapses_without_crashing() -> None:
+    result = clamp_sweep_window(date(2027, 6, 1), date(2027, 12, 31), today=date(2027, 3, 1))
+    assert result.start == result.end == date(2026, 12, 31)
+    assert {c.field for c in result.clamps} == {"start", "end"}
+    assert all("clamped ceiling" in c.reason for c in result.clamps)
+
+
 # ── missing_1m_partitions ──────────────────────────────────────────────────────
 
 
@@ -287,6 +307,44 @@ def test_lake_invariant_no_findings_is_clean(
         **_base_kwargs(lake_root=tmp_path, results_root=tmp_path / "sweeps")
     )
     assert not any("lake invariant finding" in r.reason for r in verdict.refusals)
+
+
+def test_duplicate_symbol_is_not_double_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeated symbol token (e.g. ``symbols=["NIFTY", "NIFTY"]``, which a
+    CSV round-trip like ``"NIFTY,NIFTY"`` can produce) must be de-duplicated
+    before the per-symbol lake-invariants scan, so a real finding is reported
+    (and the O(files) scan paid) exactly once, not once per repetition."""
+    _touch_partition(
+        tmp_path,
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        year=2026,
+        month=1,
+    )
+    scan_calls: list[str] = []
+
+    class _FakeFinding:
+        pass
+
+    class _FakeScan:
+        findings = (_FakeFinding(),)
+
+    def _fake_scan(*args: Any, symbol: str, **kwargs: Any) -> _FakeScan:
+        scan_calls.append(symbol)
+        return _FakeScan()
+
+    monkeypatch.setattr(mod, "scan_lake_invariants", _fake_scan)
+    verdict = run_oneclick_preflight(
+        **_base_kwargs(
+            lake_root=tmp_path, results_root=tmp_path / "sweeps", symbols=["NIFTY", "NIFTY"]
+        )
+    )
+    assert scan_calls == ["NIFTY"]
+    assert sum(1 for r in verdict.refusals if "lake invariant finding" in r.reason) == 1
 
 
 # ── derived-TF freshness (G1 reuse, monkeypatched verdicts source) ──────────
