@@ -11,7 +11,18 @@
 * :meth:`ResultsStore.top_k` leaderboard (ordering, tie-break, descending,
   fewer-than-k, ``k < 1`` + unknown-field guards) and ``get`` / ``__len__`` /
   ``__contains__`` / ``rows`` / ``extend``;
-* the ``polars``-missing import guards and the atomic-write failure cleanup.
+* the ``polars``-missing import guards and the atomic-write failure cleanup;
+* the G14 load-boundary damage wrap — old-schema / wrong-dtype / null-cell /
+  invalid-content / corrupt-bytes files ALL raise the typed
+  :class:`ResultsStoreSchemaError` naming the store path, never a raw error
+  (gap-register ruling 5, DEC-SWEEP-RESULTS-DEPTH-001);
+* the presence-tolerant optional-column back-compat law (missing optional
+  column → honest ``None``; unknown extra column → ignored) — the
+  WindowLedgerRecord precedent, guarded for real files by the pre-extension
+  golden suite;
+* the ruling-1 (R21) top-1000-per-tuple regression pin: a >1000-row store
+  keeps every row and serves exactly the ordered top-1000 (tie law intact,
+  no silent cap), before and after a flush→load cycle.
 
 The byte-equality oracle + determinism invariants live in the golden / property
 suites; here we assert behaviour + cover every branch.
@@ -20,8 +31,13 @@ suites; here we assert behaviour + cover every branch.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:  # typing-only — the tests import polars lazily at run time
+    import polars as pl
 
 import pytest
 from brutex.engine.results_store import (
@@ -31,6 +47,7 @@ from brutex.engine.results_store import (
     ResultRow,
     ResultsStore,
     ResultsStoreError,
+    ResultsStoreSchemaError,
 )
 from brutex.strategies.combo import combo_hash
 from brutex.vocabulary.describe import matched_condition_names
@@ -538,3 +555,242 @@ class TestFailurePaths:
         # No half-written temp file is left behind in the destination dir.
         assert not list(tmp_path.glob(".brutex-write-*"))
         assert not path.exists()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# G14 — old-schema / damaged store files raise the TYPED schema error
+# (gap-register ruling 5, DEC-SWEEP-RESULTS-DEPTH-001): never a raw
+# polars / KeyError / TypeError / ValueError that could 500 /results.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_current_schema_df(path: Path) -> None:
+    """Flush a small REAL two-row store to *path* (the mutation base)."""
+    store = ResultsStore(path=path)
+    store.extend(
+        [
+            _row(run_id=_rid(1), sharpe_ratio=1.5, deflated_sharpe=0.5),
+            _row(run_id=_rid(2), sharpe_ratio=2.5, deflated_sharpe=None),
+        ]
+    )
+    store.flush()
+
+
+class TestLoadSchemaDamageWrap:
+    """B1 (G14): every decode failure is :class:`ResultsStoreSchemaError`."""
+
+    def _mutated(self, tmp_path: Path, mutate: Callable[[pl.DataFrame], pl.DataFrame]) -> Path:
+        """Write a REAL store, apply *mutate* to its DataFrame, rewrite it."""
+        import polars as pl
+
+        good = tmp_path / "good.parquet"
+        _write_current_schema_df(good)
+        df = mutate(pl.read_parquet(good))
+        bad = tmp_path / "bad.parquet"
+        df.write_parquet(bad)
+        return bad
+
+    def test_old_schema_missing_required_column_raises_typed(self, tmp_path: Path) -> None:
+        # The pre-u128 shape: ONE `mask_bits` Int64 column instead of the
+        # `mask_bits_lo`/`mask_bits_hi` limb pair — the way an OLD run wrote it.
+        import polars as pl
+
+        bad = self._mutated(
+            tmp_path,
+            lambda df: df.drop("mask_bits_lo", "mask_bits_hi").with_columns(
+                pl.lit(5, dtype=pl.Int64).alias("mask_bits")
+            ),
+        )
+        with pytest.raises(ResultsStoreSchemaError, match="not decodable") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)  # the store path is named
+        assert "mask_bits_lo" in str(excinfo.value)  # the missing column is named
+        assert isinstance(excinfo.value.__cause__, KeyError)  # wrapped, never raw
+
+    def test_wrong_dtype_metric_column_raises_typed(self, tmp_path: Path) -> None:
+        # sharpe_ratio stored as Utf8 (a foreign/hand-rolled writer) → ValueError → typed.
+        import polars as pl
+
+        bad = self._mutated(
+            tmp_path,
+            lambda df: df.with_columns(pl.lit("not-a-number", dtype=pl.Utf8).alias("sharpe_ratio")),
+        )
+        with pytest.raises(ResultsStoreSchemaError, match="not decodable") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ValueError)
+
+    def test_wrong_dtype_price_column_raises_typed(self, tmp_path: Path) -> None:
+        # avg_entry_price as junk text → decimal.InvalidOperation (ArithmeticError) → typed.
+        import polars as pl
+
+        bad = self._mutated(
+            tmp_path,
+            lambda df: df.with_columns(pl.lit("junk", dtype=pl.Utf8).alias("avg_entry_price")),
+        )
+        with pytest.raises(ResultsStoreSchemaError, match="not decodable") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ArithmeticError)
+
+    def test_null_in_required_column_raises_typed(self, tmp_path: Path) -> None:
+        # A null cell in a REQUIRED Int64 column (torn/foreign write) → TypeError → typed.
+        import polars as pl
+
+        bad = self._mutated(
+            tmp_path,
+            lambda df: df.with_columns(pl.lit(None, dtype=pl.Int64).alias("net_pnl_paisa")),
+        )
+        with pytest.raises(ResultsStoreSchemaError, match="not decodable") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, TypeError)
+
+    def test_invalid_row_content_raises_typed_naming_path(self, tmp_path: Path) -> None:
+        # Dtype-clean but validation-violating content (negative absolute magnitude):
+        # the ResultRow raise is re-wrapped so the STORE PATH is named.
+        import polars as pl
+
+        bad = self._mutated(
+            tmp_path,
+            lambda df: df.with_columns(pl.lit(-5, dtype=pl.Int64).alias("gross_profit_paisa")),
+        )
+        with pytest.raises(ResultsStoreSchemaError, match="not decodable") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ResultsStoreError)
+
+    def test_duplicate_conflicting_rows_in_file_raise_typed(self, tmp_path: Path) -> None:
+        # Two rows sharing one run_id with different metrics — a file flush() can
+        # never produce — is file damage, wrapped with the path named.
+        import polars as pl
+
+        def _dup(df: pl.DataFrame) -> pl.DataFrame:
+            clone = df.head(1).with_columns(pl.lit(9.75, dtype=pl.Float64).alias("sharpe_ratio"))
+            return pl.concat([df, clone])
+
+        bad = self._mutated(tmp_path, _dup)
+        with pytest.raises(ResultsStoreSchemaError, match="not decodable") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, ResultsStoreError)
+
+    def test_corrupt_bytes_raise_typed_schema_error_naming_path(self, tmp_path: Path) -> None:
+        bad = tmp_path / "garbage.parquet"
+        bad.write_bytes(b"\x00\x01 not a parquet file")
+        with pytest.raises(ResultsStoreSchemaError, match="unreadable results store") as excinfo:
+            ResultsStore.load(bad)
+        assert str(bad) in str(excinfo.value)
+
+    def test_schema_error_is_a_results_store_error(self) -> None:
+        # Every existing resilient reader catches ResultsStoreError — the damage
+        # subclass MUST stay inside that hierarchy (skip-and-count unchanged).
+        assert issubclass(ResultsStoreSchemaError, ResultsStoreError)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# B2 — presence-tolerant reads for OPTIONAL columns (the WindowLedgerRecord
+# precedent): a store written BEFORE an optional-column extension loads with
+# the missing field as an honest None. The committed pre-extension golden
+# (tests/golden/test_results_store_pre_extension_golden.py) is the guard;
+# here we pin the MECHANISM.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestPresenceTolerantOptionalColumns:
+    def test_store_missing_optional_deflated_sharpe_loads_none(self, tmp_path: Path) -> None:
+        # Simulate a pre-DEC-RANKING-OVERFIT-001 store: today's file minus the
+        # optional column. It must LOAD (never "old-schema damage"), with the
+        # field an honest None and every other field byte-for-byte intact.
+        import polars as pl
+
+        good = tmp_path / "good.parquet"
+        _write_current_schema_df(good)
+        old = tmp_path / "pre-extension.parquet"
+        pl.read_parquet(good).drop("deflated_sharpe").write_parquet(old)
+
+        reloaded = ResultsStore.load(old)
+        assert len(reloaded) == 2
+        expected_1 = _row(run_id=_rid(1), sharpe_ratio=1.5, deflated_sharpe=None)
+        expected_2 = _row(run_id=_rid(2), sharpe_ratio=2.5, deflated_sharpe=None)
+        assert reloaded.get(_rid(1)) == expected_1  # None default, all else intact
+        assert reloaded.get(_rid(2)) == expected_2
+
+    def test_newer_store_with_unknown_extra_column_still_loads(self, tmp_path: Path) -> None:
+        # The mirror direction: TODAY'S reader over a FUTURE store carrying an
+        # unknown additive column ignores it (extensions are additive-only, so
+        # an old reader never breaks on a new file).
+        import polars as pl
+
+        good = tmp_path / "good.parquet"
+        _write_current_schema_df(good)
+        newer = tmp_path / "future.parquet"
+        pl.read_parquet(good).with_columns(
+            pl.lit(7, dtype=pl.Int64).alias("mae_avg_paisa")
+        ).write_parquet(newer)
+
+        reloaded = ResultsStore.load(newer)
+        assert len(reloaded) == 2
+        assert reloaded.get(_rid(1)) == _row(run_id=_rid(1), sharpe_ratio=1.5, deflated_sharpe=0.5)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# B3 — gap-register ruling 1 (R21): the store genuinely keeps + serves
+# top_k=1000 per tuple — exact count, order law intact, no silent cap.
+# ──────────────────────────────────────────────────────────────────────────
+
+#: > 1000 so the top-1000 slice is a strict subset (proves no silent cap).
+_THOUSAND_POOL: Final[int] = 1_100
+
+
+def _thousand_rows() -> list[ResultRow]:
+    """1,100 rows with DELIBERATE ranking ties (pnl pairs) for the tie law."""
+    return [
+        _row(
+            run_id=_rid(i),
+            # Pairs tie on the ranking column → the run_id-asc tie law is
+            # exercised inside the board AND across the rank-1000 boundary.
+            net_pnl_paisa=(i // 2) * 10,
+            sharpe_ratio=float(i % 7),
+        )
+        for i in range(_THOUSAND_POOL)
+    ]
+
+
+class TestTopThousandStorage:
+    def test_top_k_1000_exact_order_and_no_silent_cap(self) -> None:
+        rows = _thousand_rows()
+        store = ResultsStore(path=Path("unused.parquet"))
+        assert store.extend(rows) == _THOUSAND_POOL
+        assert len(store) == _THOUSAND_POOL  # all 1,100 KEPT (no cap at ingest)
+
+        board = store.top_k(1000, by="net_pnl_paisa")
+        assert len(board) == 1000  # exactly 1000 served — never silently fewer
+
+        # Independent oracle: value DESC, ties run_id ASC (ints — exact).
+        expected = sorted(rows, key=lambda r: (-r.net_pnl_paisa, r.run_id))[:1000]
+        assert [r.run_id for r in board] == [r.run_id for r in expected]
+        # The rank-1000 boundary cut the worst 100 rows, not an arbitrary slice.
+        served = {r.run_id for r in board}
+        dropped = {r.run_id for r in rows} - served
+        assert len(dropped) == _THOUSAND_POOL - 1000
+        assert max(r.net_pnl_paisa for r in rows if r.run_id in dropped) <= min(
+            r.net_pnl_paisa for r in board
+        )
+
+    def test_top_k_1000_survives_flush_load_round_trip(self, tmp_path: Path) -> None:
+        # The STORAGE side of ruling 1: a >1000-row tuple store persists and
+        # re-serves the identical ordered top-1000 after a flush→load cycle.
+        rows = _thousand_rows()
+        path = tmp_path / "tuple_store.parquet"
+        store = ResultsStore(path=path)
+        store.extend(rows)
+        before = [r.run_id for r in store.top_k(1000, by="net_pnl_paisa")]
+        flushed = store.flush()
+        assert flushed.row_count == _THOUSAND_POOL
+
+        reloaded = ResultsStore.load(path)
+        assert len(reloaded) == _THOUSAND_POOL
+        after = [r.run_id for r in reloaded.top_k(1000, by="net_pnl_paisa")]
+        assert after == before
+        assert len(after) == 1000

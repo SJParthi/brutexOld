@@ -245,22 +245,32 @@ def sweep_verify_exit_code(*, has_findings: bool, inconclusive: bool) -> int:
 
 def _add_sweep_grid_args(
     parser: argparse.ArgumentParser,
+    *,
+    dates_required: bool = True,
 ) -> None:  # pragma: no cover — declarative argparse wiring (cli-omitted)
     """Add the shared grid-sweep arguments to *parser* (CLAUDE.md §11 COMMON).
 
     The single declaration of the full ``(symbols × intervals × directions × K ×
-    SL × TP)`` grid + lake/output/overfit/options-sim knobs, reused by BOTH
-    ``sweep-all`` (manual) and ``sweep-daemon`` (automatic) so the two surfaces
-    can never drift apart — exactly one source of truth for the sweep CLI
-    contract (DEC-SWEEP-SCHEDULER-001).
+    SL × TP)`` grid + lake/output/overfit/options-sim knobs, reused by
+    ``sweep-all`` (manual), ``sweep-daemon`` (automatic) and ``nightly run``
+    (DEC-SWEEP-NIGHTLY-AUTOMATION-001) so the surfaces can never drift apart —
+    exactly one source of truth for the sweep CLI contract
+    (DEC-SWEEP-SCHEDULER-001). *dates_required* (default ``True`` — the
+    ``sweep-all``/``sweep-daemon`` contract is byte-unchanged) is relaxed ONLY
+    by ``nightly run``, which fills blank dates from ``default_date_range()``
+    (the SAME [2020-01-01, previous IST day] law the pull uses) at dispatch.
     """
     parser.add_argument(
         "--symbols",
         default="NIFTY,BANKNIFTY",
         help="Comma-separated index symbols (default NIFTY,BANKNIFTY — run SENSEX with --exchange BSE)",
     )
-    parser.add_argument("--start", required=True, help="Window start (YYYY-MM-DD or full ISO)")
-    parser.add_argument("--end", required=True, help="Window end (YYYY-MM-DD or full ISO)")
+    parser.add_argument(
+        "--start", required=dates_required, help="Window start (YYYY-MM-DD or full ISO)"
+    )
+    parser.add_argument(
+        "--end", required=dates_required, help="Window end (YYYY-MM-DD or full ISO)"
+    )
     parser.add_argument(
         "--exchange", default="NSE", help="LAKE exchange partition (default NSE; BSE for SENSEX)"
     )
@@ -1656,6 +1666,201 @@ def build_parser() -> argparse.ArgumentParser:
             "Override the >=50%% refusal threshold (C7 — a venv/library drift can "
             "byte-diverge EVERYTHING under a 'matched' context; be sure first)"
         ),
+    )
+
+    # ── nightly (DEC-SWEEP-NIGHTLY-AUTOMATION-001) — zero-click chain ──
+    # COLLISION → DISK → BACKUP → PULL → PREBUILD → SWEEP over EXISTING public
+    # entry points; R50 backup/restore; launchd scheduling with mandatory
+    # post-install verification. Cron-visible exit codes like enrich-greeks.
+    nightly = sub.add_parser(
+        "nightly",
+        help=(
+            "Zero-click nightly chain (collision → disk → backup → pull → "
+            "prebuild → sweep) + backup/restore + launchd scheduling "
+            "(DEC-SWEEP-NIGHTLY-AUTOMATION-001)"
+        ),
+    )
+    nightly_sub = nightly.add_subparsers(dest="nightly_command", required=True)
+
+    n_run = nightly_sub.add_parser(
+        "run",
+        help=(
+            "Run the whole chain once (launchd/cron entry point). EXIT_OK iff "
+            "every attempted link succeeded and no tripwire fired; a SUSPECT "
+            "run exits 2 (cron-red)"
+        ),
+    )
+    n_run.add_argument(
+        "--backup-root",
+        type=Path,
+        default=None,
+        dest="backup_root",
+        help="Snapshot destination (default $BRUTEX_NIGHTLY_BACKUP_ROOT else ~/.brutex/backups)",
+    )
+    n_run.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help="Sealed snapshots to retain (default $BRUTEX_NIGHTLY_BACKUP_KEEP else 7; >= 1)",
+    )
+    n_run.add_argument(
+        "--from-date",
+        default=None,
+        dest="from_date",
+        help="Spot-pull scope start YYYY-MM-DD (blank = the 2020-01-01 pull default)",
+    )
+    n_run.add_argument(
+        "--to-date",
+        default=None,
+        dest="to_date",
+        help="Spot-pull scope end YYYY-MM-DD (blank = previous IST day)",
+    )
+    n_run.add_argument(
+        "--skip-backup",
+        action="store_true",
+        dest="skip_backup",
+        help="Skip the BACKUP link (loud SKIPPED + Telegram nag — stores unprotected tonight)",
+    )
+    n_run.add_argument(
+        "--skip-sweep",
+        action="store_true",
+        dest="skip_sweep",
+        help="Skip the SWEEP link (honest SKIPPED)",
+    )
+    n_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Probes + inventory + plan + report ONLY — takes NO locks, mutates NOTHING",
+    )
+    n_run.add_argument(
+        "--acknowledge-sla-overrun",
+        action="store_true",
+        dest="acknowledge_sla_overrun",
+        help="HARD-REFUSED on nightly run — the unattended chain never overrides safety gates",
+    )
+    _add_sweep_grid_args(n_run, dates_required=False)
+
+    n_backup = nightly_sub.add_parser(
+        "backup",
+        help=(
+            "One-shot COLLISION + DISK + BACKUP links (same locks): seal one "
+            "snapshot of the result-critical stores + prune retention"
+        ),
+    )
+    n_backup.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    n_backup.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Results root (default <lake-root>/sweeps)",
+    )
+    n_backup.add_argument(
+        "--backup-root",
+        type=Path,
+        default=None,
+        dest="backup_root",
+        help="Snapshot destination (default $BRUTEX_NIGHTLY_BACKUP_ROOT else ~/.brutex/backups)",
+    )
+    n_backup.add_argument("--keep", type=int, default=None, help="Sealed snapshots to retain")
+
+    n_restore = nightly_sub.add_parser(
+        "restore",
+        help=(
+            "Verify-EVERYTHING-then-write restore of one sealed snapshot "
+            "(deltas cleared, ledger.parquet strictly LAST; --yes gated)"
+        ),
+    )
+    n_restore.add_argument(
+        "--snapshot", type=Path, required=True, help="The sealed snapshot directory"
+    )
+    n_restore.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    n_restore.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Results root (default <lake-root>/sweeps)",
+    )
+    n_restore.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print the ordered plan + verify verdict; no locks, no writes",
+    )
+    n_restore.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the live restore (the 6 a.m. safety gate — refused without it)",
+    )
+
+    n_install = nightly_sub.add_parser(
+        "install",
+        help=(
+            "One-time launchd bootstrap (macOS): write + load the LaunchAgent "
+            "and VERIFY launchctl lists it (installed-but-unverified FAILS)"
+        ),
+    )
+    n_install.add_argument("--at", default="01:30", help="Local fire time HH:MM (default 01:30)")
+    n_install.add_argument(
+        "--label", default="com.brutex.nightly", help="launchd label (default com.brutex.nightly)"
+    )
+    n_install.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+    n_install.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Baked into the plist EnvironmentVariables when set",
+    )
+    n_install.add_argument(
+        "--backup-root",
+        type=Path,
+        default=None,
+        dest="backup_root",
+        help="Baked into the plist EnvironmentVariables when set",
+    )
+
+    n_uninstall = nightly_sub.add_parser(
+        "uninstall", help="Unload + remove the LaunchAgent, verifying it is no longer listed"
+    )
+    n_uninstall.add_argument("--label", default="com.brutex.nightly", help="launchd label")
+    n_uninstall.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
+    n_status = nightly_sub.add_parser(
+        "status",
+        help=(
+            "The 6 a.m. command: schedule presence, launchctl listing, last "
+            "report, latest snapshot — honest lines even when nothing ran"
+        ),
+    )
+    n_status.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    n_status.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Results root (default <lake-root>/sweeps)",
+    )
+    n_status.add_argument("--label", default="com.brutex.nightly", help="launchd label")
+    n_status.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
     )
 
     return parser
@@ -4938,6 +5143,446 @@ def cmd_enrich_greeks(
     return EXIT_INTERNAL_ERROR
 
 
+# ────────────────────────────────────────────────────────────────────────
+# nightly (DEC-SWEEP-NIGHTLY-AUTOMATION-001) — thin, fully-covered shims
+# over the 100%-tested brutex.nightly modules (the cmd_enrich_greeks template).
+# ────────────────────────────────────────────────────────────────────────
+
+#: The unattended-safety trio HARD-REFUSED on ``nightly run`` — STRICTER than
+#: the sweep-daemon precedent, which dispatch-refuses only --allow-out-of-scope.
+_NIGHTLY_FORBIDDEN_FLAGS: Final[tuple[tuple[str, str], ...]] = (
+    ("allow_out_of_scope", "--allow-out-of-scope"),
+    ("acknowledge_sla_overrun", "--acknowledge-sla-overrun"),
+    ("allow_missing_slices", "--allow-missing-slices"),
+)
+
+
+def _launchctl_runner(argv: Sequence[str]) -> tuple[int, str, str]:
+    """The production CommandRunner: run *argv*, return ``(rc, stdout, stderr)``."""
+    import subprocess  # nosec B404 — fixed launchctl argv, no shell/user input
+
+    try:
+        completed = subprocess.run(  # noqa: S603  # nosec B603 — fixed launchctl argv, no shell/user input
+            list(argv), capture_output=True, text=True, check=False, timeout=30.0
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (127, "", str(exc))
+    return (completed.returncode, completed.stdout, completed.stderr)
+
+
+def _default_plist_dir() -> Path:
+    """Return the default LaunchAgents directory for the nightly plist."""
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+def cmd_nightly_run(args: argparse.Namespace) -> int:
+    """Run the whole nightly chain once (the launchd/cron entry point)."""
+    for attr, flag in _NIGHTLY_FORBIDDEN_FLAGS:
+        if getattr(args, attr, False):
+            print(
+                f"[brutex] nightly never overrides safety gates ({flag}) — run "
+                "sweep-all manually for a supervised override",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+    resolved = _resolve_lake_root(args.lake_root)
+    _require_lake_dir(resolved, command="nightly run")
+
+    from brutex.dashboard.pipeline_pull import strict_gate_enabled
+    from brutex.dashboard.pull_controller import default_date_range
+    from brutex.nightly.backup import (
+        default_backup_root,
+        resolve_backup_keep,
+        resolve_backup_verify,
+    )
+    from brutex.nightly.probes import NightlyEnvError, resolve_sweep_fresh_seconds
+    from brutex.nightly.report import summary_lines
+    from brutex.nightly.run import NightlyPlan, run_nightly
+    from brutex.nightly.sweep_binding import nightly_sweep_kwargs
+
+    # Every env knob parses FAIL-LOUD pre-chain (the resolve_cli_greeks_enrich
+    # precedent) — a junk value is a clean EXIT_USER_ERROR, never a mid-chain 500.
+    try:
+        keep = args.keep if args.keep is not None else resolve_backup_keep()
+        if keep < 1:
+            raise NightlyEnvError(f"--keep must be >= 1, got {keep}")
+        resolve_backup_verify()
+        resolve_sweep_fresh_seconds()
+        strict_gate_enabled()
+        from_dt = date.fromisoformat(args.from_date) if args.from_date else None
+        to_dt = date.fromisoformat(args.to_date) if args.to_date else None
+        if from_dt is not None and to_dt is not None and from_dt > to_dt:
+            raise ValueError(f"--from-date {args.from_date} is after --to-date {args.to_date}")
+    except (NightlyEnvError, ValueError) as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    results_root = args.results_root if args.results_root is not None else resolved / "sweeps"
+    backup_root = args.backup_root if args.backup_root is not None else default_backup_root()
+    start_default, end_default = default_date_range()
+    plan = NightlyPlan(
+        lake_root=resolved,
+        results_root=results_root,
+        backup_root=backup_root,
+        keep=keep,
+        from_date=args.from_date,
+        to_date=args.to_date,
+        sweep_kwargs=nightly_sweep_kwargs(
+            args, lake_root=resolved, start_default=start_default, end_default=end_default
+        ),
+        skip_backup=args.skip_backup,
+        skip_sweep=args.skip_sweep,
+        dry_run=args.dry_run,
+    )
+    report = run_nightly(plan)
+    lines, _verdict = summary_lines(report)
+    for line in lines:
+        print(line)
+    return report.exit_code
+
+
+def cmd_nightly_backup(
+    lake_root: Path | None,
+    *,
+    results_root: Path | None,
+    backup_root: Path | None,
+    keep: int | None,
+) -> int:
+    """One-shot COLLISION + DISK + BACKUP links (same locks as the chain)."""
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="nightly backup")
+    from brutex.adapters.groww.pull_singleflight import (
+        NightlyAlreadyRunningError,
+        nightly_singleflight_lock,
+    )
+    from brutex.nightly.backup import (
+        BackupManifestError,
+        backup_inventory,
+        create_snapshot,
+        default_backup_root,
+        estimate_backup_bytes,
+        resolve_backup_keep,
+    )
+    from brutex.nightly.probes import (
+        NightlyEnvError,
+        check_disk_floors,
+        probe_sweep_liveness,
+        resolve_sweep_fresh_seconds,
+    )
+    from brutex.nightly.report import mint_nightly_id, open_nightly_audit
+
+    results = results_root if results_root is not None else resolved / "sweeps"
+    broot = backup_root if backup_root is not None else default_backup_root()
+    try:
+        keep_resolved = keep if keep is not None else resolve_backup_keep()
+        if keep_resolved < 1:
+            raise NightlyEnvError(f"--keep must be >= 1, got {keep_resolved}")
+        fresh_seconds = resolve_sweep_fresh_seconds()
+    except NightlyEnvError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    nightly_id = mint_nightly_id()
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(
+                nightly_singleflight_lock(resolved, holder_note=f"nightly:{nightly_id}")
+            )
+        except NightlyAlreadyRunningError as exc:
+            print(f"[brutex] {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if not _enter_pull_singleflight(stack, resolved):
+            return EXIT_USER_ERROR
+        liveness = probe_sweep_liveness(results, fresh_seconds=fresh_seconds)
+        if liveness.live:
+            print(
+                f"[brutex] a sweep appears to be RUNNING ({liveness.evidence}) — "
+                "never back up a live results tree; stop the sweep first",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        items, _absent = backup_inventory(resolved, results, exclude_nightly_id=None)
+        verdict = check_disk_floors(
+            lake_root=resolved, backup_root=broot, inventory_bytes=estimate_backup_bytes(items)
+        )
+        if not verdict.ok:
+            print(f"[brutex] {verdict.detail}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        try:
+            result = create_snapshot(
+                lake_root=resolved,
+                results_root=results,
+                backup_root=broot,
+                snapshot_id=nightly_id,
+                nightly_id=nightly_id,
+                keep=keep_resolved,
+            )
+        except (BackupManifestError, OSError) as exc:
+            print(f"[brutex] backup FAILED: {exc}", file=sys.stderr)
+            return EXIT_INTERNAL_ERROR
+        with open_nightly_audit(results) as audit:
+            audit.append(
+                action="BACKUP_SNAPSHOT",
+                subject=f"nightly:{nightly_id}",
+                payload={"snapshot": str(result.snapshot_path), "files": result.file_count},
+            )
+            if result.pruned:
+                audit.append(
+                    action="BACKUP_PRUNE",
+                    subject=f"nightly:{nightly_id}",
+                    payload={"pruned": list(result.pruned)},
+                )
+    print(
+        f"[brutex] snapshot {result.snapshot_id} SEALED at {result.snapshot_path} "
+        f"({result.file_count} files, {result.total_bytes} bytes"
+        + (f"; pruned {len(result.pruned)}" if result.pruned else "")
+        + ")"
+    )
+    return EXIT_OK
+
+
+def cmd_nightly_restore(
+    *,
+    snapshot: Path,
+    lake_root: Path | None,
+    results_root: Path | None,
+    dry_run: bool,
+    yes: bool,
+) -> int:
+    """Verify-everything-then-write restore (locks held; ``--yes`` gated)."""
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="nightly restore")
+    from brutex.adapters.groww.pull_singleflight import (
+        NightlyAlreadyRunningError,
+        nightly_singleflight_lock,
+    )
+    from brutex.nightly.probes import probe_sweep_liveness, resolve_sweep_fresh_seconds
+    from brutex.nightly.report import mint_nightly_id, open_nightly_audit
+    from brutex.nightly.restore import (
+        RestoreRefused,
+        RestoreVerifyError,
+        plan_restore,
+        restore_snapshot,
+        verify_snapshot,
+    )
+
+    results = results_root if results_root is not None else resolved / "sweeps"
+    try:
+        plan = plan_restore(snapshot, lake_root=resolved, results_root=results)
+    except RestoreRefused as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(f"[brutex] restore plan for {snapshot.name}: {len(plan.items)} file(s), in order:")
+    for entry in plan.items:
+        print(f"[brutex]   {entry.restore_order} {entry.namespace}/{entry.relpath}")
+    for key in plan.skipped_live_audit:
+        print(
+            f"[brutex]   SKIP {key} (live cross-run nightly audit chain — "
+            "never overwritten by restore; legacy snapshot)"
+        )
+
+    if dry_run:
+        verification = verify_snapshot(snapshot)
+        if verification.ok:
+            print(f"[brutex] verify OK — {verification.checked} file(s) match the manifest")
+            return EXIT_OK
+        print(
+            f"[brutex] verify FAILED — {len(verification.mismatches)} mismatch(es): "
+            + ", ".join(verification.mismatches[:10]),
+            file=sys.stderr,
+        )
+        return EXIT_VERIFY_FINDINGS
+
+    if not yes:
+        print(
+            "[brutex] refusing to restore without --yes (a live restore REPLACES "
+            "the stores above — the 6 a.m. safety gate)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    nightly_id = mint_nightly_id()
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(
+                nightly_singleflight_lock(resolved, holder_note=f"nightly:{nightly_id}")
+            )
+        except NightlyAlreadyRunningError as exc:
+            print(f"[brutex] {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if not _enter_pull_singleflight(stack, resolved):
+            return EXIT_USER_ERROR
+        liveness = probe_sweep_liveness(results, fresh_seconds=resolve_sweep_fresh_seconds())
+        if liveness.live:
+            print(
+                f"[brutex] a sweep appears to be RUNNING ({liveness.evidence}) — "
+                "stop the dashboard/pull/sweep first",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        with open_nightly_audit(results) as audit:
+            audit.append(
+                action="RESTORE_START",
+                subject=f"nightly:{nightly_id}",
+                payload={"snapshot": str(snapshot)},
+            )
+            try:
+                outcome = restore_snapshot(plan)
+            except RestoreVerifyError as exc:
+                print(f"[brutex] {exc}", file=sys.stderr)
+                return EXIT_VERIFY_FINDINGS
+            except RestoreRefused as exc:
+                print(f"[brutex] {exc}", file=sys.stderr)
+                return EXIT_USER_ERROR
+            except OSError as exc:
+                print(
+                    f"[brutex] restore FAILED mid-copy ({exc}) — the store set is mixed "
+                    "old/new; RE-RUN this restore (idempotent) to converge",
+                    file=sys.stderr,
+                )
+                return EXIT_INTERNAL_ERROR
+            audit.append(
+                action="RESTORE_DONE",
+                subject=f"nightly:{nightly_id}",
+                payload={
+                    "restored": outcome.restored,
+                    "deltas_cleared": outcome.deltas_cleared,
+                    "ledger_restored_last": outcome.ledger_restored_last,
+                },
+            )
+    print(
+        f"[brutex] restored {outcome.restored} file(s) ({outcome.total_bytes} bytes); "
+        f"deltas cleared {outcome.deltas_cleared}; ledger restored last: "
+        f"{outcome.ledger_restored_last}"
+    )
+    print(
+        "[brutex] follow-up: run `brutex doctor`; bars↔ledger drift since the snapshot "
+        "reconciles via reconcile_ledger_with_lake / seed_lake_success "
+        "(docs/runbooks/lake-backup-restore.md)"
+    )
+    return EXIT_OK
+
+
+def cmd_nightly_install(
+    *,
+    at: str,
+    label: str,
+    plist_dir: Path | None,
+    lake_root: Path | None,
+    backup_root: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+    platform: str | None = None,
+) -> int:
+    """One-time launchd bootstrap with the MANDATORY post-install verification."""
+    from brutex.nightly.schedule import (
+        CRON_GUIDANCE,
+        install,
+        parse_at,
+        pmset_wake_command,
+        resolve_program_arguments,
+    )
+
+    plat = sys.platform if platform is None else platform
+    if plat != "darwin":
+        print(
+            "[brutex] nightly install targets macOS launchd; on Linux schedule via cron:",
+            file=sys.stderr,
+        )
+        print(f"[brutex]   {CRON_GUIDANCE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    try:
+        hour, minute = parse_at(at)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    env_vars: dict[str, str] = {}
+    if lake_root is not None:
+        env_vars["BRUTEX_LAKE_ROOT"] = str(lake_root)
+    if backup_root is not None:
+        env_vars["BRUTEX_NIGHTLY_BACKUP_ROOT"] = str(backup_root)
+    outcome = install(
+        label=label,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        program_arguments=resolve_program_arguments(),
+        hour=hour,
+        minute=minute,
+        env_vars=env_vars,
+        log_dir=Path.home() / ".brutex" / "logs",
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    print(
+        "[brutex] REQUIRED for on-time fires (gap-register row 20): launchd does NOT "
+        "wake a sleeping Mac — a fire missed while asleep runs ONCE at next wake; "
+        "powered off = skipped. Run this scheduled wake yourself (one-time, sudo — "
+        "BruteX never runs pmset): "
+        f"{pmset_wake_command(hour, minute)}"
+    )
+    return EXIT_OK
+
+
+def cmd_nightly_uninstall(
+    *,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """Unload + remove the LaunchAgent, verifying launchctl no longer lists it."""
+    from brutex.nightly.schedule import uninstall
+
+    outcome = uninstall(
+        label=label,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    return EXIT_OK
+
+
+def cmd_nightly_status(
+    *,
+    lake_root: Path | None,
+    results_root: Path | None,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """The 6 a.m. command — honest status lines even when nothing has run yet."""
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="nightly status")
+    from brutex.nightly.backup import default_backup_root
+    from brutex.nightly.schedule import status
+
+    report = status(
+        label=label,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        lake_root=resolved,
+        results_root=results_root if results_root is not None else resolved / "sweeps",
+        backup_root=default_backup_root(),
+        runner=runner if runner is not None else _launchctl_runner,
+    )
+    for line in report.lines():
+        print(f"[brutex] {line}")
+    if report.deadman.verdict == "MISSED":
+        # Row 20 dead-man: a Mac asleep at the trigger starts NO process, so
+        # only the surface that notices can alert. Best-effort — a disabled
+        # Telegram is a silent no-op; a raise never breaks the status command.
+        with contextlib.suppress(Exception):
+            from brutex.notifications.sweep_alerts import SweepAlerter
+
+            SweepAlerter().nightly_deadman(
+                detail=report.deadman.detail,
+                newest_run_age_seconds=report.deadman.newest_run_age_seconds,
+            )
+    return EXIT_OK
+
+
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
     """Delete all persisted BruteX data — dry-run by default, typed-confirm to execute.
 
@@ -5354,6 +5999,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             map_size_mb=sweep_cache_map_mb,
             bloom_capacity=sweep_cache_bloom_capacity,
         )
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 1 of 2 ──
+    # Resolve the run-end results-depth kill switch EAGERLY: a junk
+    # BRUTEX_RESULTS_DEPTH is a clean pre-sweep user-config error, never a
+    # failure discovered AFTER an already-completed multi-day sweep.
+    from brutex.engine.results_depth_pass import resolve_results_depth_enabled
+
+    try:
+        results_depth_enabled = resolve_results_depth_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -5822,6 +6479,57 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
+        # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
+        # The ONE run-end results-depth block — trade capture → aggregates →
+        # sidecar trio → baselines → the global top-100 artifact — strictly
+        # AFTER the cascade above, fenced inside _run_results_depth_adapter so
+        # a pass failure never changes the sweep's exit path. Reference bars
+        # load best-effort through the SAME Catalog/ReplayFeed path the sweep
+        # preloaded with; a missing series degrades honestly inside the pass
+        # (NULL + counted, never fabricated).
+        if results_depth_enabled:
+            _run_results_depth_adapter(
+                out_root=out_root,
+                grid=grid,
+                bars_for=_bars_for,
+                minute_bars_for=_depth_reference_loader(
+                    slices=slices,
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    interval="1minute",
+                ),
+                daily_bars_for=_depth_reference_loader(
+                    slices=slices,
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    interval="1day",
+                ),
+                vix_bars=_depth_reference_loader(
+                    slices={},
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=_RESULTS_DEPTH_VIX_EXCHANGE,
+                    segment=_RESULTS_DEPTH_VIX_SEGMENT,
+                    start=start,
+                    end=end,
+                    interval="1minute",
+                )(_RESULTS_DEPTH_VIX_SYMBOL),
+                margin_entry_date=_parse_dt(start).date(),
+            )
+        else:
+            print(
+                "[brutex] results-depth: disabled via BRUTEX_RESULTS_DEPTH — the run-end "
+                "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
+            )
+
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
         return sweep_all_exit_code(result.tuples_failed)
@@ -7488,6 +8196,186 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
         print(_render_options_leaderboard(row, results))
 
 
+# ════════════════════════════════════════════════════════════════════════
+# P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) — the ONE thin,
+# clearly-marked run-end results-depth block: after `cmd_sweep_all`'s cascade
+# completes, the COMMON `brutex.engine.results_depth_pass` runs over the
+# persisted stores (trade capture → aggregates → sidecars → baselines →
+# global top-100), wired to the WP3 providers (dual-language reasons +
+# margin-true ROI). Default ON; `BRUTEX_RESULTS_DEPTH=0` is the fail-loud
+# kill switch (resolved EAGERLY pre-sweep). Fenced: a pass failure prints
+# loud + logs and NEVER fails the sweep (the `_maybe_run_options_sim_on_
+# winners` precedent) — the artifacts are rebuildable (stamp-skip resume).
+# ════════════════════════════════════════════════════════════════════════
+
+#: The India VIX lake coordinates (CLAUDE.md §6 — `NSE-INDIAVIX`, an INDEX-
+#: segment spot dataset; REFERENCE_ONLY: stamped on trades, never swept).
+_RESULTS_DEPTH_VIX_EXCHANGE: Final[str] = "NSE"
+_RESULTS_DEPTH_VIX_SEGMENT: Final[str] = "INDEX"
+_RESULTS_DEPTH_VIX_SYMBOL: Final[str] = "INDIAVIX"
+
+
+def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _maybe_run_options_sim_on_winners precedent; the fenced orchestration in _run_results_depth_adapter is the covered surface)
+    *,
+    slices: Mapping[tuple[str, str], list[Any]],
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    interval: str,
+) -> Callable[[str], list[Any] | None]:
+    """Best-effort per-symbol reference-bar loader for the results-depth pass.
+
+    Serves the sweep's own in-memory slice when the coordinate was already
+    preloaded (zero re-read); otherwise loads through the SAME
+    Catalog/ReplayFeed path ``cmd_sweep_all`` preloads with (reconcile first,
+    so an unregistered-but-on-disk partition still reads). ANY load failure
+    or an empty read returns ``None`` — the pass then degrades honestly
+    (``no_1m_data`` / empty lens / NULL VIX, all counted) instead of failing
+    an already-completed sweep. KeyboardInterrupt/SystemExit/MemoryError
+    always re-raise raw.
+    """
+
+    def _load(symbol: str) -> list[Any] | None:
+        cached = slices.get((symbol, interval))
+        if cached:
+            return cached
+        try:
+            from brutex.data.catalog import Catalog
+            from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+            from brutex.feed.replay import ReplayFeed
+
+            with Catalog.open(catalog_path) as cat:
+                reconcile_catalog_from_lake(
+                    lake_root=lake_root,
+                    catalog=cat,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                )
+                feed = ReplayFeed(
+                    catalog=cat,
+                    lake_root=lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbols=[symbol],
+                    interval=interval,
+                    start=_parse_dt(start),
+                    end=_parse_dt(end),
+                )
+                bars = [event.bar for event in feed]
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            print(
+                f"[brutex] WARNING: results-depth could not load {symbol}/{interval} "
+                f"reference bars ({type(exc).__name__}: {exc}) — degrading honestly "
+                "(the pass NULL-counts the missing series, it never fabricates)",
+                file=sys.stderr,
+            )
+            return None
+        return bars or None
+
+    return _load
+
+
+def _run_results_depth_adapter(
+    *,
+    out_root: Path,
+    grid: Any,
+    bars_for: Callable[[str, str], Sequence[Any]],
+    minute_bars_for: Callable[[str], Sequence[Any] | None],
+    daily_bars_for: Callable[[str], Sequence[Any] | None],
+    vix_bars: Sequence[Any] | None,
+    margin_entry_date: date,
+    pass_runner: Callable[..., Any] | None = None,
+) -> bool:
+    """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
+
+    Wires the WP3 providers into the COMMON pass — R33 dual-language reasons
+    (:func:`brutex.ranking.phrases.reason_payload`) + R47 margin-true ROI
+    (:func:`brutex.engine.margin_history.margin_roi_payload`, honest
+    ``unverified`` today) — runs it, and prints the honest report line.
+
+    The fence mirrors the options-sim/greeks-enrich precedent: a pass failure
+    prints LOUD on stderr + logs ``cli.results_depth.pass_failed`` and NEVER
+    changes the sweep's exit path (the sweep itself succeeded; every depth
+    artifact is rebuildable via the idempotent stamp-skip resume);
+    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
+    raw (global stops are never swallowed). Returns ``True`` iff the pass
+    completed and its report printed.
+
+    ``pass_runner`` is an injection seam for tests; ``None`` runs the real
+    :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
+    """
+    import structlog
+
+    from brutex.engine.margin_history import margin_roi_payload
+    from brutex.engine.results_depth_pass import run_results_depth_pass
+    from brutex.ranking.phrases import reason_payload
+
+    runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    def _margin_roi(candidate: Any) -> dict[str, object]:
+        # lots=1 here is a margin-SIZING hypothetical for the refusal-only
+        # (all-UNVERIFIED) ROI mechanism — NOT a trade-row value: captured
+        # trades carry lots=None by design until P5's translation sidecar
+        # lands (gap-register Ruling 18). The regime date is the sweep
+        # window START — the v1 all-refusal tables answer "unverified" for
+        # EVERY in-window date, so no per-trade date threading is needed
+        # until a sourced row lands.
+        return margin_roi_payload(
+            candidate.row.net_pnl_paisa,
+            instrument=candidate.row.instrument,
+            entry_date=margin_entry_date,
+            lots=1,
+        )
+
+    try:
+        report = runner(
+            out_root=out_root,
+            grid=grid,
+            bars_for=bars_for,
+            minute_bars_for=minute_bars_for,
+            daily_bars_for=daily_bars_for,
+            vix_bars=vix_bars,
+            reason_provider=reason_payload,
+            margin_roi_provider=_margin_roi,
+        )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        print(
+            f"[brutex] WARNING: results-depth pass FAILED ({type(exc).__name__}: {exc}) — "
+            "the sweep itself SUCCEEDED; re-run 'brutex sweep-all' with the same selection "
+            "to rebuild the depth artifacts (idempotent stamp-skip resume).",
+            file=sys.stderr,
+        )
+        structlog.get_logger("brutex.cli").error(
+            "cli.results_depth.pass_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    print(
+        f"[brutex] results-depth — tuples={report.tuples_processed} "
+        f"skipped_current={report.tuples_skipped_current} "
+        f"missing_store={report.tuples_missing_store} errored={report.tuples_errored} "
+        f"captured={report.combos_captured} parity_failed={report.combos_parity_failed} "
+        f"pool={report.pool} gate_passers={report.gate_passers} "
+        f"baselines={report.baselines_written} "
+        f"top100={'written' if report.top100_written else 'FAILED'} "
+        f"entries={report.top100_entries}"
+    )
+    return True
+
+
+# ════ END P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) ════
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
@@ -7839,6 +8727,41 @@ def _dispatch(argv: list[str] | None) -> int:
             results_root=args.results_root,
             execute=args.execute,
             allow_mass_quarantine=args.allow_mass_quarantine,
+        )
+    # Nightly zero-click chain (DEC-SWEEP-NIGHTLY-AUTOMATION-001).
+    if args.command == "nightly":
+        if args.nightly_command == "run":
+            return cmd_nightly_run(args)
+        if args.nightly_command == "backup":
+            return cmd_nightly_backup(
+                args.lake_root,
+                results_root=args.results_root,
+                backup_root=args.backup_root,
+                keep=args.keep,
+            )
+        if args.nightly_command == "restore":
+            return cmd_nightly_restore(
+                snapshot=args.snapshot,
+                lake_root=args.lake_root,
+                results_root=args.results_root,
+                dry_run=args.dry_run,
+                yes=args.yes,
+            )
+        if args.nightly_command == "install":
+            return cmd_nightly_install(
+                at=args.at,
+                label=args.label,
+                plist_dir=args.plist_dir,
+                lake_root=args.lake_root,
+                backup_root=args.backup_root,
+            )
+        if args.nightly_command == "uninstall":
+            return cmd_nightly_uninstall(label=args.label, plist_dir=args.plist_dir)
+        return cmd_nightly_status(
+            lake_root=args.lake_root,
+            results_root=args.results_root,
+            label=args.label,
+            plist_dir=args.plist_dir,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
