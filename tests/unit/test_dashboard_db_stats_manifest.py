@@ -34,6 +34,7 @@ for the fail-closed branches), so ``reportPrivateUsage`` is silenced.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 from collections.abc import Callable, Generator, Mapping, Sequence
@@ -883,6 +884,78 @@ class TestFallbackMatrix:
         assert "absent" in _fallback_clauses(logs)
         assert "non_month_file" in _seed_skip_reasons(logs)
         assert not _shard_path(tmp_path).exists(), "no shard may exist for a stray dataset"
+
+    def test_unicode_digit_month_file_falls_back_never_misorders(
+        self, conn: Any, tmp_path: Path
+    ) -> None:
+        """The endgame-round-3 refuter shape end-to-end: a month partition
+        renamed to Arabic-Indic digits (``٢٠٢٣/١٢.parquet``) plus a crafted
+        shard whose stamped stats all MATCH the live files.
+
+        Fails-before: the Unicode-aware ``\\d`` grammar parsed the rel as
+        (2023, 12) with valid Dec-2023 month bounds, so the shard passed ALL
+        FOUR validation clauses — yet ``٢٠٢٣/١٢.parquet`` sorts
+        lexicographically AFTER ``2024/01.parquet`` while chronologically
+        PRECEDING it, so ``plan_page``'s prefix-sum walk (rel order ≡
+        timestamp order) planned the WRONG file first and the served ASC page
+        held Jan-2024 rows where the legacy scan serves Dec-2023 — the ONLY
+        tamper class that silently SERVED instead of failing closed. The
+        ASCII month grammar now fails it closed at clause 1 (``rel_grammar``)
+        and the seed refuses to mint a shard for the Unicode-named file
+        (``non_month_file``), so the dataset stays honestly legacy-served.
+        """
+        _write_months(tmp_path, ((2023, 12), (2024, 1)))
+        dataset = lsm.dataset_dir(tmp_path, lsm.KIND_BARS, _COORDS)
+        unicode_rel = "٢٠٢٣/١٢.parquet"
+        (dataset / "2023" / "12.parquet").rename(dataset / "2023" / "١٢.parquet")
+        (dataset / "2023").rename(dataset / "٢٠٢٣")
+        dec_stat = os.stat(dataset / "٢٠٢٣" / "١٢.parquet")
+        jan_stat = os.stat(dataset / "2024" / "01.parquet")
+
+        def _row(rel: str, stat: os.stat_result, year: int, month: int) -> dict[str, Any]:
+            return {
+                "rel": rel,
+                "rows": 20,
+                "min_ts": datetime(year, month, 5, 4, 0, tzinfo=UTC).isoformat(),
+                "max_ts": datetime(year, month, 8, 4, 19, tzinfo=UTC).isoformat(),
+                "mtime_ns": stat.st_mtime_ns,
+                "size": stat.st_size,
+                "raw_hash": None,
+            }
+
+        shard = _shard_path(tmp_path)
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        shard.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "kind": "bars",
+                    "key": dict(_COORDS),
+                    "identity_key": ["timestamp"],
+                    "row_count": 40,
+                    "min_ts": datetime(2023, 12, 5, 4, 0, tzinfo=UTC).isoformat(),
+                    "max_ts": datetime(2024, 1, 8, 4, 19, tzinfo=UTC).isoformat(),
+                    # Sorted ascending by rel — the ASCII rel sorts BEFORE the
+                    # Arabic-Indic one, which IS the misorder (chronologically
+                    # Dec-2023 precedes Jan-2024).
+                    "files": [
+                        _row("2024/01.parquet", jan_stat, 2024, 1),
+                        _row(unicode_rel, dec_stat, 2023, 12),
+                    ],
+                    "updated_utc": "2026-07-08T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        legacy = _q(conn, tmp_path, use=False, limit=5)  # ASC default: Dec-2023 first
+        rec = _RecordingConn(conn)
+        with capture_logs() as logs:
+            served = _q(rec, tmp_path, use=True, limit=5)
+        assert served == legacy, "a Unicode-digit-rel shard must never plan a misordered page"
+        assert "rel_grammar" in _fallback_clauses(logs)
+        assert isinstance(rec.page_sources()[0], str), "the page must run on the legacy glob"
+        assert "non_month_file" in _seed_skip_reasons(logs)
+        assert lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=_COORDS) is None
 
 
 # ── TOCTOU close + whole-request degrade law ────────────────────────────────────────

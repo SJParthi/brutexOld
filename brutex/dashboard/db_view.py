@@ -2079,7 +2079,10 @@ class _StatsReadContext:
 
         Prefix-sums over the per-file in-bound counts: walk the files in the
         page's own direction (rel-ascending for ASC, reversed for DESC — the
-        UTC-month partition law makes file order ≡ timestamp order), skip the
+        UTC-month partition law makes file order ≡ timestamp order, enforced
+        STRUCTURALLY by the shard loader's clause-1 ASCII-month-grammar +
+        strictly-increasing-chronology check, so no validating shard can
+        plan a misordered page — endgame round 3), skip the
         files wholly before the window, stop at the first file wholly after
         it, and rebase the ``OFFSET`` to be local to the first selected file.
         The returned sublist is re-sorted rel-ASCENDING regardless of page

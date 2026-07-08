@@ -1148,6 +1148,15 @@ hostile-review pass._
   stale-proof pointer to this blurb + MIGRATION.md #1595; bench-m4pro.yml's paging-gate comments repointed
   from the stale "ratio_ceiling() 1.1× tier" to the real `metadata_sweep_ceiling` 3.0× — each with a
   deterministic doc-pin regression (`test_claude_md_branch_consistency.py` + `TestBenchWorkflowWiring`).
+  Round 3 — the Unicode-digit month-rel hole (MINOR, the ONLY tamper class that SERVED instead of failing
+  closed): the month-grammar regexes' Unicode-aware `\d` + `int()` accepted a planted `٢٠٢٣/١٢.parquet` as
+  (2023, 12) with valid bounds, passing ALL FOUR clauses while sorting lexicographically AFTER every ASCII rel
+  — the confirmed repro served a chronologically MISORDERED /db page (Jan-2024 where legacy serves Dec-2023);
+  fixed at root cause with `re.ASCII` grammar + a clause-1 STRUCTURAL chronology law (every rel must parse,
+  new fail-closed `rel_grammar` clause; the parsed (year, month) sequence must be strictly increasing —
+  subsuming the lexicographic sorted+unique check), each regression pinned fails-before incl. the end-to-end
+  misordered-page repro; plus the #1595 round-2 GATES exactness reconcile (474/148 + 221 → the measured
+  476/148 + 222; round-3 tree measures 482/152, 232 tests).
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
   Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +

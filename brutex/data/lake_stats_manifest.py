@@ -40,7 +40,14 @@ Shard schema (:data:`STATS_MANIFEST_VERSION` = 1)
   physical rows.
 * ``files`` is sorted ascending by ``rel`` (the filename order the lake's
   keep-FIRST QUALIFY dedup depends on) and ``row_count == Σ files[].rows`` is
-  checked at load.
+  checked at load. Every ``rel`` must match its kind's ASCII month grammar
+  and the parsed ``(year, month)`` sequence must be STRICTLY increasing in
+  file order (⇔ sorted unique rels under the fixed-width zero-padded
+  grammar) — the structural guarantee behind the /db page planner's
+  "file order ≡ timestamp order" prefix-sum walk (endgame round 3: a
+  Unicode-digit rel previously parsed under the Unicode-aware ``\\d`` yet
+  sorted after every ASCII rel, so a crafted shard could serve a
+  chronologically MISORDERED page while passing all four clauses).
 * ``updated_utc`` is observability ONLY — never validated, never identity.
 
 Anti-illusion law (Golden Rule #1)
@@ -49,8 +56,9 @@ Anti-illusion law (Golden Rule #1)
 following hold, re-checked on every consult (O(D) in the ONE dataset's month
 files — metadata syscalls only, independent of total lake depth):
 
-1. parse + version + key echo + well-formed rows + sorted + sum invariant —
-   over a BOUNDED read (at most :data:`MAX_SHARD_BYTES` + 1 bytes; an
+1. parse + version + key echo + well-formed rows + ASCII-month-grammar rels
+   in strictly-increasing chronological order (⇔ sorted unique) + sum
+   invariant — over a BOUNDED read (at most :data:`MAX_SHARD_BYTES` + 1 bytes; an
    out-of-band multi-GB shard fails closed as ``oversized``, never read
    whole) of a REGULAR file only (the shard is opened ``O_NONBLOCK`` +
    ``S_ISREG``-checked on the open descriptor, so a FIFO/device/socket inode
@@ -136,6 +144,7 @@ import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import MAXYEAR, UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from stat import S_ISREG
 from typing import Final
@@ -221,11 +230,21 @@ _OPTIONS_TREE_DIRNAME: Final[str] = "options"
 
 #: Bars month grammar: ``<yyyy>/<mm>.parquet`` (nested year dir — the
 #: ``build_partition_path`` tail). Month range is checked numerically.
-_BARS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})/(\d{2})\.parquet\Z")
+#: ``re.ASCII`` is LOAD-BEARING (endgame round 3): the Unicode-aware ``\d``
+#: default ALSO matches e.g. Arabic-Indic digits — and ``int()`` happily
+#: converts them — so a planted ``٢٠٢٣/١٢.parquet`` parsed as (2023, 12) with
+#: VALID month bounds, yet sorts lexicographically AFTER every ASCII rel
+#: (its code points sit above ``9``), silently breaking the rel-sort ≡
+#: chronological law the /db page planner's prefix-sum walk depends on. The
+#: production writers only ever mint ASCII zero-padded rels (test-pinned),
+#: so restricting ``\d`` to ``[0-9]`` rejects only out-of-band names — the
+#: DEC-CLI-GREEKS-ENRICH-001 ``_is_canonical_digits`` precedent.
+_BARS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})/(\d{2})\.parquet\Z", re.ASCII)
 
 #: Options month grammar: ``<YYYY>-<MM>.parquet`` (flat series dir — the
-#: ``OptionParquetWriter`` partition filename).
-_OPTIONS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})-(\d{2})\.parquet\Z")
+#: ``OptionParquetWriter`` partition filename). ``re.ASCII``: same law as
+#: :data:`_BARS_REL_RE`.
+_OPTIONS_REL_RE: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})-(\d{2})\.parquet\Z", re.ASCII)
 
 #: The write-side best-effort catch set: a shard failure logs + unlinks +
 #: returns, NEVER raising into the pull. ``json.JSONDecodeError`` is a
@@ -496,7 +515,9 @@ def parse_rel_month(kind: str, rel: str) -> tuple[int, int] | None:
     """Parse *rel* under *kind*'s month grammar → ``(year, month)`` or ``None``.
 
     Bars: ``<yyyy>/<mm>.parquet`` (zero-padded, nested year dir); options:
-    ``<YYYY>-<MM>.parquet`` (flat). Anything else — wrong grammar, month
+    ``<YYYY>-<MM>.parquet`` (flat). Digits are ASCII ``[0-9]`` ONLY (the
+    ``re.ASCII`` grammar — a Unicode-decimal rel like ``٢٠٢٦/٠٧.parquet``
+    is rejected, endgame round 3). Anything else — wrong grammar, month
     outside 1–12, year ``0000`` — returns ``None`` (fail-closed: the caller
     treats the row as invalid). Test-pinned against
     ``partition.build_partition_path`` / the option writer's partition
@@ -804,7 +825,10 @@ def _load_shard_with_clause(
     (at most :data:`MAX_SHARD_BYTES` + 1 bytes — an out-of-band multi-GB
     shard fails closed as ``oversized`` instead of being read whole into
     memory, review round 4) + parse + version + kind/key echo + identity-key
-    echo + well-formed rows + sorted files + sum invariant + aggregate-bounds
+    echo + well-formed rows + ASCII-month-grammar rels in strictly-increasing
+    chronological order (``rel_grammar`` / ``files_unsorted`` — the structural
+    "file order ≡ timestamp order" guarantee the /db page planner consumes,
+    endgame round 3) + sum invariant + aggregate-bounds
     consistency. Takes NO lock (``os.replace`` atomicity — a read sees a
     complete old or new shard). Returns the parsed :class:`DatasetStats` on
     success, or the fail-closed clause NAME (a ``str``) — exactly one of the
@@ -921,8 +945,22 @@ def _load_shard_with_clause(
             rows.append(_row_from_json(entry))
         except ValueError:
             return "row_malformed"
-    rels = [row.rel for row in rows]
-    if rels != sorted(rels) or len(set(rels)) != len(rels):
+    # Chronological-order law, STRUCTURAL (endgame round 3): every rel must
+    # parse under the kind's ASCII month grammar, and the parsed (year, month)
+    # sequence must be STRICTLY increasing in stored file order. Under the
+    # fixed-width zero-padded grammar this is exactly "rels sorted ascending +
+    # unique" (the keep-FIRST QUALIFY filename order the prior lexicographic
+    # check asserted), and it is the invariant the /db page planner's
+    # prefix-sum walk consumes as "file order ≡ timestamp order" — enforced
+    # HERE so no shard that validates can EVER plan a misordered page, instead
+    # of being assumed from a string sort a non-grammar rel could subvert.
+    months: list[tuple[int, int]] = []
+    for row in rows:
+        parsed = parse_rel_month(kind, row.rel)
+        if parsed is None:
+            return "rel_grammar"
+        months.append(parsed)
+    if any(prev >= cur for prev, cur in pairwise(months)):
         return "files_unsorted"
     # The ``field=`` names in the three guarded checks below feed messages the
     # ``except`` clauses DISCARD (only the clause tag survives) — a provably-
@@ -968,7 +1006,8 @@ def load_shard_stats(lake_root: Path, *, kind: str, key: Mapping[str, str]) -> D
     """Read + structurally validate the dataset's shard (clause 1 ONLY).
 
     Parse + version + kind/key echo + identity-key echo + well-formed rows +
-    sorted files + sum invariant. Does NOT check the live directory — use
+    month-grammar rels in strictly-increasing chronological order + sum
+    invariant. Does NOT check the live directory — use
     :func:`load_valid_dataset_stats` for the full anti-illusion validation.
     Returns ``None`` on any structural failure (or when the kill switch is
     off). Takes no lock.
@@ -1043,7 +1082,8 @@ def load_valid_dataset_stats(
     """Serve the dataset's stats ONLY after FULL per-request revalidation.
 
     The anti-illusion gate (module docstring): clause 1 structural (parse +
-    version + key echo + rows well-formed + sorted + sum invariant), clause 2
+    version + key echo + rows well-formed + month-grammar rels in
+    strictly-increasing chronological order + sum invariant), clause 2
     FILE-SET EQUALITY (recursive walk, any depth — the legacy-glob file set),
     clause 3 PER-FILE STAT EQUALITY
     (``mtime_ns`` + ``size`` vs the stamped token), clause 4 MONTH-BOUNDS

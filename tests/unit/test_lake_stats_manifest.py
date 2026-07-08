@@ -265,6 +265,47 @@ class TestMonthGrammar:
     def test_options_junk_rejected(self, rel: str) -> None:
         assert lsm.parse_rel_month(lsm.KIND_OPTIONS, rel) is None
 
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "٢٠٢٦/٠٧.parquet",  # Arabic-Indic digits (U+0660-0669), whole rel
+            "2026/٠7.parquet",  # one Unicode digit inside an ASCII month
+            "２０２６/０７.parquet",  # full-width digits (U+FF10-FF19)
+        ],
+    )
+    def test_bars_unicode_digit_rels_rejected(self, rel: str) -> None:
+        """Unicode-decimal rels must fail the ASCII month grammar (endgame round 3).
+
+        Fails-before: the Unicode-aware ``\\d`` matched these and ``int()``
+        converted them, so ``٢٠٢٦/٠٧.parquet`` parsed as ``(2026, 7)`` with
+        VALID month bounds — yet it sorts lexicographically AFTER every ASCII
+        rel, breaking the rel-sort ≡ chronological law the /db page planner's
+        prefix-sum walk depends on (a validating shard could serve a WRONG
+        page with no fail-closed clause firing).
+        """
+        assert lsm.parse_rel_month(lsm.KIND_BARS, rel) is None
+        assert lsm.rel_month_bounds(lsm.KIND_BARS, rel) is None
+
+    @pytest.mark.parametrize("rel", ["٢٠٢٦-٠٧.parquet", "２０２６-０７.parquet"])
+    def test_options_unicode_digit_rels_rejected(self, rel: str) -> None:
+        assert lsm.parse_rel_month(lsm.KIND_OPTIONS, rel) is None
+        assert lsm.rel_month_bounds(lsm.KIND_OPTIONS, rel) is None
+
+    def test_unicode_digit_trap_is_real(self) -> None:
+        """Pin the stdlib behaviours that made the trap possible.
+
+        Documents WHY the grammar must be compiled ``re.ASCII``: the default
+        Unicode-aware ``\\d`` really does match Arabic-Indic digits and
+        ``int()`` really does convert them (the same interpreter facts behind
+        the DEC-CLI-GREEKS-ENRICH-001 ``_is_canonical_digits`` fix). If a
+        future Python changed either fact this canary flags the assumption.
+        """
+        assert int("٢٠٢٦") == 2026
+        assert re.match(r"\A\d{4}\Z", "٢٠٢٦") is not None  # Unicode-aware default
+        assert re.match(r"\A\d{4}\Z", "٢٠٢٦", re.ASCII) is None  # the fix
+        unicode_rel, ascii_rel = "٢٠٢٦/٠٧.parquet", "2027/01.parquet"
+        assert unicode_rel > ascii_rel  # a Unicode rel sorts AFTER every ASCII rel
+
     def test_unknown_kind_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown stats-manifest kind"):
             lsm.parse_rel_month("greeks", "2026/07.parquet")
@@ -615,6 +656,25 @@ class TestBuildDatasetStats:
     def test_grammar_violating_rel_raises(self) -> None:
         row = lsm.StatsFileRow(
             rel="2026-07.parquet",
+            rows=1,
+            min_ts=_ts(2026, 7, 1),
+            max_ts=_ts(2026, 7, 2),
+            mtime_ns=0,
+            size=0,
+            raw_hash=None,
+        )
+        with pytest.raises(ValueError, match="month grammar"):
+            lsm.build_dataset_stats(kind=lsm.KIND_BARS, key=BARS_KEY, files=[row])
+
+    def test_unicode_digit_rel_raises(self) -> None:
+        """The factory refuses a Unicode-decimal rel (endgame round 3).
+
+        Fails-before: ``٢٠٢٦/٠٧.parquet`` passed the Unicode-aware grammar as
+        ``(2026, 7)`` so the factory would happily persist a shard whose rel
+        sort order is NOT chronological order.
+        """
+        row = lsm.StatsFileRow(
+            rel="٢٠٢٦/٠٧.parquet",
             rows=1,
             min_ts=_ts(2026, 7, 1),
             max_ts=_ts(2026, 7, 2),
@@ -1557,6 +1617,32 @@ class TestStructuralClauses:
 
         assert self._clause(tmp_path, _mutate) == "files_unsorted"
 
+    def test_rel_grammar_junk_rel_is_clause_1(self, tmp_path: Path) -> None:
+        """A non-month rel now fails CLOSED at clause 1 (endgame round 3) —
+        the chronological-order law needs every rel to PARSE before the
+        strictly-increasing check can hold structurally."""
+        _seed_bars(tmp_path)
+
+        def _mutate(obj: dict[str, Any]) -> None:
+            obj["files"][0]["rel"] = "junk.parquet"
+
+        assert self._clause(tmp_path, _mutate) == "rel_grammar"
+
+    def test_unicode_digit_rel_is_rel_grammar_clause(self, tmp_path: Path) -> None:
+        """The endgame-round-3 attack shape at clause 1: a crafted shard whose
+        second rel is the Arabic-Indic twin of a real month. Fails-before:
+        the Unicode-aware grammar parsed it as (2026, 7), the rel list
+        ``["2026/06.parquet", "٢٠٢٦/٠٧.parquet"]`` IS lexicographically
+        sorted + unique, and every other clause held — the shard LOADED, and
+        the /db page planner would treat that NON-chronological rel order as
+        chronological. The ASCII grammar fails it closed as ``rel_grammar``."""
+        _seed_bars(tmp_path)
+
+        def _mutate(obj: dict[str, Any]) -> None:
+            obj["files"][1]["rel"] = "٢٠٢٦/٠٧.parquet"
+
+        assert self._clause(tmp_path, _mutate) == "rel_grammar"
+
     def test_sum_invariant_mismatch(self, tmp_path: Path) -> None:
         _seed_bars(tmp_path)
 
@@ -1814,6 +1900,9 @@ class TestLoadValidDatasetStats:
         assert _fallback_clauses(logs) == ["month_bounds"]
 
     def test_month_grammar_junk_rel_falls_back(self, tmp_path: Path) -> None:
+        """A non-month rel fails closed at clause 1 (``rel_grammar``) since
+        endgame round 3 — previously it survived to clause 4 and fell back as
+        ``month_bounds``; either way the dataset is legacy-served."""
         self._options_shard_with(
             tmp_path,
             rel="legacy.parquet",
@@ -1825,7 +1914,30 @@ class TestLoadValidDatasetStats:
                 lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_OPTIONS, key=OPTIONS_KEY)
                 is None
             )
-        assert _fallback_clauses(logs) == ["month_bounds"]
+        assert _fallback_clauses(logs) == ["rel_grammar"]
+
+    def test_unicode_digit_rel_shard_falls_back_rel_grammar(self, tmp_path: Path) -> None:
+        """The FULL endgame-round-3 attack: a planted ``٢٠٢٦-٠٧.parquet``
+        with a crafted shard whose stamped stats all MATCH the live file.
+        Fails-before: ``parse_rel_month`` accepted the Arabic-Indic digits
+        (Unicode-aware ``\\d`` + ``int()``), ``rel_month_bounds`` returned
+        valid July-2026 bounds, file-set equality saw the planted file, the
+        stat token matched, and the month-bounds clause held — the shard was
+        SERVED, the only tamper class that served a potentially misordered
+        page instead of failing closed. The ASCII grammar must reject it at
+        clause 1."""
+        self._options_shard_with(
+            tmp_path,
+            rel="٢٠٢٦-٠٧.parquet",
+            min_ts="2026-07-01T00:00:00+00:00",
+            max_ts="2026-07-02T00:00:00+00:00",
+        )
+        with capture_logs() as logs:
+            assert (
+                lsm.load_valid_dataset_stats(tmp_path, kind=lsm.KIND_OPTIONS, key=OPTIONS_KEY)
+                is None
+            )
+        assert _fallback_clauses(logs) == ["rel_grammar"]
 
     def test_year_9999_december_rel_falls_back_month_bounds(self, tmp_path: Path) -> None:
         """A CRAFTED year-9999 December rel with a matching on-disk file passes
