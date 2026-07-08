@@ -786,6 +786,44 @@ def _job_lake_root(tmp_path: Path) -> Path:
     return tmp_path / "job_lake"
 
 
+def _bypass_sweep_preflight(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Stub the mandatory sweep confirm gate OK and return its matching token.
+
+    The ``/api/v1/sweep/run`` route re-runs the merged probe-only data
+    preflight synchronously and 409s a refused verdict / stale
+    ``confirm_token`` BEFORE any job registers
+    (DEC-SWEEP-PREFLIGHT-ESTIMATOR-001) — over these tests' empty per-test
+    lake the REAL gate always refuses (``coverage_missing``). The tests here
+    pin the METER/PROBE lifecycle wiring around the sweep JOB, not the data
+    gate (owned by ``tests/unit/test_dashboard_sweep_preflight_route.py``),
+    so the gate is stubbed OK and the returned token rides the POST.
+    """
+    import importlib
+
+    app_module = importlib.import_module("brutex.dashboard.app")
+    token = "tok-rate-monitor-1"
+
+    def _gate(
+        launches: Any, *, lake_root: Path, results_root: Path | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "ok": True,
+            "refusals": [],
+            "refusal_text": "",
+            "headline": "stubbed preflight — meter-lifecycle test",
+            "estimate": {"trials": 1, "tuples": 1, "provisional": True},
+            "warnings": [],
+            "notes": [],
+            "launches": [],
+            "confirm_token": token,
+            "acknowledge_sla": False,
+        }
+
+    monkeypatch.setattr(app_module, "preflight_sweep_request", _gate)
+    return token
+
+
 def _wait_for_job_settled(
     client: Any, *, lake_root: Path, timeout: float = 20.0
 ) -> dict[str, object]:
@@ -853,11 +891,14 @@ class TestSweepKindAwareRateProbe:
             return 0
 
         monkeypatch.setattr(app_module, "run_sweep_from_request", _blocking_sweep)
+        token = _bypass_sweep_preflight(monkeypatch)
         # DEFAULT probes — the production wiring
         client, store = _wired_client(tmp_path, monkeypatch)
         try:
             with client:  # type: ignore[attr-defined]
-                resp = client.post("/api/v1/sweep/run")  # type: ignore[attr-defined]
+                resp = client.post(  # type: ignore[attr-defined]
+                    "/api/v1/sweep/run", params={"confirm_token": token}
+                )
                 assert resp.status_code == 200
                 assert resp.json()["started"] is True
                 assert started_running.wait(timeout=10.0)
@@ -945,12 +986,16 @@ class TestMeterLifecycleAppWiring:
         monkeypatch.setattr(
             app_module, "run_sweep_from_request", lambda request, *, lake_root, results_root: 0
         )
+        token = _bypass_sweep_preflight(monkeypatch)
         injected = SessionRateController()
         client, store = _wired_client(tmp_path, monkeypatch, session_rate=injected)
         with store, client:
             injected.register_meter(CallMeter())  # pull #1's meter (simulated)
             assert injected.peek_meter() is not None
-            assert client.post("/api/v1/sweep/run").json()["started"] is True  # type: ignore[attr-defined]
+            started = client.post(  # type: ignore[attr-defined]
+                "/api/v1/sweep/run", params={"confirm_token": token}
+            ).json()["started"]
+            assert started is True
             # The release-aware settle wait is the ordering barrier: the flock is
             # released strictly AFTER on_run_end in the same identity-gated
             # finally, so the peek below can never race the clear it pins.
@@ -1044,6 +1089,7 @@ class TestMeterLifecycleAppWiring:
             return 0
 
         monkeypatch.setattr(app_module, "run_sweep_from_request", _blocking_sweep)
+        token = _bypass_sweep_preflight(monkeypatch)
 
         captured: dict[str, object] = {}
 
@@ -1059,7 +1105,10 @@ class TestMeterLifecycleAppWiring:
                 probe = captured["probe"]
                 assert callable(probe)
                 assert probe() is False  # idle — no job running
-                assert client.post("/api/v1/sweep/run").json()["started"] is True  # type: ignore[attr-defined]
+                started = client.post(  # type: ignore[attr-defined]
+                    "/api/v1/sweep/run", params={"confirm_token": token}
+                ).json()["started"]
+                assert started is True
                 assert started_running.wait(timeout=10.0)
                 assert probe() is True, (
                     "_pull_live must read True during a SWEEP — the #920 duty-degrade "
