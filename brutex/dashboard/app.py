@@ -53,6 +53,7 @@ import structlog
 
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
+from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
 from brutex.adapters.ingest_common import (
     gate_pull_credentials,
     label_synthetic,
@@ -2738,6 +2739,12 @@ def build_app(
                     dry_run=dry_run,
                     session_rate=_session_rate,
                     on_progress=partial(_metadata_progress_sync, _pull_job),
+                    # Durable &-form winner map (DEC-FORM-WINNER-PERSIST-001):
+                    # keyed by the PRIMARY underlying inside the pull; a dry-run
+                    # threads store=None (base-identical, nothing persisted).
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             return report.to_dict()
 
@@ -2859,6 +2866,11 @@ def build_app(
                     on_progress=_hist_progress,
                     session_rate=_session_rate,
                     until_clean=until_clean,
+                    # ONE durable &-form winner map shared by BOTH composite phases
+                    # (DEC-FORM-WINNER-PERSIST-001); dry-run threads store=None.
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             return report.to_dict()
 
@@ -3056,6 +3068,13 @@ def build_app(
                     # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection
                     # grammars run the SAME strict steps 3-6 order as the composite.
                     underlying_kinds=underlying_kinds,
+                    # Durable &-form winner map on the direct-selection grammars too
+                    # (DEC-FORM-WINNER-PERSIST-001 review round-2 fix: this seam was
+                    # MISSED, so ?underlying=M&M re-paid the wasted plain-form fetch
+                    # and never read/persisted a winner); dry-run threads store=None.
+                    form_preference=PersistentSymbolFormPreference(
+                        None if dry_run else instrument_store
+                    ),
                 )
             # Consecutive-failure health over the post-pull Greeks pass
             # (DEC-GREEKS-ENRICH-OBSERVE-001): a dry-run's `None` verdict is
@@ -3259,6 +3278,13 @@ def build_app(
             # movers are NEVER left blocked by a failed pull.
             prebuild_ok = False
 
+            # ONE durable &-form winner map for the WHOLE pipeline run
+            # (DEC-FORM-WINNER-PERSIST-001): the metadata phase's %26 win reorders
+            # the historical phase's very first fetch for that underlying (both key
+            # by the PRIMARY underlying), and the schema_meta rows survive across
+            # pulls/processes. A dry-run threads store=None (base-identical).
+            form_preference = PersistentSymbolFormPreference(None if dry_run else instrument_store)
+
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
 
@@ -3312,6 +3338,7 @@ def build_app(
                         dry_run=dry_run,
                         session_rate=_session_rate,
                         on_progress=partial(_metadata_progress_sync, _pull_job),
+                        form_preference=form_preference,
                     )
 
             def _run_historical(prior_steps: PriorStepsVerdict) -> CompositePullReport:
@@ -3362,6 +3389,7 @@ def build_app(
                         scope_end=fno_scope_end,
                         on_bars=_pull_job.add_bars,
                         on_ledger_sync=_hist_ledger_sync,
+                        form_preference=form_preference,
                         prior_steps=prior_steps,
                     )
 

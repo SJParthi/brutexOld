@@ -3980,3 +3980,142 @@ class TestMarkCompleteStoreWriteDefer:
         assert deferred[0]["contracts"] == 2
         assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
         assert deferred[0]["defer_seconds"] == 0.2
+
+
+# ── DEC-FORM-WINNER-PERSIST-001: ONE shared &-form preference per phase ───────
+
+
+class _FormMetaStore:
+    """A minimal in-memory ``MetaKV`` (the durable form-winner sidecar twin)."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.rows[key] = value
+
+    def get_meta(self, key: str) -> str | None:
+        return self.rows.get(key)
+
+
+def test_form_preference_identity_reaches_the_ingest_spine(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SAME injected object reaches ``run_groww_option_ingest`` — no fresh copy.
+
+    DEC-FORM-WINNER-PERSIST-001: with the durable preference threaded, the spine's
+    fresh-per-pass default stands down, so the learning is shared across market
+    buckets, until-clean rounds AND (via the store) pulls.
+    """
+    from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
+
+    seen: list[object] = []
+    real_ingest = hp.run_groww_option_ingest
+
+    def _spy(*args: object, **kwargs: object) -> GrowwOptionIngestReport:
+        seen.append(kwargs.get("form_preference"))
+        return real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy)
+    preference = SymbolFormPreference()
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    pull_contract_candles(
+        registry.list_contracts(underlying="NIFTY"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+        form_preference=preference,
+    )
+    assert seen != []
+    assert all(item is preference for item in seen)  # the IDENTICAL object, every bucket
+
+
+def test_form_preference_default_none_lets_the_spine_build_its_own(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default parity: unwired callers still pass ``None`` (the spine's per-pass default)."""
+    seen: list[object] = []
+    real_ingest = hp.run_groww_option_ingest
+
+    def _spy(*args: object, **kwargs: object) -> GrowwOptionIngestReport:
+        seen.append(kwargs.get("form_preference"))
+        return real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    pull_contract_candles(
+        registry.list_contracts(underlying="NIFTY"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen != []
+    assert all(item is None for item in seen)
+
+
+def test_durable_preference_persists_the_candle_phase_winner(tmp_path: Path) -> None:
+    """End-to-end: an ``&``-contract's %26 candle win lands in the durable store.
+
+    Proves the WHOLE thread — pull_contract_candles → _run_phase →
+    run_groww_option_ingest → fetch_candle_windows — records under the contract's
+    UNDERLYING key through the injected PersistentSymbolFormPreference.
+    """
+    from brutex.adapters.groww.symbol_form_preference import (
+        PersistentSymbolFormPreference,
+        form_winner_key,
+    )
+
+    class _AmpersandSDK(_FakeSDK):
+        def get_historical_candles(self, **kw: object) -> dict[str, object]:
+            symbol = str(kw["groww_symbol"])
+            self.candle_symbols.append(symbol)
+            if "%26" in symbol:
+                return _candle_payload()
+            return {"candles": []}  # the plain & form is silently empty (the #898 shape)
+
+    store = RegistryStore.open(tmp_path / "registry.duckdb")
+    store.upsert_contract(
+        "NSE",
+        "M&M",
+        date(2024, 1, 25),
+        "NSE-M&M-25Jan24-2400-CE",
+        side="CE",
+        strike=2400.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    meta = _FormMetaStore()
+    sdk = _AmpersandSDK()
+    sink = _RecordingSink()
+    report = pull_contract_candles(
+        store.list_contracts(underlying="M&M"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=store,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+        form_preference=PersistentSymbolFormPreference(meta),
+    )
+    assert report.contracts_completed == 1
+    # First fetch tried plain (empty) then the %26 form (bars) — and the win was
+    # PERSISTED under the underlying key AS THE KEY-LEVEL ROLE FORM (never the
+    # per-contract spelling), so the row seeds the metadata phase and every other
+    # contract of the underlying in the next pull/process.
+    assert sdk.candle_symbols == ["NSE-M&M-25Jan24-2400-CE", "NSE-M%26M-25Jan24-2400-CE"]
+    assert meta.rows == {form_winner_key("M&M"): "M%26M"}
+    store.close()
