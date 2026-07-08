@@ -50,7 +50,7 @@
 | # | Needed capability | Domain | Severity | Evidence (file:line) |
 |---|-------------------|--------|----------|----------------------|
 | 1 | **Auto-wire the Stage-4 cascade into the main sweep** — the 9 overfitting filters EXIST but `run_stage4_cascade()` is called manually; wire it so every sweep's top-K winners are auto-filtered. Highest value-per-effort | Engine | 🔴 Critical (quick win) | `metrics/cascade.py` done; not invoked by `sweep_orchestrator` |
-| 2 | **Options Track executor** — the strike selector + grid + expiry + lot-size are **already built** (`options/strike_rules.py`, 10 rules); what's missing is the **executor/materializer** (winning spot signal → priced options PnL), Greeks/risk-free, options TF resampler, and the real `data/option_sink.py` (currently a Protocol stub) | Data | 🔴 Critical | `options/strike_rules.py:190` done; `options/__init__.py` (Greeks TBD); `data/option_sink.py:57` stub |
+| 2 | **Options Track executor** — the strike selector + grid + expiry + lot-size are **already built** (`options/strike_rules.py`, 10 rules); what's missing is the **executor/materializer** (winning spot signal → priced options PnL), Greeks/risk-free, options TF resampler, and the real `data/option_sink.py` (currently a Protocol stub) | Data | 🔴 Critical | `options/strike_rules.py:190` done; `options/__init__.py` (Greeks TBD); `options/executor.py:335` `OptionBarSource` seam (the old `data/option_sink.py` stub was removed; production reader `LakeOptionBarSource`, `options/lake_source.py:97`) |
 | 3 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration; makes billions-scale search smart | Engine | 🔴 High | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
 | 4 | ~~**Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail~~ ✅ **CLOSED** by DEC-TELEGRAM-WIRE-001 (#567): `notifications/sweep_alerts.py` wires watchdog-hung / rate.breach / auth.renew_failed / sweep-complete + a manual `brutex notify test` | Observability | ✅ Done | `notifications/sweep_alerts.py`; `cmd_sweep_all` + `cmd_fetch` + `pull_controller` |
 | 5 | ~~**Runtime look-ahead enforcement in the sweep**~~ ✅ **CLOSED** by DEC-LOOKAHEAD-BARRIER-001: Property **P-06** is now a LIVE runtime enforcer (`feed/lookahead.py` `LookAheadBarrier`) wired into the strategy runner (`runner.py`) + execution driver (`driver.py`) alongside the existing `ReplayFeed.ensure_no_lookahead()` timestamp guard — active automatically on every sweep eval (`record=False`, O(1) memory) + a manual `brutex verify-lookahead` recheck. P-06 promoted from `pytest.skip` to a live hypothesis test | Engine | ✅ Done | `feed/lookahead.py`; `runner.py` + `driver.py` call sites; `feed/replay.py:184-208` (the sibling timestamp guard) |
@@ -58,7 +58,7 @@
 | 7 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
 | 8 | **Keepalive prod start-wiring + watchdog sub-tuple detection + 120m/180m/240m TF persistence** | Mixed | 🟢 Low | keepalive `start()` call site UNVERIFIED; watchdog inter-tuple only; 8/19 TFs persisted |
 | 9 | **Clean up 3 docstring-only stub packages + the missing `brutex/math/` facade** — ✅ **MOSTLY RESOLVED (DEC-STRUCTURE-CLEANUP-001, #569, PR #479):** `backtest/`, `sprint/`, `visualization/` DELETED (zero importers); `brutex/math/` facade CREATED (programmatic re-export of `fno_math` + `trading_core`, 100% line+branch); CLAUDE.md §5 reconciled. **Remaining:** the dormant `rust/fno-math/src/math/` Rust scaffold is untouched (separate follow-up) | Structure | 🟢 Low (was 🟡) | done: no `backtest`/`sprint`/`visualization`; `brutex/math/__init__.py` live. remaining: `rust/fno-math/src/math/mod.rs:1-13` |
-| 10 | **Disk-full (ENOSPC) write-failure unit test + JSON-fuzz the parser** — handlers EXIST (cleanup + re-raise), only the tests are missing | Hardening | 🟢 Low | `sweep_checkpoint.py:314-332` handler; no ENOSPC unit test |
+| 10 | **Disk-full (ENOSPC) write-failure unit test + JSON-fuzz the parser** — handlers EXIST (cleanup + re-raise), only the tests are missing | Hardening | 🟢 Low | `sweep_checkpoint.py:299-321` handler; no ENOSPC unit test |
 | 11 | **Post-persistence DSR re-gating · synthetic-data corruption tests · info-leak static analyzer** | Engine/Hardening | 🟢 Low | documented design limits, not bugs |
 
 > **Explicitly OUT OF SCOPE (not needed):** TOTP `generateAccessToken` auto-mint (operator 2026-06-07) — the manual-token + RenewToken-keepalive path is the accepted auth model.
@@ -74,7 +74,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Per-bar condition eval | u64 bit test `(bar_bits & mask)==mask` | `combo_mask.py` | throughput canary 8× |
 | Combo uniqueness/dedup | BLAKE3 9-field hash → Bloom → LMDB | `strategies/combo.py`, `engine/sweep_cache.py` | bloom property P-05 |
 | Bar / indicator lookup | resident array index | `sweep_kernel.py` | `test_store_o1.py` 3× |
-| Window-skip (ingest) | O(1) coverage set | `data/fetch_coverage.py:46-102` | — |
+| Window-skip (ingest) | O(1) coverage set | `data/fetch_coverage.py:22-38` | — |
 
 > **What is NOT and CANNOT be O(1):** the *total* sweep wall-time. Enumerating
 > `C(52,K) × params` trials × `N` bars is inherently `O(Σ work)` — claiming
@@ -166,7 +166,7 @@ These were **not** in the wave-1 audit and are now tracked (Golden Rule #1 — h
 | `brutex/sprint/` | "Day 1 end-to-end runner" glue | ✅ **DELETED** (#569 — never built, zero importers) | removed in DEC-STRUCTURE-CLEANUP-001 |
 | `brutex/visualization/` | PNG charts for the Telegram digest | ✅ **DELETED** (#569 — stub; PNG charting is a separate future decision) | removed in DEC-STRUCTURE-CLEANUP-001 |
 | `brutex/math/` | CLAUDE.md §5 mandated Rust facade | ✅ **CREATED** (#569 — programmatic re-export of `fno_math` + `trading_core`, 100% line+branch) | `brutex/math/__init__.py` |
-| `rust/fno-math/src/math/` | rolling / distributions / solvers | **dormant scaffold** (untouched — separate follow-up) | `mod.rs:1-13` ("scaffold only", modules commented out) |
+| `rust/fno-math/src/math/` | rolling / distributions / solvers | **dormant scaffold** (untouched — separate follow-up) | `rust/fno-math/src/math/mod.rs:1-13` ("scaffold only", modules commented out) |
 | `options/strike_rules.py` | the strike selector | ✅ **BUILT** (corrects the wave-1 "no strike-selector" claim) | `strike_rules.py:190` (offset + delta-target) |
 | `engine/deflate.py` + `engine/robustness.py` | DSR pool-deflation + CPCV pass-rate | ✅ built but **un-enumerated** in wave 1 | (reviewer should confirm delegate vs duplicate) |
 

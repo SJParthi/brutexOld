@@ -36,8 +36,9 @@ Concretely, on the canonical :class:`~brutex.models.Instrument`:
 Pure, O(1) (a fixed set of enum + frozenset membership checks), no I/O, no global
 state. This module deliberately imports only :mod:`brutex.models` +
 :mod:`brutex.universe` (both dependency-light), so it can gate a cost/fill
-application at any call site without dragging in the heavy Track-2 calculator or
-the execution simulator.
+application at any call site without dragging in the heavy Track-2 calculator
+(the deprecated execution simulator this note once also named was deleted per
+DEC-EXECUTION-TRIO-DELETE-001).
 """
 
 from __future__ import annotations

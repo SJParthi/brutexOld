@@ -18,7 +18,251 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
+_Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
+MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+(1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
+ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
+production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
+`entry_open + tick` → `entry_open − tick` (byte-exact test 10_005 → 9_995; BUY-only
+DEC-EXEC-008 + intraday DEC-RISK-011 locks UNTOUCHED, `executor.py` not edited), the
+§4.2 expiry state machine honestly labelled a fail-loud STUB in-spec, and the two
+§4.2 pseudo-code drifts REGISTERED as §16 items 18/19 — never silently decided;
+(2) the broker (Groww) token/credential docs refreshed to the AWS-only / fail-fast /
+mid-run-re-read truth (#1065/#1072/#1092) — the stale `BRUTEX_TOKEN_BROKER_READONLY`
+instructions + REMOVED local-mint-fallback prose replaced across the two runbooks, the
+deploy guide, the minter runbook, `TOKEN_BROKER_CONTRACT.md` (TickVault claims left
+"per its own repo"), ADR-0013/0014 Status-line superseded-in-part notes, and the
+scoreboard's re-mint cell → re-read (`groww.token.reread`); DOCS-only, auth code CITED
+never edited, rate caps untouched; (3) ADR-0004 GPU gate reconciled — Status PROPOSED
+→ ACCEPTED (CPU-first arm EXECUTED + MEASURED #411/#413/#417), the never-run §6
+tri-platform benchmark RETIRED as scheduled work + RETAINED as a dormant FAIL-CLOSED
+precondition, mechanically pinned by NEW `tests/unit/test_gpu_gate_drift_pin.py`
+(no MLX/CuPy/`BRUTEX_GPU_OFFLOAD` in `brutex/`+`rust/`; #1492-G3 pattern);
+(4) the dormant cloud auto-fix snippet (claude_automation.md §3) RETIRED outright —
+DELETE, never wired, a #1180-class privileged-trigger hazard — and the fork-PR redteam
+sweep EXTENDED to comment-family triggers (`test_no_issue_comment_privileged_workflows`,
+GITHUB_TOKEN carve-out; revival needs a fresh DEC + the ledgered precondition checklist);
+(5) the Phase-1 sign-off checklist closed by SUPERSESSION — all 11 boxes ticked with
+per-item citations, the "10 boxes" count defect fixed, the env-var trailer superseded by
+#1065; NO operator ack pre-claimed (requested on the PR). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the ONE code delta lives inside the
+DEC-EXEC-008-stubbed short branch, `calculator.py` stays 100% line+branch.)
+Earlier: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
+MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541) — the 5-item engine cleanup pack (reapplied onto
+current main after the original 2026-07-06 lineage was wiped), ONE change set:
+(1) the combo `\x1f` reject-only guard is MIRRORED into both previously-
+unguarded run-identity joins (`refinement_run_id` + `_walk_forward_run_hash`)
+via ONE COMMON `strategies.combo.reject_unit_separator`, plus `allow_nan=False`
+at both engine canonical-JSON sites (+ the stage1a schedule-hash third mirror)
+— byte-frozen run-identity goldens (with an independent pip-blake3
+payload-byte oracle proving `fno_math.blake3_hash ≡ blake3`) landed FIRST and
+pass unchanged; LOW/defence-in-depth, NOT a live bug. (2) the option-dedup
+bloom-before-exact-confirm ordering VERIFIED already correct — ZERO executable
+change (AST-proven); no-phantom + bloom-negative-short-circuit pins added at
+both public probe entries (`add_if_new`/`unique_option_bars`) — the PRODUCTION
+consumer of the verified ordering is the engine sweep's
+`ComboDedup(OptionDedupIndex)` dedup tier (`sweep_launch.py`/`cli.py`); the
+original sink-path pin covered the since-deleted `OptionBarSink` orchestration
+(removed on main by DEC-INGEST-AUDIT-WIRING-001 #1500 — dropped in the rebase),
+with the mark-after-durable-write LAW recorded as history in #1547. (3) the
+hand-synced Python `VwapState` +
+`MarketStructureState`/`Trend` twins DELETED — the `rust/trading-core`
+pyclasses are the SINGLE SOURCE (additive `last_swing_high/low` getters
+delegating to the EXISTING core accessors, core untouched — TickVault-safe;
+crate 0.3.0→0.3.1, so the LIVE `_indicator_version()` string moves with the
+bump — NO math change, new runs re-key via `indicator_version` exactly as the
+§2-Rule-4 formula intends; the frozen twin fixture + SHA never regenerated,
+replayed Rust-only; P-06 preserved at strength; `MarketStructureSignal`
+stays). (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic
+`MaskWord` core (the existing Rust suite passed UNMODIFIED — the
+frozen-behaviour gate; native `Vec<u128>` FFI per the recorded pyo3-0.29-abi3
+probe transcript) — >64-bit masks/bar_bits are now Rust-served, parity-pinned
+vs the `simulate_trades` oracle, with lazy wide-kernel promotion (reasons
+re-scoped `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+`wide_kernel_promoted`); HONEST: future-proofing, production-UNREACHABLE at
+today's 60-bit vocabulary — every currently-legal u64 input byte-identical,
+the frozen u64 golden corpus untouched, u64 bench non-regression measured.
+(5) the deprecated `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver`
+trio DELETED with its 8 test surfaces + golden fixture + dead ci.yml gates
+(grep-proven zero production consumers; `types.py` kept whole —
+`InstrumentMeta` live — and `errors.py` semantics untouched, its five
+subclasses honestly ledgered as orphaned; landed as ONE atomic commit — the
+wiped first lineage's two-commit accident is recorded as history in #1550) —
+the pack's ONLY behaviour-visible item (import surface). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; run identity bit-identical for all currently-legal
+inputs (golden-proven); no scope/vocab/rate change; touched modules 100%
+line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline; cargo suites green (fno-math 565, trading-core 162);
+cargo-mutants evidence partial under the ledgered #1511 Rust timeout —
+stated, not papered over).
+Earlier: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 —
+the test-apparatus debt pack: nine long-ledgered apparatus gaps closed as ONE
+change set, each landed fix-the-violation or measured-green: (a) a repo-wide
+doctest gate (pkgutil walk, measured 55-example teeth floor; the 3 broken
+tf_resampler examples fixed — the ONLY brutex/ source edit, docstring-only);
+(b) EXPLICIT hypothesis determinism on CI (the fully-explicit repo-registered
+`ci` profile, `HYPOTHESIS_PROFILE=ci` in ci/verify-m4pro/mutation; HONEST:
+GHA was ALREADY implicitly derandomized by hypothesis ≥6.113's built-in
+auto-loaded `ci` profile — the real sanctioned flip is the reverse: no-env
+scheduled arms (stress-nightly et al.) now deliberately load the random
+default, overriding the auto-load; the false "500 examples /
+HYPOTHESIS_SEED" pyramid claim corrected; non-tautological pins — AST
+source pin + CI-env-stripped subprocess selection pin);
+(c) a fix-reversion ci-ok hard gate — a fix:-titled PR's shipped tests must
+FAIL with the fix reverted to merge-base in a scratch worktree (closes the
+#1154 surviving-fixture class); (d) a citation ACCURACY scanner (ci-ok hard
+gate, push+PR) — file:line cites in the normative docs resolve Tier 1/2/3 and
+MIGRATION #NNN refs resolve; the live 29-finding census (13 in this file's §2
+Rule 6 / §6 rows — the 4th #609/#669/#846 recurrence) reconciled to fixpoint
+in the same change (round-2 honesty: fixpoint = scanner-green, NOT per-line
+proof — two §6 rows the any-anchor×any-segment Tier-3 envelope blessed while
+stale, plus one anchor-appeasing wrong-target re-point, were re-fixed on the
+merits; the envelope is now stated plainly in the scanner's residual-limits
+docstring, and out-of-root `../`/absolute cites now fail loudly instead of
+reading + blessing a non-repo file); (e) a DEC-ID appropriateness heuristic in
+validate_dec_ids.py (source-touching non-exempt PRs must cite a resolving
+DEC-ID or touch the ledger; STANDARDS row 18 stays PARTIAL); (f) jscpd 3%→1%
+(measured 0.37% baseline); (g) the pandas import ban widened to ALL of
+brutex/ (zero offenders; the `brutex/*.py` + `brutex/**/*.py` pathspec PAIR —
+round-2 caught git's `**` glob alone missing the 12 top-level modules); (h) P-10/P-12 promoted to real cost-calculator
+properties (STT sell-leg-only; brokerage = the VERIFIED flat ₹20/order law —
+the stale min(₹20, 0.03%) wording corrected); (i) the sweep worker-scaling
+A/B bench enumerated in bench-m4pro.yml — EXECUTING GREEN on the live
+registered M4 Pro runner (in-PR reconcile: the first real run failed on the
+missing polars [data] extra, fixed a54c9a0a; re-run fully green, run
+28851211762 — step measured 20 s vs the generous 25-min timeout; VERDICT:
+KEEP CAP=8). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; apparatus/CI/docs only.
+Earlier: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+MIGRATION.md #1539 — the /movers prev-close calendar-contiguity honesty guard:
+a previous-day close/OI baseline that provably skipped a nearer NSE session (a
+lake hole — the confirmed repro printed 2.2822% where the true Friday-based
+figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
++ the INDEPENDENT `oi_baseline_*` twins), warned ONCE (capped 20/build, deduped
+per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
+untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
+(strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
+NON-session documented limit), enriched resolvers `resolve_prev_close`/
+`resolve_prev_oi` with byte-identical `.value` seams over the historical
+`_prev_day_close`/`_prev_day_oi`, ONE pure `prev_baseline_provenance`, and
+EMIT-ON-FALSE row projection (contiguous + abstained payloads byte-for-byte
+the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
+HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
+the missing session does; `preopen_report._previous_trading_day` NOT refactored
+(named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
+MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
+TIMEFRAME-INVARIANT: it is re-sourced from the RAW 1-minute session frame
+(post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, exactly
+mirroring the already-TF-invariant futures/options `_read_future_session`,
+instead of the resampled display-timeframe bars — so the SAME (symbol, day,
+as-of) turnover no longer CHANGES with the selected display timeframe
+(reproduced NSE-NIFTY 2024-01-02 whole-day: value 1m 19583300 ≠ 5m 19833500 ≠
+1day 20100000 paisa, now all byte-identical to the raw-1m answer). Three edits,
+ALL in `brutex/dashboard/movers_snapshot.py` (ZERO other source files): extract
+the shared raw-1m read+cut into `_read_cut_1m_frame` (§11 COMMON —
+`_read_session_bars` becomes a byte-identical wrapper, preserving the
+DEC-PIPELINE-AUTOPREBUILD-001 stored-vs-resample display-bar equality), the NEW
+no-`interval`-arg `spot_session_value_paisa` (HLC3 × volume via the ONE COMMON
+`session_traded_value_paisa`, per-bar `round_money` 2dp BEFORE × volume,
+`Decimal(str(...))` matching `_read_future_session`, `None` on missing 1-minute
+— never fabricates, Golden Rule #1), and a `value_paisa: int | None = None`
+injection into `compute_snapshot` (`None`/omitted falls back to the legacy
+display-bar reduction byte-identically, so the existing 320000/318660 goldens
+pass UNMODIFIED — the injection-gate mutant killer) wired from
+`compute_spot_candidates` inside the existing `skip_errors` try. HONEST
+envelope: a spot-ranking CORRECTNESS fix (Top Value becomes a genuine session
+property, mirroring futures/options) that CHANGES the displayed spot Top Value
+on coarse timeframes versus today — a SANCTIONED correction, not a silent
+break; value(1minute) byte-unchanged; a mid-session as-of legitimately keeps
+1day whole-day (the bar IS the day), so invariance is scoped PER shared
+effective as-of; disclosed I/O — one extra month-bounded raw-1m read on the
+daily/stored-first paths + a double-read on the resample-fallback path (bounded
+O(one month), candidate-cache-memoised per write-generation); futures/options
+value output BYTE-UNCHANGED (`session_traded_value_paisa` +
+`filter_to_ist_minute` + the `_read_future_session` 6-tuple untouched; diff-stat
+shows ONLY `movers_snapshot.py` in source; the F&O suites re-run UNMODIFIED
+green). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; READ-ONLY dashboard ranking;
+no lake/schema/scope/vocab/rate change; touched module 100% line+branch;
+ruff/ruff-format/`mypy --strict`/pyright clean.)
+Earlier: 2026-07-06 (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 —
+the CLI `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment
+pass the dashboard runs — post-drain Seam A (fetch lane drained + window
+ledger persisted FIRST, single-flight lock still HELD), default-ON with the
+fail-loud `BRUTEX_CLI_GREEKS_ENRICH` kill switch, inert under
+`--dry-run`/`--inspect` via `_no_persist`, halts (`LakeWriteHalt`/
+`GreeksEnrichPoolBroken`) alert-then-re-raise, a fenced failure NEVER fails
+the pull — and a NEW `brutex enrich-greeks` subcommand delivers the #1188
+bulk v1→v2 re-enrich (exit 0 iff fully clean — cron-visible). ONE COMMON
+wheel-free `brutex/data/greeks_enrich_pass.py` owns the fence (MOVED from
+`historical_pull`, whose `_enrich_greeks_from_minute` is now a thin
+delegator — dashboard behavior byte-identical, outcome types aliased to the
+SAME objects) + the chain-union lake-walk target discovery (CE/PE only,
+zero Parquet opens). HONEST: NOT O(1) — discovery is an O(option partition
+dirs) walk and the pass re-READS the scoped stored bars every run (the
+stamp-driven `already_current` gate makes re-runs cheap by skipping writes
++ solves, never reads); the CLI L2 heal seam landed INDEPENDENTLY on
+main as DEC-CLI-LAKE-HEAL-L2-001 (#1493) and the merged fetch path runs it
+BEFORE this enrich seam — the dashboard heal-L2-before-Greeks-enrich
+ordering law holds on the CLI too; the six-step strict gate
+(DEC-PULL-SIX-STEP-ORDER-001 #1527, merged in flight) sits BETWEEN the
+dashboard's own F&O L2 heal (`_heal_lake_after_pull`) and the enrich
+delegator inside `pull_contract_candles` — `_GREEKS_STRICT_WITHHELD` is a
+distinct instance of the COMMON `GreeksEnrichOutcome`; the CLI never calls
+that seam — its Seam A enrich invokes the COMMON fence directly, so the
+strict gate cannot touch it. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+F&O lake REFERENCE_ONLY; no scope/vocab/rate change; touched modules 100%
+line+branch).
+Earlier: 2026-07-07 (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 —
+the `/movers` Spot default as-of TIME resolves to the SAME latest available
+minute across EVERY timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the
+identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX).
+Earlier: 2026-07-06 (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md #1534 —
+the committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare gate
+on bench-m4pro + mechanical no-silent-re-baseline governance (closes the
+STANDARDS_100PCT.md §11 P1 "benchmark baseline JSON + `--benchmark-compare
+--fail` gate" backlog item, the deviation from the literal flag ledgered): NEW
+pure-stdlib zero-brutex-import `brutex/observability/bench_baseline.py` (the
+comparator/schema/capture/governance core + the ONE hardware-key format law) +
+`hardware_fingerprint`/`hardware_key` on the COMMON `config/hardware_envelope.py`
++ the env-gated 6-entry measurement suite (`tests/bench/test_absolute_baseline.py`
+over `_abs_baseline_registry.py`, house best-of-N-MIN idiom) + committed
+baselines at `tests/bench/baselines/<hardware_key>.json` (`tolerance_pct`
+structurally capped so a 2x slowdown can NEVER pass any governed config; a
+MORE-than-4x speedup FAILS as SUSPICIOUS_SPEEDUP, more-than-2x WARNs "baseline
+stale") + `scripts/ci/bench_baseline_gate.py` (validate/compare/capture/govern/
+key; exit 0 ok-or-LOUD-abstain / 1 numeric with ONE bounded fresh-process
+re-measure / 2 structural never-retried). bench-m4pro gains
+measure→compare→capture→artifact + a GitHub-hosted `bless-baseline` job (the
+ONLY contents/PR-write holder — the candidate travels runner→artifact→verbatim
+API commit with no edit surface); ci.yml's REQUIRED `bench` job gains schema
+`validate` on every run + the `govern` entry-cell diff gate on PRs with LIVE
+`gh api` provenance-run verification pinned to THIS repository. GOVERNANCE LAW
+per cell class: a MODIFIED cell needs a NEW ledgered DEC id + the literal entry
+key + the literal value token + a FRESH live-verified run; an ADDED cell rides
+the standing bootstrap authorization; a REMOVED cell / top-level change needs a
+ledgered note; a DELETED file needs its filename in the added lines; NO
+override env. BOOTSTRAP: ZERO measured numbers ship (`tests/bench/baselines/`
+holds only README.md); the first baseline is measured by the REAL M4 Pro and
+auto-blessed via a bot PR the operator nudges + merges (GITHUB_TOKEN PRs do not
+trigger CI; NO PAT). HONEST: bench-m4pro stays NON-required (a regression is
+caught post-merge as a red run + issue, not a merge blocker); the gate is
+dormant until the runner is online AND the first bless merges; the gate catches
+strictly-GREATER-than-tolerance drift ONLY (strict `>` boundary law — a
+regression exactly AT tolerance passes, test-pinned) — at-or-below-tolerance
+drift accumulates until a ledgered
+re-bless (the 1.1x ratio tiers + the single-canary-op 50 M/s floor are
+complements, NOT a sub-tolerance net); a STANDING red — numeric
+SUSPICIOUS_SPEEDUP or STRUCTURAL alike — dies at compare before a dispatch
+capture can run, recovery is removal-first (`docs/runbooks/bench-baseline.md`).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+`bench_baseline.py` + the touched `hardware_envelope.py` 100% line+branch).
+Earlier: 2026-07-06 (DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533 —
 mid-pull ledger-read O(page) discipline restored: (a) the /coverage/windows +
 pull-progress DuckDB fast paths now FOLD pending window-ledger deltas
 latest-wins IN SQL — NEW `lake_read.dedup_qualify_latest_sql`/
@@ -659,7 +903,186 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
+- **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
+  DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
+  pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
+  (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
+  "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
+  drifts registered as §16 items 18/19; BUY-only DEC-EXEC-008 + DEC-RISK-011 locks untouched); the
+  broker token/credential docs (runbooks + deploy guide + minter + `TOKEN_BROKER_CONTRACT.md` +
+  ADR-0013/0014 status notes + scoreboard cell) refreshed to the AWS-only / fail-fast /
+  mid-run-re-read truth (#1065/#1072/#1092 — docs-only, rate caps untouched); ADR-0004 GPU gate
+  reconciled (PROPOSED→ACCEPTED, §6 benchmark retired-as-scheduled + retained as a dormant
+  fail-closed precondition, NEW drift pin `tests/unit/test_gpu_gate_drift_pin.py`); the dormant
+  cloud auto-fix snippet RETIRED (DELETE) + the redteam sweep extended to comment-family triggers;
+  the Phase-1 sign-off checklist closed by supersession (11 boxes, honest no-backdate clause).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched costs module
+  stays 100% line+branch).
+  Earlier: `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+  DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541)** — the
+  5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
+  (1) the combo `\x1f` reject-only guard mirrored into BOTH
+  previously-unguarded run-identity joins via ONE COMMON `strategies.combo.reject_unit_separator`
+  (+ `allow_nan=False` at the engine canonical-JSON sites incl. the stage1a third mirror) —
+  byte-frozen run-identity goldens landed FIRST and pass unchanged (LOW hardening, no live bug);
+  (2) the option-dedup bloom-before-exact-confirm ordering VERIFIED already correct — pins +
+  docs only, ZERO executable change (AST-proven); the PRODUCTION consumer is the engine sweep's
+  `ComboDedup(OptionDedupIndex)` dedup tier (the `OptionBarSink` pin was dropped in the rebase —
+  main's #1500 deleted that dead orchestration; the mark-after-durable-write LAW recorded as
+  history in #1547);
+  (3) the hand-synced Python `VwapState` + `MarketStructureState`/`Trend` twins DELETED — the
+  `rust/trading-core` pyclasses are the single source (additive `last_swing_high/low` getters,
+  core untouched — TickVault-safe; crate 0.3.0→0.3.1 moves the live `_indicator_version()`
+  string with NO math change; twin fixture + SHA never regenerated; P-06 preserved);
+  (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic `MaskWord` core (existing
+  Rust suite passed UNMODIFIED; native `Vec<u128>` FFI per the recorded pyo3 probe; lazy
+  wide-kernel promotion; `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+  `wide_kernel_promoted` observability) — HONEST: future-proofing, production-unreachable at the
+  60-bit vocabulary, u64 golden corpus byte-untouched; (5) the deprecated
+  `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver` trio DELETED in full (8 test surfaces +
+  golden fixture + dead ci.yml gates; `types.py` whole + `errors.py` semantics untouched, five
+  subclasses honestly orphaned; ONE atomic commit — the wiped lineage's two-commit shape recorded
+  as history in #1550) — the
+  pack's ONLY behaviour-visible item. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
+  bit-identical for all currently-legal inputs (golden-proven); no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+  pre-change baseline; cargo-mutants partial under the ledgered #1511 timeout).
+  Earlier: `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
+  MIGRATION.md #1541** — the test-apparatus debt pack: repo-wide doctest gate (measured
+  55-example floor; the 3 broken tf_resampler examples fixed — docstring-only, the sole
+  brutex/ source edit) · EXPLICIT hypothesis `ci` profile on CI (GHA was already implicitly
+  derandomized by hypothesis's built-in auto-CI profile; the real flip: no-env scheduled arms
+  incl. stress-nightly now deliberately random) · the fix-reversion ci-ok hard gate (`bugfix-reversion-check`) · the citation
+  ACCURACY scanner (`citation-accuracy-scan`, push+PR; the 29-finding live census reconciled
+  to fixpoint in-PR) · the DEC-ID appropriateness heuristic (row 18 stays PARTIAL) · jscpd
+  3%→1% (0.37% measured) · the brutex/-wide pandas import ban (zero offenders) · P-10/P-12
+  promoted to real cost-model properties (flat ₹20/order brokerage law; stale min() wording
+  corrected) · the sweep worker-scaling bench enumerated in bench-m4pro.yml, EXECUTING GREEN
+  on the live registered M4 Pro runner (in-PR reconcile: first real run failed on the missing
+  polars [data] extra, fixed a54c9a0a; re-run fully green, run 28851211762 — step measured
+  20 s vs the generous 25-min timeout; VERDICT: KEEP CAP=8). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; apparatus/CI/docs only; ruff/ruff-format/mypy --strict/pyright at
+  the pre-change baseline).
+  Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes — folded from
+  `claude/trusting-einstein-bobai2`, PR #1246) (**DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
+  MIGRATION.md #1539** — the /movers prev-close calendar-contiguity honesty guard: the spot/futures/options
+  previous-day close + futures/options previous-day OI baselines (which silently served the NEAREST-prior lake bar
+  with zero calendar check — the confirmed repro: a Fri-hole lake baselined Mon on Thu's close and printed 2.2822%
+  where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
+  (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
+  ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
+  documented NON-session limit; NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
+  `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
+  `PrevOiBaseline(value, found_date)` keep byte-identical `.value` seams (`_prev_day_close`/`_prev_day_oi` wrappers —
+  every historical pin green unmodified; `_prior_session_last_from_minute` appends its found date, [0]/[1] stable);
+  ONE pure `prev_baseline_provenance` yields (session_iso, contiguous|null), stamped as defaulted additive fields on
+  MoverSnapshot/FuturesMover/OptionMover with close + OI judged INDEPENDENTLY (the null-OI-1day divergence pinned);
+  row projectors EMIT-ON-FALSE so contiguous AND abstained payloads are byte-for-byte the pre-fix wire (golden-pinned
+  both arms on all three tabs + a FROZEN additive-key-NAME set); one capped (20/build) per-(symbol,kind)-deduped
+  `movers.prev_baseline_noncontiguous` WARN + a single suppressed summary; `movers.html` appends a strict-`=== false`
+  " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
+  makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
+  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` deliberately NOT refactored — the
+  named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
+  line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538**
+  — the `/movers` SPOT "Top Value" (turnover) is now TIMEFRAME-INVARIANT: re-sourced from the RAW 1-minute session
+  frame (post as-of cut, PRE-resample) via the NEW `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options `_read_future_session`, instead of the resampled display-timeframe bars — so the SAME (symbol, day,
+  as-of) turnover no longer CHANGES with the selected display timeframe (reproduced NSE-NIFTY 2024-01-02 whole-day:
+  1m 19583300 ≠ 5m 19833500 ≠ 1day 20100000 paisa, now all byte-identical to the raw-1m answer). Three edits ALL in
+  `brutex/dashboard/movers_snapshot.py`: extract the shared raw-1m read+cut into `_read_cut_1m_frame` (§11 COMMON,
+  `_read_session_bars` a byte-identical wrapper), the NEW no-`interval`-arg `spot_session_value_paisa` (HLC3 × volume
+  via the ONE COMMON `session_traded_value_paisa`, `None` on missing 1-minute — never fabricates), and a
+  `value_paisa: int | None = None` injection into `compute_snapshot` (`None`/omitted falls back byte-identically, the
+  320000/318660 goldens pass UNMODIFIED). HONEST: a SANCTIONED display-value correction on coarse timeframes;
+  value(1minute) byte-unchanged; futures/options value BYTE-UNCHANGED; READ-ONLY dashboard ranking; ENGINE UNCHANGED
+  — NIFTY/BANKNIFTY/SENSEX; touched module 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/intelligent-euler-dwf2ab` (**DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536** — the CLI
+  `brutex fetch` pull path now runs the SAME fenced Greeks-enrichment pass the dashboard runs, and a NEW
+  `brutex enrich-greeks` subcommand delivers the #1188 bulk re-enrich — closing the two
+  DEC-GREEKS-CORRECTNESS-AUDIT-001 named follow-ups ("a CLI-pulled lake never enriches" + "bulk re-enrich"). ONE
+  COMMON wheel-free module `brutex/data/greeks_enrich_pass.py` (the MOVED dashboard fence `run_greeks_enrich_pass` +
+  `GreeksEnrichOutcome`/`GREEKS_NOT_RUN` + the wheel-free chain-union lake discovery
+  `discover_option_windows`/`lake_target_builder` + the `has_option_candles` pre-gate + the fail-loud
+  `resolve_cli_greeks_enrich` env gate); `historical_pull._enrich_greeks_from_minute` is now a thin delegator —
+  dashboard behavior BYTE-IDENTICAL (event names, the 13 `done` fields in order, logger name via `log=_LOG`, the halt
+  re-raise, outcome types aliased to the SAME objects; the existing dashboard suite passes unmodified). The fetch
+  seam is Seam A — post-drain, ledger persisted, single-flight lock still HELD, default-ON
+  (`BRUTEX_CLI_GREEKS_ENRICH=0` kill switch; a junk value fails loud pre-pull `EXIT_USER_ERROR`; inert under
+  `--dry-run`/`--inspect` via `_no_persist`), scoped pulled-underlyings × pulled-window, deliberately NOT gated on
+  `bars_appended > 0` (async-pipeline counts reconcile AFTER the seam); halts alert-then-re-raise via the COMMON
+  `emit_pull_halt_alert` (`_one_fetch_pass` pattern), any other failure is fenced and NEVER fails the pull; a
+  pure-spot lake skips in O(exchange dirs) with one DEBUG event. `brutex enrich-greeks` (whole lake or
+  `--underlying`/`--start`/`--end` slice, dates CLI-inclusive → half-open internally; `--dry-run` = wheel-free
+  discovery counts, no lock) takes the pull single-flight lock + `keep_awake` and exits `EXIT_OK` iff `ok is True
+  and errored_targets == 0` (the `lake audit-unique` cron-visible precedent — a deliberate, documented divergence
+  from the never-fail pull path). Discovery bounds year dirs via the canonical `brutex.data.partition` constants
+  (§11 COMMON — imported, never re-minted). Review round-1 fixes folded: discovery's year/month names are
+  ASCII-digit-gated (`_is_canonical_digits` — bare `isdigit()` admitted non-decimal Unicode digits like `²024` whose
+  `int()` raise killed the whole pass, and silently accepted Arabic-Indic decimals; both now skip per the
+  junk-tolerance contract); the fetch seam's `+1 day` widening SATURATES at `date.max` (`_next_day_saturating` — a
+  degenerate `--end 9999-12-31` pull previously died on an uncaught post-drain `OverflowError`); `enrich-greeks`
+  refuses `--end 9999-12-31` cleanly (`EXIT_USER_ERROR`, never a traceback) and refuses a nonexistent `--lake-root`
+  loudly via the COMMON `_require_lake_dir` (previously a green `errored_targets=0` illusion + a materialised
+  phantom `.locks/`). Review round-4 fix folded: the `enrich-greeks` clean-done summary echoes `contracts=N` (the
+  fenced build's actual target count, captured by wrapping the builder — never a second discovery walk; the `?` leg is
+  a DEFENSIVE belt only — with the real pass `ok=True` implies the build already ran and a pre-build failure takes the
+  FAILED branch, so it is production-unreachable and guards a future pass-contract change, never a fabricated 0) and
+  an explicit `--underlying` matching ZERO stored option contracts
+  prints one loud stderr WARNING naming the sorted tokens (matching is exact + case-sensitive — `nifty` never
+  matches stored `NIFTY`; exit 0 unchanged, the pass genuinely completed; a whole-lake zero stays quiet) — closing
+  the silent-green typo class one level below the `_require_lake_dir` guard. HONEST: NOT O(1) — discovery is
+  O(option partition dirs + month entries)
+  and the pass re-READS the scoped stored bars every run (`already_current` skips writes/solves, not reads; a
+  full-floor fetch over a dashboard-populated lake re-reads the whole stored index-options history inside the lock —
+  levers: window scoping, `BRUTEX_CLI_GREEKS_ENRICH=0`, `BRUTEX_GREEKS_WORKERS=1`); the CLI L2 heal seam landed INDEPENDENTLY on main as
+  DEC-CLI-LAKE-HEAL-L2-001 (#1493) while this change was in flight — the merge orders this enrich seam strictly
+  AFTER that heal (heal in `cmd_fetch`'s drain `finally` before `end_pull_ledger`, enrich after it; a heal-halt
+  `LakeWriteHalt` re-raises so the enrich never runs over an un-healed slice — the dashboard's
+  heal-L2-BEFORE-Greeks-enrich ordering law holds on the CLI path too); SIX-STEP RECONCILE (DEC-PULL-SIX-STEP-ORDER-001
+  #1527, merged in flight): the dashboard call-site law is preserved with main's strict gate BETWEEN heal and enrich —
+  `_mark_complete` → `_heal_lake_after_pull` (integrity, ALWAYS runs) → the opt-in `BRUTEX_PIPELINE_STRICT_GATE=1`
+  barrier (an unclean prior step / F&O phase WITHHOLDS the pass, `_GREEKS_STRICT_WITHHELD` — now a distinct instance of
+  the COMMON `GreeksEnrichOutcome`, identity-keyed so it never collides with `GREEKS_NOT_RUN`) →
+  `_enrich_greeks_from_minute` (still the thin delegator into the COMMON fence); the CLI never calls that seam
+  (`pull_contract_candles` — `prior_steps=None` covers the OTHER non-pipeline callers: the /db selection route,
+  tests) — its Seam A enrich invokes the COMMON fence directly, so the strict gate cannot touch it (the CLI spot
+  six-step path is
+  main's NAMED follow-up DEC-PULL-SIX-STEP-ORDER-CLI-001, not this change's); `futures_skipped` reads 0 on CLI passes (FUT filtered at discovery —
+  documented asymmetry); the bulk lever is manual (no cron). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+  REFERENCE_ONLY, no scope/vocab/rate change, zero vendor calls added; touched modules 100% line+branch;
+  ruff/ruff-format clean, mypy `--strict` + pyright at the pre-change baseline).
+  Earlier: `claude/movers-asof-default-latest-minute` (**DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535** —
+  the `/movers` Spot default as-of TIME resolves to the SAME latest available minute across EVERY timeframe, so
+  1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest close; READ-ONLY dashboard, ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX).
+  Earlier: `claude/happy-allen-y29nc6` (**DEC-BENCH-ABS-BASELINE-001,
+  MIGRATION.md #1534** — committed per-hardware ABSOLUTE benchmark baseline + fail-loud compare
+  gate on bench-m4pro + mechanical no-silent-re-baseline governance: NEW pure-stdlib COMMON core
+  `brutex/observability/bench_baseline.py` (schema/comparator/capture/govern + the ONE
+  hardware-key format law) + `hardware_envelope.py` gains `cpu_model_string`/`HardwareFingerprint`/
+  `hardware_key` (the BRUTEX_* sizing overrides provably cannot move the fingerprint;
+  `BRUTEX_BENCH_BASELINE_KEY` is the one explicit, slug-validated key override) + the 6-entry measurement registry
+  (`tests/bench/_abs_baseline_registry.py`, best-of-N-MIN per DEC-CANARY-MINTIME-001) + per-hardware
+  baselines at `tests/bench/baselines/<key>.json` (`tolerance_pct` capped `[0,100)` + its failure
+  multiplier `1 + t/100` float-exactly < 2.0 — a 2x slowdown can NEVER pass; strict-`>` boundary;
+  > 4x speedup FAILS) + `scripts/ci/bench_baseline_gate.py`
+  (validate/compare/capture/govern/key; 0 ok-or-LOUD-abstain / 1 numeric-retry-once / 2
+  structural-never-retried). bench-m4pro gains measure→compare→capture→artifact + the GitHub-hosted
+  `bless-baseline` bot-PR job (the ONLY contents/PR-write holder — the self-hosted runner's inherited
+  token is issues:write only, for its alert steps; main-ref + schedule/dispatch pinned);
+  ci.yml's required `bench` job gains the always-on schema validate + the PR governance diff gate
+  (a blessed-cell bump needs a NEW human-written ledger entry quoting the entry key + literal value
+  token + a LIVE-verified fresh run). BOOTSTRAP fabrication-free: ZERO numbers ship — the first
+  baseline is measured on the real M4 Pro and blessed via one operator nudge+merge; until then
+  compare ABSTAINS green-but-loud. Ratio tiers + the 50 M/s floor UNTOUCHED (complements). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; new brutex modules 100%
+  line+branch; ruff/ruff-format/mypy --strict/pyright clean).
+  Earlier: `claude/peaceful-planck-dnsjg9` (**DEC-LEDGER-DELTA-O-PAGE-001, MIGRATION.md #1533** — mid-pull
   ledger-read O(page) discipline restored across (a)-(f): (a) the /coverage/windows + pull-progress DuckDB fast paths
   fold pending window-ledger deltas latest-wins IN SQL via NEW `lake_read.dedup_qualify_latest_sql`/
   `dedup_latest_source_sql` (the keep-LAST twin of `dedup_qualify_sql` — `ORDER BY (filename = <bound base path>) ASC,
@@ -949,8 +1372,12 @@ hostile-review pass._
   SPOTJOIN-3 2dp `round_money` spot snap (spot only, never a Greek), and `GREEKS_FORMULA_VERSION` 1→2
   (enrich golden regenerated — the diff is EXACTLY the formula bit, zero value drift). HONEST envelope:
   the v2 re-enrich reaches ONLY contracts inside a live pull window (expired contracts keep v1 stamps —
-  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up); rust/** kernel out of
-  scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
+  bulk re-enrich a named follow-up); a CLI-pulled lake never enriches (follow-up) [CLI-ENRICH RECONCILE —
+  DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536: BOTH follow-ups are now CLOSED — the CLI fetch path runs the
+  same fenced pass post-drain (default-ON, `BRUTEX_CLI_GREEKS_ENRICH` kill switch) and `brutex enrich-greeks`
+  is the bulk v1→v2 re-enrich lever; the CLI L2 heal seam is ALSO closed — DEC-CLI-LAKE-HEAL-L2-001 (#1493),
+  ordered BEFORE the CLI enrich seam];
+  rust/** kernel out of scope this round. Both touched modules 100% line+branch (340/90 + 117/32); ruff/`mypy --strict`/pyright
   clean; ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), F&O lake REFERENCE_ONLY, no scope/vocab/rate change.
   Prior merged: **DEC-CI-FORK-PR-HARDEN-001,
   MIGRATION.md #1180** — the PUBLIC repo's fork-PR attack surface CLOSED; CI-workflow +
@@ -974,8 +1401,10 @@ hostile-review pass._
   non-member → trusted=false, allowlist/OWNER/MEMBER/COLLABORATOR → trusted=true). HONEST
   (Golden Rule #10): server-side branch protection (require PR + `CI OK (aggregate gate)`
   + up-to-date branch + restricted merge; Actions → "Require approval for all outside
-  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1176,
-  NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
+  own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
+  DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1555), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
@@ -1944,7 +2373,7 @@ hostile-review pass._
   OPTIONAL gated 4th phase `run_movers` + `PipelinePullReport.movers_warmed` that runs ONLY after a
   fully-successful fetch (`historical_phase_ok`) — the operator's "never run movers unless the fetch
   succeeded". The WARMER is NOT yet bound in the route (a today-coordinate warm would cache empty snapshots
-  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump). 
+  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump).
   `pipeline_pull.py` at 100% line+branch; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED. Prior merged:
   DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876 (PR #830: the `/movers` page defaults Top-N to 100 and offers ALL
   21 Track-1 timeframes (1m + 19 derived intraday + 1d), every one derived on-the-fly from the stored
@@ -2130,12 +2559,12 @@ hostile-review pass._
    300/min**; `docs/groww/api-reference/01-introduction.md:130-134`).
    The **backtesting `get_historical_candles` per-second cap + daily
    quota are UNDOCUMENTED** and are an OPEN Phase-0 probe gate
-   (`brutex/adapters/groww/constants.py:112-118`
+   (`brutex/adapters/groww/constants.py:141-143`
    `GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`,
    `GROWW_DAILY_QUOTA_UNVERIFIED=None`; ADR-0009 §3.1 risk #4 / §4) — the
    `_UNVERIFIED` suffix carries the honesty requirement in the
    identifier. The adapter paces with the vendor-neutral adaptive
-   token-bucket controller (`brutex/adapters/rate_common.py:136`
+   token-bucket controller (`brutex/adapters/rate_common.py:327`
    `RateController`, injected `ceiling_rps`; the 429/timeout ladders step
    down to a deep floor of **1 r/s** under sustained pressure and recover
    up to the ceiling once it clears). On TOP of the per-second bucket the
@@ -2267,7 +2696,43 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/peaceful-planck-dnsjg9`
+- **Active feature branch:** `claude/stoic-davinci-7c7xp0`
+  Earlier: `claude/zen-meitner-8780fo`
+  (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
+  DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
+  DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
+  Earlier: `claude/ecstatic-cannon-o3zbbe`
+  (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 — the test-apparatus
+  debt pack: nine long-ledgered apparatus gaps closed as ONE change set;
+  apparatus/CI/docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes)
+  (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1539 — the `/movers`
+  prev-close/OI baselines gain an honest calendar-contiguity verdict: a
+  baseline anchored on a non-adjacent NSE session is stamped
+  (`prev_close_*`/`oi_baseline_*` EMIT-ON-FALSE keys), warned once (capped),
+  and marked " *" in the UI — the served number itself unchanged; READ-ONLY
+  dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier (same branch):
+  (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538 — the `/movers`
+  SPOT "Top Value" (turnover) is TIMEFRAME-INVARIANT: re-sourced from the RAW
+  1-minute session frame (post as-of cut, PRE-resample) via the NEW
+  `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options session value; READ-ONLY dashboard ranking, ENGINE UNCHANGED
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/intelligent-euler-dwf2ab`
+  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch` pull
+  path runs the SAME fenced Greeks-enrichment pass the dashboard runs + the NEW
+  `brutex enrich-greeks` bulk re-enrich subcommand; ENGINE UNCHANGED),
+  `claude/movers-asof-default-latest-minute`
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
+  default as-of TIME resolves to the SAME latest available minute across EVERY
+  timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX),
+  `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
+  MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
+  (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
+  ADR-0017, MIGRATION.md #1531–#1532)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -2303,14 +2768,17 @@ hostile-review pass._
 - **No look-ahead** — at bar N, the engine may only access bars 0..N.
   Enforced TODAY by TWO complementary runtime guards: (1) the
   feed-boundary guard (`ReplayFeed.ensure_no_lookahead`, raises
-  `LookAheadError`; wired into the strategy runner + execution driver,
-  integration-tested) — a *timestamp*-based check on emitted signals; and
+  `LookAheadError`; wired into the strategy runner — the deprecated
+  execution driver, the historical second wiring site, was DELETED with
+  the simulator/driver trio per DEC-EXECUTION-TRIO-DELETE-001
+  (MIGRATION.md #1550) — integration-tested) — a *timestamp*-based check
+  on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
   `LookAheadBarrier`): an *index*-based accessor that raises `LookAheadError`
   the moment an `access(i)` reaches index `i > N`. Guard (1) is the real
   strategy-look-ahead defence — it catches a future *signal*. Guard (2), as
-  wired into the runner/driver event loop (a default `record=False`
+  wired into the runner event loop (a default `record=False`
   O(1)-memory barrier on every sweep eval), asserts the **advance/access
   cursor invariant**: both sites `advance_to(step)` then `guard(step, …)` at
   the SAME `step`, so it fires on a feed/barrier desync or a wiring regression
@@ -2326,7 +2794,7 @@ hostile-review pass._
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
   DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
-  runner/driver guards above never covered) now has its own three-layer
+  runner-wired guards above never covered) now has its own three-layer
   defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
   causality (audit-verified — Stage-1A updates prior-bar history AFTER
   evaluation; the trade sim enters at the next bar's open) + PERMANENT
@@ -2389,7 +2857,10 @@ bruteX/
 │   ├── dashboard/                  ← FastAPI UI
 │   ├── data/                       ← Parquet + DuckDB lake (generic)
 │   ├── engine/                     ← brute-force combo/mask sweep engine
-│   ├── execution/                  ← signal-only simulator (Track 1)
+│   ├── execution/                  ← shared execution types + typed errors
+│   │                                 for the lean instrument store (the
+│   │                                 deprecated costs/simulator/driver trio
+│   │                                 was DELETED — DEC-EXECUTION-TRIO-DELETE-001)
 │   ├── feed/                       ← replay + resampler
 │   ├── indicators/                 ← evaluate-time indicators (pivots/fib/EMA)
 │   ├── math/                       ← thin facade to Rust hot kernel
@@ -2442,10 +2913,10 @@ bruteX/
 | Fact | Value | Source |
 |------|-------|--------|
 | Vendor / transport | **Groww Trade API — `growwapi` Python SDK** (injected `GrowwAPI` client; no raw HTTP) | `adr/0009-...-migration.md:43-44`; `groww/adapter.py:1-17` |
-| Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:129` (`fetch_ohlcv` → `fetch_candle_windows`) |
+| Historical OHLC (spot + options) | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` — single method for all instruments | `groww/api-reference/03-backtesting.md:138-200`; `groww/adapter.py:151` (`fetch_ohlcv` → `fetch_candle_windows`) |
 | F&O candle lake (`/db` logical table) | **`fno_candles`** — the FUTURES + OPTIONS historical OHLC the pull ALREADY writes to `bars/<exch>/FNO/<groww_symbol>/<interval>/<yyyy>/<mm>.parquet` (shared `ParquetBarSink`; OHLCV + `open_interest` first-class non-null; 2-dp tick grid). NOT a separate store — the SAME lake as spot with `segment="FNO"`; FORMALIZED as a first-class `/db` row (decoded per contract via `fno_symbol.parse_fno_symbol`) + registered in `schema_meta` (`fno_candle_lake.*`) — DEC-FNO-CANDLE-LAKE-001 #861 | `data/fno_candle_lake.py`; `data/fno_symbol.py`; `dashboard/db_view.py` (`list_fno_candle_datasets`); `adapters/groww/option_ingest.py` (`sink.append(segment="FNO", …)`) |
 | Options contract resolution | `groww.get_expiries(...)` → `groww.get_contracts(...)` → feed each Groww symbol to `get_historical_candles` (all listed strikes, not relative-to-spot), **`1minute` ONLY** with a DEFAULT window SPLIT by contract type — the STRICT law `[expiry − lookback → expiry] ∩ envelope`: FUTURES `expiry − 60 days → expiry` (DEC-FUTURES-LOOKBACK-60D-001 #1003, supersedes the 3-calendar-month default of #894), OPTIONS `expiry − 30 days → expiry` (explicit operator dates override either; a NOT-YET-OPEN far-future contract is honestly SKIPPED — fetched not at all, zero ledger rows, until the calendar reaches `expiry − lookback` — never a substitute window, never the full range — DEC-FNO-FAR-EXPIRY-WINDOW-001 #1127; `1day` DERIVED from the pulled 1-minute; an operator `/pull-pipeline` date range additionally SCOPES which expiries are pulled at all — expiry ∈ `[from → to]` inclusive, out-of-scope = zero vendor calls + zero ledger rows + one `fno.expiry_out_of_scope` log, stored bars untouched, windows never reshaped — DEC-FNO-EXPIRY-SCOPE-001 #1146; the candle PULL ORDER is the strict six-step law — futures before options, indices before stocks within each: INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS, ledger namespaces byte-unchanged — DEC-PULL-SIX-STEP-ORDER-001 #1527) — DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 + DEC-FNO-LOOKBACK-SPLIT-001 #894 | `groww/api-reference/03-backtesting.md:41-134`; `adapters/groww/contract_bounds.py` (`default_fno_minute_window`, `DEFAULT_OPTION_LOOKBACK_DAYS`, `DEFAULT_FUTURES_LOOKBACK_DAYS`); `adapters/groww/expiry_scope.py`; `dashboard/historical_pull.py` |
-| Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:124-136`; `groww/api-reference/03-backtesting.md:8` |
+| Backtesting segments | `CASH`, `FNO` ONLY (`COMMODITY` excluded; indices ride the `CASH`/`IDX` row, mapped to the neutral `INDEX` segment) | `groww/constants.py:91-95`; `groww/instruments.py:154-169`; `groww/api-reference/03-backtesting.md:8` |
 | Instrument types | `EQ, IDX, FUT, CE, PE` | `groww/constants.py:95`; `groww/api-reference/04-annexures.md:100-108` |
 | Historical depth | **"available from 2020"** (Equities, Indices, FNO) | `groww/constants.py:106-108`; `groww/api-reference/03-backtesting.md:145` |
 | 1-minute granularity at the 2020 boundary | **UNVERIFIED** — Phase-0 probe gate (rows may not truly start Jan-2020 at 1m) | `groww/constants.py:107`; `adr/0009-...-migration.md:113-114` |
@@ -2453,20 +2924,20 @@ bruteX/
 | Candle interval — Track 1 spot | **`1minute` ONLY fetched** (DEC-1MINUTE-ONLY-DERIVE-1DAY-001 #853 — `resolve_fetch_intervals` always returns `("1minute",)`); `1day` (PDH/PDL anchor) + the 19 intraday TFs are DERIVED from the stored 1-minute, never separately vendor-fetched — since DEC-PIPELINE-AUTOPREBUILD-001 #1145 written ONLY by the pull pipeline's automatic FINAL prebuild stage (`materialize_lake_timeframes(include_daily=True)`; the midnight-IST `1day` via the shared `spot_daily_resample.make_lake_write_1day`; since DEC-PREBUILD-CLEANSET-001 #1221 run on every completed pull over the CLEAN symbol set — quarantined symbols excluded via `exclude_symbols`, not gated on a fully-clean fetch), NEVER mid-pull (`_resample_daily_after_pull` + the `BRUTEX_AUTO_DERIVE_TFS` autoderive + the manual `derive-timeframes` route are REMOVED). The granularity dropdown + the bhavcopy cross-check of DEC-PULL-1DAY-FIRST-001 (#723) are REMOVED | `dashboard/pull_controller.py` (`GROWW_FETCH_INTERVALS`, `resolve_fetch_intervals`); `dashboard/pipeline_prebuild.py`; `data/timeframe_materialize.py`; `data/spot_daily_resample.py` |
 | Chunk window — by interval tier | **1/2/3/5m → 30d · 10/15/30m → 90d · 1h+/1d/1w/1mo → 180d** per call (richer than a single split) | `groww/constants.py:76-89`; `groww/chunks.py:34-60`; `groww/api-reference/03-backtesting.md:238-246` |
 | Candle response shape | **ROW-arrays** — `{"candles": [[ts, open, high, low, close, volume, open_interest], ...]}`; OI `null` for non-FNO | `groww/parser.py:1-18,104-124`; `groww/api-reference/03-backtesting.md:202-236` |
-| **Price unit** | **RUPEES (float)** from Groww — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `groww/api-reference/03-backtesting.md:202` |
+| **Price unit** | **RUPEES (float)** from Groww — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:26-35`; `groww/api-reference/03-backtesting.md:202` |
 | Timestamp unit | **Native-IST string** `"yyyy-MM-ddTHH:mm:ss"` (or epoch seconds defensively) — localized to IST (fixed +05:30, no DST), stored UTC, displayed IST | `groww/parser.py:33-67`; `groww/constants.py:109-110`; `groww/api-reference/03-backtesting.md:198-207` |
-| Symbol/key format | **`groww_symbol` string** `EXCH-SYMBOL[-…]` (e.g. `NSE-NIFTY`, `BSE-SENSEX`) — O(1) resolution: a BARE trading symbol (incl. a hyphenated stock like `BAJAJ-AUTO` / a verbose-symbol index like `MIDCPNIFTY`) resolves via `by_exchange_symbol` + the master's `groww_symbol_by_pair` (the real groww_symbol, never reconstructed); an already-prefixed FUT/CE/PE contract resolves via `by_groww_symbol`. NOT a numeric ID (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001, MIGRATION.md entry #845) | `groww/instruments.py:190-201`; `groww/adapter.py:162-174`; `groww/api-reference/02-instruments.md:119`, `03-backtesting.md:10-37` |
+| Symbol/key format | **`groww_symbol` string** `EXCH-SYMBOL[-…]` (e.g. `NSE-NIFTY`, `BSE-SENSEX`) — O(1) resolution: a BARE trading symbol (incl. a hyphenated stock like `BAJAJ-AUTO` / a verbose-symbol index like `MIDCPNIFTY`) resolves via `by_exchange_symbol` + the master's `groww_symbol_by_pair` (the real groww_symbol, never reconstructed); an already-prefixed FUT/CE/PE contract resolves via `by_groww_symbol`. NOT a numeric ID (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001, MIGRATION.md entry #845) | `groww/instruments.py:240-243,524-531`; `groww/adapter.py:162-174`; `groww/api-reference/02-instruments.md:119`, `03-backtesting.md:154-156` |
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
-| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:112-118,165` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:136-198`; `groww/constants.py:165`; `dashboard/pull_controller.py:776`; `cli.py:2020` + this file §2 rule 6 |
-| Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:339-370`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
+| Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:327-368`; `groww/constants.py:177`; `dashboard/pull_controller.py:978`; `cli.py:3959-3960` + this file §2 rule 6 |
+| Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
 | Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError, GrowwEmptyResponseError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name; an empty/non-JSON body `json.JSONDecodeError` → **retryable** `GrowwEmptyResponseError`, so a transient throttle is re-pulled instead of a terminal "not on Groww" quarantine — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854) | `groww/errors.py`; `groww/api-reference/05-exceptions.md:9-70` |
-| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set; **212** single stocks verified in the operator instrument master (lake scope) | `groww/constants.py:103-104`; `groww/instruments.py:174` |
+| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:537-554` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
-| Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:124-136`; `groww/adapter.py:162-174` |
+| Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |

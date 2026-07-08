@@ -20,14 +20,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
+import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import (
     ANCHOR_DEPENDENT_MASK,
     Stage1AMatrixBuilder,
+    WalkForwardFold,
     _ema_to_paisa,
     _price_to_paisa,
+    _walk_forward_schedule_hash,
     build_bar_bits,
 )
 from brutex.vocabulary import bits as B
@@ -325,3 +329,24 @@ def test_timestamp_ist_is_converted_not_assumed() -> None:
     # Should not raise; IST date is 2024-01-02.
     builder.push(bar)
     assert bar.timestamp.astimezone(IST).date().isoformat() == "2024-01-02"
+
+
+def test_walk_forward_schedule_hash_rejects_nan_param() -> None:
+    """``allow_nan=False`` (DEC-RUN-IDENTITY-GUARD-PARITY-001): a smuggled
+    non-finite float raises instead of silently emitting non-canonical
+    ``NaN`` JSON — unreachable for the typed all-int schedule fields, so
+    every currently-legal digest is byte-unchanged (golden-pinned in
+    ``tests/golden/test_engine_run_identity_golden.py``)."""
+    fold = WalkForwardFold(
+        fold_index=0,
+        train_start_day=0,
+        train_end_day=3,
+        test_start_day=3,
+        test_end_day=4,
+        train_start_bar=0,
+        train_end_bar=6,
+        test_start_bar=6,
+        test_end_bar=8,
+    )
+    with pytest.raises(ValueError, match="[Oo]ut of range float"):
+        _walk_forward_schedule_hash((fold,), cast(int, float("nan")), 1, 1, 4, 8)

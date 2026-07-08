@@ -39,9 +39,11 @@ class ResampleInputError(DataLakeError):
     (``maintain_order=True`` + ``first()``/``last()`` trust input order). This
     typed error makes the violation LOUD at the resampler boundary — the same
     raise-on-non-monotonic convention the feed resampler
-    (``brutex.feed.errors.ResampleError``) and the execution driver already
-    enforce — so corrupted input can never masquerade as a clean aggregate
-    (Golden Rule #1).
+    (``brutex.feed.errors.ResampleError``) enforces (the typed
+    ``brutex.execution.errors.NonMonotonicBarError`` exists for the same
+    violation; its ``BacktestDriver`` raiser was deleted per
+    DEC-EXECUTION-TRIO-DELETE-001) — so corrupted input can never masquerade
+    as a clean aggregate (Golden Rule #1).
     """
 
 

@@ -18,6 +18,7 @@ from brutex.observability.correlation import (
     REQUEST_ID_KEY,
     current_pull_id,
     current_request_id,
+    inherited_pull_id_scope,
     new_pull_id,
     new_request_id,
     pull_id_scope,
@@ -90,6 +91,53 @@ def test_scoped_id_is_assertable_via_capture_logs() -> None:
     with capture_logs() as logs, pull_id_scope("feedface0000"):
         structlog.get_logger("t").info("ingest.window", pull_id=current_pull_id())
     assert logs[0]["pull_id"] == "feedface0000"
+
+
+# ── inherited_pull_id_scope (DEC-PULL-BEAT-PERRUN-001) ────────────────────────
+
+
+def test_inherited_scope_mints_when_unbound() -> None:
+    """No ambient id → mint (byte-identical to pull_id_scope for standalone callers)."""
+    with inherited_pull_id_scope() as pid:
+        assert len(pid) == 12
+        assert current_pull_id() == pid
+    assert current_pull_id() == ""
+
+
+def test_inherited_scope_inherits_a_bound_ambient_id() -> None:
+    """A non-empty ambient id is INHERITED (the job-level run scope reaches inner
+    entrypoint scopes instead of being shadow-minted over)."""
+    with pull_id_scope("cafe00000001"):
+        with inherited_pull_id_scope() as pid:
+            assert pid == "cafe00000001"
+            assert current_pull_id() == "cafe00000001"
+        assert current_pull_id() == "cafe00000001"  # nesting-safe restore
+
+
+def test_inherited_scope_explicit_id_wins_over_ambient() -> None:
+    with pull_id_scope("cafe00000001"):
+        with inherited_pull_id_scope("beef00000002") as pid:
+            assert pid == "beef00000002"
+            assert current_pull_id() == "beef00000002"
+        assert current_pull_id() == "cafe00000001"
+
+
+def test_inherited_scope_explicit_empty_binds_empty() -> None:
+    """The documented ``pull_id_scope("")``-binds-empty trap is mirrored, not fixed:
+    an explicit "" wins (pass None, not "", to mean 'no explicit id')."""
+    with pull_id_scope("cafe00000001"), inherited_pull_id_scope("") as pid:
+        assert pid == ""
+        assert current_pull_id() == ""
+
+
+def test_inherited_scope_nested_restore() -> None:
+    """Exit restores the OUTER binding at every nesting depth (no leak)."""
+    with inherited_pull_id_scope("outer0000000"), inherited_pull_id_scope() as inner:
+        assert inner == "outer0000000"  # inherit, not shadow-mint
+        with inherited_pull_id_scope("inner1111111"):
+            assert current_pull_id() == "inner1111111"
+        assert current_pull_id() == "outer0000000"
+    assert current_pull_id() == ""
 
 
 # ── request_id (DEC-DASHBOARD-REQUEST-LOGGING-001) — mirrors pull_id ──────────

@@ -18,11 +18,14 @@ Parquet lake.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from brutex.dashboard.movers_options import (
     OptionMover,
+    OptionsCandidates,
     _monthly_expiries,
     _tier_expiry_by_underlying,
     _tier_universe,
@@ -39,6 +42,7 @@ from brutex.dashboard.movers_options import (
     rank_value,
     rank_volume,
 )
+from brutex.dashboard.movers_pcr import PcrLeg, UnderlyingPcr, compute_pcr_rows, pcr_row_json
 from brutex.data.moneyness import Moneyness, StepConfidence
 
 # ── _tier_expiry_by_underlying (Near/Next/Far resolution) ──────────────────
@@ -1113,3 +1117,95 @@ class TestStrikeStepConfidence:
             skipped=0,
         )
         assert payload["highest_oi"][0]["strike_step_confidence"] is None
+
+
+# ── the PCR payload thread (DEC-MOVERS-OPTIONS-PCR-001) ────────────────────
+
+
+class TestOptionsPcrPayload:
+    """The per-underlying PCR rows ride the payload untouched by rank-time knobs."""
+
+    @staticmethod
+    def _pcr_rows() -> tuple[UnderlyingPcr, ...]:
+        # TWO underlyings, deliberately: a single-row fixture made the
+        # byte-invariance pin below toothless against a ``[:top_n]`` slice
+        # mutant of the payload's pcr emission (slicing one row at the
+        # top_n=1 arm is invariant — mutation-proven). With two rows the
+        # smallest top_n arm drops a row under any slice mutant and the
+        # byte-identity assert trips.
+        return compute_pcr_rows(
+            [
+                PcrLeg(underlying="NIFTY", opt_type="PE", oi=300, volume=30),
+                PcrLeg(underlying="NIFTY", opt_type="CE", oi=200, volume=20),
+                PcrLeg(underlying="BANKNIFTY", opt_type="PE", oi=400, volume=40),
+                PcrLeg(underlying="BANKNIFTY", opt_type="CE", oi=200, volume=20),
+            ],
+            legs_total={"NIFTY": 2, "BANKNIFTY": 2},
+            target_expiry={"NIFTY": date(2025, 6, 26), "BANKNIFTY": date(2025, 6, 26)},
+        )
+
+    def test_candidates_backcompat_defaults_pcr_empty(self) -> None:
+        # Defaulted-LAST field: every pre-PCR constructor call site stays valid.
+        cands = OptionsCandidates(
+            movers=(), skipped=0, date="2025-06-13", expiry_tier="near", expiry_track="all"
+        )
+        assert cands.pcr == ()
+
+    def test_payload_carries_the_pcr_key_default_empty(self) -> None:
+        payload = build_options_payload(
+            [], interval="1day", date="2025-06-13", time=None, top_n=10, skipped=0
+        )
+        assert payload["pcr"] == []
+
+    def test_payload_serializes_the_rows(self) -> None:
+        payload = build_options_payload(
+            [_mover()],
+            interval="1day",
+            date="2025-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            pcr=self._pcr_rows(),
+        )
+        assert payload["pcr"] == [pcr_row_json(row) for row in self._pcr_rows()]
+        # Sorted by PARSED underlying: BANKNIFTY (400/200) then NIFTY (300/200).
+        assert [(r["underlying"], r["oi_pcr"]) for r in payload["pcr"]] == [
+            ("BANKNIFTY", "2"),
+            ("NIFTY", "1.5"),
+        ]
+
+    def test_pcr_is_byte_identical_across_top_n_and_min_volume(self) -> None:
+        # PCR is a scan-time per-underlying aggregate over the FULL tier chain —
+        # the rank-time top_n / min_volume knobs must never touch it (edge 18).
+        movers = [_mover(), _mover(symbol="NSE-NIFTY-30Jun25-24000-PE", opt_type="PE")]
+        payloads = [
+            build_options_payload(
+                movers,
+                interval="1day",
+                date="2025-06-13",
+                time=None,
+                top_n=top_n,
+                skipped=0,
+                min_volume=min_volume,
+                pcr=self._pcr_rows(),
+            )
+            for top_n, min_volume in ((1, 0), (500, 0), (1, 10**9), (500, 10**9))
+        ]
+        first = json.dumps(payloads[0]["pcr"], sort_keys=True)
+        assert all(json.dumps(p["pcr"], sort_keys=True) == first for p in payloads[1:])
+
+    def test_other_payload_keys_are_byte_identical_with_and_without_pcr(self) -> None:
+        # Adding PCR must not perturb ANY existing key (byte-identity pin).
+        movers = [_mover()]
+        kwargs: dict[str, Any] = {
+            "interval": "1day",
+            "date": "2025-06-13",
+            "time": None,
+            "top_n": 10,
+            "skipped": 0,
+        }
+        with_pcr = build_options_payload(movers, **kwargs, pcr=self._pcr_rows())
+        without = build_options_payload(movers, **kwargs)
+        with_pcr.pop("pcr")
+        without.pop("pcr")
+        assert json.dumps(with_pcr, sort_keys=True) == json.dumps(without, sort_keys=True)
