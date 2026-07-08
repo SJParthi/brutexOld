@@ -434,6 +434,9 @@ def reconcile_funnel(manifest: ManifestResult) -> dict[str, Any]:
     ``ok`` iff every ``stage_n == stage_{n-1} − kills_n`` AND
     ``enumerated == tested + skipped``. Missing/malformed keys ⇒
     ``ok=None`` with status ``awaiting``/``partial`` — never a fake verdict.
+    An EMPTY ``actual.funnel`` also abstains (``ok=None``, awaiting): zero
+    stages reconcile NOTHING, so a manifest written before the funnel counts
+    land must never read a vacuous green ✓.
     A door/stage COUNT mismatch also abstains (``ok=None``): the P2 contract
     keeps unobservable doors ABSENT (keyed by name, not positionally tiled to
     funnel transitions), so a sparse ``per_door_kills`` is a legitimate real
@@ -518,6 +521,15 @@ def reconcile_funnel(manifest: ManifestResult) -> dict[str, Any]:
                 "lines": [f"funnel reconcile awaiting: malformed per_door_kills[{idx}]"],
             }
         kills.append(entry)
+    if not funnel:
+        # Vacuous-pass refusal: an empty funnel has zero transitions AND a
+        # trivially-true sum line reconciles NOTHING — abstain, never a
+        # green "reconciles to the digit" on no evidence.
+        return {
+            "ok": None,
+            "status": "awaiting",
+            "lines": ["funnel reconcile awaiting: actual.funnel is empty — nothing to reconcile"],
+        }
     lines: list[str] = []
     if len(kills) != max(0, len(funnel) - 1):
         # ABSENT-key law: a door the run core cannot observe is ABSENT, so a
@@ -569,7 +581,9 @@ def verify_checks(
     operator-judged checks #3/#4 can NEVER exceed ``ready`` server-side (the
     operator's ack is a client-side visual toggle, explicitly NOT server
     truth); un-wired checks #1/#5/#6 can NEVER read ``pass``. Check #2's
-    detail ALWAYS carries the assumed-algorithm caveat.
+    detail ALWAYS carries the assumed-algorithm caveat, and a clean chain
+    over ZERO records (an empty events.jsonl — a run killed before the
+    recorder's first write) reads ``awaiting``, never a vacuous ``pass``.
 
     Parameters
     ----------
@@ -611,16 +625,33 @@ def verify_checks(
         )
     else:
         chain_ok, records, first_break, chain_detail = chain
-        checks.append(
-            {
-                "id": 2,
-                "name": "Audit chain replay",
-                "state": "pass" if chain_ok else "fail",
-                "detail": chain_detail,
-                "records": records,
-                "first_break_line": first_break,
-            }
-        )
+        if chain_ok and records == 0:
+            # Vacuous-pass refusal: an EMPTY events.jsonl replays "clean"
+            # having verified NOTHING — awaiting evidence, never a green PASS.
+            checks.append(
+                {
+                    "id": 2,
+                    "name": "Audit chain replay",
+                    "state": "awaiting",
+                    "detail": (
+                        "chain intact but 0 records — an empty events file verifies "
+                        f"nothing {_CHAIN_ASSUMED}"
+                    ),
+                    "records": 0,
+                    "first_break_line": first_break,
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "id": 2,
+                    "name": "Audit chain replay",
+                    "state": "pass" if chain_ok else "fail",
+                    "detail": chain_detail,
+                    "records": records,
+                    "first_break_line": first_break,
+                }
+            )
     if trades_available:
         eyeball_state = "ready"
         eyeball_detail = (

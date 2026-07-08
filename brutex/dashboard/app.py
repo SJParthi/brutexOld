@@ -5967,8 +5967,11 @@ def build_app(
     def _oneclick_roots() -> tuple[Path | None, Path | None]:
         """Resolve ``(results_root, fixture_root)`` — the fixture override wins.
 
-        Returns ``(None, None)`` when no lake root is wired (an honest
-        awaiting payload, never a 500). A junk fixture env raises the 400.
+        Returns ``(None, None)`` when no lake root is wired — no instrument
+        store at all (mirrors ``_require_store``'s condition WITHOUT raising
+        its 503) or a store lacking a real ``path`` — so the routes serve the
+        honest ``status:"awaiting"`` payload, never a 500/503. A junk fixture
+        env raises the 400.
         """
         try:
             fixture_root = oneclick_artifacts.resolve_fixture_root()
@@ -5976,8 +5979,9 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if fixture_root is not None:
             return fixture_root, fixture_root
-        store = _require_store()
-        store_path = getattr(store, "path", None)
+        if instrument_store is None:
+            return None, None
+        store_path = getattr(instrument_store, "path", None)
         if not isinstance(store_path, Path):
             return None, None
         return default_results_root(store_path.parent), None

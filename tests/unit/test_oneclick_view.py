@@ -399,13 +399,17 @@ class TestReconcileFunnel:
         assert verdict["ok"] is False
         assert verdict["lines"][-1].endswith("✗")
 
-    def test_empty_funnel_with_zero_doors_reduces_to_the_sum_line(self) -> None:
+    def test_empty_funnel_abstains_never_a_vacuous_pass(self) -> None:
+        """Regression: [] funnel + [] doors used to read ok=True having
+        reconciled NOTHING — zero evidence must abstain, never pass."""
         body = _manifest_body()
         body["actual"]["funnel"] = []
         body["per_door_kills"] = []
         verdict = ov.reconcile_funnel(ManifestResult("ok", body, "", None))
-        assert verdict["ok"] is True
-        assert len(verdict["lines"]) == 1
+        assert verdict["ok"] is None
+        assert verdict["status"] == "awaiting"
+        assert "actual.funnel is empty" in verdict["lines"][0]
+        assert "✓" not in verdict["lines"][0]  # abstention, not a verdict
 
 
 # ── R44 truth table ─────────────────────────────────────────────────────
@@ -443,6 +447,21 @@ class TestVerifyChecks:
         assert bad["state"] == "fail"
         assert bad["first_break_line"] == 4
 
+    def test_chain_clean_over_zero_records_is_awaiting_never_pass(self) -> None:
+        """Regression: (ok=True, records=0) — the empty events.jsonl of a run
+        killed before the recorder's first write — used to read a green PASS
+        having verified nothing. It must read awaiting, with the caveat."""
+        row = ov.verify_checks(
+            _ok_manifest(),
+            (True, 0, None, "chain verified: 0 records (algorithm assumed until P2 merges)"),
+            False,
+        )[1]
+        assert row["state"] == "awaiting"
+        assert row["records"] == 0
+        assert row["first_break_line"] is None
+        assert "verifies nothing" in row["detail"]
+        assert "(algorithm assumed until P2 merges)" in row["detail"]
+
     def test_operator_judged_checks_cap_at_ready(self) -> None:
         """C-M4: #3/#4 can NEVER exceed 'ready' server-side."""
         checks = {check["id"]: check for check in ov.verify_checks(_ok_manifest(), None, True)}
@@ -466,7 +485,7 @@ class TestVerifyChecks:
 
     def test_states_stay_within_the_five_state_vocabulary(self) -> None:
         allowed = {"pass", "fail", "ready", "awaiting", "not_wired"}
-        for chain in (None, (True, 1, None, "x"), (False, 0, 1, "y")):
+        for chain in (None, (True, 1, None, "x"), (False, 0, 1, "y"), (True, 0, None, "z")):
             for trades in (True, False):
                 for check in ov.verify_checks(_ok_manifest(), chain, trades):
                     assert check["state"] in allowed

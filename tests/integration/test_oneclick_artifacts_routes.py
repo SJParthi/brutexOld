@@ -95,9 +95,14 @@ class TestRunsRoute:
         payload = client.get("/api/v1/oneclick/runs").json()
         assert payload["status"] == "awaiting"
 
-    def test_no_store_is_503(self) -> None:
+    def test_no_store_is_200_awaiting_never_503(self) -> None:
+        """No instrument store wired ⇒ honest awaiting — the 503 regression pin."""
         response = _client(None).get("/api/v1/oneclick/runs")
-        assert response.status_code == 503
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert payload["runs"] == []
+        assert payload["fixture_root_active"] is False
 
     def test_revision_outage_computes_fresh_uncached(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -424,6 +429,34 @@ class TestVerifyRoute:
         row = {check["id"]: check for check in payload["checks"]}[2]
         assert row["state"] == "awaiting"
 
+    def test_empty_events_file_click_is_awaiting_never_a_vacuous_pass(self, tmp_path: Path) -> None:
+        """Regression: a run killed before the recorder's first write leaves a
+        ZERO-byte events.jsonl whose chain replays "clean" over 0 records —
+        the click must read awaiting (verified nothing), never a green PASS."""
+        lake = _lake_with_corpus(tmp_path)
+        events_path = lake / "sweeps" / "runs" / RUN_ID / "events.jsonl"
+        events_path.write_bytes(b"")
+        payload = _client(lake).get(f"/api/v1/oneclick/verify?run_id={RUN_ID}&check=chain").json()
+        row = {check["id"]: check for check in payload["checks"]}[2]
+        assert row["state"] == "awaiting"
+        assert row["records"] == 0
+        assert "verifies nothing" in row["detail"]
+
+    def test_empty_funnel_is_awaiting_never_a_vacuous_pass(self, tmp_path: Path) -> None:
+        """Regression: an empty actual.funnel + per_door_kills used to read a
+        green check #7 having reconciled nothing — it must abstain."""
+        lake = _lake_with_corpus(tmp_path)
+        manifest_path = lake / "sweeps" / "runs" / RUN_ID / "manifest.json"
+        body = json.loads(manifest_path.read_text(encoding="utf-8"))
+        body["actual"]["funnel"] = []
+        body["per_door_kills"] = []
+        manifest_path.write_text(json.dumps(body), encoding="utf-8")
+        payload = _client(lake).get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks[7]["state"] == "awaiting"
+        assert payload["funnel_reconcile"]["ok"] is None
+        assert "actual.funnel is empty" in payload["funnel_reconcile"]["lines"][0]
+
     def test_truth_table_caps_hold_through_the_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -470,6 +503,68 @@ class TestVerifyRoute:
         assert (
             _client(_lake_with_corpus(tmp_path)).get("/api/v1/oneclick/verify").status_code == 400
         )
+
+
+# ── no instrument store wired: honest awaiting, never a 503 ────────────
+
+
+class TestNoStoreHonestAwaiting:
+    """``build_app`` WITHOUT an instrument store: every oneclick route is a
+    200 honest ``awaiting`` payload — the ``_oneclick_roots`` docstring promise
+    (regression: ``_require_store`` used to 503 every route here)."""
+
+    def test_runs_awaits(self) -> None:
+        response = _client(None).get("/api/v1/oneclick/runs")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert payload["runs"] == []
+        assert payload["fixture_root_active"] is False
+        assert "awaiting real run artifact" in payload["detail"]
+
+    def test_manifest_awaits(self) -> None:
+        response = _client(None).get(f"/api/v1/oneclick/manifest?run_id={RUN_ID}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert payload["pill"]["state"] == "awaiting"
+        assert payload["fixture_root_active"] is False
+
+    def test_top100_awaits(self) -> None:
+        response = _client(None).get(f"/api/v1/oneclick/top100?run_id={RUN_ID}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert payload["row_count"] == 0
+        assert payload["fixture_root_active"] is False
+
+    def test_events_awaits(self) -> None:
+        response = _client(None).get(f"/api/v1/oneclick/events?run_id={RUN_ID}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert payload["records"] == []
+        assert payload["fixture_root_active"] is False
+
+    def test_trades_awaits(self) -> None:
+        response = _client(None).get(f"/api/v1/oneclick/trades?run_id={RUN_ID}&rank=1")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting"
+        assert payload["rows"] == []
+        assert payload["total"] is None
+        assert payload["source"] == "none"
+        assert payload["fixture_root_active"] is False
+
+    def test_verify_awaits(self) -> None:
+        response = _client(None).get(f"/api/v1/oneclick/verify?run_id={RUN_ID}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["checks"]) == 7
+        assert payload["funnel_reconcile"]["ok"] is None
+        assert payload["fixture_root_active"] is False
+        # No un-earned green: an unwired lake can never read "pass".
+        assert all(check["state"] != "pass" for check in payload["checks"])
 
 
 # ── concurrency + hostile twin ──────────────────────────────────────────
