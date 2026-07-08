@@ -865,7 +865,7 @@ jobs:
           # are covered by the sibling test_notifications_sweep_alerts_backup
           # suite added to the invocation.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_greeks_backfill.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
           fi
