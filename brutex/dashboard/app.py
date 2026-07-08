@@ -5741,9 +5741,35 @@ def build_app(
             end=request.end,
         )
 
+        sweep_succeeded = False
+
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: run the grid sweep; the live tick streams to the progress file."""
-            return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            """Background body: run the grid sweep; the live tick streams to the progress file.
+
+            A round-12 adversarial-refuter review found this returned the
+            bare exit code with no check — ``BackgroundPullJob`` silently
+            discards a non-zero int, so a genuine internal
+            ``cmd_sweep_all`` failure (e.g. the engine's own
+            ``max_combos``/grid-size construction guards, ADR-0007
+            condition 3) reported the SAME "done" finish detail as full
+            success, with ``on_success``/``mark_dirty`` firing on a run
+            that did nothing — the exact failure mode rounds 5-8 already
+            fixed for the multi-exchange one-click route's own ``_work``,
+            left open here. Mirrors that fix: a non-zero exit becomes a
+            named ``{"note": ...}`` finish detail (the SAME
+            ``BackgroundPullJob``/``_finish_detail`` contract), and
+            ``on_success`` (below) only fires on a REAL success.
+            """
+            nonlocal sweep_succeeded
+            code = run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+            if code != 0:
+                return {"note": f"sweep {request.symbols}: cmd_sweep_all FAILED (exit {code})"}
+            sweep_succeeded = True
+            return 0
+
+        def _on_success() -> None:
+            if sweep_succeeded:
+                _summary_cache.mark_dirty()
 
         # On a SUCCESSFUL sweep, bump the dashboard write-generation (the sweep
         # _work never reports per-bar progress, so the _on_progress mark_dirty
@@ -5758,7 +5784,7 @@ def build_app(
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
-            on_success=_summary_cache.mark_dirty,
+            on_success=_on_success,
         )
         payload = request.to_dict()
         payload["started"] = started

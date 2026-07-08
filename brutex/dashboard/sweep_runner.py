@@ -243,7 +243,53 @@ def _normalise_k(value: str | None) -> str:
         if not 1 <= parsed <= _MAX_K:
             raise ValueError(f"k must be a whole number 1..{_MAX_K} — got {token!r}")
         out.append(str(parsed))
+    _validate_k_against_max_combos(out)
     return ",".join(out)
+
+
+def _validate_k_against_max_combos(k_tokens: Sequence[str]) -> None:
+    """Refuse a ``k`` whose mask count the engine's own ``max_combos`` guard will reject.
+
+    A round-12 adversarial-refuter review found the SAME "preflight says
+    ok, engine construction says no" failure mode round 11 fixed for SL/TP
+    also applies to ``k``: ``build_sweep_kwargs`` always passes
+    ``conditions=None`` (the full :data:`TOTAL_CONDITIONS`-bit vocabulary)
+    and ``max_combos=None`` (→ the engine's
+    :data:`~brutex.engine.sweep_driver.DEFAULT_MAX_COMBOS` = 100,000), so
+    :meth:`~brutex.engine.sweep_orchestrator.SweepGridConfig.__post_init__`
+    rejects any ``k`` whose ``C(TOTAL_CONDITIONS, k)`` mask count exceeds
+    that cap — e.g. ``k=4`` alone enumerates ``C(60,4) = 487,635`` masks.
+    ``_normalise_k`` only checked ``k`` was in the raw ``[1, 60]`` RANGE,
+    never against this cap, so a single-tuple launch (too small for the
+    SLA wall-clock guard to ever catch) could preflight `ok: true` — the
+    preflight's OWN estimator even correctly reports the true, over-cap
+    trial count — and still crash deterministically inside engine
+    construction. Refuse HERE, loudly, before any background job starts.
+
+    Parameters
+    ----------
+    k_tokens
+        The already-range-validated ``k`` values, as decimal strings.
+
+    Raises
+    ------
+    ValueError
+        If any ``k`` enumerates more than
+        :data:`~brutex.engine.sweep_driver.DEFAULT_MAX_COMBOS` masks over
+        the full :data:`TOTAL_CONDITIONS`-bit vocabulary.
+    """
+    from brutex.engine.combo_mask import count_combos
+    from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+
+    for token in k_tokens:
+        k = int(token)
+        n_masks = count_combos(k, TOTAL_CONDITIONS)
+        if n_masks > DEFAULT_MAX_COMBOS:
+            raise ValueError(
+                f"k={k} enumerates {n_masks} masks (C({TOTAL_CONDITIONS},{k})) "
+                f"exceeding the engine's max_combos={DEFAULT_MAX_COMBOS} — the dashboard "
+                f"has no override for this ceiling; choose a smaller k"
+            )
 
 
 def _normalise_leg(value: str | None, default: str, *, label: str) -> str:

@@ -114,6 +114,51 @@ def test_default_params_start_job(client: TestClient, monkeypatch: pytest.Monkey
     assert _CAPTURED["results_root"] == _CAPTURED["lake_root"] / "sweeps"
 
 
+def test_nonzero_exit_code_surfaces_a_failure_not_a_false_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 adversarial-refuter finding: this route's ``_work`` used to
+    return ``cmd_sweep_all``'s bare exit code with no check —
+    ``BackgroundPullJob`` silently discards a non-zero int, so a genuine
+    internal ``cmd_sweep_all`` failure (e.g. the engine's own construction
+    guards) reported the SAME "done" finish detail as full success. Must
+    now surface a named failure in the finish detail instead."""
+
+    def _fails(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    final = _wait_for_job(client)
+    assert final["state"] == "done"  # the job thread itself never raises
+    assert "FAILED" in final["detail"]
+    assert "exit 1" in final["detail"]
+
+
+def test_nonzero_exit_code_does_not_mark_cache_dirty(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same finding: ``on_success``/``mark_dirty`` must not fire on a run
+    that did nothing — only a REAL success invalidates the results cache."""
+    from brutex.dashboard.summary_cache import SummaryCache
+
+    mark_dirty_calls: list[int] = []
+    cache = SummaryCache()
+    monkeypatch.setattr(cache, "mark_dirty", lambda: mark_dirty_calls.append(1))
+
+    def _fails(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fails)
+    with TestClient(build_app(DashboardState(), instrument_store=store, summary_cache=cache)) as c:
+        resp = c.post("/api/v1/sweep/run")
+        assert resp.status_code == 200
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert mark_dirty_calls == []
+
+
 def test_custom_params_are_echoed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
     resp = client.post(

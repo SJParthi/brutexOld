@@ -16,7 +16,7 @@ SLA-acknowledge wiring, and the ruling-9 multi-symbol/SENSEX fan-out
 ownership zone ONLY — zero P2/P3/P4/P5/P6 files touched. See
 docs/MIGRATION.md entry #1568 for full detail.
 
-**Eleven rounds of adversarial review** (a 4-agent hostile review + ten
+**Twelve rounds of adversarial review** (a 4-agent hostile review + eleven
 further adversarial-refuter rounds) have run against this branch, each
 finding and fixing real issues of steadily decreasing severity — including,
 in the most recent round, a genuine gap where the preflight could report
@@ -214,6 +214,18 @@ contradicting the "a run that starts is provably runnable" design claim.
 Fixed by adding Mode-A-grid validation to `resolve_sweep_request` (used by
 every entry point), refusing loudly with a 400 before any background job
 starts.
+
+**Adversarial-refuter round 12:** confirmed the round-11 fix closes the
+gap across all 3 entry points (legacy route + both one-click routes,
+including the BSE/SENSEX fan-out group), then found the SAME failure
+class applies to `k` — a single `k=4` enumerates 487,635 masks past the
+engine's 100,000-mask `max_combos` cap, too small a launch for the SLA
+guard to ever catch, yet the preflight reported `ok: true`. Also found the
+legacy `/api/v1/sweep/run` route's background job returned the raw exit
+code with no check at all (unlike the one-click route, hardened across
+rounds 5-8), silently reporting any internal `cmd_sweep_all` failure as
+"done". Both fixed with the same 400-before-launch / named-failure
+pattern established in rounds 5-11. Full detail in docs/MIGRATION.md #1568.
 
 Full detail, each round's exact findings and fixes, in docs/MIGRATION.md
 #1568.

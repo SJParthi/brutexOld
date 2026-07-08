@@ -101,7 +101,7 @@ def test_custom_values_are_normalised() -> None:
         symbols=" SENSEX , ",
         intervals="1minute, 5minute",
         directions="buy , sell",
-        k="1, 3 ,5",
+        k="1, 3 ,2",
         sl="150,100",
         tp="200",
         top=50,
@@ -115,7 +115,7 @@ def test_custom_values_are_normalised() -> None:
     assert req.symbols == "SENSEX"
     assert req.intervals == "1minute,5minute"
     assert req.directions == "BUY,SELL"  # upper-cased
-    assert req.k == "1,3,5"
+    assert req.k == "1,3,2"
     assert req.sl == "150,100"
     assert req.tp == "200"
     assert req.top == 50
@@ -177,14 +177,22 @@ def test_k_bound_is_the_full_60_vocabulary() -> None:
     Pinned against the engine's own default condition set so a future vocab
     growth moves the dashboard bound automatically (DEC-VOCAB-U128-CODEGEN-001;
     the drift class the 60-vocab doc sweep exists to kill).
+
+    Round-12 update: ``k=53..60`` are now legitimately refused by the
+    SEPARATE ``max_combos`` guard (a round-12 adversarial-refuter fix) —
+    ``C(60,53)`` alone enumerates ~386M masks, far past the engine's
+    100,000-mask ceiling. The original assertion here proved the RANGE
+    check no longer artificially caps at the stale 52 — that is now proven
+    by asserting the refusal comes from the max_combos guard, never the
+    OLD "k must be a whole number 1..52" range message.
     """
     from brutex.cli import default_condition_bits
     from brutex.dashboard.sweep_runner import _MAX_K
     from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
     assert _MAX_K == TOTAL_CONDITIONS == len(default_condition_bits()) == 60
-    # The pre-fix boundary: 53..60 must be ACCEPTED now.
-    assert resolve_sweep_request(k="53,60", today=_TODAY).k == "53,60"
+    with pytest.raises(ValueError, match="max_combos"):
+        resolve_sweep_request(k="53,60", today=_TODAY)
 
 
 def test_non_integer_sl_leg_raises() -> None:
@@ -259,6 +267,26 @@ def test_off_grid_sl_now_refused() -> None:
 def test_off_grid_tp_now_refused() -> None:
     with pytest.raises(ValueError, match="off the locked Mode-A grid"):
         resolve_sweep_request(tp="1500", today=_TODAY)
+
+
+def test_k_over_max_combos_now_refused() -> None:
+    """Round-12 adversarial-refuter finding: the SAME "preflight says ok,
+    engine construction says no" failure mode round 11 fixed for SL/TP also
+    applies to ``k`` — ``build_sweep_kwargs`` always uses the full 60-bit
+    vocabulary (``conditions=None``) and the engine's default
+    ``max_combos=100_000``, so ``k=4`` alone (``C(60,4)=487,635`` masks)
+    used to preflight `ok: true` on a single-tuple launch (too small for
+    the SLA guard to ever catch) and then crash deterministically inside
+    ``SweepGridConfig`` construction. Must now refuse loudly at
+    request-resolution time."""
+    with pytest.raises(ValueError, match="max_combos"):
+        resolve_sweep_request(k="4", sl="50", tp="100", today=_TODAY)
+
+
+def test_k_within_max_combos_still_accepted() -> None:
+    """The max_combos guard must not reject legitimate small-k requests."""
+    req = resolve_sweep_request(k="1,2,3", sl="50", tp="100", today=_TODAY)
+    assert req.k == "1,2,3"
 
 
 # ── path helpers ──────────────────────────────────────────────────────────────
