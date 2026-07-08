@@ -54,6 +54,7 @@ from brutex.notifications.telegram import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
+    from datetime import date
     from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -684,6 +685,36 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def reference_export_failed(self, *, export_date: str, reason: str) -> bool:
+        """Alert that the post-pull S3 reference export FAILED (WARN; DEC-REFERENCE-EXPORT-S3-001).
+
+        Fired by the FENCED :func:`~brutex.export.reference_export.\
+        run_reference_export_seam` when the day's reference export could not be
+        published to S3. The export is a downstream OBSERVER — a failure NEVER
+        fails the pull (the bars are safe in the lake), so this is WARN, not
+        CRITICAL: the operator is told the external reference copy is stale so
+        TickVault's cross-verification will not see today's day. Deduped per
+        export date so a retried failure of the SAME day coalesces.
+
+        Parameters
+        ----------
+        export_date
+            The ISO day whose export failed (``YYYY-MM-DD``).
+        reason
+            A short, non-secret cause token (the error type + message).
+        """
+        message = escape_markdown_v2(
+            f"📦 Reference export FAILED for {export_date}: {reason}. The pull is "
+            "unaffected (bars are safe in the lake); the S3 reference copy for that "
+            "day is stale until the next successful export."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.WARN,
+            message=message,
+            dedupe_key=f"reference-export:{export_date}",
+        )
+
     def lake_heal_report(
         self,
         *,
@@ -1092,6 +1123,35 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
         )
 
 
+def emit_reference_export_failed_alert(*, export_date: date, reason: str) -> None:
+    """Fire the ONE best-effort reference-export failure alert (DEC-REFERENCE-EXPORT-S3-001).
+
+    The COMMON module helper mirroring :func:`emit_pull_halt_alert` — the ONE
+    place the reference-export seam
+    (:func:`~brutex.export.reference_export.run_reference_export_seam`) maps a
+    failure onto :meth:`SweepAlerter.reference_export_failed`. The whole body is
+    wrapped in a blanket ``try/except`` so the fire-and-forget contract is
+    STRUCTURAL: an alert failure is swallowed + logged and can NEVER escape into
+    the fenced seam (which must never fail the pull). Silent no-op when Telegram
+    is disabled (the default).
+
+    Parameters
+    ----------
+    export_date
+        The IST day whose export failed.
+    reason
+        A short, non-secret cause token (the error type + message).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().reference_export_failed(export_date=export_date.isoformat(), reason=reason)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never fails the pull
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "reference_export_alert_failed"
+        )
+
+
 __all__ = [
     "CONFLICT_DELTA_ALERT_ENV",
     "CRASH_LOOP_RELAUNCH_THRESHOLD",
@@ -1107,6 +1167,7 @@ __all__ = [
     "conflict_alert_threshold",
     "emit_lake_heal_alert",
     "emit_pull_halt_alert",
+    "emit_reference_export_failed_alert",
     "emit_vendor_conflict_alert",
     "escape_markdown_v2",
 ]

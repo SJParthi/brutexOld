@@ -18,7 +18,41 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+_Last updated: 2026-07-08 (DEC-REFERENCE-EXPORT-S3-001, MIGRATION.md #1605 —
+the post-pull Groww 1-minute REFERENCE EXPORT to S3: after every completed
+BruteX pull the day's CLEANED STORED 1-minute OHLCV is published — one Parquet
+per spot instrument (`INDEX` + `CASH`; the F&O contract tree deliberately OUT
+OF SCOPE) — to `s3://<bucket>/groww-reference/<YYYY-MM-DD>/<groww_symbol>.parquet`
++ a `manifest.json` written LAST (atomic `PutObject` ⇒ a present manifest ⇒ a
+COMPLETE export; a partial export leaves per-file objects WITHOUT a manifest,
+detectable-incomplete, never a false-OK), so TickVault reads it as a SECOND
+independent reference source for its ~770-instrument cross-verification. NEW
+`brutex/export/reference_export.py` reads the SAME cleaned bytes every `/movers`
+reader trusts (the keep-FIRST `read_day_intraday_frame` dedup gate, POST
+heal/dedup/session-filter, 2-dp tick grid) filtered to the exact IST day —
+the RAW vendor payload is NEVER re-fetched (Golden Rule #1); streaming per-file
+write (O(instruments)/day, no whole-day blowup — NOT O(1), Golden Rule #10);
+per-file row count + sha256 in the manifest; idempotent same-day re-export. The
+destination bucket is parameterized fail-loud via `$BRUTEX_REFERENCE_EXPORT_BUCKET`
+(TickVault exposes no dedicated archive bucket in `deploy/` — NEVER guessed);
+a dependency-free WRITE-ONLY `S3Uploader` Protocol (real boto3 s3 client via the
+ambient AWS chain — instance role / SSM profile, NEVER a hardcoded key, the
+`config/credentials_aws.py` precedent; BruteX's read-only-broker stance
+UNTOUCHED). Wiring: a FENCED `cmd_fetch` Seam B (default-OFF `BRUTEX_REFERENCE_EXPORT`
+gate; inert on dry-run; junk fails `EXIT_USER_ERROR` pre-pull) + `brutex
+export-reference [--date]` (cron-visible exit codes, the `enrich-greeks`
+precedent) — `run_reference_export_seam` NEVER fails the pull (ANY failure ⇒ one
+WARN + a best-effort `SweepAlerter.reference_export_failed` Telegram alert ⇒
+`None`). HARD FENCE respected: NO sweep-path / dashboard-template files touched
+— new `brutex/export/` module + the pull-seam wiring + CLI registration ONLY.
+Tests via an in-memory `FakeS3Uploader` (the dependency-free `FakeAwsClient`
+precedent — no boto3/network/creds; the sanctioned alternative to a heavy moto
+dep), incl. ONE full mocked-export run with the manifest asserted. ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope/vocab/rate
+change; `reference_export.py` + `sweep_alerts.py` 100% line+branch; every added
+cli.py non-pragma line covered; ruff/ruff-format clean, `mypy --strict` clean,
+pyright at the pre-change baseline).
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
 the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
 pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL

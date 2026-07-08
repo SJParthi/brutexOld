@@ -138,6 +138,28 @@ skipped (ratio gate still runs).
 
 ---
 
+## 8. Reference export to S3 (DEC-REFERENCE-EXPORT-S3-001)
+
+Post-pull publish of the day's CLEANED STORED 1-minute spot bars to an S3 prefix
+so TickVault can read them as a second reference source. Layout:
+`s3://<bucket>/groww-reference/<YYYY-MM-DD>/<groww_symbol>.parquet` + a
+`manifest.json` written LAST. Opt-in (default OFF); a failure NEVER fails the
+pull (one WARN + a best-effort Telegram alert). Credentials come from the
+ambient AWS chain (instance role / SSM profile) — NEVER a hardcoded key; the
+bounded WRITE-ONLY-to-`groww-reference/` IAM policy lives on the bucket side.
+
+| Env var | Default | Allowed | Module |
+|---|---|---|---|
+| `BRUTEX_REFERENCE_EXPORT` | `false` (off) | `1`/`on`/`true`/`yes` to enable the post-pull seam; `0`/`off`/`false`/`no` off; junk fails loud | `brutex.export.reference_export` |
+| `BRUTEX_REFERENCE_EXPORT_BUCKET` | — (required when enabled) | destination S3 bucket name (NEVER guessed — fail-loud if unset) | `brutex.export.reference_export` |
+| `BRUTEX_REFERENCE_EXPORT_REGION` | `ap-south-1` | AWS region for the S3 client | `brutex.export.reference_export` |
+
+The `brutex export-reference [--date]` CLI subcommand runs the same export
+on-demand (cron-visible exit codes, the `enrich-greeks` precedent); `--date`
+defaults to the latest stored spot day.
+
+---
+
 ## 7. Safety + reproducibility (CLAUDE.md hooks)
 
 | Env var | Default | Allowed | Module |

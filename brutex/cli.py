@@ -851,6 +851,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print discovery counts only; enrich nothing, take no lock",
     )
 
+    # ── export-reference (DEC-REFERENCE-EXPORT-S3-001) — S3 reference export ──
+    export_ref = sub.add_parser(
+        "export-reference",
+        help=(
+            "Export a day's CLEANED STORED 1-minute spot bars to S3 as a "
+            "reference source for TickVault cross-verification "
+            "(needs $BRUTEX_REFERENCE_EXPORT_BUCKET + the boto3 extra)"
+        ),
+    )
+    export_ref.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    export_ref.add_argument(
+        "--date",
+        default=None,
+        help="IST day to export YYYY-MM-DD (default: the latest stored spot day)",
+    )
+
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
     doctor = sub.add_parser(
         "doctor",
@@ -3635,6 +3656,159 @@ def _run_cli_greeks_enrich(
     return outcome
 
 
+def _run_cli_reference_export(  # pragma: no cover — real boto3 S3 client + AWS composition
+    *, lake_root: Path, export_date: date
+) -> None:
+    """Build the real S3 uploader + run the FENCED reference-export seam (Seam B).
+
+    The pull-path composition shim for DEC-REFERENCE-EXPORT-S3-001: resolves the
+    destination bucket (``$BRUTEX_REFERENCE_EXPORT_BUCKET``) + region, builds the
+    real boto3 S3 client (credentials from the ambient AWS chain — instance role
+    / SSM profile, NEVER a hardcoded key), and delegates to the 100%-tested
+    :func:`~brutex.export.reference_export.run_reference_export_seam`, which is
+    FENCED (never raises — a config/transport failure is one WARN + a best-effort
+    Telegram alert). Marked ``# pragma: no cover`` (the AWS-composition-shim
+    convention, e.g. ``_build_live_groww_spot``): the seam + uploader logic are
+    covered by ``tests/unit/test_reference_export.py`` via an injected in-memory
+    fake, and this shim only wires the real client.
+    """
+    from brutex.export.reference_export import (
+        REFERENCE_EXPORT_PREFIX,
+        REFERENCE_EXPORT_REGION_ENV,
+        ReferenceExportConfigError,
+        build_real_s3_uploader,
+        resolve_export_bucket,
+        run_reference_export_seam,
+    )
+
+    try:
+        bucket = resolve_export_bucket()
+    except ReferenceExportConfigError as exc:
+        # A misconfigured bucket is the operator's setup gap, not a pull failure:
+        # WARN + skip (the export is opt-in, and the pull already completed).
+        print(f"[brutex] reference export skipped — {exc}", file=sys.stderr)
+        return
+    region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
+    uploader = build_real_s3_uploader(bucket=bucket, region=region)
+    print(
+        f"[brutex] reference export — publishing {export_date.isoformat()} to "
+        f"s3://{bucket}/{REFERENCE_EXPORT_PREFIX}/",
+        file=sys.stderr,
+    )
+    report = run_reference_export_seam(lake_root, export_date, uploader=uploader, bucket=bucket)
+    if report is not None:
+        print(
+            f"[brutex] reference export done — instruments={report.instrument_count} "
+            f"manifest=s3://{bucket}/{report.manifest_key}"
+        )
+
+
+def cmd_export_reference(  # pragma: no cover — real boto3 S3 client + AWS composition
+    lake_root: Path | None, *, date_str: str | None
+) -> int:
+    """``brutex export-reference [--date]`` — publish a day's reference lake to S3.
+
+    Cron-visible exit codes (the ``enrich-greeks`` precedent — a DELIBERATE
+    divergence from the never-fail pull path so a scheduled export's health is
+    observable): :data:`EXIT_OK` when the manifest landed, :data:`EXIT_USER_ERROR`
+    on a bad ``--date`` / missing lake / unset bucket, :data:`EXIT_INTERNAL_ERROR`
+    when the fenced seam returned ``None`` (the export failed — already WARNed +
+    alerted). ``--date`` defaults to the latest available lake day.
+
+    Marked ``# pragma: no cover`` (the AWS-composition-shim convention): the
+    export CORE + seam are 100%-tested via an injected fake; this shim only
+    resolves the lake/date/bucket and wires the real boto3 client.
+    """
+    from brutex.export.reference_export import (
+        REFERENCE_EXPORT_PREFIX,
+        REFERENCE_EXPORT_REGION_ENV,
+        ReferenceExportConfigError,
+        build_real_s3_uploader,
+        resolve_export_bucket,
+        run_reference_export_seam,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="export-reference")
+    if date_str is not None:
+        try:
+            export_date = date.fromisoformat(date_str)
+        except ValueError as exc:
+            print(f"[brutex] {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+    else:
+        latest = _latest_reference_export_date(resolved)
+        if latest is None:
+            print(
+                "[brutex] export-reference: no stored 1-minute spot bars found — "
+                "nothing to export (pass --date or run a pull first)",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        export_date = latest
+    try:
+        bucket = resolve_export_bucket()
+    except ReferenceExportConfigError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
+    uploader = build_real_s3_uploader(bucket=bucket, region=region)
+    print(
+        f"[brutex] export-reference — {export_date.isoformat()} → "
+        f"s3://{bucket}/{REFERENCE_EXPORT_PREFIX}/{export_date.isoformat()}/",
+        file=sys.stderr,
+    )
+    report = run_reference_export_seam(resolved, export_date, uploader=uploader, bucket=bucket)
+    if report is None:
+        print("[brutex] export-reference FAILED — see the reference_export.failed WARN")
+        return EXIT_INTERNAL_ERROR
+    print(
+        f"[brutex] export-reference done — instruments={report.instrument_count} "
+        f"skipped={len(report.skipped_symbols)} "
+        f"manifest=s3://{bucket}/{report.manifest_key}"
+    )
+    return EXIT_OK
+
+
+def _latest_reference_export_date(  # pragma: no cover — real-lake I/O shim over the tested core
+    lake_root: Path,
+) -> date | None:
+    """Return the latest IST day that has stored 1-minute spot bars, or ``None``.
+
+    A thin real-lake helper for the ``export-reference`` default date: reads the
+    most recent stored bar's IST date across the discovered spot instruments.
+    Marked ``# pragma: no cover`` (real-lake I/O composition); the discovery +
+    read primitives it uses are 100%-tested in
+    ``tests/unit/test_reference_export.py``.
+    """
+    import polars as pl
+
+    from brutex.export.reference_export import (
+        REFERENCE_EXPORT_INTERVAL,
+        discover_reference_instruments,
+    )
+
+    latest: date | None = None
+    for series in discover_reference_instruments(lake_root):
+        base = (
+            lake_root
+            / "bars"
+            / series.exchange
+            / series.segment
+            / series.symbol
+            / REFERENCE_EXPORT_INTERVAL
+        )
+        for parquet in base.rglob("*.parquet"):
+            frame = pl.read_parquet(parquet)
+            if frame.is_empty():
+                continue
+            day = frame.get_column("timestamp").dt.convert_time_zone("Asia/Kolkata").dt.date().max()
+            # polars' Series.max() is a broad scalar union; narrow to a real date.
+            if isinstance(day, date) and (latest is None or day > latest):
+                latest = day
+    return latest
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -3782,6 +3956,14 @@ def cmd_fetch(
         from brutex.data.greeks_enrich_pass import resolve_cli_greeks_enrich
 
         greeks_enrich_enabled = resolve_cli_greeks_enrich()
+        # Fail-loud env gate for the post-pull S3 reference export
+        # (DEC-REFERENCE-EXPORT-S3-001): resolved HERE — before any vendor work —
+        # so a junk BRUTEX_REFERENCE_EXPORT value exits EXIT_USER_ERROR without
+        # burning a paced pull. Default OFF (opt-in: needs an external bucket +
+        # the boto3 extra); reference_export.py is wheel-free at import.
+        from brutex.export.reference_export import resolve_reference_export_enabled
+
+        reference_export_enabled = resolve_reference_export_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -4310,6 +4492,15 @@ def cmd_fetch(
                     # after the pull completed (review round-1 fix).
                     end=_next_day_saturating(end_dt.date()),
                 )
+            # ── Post-pull S3 reference export (DEC-REFERENCE-EXPORT-S3-001) ──
+            # Seam B: after the drain + heal + Greeks enrich, publish the day's
+            # CLEANED STORED 1-minute bars to S3 for TickVault's cross-verify.
+            # FENCED end-to-end (run_reference_export_seam never raises) so a
+            # bucket/IAM/transport failure emits one WARN + a best-effort alert
+            # and NEVER fails the pull. Default OFF (opt-in env gate); inert on
+            # a dry-run / --inspect (`_no_persist`).
+            if reference_export_enabled and not _no_persist:
+                _run_cli_reference_export(lake_root=resolved, export_date=end_dt.date())
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -7221,6 +7412,8 @@ def _dispatch(argv: list[str] | None) -> int:
             end=args.end,
             dry_run=args.dry_run,
         )
+    if args.command == "export-reference":
+        return cmd_export_reference(args.lake_root, date_str=args.date)
     if args.command == "doctor":
         if args.live:
             return cmd_doctor_live(args)
