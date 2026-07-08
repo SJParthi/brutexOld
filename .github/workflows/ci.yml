@@ -1199,10 +1199,15 @@ jobs:
             echo "(brutex.engine.stage3_wire test file not present yet — gate inactive)"
           fi
           # 19i2 · brutex.ranking — composite score + hard gates (DEC-RANKING-001)
-          if compgen -G "tests/unit/test_ranking.py" > /dev/null; then
-            pytest --cov=brutex.ranking --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ranking.py
+          # + the R30 preset table (brutex.ranking.presets) + the R33 phrase
+          # table (brutex.ranking.phrases) — DEC-SWEEP-RESULTS-DEPTH-001 WP3.
+          # PACKAGE-level gate over tests/unit/test_ranking*.py: a dotted
+          # --cov=brutex.ranking.<module> spec trips a numpy double-import via
+          # the package __init__, so the ranking modules gate as one package.
+          if compgen -G "tests/unit/test_ranking*.py" > /dev/null; then
+            pytest --cov=brutex.ranking --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ranking*.py
           else
-            echo "(brutex.ranking test file not present yet — gate inactive)"
+            echo "(brutex.ranking test files not present yet — gate inactive)"
           fi
           # 19j · brutex.strategies.types (31 stmts, 4 branches, 10 tests)
           if compgen -G "tests/unit/test_strategies_types.py" > /dev/null; then
@@ -2179,6 +2184,62 @@ jobs:
             pytest --cov=brutex.engine.sweep_run_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_run_core.py
           else
             echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
+          fi
+          # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
+          # engine module ships at 100% line+branch from its OWN dedicated
+          # unit suite (the package-wide brutex.engine gate above also runs
+          # them; these pinpoint the failing module). The two NEW
+          # brutex.ranking modules (presets/phrases) ride the widened
+          # brutex.ranking PACKAGE gate at 19i2 above.
+          if compgen -G "tests/unit/test_engine_minute_path.py" > /dev/null; then
+            pytest --cov=brutex.engine.minute_path --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_minute_path.py
+          else
+            echo "(brutex.engine.minute_path test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_trade_capture.py" > /dev/null; then
+            pytest --cov=brutex.engine.trade_capture --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_trade_capture.py
+          else
+            echo "(brutex.engine.trade_capture test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_trade_store.py" > /dev/null; then
+            pytest --cov=brutex.engine.trade_store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_trade_store.py
+          else
+            echo "(brutex.engine.trade_store test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_session_lens.py" > /dev/null; then
+            pytest --cov=brutex.engine.session_lens --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_session_lens.py
+          else
+            echo "(brutex.engine.session_lens test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_combo_aggregates.py" > /dev/null; then
+            pytest --cov=brutex.engine.combo_aggregates --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_combo_aggregates.py
+          else
+            echo "(brutex.engine.combo_aggregates test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_baseline.py" > /dev/null; then
+            pytest --cov=brutex.engine.baseline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_baseline.py
+          else
+            echo "(brutex.engine.baseline test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_twin_detect.py" > /dev/null; then
+            pytest --cov=brutex.engine.twin_detect --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_twin_detect.py
+          else
+            echo "(brutex.engine.twin_detect test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_margin_history.py" > /dev/null; then
+            pytest --cov=brutex.engine.margin_history --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_margin_history.py
+          else
+            echo "(brutex.engine.margin_history test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_top100_artifact.py" > /dev/null; then
+            pytest --cov=brutex.engine.top100_artifact --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_top100_artifact.py
+          else
+            echo "(brutex.engine.top100_artifact test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_engine_results_depth_pass.py" > /dev/null; then
+            pytest --cov=brutex.engine.results_depth_pass --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_depth_pass.py
+          else
+            echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above

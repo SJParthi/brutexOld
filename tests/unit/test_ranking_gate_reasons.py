@@ -1,0 +1,232 @@
+"""Unit tests for :func:`brutex.ranking.gate_reasons` (DEC-SWEEP-RESULTS-DEPTH-001).
+
+Gap-register ruling 12 / R28: the reason-returning twin of ``passes_gates`` —
+every failed hard-gate door named from the STABLE :data:`GATE_REASON_ORDER`
+vocabulary, empty tuple = pass. Every case here ALSO asserts the twin-parity
+law ``bool(passes_gates(m)) == (gate_reasons(m) == ())`` so the two functions
+can never drift door-by-door (the hypothesis-randomized parity property lives
+in ``tests/property/test_ranking_gate_reasons_property.py``).
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+from brutex.metrics.compute import ResultMetrics
+from brutex.ranking import (
+    GATE_CONSECUTIVE_LOSSES,
+    GATE_MAX_DRAWDOWN,
+    GATE_MIN_TRADES,
+    GATE_NON_FINITE_INPUT,
+    GATE_PROFIT_FACTOR,
+    GATE_REASON_ORDER,
+    GATE_WIN_RATE_WLR,
+    gate_reasons,
+    passes_gates,
+)
+
+from tests.fakes.metrics_fixtures import make_result_metrics
+
+
+def _assert_twin_parity(m: ResultMetrics) -> None:
+    """The one law both functions must always agree on (ruling 12)."""
+    assert passes_gates(m) == (gate_reasons(m) == ())
+
+
+class TestVocabulary:
+    """The wire vocabulary is stable, complete, ordered, and duplicate-free."""
+
+    def test_reason_order_is_the_exact_wire_vocabulary(self) -> None:
+        """P2's manifest counter fold keys on these EXACT strings — a rename is
+        a breaking contract change, so the literals are pinned here."""
+        assert GATE_REASON_ORDER == (
+            "non_finite_input",
+            "min_trades",
+            "profit_factor",
+            "max_drawdown",
+            "win_rate_wlr",
+            "consecutive_losses",
+        )
+
+    def test_tokens_match_their_constants(self) -> None:
+        assert GATE_NON_FINITE_INPUT == "non_finite_input"
+        assert GATE_MIN_TRADES == "min_trades"
+        assert GATE_PROFIT_FACTOR == "profit_factor"
+        assert GATE_MAX_DRAWDOWN == "max_drawdown"
+        assert GATE_WIN_RATE_WLR == "win_rate_wlr"
+        assert GATE_CONSECUTIVE_LOSSES == "consecutive_losses"
+
+    def test_no_duplicate_tokens(self) -> None:
+        assert len(set(GATE_REASON_ORDER)) == len(GATE_REASON_ORDER)
+
+
+class TestPassCase:
+    def test_gate_passer_returns_empty_tuple(self) -> None:
+        m = make_result_metrics()
+        assert gate_reasons(m) == ()
+        assert passes_gates(m) is True
+        _assert_twin_parity(m)
+
+    def test_result_is_a_tuple_not_a_list(self) -> None:
+        """The wire shape is an immutable tuple (hashable, safe to share)."""
+        assert isinstance(gate_reasons(make_result_metrics()), tuple)
+
+
+class TestSingleDoors:
+    """Each of the 5 hard doors fires alone, named, in twin parity."""
+
+    def test_min_trades(self) -> None:
+        m = make_result_metrics(total_trades=29, winning_trades=15, losing_trades=14)
+        assert gate_reasons(m) == (GATE_MIN_TRADES,)
+        _assert_twin_parity(m)
+
+    def test_profit_factor_below_threshold(self) -> None:
+        m = make_result_metrics(profit_factor=1.19)
+        assert gate_reasons(m) == (GATE_PROFIT_FACTOR,)
+        _assert_twin_parity(m)
+
+    def test_profit_factor_none_fails_the_same_door(self) -> None:
+        """A ``None`` metric (mathematically undefined) fails — the passes_gates law."""
+        m = make_result_metrics(profit_factor=None)
+        assert gate_reasons(m) == (GATE_PROFIT_FACTOR,)
+        _assert_twin_parity(m)
+
+    def test_max_drawdown(self) -> None:
+        m = make_result_metrics(max_drawdown_pct=30.01)
+        assert gate_reasons(m) == (GATE_MAX_DRAWDOWN,)
+        _assert_twin_parity(m)
+
+    def test_win_rate_with_low_wlr(self) -> None:
+        m = make_result_metrics(win_rate=0.2, win_loss_ratio=1.9)
+        assert gate_reasons(m) == (GATE_WIN_RATE_WLR,)
+        _assert_twin_parity(m)
+
+    def test_win_rate_with_none_wlr_counts_as_zero(self) -> None:
+        """``None`` win/loss ratio projects to 0.0 — exactly like passes_gates."""
+        m = make_result_metrics(win_rate=0.2, win_loss_ratio=None)
+        assert gate_reasons(m) == (GATE_WIN_RATE_WLR,)
+        _assert_twin_parity(m)
+
+    def test_low_win_rate_with_big_wlr_passes_the_door(self) -> None:
+        """A low hit-rate with winners ≥2× losers is acceptable (the AND law)."""
+        m = make_result_metrics(win_rate=0.2, win_loss_ratio=2.0)
+        assert gate_reasons(m) == ()
+        _assert_twin_parity(m)
+
+    def test_consecutive_losses(self) -> None:
+        m = make_result_metrics(max_consecutive_losses=11)
+        assert gate_reasons(m) == (GATE_CONSECUTIVE_LOSSES,)
+        _assert_twin_parity(m)
+
+
+class TestBoundaries:
+    """Exact-threshold values PASS on both twins (the gates are strict </>)."""
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"total_trades": 30, "winning_trades": 18, "losing_trades": 12},
+            {"profit_factor": 1.2},
+            {"max_drawdown_pct": 30.0},
+            {"win_rate": 0.25, "win_loss_ratio": 0.0},
+            {"win_rate": 0.2, "win_loss_ratio": 2.0},
+            {"max_consecutive_losses": 10},
+        ],
+    )
+    def test_at_threshold_passes_both_twins(self, overrides: dict[str, object]) -> None:
+        m = make_result_metrics(**overrides)
+        assert gate_reasons(m) == ()
+        assert passes_gates(m) is True
+
+
+class TestMultipleDoors:
+    """All failed doors are reported, in the documented evaluation order."""
+
+    def test_every_door_fails_reports_all_five_in_order(self) -> None:
+        m = make_result_metrics(
+            total_trades=1,
+            winning_trades=0,
+            losing_trades=1,
+            profit_factor=0.5,
+            max_drawdown_pct=50.0,
+            win_rate=0.1,
+            win_loss_ratio=0.5,
+            max_consecutive_losses=20,
+        )
+        assert gate_reasons(m) == (
+            GATE_MIN_TRADES,
+            GATE_PROFIT_FACTOR,
+            GATE_MAX_DRAWDOWN,
+            GATE_WIN_RATE_WLR,
+            GATE_CONSECUTIVE_LOSSES,
+        )
+        _assert_twin_parity(m)
+
+    def test_two_doors_keep_relative_order(self) -> None:
+        m = make_result_metrics(max_drawdown_pct=99.0, max_consecutive_losses=15)
+        assert gate_reasons(m) == (GATE_MAX_DRAWDOWN, GATE_CONSECUTIVE_LOSSES)
+        _assert_twin_parity(m)
+
+    def test_first_reason_is_the_passes_gates_short_circuit_door(self) -> None:
+        """``gate_reasons(m)[0]`` names the door passes_gates trips first on."""
+        m = make_result_metrics(profit_factor=0.1, max_consecutive_losses=99)
+        assert gate_reasons(m)[0] == GATE_PROFIT_FACTOR
+        _assert_twin_parity(m)
+
+
+class TestNonFiniteFailClosed:
+    """A present-but-non-finite gate input short-circuits to the ONE guard token."""
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"profit_factor": math.nan},
+            {"profit_factor": math.inf},
+            {"max_drawdown_pct": math.nan},
+            {"max_drawdown_pct": -math.inf},
+            {"win_rate": math.nan},
+            {"win_loss_ratio": math.nan},
+            {"win_loss_ratio": -math.inf},
+        ],
+    )
+    def test_non_finite_input_is_the_only_reason(self, overrides: dict[str, object]) -> None:
+        m = make_result_metrics(**overrides)
+        assert gate_reasons(m) == (GATE_NON_FINITE_INPUT,)
+        _assert_twin_parity(m)
+
+    def test_non_finite_masks_other_door_verdicts(self) -> None:
+        """Even with other doors provably failing, malformed metrics report ONLY
+        the guard: judging the remaining doors on garbage would fabricate
+        verdicts (NaN silently passes any comparison — Golden Rule #1)."""
+        m = make_result_metrics(
+            profit_factor=math.nan,
+            total_trades=0,
+            winning_trades=0,
+            losing_trades=0,
+            max_consecutive_losses=99,
+        )
+        assert gate_reasons(m) == (GATE_NON_FINITE_INPUT,)
+        _assert_twin_parity(m)
+
+    def test_none_is_not_non_finite(self) -> None:
+        """``None`` keeps its per-door semantics — it never trips the guard."""
+        m = make_result_metrics(profit_factor=None, win_loss_ratio=None)
+        assert GATE_NON_FINITE_INPUT not in gate_reasons(m)
+        _assert_twin_parity(m)
+
+
+class TestDeterminism:
+    def test_same_input_same_output(self) -> None:
+        m = make_result_metrics(max_drawdown_pct=45.0, win_rate=0.1, win_loss_ratio=0.1)
+        assert gate_reasons(m) == gate_reasons(m)
+
+    def test_reasons_follow_gate_reason_order(self) -> None:
+        """Emitted tokens appear in strictly increasing vocabulary order."""
+        m = make_result_metrics(
+            total_trades=5, winning_trades=2, losing_trades=3, max_consecutive_losses=50
+        )
+        reasons = gate_reasons(m)
+        indices = [GATE_REASON_ORDER.index(token) for token in reasons]
+        assert indices == sorted(indices)
+        assert len(set(indices)) == len(indices)
