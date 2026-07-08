@@ -59,6 +59,37 @@ overwrite stays the documented stat-token residual. Results-safe — never in ru
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
 parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
 modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
+pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
+`dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
+unpaced CallMeter, so the old "no `.meter` no-op" claims were FALSE), (b)
+`BackgroundPullJob(on_run_end=SessionRateController.clear_meter)` in the job's
+identity-gated finally, and (c) the OFF-job `pull_candles` spine's OWN paired,
+identity-gated clear (round 4 — `clear_meter(expected=)` compare-and-clear via
+`_pull_meter_scope`; supersedes round 2's route-level unconditional `finally`
+clear, which a round-4 reviewer proved evicted a concurrent JOB pull's LIVE
+meter whenever the direct route 400'd before registering — a malformed date;
+the route's dry-run arm still passes NO holder) — so "no in-process pull
+running ⇒ no meter registered" is a process invariant covering every
+registration path, a raise-before-register clears nothing, and a concurrent
+pull's later registration is never evicted (the 96-agent audit's C0 cross-pull
+leak + the dry-run fabricated "flowing" closed; the dry-run gate's clear stays
+unconditional with its concurrent-off-job-live-pull blast radius now honestly
+DISCLOSED, not denied — round-4 MINOR x2). Plus: per-spine mutant-killing wiring tests (all four
+register sites — the audit's C1/C2 surviving-mutant gap); a kind-aware
+`/api/v1/pull/rate` probe (`BackgroundPullJob.start(job_kind=)` — a 2-4-day
+dashboard SWEEP reads honest idle, never a site-wide red "stalled"; the
+`_pull_live` duty-degrade probe DELIBERATELY stays sweep-inclusive, #920); a
+900 s `BRIDGE_MAX_AGE_S` TTL in the merged projection (a SIGKILLed CLI's stuck
+`pull_active=True` bridge file decays to idle instead of a permanent red; the
+12 s-900 s died-mid-run alert window preserved); the false bx-rate-monitor.js
+"obs rendered" claim + dead CSS removed; six stale pre-#1056 doc passages
+reconciled + (round 3) the scoped "no in-process pull running ⇒ no meter
+registered" wording swept across every remaining claim site and locked by a
+grep doc-pin test. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
+ruff/ruff-format/mypy --strict/pyright clean).
 Earlier: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 —
 the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
 one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
@@ -324,7 +355,7 @@ registered M4 Pro runner (in-PR reconcile: the first real run failed on the
 missing polars [data] extra, fixed a54c9a0a; re-run fully green, run
 28851211762 — step measured 20 s vs the generous 25-min timeout; VERDICT:
 KEEP CAP=8). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-scope/vocab/rate change; apparatus/CI/docs only.
+scope/vocab/rate change; apparatus/CI/docs only).
 Earlier: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
 MIGRATION.md #1539 — the /movers prev-close calendar-contiguity honesty guard:
 a previous-day close/OI baseline that provably skipped a nearer NSE session (a
@@ -1219,6 +1250,52 @@ hostile-review pass._
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
   `lake_heal.py` + `db_view.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
   clean, pyright 0 errors in every touched/new file).
+  Earlier: `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593** — the #1056
+  pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
+  set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
+  `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
+  single-flight release; job-lock → controller-lock order pinned), PLUS the OFF-job `pull_candles` spine pairing its
+  own build-site registration with an identity-gated clear (round 4 — `clear_meter(expected=)` compare-and-clear via
+  `_pull_meter_scope`, success AND raise; supersedes round 2's route-level unconditional `finally` clear on
+  `POST /api/v1/universe/pull`, which a round-4 reviewer REPRODUCED evicting a concurrent JOB pull's LIVE meter
+  whenever the route 400'd before `pull_candles` ever registered — registration is once per phase START, so the
+  job's F&O phase ran meterless and an issued-but-all-failing pull read FLOWING again) so "no in-process pull
+  running ⇒ no meter registered" is a process invariant covering every registration path — a dead pull's meter is
+  unreadable in every later process state, a raise-before-register clears nothing, and a concurrent pull's later
+  registration is never evicted; the intra-pull
+  `register_meter(None)`-keeps-prior guard byte-unchanged + re-pinned. (b) the dry-run finding —
+  `register_pull_meter(…, dry_run=)` clears-and-never-registers at ALL FOUR build sites (the metadata/F&O dry-run
+  GrowwClients carry a REAL unpaced CallMeter, `client.py` `default_factory=CallMeter`, so the #1056 "no `.meter`
+  silent no-op" in-code/ledger claims were FALSE and are rewritten); a warm-process dry-run reads the same honest
+  `meter_present=False` as a cold one, never a fabricated MEASURED "flowing"; round 2 — the direct route's dry-run
+  arm passes `session_rate=None`, so an operator's concurrent `?dry_run=true` on the off-job route can never evict a
+  LIVE pull's registered meter; round 4 — the gate's clear stays UNCONDITIONAL (no handle to compare) and its
+  reverse blast radius is now honestly DISCLOSED, not denied: a JOB dry-run started while a direct off-job REAL pull
+  is in flight evicts that pull's meter for its remainder (degrades to `meter_present=False`, never fabricates — the
+  false "no live pull can be concurrent with it in-process" premise rewritten, round-4 MINOR x2). (c) C1/C2 — per-spine mutant-killing
+  wiring tests drive the REAL `pull_all_spot`/`pull_candles`/`pull_expiries_contracts`/`pull_contract_candles` and
+  assert `peek_meter() is` the exact injected CallMeter + dry-run eviction twins (every severed site / dropped kwarg
+  now fails a named test; each mutant re-applied + captured failing). (d) C5 — `BackgroundPullJob.start(job_kind=)`
+  (`JOB_KIND_PULL`/`JOB_KIND_SWEEP`) + the atomic `running_job_kind` property; the `/api/v1/pull/rate` probe is
+  kind-aware so a 2-4-day dashboard sweep reads honest idle, never a site-wide red "stalled";
+  `_pull_active_probe`/`_pull_live` DELIBERATELY stay sweep-INCLUSIVE (the #920 duty-degrade floors still engage —
+  comment-pinned + regression-tested). (e) C3 — `BRIDGE_MAX_AGE_S=900.0` in `build_pull_rate_view_merged`: a bridge
+  older than 15 min (or non-finite-aged) is DEAD EVIDENCE ≡ absent, so a SIGKILLed CLI's stuck `pull_active=True`
+  stamp can't fabricate a permanent red on an idle dashboard; `<=` keeps the 12 s-900 s died-mid-run alert window;
+  fresh-bridge projection pinned field-for-field byte-identical. (f) C4 — bx-rate-monitor.js's false "obs rendered
+  beside it" claim rewritten (`req_per_hour_observed` is wire-only back-compat, deliberately NOT rendered) + the dead
+  `.bxrm-obs` CSS deleted. (g) C6 — six stale pre-#1056 doc passages + `register_pull_meter`'s "silent NO-OP"
+  docstring rewritten to registered-meter-lifecycle semantics; `build_app` gains an injectable `session_rate` test
+  seam (default byte-identical, pinned); round 3 — the falsified "no job running ⇒ no meter registered" over-claim
+  swept from its three remaining committed sites (`rate_sampler` ×2 + `pull_jobs`' `on_run_end` doc) to the scoped
+  "no in-process pull running" law + a grep doc-pin (`TestMeterLifecycleInvariantDocPin`) over every
+  `brutex/dashboard/*.py` so it can never re-drift. HONEST: the sampler stays contractually observe-only; a dry-run <60 s after
+  a real pull can still read the decaying `recent_minute` as "flowing" ≤60 s (admission fallback — documented, not
+  mechanised); the job-finish clear can lose to at most ONE final ≤2 s sampler snapshot (pull_active flips False in
+  the same path); a wedged-but-alive CLI beyond 900 s also decays to idle (Telegram pull-health + the pull journal
+  remain the persistent alarm); the CLI bridge still carries no `failed_rps` (#1211 named follow-up). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright`
+  clean).
   Earlier: `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
   MIGRATION.md #1581** — the durable `&`-form winner map: `schema_meta` rows
   (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
@@ -3113,6 +3190,10 @@ hostile-review pass._
 - **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 — the write-time
   PER-FILE lake STATS manifest; matches §1's Active branch line)
+  Earlier: `claude/upbeat-tesla-mfrovq`
+  (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
+  CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
+  full blurb)
   Earlier: `claude/sleepy-hawking-l87497`
   (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 — the durable
   `&`-underlying form-winner persistence + the `&`-family probe CLI;
@@ -3131,10 +3212,10 @@ hostile-review pass._
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
   DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
-  Earlier: `claude/ecstatic-cannon-o3zbbe`
-  (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 — the test-apparatus
-  debt pack: nine long-ledgered apparatus gaps closed as ONE change set;
-  apparatus/CI/docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/ecstatic-cannon-o3zbbe` (DEC-TEST-APPARATUS-DEBTS-001,
+  MIGRATION.md #1541 — the test-apparatus debt pack: nine long-ledgered
+  apparatus gaps closed as ONE change set; apparatus/CI/docs only; see §1
+  Active branch chain for the full blurb)
   Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes)
   (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1539 — the `/movers`
   prev-close/OI baselines gain an honest calendar-contiguity verdict: a
@@ -3150,15 +3231,16 @@ hostile-review pass._
   futures/options session value; READ-ONLY dashboard ranking, ENGINE UNCHANGED
   NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/intelligent-euler-dwf2ab`
-  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch` pull
-  path runs the SAME fenced Greeks-enrichment pass the dashboard runs + the NEW
-  `brutex enrich-greeks` bulk re-enrich subcommand; ENGINE UNCHANGED),
-  `claude/movers-asof-default-latest-minute`
+  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch`
+  pull path now runs the SAME fenced Greeks-enrichment pass the dashboard
+  runs + the NEW `brutex enrich-greeks` bulk re-enrich; see §1 Active
+  branch chain for the full blurb)
+  Earlier: `claude/movers-asof-default-latest-minute`
   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
   default as-of TIME resolves to the SAME latest available minute across EVERY
   timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
-  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX),
-  `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
   #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
   MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
   (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
