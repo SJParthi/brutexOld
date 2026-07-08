@@ -26,6 +26,10 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
+from brutex.adapters.groww.symbol_form_preference import (
+    PersistentSymbolFormPreference,
+    form_winner_key,
+)
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.composite_pull import CompositePullReport
@@ -1368,3 +1372,82 @@ def test_pull_pipeline_default_strict_gate_is_false(
     requested = [e for e in logs if e["event"] == "universe.pull_pipeline.requested"]
     assert len(requested) == 1
     assert requested[0]["strict_gate"] is False
+
+
+# ── durable &-form winner wiring (DEC-FORM-WINNER-PERSIST-001, round-5 pin) ──
+
+
+def _patch_spines_capturing_form_preference(
+    monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]
+) -> None:
+    """Wire spine fakes that record each phase's ``form_preference`` kwarg.
+
+    Fail-loud key access (the round-2 direct-selection discipline): deleting
+    the ``form_preference=...`` kwarg at either phase call site in the
+    /pull-pipeline ``_work`` closure KeyErrors these fakes, failing the tests
+    below instead of passing silently.
+    """
+
+    def _metadata(*args: Any, **kwargs: Any) -> MetadataPullReport:
+        captured["metadata_form_preference"] = kwargs["form_preference"]
+        return _fake_metadata(*args, **kwargs)
+
+    def _historical(*args: Any, **kwargs: Any) -> CompositePullReport:
+        captured["historical_form_preference"] = kwargs["form_preference"]
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _historical)
+
+
+def test_pull_pipeline_threads_one_durable_form_preference_to_both_phases(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ONE durable form-winner map per pipeline run, shared by BOTH phases.
+
+    The round-5 regression pin for the headline DEC-FORM-WINNER-PERSIST-001
+    claim "ONE instance per /pull-pipeline run shared by the metadata +
+    historical phases" — previously asserted by ZERO tests, so reverting the
+    pipeline to per-phase fresh instances (silently re-breaking the
+    cross-phase amnesia this decision fixes) passed every suite. Drives the
+    REAL route + ``run_full_pipeline`` with fakes one level down and pins:
+    (a) the wired preference is a ``PersistentSymbolFormPreference`` whose
+    winners persist into the REAL wired ``InstrumentStore`` on a non-dry-run,
+    and (b) the metadata and historical phases receive the SAME instance (a
+    metadata-phase %26 win must reorder the candle phase's first fetch).
+    """
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_spines_capturing_form_preference(monkeypatch, captured)
+    resp = client.post("/api/v1/universe/pull-pipeline")
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["metadata_form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    # (b) IDENTITY sharing — the historical phase got the SAME object, so a
+    # metadata-phase win is visible to the candle phase within one run.
+    assert captured["historical_form_preference"] is pref
+    # (a) the preference is wired over the REAL InstrumentStore: a winner
+    # recorded through the routed instance lands in its schema_meta.
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store
+
+
+def test_pull_pipeline_dry_run_form_preference_is_store_less(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(c) a dry-run pipeline threads ``store=None`` — synthetic runs never persist."""
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+    _patch_spines_capturing_form_preference(monkeypatch, captured)
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["metadata_form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    assert captured["historical_form_preference"] is pref  # still ONE shared instance
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True  # in-memory learning only
+    assert store.get_meta(form_winner_key("M&M")) is None  # store=None: no durable row

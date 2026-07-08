@@ -69,7 +69,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Final, Protocol
+from typing import Final
 
 import structlog
 
@@ -83,6 +83,7 @@ from brutex.adapters.groww.probe import (
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.meta_kv import MetaKV
 from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
 from brutex.models import Instrument
 
@@ -104,19 +105,15 @@ PRE_FLOOR_REASON: Final[str] = "pre-floor"
 DepthProbe = Callable[[Instrument], DepthProbeResult]
 
 
-class VendorFloorMetaStore(Protocol):
-    """The ONE persistence surface the learner needs — structurally satisfied by
-    :class:`~brutex.data.instrument_store.InstrumentStore` (its generic
-    ``schema_meta`` key/value sidecar, the DEC-INSTRUMENT-MASTER-INTEGRITY-001
-    persist pattern)."""
-
-    def set_meta(self, key: str, value: str) -> None:
-        """Persist one ``schema_meta`` key/value."""
-        raise NotImplementedError  # structural Protocol stub — never executed
-
-    def get_meta(self, key: str) -> str | None:
-        """Return a ``schema_meta`` value (``None`` if absent)."""
-        raise NotImplementedError  # structural Protocol stub — never executed
+#: The ONE persistence surface the learner needs — a back-compat alias of the
+#: SHARED :class:`~brutex.data.meta_kv.MetaKV` Protocol (DEC-FORM-WINNER-PERSIST-001
+#: consolidated the two structurally identical ``set_meta``/``get_meta`` Protocol
+#: copies into one — CLAUDE.md §11 COMMON; Protocols are structural, so this is a
+#: behavioral no-op). Structurally satisfied by
+#: :class:`~brutex.data.instrument_store.InstrumentStore` (its generic
+#: ``schema_meta`` key/value sidecar, the DEC-INSTRUMENT-MASTER-INTEGRITY-001
+#: persist pattern).
+VendorFloorMetaStore = MetaKV
 
 
 def _utc_now() -> datetime:
