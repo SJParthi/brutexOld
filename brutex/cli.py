@@ -1020,6 +1020,111 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the interactive typed-'WIPE' confirmation (for non-interactive / CI use).",
     )
 
+    # ── backup (DEC-BACKUP-OFFBOX-001) — off-box restic backup tooling ──
+    backup = sub.add_parser(
+        "backup",
+        help=(
+            "Off-box restic backup tools: run (nightly snapshot) / check (dead-man) / "
+            "restore-drill (byte-verified) / status (DEC-BACKUP-OFFBOX-001)"
+        ),
+    )
+    backup_sub = backup.add_subparsers(dest="backup_command", required=True)
+    backup_run = backup_sub.add_parser(
+        "run",
+        help=(
+            "Run one off-box backup: preflight (mount + non-empty gate) → snapshot → "
+            "verify (structure + rotating read-data subset) → stamp → retention"
+        ),
+    )
+    backup_run.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help=(
+            "First-install escape: proceed even when the lake root has none of "
+            "bars/ledger/sweeps/audit (logged loudly; never the default)."
+        ),
+    )
+    backup_run.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root to snapshot (default: $BRUTEX_LAKE_ROOT → ~/.brutex/lake)",
+    )
+    backup_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Print the include/exclude plan + the WOULD-run restic argv; zero restic "
+            "calls, zero state writes."
+        ),
+    )
+    backup_check = backup_sub.add_parser(
+        "check",
+        help=(
+            "O(1) dead-man freshness check (hourly launchd job): one tiny JSON read, "
+            "at most one CRITICAL alert + one healthcheck ping — never a lake walk"
+        ),
+    )
+    backup_check.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Force the daily remote cross-check this tick (restic snapshots metadata "
+            "vs the local success stamp)."
+        ),
+    )
+    backup_check.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute + log the verdict only — no alert, no sidecar write, no ping.",
+    )
+    backup_drill = backup_sub.add_parser(
+        "restore-drill",
+        help=(
+            "Byte-verified restore drill: 1 MiB known-bytes canary roundtrip + a "
+            "deterministic stratified sample restored from the LAST VERIFIED snapshot. "
+            "Proves the restore machinery end-to-end and spot-checks integrity; it "
+            "does NOT prove all data restores (full assurance = the rotating "
+            "read-data-subset cycle + the quarterly manual DR exercise, ADR-0017)."
+        ),
+    )
+    backup_drill.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        help="Sampled file count (default: BRUTEX_BACKUP_DRILL_SAMPLE = 16).",
+    )
+    backup_drill.add_argument(
+        "--target",
+        type=Path,
+        default=None,
+        help="Restore target dir (default: a fresh temp dir under <state_dir>/drill-tmp).",
+    )
+    backup_drill.add_argument(
+        "--snapshot",
+        default=None,
+        help="Snapshot id override (default: the last VERIFIED success from state.json).",
+    )
+    backup_drill.add_argument(
+        "--keep",
+        action="store_true",
+        help="Keep the restored tree even on success (always kept on failure).",
+    )
+    backup_status = backup_sub.add_parser(
+        "status",
+        help=(
+            "Print state.json + deadman.json + the resolved config (repo redacted, "
+            "password value never read); exit mirrors the shallow dead-man verdict "
+            "(0 fresh/running, 1 alarm) with ZERO side effects"
+        ),
+    )
+    backup_status.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit the status as one JSON object instead of human-readable lines.",
+    )
+
     from brutex.engine.sweep_report import SORT_KEYS
     from brutex.feed.resampler import INTERVAL_SECONDS
 
@@ -2036,6 +2141,142 @@ def cmd_doctor_live(args: argparse.Namespace) -> int:  # pragma: no cover — re
         return 3
     print(report.to_json() if options.json_output else report.format())
     return report.exit_code
+
+
+def _redact_backup_repo(repo: str | None) -> str:
+    """Redact a restic repo URL to scheme+host for display (never the full path).
+
+    ``s3:s3.ap-south-1.amazonaws.com/bucket/brutex`` → ``s3:s3.ap-south-1.amazonaws.com``;
+    the B2 colon form ``b2:bucketname:path/to/repo`` → ``b2:bucketname`` (the
+    colon-joined path is redacted like a ``/`` path — round-3 NIT); a
+    scheme-less local-path repo reads as ``local``; unset reads ``unset``.
+    Any userinfo is stripped (``sftp://user:pass@host//srv`` → ``sftp:host``)
+    so a mis-configured embedded credential is never echoed by ``status``.
+    The userinfo strip runs BEFORE the path split (round-6 NIT): a password
+    containing ``/`` (``sftp://user:pa/ss@host/srv``) would otherwise
+    truncate at the password's slash and echo the USERNAME (``sftp:user``);
+    ordering is safe because a legit post-host path cannot carry userinfo —
+    the LAST ``@`` bounds it (a rare ``@`` in the path costs only a
+    host-fragment display, never a credential echo).
+    """
+    if repo is None:
+        return "unset"
+    scheme, sep, rest = repo.partition(":")
+    if not sep:
+        return "local"
+    host = rest.lstrip("/").rsplit("@", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    return f"{scheme}:{host}"
+
+
+def cmd_backup_status(*, json_output: bool) -> int:
+    """``brutex backup status`` — read-only state + config + verdict (O(1)).
+
+    Prints (or ``--json`` emits) ``state.json`` + ``deadman.json`` + the
+    resolved config with the repo URL redacted to scheme+host, the password
+    PATH shown but its value never read, plus "Telegram alerts:
+    ENABLED/DISABLED" and "healthcheck ping: SET/UNSET". Zero restic calls;
+    exit mirrors the shallow dead-man verdict (0 fresh/running, 1 alarm)
+    WITHOUT alert/ping/sidecar side effects (DEC-BACKUP-OFFBOX-001 §13).
+    """
+    import json as _json
+
+    from brutex.backup import (
+        EXIT_DEADMAN_BREACH,
+        BackupStateError,
+        DeadmanVerdict,
+        evaluate_deadman,
+        load_deadman,
+        load_state,
+    )
+    from brutex.backup.state import deadman_path, state_path
+    from brutex.config.backup_env import resolve_backup_env
+    from brutex.notifications.telegram import ENV_ENABLED
+
+    cfg = resolve_backup_env()
+    state_error: str | None = None
+    state = None
+    try:
+        state = load_state(state_path(cfg))
+    except BackupStateError as exc:
+        state_error = str(exc)
+    sidecar = load_deadman(deadman_path(cfg))
+    report = evaluate_deadman(
+        state,
+        sidecar,
+        threshold_hours=cfg.deadman_hours,
+        realert_hours=cfg.realert_hours,
+        skew_tolerance_s=cfg.clock_skew_tolerance_s,
+        max_runtime_hours=cfg.max_runtime_hours,
+        state_error=state_error,
+    )
+    telegram_enabled = os.environ.get(ENV_ENABLED, "false").strip().lower() == "true"
+    payload: dict[str, Any] = {
+        "verdict": report.verdict.value,
+        "detail": report.detail,
+        "hours_since_success": report.hours_since_success,
+        "threshold_hours": report.threshold_hours,
+        "state": _json.loads(state.to_json()) if state is not None else None,
+        "state_error": state_error,
+        "deadman": _json.loads(sidecar.to_json()),
+        "config": {
+            "repo": _redact_backup_repo(cfg.repo),
+            "password_file": str(cfg.password_file) if cfg.password_file else None,
+            "password_command_set": cfg.password_command is not None,
+            "restic_bin": cfg.restic_bin,
+            "state_dir": str(cfg.state_dir),
+            "deadman_hours": cfg.deadman_hours,
+            "realert_hours": cfg.realert_hours,
+            "max_runtime_hours": cfg.max_runtime_hours,
+            "verify_subset": cfg.verify_subset,
+            "drill_sample": cfg.drill_sample,
+            "extra_excludes": list(cfg.extra_excludes),
+        },
+        "telegram_alerts": "ENABLED" if telegram_enabled else "DISABLED",
+        "healthcheck_ping": "SET" if cfg.healthcheck_url is not None else "UNSET",
+    }
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"backup verdict: {report.verdict.value} — {report.detail}")
+        print(f"repo: {_redact_backup_repo(cfg.repo)}")
+        print(f"state: {state.to_json() if state is not None else state_error or 'missing'}")
+        print(f"deadman: {sidecar.to_json()}")
+        print(f"Telegram alerts: {payload['telegram_alerts']}")
+        print(f"healthcheck ping: {payload['healthcheck_ping']}")
+    quiet = report.verdict in (DeadmanVerdict.FRESH, DeadmanVerdict.RUNNING)
+    return EXIT_OK if quiet else EXIT_DEADMAN_BREACH
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    """Dispatch ``brutex backup <run|check|restore-drill|status>`` (thin adapter).
+
+    Delegates to :mod:`brutex.backup` — every handler returns the design's
+    deterministic exit code, which passes through unchanged
+    (DEC-BACKUP-OFFBOX-001 §13). ``bootstrap_env()`` already loaded
+    ``~/.brutex/.env`` at dispatch, so persisted ``BRUTEX_BACKUP_*`` vars are
+    live here.
+    """
+    from brutex.backup import run_backup, run_deadman_check, run_restore_drill
+    from brutex.config.backup_env import resolve_backup_env
+
+    if args.backup_command == "run":
+        return run_backup(
+            resolve_backup_env(),
+            lake_root=args.lake_root,
+            allow_empty=args.allow_empty,
+            dry_run=args.dry_run,
+        )
+    if args.backup_command == "check":
+        return run_deadman_check(resolve_backup_env(), deep=args.deep, dry_run=args.dry_run)
+    if args.backup_command == "restore-drill":
+        return run_restore_drill(
+            resolve_backup_env(),
+            sample=args.sample,
+            target_dir=args.target,
+            snapshot_id=args.snapshot,
+            keep=args.keep,
+        )
+    return cmd_backup_status(json_output=args.json_output)
 
 
 def cmd_monitor(poll_interval: float, ticks: int) -> int:
@@ -7390,6 +7631,8 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
+    if args.command == "backup":
+        return cmd_backup(args)
     if args.command == "sweep":
         return cmd_sweep(
             lake_root=args.lake_root,
