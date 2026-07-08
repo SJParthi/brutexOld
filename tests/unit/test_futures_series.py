@@ -197,6 +197,34 @@ class TestScanAndFilter:
         assert len(warned) == 1
         assert warned[0]["entry"] == repr("NSE-NIFTY-28Oct25-FUT")
 
+    def test_case_drifted_nifty_dir_is_warned_as_scan_evidence(self, tmp_path: Path) -> None:
+        # Round-7 finding 4: a dir that PARSES but misses the series only by
+        # letter case (a hand-copied 'NSE-nifty-28Aug25-FUT') fell in neither
+        # scan bucket — dropped with ZERO WARN and zero evidence, unlike the
+        # repr-WARNed unparsed dirs. If it held a month's only copy the
+        # interior-hole gate still refused, but never named the drifted dir
+        # sitting right there. Now: one repr-named case_drift_dir WARN (the
+        # #911 key-drift diagnostic convention); still never a segment.
+        drifted = "NSE-nifty-28Aug25-FUT"
+        root = _mk_lake(tmp_path, _JUN, _JUL, drifted)
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 7, 31))
+        assert res.contract_symbols == (_JUN, _JUL)
+        assert res.unparsed_dirs == ()  # it PARSED — not parse-failure evidence
+        warned = _events(logs, "futures_series.case_drift_dir")
+        assert len(warned) == 1
+        assert warned[0]["dir"] == repr(drifted)
+
+    def test_exact_case_foreign_dirs_emit_no_case_drift_warn(self, tmp_path: Path) -> None:
+        # The WARN is scoped to CASE drift only: genuinely foreign parsed
+        # dirs (BANKNIFTY, a BSE-embedded exchange) are simply out of the
+        # series and stay silent — never noise, never guessed.
+        root = _mk_lake(tmp_path, _JUN, "NSE-BANKNIFTY-25Jun25-FUT", "BSE-NIFTY-30Jul26-FUT")
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 6, 26))
+        assert res.contract_symbols == (_JUN,)
+        assert _events(logs, "futures_series.case_drift_dir") == []
+
     def test_poison_alias_dir_is_ignored_not_resolved(self, tmp_path: Path) -> None:
         # F7: a hand-created literal bars/NSE/FNO/NSE-NIFTY-FUT/ dir parses to
         # None → counted as evidence, NEVER a segment (the alias never reaches
@@ -286,6 +314,50 @@ class TestRefusals:
         root = _mk_lake(tmp_path, "NSE-NIFTY-10Sep27-FUT", "NSE-NIFTY-30Sep27-FUT")
         with pytest.raises(FuturesSeriesError, match="strictly monthly"):
             resolve_futures_series(root, start=date(2027, 9, 1), end=date(2027, 9, 30))
+
+    def test_same_month_poison_refused_when_sibling_falls_outside_selection(
+        self, tmp_path: Path
+    ) -> None:
+        # Round-7 finding 2: the round-5 gate compared SELECTED pairs only —
+        # a window ending BEFORE the legitimate same-month contract's
+        # ownership begins (July 16, the day after the poison's stolen
+        # expiry) selected ONLY the poison, so the pairwise check never saw
+        # the conflict and the poison dir's bars were served as series bars
+        # under a bogus roll_schedule with only the observe-only drift WARN.
+        # The gate now runs over the FULL scanned dir set.
+        poison = "NSE-NIFTY-15Jul25-FUT"
+        root = _mk_lake(tmp_path, _JUN, poison, _JUL, _AUG)
+        with pytest.raises(FuturesSeriesError, match="strictly monthly") as exc:
+            resolve_futures_series(root, start=date(2025, 7, 10), end=date(2025, 7, 14))
+        message = str(exc.value)
+        assert poison in message
+        assert _JUL in message
+        assert "quarantine" in message
+
+    def test_same_month_poison_refused_as_sole_selected_segment(self, tmp_path: Path) -> None:
+        # Round-7 finding 6: a window falling WHOLLY inside the poison's
+        # stolen ownership span (May 30 → Jun 10) makes the poison the ONLY
+        # selected segment — `itertools.pairwise` over one segment is empty,
+        # so the round-5 gate never fired at all. Whole-lake check refuses.
+        poison = "NSE-NIFTY-10Jun25-FUT"
+        root = _mk_lake(tmp_path, "NSE-NIFTY-29May25-FUT", poison, _JUN)
+        with pytest.raises(FuturesSeriesError, match="strictly monthly") as exc:
+            resolve_futures_series(root, start=date(2025, 6, 2), end=date(2025, 6, 9))
+        message = str(exc.value)
+        assert poison in message
+        assert _JUN in message
+
+    def test_same_month_poison_outside_the_window_still_refuses(self, tmp_path: Path) -> None:
+        # The widened gate is deliberately WHOLE-LAKE (never window-scoped):
+        # NIFTY futures are strictly monthly, so a same-month duplicate
+        # anywhere is lake corruption — refusing forces the quarantine even
+        # when today's window would not touch the poisoned month (a later
+        # window silently would). Structurally vendor-impossible, so a
+        # legitimate lake can never false-refuse.
+        poison = "NSE-NIFTY-15Sep25-FUT"
+        root = _mk_lake(tmp_path, _JUN, _JUL, _AUG, poison, "NSE-NIFTY-30Sep25-FUT")
+        with pytest.raises(FuturesSeriesError, match="strictly monthly"):
+            resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 6, 26))
 
 
 class TestInteriorHoleGate:

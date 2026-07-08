@@ -78,6 +78,8 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 __all__ = [
     "MAX_MONTHLY_EXPIRY_GAP_DAYS",
+    "SERIES_EXCHANGE",
+    "SERIES_SEGMENT",
     "CalendarCrossCheck",
     "FuturesSeriesError",
     "FuturesSeriesResolution",
@@ -90,9 +92,13 @@ _LOG = structlog.get_logger("brutex.data.futures_series")
 
 #: The lake exchange + underlying + segment the ADR-0012 track resolves under
 #: (NIFTY futures trade on NSE, stored under the FNO segment partition).
-_SERIES_EXCHANGE: Final[str] = "NSE"
+#: ``SERIES_EXCHANGE``/``SERIES_SEGMENT`` are PUBLIC — the alias-aware loader
+#: (:mod:`brutex.feed.series_load`) pins its launch coordinates against them
+#: (review round-7 finding 3: an override-admitted foreign coordinate must
+#: refuse naming the coordinate, never mis-remediate as missing data).
+SERIES_EXCHANGE: Final[str] = "NSE"
 _SERIES_UNDERLYING: Final[str] = "NIFTY"
-_SERIES_SEGMENT: Final[str] = "FNO"
+SERIES_SEGMENT: Final[str] = "FNO"
 
 #: Max calendar-day gap between consecutive monthly expiries before the series
 #: is declared HOLED (missing contract). Monthly last-Thu/last-Tue expiries are
@@ -306,10 +312,15 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
 
     ONE ``os.scandir``; ``-FUT`` suffix prefilter, then the canonical
     :func:`~brutex.data.fno_symbol.parse_fno_symbol` filter (exchange NSE +
-    underlying NIFTY + instrument_type FUT). Unparseable ``-FUT`` names are
-    WARNed + returned as evidence, never guessed — including a hand-created
-    literal ``NSE-NIFTY-FUT`` poison dir, which parses to ``None`` and is
-    ignored (the alias never reaches a path-building API).
+    underlying NIFTY + instrument_type FUT — case-EXACT, like every lake key).
+    Unparseable ``-FUT`` names are WARNed + returned as evidence, never
+    guessed — including a hand-created literal ``NSE-NIFTY-FUT`` poison dir,
+    which parses to ``None`` and is ignored (the alias never reaches a
+    path-building API). A dir that parses but misses the series ONLY by
+    letter case (``NSE-nifty-…``) is skipped with a
+    ``futures_series.case_drift_dir`` WARN (review round-7 finding 4) so the
+    drift is named as scan evidence; genuinely foreign parsed dirs stay
+    silent.
     """
     import os
 
@@ -339,11 +350,27 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
                 _LOG.warning("futures_series.unparsed_dir", dir=repr(name))
                 continue
             if (
-                parts.exchange == _SERIES_EXCHANGE
+                parts.exchange == SERIES_EXCHANGE
                 and parts.underlying == _SERIES_UNDERLYING
                 and parts.instrument_type == FUTURE_TYPE
             ):
                 parsed.append((name, parts.expiry))
+            elif (
+                parts.instrument_type == FUTURE_TYPE
+                and parts.exchange.upper() == SERIES_EXCHANGE
+                and parts.underlying.upper() == _SERIES_UNDERLYING
+            ):
+                # Case-drifted NIFTY dir (review round-7 finding 4): lake keys
+                # are case-exact, so a hand-copied ``NSE-nifty-30Sep25-FUT``
+                # PARSES yet is filtered from the series — previously with
+                # ZERO evidence, unlike the repr-WARNed unparsed dirs. If it
+                # held a month's ONLY copy the interior-hole gate still
+                # refuses loudly, but its "pull it" remediation never named
+                # the drifted dir sitting right there. WARN as scan evidence
+                # (the #911 key-drift diagnostic convention); genuinely
+                # foreign dirs (BANKNIFTY / a BSE-embedded exchange) stay
+                # silent — they are simply out of the series.
+                _LOG.warning("futures_series.case_drift_dir", dir=repr(name))
     return parsed, sorted(unparsed)
 
 
@@ -384,10 +411,10 @@ def resolve_futures_series(
         raise FuturesSeriesError(
             f"futures series window is inverted: start {start.isoformat()} > end {end.isoformat()}"
         )
-    fno_root = lake_root / "bars" / _SERIES_EXCHANGE / _SERIES_SEGMENT
+    fno_root = lake_root / "bars" / SERIES_EXCHANGE / SERIES_SEGMENT
     if not fno_root.is_dir():
         raise FuturesSeriesError(
-            f"no {_SERIES_EXCHANGE}/{_SERIES_SEGMENT} lake tree at {fno_root} — no NIFTY "
+            f"no {SERIES_EXCHANGE}/{SERIES_SEGMENT} lake tree at {fno_root} — no NIFTY "
             "futures contracts have been pulled; run the dashboard ▶ Pull · full "
             "pipeline (the F&O phase pulls every contract + the prebuild derives "
             "its timeframes)"
@@ -412,6 +439,33 @@ def resolve_futures_series(
             )
         by_expiry[expiry] = name
     ordered = sorted(by_expiry.items())  # [(expiry, dir_name)] ascending
+
+    # Same-month poison gate (review round-5 finding 10; WIDENED to the FULL
+    # scanned dir set by review round-7 findings 2/6): NIFTY futures are
+    # STRICTLY monthly — the vendor never lists two contracts expiring in one
+    # calendar month — so ANY two lake dirs sharing (year, month) are lake
+    # corruption (a hand-planted/foreign dir), whatever the sweep window. The
+    # round-5 gate compared SELECTED segments only, so a window that ended
+    # before the legitimate contract's ownership began (or sat wholly inside
+    # the poison's stolen span) selected ONLY the poison and sailed past the
+    # pairwise check — the foreign dir's bars were served as series bars under
+    # a bogus mid-month ``roll_schedule`` with only the OBSERVE-only
+    # ``expiry_drift`` WARN (fully silent on a calendar-abstaining 2027+
+    # window). Two same-month expiries are always ADJACENT in the
+    # expiry-sorted ``ordered`` (any expiry between them shares their month),
+    # so ONE pairwise pass over the WHOLE lake subsumes the selected-pairs
+    # check; structurally vendor-impossible → this can never false-refuse a
+    # legitimate lake.
+    for (prev_expiry, prev_name), (next_expiry, next_name) in itertools.pairwise(ordered):
+        if (prev_expiry.year, prev_expiry.month) == (next_expiry.year, next_expiry.month):
+            raise FuturesSeriesError(
+                f"ambiguous lake: contract dirs {prev_name!r} and {next_name!r} "
+                f"both expire in {prev_expiry.year:04d}-{prev_expiry.month:02d} "
+                f"({prev_expiry.isoformat()} vs {next_expiry.isoformat()}) — "
+                "NIFTY futures are strictly monthly, so a second same-month expiry "
+                "is lake corruption and would mint a bogus mid-month roll — "
+                "quarantine the foreign dir before launching"
+            )
 
     # Ownership windows over the FULL scanned set (vendor truth first): the
     # predecessor is taken from the full dir set, not only in-window dirs.
@@ -471,33 +525,11 @@ def resolve_futures_series(
                 next_seg.contract_symbol,
                 next_seg.expiry,
             )
-        # Same-month poison gate (review round-5 finding 10): NIFTY futures
-        # are STRICTLY monthly — the vendor never lists two contracts expiring
-        # in one calendar month — so two SELECTED segments sharing
-        # (year, month) is always lake corruption (a hand-planted/foreign
-        # dir). The duplicate-expiry refusal above catches only an IDENTICAL
-        # parsed expiry and the continuity gates only a gap
-        # > MAX_MONTHLY_EXPIRY_GAP_DAYS, so a mid-month poison dir previously
-        # slid between them, minting a bogus mid-month ``roll_schedule`` entry
-        # (an extra Stage-1A D11 hard reset + a re-keyed run identity) with
-        # only the OBSERVE-only ``expiry_drift`` WARN — fully silent on a
-        # calendar-abstaining 2027+ window. Structurally vendor-impossible →
-        # this can never false-refuse a legitimate lake. A same-month dir
-        # OUTSIDE the selection cannot poison the schedule (ownership clamps
-        # to the window; the schedule folds SELECTED expiries only).
-        if (prev_seg.expiry.year, prev_seg.expiry.month) == (
-            next_seg.expiry.year,
-            next_seg.expiry.month,
-        ):
-            raise FuturesSeriesError(
-                f"ambiguous lake: contract dirs {prev_seg.contract_symbol!r} and "
-                f"{next_seg.contract_symbol!r} both expire in "
-                f"{prev_seg.expiry.year:04d}-{prev_seg.expiry.month:02d} "
-                f"({prev_seg.expiry.isoformat()} vs {next_seg.expiry.isoformat()}) — "
-                "NIFTY futures are strictly monthly, so a second same-month expiry "
-                "is lake corruption and would mint a bogus mid-month roll — "
-                "quarantine the foreign dir before launching"
-            )
+        # (The round-5 same-month poison gate that lived here now runs over
+        # the FULL ``ordered`` dir set right after the duplicate-expiry pass —
+        # review round-7 findings 2/6: a poison dir whose legitimate same-
+        # month sibling fell OUTSIDE the selection evaded the selected-pairs
+        # comparison entirely.)
 
     # Continuity gate, START side (review round-1 findings 1/10): the pairwise
     # gate above only sees SELECTED segments, so a window that STARTS inside a
