@@ -656,7 +656,7 @@ class TestLaunchSweep:
     def test_lock_contended_returns_unstarted(self, tmp_path: Path) -> None:
         lock_path = lb.launch_lock_path(tmp_path)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             record: dict[str, Any] = {}

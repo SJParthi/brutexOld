@@ -819,7 +819,10 @@ def launch_sweep(
 
     lock_path = launch_lock_path(lake_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    # 0o600 (CodeQL alerts 862/863): the sidecar's contents are non-secret,
+    # but there is no reason to be world-readable; flock semantics are
+    # unaffected — same-user dashboard processes still contend on the fd.
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
