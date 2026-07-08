@@ -479,3 +479,72 @@ class TestFrontend:
         block = template[start:end]
         assert "textContent" in block
         assert "innerHTML" not in block  # CodeQL XSS guard
+
+    # ── Fix round 9 (refuter-confirmed): the panel poll is SELF-RECOVERING —
+    #    the DEC-PULL-UI-STALENESS-001 posture of the sibling pollProgress on
+    #    this same page. Substring pins per the panel's honest envelope
+    #    (presence, not execution — no headless JS runner in the unit gate). ──
+
+    @staticmethod
+    def _gb_block() -> str:
+        template = _universe_template()
+        start = template.index("const GB_MS")
+        end = template.index("const verdictRefreshBtn")
+        return template[start:end]
+
+    def test_backfill_poll_never_gives_up_capped_backoff(self) -> None:
+        """The bounded give-up is REMOVED (fix round 9, refuter-confirmed).
+
+        The old catch stopped polling FOREVER after 5 consecutive 600 ms poll
+        failures (~3 s of blips on a multi-hour wet run), painted '… live
+        progress feed dropped …; re-open the page to re-check' (a FALSE
+        remedy — no re-attach path existed) and re-enabled the run-STARTING
+        button mid-job — the exact bounded-give-up class
+        DEC-PULL-UI-STALENESS-001 (the 38-minute frozen-tab incident) removed
+        site-wide. The poll now runs quick retries then a 3 s→30 s capped
+        exponential backoff and never stops until a TERMINAL state is
+        actually observed; a non-ok or malformed poll COUNTS as a failure and
+        can never settle the panel.
+        """
+        template = _universe_template()
+        block = self._gb_block()
+        # The give-up branch (and its false remedy) is gone from the template.
+        assert "re-open the page to re-check" not in template
+        # Quick retries in FRONT of the capped exponential backoff.
+        assert "const GB_BACKOFF_BASE_MS = 3000;" in block
+        assert "const GB_BACKOFF_MAX_MS = 30000;" in block
+        assert "function gbRetryDelayMs()" in block
+        # The catch never stops: it counts, says so honestly, and re-schedules.
+        assert "gbTimer = setTimeout(pollGreeksBackfill, gbRetryDelayMs());" in block
+        assert "— retrying" in block
+        # Every failure mode counts (the DEC-PULL-UI-STALENESS-001 rule): a
+        # non-ok or malformed-body poll can never settle the panel as done.
+        assert "throw new Error('HTTP ' + r.status);" in block
+        assert "malformed progress payload" in block
+        # The button comes back ONLY on an observed terminal state (gbFinish).
+        assert "function gbFinish()" in block
+
+    def test_backfill_panel_reattaches_on_load_and_on_refusal(self) -> None:
+        """gbAttachIfRunning: the 're-check' path actually EXISTS (fix round 9).
+
+        A re-opened page probes the progress route once and resumes a running
+        job's live feed (previously blank — pollGreeksBackfill had no call
+        site outside the start click), and a started:false refusal attaches
+        to the running backfill instead of a dead-end message — so the
+        run-STARTING button is never the only way to look at a live job.
+        """
+        block = self._gb_block()
+        assert "async function gbAttachIfRunning()" in block
+        # Page-load re-attach beside the click wiring.
+        assert "greeksBackfillBtn.addEventListener('click', startGreeksBackfill);" in block
+        assert block.count("gbAttachIfRunning(") >= 3  # definition + load + refusal call sites
+        assert "const attached = await gbAttachIfRunning();" in block
+
+    def test_backfill_poll_hidden_tab_zero_fetches_with_catchup(self) -> None:
+        """A hidden tab fires ZERO fetches; tab return re-polls immediately."""
+        block = self._gb_block()
+        assert "if (document.hidden)" in block
+        assert "const GB_HIDDEN_MS" in block
+        assert "gbTimer = setTimeout(pollGreeksBackfill, GB_HIDDEN_MS);" in block
+        assert "document.addEventListener('visibilitychange'" in block
+        assert "if (!document.hidden && gbWatchActive) pollGreeksBackfill();" in block

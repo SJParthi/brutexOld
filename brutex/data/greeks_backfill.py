@@ -720,10 +720,13 @@ def _stale_stamp_pairs(series: pl.Series, *, rate_source: RiskFreeSource) -> lis
     """The stale ``(pid, reason)`` pairs among *series*' distinct non-null stamps.
 
     First-seen row order (the census label is the FIRST stale stamp's reason —
-    the pre-round-7 tie-break preserved). Raises ``ValueError`` / ``TypeError``
-    / ``OverflowError`` on a value the ``int()`` coercion rejects — a
-    schema-poisoned stamp column (utf8 / NaN / inf; fix round 6): the callers
-    fold that into ``probe_failed``.
+    the pre-round-7 tie-break preserved). Both callers gate *series* through
+    :func:`_stamp_dtype_poisoned` FIRST (fix round 9), so every value here is
+    a Python ``int`` from an integer-dtype column — the ``int()`` coercion is
+    pure normalisation and can never raise, and
+    :func:`~brutex.data.greeks_enrich.unpack_greeks_provenance` /
+    :func:`~brutex.data.greeks_enrich.stamp_is_current_inputs` are total over
+    ``int`` (pure bit masking).
     """
     pairs: list[tuple[int, str]] = []
     for value in series.drop_nulls().unique(maintain_order=True).to_list():
@@ -733,6 +736,46 @@ def _stale_stamp_pairs(series: pl.Series, *, rate_source: RiskFreeSource) -> lis
             reason = _STALE_V1 if stored.formula_version != GREEKS_FORMULA_VERSION else _STALE_DRIFT
             pairs.append((pid, reason))
     return pairs
+
+
+def _stamp_dtype_poisoned(series: pl.Series, *, symbol: str, path: Path) -> bool:
+    """``True`` + ONE ``probe_skip`` WARN iff *series*' dtype is non-INTEGER.
+
+    The lake writers only ever produce INTEGER ``greeks_provenance_id``
+    columns (:func:`~brutex.data.greeks_enrich.pack_greeks_provenance` packs
+    Python ints; the driver's overlay null-fill is ``Int32``), so ANY other
+    dtype is a SCHEMA-POISONED column — folded into ``probe_failed`` as ONE
+    repair unit (the round-7 precedence), never fed further.
+
+    Fix round 9 (refuter-confirmed): the rounds-1/6 poisoned-column folds
+    keyed on the ``int()`` value coercion RAISING
+    (``ValueError``/``TypeError``/``OverflowError``), which a NUMERIC-STRING
+    utf8 (``"7"``), a Boolean (``int(True) == 1``) or a fractional float
+    (``int(258.5)`` truncates) stamp does NOT — the coercible-but-non-integer
+    dtype then detonated the un-fenced ``is_in`` driver-view filter in
+    :func:`_suspicious_file_verdict` (polars ``InvalidOperationError``:
+    ``'is_in' cannot check for List(Int64) values in String data``) and ONE
+    junk file killed the WHOLE scan — the DEC-MOVERS-CORRUPT-SKIP-001 class
+    this module pledges away; the fractional float instead truncated,
+    silently ``is_in``-matched nothing and mis-classified the contract
+    ``stale_unfixable`` ("lake repair needed") although the driver's
+    ``isinstance(stored_pid, int)`` gate would recompute it outright. Gating
+    the DTYPE at the fold makes the downstream expression space total: every
+    polars integer dtype (Int8…UInt64, huge UInt64 values included) is
+    ``is_in``-safe against the Int64 pid list (probed on the pinned polars)
+    and ``int()`` over its values can never raise — so the old value-level
+    coercion folds are SUBSUMED, not narrowed.
+    """
+    if series.dtype.is_integer():
+        return False
+    _LOG.warning(
+        "greeks_backfill.probe_skip",
+        symbol=symbol,
+        file=str(path),
+        dtype=str(series.dtype),
+        error="schema-poisoned greeks_provenance_id dtype (non-integer)",
+    )
+    return True
 
 
 def _warn_driver_invisible(
@@ -788,9 +831,14 @@ def _suspicious_file_verdict(
       carrying row: non-finite OHLC in the view (fix rounds 4 + 6), or
       staleness ONLY on driver-invisible rows (fix round 7 — WARNed here
       naming ``lake_heal`` as the repair).
-    * ``probe_failed`` — the stamp column turned uncoercible between the two
+    * ``probe_failed`` — the stamp column turned NON-INTEGER between the two
       bounded reads (a concurrent rewrite): the schema-poisoned fold, counted
-      by the caller's census discipline.
+      by the caller's census discipline (fix round 9 — the dtype gate, BEFORE
+      the null branch: a poisoned column is ONE repair unit even when null
+      stamps sit alongside, the round-7 precedence; it also fences the
+      ``is_in`` driver-view filter below, which detonated on a
+      coercible-but-non-integer dtype the old value-level ``int()`` fold
+      could not see).
     """
     import polars as pl
 
@@ -801,24 +849,16 @@ def _suspicious_file_verdict(
     stamp = pl.col("greeks_provenance_id")
     raw_series = raw["greeks_provenance_id"]
     view_series = view["greeks_provenance_id"]
+    if _stamp_dtype_poisoned(raw_series, symbol=symbol, path=path):
+        return None, False, True
     unfixable = False
     if view_series.null_count() > 0:
         if _any_row_fixable(view.filter(stamp.is_null())):
             return _STALE_NULL, False, False
         # Every view null stamp sits on a driver-skippable row (fix round 4).
         unfixable = True
-    try:
-        view_pairs = _stale_stamp_pairs(view_series, rate_source=rate_source)
-        raw_pairs = _stale_stamp_pairs(raw_series, rate_source=rate_source)
-    except (ValueError, TypeError, OverflowError) as exc:
-        _LOG.warning(
-            "greeks_backfill.probe_skip",
-            symbol=symbol,
-            file=str(path),
-            dtype=str(raw_series.dtype),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return None, False, True
+    view_pairs = _stale_stamp_pairs(view_series, rate_source=rate_source)
+    raw_pairs = _stale_stamp_pairs(raw_series, rate_source=rate_source)
     if view_pairs:
         if _any_row_fixable(view.filter(stamp.is_in([pid for pid, _ in view_pairs]))):
             return view_pairs[0][1], False, False
@@ -914,21 +954,24 @@ def _probe_contract_staleness(
     rides the SAME driver-actionability gate (:func:`_legacy_file_verdict` —
     fix round 7 closed its unconditional stale-null bypass of the rounds-4/6
     fixability discipline). A corrupt/unreadable file is counted + logged and
-    the probe continues — and so is a SCHEMA-POISONED stamp column (a
-    wrong-dtype ``greeks_provenance_id`` like utf8, a non-null NaN float, or
-    an inf/1e999 float — values the ``int()`` coercion rejects with
-    ``ValueError``/``TypeError``/``OverflowError``; the last is the
-    fix-round-6 refuter repro: ``int(inf)`` raises ``OverflowError``, which
-    subclasses ``ArithmeticError`` — NOT ``ValueError`` — so one inf-stamped
-    file previously killed the WHOLE scan): all fold into ``probe_failed`` so
-    ONE junk file never kills the scan (the DEC-MOVERS-CORRUPT-SKIP-001
-    class). A poisoned stamp column folds into ``probe_failed`` even when
-    null stamps sit alongside — the column is ONE repair unit (a deliberate
-    round-7 precedence over the old null-branch-first order: feeding the
-    driver a schema-poisoned column could never converge either). A genuine
-    code bug elsewhere still propagates — the read catch is the narrow
-    movers_resilient ``(PolarsError, OSError)`` set, the value catch only the
-    coercion trio; healing is :mod:`brutex.data.lake_heal`'s job, never
+    the probe continues — and so is a SCHEMA-POISONED stamp column: ANY
+    non-INTEGER ``greeks_provenance_id`` dtype (utf8 — numeric-string or not,
+    Boolean, every float incl. NaN/inf/fractional, …) folds into
+    ``probe_failed`` at the :func:`_stamp_dtype_poisoned` DTYPE gate, so ONE
+    junk file never kills the scan (the DEC-MOVERS-CORRUPT-SKIP-001 class).
+    Fix round 9 (refuter-confirmed) moved this fold from the raising-``int()``
+    VALUE gate of rounds 1/6 to the dtype: a coercible-but-non-integer stamp
+    (utf8 ``"7"``, Boolean ``True``, a fractional float) sailed past the
+    ``ValueError``/``TypeError``/``OverflowError`` trio and detonated the
+    un-fenced ``is_in`` in :func:`_suspicious_file_verdict` — see
+    :func:`_stamp_dtype_poisoned` for the full class. A poisoned stamp column
+    folds into ``probe_failed`` even when null stamps sit alongside — the
+    column is ONE repair unit (a deliberate round-7 precedence over the old
+    null-branch-first order: feeding the driver a schema-poisoned column
+    could never converge either). A genuine code bug elsewhere still
+    propagates — the read catch is the narrow movers_resilient
+    ``(PolarsError, OSError)`` set, the stamp-column gate the dtype check
+    only; healing is :mod:`brutex.data.lake_heal`'s job, never
     re-implemented here. Each probed file fires one liveness
     :func:`~brutex.observability.progress_beat.emit_progress_beat` (a no-op
     outside a dashboard job) so the O(files) probe never trips the pull stall
@@ -966,23 +1009,17 @@ def _probe_contract_staleness(
                 error=f"{type(exc).__name__}: {exc}",
             )
             continue
-        try:
-            raw_pairs = _stale_stamp_pairs(series, rate_source=rate_source)
-        except (ValueError, TypeError, OverflowError) as exc:
-            # A schema-poisoned stamp column (utf8 "poison", a NaN float, an
-            # inf/1e999 float — int(inf) raises OverflowError, fix round 6):
-            # data corruption, not a code bug — count + log + continue, exactly
-            # like the unreadable-file arm above (ONE repair unit even when
-            # null stamps sit alongside — round-7 precedence, see docstring).
+        if _stamp_dtype_poisoned(series, symbol=symbol, path=path):
+            # A schema-poisoned stamp column (utf8 — numeric-string or not,
+            # Boolean, any float incl. NaN/inf/fractional): data corruption,
+            # not a code bug — count + log + continue, exactly like the
+            # unreadable-file arm above (ONE repair unit even when null
+            # stamps sit alongside — round-7 precedence; fix round 9 moved
+            # the fold from the raising-int() value gate to the DTYPE,
+            # closing the coercible-dtype is_in crash class).
             probe_failed += 1
-            _LOG.warning(
-                "greeks_backfill.probe_skip",
-                symbol=symbol,
-                file=str(path),
-                dtype=str(series.dtype),
-                error=f"{type(exc).__name__}: {exc}",
-            )
             continue
+        raw_pairs = _stale_stamp_pairs(series, rate_source=rate_source)
         if series.null_count() == 0 and not raw_pairs:
             continue  # fully current — the clean fast path stays ONE stamp read
         fallback_reason = _STALE_NULL if series.null_count() > 0 else raw_pairs[0][1]

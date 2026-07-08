@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +169,41 @@ def _write_month_prices(
         }
     )
     frame.write_parquet(dest)
+    return dest
+
+
+def _write_month_stamped(
+    lake: Path,
+    symbol: str,
+    year: int,
+    month: int,
+    stamps: pl.Series,
+) -> Path:
+    """Write a FULL canonical month partition with an arbitrary-dtype stamp column.
+
+    The fix-round-9 poisoned-dtype probes need valid timestamps + finite OHLC:
+    the pre-fix crash lived in the VERDICT's un-fenced driver-view ``is_in``
+    filter, reachable only when ``_read_driver_frames`` succeeds — the bare
+    stamp-column fixtures of the rounds-1/6 pins never got that far.
+    """
+    dest = (
+        lake / "bars" / "NSE" / "FNO" / symbol / "1minute" / f"{year:04d}" / f"{month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = len(stamps)
+    base = datetime(year, month, 15, 3, 45, tzinfo=UTC)
+    pl.DataFrame(
+        {
+            "timestamp": pl.Series(
+                [base + timedelta(minutes=i) for i in range(n)], dtype=pl.Datetime("us", "UTC")
+            ),
+            "open": pl.Series([100.0] * n, dtype=pl.Float64),
+            "high": pl.Series([101.0] * n, dtype=pl.Float64),
+            "low": pl.Series([99.0] * n, dtype=pl.Float64),
+            "close": pl.Series([100.0] * n, dtype=pl.Float64),
+            "greeks_provenance_id": stamps,
+        }
+    ).write_parquet(dest)
     return dest
 
 
@@ -436,6 +471,58 @@ class TestScanner:
         assert scan.probe_failed == 1 and scan.current == 1
         assert [t.symbol for t in scan.targets] == [_PE]
         assert any(r["event"] == "greeks_backfill.probe_skip" and "dtype" in r for r in logs)
+
+    def test_numeric_string_stamp_column_is_probe_failed_not_fatal(self, lake: Path) -> None:
+        """A COERCIBLE utf8 stamp (``"<pid>"``) folds into probe_failed, never a crash.
+
+        Fix round 9 (refuter-confirmed): the rounds-1/6 poisoned-column folds
+        keyed on the ``int()`` coercion RAISING — ``int("7")`` does NOT — so a
+        numeric-string stamp column with valid timestamps + finite OHLC sailed
+        into the round-7 verdict's un-fenced driver-view ``is_in`` filter and
+        ONE junk file killed the WHOLE scan with a polars
+        ``InvalidOperationError`` ("'is_in' cannot check for List(Int64)
+        values in String data") — the persistent-DoS
+        DEC-MOVERS-CORRUPT-SKIP-001 class the module pledges away. The
+        ``_stamp_dtype_poisoned`` DTYPE gate now folds it before any
+        expression runs.
+        """
+        from structlog.testing import capture_logs
+
+        _write_month_stamped(lake, _CE, 2024, 1, pl.Series([str(_V1_PID)], dtype=pl.Utf8))
+        _write_month(lake, _PE, 2024, 1, [_V1_PID])  # the healthy sibling still scans
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.stale_unfixable == 0
+        assert [t.symbol for t in scan.targets] == [_PE]
+        assert any(r["event"] == "greeks_backfill.probe_skip" and "dtype" in r for r in logs)
+
+    def test_boolean_stamp_column_is_probe_failed_not_fatal(self, lake: Path) -> None:
+        """A Boolean stamp column folds too (``int(True) == 1`` — coercible; round 9).
+
+        The Boolean twin of the numeric-string escape: same un-fenced
+        ``is_in`` detonation pre-fix ("… values in Boolean data").
+        """
+        _write_month_stamped(lake, _CE, 2024, 1, pl.Series([True], dtype=pl.Boolean))
+        scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.targets == () and scan.stale_unfixable == 0
+
+    def test_fractional_float_stamp_column_is_probe_failed_not_stale_unfixable(
+        self, lake: Path
+    ) -> None:
+        """A fractional float stamp folds into probe_failed, never 'unfixable' mis-advice.
+
+        Fix round 9 secondary (refuter-confirmed): ``int(<pid>.5)`` TRUNCATED,
+        the driver-view ``is_in([<pid>])`` silently matched nothing, and the
+        contract was mis-classified ``stale_unfixable`` ("lake repair
+        needed") although the driver's ``isinstance(stored_pid, int)`` reuse
+        gate would recompute it outright — the dtype gate folds the whole
+        non-integer column into the honest ``probe_failed`` repair unit.
+        """
+        _write_month_stamped(
+            lake, _CE, 2024, 1, pl.Series([float(_V1_PID) + 0.5], dtype=pl.Float64)
+        )
+        scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.stale_unfixable == 0 and scan.targets == ()
 
     @pytest.mark.parametrize("poison", [float("nan"), float("inf"), float("-inf")])
     def test_nonfinite_ohlc_null_stamp_is_stale_unfixable_never_targeted(
@@ -756,6 +843,47 @@ class TestScanner:
                         "low": pl.Series([99.0], dtype=pl.Float64),
                         "close": pl.Series([100.0], dtype=pl.Float64),
                         "greeks_provenance_id": pl.Series(["poison"], dtype=pl.Utf8),
+                    }
+                ).write_parquet(dest)
+            return result
+
+        monkeypatch.setattr(pl, "read_parquet", _racing)
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.targets == ()
+        assert any(r["event"] == "greeks_backfill.probe_skip" and "dtype" in r for r in logs)
+
+    def test_stamp_column_turns_numeric_string_between_reads_folds_into_probe_failed(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The COERCIBLE-dtype race twin of the test above (fix round 9).
+
+        A concurrent rewrite to a NUMERIC-string utf8 stamp between the two
+        bounded reads used to sail past the verdict's ``int()``-coercion fold
+        (``int("<pid>")`` succeeds) and detonate its un-fenced driver-view
+        ``is_in`` filter — killing the WHOLE scan. The verdict's dtype gate
+        (BEFORE the null branch — the round-7 ONE-repair-unit precedence)
+        folds it into ``probe_failed``.
+        """
+        from structlog.testing import capture_logs
+
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        dest = _write_month_rows(lake, _CE, 2024, 1, [(ts0, _V1_PID, 100.0)])
+        real_read = pl.read_parquet
+
+        def _racing(source: Any, *args: Any, **kwargs: Any) -> Any:
+            result = real_read(source, *args, **kwargs)
+            if kwargs.get("columns") == ["greeks_provenance_id"]:
+                # Rewrite AFTER the stamp probe read — the verdict's own read
+                # sees a coercible-but-non-integer utf8 stamp column.
+                pl.DataFrame(
+                    {
+                        "timestamp": pl.Series([ts0], dtype=pl.Datetime("us", "UTC")),
+                        "open": pl.Series([100.0], dtype=pl.Float64),
+                        "high": pl.Series([101.0], dtype=pl.Float64),
+                        "low": pl.Series([99.0], dtype=pl.Float64),
+                        "close": pl.Series([100.0], dtype=pl.Float64),
+                        "greeks_provenance_id": pl.Series([str(_V1_PID)], dtype=pl.Utf8),
                     }
                 ).write_parquet(dest)
             return result

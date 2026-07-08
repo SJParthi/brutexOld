@@ -84,11 +84,14 @@ only while the run's CUMULATIVE `errored == 0` — an errored contract keeps its
 stale stamps, so an identical-plan crash-resume could silently SKIP it and
 report a false-clean `errored=0` exit-0 ✅ run; the "plan shrinks so the stale
 checkpoint self-ignores" resume claim is corrected for the errored-prefix
-case); the `progress_beat` seam is MULTI-registrant (register returns an
-opaque handle, emit BROADCASTS to every registered watchdog, unregister
-removes only its own — the two now-concurrent `BackgroundPullJob`s can no
-longer clobber/clear each other's liveness beat and resurrect the false
-CRITICAL stall-alert class this branch closed); a stray FILE at
+case); the two now-concurrent `BackgroundPullJob`s keep INDEPENDENT
+watchdog liveness — MECHANISM SUPERSEDED at the merge-reconcile (merge
+040b2aec): the branch's interim multi-registrant beat registry (and round
+4's `bind_progress_beat_scope` scoping over it) was resolved AWAY in favour
+of main's DEC-PULL-BEAT-PERRUN-001 (#1537) per-run pull-id-KEYED beat
+channels — `progress_beat.py` at HEAD is main's, byte-identical, and the
+clobber/clear false-CRITICAL class stays closed by keyed registration
+(see the #1558 supersession note); a stray FILE at
 `.greeks_backfill` (ENOTDIR) reads the stable `absent` token instead of
 muting the ENTIRE composite `lake_revision` probe.
 FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
@@ -97,12 +100,17 @@ of the loaded CSV curve), so a crashed FORCE run's surviving checkpoint
 self-ignores across a rate-value change instead of exempting the recorded
 prefix from the driver's value-checked gate (false-clean green run; a
 SPOT-heal inside the crash window stays a DOCUMENTED residue — delete the
-checkpoint after a heal); progress beats are JOB-SCOPED on the emitting
-thread (`bind_progress_beat_scope` — a concurrent dry-run backfill's O(files)
-scan can no longer mask a genuinely-WEDGED pull's HUNG→CRITICAL→WEDGED chain;
-unscoped fan-out threads keep the fail-open broadcast, and the round-3 "the
-WEDGED dual signal backstops the masking" claim is RETRACTED as vacuous —
-WEDGED is gated on the HUNG edge); a null-stamped row with non-finite OHLC
+checkpoint after a heal); a concurrent dry-run backfill's O(files) scan can
+no longer mask a genuinely-WEDGED pull's HUNG→CRITICAL→WEDGED chain — SHIPPED
+as main's DEC-PULL-BEAT-PERRUN-001 (#1537) pull-id-keyed channels after the
+merge-reconcile superseded the interim `bind_progress_beat_scope` design
+(which no longer exists in the tree): `BackgroundPullJob._run` runs its
+worker inside `pull_id_scope` with its beat registered on its OWN run id, an
+unattributed beat is DROPPED + WARNed (loud false stalled-SUSPECT, never a
+masked true stall — keyed routing, NOT a fail-open broadcast), and the
+round-3 "the WEDGED dual signal backstops the masking" claim stays RETRACTED
+as vacuous — WEDGED is gated on the HUNG edge (see the #1558 supersession
+note); a null-stamped row with non-finite OHLC
 (driver-skippable by IVX-2 design) classifies the NEW `stale_unfixable`
 census bucket — never re-targeted (the census converges instead of a forever
 re-feed reported `already_current`), surfaced with ⚠️ Telegram head + note +
@@ -153,11 +161,35 @@ marker via the NEW wheel-free COMMON `brutex/data/greeks_revision.py`
 (`greeks_backfill` re-exports/delegates byte-identically) whenever it wrote
 bars, closing the round-2 staleness class on that surface and reconciling
 `lake_revision`'s falsified "the ONE sanctioned production writer" honesty
-claim to name BOTH marker-carrying writers. ENGINE
+claim to name BOTH marker-carrying writers.
+FIX ROUND 9 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
+schema-poisoned stamp fold moved from the raising-`int()` VALUE gate to a
+DTYPE gate (NEW `_stamp_dtype_poisoned` — ANY non-integer
+`greeks_provenance_id` dtype folds into `probe_failed` at BOTH the raw probe
+and the verdict, BEFORE the null branch): a COERCIBLE-but-non-integer stamp
+(utf8 `"7"`, Boolean, fractional float) sailed past the rounds-1/6
+coercion-trio catches and detonated the un-fenced `is_in` driver-view
+filter — ONE junk file killed the WHOLE scan (raw CLI traceback on wet AND
+`--dry-run`; dashboard job error, no Telegram) and a fractional float
+mis-classified `stale_unfixable` — the now-unreachable trio catches removed,
+whole-float columns now fold `probe_failed` (sanctioned narrowing); the
+`universe.html` backfill panel poll is SELF-RECOVERING (the
+DEC-PULL-UI-STALENESS-001 posture: quick retries then a 3 s→30 s capped
+exponential backoff, NEVER a give-up — the bounded give-up that painted
+"live progress feed dropped" after ~3 s of blips on a multi-hour wet run
+and re-enabled the run-starting button is REMOVED; a non-ok/malformed poll
+never settles the panel; a hidden tab fires zero fetches with a
+visibilitychange catch-up; and `gbAttachIfRunning()` re-attaches on page
+load AND on a started:false refusal — the previously-FALSE "re-open the
+page" remedy now works); this file's + #1558's rounds-3/4 progress-beat
+mechanism claims reconciled to the shipped #1537 keyed-channel design (see
+the supersession notes). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`greeks_enrich_pass.py`/
 `greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
-+ `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
++ `pull_jobs.py`/`lake_revision.py` ALL 100% line+branch (`progress_beat.py`
+is NOT touched by this branch — byte-identical to main's #1537 keyed design,
+dropped from this list at the round-9 honesty reconcile);
 every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
 Earlier: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 —
 the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
@@ -1218,14 +1250,17 @@ hostile-review pass._
   `SweepCheckpointError`; schema-poisoned stamp columns + out-of-range month filenames fold into `probe_failed`/skip
   instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). FIX ROUND 3 folded
   (refuter-majority-confirmed, #1558): the checkpoint freezes at the last fully-clean prefix boundary (an errored
-  contract is always re-fed on resume — never a false-clean `errored=0` skip); `progress_beat` is a multi-registrant
-  handle-keyed registry (two concurrent jobs keep independent watchdog liveness); a stray file at `.greeks_backfill`
-  reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
+  contract is always re-fed on resume — never a false-clean `errored=0` skip); two concurrent jobs keep independent
+  watchdog liveness (the interim multi-registrant beat registry was SUPERSEDED at merge 040b2aec by main's
+  DEC-PULL-BEAT-PERRUN-001 #1537 pull-id-keyed channels — see the #1558 supersession note); a stray file at
+  `.greeks_backfill` reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
   (refuter-majority-confirmed, #1558): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
   checkpoint self-ignores across a rate-value change, so the recorded prefix is always re-routed through the driver's
-  value-checked gate (spot-heal-in-crash-window = documented residue); progress beats are JOB-SCOPED on the emitting
-  thread (a concurrent backfill scan no longer masks a wedged pull's HUNG→WEDGED chain; the round-3 broadcast's
-  "WEDGED dual-signal backstop" honesty claim retracted as vacuous); NEW `stale_unfixable` census bucket for
+  value-checked gate (spot-heal-in-crash-window = documented residue); a concurrent backfill scan no longer masks a
+  wedged pull's HUNG→WEDGED chain (shipped as #1537's keyed channels after the merge-reconcile superseded the interim
+  `bind_progress_beat_scope` design — `BackgroundPullJob._run` runs inside `pull_id_scope` with its beat keyed on its
+  own run id; the round-3 broadcast's "WEDGED dual-signal backstop" honesty claim stays retracted as vacuous); NEW
+  `stale_unfixable` census bucket for
   null-stamped non-finite-OHLC rows (driver-skippable IVX-2 class — excluded from targeting so the census CONVERGES,
   ⚠️ Telegram/note/stderr); non-finite `--pause-s`/`_PAUSE_S` refused eagerly; #1175-style bench pins added
   (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). FIX ROUNDS 5+6 folded
@@ -1250,7 +1285,17 @@ hostile-review pass._
   writer — touches the SHARED cross-process freshness marker on every bar-writing pass through the NEW wheel-free
   COMMON `brutex/data/greeks_revision.py` (`greeks_backfill` re-exports/delegates byte-identically; best-effort, a
   zero-write pass fabricates no signal), closing the round-2 dashboard-staleness class on that surface and
-  reconciling `lake_revision`'s falsified "the ONE sanctioned production writer" honesty claim. ENGINE
+  reconciling `lake_revision`'s falsified "the ONE sanctioned production writer" honesty claim. FIX ROUND 9 folded
+  (refuter-majority-confirmed, #1558): the poisoned-stamp fold moved to a DTYPE gate (`_stamp_dtype_poisoned` — any
+  non-integer `greeks_provenance_id` dtype → `probe_failed` at both the raw probe and the verdict, before the null
+  branch; a coercible-but-non-integer stamp — utf8 `"7"`, Boolean, fractional float — previously sailed past the
+  rounds-1/6 raising-`int()` catches and detonated the un-fenced driver-view `is_in`, ONE junk file killing the WHOLE
+  scan; the unreachable coercion-trio catches removed, whole-float columns fold `probe_failed` — sanctioned
+  narrowing); the `universe.html` backfill panel poll never gives up (quick retries then 3 s→30 s capped backoff —
+  the DEC-PULL-UI-STALENESS-001 posture; non-ok/malformed polls never settle; hidden tab fires zero fetches +
+  visibilitychange catch-up; `gbAttachIfRunning()` re-attaches on page load and on a started:false refusal — the
+  button re-enables only on an observed terminal state); the rounds-3/4 progress-beat mechanism claims reconciled to
+  the shipped #1537 keyed-channel design (supersession notes in #1558). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
   `greeks_enrich_pass.py`/`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch;
   ruff/ruff-format/`mypy --strict`/pyright clean).
