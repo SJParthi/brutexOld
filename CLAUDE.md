@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1558–#1568 —
+_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1559–#1569 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
 DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
@@ -99,7 +99,7 @@ AST-pinned) and the doubly-dead informational quota surface is DELETED
 (`GET /api/v1/quota` + panel fields + `/universe` gauge — all only ever
 served the constant sentinel), the vendor-neutral enforcement seam kept
 dormant logic-byte-identical; (11) the TWO daily-open-substitution surfaces
-now share ONE per-session predicate (MIGRATION.md #1568,
+now share ONE per-session predicate (MIGRATION.md #1569,
 DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up the #1267/#1232
 drift pin deferred to): NEW pure `spot_daily_resample.classify_daily_open`
 (substituted iff a NON-Muhurat session's first present 1-minute bar is NOT
@@ -113,17 +113,17 @@ same-lake same-verdict equivalence proven + pinned, the old divergence pin
 consciously rewritten to an alignment pin; the ONE remaining deliberate
 divergence is POPULATION not predicate (census = ALL stored sessions,
 detector = the forming-session cutoff), documented + pinned; also corrects
-#1558's earlier misattribution (this item was never closed-wontfix — it is
+#1559's earlier misattribution (this item was never closed-wontfix — it is
 closed by IMPLEMENTATION). ALL ELEVEN: ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch
 PACING/RATE byte-identical everywhere, with exactly THREE SANCTIONED
 behavior changes (each honestly scoped in its own ledger entry): the
-same-run post-close 1day derive (#1559 — previously deferred to the
-next run), the learned-floor-clamped CLI planning (#1563 — a persisted
+same-run post-close 1day derive (#1560 — previously deferred to the
+next run), the learned-floor-clamped CLI planning (#1564 — a persisted
 learned floor plans FEWER 1-minute windows by design; dry-run
-byte-identical), and the fresh-foreign-lease pull REFUSAL (#1564);
+byte-identical), and the fresh-foreign-lease pull REFUSAL (#1565);
 every other item's fetch behaviour is byte-identical (the counter
-split #1561 explicitly so); touched modules 100% line+branch).
+split #1562 explicitly so); touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
@@ -1034,7 +1034,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1558–#1568** —
+- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1559–#1569** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
   DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
@@ -1049,12 +1049,12 @@ hostile-review pass._
   banner auto-clears on the next real pull launch that actually STARTS — started-gated
   `clear_banner_after_start`, a refused start clears nothing) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
   follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant) ·
-  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1568 — the two daily-open-substitution surfaces share the ONE
+  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1569 — the two daily-open-substitution surfaces share the ONE
   per-session predicate `spot_daily_resample.classify_daily_open`: Muhurat abstains on BOTH, `!=` 09:15 on
   BOTH — the /completeness census's strict-`>` flips to `<>` + a `MUHURAT_SESSIONS` NOT-IN exclusion, its SQL
   CTE mirror-pinned equivalent to the classifier; the remaining divergence is POPULATION (forming-session
   cutoff) not predicate, documented + pinned; closes the #1267/#1232 named follow-up BY IMPLEMENTATION and
-  corrects #1558's wontfix misattribution).
+  corrects #1559's wontfix misattribution).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch;
   ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
   Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
