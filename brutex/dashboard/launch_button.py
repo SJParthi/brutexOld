@@ -80,12 +80,22 @@ bounded seek-read of the last N KiB, confined under ``<lake_root>/sweeps``
 (a tampered state file cannot read arbitrary files). The lake precondition
 checks PRESENCE of all 21 NIFTY/INDEX interval partitions; TF FRESHNESS is
 deliberately NOT re-derived here — the launched CLI's own preflight verifies
-it at launch (a refusal appears in the log tail within seconds). ``fcntl`` is
-POSIX (Linux + macOS — the Track-1 envelope); the keep-awake watcher degrades
-gracefully where ``caffeinate`` is absent. Deferred to the canonical page
-(disclosed, not implemented): flock critical-section deadline-bounding,
-minimal-env spawn, auth on the launch route, disk-floor vs true sweep
-footprint sizing.
+it at launch (a refusal appears in the log tail within seconds). The page
+ASSUMES a SINGLE dashboard process — liveness probing is waitpid/kill-based,
+so multi-worker uvicorn or reparenting can read a finished sweep as running
+until its parent reaps it (safe direction: refuses duplicates, never
+launches one). Pid-stamp-write-failure asymmetry (R3 MINOR-1, judged not
+practically reachable): on a pid-stamp ``OSError`` the durable record
+reverts to the pid-less placeholder, so if the compensating ``killpg`` ALSO
+failed against a still-live child, the 120 s age-out could permit a
+duplicate — surfaced to the operator as the 500 "verify manually" detail.
+The launch does NOT coordinate with an in-flight pull/prebuild on the same
+lake (stated on-page — ensure no pull is running before clicking).
+``fcntl`` is POSIX (Linux + macOS — the Track-1 envelope); the keep-awake
+watcher degrades gracefully where ``caffeinate`` is absent. Deferred to the
+canonical page (disclosed, not implemented): flock critical-section
+deadline-bounding, minimal-env spawn, auth on the launch route, disk-floor
+vs true sweep footprint sizing.
 """
 
 from __future__ import annotations
