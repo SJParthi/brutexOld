@@ -1551,6 +1551,29 @@ class TestCensus:
         assert options.clean == 1
         assert census.engine_clean is True  # options never touch the engine verdict
 
+    def test_census_options_files_count_scanned_only(self, tmp_path: Path) -> None:
+        # Round-10 pin (surviving mutant): the OPTIONS row's file accounting
+        # counts ONLY genuinely SCANNED option files — a SKIPPED file
+        # (unreadable garbage here; a symlinked / nested-dtype file rides the
+        # same counter) must inflate neither `files` nor `clean`, and the
+        # census-level `files_scanned` fold rides scanned-only too. The
+        # `option_files_scanned + option_files_skipped` mutant survived the
+        # whole covering set (every census fixture asserting `files` had zero
+        # skips; the skip fixtures never asserted `files`).
+        good = tmp_path / "options" / "SERIES" / "2024-07.parquet"
+        _plant_option_raw(good, [("CE", _ts(1, month=7, day=1))])
+        bad = tmp_path / "options" / "SERIES" / "2024-06.parquet"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_bytes(b"garbage - skipped, never scanned")
+        report = scan_lake_invariants(tmp_path)
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 1
+        census = build_lake_census(report)
+        options = {row.segment: row for row in census.segments}["OPTIONS"]
+        assert options.files == 1  # scanned-only — the skipped file not counted
+        assert options.clean == 1
+        assert census.files_scanned == 1
+
     def test_census_option_foreign_overlap_union_math(self, tmp_path: Path) -> None:
         # One file with dup AND overlapping-foreign keys is ONE poisoned file
         # (union math — the bars law, now real for OPTIONS); a second series'

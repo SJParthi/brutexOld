@@ -1955,6 +1955,47 @@ class TestOptionForeignHeal:
         assert "\n" not in partition
         assert "\x1b" not in partition
 
+    def test_option_foreign_action_dropped_sums_dups_and_removals(self, tmp_path: Path) -> None:
+        """Round-10 pin (surviving mutant): the reassignment ``HealAction.dropped``
+        is EXACTLY ``dropped_duplicates + dropped_removed`` — the value
+        ``emit_lake_heal_alert`` sums (``dropped=sum(action.dropped …)``), so a
+        zeroed/one-component mutant under-reports dropped rows on the operator
+        alert. ONE source carries a physically-DUPLICATED home key (dup
+        collapse: 1) + a reassignable foreign row AND an overlap foreign row
+        (keyed removals: 2) → ``dropped == 3``, no covering test asserted the
+        dup component before this pin."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        june, _july = _poison_option_foreign(lake)
+        june_df = pl.read_parquet(june)
+        home_dup = june_df.filter(pl.col("timestamp") == _ts(0))[0:1].with_columns(
+            (pl.col("close") + 1.0).alias("close")
+        )
+        pl.concat([june_df, home_dup]).write_parquet(june)
+        scan = scan_lake_invariants(lake)
+        kinds = {type(f).__name__ for f in scan.findings}
+        assert kinds == {"OptionForeignMonthRows", "OptionIntraFileDup"}
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.option_files_scanned,
+            mode="auto",
+            recall=False,
+            now=_now,
+        )
+        assert report.healed == 1  # the foreign reassignment (heals first)
+        assert report.skipped == 1  # the same-file dup reads changed=False after
+        assert report.errors == 0
+        (action,) = report.actions
+        assert action.action == AUDIT_HEAL_REASSIGN
+        assert action.moved == 2
+        assert action.kept == 1
+        assert action.dropped == 3  # 1 home-dup collapse + 2 keyed removals
+        # The exact aggregation the batch alert computes over the report
+        # (notifications.sweep_alerts.emit_lake_heal_alert):
+        assert sum(a.dropped for a in report.actions) == 3
+
     def test_option_nested_dtype_swap_isolated_batch_continues(self, tmp_path: Path) -> None:
         """Round-12 fold: a scan→heal swap to a nested-key-dtype file is an
         ISOLATED :class:`OptionWriterError` refusal, never a batch abort.
