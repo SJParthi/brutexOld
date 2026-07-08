@@ -1,5 +1,14 @@
 # Phase 3.5 — Apple Metal GPU Offload
 
+> **SUPERSEDED (2026-07-06, DEC-GPU-GATE-RECONCILE-001):** this
+> pre-ADR-0004 Metal phase never started and is superseded by ADR-0004
+> (DEC-GPU-ACCELERATION-ADR-001, MIGRATION.md #410 — CPU/Rust-first; §5.2
+> rejects GPU on the M4 Pro; §5 item 4 prefers MLX over raw Metal). Any
+> future GPU work is gated by ADR-0004 §6's retained fail-closed
+> precondition + `tests/unit/test_gpu_gate_drift_pin.py`. The status line
+> below stays — it is factually true; the body is preserved as the
+> historical design sketch.
+
 ## Status: ☐ Not started
 
 ## Effort: 3-4 weeks

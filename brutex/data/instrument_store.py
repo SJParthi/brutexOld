@@ -462,7 +462,7 @@ class InstrumentSnapshot:
     """Frozen in-memory view of an instrument universe.
 
     This is what the **hot path** of a brute-force sweep reads from:
-    strategies, execution simulator, combo runner, all of them. It
+    strategies, combo runner, metadata consumers, all of them. It
     is constructed once at sweep start via
     :meth:`InstrumentStore.load_snapshot` and then shared read-only
     across every combo.
@@ -484,9 +484,9 @@ class InstrumentSnapshot:
       on a given underlying
     * :attr:`by_instrument_type[t]` \u2014 O(1) to get every row of
       a given type
-    * :attr:`meta_by_symbol[s]` \u2014 O(1) to feed the
-      :class:`~brutex.execution.types.InstrumentMeta` straight into
-      the execution simulator
+    * :attr:`meta_by_symbol[s]` \u2014 O(1) to hand the
+      :class:`~brutex.execution.types.InstrumentMeta` straight to
+      any per-symbol metadata consumer
 
     ## Guarantees verified at construction
 
@@ -510,15 +510,15 @@ class InstrumentSnapshot:
         filters like "every FNO row" skip the per-call scan.
     by_underlying
         Pre-indexed ``{str: tuple[Instrument, ...]}``. Used by
-        Phase C to enumerate option chains and by the execution
-        simulator to size multi-leg positions.
+        Phase C to enumerate option chains and by any consumer
+        sizing multi-leg positions.
     by_instrument_type
         Pre-indexed ``{InstrumentType: tuple[Instrument, ...]}``.
         ``IDX`` entry gives the 8 spot indices in one lookup.
     meta_by_symbol
         Pre-built ``{symbol: InstrumentMeta}`` for direct handoff
         to :class:`~brutex.execution.types.InstrumentMeta`\u2011accepting
-        APIs (``ExecutionSimulator``, ``BacktestDriver``).
+        APIs.
     snapshot_date
         The ``as_of`` date used to build the snapshot, or ``None``
         if the caller asked for "latest of everything".
@@ -634,9 +634,8 @@ class InstrumentSnapshot:
     def meta_map(self) -> dict[str, ExecutionInstrumentMeta]:
         """Return a copy of the full ``{symbol: InstrumentMeta}`` map.
 
-        The simulator and backtest driver accept a
-        ``Mapping[str, InstrumentMeta]`` in their constructors \u2014 this
-        method is the direct handoff.
+        The direct handoff for any API accepting a
+        ``Mapping[str, InstrumentMeta]``.
         """
         return dict(self._meta_by_symbol)
 

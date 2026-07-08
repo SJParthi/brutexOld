@@ -63,6 +63,7 @@ from collections.abc import Sequence
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentBars",
     "ResidentSweepSim",
+    "ResidentSweepSimU128",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
@@ -110,6 +111,7 @@ _assert_compiled_surface(_compiled)
 from ._fno_math import (  # noqa: E402
     ResidentBars,
     ResidentSweepSim,
+    ResidentSweepSimU128,
     __version__,
     add_u64,
     bitand_count_u64s,
@@ -140,6 +142,7 @@ __build_crate_version__: str = __version__
 __all__ = [
     "ResidentBars",
     "ResidentSweepSim",
+    "ResidentSweepSimU128",
     "__version__",
     "add_u64",
     "bitand_count_u64s",

@@ -18,7 +18,87 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 —
+_Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
+MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+(1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
+ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
+production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
+`entry_open + tick` → `entry_open − tick` (byte-exact test 10_005 → 9_995; BUY-only
+DEC-EXEC-008 + intraday DEC-RISK-011 locks UNTOUCHED, `executor.py` not edited), the
+§4.2 expiry state machine honestly labelled a fail-loud STUB in-spec, and the two
+§4.2 pseudo-code drifts REGISTERED as §16 items 18/19 — never silently decided;
+(2) the broker (Groww) token/credential docs refreshed to the AWS-only / fail-fast /
+mid-run-re-read truth (#1065/#1072/#1092) — the stale `BRUTEX_TOKEN_BROKER_READONLY`
+instructions + REMOVED local-mint-fallback prose replaced across the two runbooks, the
+deploy guide, the minter runbook, `TOKEN_BROKER_CONTRACT.md` (TickVault claims left
+"per its own repo"), ADR-0013/0014 Status-line superseded-in-part notes, and the
+scoreboard's re-mint cell → re-read (`groww.token.reread`); DOCS-only, auth code CITED
+never edited, rate caps untouched; (3) ADR-0004 GPU gate reconciled — Status PROPOSED
+→ ACCEPTED (CPU-first arm EXECUTED + MEASURED #411/#413/#417), the never-run §6
+tri-platform benchmark RETIRED as scheduled work + RETAINED as a dormant FAIL-CLOSED
+precondition, mechanically pinned by NEW `tests/unit/test_gpu_gate_drift_pin.py`
+(no MLX/CuPy/`BRUTEX_GPU_OFFLOAD` in `brutex/`+`rust/`; #1492-G3 pattern);
+(4) the dormant cloud auto-fix snippet (claude_automation.md §3) RETIRED outright —
+DELETE, never wired, a #1180-class privileged-trigger hazard — and the fork-PR redteam
+sweep EXTENDED to comment-family triggers (`test_no_issue_comment_privileged_workflows`,
+GITHUB_TOKEN carve-out; revival needs a fresh DEC + the ledgered precondition checklist);
+(5) the Phase-1 sign-off checklist closed by SUPERSESSION — all 11 boxes ticked with
+per-item citations, the "10 boxes" count defect fixed, the env-var trailer superseded by
+#1065; NO operator ack pre-claimed (requested on the PR). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the ONE code delta lives inside the
+DEC-EXEC-008-stubbed short branch, `calculator.py` stays 100% line+branch.)
+Earlier: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
+MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541) — the 5-item engine cleanup pack (reapplied onto
+current main after the original 2026-07-06 lineage was wiped), ONE change set:
+(1) the combo `\x1f` reject-only guard is MIRRORED into both previously-
+unguarded run-identity joins (`refinement_run_id` + `_walk_forward_run_hash`)
+via ONE COMMON `strategies.combo.reject_unit_separator`, plus `allow_nan=False`
+at both engine canonical-JSON sites (+ the stage1a schedule-hash third mirror)
+— byte-frozen run-identity goldens (with an independent pip-blake3
+payload-byte oracle proving `fno_math.blake3_hash ≡ blake3`) landed FIRST and
+pass unchanged; LOW/defence-in-depth, NOT a live bug. (2) the option-dedup
+bloom-before-exact-confirm ordering VERIFIED already correct — ZERO executable
+change (AST-proven); no-phantom + bloom-negative-short-circuit pins added at
+both public probe entries (`add_if_new`/`unique_option_bars`) — the PRODUCTION
+consumer of the verified ordering is the engine sweep's
+`ComboDedup(OptionDedupIndex)` dedup tier (`sweep_launch.py`/`cli.py`); the
+original sink-path pin covered the since-deleted `OptionBarSink` orchestration
+(removed on main by DEC-INGEST-AUDIT-WIRING-001 #1500 — dropped in the rebase),
+with the mark-after-durable-write LAW recorded as history in #1547. (3) the
+hand-synced Python `VwapState` +
+`MarketStructureState`/`Trend` twins DELETED — the `rust/trading-core`
+pyclasses are the SINGLE SOURCE (additive `last_swing_high/low` getters
+delegating to the EXISTING core accessors, core untouched — TickVault-safe;
+crate 0.3.0→0.3.1, so the LIVE `_indicator_version()` string moves with the
+bump — NO math change, new runs re-key via `indicator_version` exactly as the
+§2-Rule-4 formula intends; the frozen twin fixture + SHA never regenerated,
+replayed Rust-only; P-06 preserved at strength; `MarketStructureSignal`
+stays). (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic
+`MaskWord` core (the existing Rust suite passed UNMODIFIED — the
+frozen-behaviour gate; native `Vec<u128>` FFI per the recorded pyo3-0.29-abi3
+probe transcript) — >64-bit masks/bar_bits are now Rust-served, parity-pinned
+vs the `simulate_trades` oracle, with lazy wide-kernel promotion (reasons
+re-scoped `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+`wide_kernel_promoted`); HONEST: future-proofing, production-UNREACHABLE at
+today's 60-bit vocabulary — every currently-legal u64 input byte-identical,
+the frozen u64 golden corpus untouched, u64 bench non-regression measured.
+(5) the deprecated `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver`
+trio DELETED with its 8 test surfaces + golden fixture + dead ci.yml gates
+(grep-proven zero production consumers; `types.py` kept whole —
+`InstrumentMeta` live — and `errors.py` semantics untouched, its five
+subclasses honestly ledgered as orphaned; landed as ONE atomic commit — the
+wiped first lineage's two-commit accident is recorded as history in #1550) —
+the pack's ONLY behaviour-visible item (import surface). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; run identity bit-identical for all currently-legal
+inputs (golden-proven); no scope/vocab/rate change; touched modules 100%
+line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline; cargo suites green (fno-math 565, trading-core 162);
+cargo-mutants evidence partial under the ledgered #1511 Rust timeout —
+stated, not papered over).
+Earlier: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 —
 the test-apparatus debt pack: nine long-ledgered apparatus gaps closed as ONE
 change set, each landed fix-the-violation or measured-green: (a) a repo-wide
 doctest gate (pkgutil walk, measured 55-example teeth floor; the 3 broken
@@ -823,7 +903,53 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
+- **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
+  DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
+  pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
+  (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
+  "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
+  drifts registered as §16 items 18/19; BUY-only DEC-EXEC-008 + DEC-RISK-011 locks untouched); the
+  broker token/credential docs (runbooks + deploy guide + minter + `TOKEN_BROKER_CONTRACT.md` +
+  ADR-0013/0014 status notes + scoreboard cell) refreshed to the AWS-only / fail-fast /
+  mid-run-re-read truth (#1065/#1072/#1092 — docs-only, rate caps untouched); ADR-0004 GPU gate
+  reconciled (PROPOSED→ACCEPTED, §6 benchmark retired-as-scheduled + retained as a dormant
+  fail-closed precondition, NEW drift pin `tests/unit/test_gpu_gate_drift_pin.py`); the dormant
+  cloud auto-fix snippet RETIRED (DELETE) + the redteam sweep extended to comment-family triggers;
+  the Phase-1 sign-off checklist closed by supersession (11 boxes, honest no-backdate clause).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched costs module
+  stays 100% line+branch).
+  Earlier: `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+  DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541)** — the
+  5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
+  (1) the combo `\x1f` reject-only guard mirrored into BOTH
+  previously-unguarded run-identity joins via ONE COMMON `strategies.combo.reject_unit_separator`
+  (+ `allow_nan=False` at the engine canonical-JSON sites incl. the stage1a third mirror) —
+  byte-frozen run-identity goldens landed FIRST and pass unchanged (LOW hardening, no live bug);
+  (2) the option-dedup bloom-before-exact-confirm ordering VERIFIED already correct — pins +
+  docs only, ZERO executable change (AST-proven); the PRODUCTION consumer is the engine sweep's
+  `ComboDedup(OptionDedupIndex)` dedup tier (the `OptionBarSink` pin was dropped in the rebase —
+  main's #1500 deleted that dead orchestration; the mark-after-durable-write LAW recorded as
+  history in #1547);
+  (3) the hand-synced Python `VwapState` + `MarketStructureState`/`Trend` twins DELETED — the
+  `rust/trading-core` pyclasses are the single source (additive `last_swing_high/low` getters,
+  core untouched — TickVault-safe; crate 0.3.0→0.3.1 moves the live `_indicator_version()`
+  string with NO math change; twin fixture + SHA never regenerated; P-06 preserved);
+  (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic `MaskWord` core (existing
+  Rust suite passed UNMODIFIED; native `Vec<u128>` FFI per the recorded pyo3 probe; lazy
+  wide-kernel promotion; `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+  `wide_kernel_promoted` observability) — HONEST: future-proofing, production-unreachable at the
+  60-bit vocabulary, u64 golden corpus byte-untouched; (5) the deprecated
+  `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver` trio DELETED in full (8 test surfaces +
+  golden fixture + dead ci.yml gates; `types.py` whole + `errors.py` semantics untouched, five
+  subclasses honestly orphaned; ONE atomic commit — the wiped lineage's two-commit shape recorded
+  as history in #1550) — the
+  pack's ONLY behaviour-visible item. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
+  bit-identical for all currently-legal inputs (golden-proven); no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+  pre-change baseline; cargo-mutants partial under the ledgered #1511 timeout).
+  Earlier: `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
   MIGRATION.md #1541** — the test-apparatus debt pack: repo-wide doctest gate (measured
   55-example floor; the 3 broken tf_resampler examples fixed — docstring-only, the sole
   brutex/ source edit) · EXPLICIT hypothesis `ci` profile on CI (GHA was already implicitly
@@ -1275,8 +1401,10 @@ hostile-review pass._
   non-member → trusted=false, allowlist/OWNER/MEMBER/COLLABORATOR → trusted=true). HONEST
   (Golden Rule #10): server-side branch protection (require PR + `CI OK (aggregate gate)`
   + up-to-date branch + restricted merge; Actions → "Require approval for all outside
-  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1176,
-  NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
+  own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
+  DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1555), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
@@ -2245,7 +2373,7 @@ hostile-review pass._
   OPTIONAL gated 4th phase `run_movers` + `PipelinePullReport.movers_warmed` that runs ONLY after a
   fully-successful fetch (`historical_phase_ok`) — the operator's "never run movers unless the fetch
   succeeded". The WARMER is NOT yet bound in the route (a today-coordinate warm would cache empty snapshots
-  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump). 
+  right after a prev-day pull — an illusion avoided; movers already auto-refresh via the generation bump).
   `pipeline_pull.py` at 100% line+branch; ruff/pyright/mypy --strict clean. ENGINE UNCHANGED. Prior merged:
   DEC-MOVERS-COMPLETENESS-001, MIGRATION.md #876 (PR #830: the `/movers` page defaults Top-N to 100 and offers ALL
   21 Track-1 timeframes (1m + 19 derived intraday + 1d), every one derived on-the-fly from the stored
@@ -2568,7 +2696,43 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/ecstatic-cannon-o3zbbe`
+- **Active feature branch:** `claude/stoic-davinci-7c7xp0`
+  Earlier: `claude/zen-meitner-8780fo`
+  (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
+  DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
+  DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
+  Earlier: `claude/ecstatic-cannon-o3zbbe`
+  (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 — the test-apparatus
+  debt pack: nine long-ledgered apparatus gaps closed as ONE change set;
+  apparatus/CI/docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes)
+  (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1539 — the `/movers`
+  prev-close/OI baselines gain an honest calendar-contiguity verdict: a
+  baseline anchored on a non-adjacent NSE session is stamped
+  (`prev_close_*`/`oi_baseline_*` EMIT-ON-FALSE keys), warned once (capped),
+  and marked " *" in the UI — the served number itself unchanged; READ-ONLY
+  dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier (same branch):
+  (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538 — the `/movers`
+  SPOT "Top Value" (turnover) is TIMEFRAME-INVARIANT: re-sourced from the RAW
+  1-minute session frame (post as-of cut, PRE-resample) via the NEW
+  `spot_session_value_paisa`, mirroring the already-TF-invariant
+  futures/options session value; READ-ONLY dashboard ranking, ENGINE UNCHANGED
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/intelligent-euler-dwf2ab`
+  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch` pull
+  path runs the SAME fenced Greeks-enrichment pass the dashboard runs + the NEW
+  `brutex enrich-greeks` bulk re-enrich subcommand; ENGINE UNCHANGED),
+  `claude/movers-asof-default-latest-minute`
+  (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
+  default as-of TIME resolves to the SAME latest available minute across EVERY
+  timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX),
+  `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
+  MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
+  (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
+  ADR-0017, MIGRATION.md #1531–#1532)
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -2604,14 +2768,17 @@ hostile-review pass._
 - **No look-ahead** — at bar N, the engine may only access bars 0..N.
   Enforced TODAY by TWO complementary runtime guards: (1) the
   feed-boundary guard (`ReplayFeed.ensure_no_lookahead`, raises
-  `LookAheadError`; wired into the strategy runner + execution driver,
-  integration-tested) — a *timestamp*-based check on emitted signals; and
+  `LookAheadError`; wired into the strategy runner — the deprecated
+  execution driver, the historical second wiring site, was DELETED with
+  the simulator/driver trio per DEC-EXECUTION-TRIO-DELETE-001
+  (MIGRATION.md #1550) — integration-tested) — a *timestamp*-based check
+  on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
   `LookAheadBarrier`): an *index*-based accessor that raises `LookAheadError`
   the moment an `access(i)` reaches index `i > N`. Guard (1) is the real
   strategy-look-ahead defence — it catches a future *signal*. Guard (2), as
-  wired into the runner/driver event loop (a default `record=False`
+  wired into the runner event loop (a default `record=False`
   O(1)-memory barrier on every sweep eval), asserts the **advance/access
   cursor invariant**: both sites `advance_to(step)` then `guard(step, …)` at
   the SAME `step`, so it fires on a feed/barrier desync or a wiring regression
@@ -2627,7 +2794,7 @@ hostile-review pass._
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
   DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
-  runner/driver guards above never covered) now has its own three-layer
+  runner-wired guards above never covered) now has its own three-layer
   defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
   causality (audit-verified — Stage-1A updates prior-bar history AFTER
   evaluation; the trade sim enters at the next bar's open) + PERMANENT
@@ -2690,7 +2857,10 @@ bruteX/
 │   ├── dashboard/                  ← FastAPI UI
 │   ├── data/                       ← Parquet + DuckDB lake (generic)
 │   ├── engine/                     ← brute-force combo/mask sweep engine
-│   ├── execution/                  ← signal-only simulator (Track 1)
+│   ├── execution/                  ← shared execution types + typed errors
+│   │                                 for the lean instrument store (the
+│   │                                 deprecated costs/simulator/driver trio
+│   │                                 was DELETED — DEC-EXECUTION-TRIO-DELETE-001)
 │   ├── feed/                       ← replay + resampler
 │   ├── indicators/                 ← evaluate-time indicators (pivots/fib/EMA)
 │   ├── math/                       ← thin facade to Rust hot kernel
