@@ -18,7 +18,58 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+_Last updated: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
+Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
+the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
+trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
+executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
+order lot_size → cost_regime → no_contract → no_data → stale_bar[opt-in] and
+the two pure date gates BEFORE any I/O; registry-calendar front-month
+resolution via the SHARED `select_near_month` — never a last-Thursday formula,
+lake-discovery fallback; exact-minute lake source with keep-FIRST dedup +
+corrupt-partition quarantine-skip; R4 disk-verified preflight naming missing
+months, no Phase-1 file edited; R45 independent Decimal-pipeline reference sim
++ per-run differential; R13 annotation-never-reranks projection + R42
+content-hash-stamped atomic sidecar) + `brutex/costs/futures_costs.py`
+(VERIFIED-rates-only: Groww min(₹20, 0.03%) futures brokerage + futures STT
+0.02%@2024-10-01/0.05%@2026-04-01 encoded; futures ETC/NSE-IPFT/stamp + the
+pre-2024-10-01 futures STT are explicit REFUSAL windows — the
+DEC-ETC-REGIME-HISTORY-001 precedent, no runtime escape hatch; INDEX futures
+COST-FREE per DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001, net == gross). R15
+OPTIMISTIC=PRECISE fill only (open ± one tick adverse; volume-0 printed bars
+FILL by default; gap-opens fill at the REAL open; the worst leg is DEFERRED,
+structurally absent); STOCK winners gracefully DEFERRED naming the future
+scope decree; a missing minute bar is a counted NO_DATA — never a nearest-bar
+substitute. HONEST: not yet wired into cmd_sweep_all/the dashboard (the seams
+are exposed; binding is the orchestrator's later step); R47 margin-ROI not
+built (no in-repo SPAN history). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+options path untouched (R12); 197 tests, all 8 new modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
 DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
 MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
 (1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
@@ -903,7 +954,73 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
+- **Active branch:** `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
+  the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
+  twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
+  futures contract (nearest UNEXPIRED monthly as of each trade's ENTRY date, resolved from the REAL `registry.duckdb`
+  calendar via the SHARED `movers_futures.select_near_month` — NEVER a computed last-Thursday formula; graceful
+  lake-partition-discovery fallback; expiry-day trades stay on the EXPIRING contract, post-expiry tail → M+1, M/M+1
+  co-trading = deterministic earliest-expiry-≥-entry, never liquidity-picked). NEW `brutex/futures/` (executor ·
+  contract_resolver · lake_source · preflight · reference_sim · leaderboard) + `brutex/costs/futures_costs.py`. R15
+  fills are OPTIMISTIC = PRECISE ONLY — minute-bar OPEN ± one tick ADVERSE per side (the LONG arm golden-pinned
+  byte-equal to `calculator._apply_slippage(...,"long")`; the SHORT arm computed adverse-both-sides, NOT inheriting
+  the documented `# CHECK SIGN` ambiguity), gap-opens fill at the REAL open (never an SL/TP fantasy), volume-0
+  PRINTED bars are REAL + TRADABLE (STALE_BAR strictly opt-in), a missing entry/exit minute is a counted NO_DATA
+  (never a nearest-bar substitute), the pessimistic/worst leg is DEFERRED — structurally absent. PINNED reject order
+  lot_size → cost_regime → no_contract → no_data → stale_bar with both pure DATE gates before any registry/lake I/O
+  (never-called-seam pinned); count-dict tally projected 1:1 onto `n_rejected_*` (no catch-all). COSTS are
+  VERIFIED-rates-only (the DEC-ETC-REGIME-HISTORY-001 refusal precedent, NO runtime escape hatch): Groww futures
+  brokerage min(₹20, 0.03%×turnover) (PLAN_FINALIZATION §8.1 row 2) + futures STT 0.02% eff. 2024-10-01 / 0.05% eff.
+  2026-04-01 (TAX_HANDLING §8.1 + DEC-COST-003) are encoded; EVERY futures-ETC window + NSE futures IPFT + futures
+  stamp + pre-2024-10-01 futures STT ship as rate-less REFUSAL rows (figures live in source TEXT only — the §14
+  proposal block is not a verification) ⇒ a cost-bearing stock future counts COST_REGIME_UNVERIFIED (exercised via
+  the SYNTHETIC cited-regime/lot test fixture — no NATURAL input reaches the gate today: index futures are cost-free
+  and skip it, a natural stock future trips LOT_SIZE_UNKNOWN first; the designed forward path, naturally reachable
+  only once a cost-bearing stock-futures scope decree + cited RegimeRows land); INDEX futures
+  are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 — net == gross; the ±tick is R15 fill realism, not a statutory
+  cost). Lots via the ONE date-keyed derivative-lot history (2020-dated / stock signals ⇒ counted LOT_SIZE_UNKNOWN,
+  never invented). STOCK winners → ExecutionKind.STOCK_SPOT_DEFERRED with an honest note NAMING the future scope
+  decree (R11); routing lives ABOVE the instrument-agnostic executor. R22 MAE/MFE from the contract's OWN minute
+  path; R31 VIX passthrough (missing = honest None, counted); R45 differential vs an independent naive
+  Decimal-pipeline reference (AST-pinned to share only the primitive readers; run_id-seeded deterministic sample;
+  mismatch ⇒ SUSPECT + loud); R42 content-hash-stamped atomic sidecar (an UNKEYED sha256 integrity checksum —
+  corrupted/torn fails its stamp, rebuilt byte-identical; NOT tamper-evidence: no secret key, a rewriter could
+  restamp); R4 preflight disk-verifies each trade month's front-month partition(s) across the roll seam and
+  refuses naming exact months — no Phase-1 file edited (the pure helper is exposed for the shim). ROLL-9
+  suffix-independence property-gated (fills+MAE/MFE bit-identical under absent/mutated/extreme post-exit suffixes);
+  R13/R30 rank-independence property-gated (annotation additive-only under ONE `futures_exec` key). O(1) honest
+  (R29): per-trade resolve+fill flat vs signal AND contract count (bench-pinned at the `_o1_tiers` ceiling); first
+  loads O(contracts)/O(bars-in-contract) + MAE/MFE O(bars-in-trade) STATED, never hidden. HONEST: NOT yet wired into
+  `cmd_sweep_all`/the dashboard (deliberate no-existing-file-edit boundary — the orchestrator binds later); R47
+  margin-ROI not built (no in-repo date-keyed SPAN history — nothing rendered, nothing invented). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; options path untouched (R12); F&O lake REFERENCE_ONLY; no scope/vocab/rate change; 197
+  tests (unit/integration/property/golden/bench/chaos), all 8 new modules 100.00% line+branch (760/194);
+  ruff/ruff-format clean; `mypy --strict` clean; pyright at the 38-error pre-change baseline, 0 new).
+  Earlier: `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
   DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
   pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
@@ -2698,7 +2815,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/stoic-davinci-7c7xp0`
+- **Active feature branch:** `claude/peaceful-wright-r7l8l9`
+  (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
+  retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
+  fields replace the wrong bearish alias; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/stoic-davinci-7c7xp0`
+  (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+  DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556 — the doc/spec/ops
+  debt reconciliation pack; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
