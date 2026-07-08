@@ -55,6 +55,7 @@ from typing import Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.run_layout import run_dir
 from brutex.models import BruteXError
 
 _LOG = structlog.get_logger(__name__)
@@ -167,7 +168,7 @@ def manifest_path(results_root: Path, run_id: str) -> Path:
     Path
         The contract manifest location (contracts file #3).
     """
-    return results_root / "runs" / run_id / MANIFEST_FILENAME
+    return run_dir(results_root, run_id) / MANIFEST_FILENAME
 
 
 def _is_int(value: object) -> bool:

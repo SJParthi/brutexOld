@@ -38,6 +38,8 @@ next launch re-quarantines and the tracker escalates).
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import re
 from collections.abc import Callable
@@ -79,6 +81,12 @@ CHECKPOINT_QUARANTINE_SUBDIR: Final[str] = ".quarantine/checkpoints"
 #: sibling never confuses the monotonic scan).
 _ORDINAL_RE: Final[re.Pattern[str]] = re.compile(r"^(\d+)$")
 
+#: The DURABLE consecutive-corruption counter file (G12 crash-loop breaker).
+#: Lives beside the run's other artifacts under ``runs/<run_id>/`` so the count
+#: SURVIVES a process death / run-core re-enter — ``run_id = grid_identity`` is
+#: timestamp-free, so every relaunch of the SAME grid resumes the SAME file.
+CHECKPOINT_CORRUPTION_STATE_FILENAME: Final[str] = "checkpoint-corruption.json"
+
 
 @dataclass(frozen=True, slots=True)
 class QuarantineOutcome:
@@ -106,33 +114,103 @@ class CheckpointCorruptionTracker:
 
     Mirrors the scheduler kernel's consecutive-failure shape (D-5):
     :meth:`record_corruption` returns ``True`` EXACTLY when the consecutive
-    count reaches *threshold* (the edge — fires once, not on every further
-    corruption); :meth:`record_clean` resets. The design's "2nd consecutive
-    corruption in-process → CRITICAL" is ``threshold=2`` (the default).
+    count reaches *threshold* (the edge — fires ONCE at that count, not on every
+    further corruption); :meth:`record_clean` resets. The design's "2nd
+    consecutive corruption → CRITICAL" is ``threshold=2`` (the default).
+
+    DURABILITY (MAJOR round-2 fix): the consecutive count is PERSISTED across
+    process deaths / run-core re-enters via :meth:`load` + *state_path*. A
+    checkpoint crash-loop is inherently CROSS-process — a buggy writer /
+    scheduler relaunches over a persistently-corrupt checkpoint, each cycle a
+    fresh process (or run-core enter) that loads the checkpoint EXACTLY ONCE.
+    A per-enter (in-memory-only) tracker could therefore reach at most
+    ``consecutive == 1`` and the ``== threshold`` escalation edge would be
+    STRUCTURALLY UNREACHABLE in production (the CRITICAL crash-loop alert never
+    fires). Persisting the count to ``runs/<run_id>/`` (``run_id`` is
+    timestamp-free, so every relaunch of the SAME grid resumes the SAME file)
+    lets the 2nd corruption ACROSS launches fire the edge. A clean load clears
+    the file. When *state_path* is ``None`` the tracker is purely in-memory (the
+    legacy shape — tests that drive the edge in one process, and callers that
+    want no durability).
 
     Attributes
     ----------
     threshold
         Consecutive corruptions at which the edge fires (``>= 1``).
     consecutive
-        The current consecutive-corruption count (managed; starts 0).
+        The current consecutive-corruption count (managed; starts 0 or the
+        persisted value via :meth:`load`).
+    state_path
+        The durable counter file, or ``None`` (in-memory only). Writes are
+        fail-soft — a persistence glitch never raises into the loader (I-3).
     """
 
     threshold: int = 2
     consecutive: int = field(default=0)
+    state_path: Path | None = field(default=None)
 
     def __post_init__(self) -> None:
         if self.threshold < 1:
             raise ValueError(f"threshold must be >= 1, got {self.threshold}")
 
+    @classmethod
+    def load(cls, run_dir: Path, *, threshold: int = 2) -> CheckpointCorruptionTracker:
+        """Build a tracker whose consecutive count is READ from ``run_dir``.
+
+        Reads the persisted count from
+        ``run_dir/checkpoint-corruption.json`` (``0`` when missing / unreadable
+        / malformed — fail-soft, so a state glitch can only UNDER-count, never
+        fabricate a crash-loop edge). Subsequent :meth:`record_corruption` /
+        :meth:`record_clean` calls persist back to the same file, so the count
+        survives across process deaths and run-core re-enters (the durability
+        the crash-loop breaker needs).
+
+        Parameters
+        ----------
+        run_dir
+            The run's artifact directory (``runs/<run_id>/``); the counter file
+            lives directly under it.
+        threshold
+            The escalation edge (``>= 1``); default 2 (the design's "2nd
+            consecutive corruption → CRITICAL").
+
+        Returns
+        -------
+        CheckpointCorruptionTracker
+            A tracker seeded with the persisted count, wired to *run_dir*.
+        """
+        state_path = run_dir / CHECKPOINT_CORRUPTION_STATE_FILENAME
+        consecutive = 0
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            raw = None
+        if isinstance(raw, dict):
+            value = raw.get("consecutive")
+            if isinstance(value, int) and value >= 0:
+                consecutive = value
+        return cls(threshold=threshold, consecutive=consecutive, state_path=state_path)
+
+    def _persist(self) -> None:
+        """Write the current count to *state_path* — fail-soft (I-3)."""
+        if self.state_path is None:
+            return
+        with contextlib.suppress(OSError):
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(
+                json.dumps({"consecutive": self.consecutive}), encoding="utf-8"
+            )
+
     def record_corruption(self) -> bool:
-        """Count one corruption; return ``True`` iff this is the escalation edge."""
+        """Count one corruption (persisted); return ``True`` iff the edge is hit."""
         self.consecutive += 1
+        self._persist()
         return self.consecutive == self.threshold
 
     def record_clean(self) -> None:
-        """Reset the consecutive count (a clean load breaks the loop evidence)."""
+        """Reset the consecutive count (persisted — a clean load breaks the loop)."""
         self.consecutive = 0
+        self._persist()
 
 
 def _next_ordinal(parent: Path, *, prefix: str = "", suffix: str = "") -> int:

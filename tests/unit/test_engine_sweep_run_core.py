@@ -353,6 +353,108 @@ def test_resume_after_suspect_never_launders_to_complete(tmp_path: Path) -> None
     )
 
 
+def test_resume_folds_recorder_suspect_when_exit_status_torn(tmp_path: Path) -> None:
+    """MAJOR (round 2): a torn exit-status ``suspect`` is caught by the recorder fold.
+
+    ``mark_suspect`` now writes the durable exit-status ``suspect=True`` FIRST,
+    but as a defence-in-depth belt the resume ALSO folds the durable
+    flight-recorder ``SUSPECT`` record. Simulate a torn/laundered exit-status
+    (``suspect`` flipped back to ``false``) and prove the resume STILL reads the
+    run as SUSPECT off the recorder — never laundering to a clean COMPLETE.
+    """
+    grid = _grid()
+    run_id = grid_identity(grid)
+    with _core(tmp_path, grid) as (core, _s):
+        core.mark_suspect("diffcheck_mismatch", "mask abcd: net_pnl_paisa")
+    # Corrupt/launder the single fail-soft exit-status artifact: flip suspect off.
+    status_path = tmp_path / "runs" / run_id / "exit-status.json"
+    doc = json.loads(status_path.read_text(encoding="utf-8"))
+    doc["suspect"] = False
+    status_path.write_text(json.dumps(doc), encoding="utf-8")
+    torn = read_exit_status(tmp_path, run_id)
+    assert torn is not None
+    assert torn["suspect"] is False  # torn state
+    # The durable recorder SUSPECT record is the belt.
+    from brutex.observability.flight_recorder import recorder_has_suspect
+
+    assert recorder_has_suspect(tmp_path, run_id) is True
+    with _core(tmp_path, grid) as (core, _s):
+        assert core.suspect is True  # folded from the recorder despite the torn flag
+    second = read_exit_status(tmp_path, run_id)
+    assert second is not None
+    assert second["state"] == "suspect_complete"  # re-stamped, never laundered
+    assert second["suspect"] is True
+
+
+def test_mark_suspect_writes_exit_status_before_alert(tmp_path: Path) -> None:
+    """The durable exit-status ``suspect=True`` lands even if the alerter blocks/raises.
+
+    ``mark_suspect`` fans exit-status FIRST, so a raising (or slow) Telegram
+    publish can never leave a resume reading ``suspect=false``.
+    """
+    grid = _grid()
+    run_id = grid_identity(grid)
+
+    class _RaisingAlerter:
+        def run_suspect(self, **_kw: Any) -> bool:
+            raise RuntimeError("telegram down")
+
+    spy = _spy()
+    with sweep_run_core(
+        results_root=tmp_path,
+        grid=grid,
+        alerter=cast("SweepAlerter", spy),
+        entry_label="unit test",
+        tripwire_config=TripwireConfig(),
+        diffcheck_k=0,
+    ) as core:
+        core._alerter = cast("SweepAlerter", _RaisingAlerter())
+        core.mark_suspect("tripwire", "some detail")  # alerter raises, guarded
+        status = read_exit_status(tmp_path, run_id)
+        assert status is not None
+        assert status["suspect"] is True  # written before the raising alert
+
+
+def test_record_worker_quarantine_records_flight(tmp_path: Path) -> None:
+    """G1 (round 2): the parallel-worker quarantine adapter logs a QUARANTINE record."""
+    grid = _grid()
+    with _core(tmp_path, grid) as (core, _s):
+        core.record_worker_quarantine(".quarantine/runtime/abc-1", "ResultsStoreError: bad")
+        run_id = core.run_id
+    rows = [r for r in _records(tmp_path, run_id) if r["kind"] == "QUARANTINE"]
+    assert len(rows) == 1
+    payload = cast("dict[str, Any]", rows[0]["payload"])
+    assert payload["what"] == "tuple_store"
+    assert payload["path_rel"] == ".quarantine/runtime/abc-1"
+    assert payload["reason"] == "ResultsStoreError: bad"
+
+
+def test_forensics_mirrored_to_internal_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row 15 (round 2): the R40 forensics are duplicated to the internal-disk mirror."""
+    mirror_root = tmp_path / "internal"
+    monkeypatch.setenv("BRUTEX_RUN_MIRROR_ROOT", str(mirror_root))
+    grid = _grid()
+    run_id = grid_identity(grid)
+    with _core(tmp_path, grid) as (_core_h, _s):
+        pass
+    mirror = mirror_root / run_id
+    assert (mirror / "manifest.json").is_file()
+    assert (mirror / "exit-status.json").is_file()
+    assert (mirror / "flight-recorder.jsonl").is_file()
+    # The primary copy on the results root is untouched.
+    assert (tmp_path / "runs" / run_id / "manifest.json").is_file()
+
+
+def test_forensics_mirror_disabled_when_root_blank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty BRUTEX_RUN_MIRROR_ROOT DISABLES the mirror (no internal write)."""
+    monkeypatch.setenv("BRUTEX_RUN_MIRROR_ROOT", "")
+    assert mod.mirror_run_forensics(tmp_path, "deadbeef") is None
+
+
 def test_g06_second_core_enter_refused_before_any_writer(tmp_path: Path) -> None:
     grid = _grid()
     with _core(tmp_path, grid), pytest.raises(SweepAlreadyRunningError), _core(tmp_path, grid):
@@ -846,6 +948,64 @@ def test_run_stage3_restamp_write_failure_is_fail_soft(
         assert core.suspect is False
 
 
+def test_run_stage3_validate_rehash_glitch_is_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR (round 2): a cell RE-HASH I/O glitch in validate is fail-soft, not FAILED.
+
+    ``validate_stage3_cells`` re-reads each cell + stamp off the results SSD, so
+    a transient EIO on the §8 external SSD raises ``StageStampError``. That must
+    be treated exactly like a guarded stamp-WRITE failure — WARN + leave the
+    cells UNSTAMPED — NOT converted into a whole-sweep ``Stage3CellStampError``
+    after the grid + stage-3 compute already succeeded.
+    """
+    from brutex.observability.stage_stamp import StageStampError
+
+    cell = tmp_path / "cell.parquet"
+    cell.write_bytes(b"cell-bytes")
+
+    def _boom(*_a: object, **_kw: object) -> tuple[Path, ...]:
+        raise StageStampError("simulated EIO re-hashing a cell")
+
+    monkeypatch.setattr(mod, "validate_stage3_cells", _boom)
+    with _core(tmp_path) as (core, _s):
+        report = _cell_report([cell], "ab" * 32)
+        assert core.run_stage3(lambda: report) is report  # no raise
+        assert "stage3" in core._stamps_present
+        assert "stage3" not in core._link_stamps  # unstamped → cascade re-derives
+        assert core.suspect is False
+
+
+def test_run_stage3_second_validate_rehash_glitch_is_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR (round 2): the POST-discard re-validate re-hash glitch is also fail-soft."""
+    from brutex.observability.stage_stamp import StageStampError
+
+    cell = tmp_path / "cell.parquet"
+    cell.write_bytes(b"cell-bytes")
+    validate_calls = {"n": 0}
+
+    def _validate(*_a: object, **_kw: object) -> tuple[Path, ...]:
+        validate_calls["n"] += 1
+        if validate_calls["n"] == 1:
+            return (cell,)  # first pass: invalid → discard + re-run
+        raise StageStampError("simulated EIO on the post-discard re-hash")
+
+    monkeypatch.setattr(mod, "validate_stage3_cells", _validate)
+
+    def _factory() -> Any:
+        cell.write_bytes(b"cell-bytes")
+        return _cell_report([cell], "ab" * 32)
+
+    with _core(tmp_path) as (core, _s):
+        assert core.run_stage3(_factory) is not None  # no raise
+        assert validate_calls["n"] == 2
+        assert "stage3" in core._stamps_present
+        assert "stage3" not in core._link_stamps
+        assert core.suspect is False
+
+
 # ────── cascade fold ──────
 
 
@@ -962,6 +1122,38 @@ def test_g12_corrupt_checkpoint_quarantined_at_enter(tmp_path: Path) -> None:
     assert not ckpt_path.exists()
     assert (tmp_path / ".quarantine" / "checkpoints" / "1.json").exists()
     assert "RESUME" not in _kinds(tmp_path, run_id)
+
+
+def test_g12_crash_loop_across_two_enters_fires_alert(tmp_path: Path) -> None:
+    """MAJOR (round 2): a persistently-corrupt checkpoint fires the CRITICAL alert.
+
+    The wired path constructs a FRESH tracker per ``sweep_run_core`` enter and
+    loads the checkpoint EXACTLY once per enter, so the crash-loop edge is only
+    reachable if the consecutive count PERSISTS across enters. Drive the loop
+    through TWO SEPARATE enters (a buggy writer re-emitting garbage each relaunch)
+    and assert the ``checkpoint_crash_loop`` alert fires on the 2nd enter, never
+    the 1st.
+    """
+    grid = _grid()
+    ckpt_path = tmp_path / "checkpoint" / "sweep-all.json"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _store() -> SweepCheckpointStore:
+        return SweepCheckpointStore(
+            path=ckpt_path,
+            sweep_id=grid_identity(grid),
+            total_combos=count_sweep_tuples(grid),
+        )
+
+    ckpt_path.write_text("{garbage-1", encoding="utf-8")  # 1st relaunch
+    with _core(tmp_path, grid, checkpoint_store=_store()) as (_c1, spy1):
+        pass
+    assert not any(t == "checkpoint_crash_loop" for _r, t, _d in spy1.suspects)
+
+    ckpt_path.write_text("{garbage-2", encoding="utf-8")  # 2nd relaunch — same garbage class
+    with _core(tmp_path, grid, checkpoint_store=_store()) as (_c2, spy2):
+        pass
+    assert any(t == "checkpoint_crash_loop" for _r, t, _d in spy2.suspects)
 
 
 def test_checkpoint_with_progress_records_resume(tmp_path: Path) -> None:

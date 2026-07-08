@@ -5758,6 +5758,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     workers=workers,
                     stall_seconds=stall_policy.timeout_seconds,
                     on_progress=core.on_progress,
+                    # MAJOR round-2 fix: wire the parent-side per-tuple hook so
+                    # TUPLE_DONE flight records + the R39 NaN/absurd SUSPECT
+                    # tripwire also run in the DEFAULT multi-core mode (the
+                    # applied summary is parent-side, so no spawn-boundary
+                    # closure). G1 store-quarantine runs IN-WORKER (a corrupt
+                    # store is quarantined + retried there so the grid never
+                    # aborts) and its QUARANTINE flight records replay here.
+                    # R45 diffcheck stays a sequential-only sampling assurance
+                    # (its stateful K budget + SUSPECT-latch mismatch callback
+                    # cannot cross the spawn boundary — named follow-up
+                    # DEC-SWEEP-DIFFCHECK-PARALLEL-001; the audit-replay
+                    # determinism lane still covers parallel runs).
+                    on_tuple=core.on_tuple,
+                    on_quarantine=core.record_worker_quarantine,
                 )
             else:
                 result = run_supervised_grid(

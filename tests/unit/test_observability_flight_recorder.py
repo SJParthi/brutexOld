@@ -21,6 +21,7 @@ from brutex.observability.flight_recorder import (
     FlightRecorder,
     contract_view,
     iter_run_records,
+    recorder_has_suspect,
     recorder_path,
     search_timeline,
     verify_recorder_chain,
@@ -418,3 +419,37 @@ class TestReaders:
         monkeypatch.setattr(audit_verify_mod, "auto_verify", _spy)
         assert verify_recorder_chain(tmp_path, _RUN_ID) == 2
         assert seen == [recorder_path(tmp_path, _RUN_ID)]
+
+
+class TestRecorderHasSuspect:
+    """The D-12 never-launder belt (MAJOR round 2): a durable SUSPECT record read."""
+
+    def test_true_when_suspect_recorded(self, tmp_path: Path) -> None:
+        recorder = _open(tmp_path)
+        recorder.record("RUN_START", {})
+        recorder.record("SUSPECT", {"reason": "diffcheck_mismatch", "detail": "x"})
+        recorder.close()
+        assert recorder_has_suspect(tmp_path, _RUN_ID) is True
+
+    def test_false_when_no_suspect(self, tmp_path: Path) -> None:
+        recorder = _open(tmp_path)
+        recorder.record("RUN_START", {})
+        recorder.record("RUN_END", {})
+        recorder.close()
+        assert recorder_has_suspect(tmp_path, _RUN_ID) is False
+
+    def test_false_when_file_missing(self, tmp_path: Path) -> None:
+        assert recorder_has_suspect(tmp_path, _RUN_ID) is False
+
+    def test_tolerates_blank_malformed_and_non_mapping_lines(self, tmp_path: Path) -> None:
+        path = recorder_path(tmp_path, _RUN_ID)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n"  # blank line → skipped
+            "{not json\n"  # malformed → skipped
+            "[1, 2, 3]\n"  # valid JSON but not a Mapping → skipped
+            '{"action": "RUN_START"}\n'  # a real non-SUSPECT record
+            '{"action": "SUSPECT"}\n',  # the durable SUSPECT
+            encoding="utf-8",
+        )
+        assert recorder_has_suspect(tmp_path, _RUN_ID) is True

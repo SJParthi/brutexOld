@@ -41,6 +41,7 @@ from typing import Any, Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.run_layout import run_dir
 
 __all__ = [
     "EXIT_STATUS_FILENAME",
@@ -77,7 +78,7 @@ class RunState(StrEnum):
 
 def exit_status_path(results_root: Path, run_id: str) -> Path:
     """Return ``<results_root>/runs/<run_id>/exit-status.json`` (never created here). O(1)."""
-    return results_root / "runs" / run_id / EXIT_STATUS_FILENAME
+    return run_dir(results_root, run_id) / EXIT_STATUS_FILENAME
 
 
 def _finite_float(value: object) -> float | None:

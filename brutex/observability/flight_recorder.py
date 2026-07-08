@@ -57,6 +57,7 @@ observability-only and never part of any run identity (I-2).
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -64,6 +65,7 @@ from typing import Final
 
 import structlog
 
+from brutex.engine.run_layout import run_dir
 from brutex.orchestrator.audit import (
     AuditEntry,
     AuditFieldError,
@@ -140,7 +142,54 @@ def recorder_path(results_root: Path, run_id: str) -> Path:
     Path
         ``<results_root>/runs/<run_id>/flight-recorder.jsonl`` (D-15).
     """
-    return results_root / "runs" / run_id / FLIGHT_RECORDER_FILENAME
+    return run_dir(results_root, run_id) / FLIGHT_RECORDER_FILENAME
+
+
+def recorder_has_suspect(results_root: Path, run_id: str) -> bool:
+    """Return ``True`` iff the durable flight recorder holds a ``SUSPECT`` record.
+
+    The D-12 never-launder belt (MAJOR round-2 fix): resume reads the sticky
+    SUSPECT flag primarily from ``exit-status.json``, but that single fail-soft
+    artifact is written after the in-memory latch — a SIGKILL or a torn write
+    in the narrow window could leave it ``suspect=false``. The
+    hash-chained ``flight-recorder.jsonl`` is appended (across attempts) with a
+    durable ``SUSPECT`` record inside every :meth:`RunCoreHandles.mark_suspect`
+    fan-out, so folding this into ``prior_suspect`` means a durably-recorded
+    SUSPECT can NEVER be laundered back to a clean COMPLETE on resume.
+
+    Fail-soft (I-3): a missing file / unreadable line / malformed JSON returns
+    ``False`` for that line and never raises — the exit-status flag remains the
+    other (independent) authority, so a read glitch here can only fail to add a
+    belt, never fabricate a SUSPECT.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root.
+    run_id
+        The run identity (D-1).
+
+    Returns
+    -------
+    bool
+        ``True`` iff at least one recorded line has ``action == "SUSPECT"``.
+    """
+    path = recorder_path(results_root, run_id)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for raw in handle:
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(record, Mapping) and record.get("action") == "SUSPECT":
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 class FlightRecorder:

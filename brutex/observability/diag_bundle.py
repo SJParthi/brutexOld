@@ -42,6 +42,7 @@ import structlog
 
 from brutex.config.hardware_envelope import hardware_key
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.run_layout import run_dir
 from brutex.observability.log_tail import clamp_max_lines, tail_lines
 
 _LOG = structlog.get_logger(__name__)
@@ -86,7 +87,7 @@ def bundle_path(results_root: Path, run_id: str) -> Path:
     Path
         The bundle location.
     """
-    return results_root / "runs" / run_id / BUNDLE_FILENAME
+    return run_dir(results_root, run_id) / BUNDLE_FILENAME
 
 
 def redact_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -183,17 +184,17 @@ def build_diagnostic_bundle(
         The bundle path, or ``None`` on a WARNed failure.
     """
     try:
-        run_dir = results_root / "runs" / run_id
+        rundir = run_dir(results_root, run_id)
         dest = bundle_path(results_root, run_id)
         members: list[tuple[str, bytes]] = []
         skipped: list[str] = []
-        if run_dir.is_dir():
-            for path in sorted(run_dir.rglob("*")):
+        if rundir.is_dir():
+            for path in sorted(rundir.rglob("*")):
                 if not path.is_file():
                     continue
                 if path.name == BUNDLE_FILENAME or path.name.startswith(_TMP_PREFIX):
                     continue
-                arcname = path.relative_to(run_dir).as_posix()
+                arcname = path.relative_to(rundir).as_posix()
                 try:
                     members.append((arcname, path.read_bytes()))
                 except OSError as exc:
@@ -226,7 +227,7 @@ def build_diagnostic_bundle(
         members.append(
             ("bundle-meta.json", json.dumps(meta, indent=2, sort_keys=True).encode("utf-8"))
         )
-        run_dir.mkdir(parents=True, exist_ok=True)
+        rundir.mkdir(parents=True, exist_ok=True)
         atomic_write_simple(dest, lambda tmp: _write_zip(tmp, members))
     except Exception as exc:
         _LOG.warning(

@@ -326,6 +326,71 @@ def test_g12_tracker_threshold_validated() -> None:
     assert one.record_corruption() is True  # edge at the very first corruption
 
 
+def test_g12_tracker_persists_across_separate_instances(tmp_path: Path) -> None:
+    """MAJOR (round 2): the consecutive count SURVIVES a fresh tracker per enter.
+
+    A checkpoint crash-loop is cross-PROCESS: each relaunch loads the checkpoint
+    ONCE with a FRESH tracker. A purely-in-memory tracker could reach at most
+    ``consecutive == 1`` so the ``== threshold`` edge would be unreachable in
+    production. ``load`` seeds the count from the durable per-run file so the 2nd
+    corruption ACROSS separate trackers fires the edge EXACTLY once.
+    """
+    first = CheckpointCorruptionTracker.load(tmp_path)
+    assert first.consecutive == 0
+    assert first.record_corruption() is False  # 1st launch: no edge
+
+    second = CheckpointCorruptionTracker.load(tmp_path)  # a fresh "process"
+    assert second.consecutive == 1  # persisted from the first
+    assert second.record_corruption() is True  # 2nd launch: the crash-loop edge
+
+    third = CheckpointCorruptionTracker.load(tmp_path)
+    assert third.consecutive == 2
+    assert third.record_corruption() is False  # beyond the edge: no re-fire
+
+
+def test_g12_tracker_clean_load_clears_persisted_count(tmp_path: Path) -> None:
+    """A clean load persists a reset, so the next relaunch starts the streak fresh."""
+    tracker = CheckpointCorruptionTracker.load(tmp_path)
+    tracker.record_corruption()
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 1
+    tracker.record_clean()
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0
+
+
+def test_g12_tracker_load_tolerates_missing_and_malformed_state(tmp_path: Path) -> None:
+    """A missing / malformed / out-of-range state file loads a clean 0 (fail-soft)."""
+    from brutex.engine.sweep_quarantine import CHECKPOINT_CORRUPTION_STATE_FILENAME
+
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0  # missing
+    state = tmp_path / CHECKPOINT_CORRUPTION_STATE_FILENAME
+    state.write_text("{not json", encoding="utf-8")
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0  # malformed
+    state.write_text('{"consecutive": -3}', encoding="utf-8")
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0  # out of range
+    state.write_text('["not-a-dict"]', encoding="utf-8")
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0  # wrong shape
+    state.write_text('{"consecutive": "x"}', encoding="utf-8")
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0  # wrong type
+
+
+def test_g12_tracker_in_memory_when_state_path_none() -> None:
+    """A ``state_path=None`` tracker is purely in-memory (no persistence side effect)."""
+    tracker = CheckpointCorruptionTracker()
+    assert tracker.state_path is None
+    tracker.record_corruption()  # must not raise despite no path
+    tracker.record_clean()
+
+
+def test_g12_tracker_persist_is_fail_soft_on_oserror(tmp_path: Path) -> None:
+    """A persist write failure is swallowed (I-3) — the in-memory count still advances."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a dir", encoding="utf-8")
+    # state_path's parent is a FILE → mkdir/write raise OSError, suppressed.
+    tracker = CheckpointCorruptionTracker(state_path=blocker / "state.json")
+    assert tracker.record_corruption() is False  # no raise; count still moves
+    assert tracker.consecutive == 1
+
+
 def test_g12_checkpoint_move_failure_is_fail_soft(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

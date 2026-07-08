@@ -196,3 +196,25 @@ diffcheck covers projection + trade-sim + drawdown, not the 60 indicator
 evaluators; the G10 refusal a starting pull prints while a sweep holds the
 shared lake lock says "peer pull" — misleading but safe, follow-up
 DEC-SWEEP-LOCK-WORDING-001.
+
+**Parallel-mode (DEFAULT `workers > 1`) parity, hostile-review round 2:** the
+`on_tuple` fan-out (TUPLE_DONE flight records + the R39 NaN/absurd per-tuple
+SUSPECT tripwire) and G1 store-quarantine now run in the DEFAULT multi-core mode
+too — `on_tuple` from the single-threaded writer-actor apply path, and G1 in the
+worker (a corrupt store is quarantined + retried in-process so the grid never
+aborts; QUARANTINE events replay into the flight recorder). The ONE parallel-mode
+gap that remains is **R45 diffcheck**: its stateful K budget + its SUSPECT-latch
+`on_mismatch` callback cannot cross the spawn boundary, so it stays a
+sequential-spine sampling assurance (K=200 ≈ 0.004%); the audit-replay
+determinism lane (`audit_verify.auto_verify`, exercised each rehearsal) still
+covers parallel runs — follow-up **DEC-SWEEP-DIFFCHECK-PARALLEL-001**.
+
+**Run-directory layout (Ruling 4 / Row 15):** `brutex/engine/run_layout.py` is
+the single source of the run-dir path; the physical subdir is `runs/` today
+(the `.parquet`-glob hazard is pinned dead — the run core writes only
+JSON/JSONL/extensionless there) with the relocation to the `sweep_runs/` sibling
+root deferred to merge-integration for ONE agreed P2/P3 layout. The R40 forensics
+(bundle + flight recorder + manifest + exit-status + chain-map + verdicts) are
+mirrored to `~/.brutex/runs/<run_id>/` on the INTERNAL disk (env
+`BRUTEX_RUN_MIRROR_ROOT`, empty ⇒ disabled) so an SSD-death cannot take the only
+copy.

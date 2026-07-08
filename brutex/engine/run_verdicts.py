@@ -53,6 +53,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.engine.cascade_wire import manifest_path, report_path
+from brutex.engine.run_layout import run_dir
 from brutex.observability.stage_stamp import write_stage_stamp
 
 _LOG = structlog.get_logger(__name__)
@@ -84,7 +85,7 @@ _DEFAULT_FIB_ANCHOR: Final[str] = "prev_day"
 
 def verdicts_path(results_root: Path, run_id: str) -> Path:
     """Return the verdicts artifact path — ``<results_root>/runs/<run_id>/verdicts.json``."""
-    return results_root / "runs" / run_id / VERDICTS_FILENAME
+    return run_dir(results_root, run_id) / VERDICTS_FILENAME
 
 
 def _read_json_tolerant(path: Path, *, what: str) -> object | None:

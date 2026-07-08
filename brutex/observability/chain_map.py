@@ -51,6 +51,7 @@ from typing import Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.engine.run_layout import run_dir
 from brutex.observability.stage_stamp import StampVerdict
 
 _LOG = structlog.get_logger(__name__)
@@ -106,7 +107,7 @@ def chain_map_path(results_root: Path, run_id: str) -> Path:
     Path
         The snapshot location (D-18).
     """
-    return results_root / "runs" / run_id / CHAIN_MAP_FILENAME
+    return run_dir(results_root, run_id) / CHAIN_MAP_FILENAME
 
 
 def _str_or_none(source: Mapping[str, object] | None, key: str) -> str | None:

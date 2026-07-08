@@ -37,9 +37,25 @@ test.
 Honest envelope (Golden Rule #10): the stage-2 aggregate stamp is one
 O(tuples) sentinel read at the sweep→stage3 boundary; the diagnostic bundle is
 O(artifacts); diffcheck costs O(K sampled masks) per run — none of these is
-claimed O(1). The parallel driver's WORKERS do not run diffcheck or the G1
-quarantine-retry (the hook closures cannot cross the spawn boundary); both are
-sequential-spine seams — a named, documented gap, not a silent one.
+claimed O(1).
+
+Parallel-mode parity (MAJOR round-2 fixes, DEC-SWEEP-UNKILLABLE-CORE-001):
+the DEFAULT multi-core sweep (``run_parallel_grid``, ``workers > 1``) now runs
+the ``on_tuple`` fan-out (TUPLE_DONE flight records + the R39 NaN/absurd
+per-tuple SUSPECT tripwire) from the single-threaded writer-actor apply path —
+the applied summary is parent-side, so no closure crosses the spawn boundary —
+and G1 store-quarantine runs IN THE WORKER (a corrupt on-disk store is
+quarantined + retried in-process so it can NEVER abort the whole grid; its
+QUARANTINE events replay into the flight recorder via
+:meth:`RunCoreHandles.record_worker_quarantine`). The ONE parallel-mode gap
+that remains is R45 diffcheck: its stateful K budget + its ``on_mismatch``
+fan-out into the run-core SUSPECT latch are not carried across the spawn
+boundary, so diffcheck stays a sequential-spine sampling ASSURANCE (K=200 ≈
+0.004% of a large grid) — a named, documented gap (follow-up
+DEC-SWEEP-DIFFCHECK-PARALLEL-001), NOT a silent one; the audit-replay
+determinism lane (``audit_verify.auto_verify``, exercised by the rehearsal
+gate) still covers parallel runs, and the two genuine default-mode gaps (the
+NaN tripwire + the grid-abort-on-corrupt-store) are now CLOSED.
 """
 
 from __future__ import annotations
@@ -58,13 +74,15 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.errors import LakeWriteHalt
-from brutex.engine.run_verdicts import build_run_verdicts
+from brutex.engine.run_layout import mirror_run_dir, run_dir
+from brutex.engine.run_verdicts import VERDICTS_FILENAME, build_run_verdicts
 from brutex.engine.sweep_diffcheck import (
     DiffCheckHook,
     DiffCheckMismatch,
     resolve_diffcheck_k,
 )
 from brutex.engine.sweep_exit_status import (
+    EXIT_STATUS_FILENAME,
     RunState,
     read_exit_status,
     write_exit_status_soft,
@@ -88,13 +106,17 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
 )
 from brutex.models import BruteXError
-from brutex.observability.chain_map import build_chain_map, write_chain_map
+from brutex.observability.chain_map import CHAIN_MAP_FILENAME, build_chain_map, write_chain_map
 from brutex.observability.correlation import run_id_scope
-from brutex.observability.diag_bundle import build_diagnostic_bundle
-from brutex.observability.flight_recorder import FlightRecorder
+from brutex.observability.diag_bundle import BUNDLE_FILENAME, build_diagnostic_bundle
+from brutex.observability.flight_recorder import (
+    FLIGHT_RECORDER_FILENAME,
+    FlightRecorder,
+    recorder_has_suspect,
+)
 from brutex.observability.power_keepawake import keep_awake
 from brutex.observability.progress_beat import emit_progress_beat
-from brutex.observability.run_manifest import ManifestAccumulator
+from brutex.observability.run_manifest import MANIFEST_FILENAME, ManifestAccumulator
 from brutex.observability.run_tripwires import (
     TripwireConfig,
     TripwireEvent,
@@ -120,6 +142,18 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.notifications.sweep_alerts import SweepAlerter
 
 _LOG = structlog.get_logger("brutex.engine.sweep_run_core")
+
+#: The R40 forensic artifacts mirrored to the INTERNAL disk (Row 15). Names are
+#: imported from their owning modules (§11 COMMON — never re-minted here); a
+#: name absent on disk for a given run is simply skipped.
+_MIRRORED_FORENSIC_NAMES: Final[tuple[str, ...]] = (
+    BUNDLE_FILENAME,
+    FLIGHT_RECORDER_FILENAME,
+    MANIFEST_FILENAME,
+    EXIT_STATUS_FILENAME,
+    CHAIN_MAP_FILENAME,
+    VERDICTS_FILENAME,
+)
 
 #: TUPLE_DONE decimation denominator (design D-9): the recorder stride is
 #: ``ceil(total / DECIMATION_TARGET_RECORDS)`` so even a 100k-tuple grid
@@ -319,6 +353,27 @@ class RunCoreHandles:
         if self._suspect_fanned:
             return
         self._suspect_fanned = True
+        # D-12 never-launder (MAJOR round-2 fix): stamp the durable exit-status
+        # ``suspect=True`` FIRST — before the recorder append, the structlog
+        # ERROR, and the potentially-blocking Telegram publish — so a SIGKILL
+        # (dashboard restart, the exact "unkillable" premise) between the
+        # in-memory latch and this write cannot leave a resume reading
+        # ``suspect=false``. The kill-window before the durable signal now
+        # spans only the in-memory latch + one atomic write, no network hop.
+        # Resume ALSO folds the durable flight-recorder SUSPECT record (see
+        # ``recorder_has_suspect`` in the CM), so even a torn exit-status write
+        # cannot launder a durably-recorded SUSPECT back to a clean COMPLETE.
+        self._guarded(
+            "exit_status.suspect",
+            lambda: write_exit_status_soft(
+                self._results_root,
+                run_id=self.run_id,
+                state=RunState.RUNNING,
+                attempt=self.attempt,
+                pid=os.getpid(),
+                suspect=True,
+            ),
+        )
         self._guarded(
             "recorder.suspect",
             lambda: self.recorder.record("SUSPECT", {"reason": reason, "detail": detail}),
@@ -330,17 +385,6 @@ class RunCoreHandles:
         self._guarded(
             "alerter.run_suspect",
             lambda: self._alerter.run_suspect(run_id=self.run_id, tripwire=reason, detail=detail),
-        )
-        self._guarded(
-            "exit_status.suspect",
-            lambda: write_exit_status_soft(
-                self._results_root,
-                run_id=self.run_id,
-                state=RunState.RUNNING,
-                attempt=self.attempt,
-                pid=os.getpid(),
-                suspect=True,
-            ),
         )
 
     def _on_trip(self, event: TripwireEvent) -> None:
@@ -502,7 +546,7 @@ class RunCoreHandles:
                 continue  # no-bars / failed / unfinished tuple — honestly absent
             pairs.append([record.tuple_digest, record.store_content_hash])
         pairs.sort()
-        dest = self._results_root / "runs" / self.run_id / "stage2"
+        dest = run_dir(self._results_root, self.run_id) / "stage2"
         dest.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps({"pairs": pairs}, sort_keys=True).encode("utf-8")
         atomic_write_simple(dest, lambda tmp: tmp.write_bytes(content))
@@ -557,7 +601,23 @@ class RunCoreHandles:
         if self._guarded("stage3.stamp_cells", lambda: self._stamp_cells(cells, snapshot)) is None:
             self._link_stamps.pop("stage3", None)  # write failed → fail-soft, unstamped
             return report
-        invalid = validate_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
+        # I-3 fail-soft symmetry (MINOR round-2 fix): the cell RE-HASH inside
+        # ``validate_stage3_cells`` re-reads each ``.parquet`` cell + its stamp
+        # sidecar off the results SSD, so a transient EIO on the documented §8
+        # external SSD raises ``StageStampError`` — which must NOT convert an
+        # otherwise-successful sweep into FAILED any more than the guarded stamp
+        # WRITE above. Guard the re-hash: a raise ⇒ ``None`` ⇒ fail-soft
+        # UNSTAMPED (the cascade replays via the legacy MISSING_STAMP rebuild),
+        # the hard :class:`Stage3CellStampError` reserved STRICTLY for a
+        # genuine returned HASH_MISMATCH after the discard + re-run.
+        first = self._guarded(
+            "stage3.validate",
+            lambda: validate_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot),
+        )
+        if first is None:  # re-hash I/O glitch → fail-soft, unstamped
+            self._link_stamps.pop("stage3", None)
+            return report
+        invalid = cast("tuple[Path, ...]", first)
         if invalid:
             if self._guarded("stage3.discard", lambda: self._discard_cells(invalid)) is None:
                 self._link_stamps.pop("stage3", None)  # discard write failed → fail-soft
@@ -574,11 +634,19 @@ class RunCoreHandles:
                 ):
                     self._link_stamps.pop("stage3", None)  # re-stamp write failed → fail-soft
                     return report
-                invalid = validate_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
-                if invalid:
+                second = self._guarded(
+                    "stage3.validate",
+                    lambda: validate_stage3_cells(
+                        cells, run_id=self.run_id, snapshot_hash=snapshot
+                    ),
+                )
+                if second is None:  # re-hash I/O glitch on the re-run → fail-soft, unstamped
+                    self._link_stamps.pop("stage3", None)
+                    return report
+                if cast("tuple[Path, ...]", second):  # genuine HASH_MISMATCH after re-run
                     raise Stage3CellStampError(
                         f"stage-3 cell stamps still invalid after one discard + re-run: "
-                        f"{[str(p) for p in invalid]}"
+                        f"{[str(p) for p in cast('tuple[Path, ...]', second)]}"
                     )
         self._link_stamps["stage3"] = StampVerdict.OK
         return report
@@ -868,6 +936,23 @@ class RunCoreHandles:
             ),
         )
 
+    def record_worker_quarantine(self, dest_rel: str, reason: str) -> None:
+        """Record a PARALLEL-worker store-quarantine event in the flight recorder (G1).
+
+        The parallel driver's ``on_quarantine`` adapter (MAJOR round-2 fix): the
+        worker already MOVED the corrupt tuple trio in-process (so the grid never
+        aborts), then returns the ``(dest_rel, reason)`` as data; this records the
+        SAME ``QUARANTINE`` flight record the sequential :meth:`_quarantine_store`
+        emits, so the forensic trail matches across modes. Fail-soft (I-3).
+        """
+        self._guarded(
+            "recorder.quarantine_worker",
+            lambda: self.recorder.record(
+                "QUARANTINE",
+                {"what": "tuple_store", "path_rel": dest_rel, "reason": reason},
+            ),
+        )
+
     # ── launch / terminal progress ────────────────────────────────────────
 
     def _reset_progress_at_launch(self) -> None:
@@ -1021,7 +1106,15 @@ def sweep_run_core(
     # SAME ``runs/<run_id>/`` and resume-SKIPS the offending (already-complete)
     # tuple — the SUSPECT would never re-fire. Carry it forward so the run can
     # never launder SUSPECT_COMPLETE back to a clean COMPLETE on resume.
-    prior_suspect = bool(prior.get("suspect")) if prior else False
+    # D-12 never-launder (MAJOR round-2 fix): the exit-status flag is the
+    # primary sticky-SUSPECT signal, but it is a single fail-soft artifact
+    # written after the in-memory latch — a torn write / SIGKILL in that window
+    # could leave it ``false``. Fold the durable, hash-chained flight-recorder
+    # SUSPECT record as an independent belt: a run whose result bytes were ever
+    # flagged possibly-wrong can NEVER resume-complete as a clean COMPLETE.
+    prior_suspect = (bool(prior.get("suspect")) if prior else False) or recorder_has_suspect(
+        results_root, run_id
+    )
 
     with ExitStack() as stack:
         stack.enter_context(sweep_run_lock(results_root))  # G6 — BEFORE any writer
@@ -1125,7 +1218,14 @@ def sweep_run_core(
                         checkpoint_store,
                         results_root=results_root,
                         recorder=recorder,
-                        tracker=CheckpointCorruptionTracker(),
+                        # G12 crash-loop breaker (MAJOR round-2 fix): the tracker
+                        # is loaded from a DURABLE per-run counter file so the
+                        # consecutive-corruption count survives the per-enter /
+                        # per-process boundary a crash-loop is made of — the
+                        # ``== threshold`` escalation edge is now reachable in
+                        # the wired path (a fresh in-memory tracker could never
+                        # reach 2 with one load per enter).
+                        tracker=CheckpointCorruptionTracker.load(run_dir(results_root, run_id)),
                         on_crash_loop=lambda detail: alerter.run_suspect(
                             run_id=run_id, tripwire="checkpoint_crash_loop", detail=detail
                         ),
@@ -1261,6 +1361,55 @@ def _finalize(
             extra_files=tuple(extra_files),
         ),
     )
+    # Row 15 (Ruling 15): mirror the R40 forensics to the INTERNAL disk so an
+    # SSD-death — the exact failure the bundle exists to diagnose — cannot take
+    # the only copy of the evidence with it. Best-effort DUPLICATE, run LAST +
+    # fail-soft, so it can never change results or kill the run (I-3).
+    core._guarded("forensics.mirror", lambda: mirror_run_forensics(core._results_root, core.run_id))
+
+
+def mirror_run_forensics(
+    results_root: Path, run_id: str, *, env: dict[str, str] | None = None
+) -> Path | None:
+    """Copy the run's R40 forensic artifacts to the INTERNAL-disk mirror (Row 15).
+
+    Copies the diagnostic bundle + flight recorder + manifest + exit-status +
+    chain-map + verdicts (whichever exist) from the results-root ``run_dir`` to
+    :func:`~brutex.engine.run_layout.mirror_run_dir` so the forensics survive an
+    SSD unplug/death. A best-effort DUPLICATE: mirroring disabled/unavailable
+    returns ``None``, and each per-file copy is individually guarded so one
+    unreadable member never aborts the mirror (I-3 — the caller wraps this in
+    ``_guarded`` too, so any residual error is a WARN, never a raise).
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root (the primary copy's home).
+    run_id
+        The run identity (D-1).
+    env
+        Environment mapping (injected in tests; defaults to ``os.environ``).
+
+    Returns
+    -------
+    Path | None
+        The mirror directory written to, or ``None`` when mirroring is
+        disabled/unavailable.
+    """
+    import shutil
+
+    dest_dir = mirror_run_dir(run_id, env=env)
+    if dest_dir is None:
+        return None
+    source_dir = run_dir(results_root, run_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for name in _MIRRORED_FORENSIC_NAMES:
+        src = source_dir / name
+        if not src.is_file():
+            continue
+        with contextlib.suppress(OSError):
+            shutil.copy2(src, dest_dir / name)
+    return dest_dir
 
 
 def _append_run_manifest_line(manifest_path: Path, chain_path: Path, *, run_id: str) -> None:
