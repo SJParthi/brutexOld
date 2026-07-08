@@ -11,11 +11,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 from brutex.dashboard.ntm_cache import (
+    REVALIDATE_LOCK_FILENAME,
     CachedConstituents,
     default_cache_dir,
     load_cached_constituent_csv,
     load_cached_constituent_with_age,
+    revalidate_lock,
     save_constituent_csv,
 )
 
@@ -131,8 +134,65 @@ def test_with_age_returns_none_when_stat_fails(tmp_path: Path) -> None:
         os.unlink(target)  # remove before the stat() call inside the helper
         return text
 
-    import pytest
-
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(Path, "read_text", _read_then_delete)
         assert load_cached_constituent_with_age(cache_dir=tmp_path) is None
+
+
+# ── Cross-process revalidation lock (DEC-NTM-REVALIDATE-CROSSPROC-001) ────────
+
+
+def test_revalidate_lock_acquired_is_exclusive_and_released_on_exit(tmp_path: Path) -> None:
+    """Acquired = a REAL exclusive flock; exit releases it for the next taker."""
+    import fcntl
+
+    with revalidate_lock(cache_dir=tmp_path) as verdict:
+        assert verdict == "acquired"
+        # Probe from a second fd (flock is per open-file-description, so a
+        # same-process second open genuinely contends): must be held.
+        probe = os.open(tmp_path / REVALIDATE_LOCK_FILENAME, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+    # After exit the lock is free again.
+    with revalidate_lock(cache_dir=tmp_path) as verdict:
+        assert verdict == "acquired"
+
+
+def test_revalidate_lock_held_elsewhere_when_peer_holds(tmp_path: Path) -> None:
+    """A peer holding the sidecar → 'held_elsewhere'; the peer's lock survives us."""
+    import fcntl
+
+    with revalidate_lock(cache_dir=tmp_path) as outer:
+        assert outer == "acquired"
+        with revalidate_lock(cache_dir=tmp_path) as inner:
+            assert inner == "held_elsewhere"
+        # Closing the inner fd must NOT have released the outer holder's lock.
+        probe = os.open(tmp_path / REVALIDATE_LOCK_FILENAME, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+
+
+def test_revalidate_lock_unavailable_when_cache_dir_is_a_file(tmp_path: Path) -> None:
+    """A cache_dir path occupied by a FILE → 'unavailable' (fail-open), never a raise."""
+    blocker = tmp_path / "cache"
+    blocker.write_text("not a directory", encoding="utf-8")
+    with revalidate_lock(cache_dir=blocker) as verdict:
+        assert verdict == "unavailable"
+
+
+def test_revalidate_lock_creates_dir_and_private_sidecar(tmp_path: Path) -> None:
+    """A missing cache dir is created; the sidecar is owner-only (0o600)."""
+    import stat
+
+    cache_dir = tmp_path / "fresh" / "cache"
+    with revalidate_lock(cache_dir=cache_dir) as verdict:
+        assert verdict == "acquired"
+    sidecar = cache_dir / REVALIDATE_LOCK_FILENAME
+    assert sidecar.is_file()
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600

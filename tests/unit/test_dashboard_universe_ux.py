@@ -231,23 +231,21 @@ def test_universe_opt_badge_present() -> None:
     assert "option-pullable · F&amp;O" in html, "the legend's OPT explanation is missing"
 
 
-def test_universe_daily_quota_gauge_present() -> None:
-    """The Dhan daily-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001): the header gauge
-    markup, the 80%/95% colour-band CSS, and the poller that reads /api/v1/quota
-    (the persisted IST-midnight tracker — DEC-DASHBOARD-QUOTA-PERSISTED-001) so the
-    gauge shows today's budget on page-load, before any pull. Hidden until a
-    positive limit is reported."""
+def test_universe_daily_quota_gauge_absent() -> None:
+    """The daily-quota gauge is GONE (DEC-QUOTA-VERDICT-MOOT-001).
+
+    Inverts the old ``_present`` guard: Groww has no daily quota and nothing
+    ever injected a tracker, so the gauge markup (DEC-DASHBOARD-QUOTA-GAUGE-001),
+    the 80%/95% colour bands, and the ``/api/v1/quota`` poller
+    (DEC-DASHBOARD-QUOTA-PERSISTED-001) are deleted with their endpoint — the
+    shipped page never 404-polls a removed route."""
     html = _render_universe_html()
-    assert 'id="quotaGauge"' in html, "the quota gauge block is missing"
+    assert "quotaGauge" not in html, "the deleted quota gauge markup resurfaced"
     for span in ("qgUsed", "qgLimit", "qgRem", "qgPct", "qgFill"):
-        assert f'id="{span}"' in html, f"the {span} element is missing"
-    assert "display:none" in html, "the gauge must start hidden until usage is reported"
-    assert ".quota-gauge.warn" in html, "the ≥80% amber band is missing"
-    assert ".quota-gauge.crit" in html, "the ≥95% red band is missing"
-    # The poller reads the persisted-quota endpoint + the crit branch.
-    assert "/api/v1/quota" in html, "the gauge does not poll the persisted-quota endpoint"
-    assert "s.quota_limit" in html, "the poller does not read quota_limit"
-    assert "pct >= 95" in html, "the crit threshold branch is missing"
+        assert f'id="{span}"' not in html, f"the deleted {span} element resurfaced"
+    assert ".quota-gauge" not in html, "the deleted quota gauge CSS resurfaced"
+    assert "/api/v1/quota" not in html, "the page must not poll the removed quota endpoint"
+    assert "s.quota_limit" not in html, "the deleted quota poller resurfaced"
 
 
 def test_universe_no_data_gap_live_stat_present() -> None:
