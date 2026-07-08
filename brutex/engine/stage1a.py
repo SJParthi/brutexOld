@@ -76,9 +76,10 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 import fno_math
+import structlog
 import trading_core
 
-from brutex.calendars.nse import IST, is_pre_open
+from brutex.calendars.nse import IST, has_muhurat_session, is_pre_open
 from brutex.indicators.day_extremes import DayExtremesState
 from brutex.indicators.ema import EMAState
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
@@ -101,6 +102,13 @@ from brutex.vocabulary.evaluator import (
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
+
+_LOG = structlog.get_logger(__name__)
+
+#: Structlog event emitted (exactly once per skipped session) when a completed
+#: Diwali *Muhurat* session's OHLC is deliberately NOT rolled into the prior-day
+#: anchor (``DEC-SWEEP-DATA-EDGE-GUARDS-001``).
+_MUHURAT_ANCHOR_SKIP_EVENT: Final[str] = "stage1a.muhurat_prev_day_anchor_skip"
 
 #: Paisa per rupee — the lake stores Decimal rupees; the evaluator wants int64
 #: paisa (``DEC-PAISA-DOC-RECONCILE-001``).
@@ -624,18 +632,41 @@ class Stage1AMatrixBuilder:
         """
         # The day we were accumulating is now complete → it is the prior day.
         if self._today_ohlc is not None:
-            self._prev_day_ohlc = self._today_ohlc
-            # Record the just-completed day into the bounded rolling history — the
-            # source of the multi-day rolling-weekly / weekly-static Fib anchors.
-            # Only needed (and paid) for a non-prev-day anchor; the prev-day path
-            # keeps `_daily_history` empty (byte-identical + allocation-free).
-            if self._fib_anchor is not FibAnchorKind.PREV_DAY and self._current_day is not None:
-                self._daily_history[self._current_day] = _day_ohlc_to_candle(
-                    self._current_day, self._today_ohlc
+            completed_day = self._current_day
+            if completed_day is not None and has_muhurat_session(completed_day):
+                # Muhurat-safe anchor roll (``DEC-SWEEP-DATA-EDGE-GUARDS-001``): a
+                # Diwali *Muhurat* session is a ~1-hour special session, NOT a
+                # regular trading day. Its distorted 1-hour OHLC must NEVER become
+                # the next regular day's pivot / PDH-PDL / Fib / day-type anchor
+                # (bits 6-29 + 48-51) — the prior REGULAR session's anchor carries
+                # through, exactly as the COMMON
+                # :func:`~brutex.indicators.prev_day_ohlc.lookup_prev_day_ohlc`
+                # (and the weekly Fib anchors) skip Muhurat sessions on their
+                # calendar-session walk. So BOTH ``_prev_day_ohlc`` (the pivot /
+                # prev-day-Fib anchor) AND ``_daily_history`` (the multi-day
+                # rolling-weekly / weekly-static Fib anchor) are left UNTOUCHED,
+                # carrying the last regular session forward. Look-ahead-clean: the
+                # decision keys ONLY on the just-completed day's own IST date. One
+                # WARN per skipped session (each completed day rolls exactly once).
+                _LOG.warning(
+                    _MUHURAT_ANCHOR_SKIP_EVENT,
+                    completed_day=completed_day.isoformat(),
+                    new_day=bar_day.isoformat(),
                 )
-                # Evict the oldest completed day past the bound (O(1) — R-4).
-                while len(self._daily_history) > _DAILY_HISTORY_MAX:
-                    self._daily_history.popitem(last=False)
+            else:
+                self._prev_day_ohlc = self._today_ohlc
+                # Record the just-completed day into the bounded rolling history —
+                # the source of the multi-day rolling-weekly / weekly-static Fib
+                # anchors. Only needed (and paid) for a non-prev-day anchor; the
+                # prev-day path keeps `_daily_history` empty (byte-identical +
+                # allocation-free).
+                if self._fib_anchor is not FibAnchorKind.PREV_DAY and completed_day is not None:
+                    self._daily_history[completed_day] = _day_ohlc_to_candle(
+                        completed_day, self._today_ohlc
+                    )
+                    # Evict the oldest completed day past the bound (O(1) — R-4).
+                    while len(self._daily_history) > _DAILY_HISTORY_MAX:
+                        self._daily_history.popitem(last=False)
 
         self._current_day = bar_day
         new_ohlc = _DayOHLC(
