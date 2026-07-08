@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Strategy chart</title>
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C;
+    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
+    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(ellipse at top, rgba(157,123,255,0.07), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
+      var(--bg);
+  }
+  header { display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px; background:linear-gradient(90deg,var(--purple),var(--blue),var(--green)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .backlinks { display:flex; gap:12px; font-size:13px; }
+  .backlinks a { color:var(--blue); text-decoration:none; }
+  .backlinks a:hover { color:var(--text-bright); }
+  .modebtn { margin-left:auto; cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-pill);
+    min-height:32px; padding:0 14px; font:inherit; font-size:12px; font-weight:700;
+    color:var(--text-bright); background:var(--surface-2); }
+  .modebtn:hover { border-color:var(--blue); }
+  .modebtn .cur { color:var(--green); }
+
+  main { max-width:1180px; width:min(100% - 2 * var(--gutter), 1180px); margin:0 auto; padding:20px var(--gutter) 60px; flex:1 1 auto; }
+
+  .hdrcard { background:linear-gradient(160deg,var(--surface),var(--surface-2)); border:1px solid var(--border-strong);
+    border-radius:16px; padding:18px 22px; margin-bottom:18px; }
+  .hdrcard .title { font-size:17px; font-weight:800; color:var(--text-bright); }
+  .hdrcard .meta { color:var(--muted); font-size:12px; margin-top:6px; }
+  .hdrcard .sentence { margin-top:12px; font-size:14px; line-height:1.7; color:var(--text); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .chip { font-size:11px; font-weight:700; padding:3px 10px; border-radius:var(--r-pill);
+    background:var(--surface-3); border:1px solid var(--border-strong); color:var(--muted); }
+
+  .bx-hoverable { border-bottom:1px dotted var(--muted); cursor:help; }
+  .bx-hoverable:hover, .bx-hoverable:focus-visible { border-bottom-color:var(--blue); }
+  body.bx-mode-beginner .jargon { display:none !important; }
+  body.bx-mode-pro .plain-eng { display:none !important; }
+
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px 20px; margin-bottom:18px; }
+  .panel h2 { margin:0 0 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
+  .panel .sub { font-size:12px; color:var(--muted); margin-bottom:10px; }
+  .chartwrap svg { width:100%; height:320px; display:block; background:var(--surface-2); border-radius:10px; }
+  .equitywrap svg { width:100%; height:200px; display:block; background:var(--surface-2); border-radius:10px; }
+  .tradepicker { display:flex; align-items:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .tradepicker button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-sm);
+    background:var(--surface-2); color:var(--text); padding:5px 12px; font:inherit; font-size:12px; }
+  .tradepicker button:disabled { opacity:.4; cursor:not-allowed; }
+  .tradepicker .cur { color:var(--text-bright); font-weight:700; }
+
+  .banner { margin-top:10px; padding:10px 14px; border:1px solid var(--border-strong);
+    border-radius:var(--r-md); background:var(--surface-2); color:var(--muted); font-size:13px; }
+  .banner.err { border-color:var(--red); color:var(--red); background:rgba(255,92,92,.08); }
+  .banner[hidden] { display:none; }
+
+  .trades-scroll { max-height:420px; overflow:auto; border:1px solid var(--border); border-radius:10px; }
+  .trades-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .trades-table th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
+    text-align:left; padding:8px 10px; font-weight:700; white-space:nowrap; }
+  .trades-table td { padding:8px 10px; border-top:1px solid var(--border); white-space:nowrap; cursor:pointer; }
+  .trades-table tr.focused td { background:rgba(91,141,239,.12); }
+  .trades-table tr:hover td { background:var(--surface-3); }
+  .trades-table td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .trades-table td.pos { color:var(--green); } .trades-table td.neg { color:var(--red); }
+  .trades-foot { display:flex; align-items:center; gap:10px; margin-top:8px; font-size:12px; color:var(--muted); }
+  .trades-foot button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-sm);
+    background:var(--surface-2); color:var(--text); padding:4px 10px; font:inherit; font-size:12px; }
+  .trades-foot button:disabled { opacity:.4; cursor:not-allowed; }
+
+  a:focus-visible, button:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
+  }
+</style>
+<link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
+<!-- Shared one-click sweep display helpers (esc/el, Beginner/Pro mode,
+     hover-explain, dual-language exit-reason table) — reused verbatim. -->
+<script defer src="/static/bx-oneclick.js"></script>
+<!-- Shared hand-rolled SVG candle + entry/exit-arrow + equity-curve renderer
+     — the SAME implementation the VERIFY-ME "trade_chart_match" mini-widget
+     mounts later (one code path, two mount points). -->
+<script defer src="/static/bx-oneclick-chart.js"></script>
+</head>
+<body data-accent="blue">
+  <header>
+    <div class="brandmark" aria-hidden="true">B</div>
+    <div class="logo">BruteX</div>
+    <nav class="backlinks" aria-label="Back">
+      <a href="/">&larr; Operator</a>
+      <a href="/results">Results</a>
+    </nav>
+    <button class="modebtn" id="modeToggleBtn" type="button"
+      title="Beginner mode shows plain English everywhere; Pro mode shows technical masks/stats.">
+      Mode: <span class="cur" id="modeToggleCur">beginner</span>
+    </button>
+  </header>
+
+  <main>
+    <!-- ── Combo header ─────────────────────────────────────────────────── -->
+    <div class="hdrcard">
+      <div class="title" id="hdrTitle">Loading strategy…</div>
+      <div class="meta" id="hdrMeta"></div>
+      <div class="sentence" id="hdrSentence"></div>
+      <div class="chips" id="hdrChips"></div>
+      <div class="banner err" id="hdrErrorBanner" hidden></div>
+    </div>
+
+    <!-- ── Candle chart with entry/exit arrows (R36) ───────────────────────
+         Reads the trade's own session-day OHLCV page from the EXISTING
+         GET /api/v1/db/candles endpoint (no new candle backend) and draws
+         plain hand-rolled SVG candlesticks + entry/exit triangle markers via
+         bx-oneclick-chart.js (shared with the later VERIFY-ME mini-widget). -->
+    <div class="panel">
+      <h2>Chart — entry/exit on the real candles</h2>
+      <div class="sub" id="chartSub"></div>
+      <div class="tradepicker" id="tradePicker" hidden>
+        <button id="focusPrev" type="button">&larr; Earlier trade</button>
+        <span class="cur" id="focusLabel"></span>
+        <button id="focusNext" type="button">Later trade &rarr;</button>
+      </div>
+      <div class="chartwrap"><svg id="candleSvg" viewBox="0 0 1000 360" role="img" aria-label="Candlestick chart with entry and exit markers"></svg></div>
+      <div class="banner" id="chartBanner" hidden></div>
+    </div>
+
+    <!-- ── Equity curve (R22) ───────────────────────────────────────────────
+         A REAL cumulative pnl_paisa series over the currently-loaded trades
+         page — never a fabricated line; an honest empty state when no trade
+         data is available yet. -->
+    <div class="panel">
+      <h2>Equity curve <span class="jargon">(this page's trades)</span><span class="plain-eng">(money made/lost, trade by trade)</span></h2>
+      <div class="sub" id="equitySub"></div>
+      <div class="equitywrap"><svg id="equitySvg" viewBox="0 0 1000 220" role="img" aria-label="Cumulative profit and loss across the loaded trades"></svg></div>
+      <div class="banner" id="equityBanner" hidden></div>
+    </div>
+
+    <!-- ── List of trades (R24/R31/R33) — click a row to focus the chart on
+         that trade. ── -->
+    <div class="panel">
+      <h2>List of trades</h2>
+      <div class="sub" id="tradesSub"></div>
+      <div class="trades-scroll"><table class="trades-table" id="tradesTable">
+        <thead><tr>
+          <th>Entry</th><th>Exit</th><th>Why exited</th><th class="num">P&amp;L</th>
+          <th class="num">Costs</th><th class="num">Lots</th><th class="num">MAE</th>
+          <th class="num">MFE</th><th class="num">VIX in</th><th class="num">VIX out</th>
+        </tr></thead>
+        <tbody id="tradesBody"></tbody>
+      </table></div>
+      <div class="trades-foot">
+        <button id="tradesPrev" type="button">&larr; Prev</button>
+        <span id="tradesStatus"></span>
+        <button id="tradesNext" type="button">Next &rarr;</button>
+      </div>
+      <div class="banner" id="tradesBanner" hidden></div>
+    </div>
+  </main>
+
+<script>
+/* ── BruteX chart-first strategy page (DEC-INSTITUTIONAL-ONECLICK-001, R36).
+   Client parses run_id/rank/combo_id/mask_hex/direction/tf/instrument from
+   its OWN URL query string — no server-side templating of those values
+   (avoids the reflected-XSS class movers.html's GAP B had to fix; this page
+   is served byte-identical regardless of the query string). Reads:
+     - GET /api/v1/sweep/trades  (paged trade list + combo_explanation)
+     - GET /api/v1/db/candles    (OHLCV bars — EXISTING endpoint, no new backend)
+   URL CONVENTION (documented for later stages / other pages to link into):
+     /strategy?run_id=<id>&rank=<n>&combo_id=<id>&mask_hex=<hex>
+               &direction=<long|short>&tf=<3m|5m|...|1h|1d>&instrument=<NIFTY|BANKNIFTY|SENSEX>
+   `rank`, `mask_hex`, `direction`, `tf` drive the real API calls; `combo_id`
+   and `instrument` are additionally used for display + the candle-lake
+   exchange lookup. A missing/invalid `rank` is the one truly-fatal case
+   (GET /api/v1/sweep/trades requires it) — everything else degrades to an
+   honest partial page (e.g. no `instrument` → trades/equity still render,
+   chart shows "instrument unknown" instead of guessing).
+
+   XSS HARD RULE: every server-derived string reaches the DOM via
+   .textContent / BX.el(...) (itself textContent-only) — never innerHTML.
+   See tests/unit/test_dashboard_strategy_template_xss.py. */
+(function () {
+  "use strict";
+  var BX = window.BXOneclick;
+  var BXChart = window.BXChart;
+
+  var TRADES_PAGE_SIZE = 100;
+
+  function qs(name) {
+    var v = new URLSearchParams(window.location.search).get(name);
+    return v === null || v === "" ? null : v;
+  }
+  var Q = {
+    run_id: qs("run_id"),
+    rank: qs("rank"),
+    combo_id: qs("combo_id"),
+    mask_hex: qs("mask_hex"),
+    direction: qs("direction"),
+    tf: qs("tf"),
+    instrument: qs("instrument"),
+    arm: qs("arm"),
+  };
+
+  var hdrTitle = document.getElementById("hdrTitle");
+  var hdrMeta = document.getElementById("hdrMeta");
+  var hdrSentence = document.getElementById("hdrSentence");
+  var hdrChips = document.getElementById("hdrChips");
+  var hdrErrorBanner = document.getElementById("hdrErrorBanner");
+  var chartSub = document.getElementById("chartSub");
+  var chartBanner = document.getElementById("chartBanner");
+  var candleSvg = document.getElementById("candleSvg");
+  var tradePicker = document.getElementById("tradePicker");
+  var focusPrev = document.getElementById("focusPrev");
+  var focusNext = document.getElementById("focusNext");
+  var focusLabel = document.getElementById("focusLabel");
+  var equitySub = document.getElementById("equitySub");
+  var equityBanner = document.getElementById("equityBanner");
+  var equitySvg = document.getElementById("equitySvg");
+  var tradesSub = document.getElementById("tradesSub");
+  var tradesBanner = document.getElementById("tradesBanner");
+  var tradesBody = document.getElementById("tradesBody");
+  var tradesStatus = document.getElementById("tradesStatus");
+  var tradesPrev = document.getElementById("tradesPrev");
+  var tradesNext = document.getElementById("tradesNext");
+  var modeBtn = document.getElementById("modeToggleBtn");
+  var modeCur = document.getElementById("modeToggleCur");
+
+  var tradesOffset = 0;
+  var tradesTotal = 0;
+  var currentPageRows = [];
+  var focusIndex = -1;
+
+  function fmtRupees(paisa) {
+    if (paisa === null || paisa === undefined) return "—";
+    var n = Number(paisa) / 100;
+    if (!isFinite(n)) return "—";
+    return "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  }
+  function fmtNumVal(v, digits) {
+    if (v === null || v === undefined || !isFinite(Number(v))) return "—";
+    return Number(v).toFixed(digits === undefined ? 2 : digits);
+  }
+  function fmtInt(v) {
+    if (v === null || v === undefined || !isFinite(Number(v))) return "—";
+    return Number(v).toLocaleString("en-IN");
+  }
+  function fmtTs(ts) {
+    return ts === null || ts === undefined ? "—" : String(ts);
+  }
+
+  function showBanner(el, text, isErr) {
+    el.textContent = text;
+    el.classList.toggle("err", !!isErr);
+    el.hidden = false;
+  }
+  function hideBanner(el) {
+    el.hidden = true;
+    el.textContent = "";
+  }
+
+  // ── Beginner/Pro mode toggle (shared, persisted) ──────────────────────
+  if (BX) {
+    BX.mode.init();
+    modeCur.textContent = BX.mode.get();
+    modeBtn.addEventListener("click", function () {
+      BX.mode.toggle();
+      modeCur.textContent = BX.mode.get();
+    });
+  }
+
+  // ── header ──────────────────────────────────────────────────────────
+  function renderHeader(comboExplanation) {
+    var bits = [];
+    bits.push(String(Q.instrument || "—"));
+    if (Q.tf) bits.push(Q.tf);
+    if (Q.direction) bits.push(Q.direction);
+    hdrTitle.textContent = (Q.rank ? "#" + Q.rank + " " : "") + bits.join(" · ");
+
+    var metaBits = [];
+    if (Q.combo_id) metaBits.push("combo " + Q.combo_id);
+    if (Q.run_id) metaBits.push("run " + Q.run_id);
+    if (Q.arm) metaBits.push("arm " + Q.arm);
+    hdrMeta.textContent = metaBits.join(" · ");
+
+    BX.clear(hdrSentence);
+    if (comboExplanation) {
+      var pro = BX.el("span", "jargon", comboExplanation.pro_sentence || "");
+      var plain = BX.el("span", "plain-eng", comboExplanation.simple_sentence || "");
+      hdrSentence.appendChild(pro);
+      hdrSentence.appendChild(plain);
+    }
+
+    BX.clear(hdrChips);
+    if (comboExplanation && comboExplanation.regime_label) {
+      hdrChips.appendChild(BX.el("span", "chip", comboExplanation.regime_label));
+    }
+    if (comboExplanation && comboExplanation.direction_label) {
+      hdrChips.appendChild(BX.el("span", "chip", comboExplanation.direction_label));
+    }
+    (comboExplanation && comboExplanation.conditions ? comboExplanation.conditions : []).forEach(function (c) {
+      var label = BX.mode.get() === "pro" ? c.pro_label : c.simple_label;
+      hdrChips.appendChild(BX.el("span", "chip", label || c.technical_name || ""));
+    });
+  }
+
+  // ── trade table row ─────────────────────────────────────────────────
+  function tradeRow(t, idx) {
+    var tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    tr.setAttribute("role", "button");
+    if (idx === focusIndex) tr.classList.add("focused");
+    var cells = [
+      fmtTs(t.entry_ts) + " @ " + fmtNumVal(t.entry_px, 2),
+      fmtTs(t.exit_ts) + " @ " + fmtNumVal(t.exit_px, 2),
+    ];
+    cells.forEach(function (text) {
+      var td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+
+    var whyTd = document.createElement("td");
+    var pro = BX.el("span", "jargon", BX.exitReasonLabel(t.exit_reason, "pro"));
+    var plain = BX.el("span", "plain-eng", BX.exitReasonLabel(t.exit_reason, "simple"));
+    whyTd.appendChild(pro);
+    whyTd.appendChild(plain);
+    tr.appendChild(whyTd);
+
+    var pnlTd = document.createElement("td");
+    pnlTd.className = "num " + (t.pnl_paisa != null ? (t.pnl_paisa >= 0 ? "pos" : "neg") : "");
+    pnlTd.textContent = fmtRupees(t.pnl_paisa);
+    tr.appendChild(pnlTd);
+
+    var costsTd = document.createElement("td");
+    costsTd.className = "num";
+    costsTd.textContent = fmtRupees(t.costs_paisa); // gap-register #18: NULL-by-design → "—"
+    tr.appendChild(costsTd);
+
+    var lotsTd = document.createElement("td");
+    lotsTd.className = "num";
+    lotsTd.textContent = t.lots === null || t.lots === undefined ? "—" : fmtInt(t.lots);
+    tr.appendChild(lotsTd);
+
+    [t.mae, t.mfe, t.vix_entry, t.vix_exit].forEach(function (v) {
+      var td = document.createElement("td");
+      td.className = "num";
+      td.textContent = fmtNumVal(v, 2);
+      tr.appendChild(td);
+    });
+
+    tr.addEventListener("click", function () { setFocus(idx); });
+    tr.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setFocus(idx); }
+    });
+    return tr;
+  }
+
+  function renderTradesAwaiting(text) {
+    BX.clear(tradesBody);
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = 10;
+    td.style.color = "var(--muted)";
+    td.style.whiteSpace = "normal";
+    td.textContent = text;
+    tr.appendChild(td);
+    tradesBody.appendChild(tr);
+  }
+
+  function renderTrades() {
+    BX.clear(tradesBody);
+    currentPageRows.forEach(function (t, idx) { tradesBody.appendChild(tradeRow(t, idx)); });
+  }
+
+  // ── equity curve ────────────────────────────────────────────────────
+  function renderEquity() {
+    if (!currentPageRows.length) {
+      BXChart.clearNode(equitySvg);
+      showBanner(equityBanner, "Equity curve not yet available — no trade data loaded for this combo.", false);
+      equitySub.textContent = "";
+      return;
+    }
+    var stats = BXChart.renderEquityCurve(equitySvg, currentPageRows);
+    if (!stats.points) {
+      showBanner(equityBanner, "Equity curve not yet available — every loaded trade's P&L is null.", false);
+      equitySub.textContent = "";
+      return;
+    }
+    hideBanner(equityBanner);
+    var bits = [fmtInt(stats.points) + " trades on this page", "final " + fmtRupees(stats.final)];
+    if (stats.hadNull) bits.push("some trades excluded (P&L not available)");
+    equitySub.textContent = bits.join(" · ");
+  }
+
+  // ── candle chart ────────────────────────────────────────────────────
+  function focusedTrade() {
+    return focusIndex >= 0 && focusIndex < currentPageRows.length ? currentPageRows[focusIndex] : null;
+  }
+
+  function updateTradePicker() {
+    var t = focusedTrade();
+    if (!t) { tradePicker.hidden = true; return; }
+    tradePicker.hidden = false;
+    focusLabel.textContent = fmtTs(t.entry_ts) + " (" + String(t.direction || "—") + ")";
+    focusPrev.disabled = focusIndex <= 0;
+    focusNext.disabled = focusIndex >= currentPageRows.length - 1;
+  }
+
+  function setFocus(idx) {
+    if (idx < 0 || idx >= currentPageRows.length) return;
+    focusIndex = idx;
+    renderTrades();
+    updateTradePicker();
+    loadChartForFocus();
+  }
+
+  focusPrev.addEventListener("click", function () { setFocus(focusIndex - 1); });
+  focusNext.addEventListener("click", function () { setFocus(focusIndex + 1); });
+
+  async function loadChartForFocus() {
+    var trade = focusedTrade();
+    BXChart.clearNode(candleSvg);
+    if (!trade) {
+      showBanner(chartBanner, "No trade selected yet.", false);
+      chartSub.textContent = "";
+      return;
+    }
+    if (!Q.instrument) {
+      showBanner(chartBanner, "Chart unavailable — the URL is missing ?instrument= (cannot resolve the candle-lake exchange/symbol).", false);
+      chartSub.textContent = "";
+      return;
+    }
+    var interval = BXChart.tfToInterval(Q.tf);
+    if (!interval) {
+      showBanner(chartBanner, "Chart unavailable — the URL is missing a recognisable ?tf= timeframe.", false);
+      chartSub.textContent = "";
+      return;
+    }
+    var sessionDate = BXChart.sessionDateOf(trade.entry_ts);
+    if (!sessionDate) {
+      showBanner(chartBanner, "Chart unavailable — this trade's entry_ts could not be parsed.", true);
+      chartSub.textContent = "";
+      return;
+    }
+    var exchange = BXChart.exchangeForInstrument(Q.instrument);
+    var segment = BXChart.segmentForInstrument();
+    chartSub.textContent = "loading " + Q.instrument + " " + Q.tf + " candles for " + sessionDate + "…";
+    hideBanner(chartBanner);
+    var params = new URLSearchParams();
+    params.set("exchange", exchange);
+    params.set("segment", segment);
+    params.set("symbol", Q.instrument);
+    params.set("interval", interval);
+    params.set("start", sessionDate);
+    params.set("end", sessionDate);
+    params.set("limit", "500");
+    try {
+      var r = await BX.fetchJSON("/api/v1/db/candles?" + params.toString());
+      if (!r.ok) {
+        showBanner(chartBanner, "error " + r.status + " loading candles for " + sessionDate, true);
+        chartSub.textContent = "";
+        return;
+      }
+      var body = r.body;
+      if (!body.rows || !body.rows.length) {
+        showBanner(chartBanner, "No candle data for " + Q.instrument + " " + Q.tf + " on " + sessionDate +
+          " — a real data gap, not fabricated.", false);
+        chartSub.textContent = "";
+        return;
+      }
+      var sameDay = currentPageRows.filter(function (t) {
+        return BXChart.sessionDateOf(t.entry_ts) === sessionDate;
+      });
+      var stats = BXChart.renderCandleChart(candleSvg, body, sameDay, { focusTrade: trade });
+      hideBanner(chartBanner);
+      chartSub.textContent = fmtInt(stats.bars) + " bars · " + fmtInt(stats.entriesDrawn) + " entr" +
+        (stats.entriesDrawn === 1 ? "y" : "ies") + " · " + fmtInt(stats.exitsDrawn) + " exit" +
+        (stats.exitsDrawn === 1 ? "" : "s") + " marked on " + sessionDate;
+    } catch (e) {
+      showBanner(chartBanner, "offline — could not reach the candle API", true);
+      chartSub.textContent = "";
+    }
+  }
+
+  // ── trades page load ────────────────────────────────────────────────
+  async function loadTradesPage() {
+    if (!Q.rank) {
+      showBanner(hdrErrorBanner, "This page needs ?rank= in the URL to look up a combo's trade list.", true);
+      renderTradesAwaiting("Missing ?rank= in the URL.");
+      tradesStatus.textContent = "";
+      tradesPrev.disabled = true;
+      tradesNext.disabled = true;
+      currentPageRows = [];
+      focusIndex = -1;
+      renderEquity();
+      updateTradePicker();
+      BXChart.clearNode(candleSvg);
+      return;
+    }
+    hideBanner(hdrErrorBanner);
+    tradesStatus.textContent = "loading…";
+    var params = new URLSearchParams();
+    params.set("rank", Q.rank);
+    if (Q.run_id) params.set("run_id", Q.run_id);
+    if (Q.mask_hex) params.set("mask_hex", Q.mask_hex);
+    if (Q.direction) params.set("direction", Q.direction);
+    if (Q.tf) params.set("tf", Q.tf);
+    params.set("offset", String(tradesOffset));
+    params.set("limit", String(TRADES_PAGE_SIZE));
+    try {
+      var r = await BX.fetchJSON("/api/v1/sweep/trades?" + params.toString());
+      if (!r.ok) {
+        renderTradesAwaiting("error " + r.status + " loading the trade list");
+        tradesStatus.textContent = "";
+        hideBanner(tradesBanner);
+        currentPageRows = [];
+        focusIndex = -1;
+        renderEquity();
+        updateTradePicker();
+        BXChart.clearNode(candleSvg);
+        return;
+      }
+      var body = r.body;
+      renderHeader(body.combo_explanation);
+      if (body.state === "ok") {
+        hideBanner(tradesBanner);
+        tradesTotal = body.total || 0;
+        currentPageRows = body.rows || [];
+        focusIndex = currentPageRows.length ? currentPageRows.length - 1 : -1;
+        renderTrades();
+        var shownFrom = tradesTotal ? tradesOffset + 1 : 0;
+        var shownTo = tradesOffset + currentPageRows.length;
+        tradesStatus.textContent = "showing " + fmtInt(shownFrom) + "–" + fmtInt(shownTo) +
+          " of " + fmtInt(tradesTotal) + " trades";
+        tradesSub.textContent = "click any row to move the chart above to that trade";
+        tradesPrev.disabled = tradesOffset <= 0;
+        tradesNext.disabled = shownTo >= tradesTotal;
+      } else if (body.state === "awaiting_artifact") {
+        currentPageRows = [];
+        focusIndex = -1;
+        tradesTotal = 0;
+        renderTradesAwaiting("Awaiting real artifact — " +
+          (body.reason || "no trade list for this combo yet (P3 backend not yet merged)"));
+        tradesStatus.textContent = "";
+        tradesSub.textContent = "";
+        tradesPrev.disabled = true;
+        tradesNext.disabled = true;
+      } else if (body.state === "artifact_error") {
+        currentPageRows = [];
+        focusIndex = -1;
+        tradesTotal = 0;
+        renderTradesAwaiting("Trade list present but unreadable: " + (body.reason || "unknown error"));
+        tradesStatus.textContent = "";
+        tradesSub.textContent = "";
+        tradesPrev.disabled = true;
+        tradesNext.disabled = true;
+      }
+      renderEquity();
+      updateTradePicker();
+      await loadChartForFocus();
+    } catch (e) {
+      renderTradesAwaiting("offline — could not reach the sweep API");
+      tradesStatus.textContent = "";
+      currentPageRows = [];
+      focusIndex = -1;
+      renderEquity();
+      updateTradePicker();
+      BXChart.clearNode(candleSvg);
+    }
+  }
+
+  tradesPrev.addEventListener("click", function () {
+    tradesOffset = Math.max(0, tradesOffset - TRADES_PAGE_SIZE);
+    loadTradesPage();
+  });
+  tradesNext.addEventListener("click", function () {
+    tradesOffset = tradesOffset + TRADES_PAGE_SIZE;
+    loadTradesPage();
+  });
+
+  renderHeader(null);
+  if (!BX || !BXChart) {
+    showBanner(hdrErrorBanner, "A required script failed to load — reload the page.", true);
+  } else {
+    loadTradesPage();
+  }
+})();
+</script>
+</body>
+</html>

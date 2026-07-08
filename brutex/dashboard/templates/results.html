@@ -178,6 +178,9 @@
     border-radius:var(--r-md); background:var(--surface-2); color:var(--text); width:32px; height:32px;
     font-size:16px; line-height:1; }
   .story-card .scmeta { color:var(--muted); font-size:12px; margin-top:6px; }
+  .story-card .scviewchart { display:inline-block; margin-top:8px; font-size:12px; font-weight:700;
+    color:var(--blue); text-decoration:none; }
+  .story-card .scviewchart:hover { color:var(--text-bright); }
   .story-card .sctoggle { margin-top:10px; }
   .story-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px;
     margin-top:16px; }
@@ -331,6 +334,7 @@
         <div>
           <div class="title" id="scTitle"></div>
           <div class="scmeta" id="scMeta"></div>
+          <a class="scviewchart" id="scViewChart" href="#" target="_blank" rel="noopener">View chart &rarr;</a>
         </div>
         <button class="scclose" id="scClose" type="button" aria-label="Close">&times;</button>
       </div>
@@ -749,6 +753,7 @@ if (document.readyState === "loading") {
   var scTradesPrev = document.getElementById("scTradesPrev");
   var scTradesNext = document.getElementById("scTradesNext");
   var scClose = document.getElementById("scClose");
+  var scViewChart = document.getElementById("scViewChart");
 
   var TOP100_ROWS = [];
   var vlist = null;
@@ -890,6 +895,25 @@ if (document.readyState === "loading") {
   // ── story card ───────────────────────────────────────────────────────
   function clearChildren(node) { BX.clear(node); }
 
+  /* R36 chart-first strategy page URL — see brutex/dashboard/templates/
+     strategy.html's own header comment for the full documented query-string
+     convention (also reused by the later VERIFY-ME stage's "pick any trade"
+     check). Built with URLSearchParams (auto-encoded) and assigned via the
+     `.href` PROPERTY — never a markup string — so this is not an innerHTML
+     sink regardless of what the top100/trades API ever puts in these fields. */
+  function strategyUrl(row) {
+    var params = new URLSearchParams();
+    if (row.sweep_run_id) params.set("run_id", String(row.sweep_run_id));
+    if (row.rank != null) params.set("rank", String(row.rank));
+    if (row.combo_id) params.set("combo_id", String(row.combo_id));
+    if (row.mask_hex) params.set("mask_hex", String(row.mask_hex));
+    if (row.direction) params.set("direction", String(row.direction));
+    if (row.tf) params.set("tf", String(row.tf));
+    if (row.instrument) params.set("instrument", String(row.instrument));
+    if (row.arm) params.set("arm", String(row.arm));
+    return "/strategy?" + params.toString();
+  }
+
   function metricTile(label, value, cls, explainKey) {
     var tile = BX.el("div", "story-tile");
     var v = BX.el("div", "stv" + (cls ? " " + cls : ""), value);
@@ -948,6 +972,7 @@ if (document.readyState === "loading") {
     var metaBits = ["combo " + String(row.combo_id || "—"), "run " + String(row.sweep_run_id || "—")];
     if (row.join_key_inferred) metaBits.push("legacy row — some links inferred");
     scMeta.textContent = metaBits.join(" · ");
+    scViewChart.href = strategyUrl(row);
     renderStoryTiles(row);
     renderStoryTwins(row);
     var pro = BX.el("span", "jargon", row.pro_sentence || "");

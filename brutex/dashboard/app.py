@@ -5619,6 +5619,28 @@ def build_app(
         """
         return _render_results_html()
 
+    @app.get("/strategy", response_class=HTMLResponse)
+    async def strategy_page() -> str:
+        """GET /strategy — the R36 chart-first strategy page (DEC-INSTITUTIONAL-ONECLICK-001, P4 stage 4 of 6).
+
+        A dedicated candle-chart-with-entry/exit-arrows + equity-curve +
+        list-of-trades screen for ONE combo. Served as a plain cached static
+        file with ZERO server-side token substitution (mirrors
+        ``_load_reports_template``'s single-load-then-serve-verbatim
+        pattern) — the client parses ``run_id``/``rank``/``combo_id``/
+        ``mask_hex``/``direction``/``tf``/``instrument`` from its OWN URL
+        query string and drives every fetch itself
+        (``GET /api/v1/sweep/trades``, the EXISTING
+        ``GET /api/v1/db/candles``), so no server value is ever reflected
+        into the page — the reflected-XSS class ``movers.html``'s GAP B had
+        to fix cannot recur here. Reachable via a "View chart" link from
+        ``/results``' per-combo story card and the Operator page's Top-100
+        rows — deliberately NOT a ``nav.py`` NAV_LINKS entry (grounding-fact
+        preference for a contextual link over a new top-level nav row; see
+        ``sweep-parallel-integration-contracts``).
+        """
+        return _load_strategy_template()
+
     @app.post("/api/v1/cascade/run")
     async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
         """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
@@ -7404,6 +7426,32 @@ def _load_results_template() -> str:
 def _render_results_html() -> str:
     """Return the brute-force sweep leaderboard page HTML (DEC-DASHBOARD-RESULTS-PAGE-001)."""
     return _load_results_template()
+
+
+_STRATEGY_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "strategy.html"
+_STRATEGY_TEMPLATE_CACHE: str | None = None
+
+
+def _load_strategy_template() -> str:
+    """Load + cache the R36 chart-first strategy page template (DEC-INSTITUTIONAL-ONECLICK-001).
+
+    Ships as ``brutex/dashboard/templates/strategy.html``. Deliberately named
+    ``_load_*`` rather than ``_render_*_html`` — this page carries NO
+    canonical top-nav (it is reached only via contextual links from
+    ``/results`` and the Operator page, per the grounding-fact preference
+    over a new ``nav.py`` NAV_LINKS row), so it is intentionally OUTSIDE the
+    ``_render_*_html`` naming convention
+    ``tests/unit/test_dashboard_nav_consistency.py``'s meta-guard scans —
+    that guard exists to catch a page that SHOULD carry the canonical nav
+    but doesn't; this page is deliberately exempt by construction, not by an
+    entry in that test's exemption list. Loaded once, then served verbatim
+    with ZERO token substitution (the page parses its own query string
+    client-side).
+    """
+    global _STRATEGY_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _STRATEGY_TEMPLATE_CACHE is None:
+        _STRATEGY_TEMPLATE_CACHE = _STRATEGY_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _STRATEGY_TEMPLATE_CACHE
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:
