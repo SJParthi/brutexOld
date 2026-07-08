@@ -84,7 +84,8 @@ class TestLaunchPage:
         # M4 honesty caveat: freshness is the CLI preflight's job
         assert "FRESHNESS is verified by the CLI" in body
         # M1: keep-awake is a separate watcher note
-        assert "caffeinate -i -s -w" in body
+        assert "caffeinate -dimsu -w" in body
+        assert "follow-on delta run" in body  # audit delta: k=6 note
 
     def test_page_renders_without_store(self, bare_client: TestClient) -> None:
         assert bare_client.get("/launch").status_code == 200

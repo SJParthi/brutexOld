@@ -59,7 +59,7 @@ existing run's info — never a duplicate launch on any probed-alive record.
 A DEAD recorded pid self-heals (the lock is recoverable) — stale-pid
 recovery is logged, not silent. The pidfile ALWAYS holds the REAL sweep pid
 (review round-2 M1): the sweep is spawned directly, and keep-awake is a
-SEPARATE detached ``caffeinate -i -s -w <sweep_pid>`` watcher whose death is
+SEPARATE detached ``caffeinate -dimsu -w <sweep_pid>`` watcher whose death is
 harmless — it never carries run identity and self-exits when the sweep ends.
 
 SLA guard (coordinator delta): ``--acknowledge-sla-overrun`` is NOT
@@ -130,12 +130,15 @@ __all__ = [
     "DEFAULT_MIN_DISK_FREE_BYTES",
     "FUTURES_DEPENDENCY_NOTE",
     "GRID_HONESTY_NOTE",
+    "K6_FOLLOWON_NOTE",
     "LAUNCH_CARDS",
     "LOCKED_DIRECTIONS",
     "LOCKED_INTERVALS",
     "LOCKED_K",
     "LOCKED_MAX_COMBOS",
+    "LOCKED_STALL_MASK_BARS_PER_SEC",
     "LOCKED_START",
+    "LOCKED_SWEEP_MEM_BUDGET_BYTES",
     "LOCKED_SWEEP_WORKERS",
     "LOCKED_TOP",
     "SLA_ACK_FLAG",
@@ -177,7 +180,9 @@ LOCKED_INTERVALS: Final[tuple[str, ...]] = tuple(
 #: value is the CLI default (dedup-identity hygiene: the launch command is the
 #: complete record of the run shape).
 LOCKED_DIRECTIONS: Final[str] = "BUY,SELL"
-LOCKED_K: Final[str] = "1,2,3,4,5,6"
+LOCKED_K: Final[str] = "1,2,3,4,5"  # audit delta: k=6 dropped — measured per-tuple
+# timing (W05_stall_table) puts k<=6 at 4.2-13.9 M4-days, outside the launch SLA;
+# k=6 runs as a documented follow-on delta run (identical flags, same --max-combos).
 LOCKED_SL: Final[str] = "none"
 LOCKED_TP: Final[str] = "none"
 LOCKED_MAX_COMBOS: Final[int] = 50_100_000
@@ -185,6 +190,22 @@ LOCKED_TOP: Final[int] = 20
 
 #: Worker count exported to the detached CLI process (CLAUDE.md §8 envelope).
 LOCKED_SWEEP_WORKERS: Final[str] = "8"
+
+#: Rank-region byte budget exported to the child (audit delta, W07_m4_oom_table:
+#: the divisor=1 worker OOM was live-proven and the 1 GiB arm bit-identical).
+#: Verified against main's real env name (`sweep_mem_budget.MEM_BUDGET_ENV`) and
+#: its fail-loud positive-int parser (`resolve_mem_budget_bytes` accepts this
+#: literal).
+LOCKED_SWEEP_MEM_BUDGET_BYTES: Final[str] = "1073741824"
+
+#: Stall-guard floor exported to the child (audit delta, W05_stall_table:
+#: pre-calibrated so the #1291 stall guard, once merged, does not false-abort
+#: heavy 1-minute tuples). HONEST: #1291 is UNMERGED — main reads no such env
+#: (grep-verified), so this is inert-but-harmless until it lands.
+LOCKED_STALL_MASK_BARS_PER_SEC: Final[str] = "20000000"
+
+#: The honest on-page k=6 note (audit delta — kept OUT of tonight's locked grid).
+K6_FOLLOWON_NOTE: Final[str] = "k=6 runs as a documented follow-on delta run"
 
 #: The honest grid summary — the futures ``1day`` TF is structurally
 #: TRADE-less (audit: phase3/W_1264_branch_validation.md), so the page never
@@ -334,7 +355,8 @@ def keepawake_watcher_argv(
 ) -> list[str] | None:
     """The SEPARATE keep-awake watcher argv, or ``None`` where unavailable.
 
-    Review round-2 M1: keep-awake is ``caffeinate -i -s -w <sweep_pid>`` — a
+    Review round-2 M1 + audit delta (W02_keepawake): keep-awake is
+    ``caffeinate -dimsu -w <sweep_pid>`` — a
     DETACHED WATCHER of the real sweep pid, never a wrapper carrying run
     identity. Its death is harmless (the pidfile keys on the sweep's own
     pid) and it self-exits when the sweep ends (``-w``). Degrades gracefully
@@ -343,7 +365,7 @@ def keepawake_watcher_argv(
     caffeinate = which("caffeinate")
     if caffeinate is None:
         return None
-    return [caffeinate, "-i", "-s", "-w", str(sweep_pid)]
+    return [caffeinate, "-dimsu", "-w", str(sweep_pid)]
 
 
 def _default_watcher_spawner(argv: list[str]) -> int:
@@ -813,7 +835,12 @@ def _default_spawner(argv: list[str], log_path: Path) -> int:
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env={**os.environ, "BRUTEX_SWEEP_WORKERS": LOCKED_SWEEP_WORKERS},
+            env={
+                **os.environ,
+                "BRUTEX_SWEEP_WORKERS": LOCKED_SWEEP_WORKERS,
+                "BRUTEX_SWEEP_MEM_BUDGET_BYTES": LOCKED_SWEEP_MEM_BUDGET_BYTES,
+                "BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC": LOCKED_STALL_MASK_BARS_PER_SEC,
+            },
         )
     pid = proc.pid
     # DELIBERATE disown: the dashboard never owns/waits this handle (that is
@@ -853,7 +880,7 @@ def launch_sweep(
     crash-stranded placeholder self-heals after :data:`LAUNCHING_GRACE_S`.
 
     M1 (review round-2): the recorded pid is ALWAYS the real sweep pid; the
-    keep-awake ``caffeinate -i -s -w <pid>`` watcher is spawned separately,
+    keep-awake ``caffeinate -dimsu -w <pid>`` watcher is spawned separately,
     best-effort, and never carries run identity.
 
     Raises

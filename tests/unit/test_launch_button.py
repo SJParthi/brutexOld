@@ -51,7 +51,8 @@ class TestLockedSweepArgv:
         assert "--start 2020-01-01" in joined
         assert "--end 2026-07-09" in joined
         assert "--directions BUY,SELL" in joined
-        assert "--k 1,2,3,4,5,6" in joined
+        assert "--k 1,2,3,4,5" in joined
+        assert "--k 1,2,3,4,5,6" not in joined  # audit delta: k=6 is the follow-on run
         assert "--sl none --tp none" in joined
         assert "--max-combos 50100000" in joined
         assert "--top 20" in joined
@@ -132,7 +133,8 @@ class TestLockedSweepArgv:
         assert ns.command == "sweep-all"
         assert ns.symbols == "NIFTY"
         assert ns.end == "2026-07-09"
-        assert ns.max_combos == 50_100_000
+        assert ns.max_combos == 50_100_000  # W15EARLY: kept unchanged at k<=5 (per-tuple-per-k)
+        assert ns.k == "1,2,3,4,5"
         assert ns.top == 20
         assert ns.acknowledge_sla_overrun is True
         assert ns.intervals.count(",") == 20  # 21 timeframes
@@ -155,7 +157,7 @@ class TestKeepawakeWatcher:
 
     def test_watcher_argv_watches_the_sweep_pid(self) -> None:
         argv = lb.keepawake_watcher_argv(4242, which=lambda name: f"/usr/bin/{name}")
-        assert argv == ["/usr/bin/caffeinate", "-i", "-s", "-w", "4242"]
+        assert argv == ["/usr/bin/caffeinate", "-dimsu", "-w", "4242"]
 
     def test_degrades_gracefully_without_caffeinate(self) -> None:
         assert lb.keepawake_watcher_argv(4242, which=lambda name: None) is None
@@ -557,7 +559,7 @@ class TestLaunchSweep:
         argv = record["argv"]
         assert argv[0] == sys.executable
         assert "caffeinate" not in " ".join(argv)
-        assert watcher_record["argv"] == ["/usr/bin/caffeinate", "-i", "-s", "-w", "4242"]
+        assert watcher_record["argv"] == ["/usr/bin/caffeinate", "-dimsu", "-w", "4242"]
         assert out.active["keepawake_pid"] == 888
         # coordinator delta: no ack by default
         assert lb.SLA_ACK_FLAG not in argv
@@ -815,13 +817,18 @@ class TestDefaultSpawner:
             time.sleep(0.05)
         assert log_path.read_text(encoding="utf-8").strip() == "0"
 
-    def test_child_env_carries_locked_workers(self, tmp_path: Path) -> None:
+    def test_child_env_carries_locked_trio(self, tmp_path: Path) -> None:
+        """Audit delta: workers + mem budget (W07_m4_oom_table) + stall floor (W05)."""
         log_path = tmp_path / "env.log"
         pid = lb._default_spawner(
             [
                 sys.executable,
                 "-c",
-                "import os; print(os.environ['BRUTEX_SWEEP_WORKERS'], flush=True)",
+                (
+                    "import os; print(os.environ['BRUTEX_SWEEP_WORKERS'],"
+                    " os.environ['BRUTEX_SWEEP_MEM_BUDGET_BYTES'],"
+                    " os.environ['BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC'], flush=True)"
+                ),
             ],
             log_path,
         )
@@ -830,7 +837,19 @@ class TestDefaultSpawner:
             if lb.probe_pid(pid) == "exited":
                 break
             time.sleep(0.05)
-        assert log_path.read_text(encoding="utf-8").strip() == lb.LOCKED_SWEEP_WORKERS
+        assert log_path.read_text(encoding="utf-8").split() == [
+            lb.LOCKED_SWEEP_WORKERS,
+            lb.LOCKED_SWEEP_MEM_BUDGET_BYTES,
+            lb.LOCKED_STALL_MASK_BARS_PER_SEC,
+        ]
+
+    def test_mem_budget_value_parses_through_the_real_fail_loud_parser(self) -> None:
+        """The exported literal is accepted by main's sweep_mem_budget resolver."""
+        from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV, resolve_mem_budget_bytes
+
+        assert MEM_BUDGET_ENV == "BRUTEX_SWEEP_MEM_BUDGET_BYTES"
+        resolved = resolve_mem_budget_bytes({MEM_BUDGET_ENV: lb.LOCKED_SWEEP_MEM_BUDGET_BYTES})
+        assert resolved == 1_073_741_824
 
 
 # ── log tail + status + page state ──────────────────────────────────

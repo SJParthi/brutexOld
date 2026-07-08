@@ -128,8 +128,11 @@
     <div id="flash"></div>
     <div class="cards" id="cards"></div>
     <div class="sub" style="margin-top:8px">
+      Locked depth: k 1–5 tonight (audit verdict — k≤6 measured at 4.2–13.9 M4-days,
+      outside the SLA); k=6 runs as a documented follow-on delta run with identical flags.
+      <br />
       Keep-awake: when <code>caffeinate</code> exists (macOS) a SEPARATE detached
-      <code>caffeinate -i -s -w &lt;sweep-pid&gt;</code> watcher is spawned — the recorded pid
+      <code>caffeinate -dimsu -w &lt;sweep-pid&gt;</code> watcher is spawned — the recorded pid
       is always the sweep's own; the watcher's death is harmless. On Linux this degrades to
       nothing (Energy-Saver checklist still applies).
     </div>
@@ -226,7 +229,7 @@
       card.appendChild(el("h3", null, c.title));
       card.appendChild(el("div", "coords",
         c.symbol + " · " + c.exchange + "/" + c.segment +
-        " · 21 TFs · k≤6 · SL/TP none · top 20 · end " + state.end_day));
+        " · 21 TFs · k≤5 · SL/TP none · top 20 · end " + state.end_day));
       card.appendChild(el("div", "gridnote", state.grid_note));
       var shown = c.command_display + (ackChecked() ? " " + c.sla_ack_flag : "");
       var pre = el("pre", null, shown);
