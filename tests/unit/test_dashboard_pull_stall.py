@@ -1165,3 +1165,33 @@ class TestWatchdogAliveBeat:
         alive = self._alive(logs)
         assert len(alive) == 1
         assert alive[0]["state"] == "unregistered"
+
+    def test_alive_log_carries_the_stamped_run_id(self) -> None:
+        """DEC-PULL-BEAT-PERRUN-001: ``run_id`` defaults ``""``, is assignable
+        POST-construction (the on_recovery pattern — the factory signature stays
+        ``(on_hung)``), and rides the alive event as an ADDITIVE ``pull_id`` field.
+        Event name + throttle behaviour byte-unchanged."""
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        assert wd.run_id == ""  # the unstamped default
+        wd.start()
+        with capture_logs() as logs:
+            wd.check_once()
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["pull_id"] == ""  # a bare/test watchdog reads honestly empty
+
+        clock2 = _FakeClock()
+        wd2 = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock2
+        )
+        wd2.run_id = "abc123def456"  # the job's post-construction stamp
+        wd2.start()
+        with capture_logs() as logs:
+            wd2.check_once()
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["pull_id"] == "abc123def456"

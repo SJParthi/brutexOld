@@ -78,11 +78,13 @@ __all__ = [
     "DB_DATASETS_KEY",
     "FNO_CASCADE_KEY",
     "LATEST_MOVERS_DATE_KEY",
+    "LATEST_MOVERS_MINUTE_KEY_PREFIX",
     "MOVERS_DATASETS_KEY",
     "PREOPEN_DATASETS_KEY_PREFIX",
     "SPOT_CASCADE_KEY",
     "build_db_datasets_payload",
     "filter_spot_datasets",
+    "latest_movers_minute_key",
     "preopen_datasets_key",
     "warm_discovery_memos",
 ]
@@ -100,6 +102,11 @@ SPOT_CASCADE_KEY: Final[str] = "db_spot_cascade"
 FNO_CASCADE_KEY: Final[str] = "db_fno_cascade"
 #: Cache key of the ``/movers`` default-day latest-date resolve (GAP #4).
 LATEST_MOVERS_DATE_KEY: Final[str] = "latest_movers_date"
+#: Key PREFIX of the ``/movers`` default-day latest-MINUTE display resolve
+#: (DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — the date is IN the key (the ``|``-join
+#: discipline; a repeat DEFAULT intraday poll on the same day is an O(1) handoff,
+#: a new latest day re-resolves), so it never collides with the date key above.
+LATEST_MOVERS_MINUTE_KEY_PREFIX: Final[str] = "latest_movers_minute"
 
 #: Key PREFIX of the /reports pre-open symbol-discovery memos
 #: (DEC-O1-CLAIMS-HONESTY-001) in the SAME ``_db_datasets_cache``. One memo
@@ -113,6 +120,16 @@ PREOPEN_DATASETS_KEY_PREFIX: Final[str] = "preopen_datasets"
 def preopen_datasets_key(basis: str) -> str:
     """The generation-memo key of one basis's pre-open symbol triples."""
     return f"{PREOPEN_DATASETS_KEY_PREFIX}|{basis}"
+
+
+def latest_movers_minute_key(date_str: str) -> str:
+    """The generation-memo key of the default-day latest-MINUTE display resolve.
+
+    The ISO date is IN the key (DEC-MOVERS-ASOF-LATEST-DEFAULT-001), so a repeat
+    DEFAULT intraday poll on the same latest day is an O(1) handoff and a new
+    latest day re-resolves — never colliding with the sibling latest-DATE memo.
+    """
+    return f"{LATEST_MOVERS_MINUTE_KEY_PREFIX}|{date_str}"
 
 
 #: The five discovery memos seeded OUTSIDE the per-basis preopen loop

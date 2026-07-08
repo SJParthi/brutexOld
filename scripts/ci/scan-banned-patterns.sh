@@ -20,7 +20,7 @@
 #   5. No hardcoded broker auth tokens (pattern: any `*_API_AUTH_TOKEN = "..."`
 #      or `*_ACCESS_TOKEN = "..."`)
 #   6. No hardcoded Telegram tokens (pattern: `<digits>:<base64>`)
-#   7. No `pandas` imports in brutex/math/ (must be pure compute or numpy)
+#   7. No `pandas` imports anywhere in brutex/ (import-anchored; polars/numpy only)
 
 set -euo pipefail
 
@@ -75,9 +75,19 @@ if git ls-files 'brutex/**/*.py' 'tests/**/*.py' 2>/dev/null | \
     fail "Possible hardcoded Telegram bot token detected. Use BRUTEX_TELEGRAM_BOT_TOKEN env var."
 fi
 
-# ── 7. pandas imports in brutex/math/ ──
-if git ls-files 'brutex/math/**/*.py' 2>/dev/null | xargs grep -En 'import pandas|from pandas' 2>/dev/null; then
-    fail "pandas imported in brutex/math/. This layer must be pure compute (numpy + fno-math only)."
+# ── 7. pandas imports anywhere in brutex/ ──
+# CLAUDE.md §4: "No pandas in hot paths — use polars or numpy + numba or Rust".
+# pandas is not even a declared dependency (pyproject.toml: polars + numpy are)
+# — ANY brutex/ import of it is a defect. Anchored to real import statements so
+# comments/docstrings mentioning pandas never false-positive. tests/ stays
+# deliberately out of scope (a test may use pandas as an independent oracle;
+# none does today).
+# PATHSPEC NOTE: git's 'brutex/**/*.py' requires an intermediate directory and
+# MISSES the top-level brutex/*.py modules (cli.py, money.py, universe.py, ...)
+# — both globs are needed for the check to genuinely cover ALL of brutex/.
+if git ls-files 'brutex/*.py' 'brutex/**/*.py' 2>/dev/null | \
+   xargs grep -En '^\s*(import\s+pandas\b|from\s+pandas\b)' 2>/dev/null; then
+    fail "pandas imported in brutex/. Use polars or numpy (CLAUDE.md §4; pandas is not a dependency)."
 fi
 
 # ── 8. Python math implementations in brutex/math/ ──

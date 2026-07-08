@@ -107,6 +107,15 @@ class TestShimCompiledSurfaceAssertion:
         with pytest.raises(ImportError, match="ResidentSweepSim"):
             _assert_compiled_surface(fake)
 
+    def test_missing_u128_symbol_raises_actionable_import_error(self) -> None:
+        # DEC-TRADE-SIM-U128-KERNEL-001 handshake pin (the LOUD stale-wheel
+        # mode): a new-shim + old-.so posture — an installed wheel predating
+        # the u128 kernel — fails AT IMPORT naming ResidentSweepSimU128, so
+        # the kernel commit is not cherry-pickable without a rebuild.
+        fake = _fake_stale_module("ResidentSweepSimU128")
+        with pytest.raises(ImportError, match="ResidentSweepSimU128"):
+            _assert_compiled_surface(fake)
+
     def test_error_message_names_maturin_rebuild(self) -> None:
         fake = _fake_stale_module("blake3_hash")
         with pytest.raises(ImportError) as excinfo:

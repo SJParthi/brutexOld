@@ -16,20 +16,57 @@ write on a wedged volume) would block its caller FOREVER:
 
 All share the same hazard — a hung call with no timeout — and this module is the SINGLE
 freeze guard for all of them (CLAUDE.md §11 COMMON, one primitive, no copy). It is
-deliberately **stdlib-only** (it imports ``threading`` / ``os`` / ``math`` and nothing
-from any ``brutex`` package), so it can never take part in an import cycle. It lives in
+deliberately **stdlib-only** (it imports ``contextvars`` / ``threading`` / ``os`` /
+``math`` and nothing from any ``brutex`` package), so it can never take part in an import
+cycle. It lives in
 :mod:`brutex.config` — the layer BOTH :mod:`brutex.adapters` and :mod:`brutex.data`
 already import (the ``brutex.config.hardware_envelope`` precedent) — so the store guard
 never needs a data→adapters import; :mod:`brutex.adapters.groww.deadline` re-exports it
 byte-compatibly (the DEC-GROWW-REAUTH-DEADLINE-001 #910 relocation precedent).
+
+Run correlation (DEC-PULL-BEAT-PERRUN-001 fix round): the daemon worker runs inside a
+COPY of the CALLER thread's contextvars context (one fresh copy per call — the
+:class:`~brutex.orchestrator.parallel.PoolRunParallel` precedent), so the wrapped *fn*
+keeps the caller's ambient ``pull_id``. Load-bearing for the deadline-wrapped durable
+write (:func:`~brutex.adapters.groww.write_deadline.append_with_deadline`, BOTH spine
+tails): the partition-flock lock-wait poll inside ``sink.append`` fires
+:func:`~brutex.observability.progress_beat.emit_progress_beat` per retry (the
+DEC-PULL-CONTENTION-ANTISTALL-001 GAP-#15 antistall seam), and a fresh thread's EMPTY
+context would resolve the ambient run id to ``""`` — the run's OWN write-contention
+beats would DROP as foreign instead of feeding its keyed watchdog channel, consuming
+the once-per-epoch ``progress_beat.foreign_beat_dropped`` WARN and silencing a later
+genuine zombie's WARN.
 """
 
 from __future__ import annotations
 
+import contextvars
 import math
 import os
 import threading
 from collections.abc import Callable
+
+
+class DeadlineSpawnError(RuntimeError):
+    """The guard FAILED TO SPAWN its worker daemon — ``fn`` never ran.
+
+    Raised ONLY by :func:`run_with_deadline` when ``threading.Thread(...).start()``
+    itself fails (a :class:`RuntimeError` under thread/memory exhaustion). A
+    DISTINCT type so a caller that must degrade on "the GUARD's own failure
+    modes" — expiry (:class:`DeadlineExceeded`) or this spawn failure — can
+    match the pair EXACTLY without also swallowing a :class:`RuntimeError`
+    raised by *fn* ITSELF (e.g. a :class:`RecursionError` out of a wrapped
+    parse — a genuine ``fn`` error, re-raised UNCHANGED on the caller thread,
+    never re-typed). The hostile-review round-4 MINOR on
+    ``pull_singleflight._bounded_lease_io``: its ``except (DeadlineExceeded,
+    RuntimeError)`` silently reclassified any fn-raised ``RuntimeError`` as a
+    wedged-volume event, contradicting its own "a genuine code bug still
+    propagates" contract — this type is the narrow spawn signal that catch
+    needed. A ``RuntimeError`` SUBCLASS, so every pre-existing broad
+    ``except RuntimeError`` / ``except Exception`` spawn-failure owner (the
+    ``rate_bridge_cache`` #1522 precedent) still catches it byte-compatibly.
+    The original ``Thread.start`` error rides ``__cause__``.
+    """
 
 
 class DeadlineExceeded(TimeoutError):
@@ -74,7 +111,11 @@ def run_with_deadline[T](
 
     A caller that must distinguish THIS guard's timeout from a :class:`TimeoutError` raised
     by *fn* ITSELF matches the :class:`DeadlineExceeded` subclass (a real ``fn``-raised
-    ``TimeoutError`` is re-raised UNCHANGED on the caller thread, never re-typed).
+    ``TimeoutError`` is re-raised UNCHANGED on the caller thread, never re-typed). The
+    guard's OTHER own failure mode — ``Thread.start()`` raising under thread/memory
+    exhaustion, so *fn* never ran — surfaces as the typed :class:`DeadlineSpawnError`
+    (a ``RuntimeError`` subclass; the original error on ``__cause__``), so a caller can
+    likewise tell it apart from a ``RuntimeError`` raised by *fn* itself.
 
     Generic over the return type so it bounds the historical candle call, the token
     re-mint, the durable lake write AND the registry/coverage DuckDB writes — one
@@ -93,6 +134,16 @@ def run_with_deadline[T](
     ``tests/unit/test_config_deadline.py`` pin this by firing N timed-out calls and
     asserting the thread count returns to its pre-storm baseline once every simulated
     hang releases.
+
+    The worker runs inside a COPY of the CALLER's contextvars context
+    (DEC-PULL-BEAT-PERRUN-001 fix round — a fresh thread starts with an EMPTY context,
+    so without the copy every ``emit_progress_beat`` fired inside *fn* — the
+    partition-flock lock-wait poll under a deadline-wrapped ``sink.append`` in BOTH
+    spine tails — resolved its ambient ``pull_id`` to ``""`` and DROPPED as a foreign
+    beat instead of feeding the run's keyed watchdog channel). One fresh copy per call
+    (the ``PoolRunParallel`` precedent): anything *fn* binds mutates only the discarded
+    copy, so no bind can leak across calls or back into the caller; a scope-less caller
+    (the CLI path) propagates an empty copy — byte-identical to the pre-copy behaviour.
     """
     result: dict[str, T] = {}
     failure: dict[str, Exception] = {}
@@ -106,7 +157,18 @@ def run_with_deadline[T](
         finally:
             done.set()
 
-    threading.Thread(target=_runner, name=thread_name, daemon=True).start()
+    # Capture on the CALLER thread; run the worker inside the copy so the wrapped fn
+    # keeps the caller's ambient run correlation (pull_id) — see the docstring above.
+    ctx = contextvars.copy_context()
+    worker = threading.Thread(target=ctx.run, args=(_runner,), name=thread_name, daemon=True)
+    try:
+        worker.start()
+    except RuntimeError as exc:
+        # Thread/memory exhaustion — ``fn`` NEVER ran. A typed spawn signal
+        # (see :class:`DeadlineSpawnError`): callers that degrade on the
+        # guard's OWN failure modes match (DeadlineExceeded, DeadlineSpawnError)
+        # exactly, while an fn-raised RuntimeError below stays a genuine error.
+        raise DeadlineSpawnError(f"{what} guard thread spawn failed: {exc}") from exc
     if not done.wait(seconds):
         # The guard's OWN timeout — a DeadlineExceeded (TimeoutError subclass). A real
         # TimeoutError raised by ``fn`` itself takes the ``failure`` path below and is re-raised
@@ -154,4 +216,4 @@ def resolve_env_seconds(env_name: str, default: float, raw: str | None = None) -
     return parsed
 
 
-__all__ = ["DeadlineExceeded", "resolve_env_seconds", "run_with_deadline"]
+__all__ = ["DeadlineExceeded", "DeadlineSpawnError", "resolve_env_seconds", "run_with_deadline"]

@@ -560,6 +560,12 @@ class TestFuturesOptionsMaterialisationInvariance:
             )
 
         # Patch BOTH bound names (movers_futures imported the helper by value).
+        # Since DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 the baselines resolve through
+        # movers_snapshot.resolve_prev_close / movers_futures.resolve_prev_oi —
+        # each resolver's ONLY fallback is this walk-back helper (looked up at
+        # call time from its module globals), so patching the two module names
+        # still intercepts every fallback beneath the new resolver level and the
+        # 1day-first / fallback-only-when-no-1day law keeps its teeth.
         monkeypatch.setattr(movers_snapshot, "_prior_session_last_from_minute", _must_not_walk_back)
         monkeypatch.setattr(movers_futures, "_prior_session_last_from_minute", _must_not_walk_back)
         cands = compute_futures_candidates(

@@ -104,6 +104,7 @@ from brutex.adapters.groww.option_ingest import (
     run_groww_option_ingest,
 )
 from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
@@ -120,6 +121,9 @@ from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.errors import StoreWriteDeadlineExceeded
+from brutex.data.greeks_enrich_pass import GREEKS_NOT_RUN as _GREEKS_NOT_RUN
+from brutex.data.greeks_enrich_pass import GreeksEnrichOutcome as _GreeksEnrichOutcome
+from brutex.data.greeks_enrich_pass import run_greeks_enrich_pass
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.raw_integrity_store import make_capture_hook_factory
 from brutex.data.registry_store import (
@@ -149,6 +153,7 @@ if TYPE_CHECKING:
     # composite_pull → this module at runtime).
     from brutex.dashboard.pipeline_verdict import PriorStepsVerdict
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
+    from brutex.data.greeks_enrich import GreeksEnrichTarget
     from brutex.orchestrator.audit import AuditWriter
 
 #: The ONLY granularity fetched from Groww for an F&O contract
@@ -1136,6 +1141,7 @@ def _run_phase(
     audit: AuditWriter | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    form_preference: SymbolFormPreference | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
 
@@ -1355,6 +1361,12 @@ def _run_phase(
                 breaker_health_probe=breaker_canary,
                 storm_breaker=storm_breaker,
                 audit=audit,
+                # ONE shared &-form preference across every step bucket AND
+                # every until-clean round (DEC-FORM-WINNER-PERSIST-001; the
+                # spine's fresh-per-pass default stands down when threaded) —
+                # in production the PersistentSymbolFormPreference over the
+                # instrument master, so the winner survives across pulls too.
+                form_preference=form_preference,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1752,40 +1764,6 @@ def _resolve_minute_windows(
     return windows
 
 
-@dataclass(frozen=True, slots=True)
-class _GreeksEnrichOutcome:
-    """The honest outcome of one post-pull Greeks-enrichment pass.
-
-    DEC-GREEKS-ENRICH-OBSERVE-001 — the tiny value the fully-guarded
-    :func:`_enrich_greeks_from_minute` wrapper returns so
-    :func:`pull_contract_candles` can surface the pass on the report + note
-    instead of one swallowed log line.
-
-    Attributes
-    ----------
-    ok
-        ``True`` = the pass COMPLETED (per-target quarantines ride
-        :attr:`errored_targets`, they never flip ``ok`` — one corrupt contract
-        must not read as a whole-pass failure); ``False`` = the WHOLE pass
-        failed (see :attr:`error`); ``None`` = the pass did not run (dry-run).
-    error
-        ``f"{type(exc).__name__}: {exc}"`` on a whole-pass failure; ``None``
-        otherwise.
-    errored_targets
-        The driver's per-target quarantine tally (the success branch's
-        ``report.errored``); ``0`` on a whole-pass failure / not-run.
-    """
-
-    ok: bool | None
-    error: str | None
-    errored_targets: int
-
-
-#: The "pass did not run" outcome (dry-run — nothing was written to enrich).
-_GREEKS_NOT_RUN: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
-    ok=None, error=None, errored_targets=0
-)
-
 #: The strict-barrier WITHHELD outcome (DEC-PULL-SIX-STEP-ORDER-001): under
 #: ``BRUTEX_PIPELINE_STRICT_GATE=1`` an unclean prior step (spot/metadata —
 #: via the threaded ``PriorStepsVerdict``) or an unclean F&O phase withholds
@@ -1793,6 +1771,11 @@ _GREEKS_NOT_RUN: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
 #: verdict (nothing is lost: the overlay is re-derivable and the next pull
 #: re-attempts it — the #1188 value-check reuse gate recomputes correctly).
 #: The note names it via the ``greeks_strict_withheld`` clause, never silence.
+#: A DISTINCT instance of the COMMON outcome type (DEC-CLI-GREEKS-ENRICH-001
+#: moved ``_GreeksEnrichOutcome``/``_GREEKS_NOT_RUN`` to
+#: :mod:`brutex.data.greeks_enrich_pass`; the caller's identity check
+#: ``greeks_outcome is _GREEKS_STRICT_WITHHELD`` keys on THIS object, so it
+#: can never collide with the module-level ``GREEKS_NOT_RUN`` sentinel).
 _GREEKS_STRICT_WITHHELD: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
     ok=None, error=None, errored_targets=0
 )
@@ -1881,31 +1864,23 @@ def _enrich_greeks_from_minute(
     ``greeks_enrich_after_pull`` (DEC-GREEKS-ENGINE-PR2B-001 /
     `DEC-GREEKS-GENERATION-TIME-001`, plan §15.4): the F&O Greeks pass at the
     post-drain seam (the fetch lane has fully drained — the pass can never
-    block or slow a fetch). It once shared this seam with the (now removed)
-    mid-pull ``_derive_daily_from_minute`` daily derive — the ``1day`` derive
-    was relocated into the pipeline's automatic FINAL prebuild stage
-    (DEC-PIPELINE-AUTOPREBUILD-001); the Greeks overlay stays HERE because it
-    annotates the just-pulled 1-minute bars themselves.
-    One :class:`~brutex.data.greeks_enrich.GreeksEnrichTarget` per resolved
-    contract window; FUT legs are skipped INSIDE the driver (never a bogus
-    Greek for a future); the risk-free source is the locked PR-1 seam
-    (:func:`~brutex.data.greeks_enrich.resolve_risk_free_source` — fixed 6.5%
-    default, ``BRUTEX_RISK_FREE_CSV`` override).
-
-    The body is guarded (plan §15.4) with TWO deliberate exceptions
-    (DEC-GREEKS-PARALLEL-001, the #1188 follow-up (a)): a
-    :class:`~brutex.data.errors.LakeWriteHalt` (disk full / OOM at a lake
-    write) and a :class:`~brutex.data.errors.GreeksEnrichPoolBroken` (a
-    Greeks pool worker died abruptly — a host-resource condition) RE-RAISE so
-    they reach :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._run`'s
-    halt handling and fire the CRITICAL Telegram pull-halt alert. EVERY other
-    failure — a misconfigured rate CSV, a missing wheel, an unexpected driver
-    error — logs ONE ``fno.greeks_enrich.error`` and returns; those can never
-    fail the pull. The authoritative 1-minute candles are already durable in
-    the lake; the Greeks overlay is a re-derivable convenience layer the NEXT
-    pull re-attempts (stamp-driven, idempotent — Golden Rule #7/#10).
-    Per-contract errors are additionally quarantined inside the driver, so
-    one bad contract never sinks the pass.
+    block or slow a fetch). Since DEC-CLI-GREEKS-ENRICH-001 this is a THIN
+    DELEGATOR into the COMMON fenced pass
+    :func:`brutex.data.greeks_enrich_pass.run_greeks_enrich_pass` — ONE source
+    of truth for the fence order (wheel import → risk-free resolution → target
+    build → driver), the ``fno.greeks_enrich.done``/``.error`` telemetry
+    contract, and the :class:`~brutex.data.errors.LakeWriteHalt` /
+    :class:`~brutex.data.errors.GreeksEnrichPoolBroken` re-raise carve-out
+    (DEC-GREEKS-PARALLEL-001 — both reach
+    :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._run`'s halt handling
+    + the CRITICAL Telegram alert; EVERY other failure logs ONE
+    ``fno.greeks_enrich.error`` and can never fail the pull). This wrapper
+    keeps ONLY the dashboard-specific target build — one
+    :class:`~brutex.data.greeks_enrich.GreeksEnrichTarget` per resolved
+    contract window (a windowless or exchange-unresolvable contract is
+    skipped; FUT legs are still passed for the driver to tally-skip — never a
+    bogus Greek for a future) — and injects the dashboard ``_LOG`` so even the
+    logger-name metadata on the pass events stays byte-identical.
 
     Returns
     -------
@@ -1916,19 +1891,13 @@ def _enrich_greeks_from_minute(
         ``"ErrorType: message"`` when the whole pass failed — surfaced on the
         report/note by the caller, never only a log line.
     """
-    # Wheel-free at function top (brutex.data.errors imports only brutex.models);
-    # the greeks_enrich import STAYS inside the try — a missing trading_core
-    # wheel must keep hitting the ok=False fence, never crash the pull.
-    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 
-    try:
-        from brutex.data.greeks_enrich import (
-            GreeksEnrichTarget,
-            enrich_greeks_for_targets,
-            resolve_risk_free_source,
-        )
+    def _build_targets() -> list[GreeksEnrichTarget]:
+        # Wheel import INSIDE the builder — run_greeks_enrich_pass invokes it
+        # inside the fence, so a missing trading_core wheel keeps hitting the
+        # ok=False fence, never crashing the pull.
+        from brutex.data.greeks_enrich import GreeksEnrichTarget
 
-        rate_source = resolve_risk_free_source()
         targets: list[GreeksEnrichTarget] = []
         for _row, contract in rebuilt:
             window = windows.get(contract.symbol)
@@ -1947,37 +1916,9 @@ def _enrich_greeks_from_minute(
                     end=window[1],
                 )
             )
-        report = enrich_greeks_for_targets(
-            targets=targets, lake_root=lake_root, rate_source=rate_source
-        )
-        _LOG.info(
-            "fno.greeks_enrich.done",
-            enriched=report.enriched,
-            already_current=report.already_current,
-            futures_skipped=report.futures_skipped,
-            undecodable=report.undecodable,
-            no_bars=report.no_bars,
-            errored=report.errored,
-            bars_written=report.bars_written,
-            bars_solved=report.bars_solved,
-            bars_null=report.bars_null,
-            bars_reused=report.bars_reused,
-            spot_reads=report.spot_reads,
-            spot_hits=report.spot_hits,
-            bars_skipped=report.bars_skipped,
-        )
-        return _GreeksEnrichOutcome(ok=True, error=None, errored_targets=report.errored)
-    except (LakeWriteHalt, GreeksEnrichPoolBroken):
-        # A pull-wide HOST condition (disk full / OOM / a dead pool worker) —
-        # re-raised past the fence so it reaches BackgroundPullJob._run's halt
-        # handling + the CRITICAL Telegram alert (DEC-GREEKS-PARALLEL-001; the
-        # _heal_lake_after_pull convention). Everything else stays fenced below.
-        raise
-    except Exception as exc:
-        _LOG.error("fno.greeks_enrich.error", error=str(exc))
-        return _GreeksEnrichOutcome(
-            ok=False, error=f"{type(exc).__name__}: {exc}", errored_targets=0
-        )
+        return targets
+
+    return run_greeks_enrich_pass(build_targets=_build_targets, lake_root=lake_root, log=_LOG)
 
 
 def pull_contract_candles(
@@ -2000,6 +1941,7 @@ def pull_contract_candles(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    form_preference: SymbolFormPreference | None = None,
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
@@ -2127,6 +2069,15 @@ def pull_contract_candles(
         planned per market bucket), so the dashboard marks the phase *open_ended* —
         this feeds real moving counts, it does NOT claim a final total. ``None``
         (default — CLI / tests) is byte-identical.
+    form_preference
+        Optional learned ``&``-form ordering shared across the WHOLE phase — every
+        market bucket and every until-clean round reuse the SAME instance
+        (DEC-FORM-WINNER-PERSIST-001; supersedes the spine's fresh-per-pass default,
+        which made the learning amnesiac across buckets/rounds). Production threads
+        the pipeline's :class:`~brutex.adapters.groww.symbol_form_preference.\
+PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pull
+        issues the learned winner FIRST); ``None`` (the default — CLI / tests) keeps
+        the spine's per-pass process-local preference byte-identical.
     underlying_kinds
         Optional ``{registry-underlying-key: is_index}`` classification map
         (DEC-PULL-SIX-STEP-ORDER-001) — keyed by the SAME
@@ -2179,13 +2130,17 @@ def pull_contract_candles(
     # (DEC-RATE-WIDGET-FNO-MEASURED-001) so the observe-only RatePanelSampler — which holds
     # only the session controller, NOT this deep-in-the-spine pool — can read the transport
     # CallMeter's real ``effective_rps`` during the long F&O phase and push the TRUE completed
-    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). Best-effort +
-    # observe-only: a dry-run / no-``session_rate`` pull, or a client with no ``.meter``
-    # (the empty-candle dry-run client), is a silent no-op. The lazy import avoids any
-    # module-load ordering coupling with pull_controller.
+    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). The
+    # empty-candle dry-run GrowwClient DOES carry a real CallMeter (``client.py``
+    # ``default_factory=CallMeter``), so honesty comes from the explicit ``dry_run=True``
+    # gate, which DEREGISTERS (clears any stale prior-pull meter, never registers the
+    # synthetic one) — never from a meterless client (the pre-#1593 "no ``.meter`` silent
+    # no-op" claim here was factually FALSE; DEC-RATE-METER-LIFECYCLE-001). Best-effort +
+    # observe-only. The lazy import avoids any module-load ordering coupling with
+    # pull_controller.
     from brutex.dashboard.pull_controller import register_pull_meter
 
-    register_pull_meter(session_rate, client)
+    register_pull_meter(session_rate, client, dry_run=dry_run)
     # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) for the F&O
     # (futures + options) pull — the F&O TWIN of the spot spine's wiring
     # (DEC-FNO-ASYNC-PIPELINE-WIRE-001). When built (DEFAULT ON; ``None`` for a dry-run / the
@@ -2333,6 +2288,7 @@ def pull_contract_candles(
                 audit=ingest_audit,
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
+                form_preference=form_preference,
             )
         finally:
             # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute
