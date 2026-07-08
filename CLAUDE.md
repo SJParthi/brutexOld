@@ -18,9 +18,9 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
-DEC-STAGE1A-ROLL-RESET-001 + the round-1 review-fix pack DEC-FUTURES-LAUNCH-REVIEW-FIXES-001,
-MIGRATION.md #1568–#1571 — the ADR-0012 NIFTY-futures sweep LAUNCH
+_Last updated: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
+MIGRATION.md #1568–#1577 + #1578 — the ADR-0012 NIFTY-futures sweep LAUNCH
 capstone (PR-5): the futures track is addressed by ONE frozen series alias **`NSE-NIFTY-FUT`**
 (symbol_id 4 in the append-only `_SYMBOL_ID_TABLE`; the two pre-launch shapes
 `NIFTY-FUT-YYYY-MM-DD` + `NSE-NIFTY-<DDMmmYY>-FUT` are RETIRED with a did-you-mean refusal —
