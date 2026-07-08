@@ -1044,6 +1044,63 @@ class TestReadTop100:
         with pytest.raises(ValueError):
             oa.read_top100(fixture_env, "../../etc/passwd")
 
+    def test_family_size_and_members_on_the_smoke_fixtures_one_collision(
+        self, fixture_env: Path
+    ) -> None:
+        """R34 twin-detector drill-down: rank 7 / rank 23 share ``fam-0007``.
+
+        The simpler (fewer-bit) row (rank 7) is the representative
+        ``read_top100`` returns; its decorated row carries the OTHER family
+        member (rank 23) in ``family_members`` so the operator can drill into
+        the twin without a second request, while every non-colliding row's
+        ``family_size`` is honestly 1 with an empty ``family_members`` list.
+        """
+        result = oa.read_top100(fixture_env, RUN_SMOKE)
+        by_rank = {r["rank"]: r for r in result["rows"]}
+        rep = by_rank[7]
+        assert rep["family_size"] == 2
+        assert [m["rank"] for m in rep["family_members"]] == [23]
+        twin = rep["family_members"][0]
+        assert twin["mask_hex"] == "88000948080000"
+        assert "conditions" in twin
+
+        # rank 23 itself never appears as its own top-level row (collapsed).
+        assert 23 not in by_rank
+
+        # A non-colliding row is honestly size-1 with no members to drill into.
+        solo = by_rank[1]
+        assert solo["family_size"] == 1
+        assert solo["family_members"] == []
+
+    def test_family_members_empty_when_family_id_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(oa.FIXTURE_ROOT_ENV, str(tmp_path))
+        run_dir = tmp_path / "run_no_family"
+        run_dir.mkdir()
+        (run_dir / "top100.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "rank": 1,
+                        "mask_hex": "1",
+                        "conditions": [],
+                        "tf": "5m",
+                        "direction": "long",
+                        "arm": "sl_tp",
+                        "metrics": {},
+                        "regime": {},
+                        "vix_band": {},
+                        "family_id": None,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = oa.read_top100(tmp_path, "run_no_family")
+        assert result["rows"][0]["family_size"] == 1
+        assert result["rows"][0]["family_members"] == []
+
     def test_decode_combo_reused_matches_direct_call(self, fixture_env: Path) -> None:
         from brutex.dashboard.combo_decoder import decode_combo
 

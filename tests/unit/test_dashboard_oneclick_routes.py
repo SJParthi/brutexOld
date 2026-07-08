@@ -1,4 +1,4 @@
-"""FastAPI route tests for the 6 P4 one-click adapter routes (stage 2 of 6).
+"""FastAPI route tests for the P4 one-click adapter routes (stages 2-3 of 6).
 
 DEC-INSTITUTIONAL-ONECLICK-001. Mirrors the ``test_dashboard_sweep_run_route.py``
 / ``test_dashboard_results_route.py`` harness: ``pytest.importorskip`` guards,
@@ -11,12 +11,12 @@ no fixture root is configured, the ``ok`` envelope against the checked-in
 fixture tree, and the HTTP 400 path-traversal guard on every route that takes
 a caller-supplied ``run_id``.
 
-Covers only the 6 routes wired in THIS stage
+Covers the 6 routes wired in stage 2
 (``/runs``, ``/run-status``, ``/preflight-estimate``, ``/estimator-calibration``,
-``/timeline``, ``/top100``); ``/trades`` and ``/verify-me`` (+ the ``/strategy``
-and ``/verify-me`` HTML pages) are a later stage's scope per the FINAL
-APPROVED SPEC (not needed by this stage's Operator-page features) — see the
-stage-2 completion report for the explicit scoping note.
+``/timeline``, ``/top100``) plus ``/trades`` wired in stage 3 (backs the
+``/results`` per-combo trade list). ``/verify-me`` (+ the ``/strategy`` and
+``/verify-me`` HTML pages) remain a later stage's scope per the FINAL
+APPROVED SPEC.
 """
 
 from __future__ import annotations
@@ -314,6 +314,122 @@ def test_top100_rejects_bad_run_id(client: TestClient, run_id: str) -> None:
     assert resp.status_code == 400
 
 
+# ── /api/v1/sweep/trades (stage 3) ──────────────────────────────────────────
+
+
+def test_trades_awaiting_when_no_fixture_root(client: TestClient) -> None:
+    resp = client.get("/api/v1/sweep/trades", params={"rank": 1})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "awaiting_artifact"
+    assert body["rows"] == []
+    assert body["total"] == 0
+
+
+def test_trades_rank_is_required(client: TestClient) -> None:
+    resp = client.get("/api/v1/sweep/trades")
+    assert resp.status_code == 422
+
+
+def test_trades_ok_against_fixture_tree(fixture_client: TestClient) -> None:
+    resp = fixture_client.get("/api/v1/sweep/trades", params={"run_id": RUN_SMOKE, "rank": 1})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "ok"
+    assert body["run_id"] == RUN_SMOKE
+    assert body["rank"] == 1
+    assert body["total"] == 12
+    assert len(body["rows"]) == 12
+    row = body["rows"][0]
+    for key in (
+        "entry_ts",
+        "entry_px",
+        "exit_ts",
+        "exit_px",
+        "direction",
+        "lots",
+        "exit_reason",
+        "pnl_paisa",
+        "costs_paisa",
+        "mae",
+        "mfe",
+        "vix_entry",
+        "vix_exit",
+    ):
+        assert key in row
+    # gap-register finding #18: NULL-by-design until P5, never fabricated.
+    assert row["lots"] is None
+    assert row["costs_paisa"] is None
+
+
+def test_trades_pagination(fixture_client: TestClient) -> None:
+    resp = fixture_client.get(
+        "/api/v1/sweep/trades",
+        params={"run_id": RUN_SMOKE, "rank": 1, "offset": 5, "limit": 3},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "ok"
+    assert body["offset"] == 5
+    assert body["limit"] == 3
+    assert len(body["rows"]) == 3
+    assert body["total"] == 12
+
+
+def test_trades_combo_explanation_populated_when_mask_and_direction_and_tf_given(
+    fixture_client: TestClient,
+) -> None:
+    resp = fixture_client.get(
+        "/api/v1/sweep/trades",
+        params={
+            "run_id": RUN_SMOKE,
+            "rank": 1,
+            "mask_hex": "10a081400000000",
+            "direction": "short",
+            "tf": "3m",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["combo_explanation"] is not None
+    assert body["combo_explanation"]["simple_sentence"]
+    assert body["combo_explanation"]["pro_sentence"]
+    assert body["combo_explanation"]["direction_label"] == "Sell"
+
+
+def test_trades_combo_explanation_absent_without_all_three_params(
+    fixture_client: TestClient,
+) -> None:
+    resp = fixture_client.get(
+        "/api/v1/sweep/trades",
+        params={"run_id": RUN_SMOKE, "rank": 1, "mask_hex": "10a081400000000"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["combo_explanation"] is None
+
+
+def test_trades_awaiting_for_rank_not_covered_by_sparse_fixture(
+    fixture_client: TestClient,
+) -> None:
+    """RUN_SMOKE's trade fixtures are deliberately sparse (only ranks 1, 2, 37)."""
+    resp = fixture_client.get("/api/v1/sweep/trades", params={"run_id": RUN_SMOKE, "rank": 99})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "awaiting_artifact"
+    assert body["rows"] == []
+
+
+def test_trades_limit_out_of_range_is_422(client: TestClient) -> None:
+    assert client.get("/api/v1/sweep/trades", params={"rank": 1, "limit": 0}).status_code == 422
+    assert client.get("/api/v1/sweep/trades", params={"rank": 1, "limit": 501}).status_code == 422
+
+
+@pytest.mark.parametrize("run_id", _TRAVERSAL_RUN_IDS)
+def test_trades_rejects_bad_run_id(client: TestClient, run_id: str) -> None:
+    resp = client.get("/api/v1/sweep/trades", params={"run_id": run_id, "rank": 1})
+    assert resp.status_code == 400
+
+
 # ── no-lake-wired honesty (mirrors /api/v1/sweep/leaderboard's no-lake path) ──
 
 
@@ -325,13 +441,14 @@ def test_routes_degrade_honestly_with_no_lake_wired() -> None:
 
     fake_store = SimpleNamespace(path=None)
     with TestClient(build_app(DashboardState(), instrument_store=fake_store)) as c:
-        for path in (
-            "/api/v1/sweep/runs",
-            "/api/v1/sweep/run-status",
-            "/api/v1/sweep/preflight-estimate",
-            "/api/v1/sweep/estimator-calibration",
-            "/api/v1/sweep/timeline",
-            "/api/v1/sweep/top100",
+        for path, extra_params in (
+            ("/api/v1/sweep/runs", {}),
+            ("/api/v1/sweep/run-status", {}),
+            ("/api/v1/sweep/preflight-estimate", {}),
+            ("/api/v1/sweep/estimator-calibration", {}),
+            ("/api/v1/sweep/timeline", {}),
+            ("/api/v1/sweep/top100", {}),
+            ("/api/v1/sweep/trades", {"rank": 1}),
         ):
-            resp = c.get(path)
+            resp = c.get(path, params=extra_params)
             assert resp.status_code == 200, f"{path} must never 500 with no lake wired"

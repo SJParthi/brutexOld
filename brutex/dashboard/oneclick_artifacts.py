@@ -786,6 +786,27 @@ def dedupe_family_representatives(rows: list[dict[str, Any]]) -> list[dict[str, 
     return output
 
 
+def _family_members_map(raw_rows: list[dict[str, Any]]) -> dict[Any, list[dict[str, Any]]]:
+    """Group the PRE-dedupe raw top100 rows by ``family_id`` for the R34 drill-down.
+
+    Returns ``{family_id: [raw_row, ...]}`` for every ``family_id`` that
+    appears on 2+ rows — a "family" of exactly one row has no twin to drill
+    into, so it is omitted. Rows lacking ``family_id`` are never grouped.
+    Pure, O(n) single pass over the SAME row objects
+    :func:`dedupe_family_representatives` consumes (identity-preserving —
+    the representative row is one of the objects in its own group's list, so
+    :func:`read_top100` can pick it out with an identity check, never a
+    fragile value comparison).
+    """
+    groups: dict[Any, list[dict[str, Any]]] = {}
+    for row in raw_rows:
+        family_id = row.get("family_id")
+        if family_id is None:
+            continue
+        groups.setdefault(family_id, []).append(row)
+    return {family_id: members for family_id, members in groups.items() if len(members) > 1}
+
+
 def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
     """Decorate one raw top100.json row with join-key back-fill + decode_combo()."""
     join_key_inferred = False
@@ -873,8 +894,30 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
     if not isinstance(data, list):
         return _artifact_error(resolved, "top100.json is not a JSON array", rows=[])
 
-    deduped = dedupe_family_representatives([r for r in data if isinstance(r, dict)])
-    rows = [_decorate_top100_row(row, resolved) for row in deduped]
+    raw_dicts = [r for r in data if isinstance(r, dict)]
+    deduped = dedupe_family_representatives(raw_dicts)
+    family_groups = _family_members_map(raw_dicts)
+    rows: list[dict[str, Any]] = []
+    for raw_row in deduped:
+        decorated = _decorate_top100_row(raw_row, resolved)
+        members = family_groups.get(raw_row.get("family_id"), [])
+        # ``members`` includes the representative itself (identity, not value,
+        # comparison — two distinct rows can be byte-identical dicts) — the
+        # R34 twin list on drill-down is every OTHER member of the family.
+        twins = [m for m in members if m is not raw_row]
+        decorated["family_size"] = len(members) if members else 1
+        decorated["family_members"] = [
+            {
+                "rank": twin.get("rank"),
+                "mask_hex": twin.get("mask_hex"),
+                "combo_id": twin.get("combo_id"),
+                "tf": twin.get("tf"),
+                "direction": twin.get("direction"),
+                "conditions": twin.get("conditions", []),
+            }
+            for twin in twins
+        ]
+        rows.append(decorated)
     return {"state": "ok", "run_id": resolved, "rows": rows}
 
 

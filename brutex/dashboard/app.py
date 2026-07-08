@@ -173,6 +173,7 @@ from brutex.dashboard.oneclick_artifacts import (
     read_estimator_calibration,
     read_run_status,
     read_top100,
+    read_trades_page,
 )
 from brutex.dashboard.pipeline_prebuild import (
     PrebuildOutcome,
@@ -6060,6 +6061,45 @@ def build_app(
         lake_root = _oneclick_lake_root()
         try:
             payload = await run_in_threadpool(read_top100, lake_root, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/trades")
+    async def api_sweep_trades(
+        rank: int = Query(...),
+        run_id: str | None = Query(default=None),
+        mask_hex: str | None = Query(default=None),
+        direction: str | None = Query(default=None),
+        tf: str | None = Query(default=None),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/trades — paged per-combo trade list (R24/R31/R33).
+
+        Thin wrapper over
+        :func:`~brutex.dashboard.oneclick_artifacts.read_trades_page`. Backs
+        the /results per-combo story-card List-of-trades tab (dual-language
+        exit reason + per-trade VIX), and is the same data source the later
+        chart-first strategy page reads entry/exit points from — *mask_hex*/
+        *direction*/*tf* are optional and, when all three are supplied,
+        additionally decorate the response with a ``combo_explanation``
+        (reusing :func:`~brutex.dashboard.combo_decoder.decode_combo`
+        verbatim, never rebuilt). A malformed *run_id* is HTTP 400.
+        """
+        lake_root = _oneclick_lake_root()
+        try:
+            payload = await run_in_threadpool(
+                read_trades_page,
+                lake_root,
+                run_id,
+                rank,
+                mask_hex=mask_hex,
+                direction=direction,
+                tf=tf,
+                offset=offset,
+                limit=limit,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)

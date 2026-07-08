@@ -126,6 +126,87 @@
     .cards { grid-template-columns: 1fr 1fr; padding: 14px; gap: 12px; }
     .controls { padding: 12px 14px; }
   }
+
+  /* ── Global Top-100 Best-of-Best + story card (R21/R26/R27/R33/R34) ────── */
+  .t100head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 24px 2px; }
+  .t100head .sectiontitle { padding:0; }
+  .modebtn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-pill);
+    min-height:32px; padding:0 14px; font:inherit; font-size:12px; font-weight:700;
+    color:var(--text-bright); background:var(--surface-2); transition:.15s var(--ease); }
+  .modebtn:hover { border-color:var(--blue); }
+  .modebtn .cur { color:var(--green); }
+  .t100meta { color:var(--muted); font-size:12px; padding:0 24px; }
+  .t100banner { margin:10px 24px 0; padding:10px 14px; border:1px solid var(--border-strong);
+    border-radius:var(--r-md); background:var(--surface-2); color:var(--muted); font-size:13px; }
+  .t100banner.err { border-color:var(--red); color:var(--red); background:rgba(255,92,92,.08); }
+
+  .t100scroll { margin:10px 24px 0; height:min(70vh,640px); overflow-y:auto; overflow-x:hidden;
+    background:var(--surface); border:1px solid var(--border); border-radius:14px; position:relative; }
+  .t100row { display:flex; align-items:center; gap:14px; padding:0 16px; height:64px;
+    border-bottom:1px solid var(--border); cursor:pointer; transition:background .1s var(--ease); }
+  .t100row:hover { background:var(--surface-2); }
+  .t100row .rank { flex:0 0 auto; width:38px; font-weight:800; color:var(--blue);
+    font-variant-numeric:tabular-nums; }
+  .t100row .meta { flex:0 0 auto; min-width:150px; color:var(--muted); font-size:11px;
+    text-transform:uppercase; letter-spacing:.4px; }
+  .t100row .meta .instrument { color:var(--text-bright); font-weight:700; }
+  .t100row .sentence { flex:1 1 auto; min-width:0; font-size:13px; color:var(--text);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .t100row .quick { flex:0 0 auto; display:flex; gap:14px; font-size:12px; font-variant-numeric:tabular-nums; }
+  .t100row .quick .pos { color:var(--green); } .t100row .quick .neg { color:var(--red); }
+  .t100row .twin { flex:0 0 auto; font-size:10px; font-weight:700; padding:2px 8px;
+    border-radius:var(--r-pill); background:rgba(157,123,255,.15); color:var(--purple); }
+
+  /* Hover-any-number-for-plain-English-line affordance (R36, bx-oneclick.js explain()). */
+  .bx-hoverable { border-bottom:1px dotted var(--muted); cursor:help; }
+  .bx-hoverable:hover, .bx-hoverable:focus-visible { border-bottom-color:var(--blue); }
+
+  /* Beginner/Pro mode: reuse the .jargon / .plain-eng convention (v29.html). */
+  body.bx-mode-beginner .jargon { display:none !important; }
+  body.bx-mode-pro .plain-eng { display:none !important; }
+
+  .story-overlay { position:fixed; inset:0; background:rgba(5,7,10,.72); z-index:50;
+    display:flex; align-items:flex-start; justify-content:center; padding:4vh 16px; overflow-y:auto; }
+  .story-overlay[hidden] { display:none; }
+  .story-card { width:min(880px,96vw); background:linear-gradient(160deg,var(--surface),var(--surface-2));
+    border:1px solid var(--border-strong); border-radius:18px; padding:24px 26px 26px;
+    box-shadow:var(--elev-2); animation: fadeInUp .25s var(--ease) both; }
+  .story-card .schead { display:flex; align-items:flex-start; gap:14px; }
+  .story-card .schead .title { flex:1 1 auto; font-size:16px; font-weight:800; color:var(--text-bright);
+    line-height:1.5; }
+  .story-card .scclose { flex:0 0 auto; cursor:pointer; border:1px solid var(--border-strong);
+    border-radius:var(--r-md); background:var(--surface-2); color:var(--text); width:32px; height:32px;
+    font-size:16px; line-height:1; }
+  .story-card .scmeta { color:var(--muted); font-size:12px; margin-top:6px; }
+  .story-card .sctoggle { margin-top:10px; }
+  .story-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px;
+    margin-top:16px; }
+  .story-tile { background:var(--surface-3); border:1px solid var(--border-strong); border-radius:12px;
+    padding:12px 14px; }
+  .story-tile .stv { font-size:19px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
+  .story-tile .stv.pos { color:var(--green); } .story-tile .stv.neg { color:var(--red); }
+  .story-tile .stl { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px;
+    margin-top:4px; }
+  .story-twins { margin-top:14px; border:1px solid var(--border-strong); border-radius:12px; padding:12px 14px; }
+  .story-twins summary { cursor:pointer; font-size:12px; font-weight:700; color:var(--purple); }
+  .story-twins ul { margin:10px 0 0; padding-left:18px; font-size:12px; color:var(--text); }
+  .story-tabs { display:flex; gap:6px; margin-top:18px; border-bottom:1px solid var(--border); }
+  .story-tab { cursor:pointer; padding:8px 14px; font-size:12px; font-weight:700; color:var(--muted);
+    border-bottom:2px solid transparent; }
+  .story-tab.active { color:var(--text-bright); border-bottom-color:var(--blue); }
+  .story-pane { display:none; margin-top:14px; }
+  .story-pane.active { display:block; }
+  .trades-scroll { max-height:340px; overflow:auto; border:1px solid var(--border); border-radius:10px; }
+  .trades-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .trades-table th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
+    text-align:left; padding:7px 10px; font-weight:700; white-space:nowrap; }
+  .trades-table td { padding:7px 10px; border-top:1px solid var(--border); white-space:nowrap; }
+  .trades-table td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .trades-table td.pos { color:var(--green); } .trades-table td.neg { color:var(--red); }
+  .trades-foot { display:flex; align-items:center; gap:10px; margin-top:8px; font-size:12px; color:var(--muted); }
+  .trades-foot button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-sm);
+    background:var(--surface-2); color:var(--text); padding:4px 10px; font:inherit; font-size:12px; }
+  .trades-foot button:disabled { opacity:.4; cursor:not-allowed; }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
 <!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, .bx-wrap fluid
@@ -137,6 +218,12 @@
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
+<!-- Shared one-click sweep display helpers (DEC-INSTITUTIONAL-ONECLICK-001):
+     esc()/el() DOM builders, Beginner/Pro mode (persisted), the hover-any-
+     number-for-plain-English-line affordance, the virtual-scroll list, and
+     the dual-language exit-reason phrase table. Reused verbatim by the
+     Operator page in a later stage — see brutex/dashboard/static/bx-oneclick.js. -->
+<script defer src="/static/bx-oneclick.js"></script>
 </head>
 <body data-accent="blue">
   <header>
@@ -215,6 +302,69 @@
       <span class="bx-skel bx-skel-row"></span>
     </div>
   </div></div>
+
+  <!-- ── Global Top-100 Best-of-Best (R21/R26): family-deduped, fully decoded
+       server-side via GET /api/v1/sweep/top100 (the P4 adapter's read_top100,
+       distinct from — and reading a DIFFERENT artifact than — this page's own
+       /api/v1/sweep/leaderboard above; Ruling 10 hard zone boundary). ALL rows
+       for the active run stay in the client-side items array at all times
+       (R26 "no shrink"); only the rows intersecting the scroll viewport are
+       ever real DOM nodes (BXOneclick.virtualList). -->
+  <div class="t100head">
+    <div class="sectiontitle">Global Top-100 — best of the best</div>
+    <button class="modebtn" id="modeToggleBtn" type="button"
+      title="Beginner mode shows plain English everywhere; Pro mode shows technical masks/stats.">
+      Mode: <span class="cur" id="modeToggleCur">beginner</span>
+    </button>
+  </div>
+  <div class="t100meta" id="t100Meta"></div>
+  <div class="t100banner" id="t100Banner" hidden></div>
+  <div class="t100scroll" id="t100Scroll"></div>
+
+  <!-- Per-combo story card (R27 plain-English verdict built ONLY from verified
+       top100/trades numbers + combo_decoder's dual-language sentences — no
+       invented text) + the R24 List-of-trades tab + R34 twin-detector
+       drill-down. Hidden until a Top-100 row is clicked. -->
+  <div class="story-overlay" id="storyOverlay" hidden>
+    <div class="story-card" id="storyCard" role="dialog" aria-modal="true" aria-label="Strategy story card">
+      <div class="schead">
+        <div>
+          <div class="title" id="scTitle"></div>
+          <div class="scmeta" id="scMeta"></div>
+        </div>
+        <button class="scclose" id="scClose" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="story-tiles" id="scTiles"></div>
+      <div class="story-twins" id="scTwinsWrap" hidden>
+        <details>
+          <summary id="scTwinsSummary"></summary>
+          <ul id="scTwinsList"></ul>
+        </details>
+      </div>
+      <div class="story-tabs">
+        <div class="story-tab active" data-pane="scStoryPane" id="scTabStory">Story</div>
+        <div class="story-tab" data-pane="scTradesPane" id="scTabTrades">List of trades</div>
+      </div>
+      <div class="story-pane active" id="scStoryPane">
+        <p id="scSentence" style="font-size:14px; line-height:1.7; color:var(--text);"></p>
+      </div>
+      <div class="story-pane" id="scTradesPane">
+        <div class="trades-scroll"><table class="trades-table" id="scTradesTable">
+          <thead><tr>
+            <th>Entry</th><th>Exit</th><th>Why exited</th><th class="num">P&amp;L</th>
+            <th class="num">Costs</th><th class="num">Lots</th><th class="num">MAE</th>
+            <th class="num">MFE</th><th class="num">VIX in</th><th class="num">VIX out</th>
+          </tr></thead>
+          <tbody id="scTradesBody"></tbody>
+        </table></div>
+        <div class="trades-foot">
+          <button id="scTradesPrev" type="button">&larr; Prev</button>
+          <span id="scTradesStatus"></span>
+          <button id="scTradesNext" type="button">Next &rarr;</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div class="foot">
     Read-only view of the per-tuple sweep stores under <code>&lt;lake&gt;/sweeps</code>
@@ -549,6 +699,412 @@ if (document.readyState === "loading") {
 } else {
   boot();
 }
+</script>
+
+<script>
+/* ── Global Top-100 Best-of-Best + story card + trades (DEC-INSTITUTIONAL-
+   ONECLICK-001, P4 stage 3 of 6). Reads GET /api/v1/sweep/top100 and
+   GET /api/v1/sweep/trades — the P4 oneclick_artifacts adapter's OWN
+   artifacts (top100.json / trades/rank-%04d.json), NEVER
+   sweep_results_view.py or /api/v1/sweep/leaderboard above (hard zone
+   boundary, Ruling 10 — those stay P3-exclusive and untouched by this
+   block). XSS hard rule: every server-derived string below reaches the DOM
+   via .textContent / createElement ONLY — never innerHTML (see
+   tests/unit/test_dashboard_results_oneclick_xss.py). Beginner/Pro mode +
+   the hover-explain affordance + the virtual list come from the shared
+   brutex/dashboard/static/bx-oneclick.js module (reused by the Operator
+   page in a later stage). */
+(function () {
+  "use strict";
+  // bx-oneclick.js is loaded with `defer`, so it executes AFTER this inline
+  // script is parsed but BEFORE DOMContentLoaded fires — init() therefore
+  // runs from a DOMContentLoaded listener (or immediately if the document
+  // is already past "loading", mirroring the screener's own boot() pattern
+  // above), never at top-level parse time, so `window.BXOneclick` is always
+  // defined by the time init() reads it.
+  function init() {
+  var BX = window.BXOneclick;
+  if (!BX) return; // bx-oneclick.js failed to load — the rest of the page still works
+
+  var t100Meta = document.getElementById("t100Meta");
+  var t100Banner = document.getElementById("t100Banner");
+  var t100Scroll = document.getElementById("t100Scroll");
+  var modeBtn = document.getElementById("modeToggleBtn");
+  var modeCur = document.getElementById("modeToggleCur");
+
+  var storyOverlay = document.getElementById("storyOverlay");
+  var scTitle = document.getElementById("scTitle");
+  var scMeta = document.getElementById("scMeta");
+  var scTiles = document.getElementById("scTiles");
+  var scTwinsWrap = document.getElementById("scTwinsWrap");
+  var scTwinsSummary = document.getElementById("scTwinsSummary");
+  var scTwinsList = document.getElementById("scTwinsList");
+  var scSentence = document.getElementById("scSentence");
+  var scTabStory = document.getElementById("scTabStory");
+  var scTabTrades = document.getElementById("scTabTrades");
+  var scStoryPane = document.getElementById("scStoryPane");
+  var scTradesPane = document.getElementById("scTradesPane");
+  var scTradesBody = document.getElementById("scTradesBody");
+  var scTradesStatus = document.getElementById("scTradesStatus");
+  var scTradesPrev = document.getElementById("scTradesPrev");
+  var scTradesNext = document.getElementById("scTradesNext");
+  var scClose = document.getElementById("scClose");
+
+  var TOP100_ROWS = [];
+  var vlist = null;
+  var currentRow = null;
+  var tradesOffset = 0;
+  var TRADES_PAGE_SIZE = 10;
+  var tradesTotal = 0;
+
+  // ── formatting ────────────────────────────────────────────────────────
+  function fmtRupees(paisa) {
+    if (paisa === null || paisa === undefined) return "—";
+    var n = Number(paisa) / 100;
+    if (!isFinite(n)) return "—";
+    return "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  }
+  function fmtPctVal(v, digits) {
+    if (v === null || v === undefined || !isFinite(Number(v))) return "—";
+    return Number(v).toFixed(digits === undefined ? 2 : digits) + "%";
+  }
+  function fmtNumVal(v, digits) {
+    if (v === null || v === undefined || !isFinite(Number(v))) return "—";
+    return Number(v).toFixed(digits === undefined ? 2 : digits);
+  }
+  function fmtInt(v) {
+    if (v === null || v === undefined || !isFinite(Number(v))) return "—";
+    return Number(v).toLocaleString("en-IN");
+  }
+  function fmtTs(ts) {
+    return ts === null || ts === undefined ? "—" : String(ts);
+  }
+
+  // ── mode toggle ──────────────────────────────────────────────────────
+  function refreshModeButton() {
+    modeCur.textContent = BX.mode.get();
+  }
+  BX.mode.init();
+  refreshModeButton();
+  modeBtn.addEventListener("click", function () {
+    BX.mode.toggle();
+    refreshModeButton();
+  });
+
+  // ── banner ───────────────────────────────────────────────────────────
+  function showBanner(text, isErr) {
+    t100Banner.hidden = false;
+    t100Banner.textContent = text;
+    t100Banner.classList.toggle("err", !!isErr);
+  }
+  function hideBanner() {
+    t100Banner.hidden = true;
+    t100Banner.textContent = "";
+  }
+
+  // ── Top-100 virtual-scroll row ───────────────────────────────────────
+  function renderTop100Row(row, index) {
+    var line = BX.el("div", "t100row");
+    var rank = BX.el("span", "rank", "#" + String(row.rank));
+    var meta = BX.el("span", "meta");
+    var instrumentSpan = BX.el("span", "instrument", String(row.instrument || "—"));
+    meta.appendChild(instrumentSpan);
+    meta.appendChild(document.createTextNode(
+      " " + String(row.tf || "") + " " + String(row.direction || "") +
+      (row.arm ? " " + String(row.arm) : "")
+    ));
+
+    var sentence = BX.el("span", "sentence");
+    var pro = BX.el("span", "jargon", row.pro_sentence || "");
+    var plain = BX.el("span", "plain-eng", row.simple_sentence || "");
+    sentence.appendChild(pro);
+    sentence.appendChild(plain);
+
+    var quick = BX.el("span", "quick");
+    var metrics = row.metrics || {};
+    var sharpeEl = BX.el("span", null, "Sharpe " + fmtNumVal(metrics.sharpe));
+    BX.explainMetric(sharpeEl, "sharpe");
+    var winEl = BX.el("span", metrics.win_rate_pct >= 50 ? "pos" : "", "Win " + fmtPctVal(metrics.win_rate_pct, 1));
+    BX.explainMetric(winEl, "win_rate_pct");
+    var ddEl = BX.el("span", "neg", "DD " + fmtPctVal(metrics.max_drawdown_pct, 1));
+    BX.explainMetric(ddEl, "max_drawdown_pct");
+    quick.appendChild(sharpeEl);
+    quick.appendChild(winEl);
+    quick.appendChild(ddEl);
+
+    line.appendChild(rank);
+    line.appendChild(meta);
+    line.appendChild(sentence);
+    line.appendChild(quick);
+
+    if (row.family_size && row.family_size > 1) {
+      var twin = BX.el("span", "twin", "+" + String(row.family_size - 1) + " twin" + (row.family_size > 2 ? "s" : ""));
+      line.appendChild(twin);
+    }
+
+    line.addEventListener("click", function () { openStory(row); });
+    line.tabIndex = 0;
+    line.setAttribute("role", "button");
+    line.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openStory(row); }
+    });
+    return line;
+  }
+
+  async function loadTop100() {
+    t100Meta.textContent = "loading…";
+    hideBanner();
+    try {
+      var r = await BX.fetchJSON("/api/v1/sweep/top100");
+      if (!r.ok) { showBanner("error " + r.status + " loading the Top-100 leaderboard", true); t100Meta.textContent = ""; return; }
+      var body = r.body;
+      if (body.state === "ok") {
+        TOP100_ROWS = body.rows || [];
+        if (!vlist) {
+          vlist = BX.virtualList(t100Scroll, { rowHeight: 64, renderRow: renderTop100Row, items: TOP100_ROWS });
+        } else {
+          vlist.setItems(TOP100_ROWS);
+        }
+        t100Meta.textContent = fmtInt(TOP100_ROWS.length) + " behaviorally-distinct combos" +
+          (body.run_id ? " · run " + body.run_id : "") +
+          " · click a row for the full story + trade list";
+        hideBanner();
+      } else if (body.state === "awaiting_artifact") {
+        TOP100_ROWS = [];
+        if (vlist) vlist.setItems([]);
+        t100Meta.textContent = "";
+        showBanner("Awaiting real artifact — " +
+          (body.reason || "no Top-100 leaderboard written for this run yet (P1/P2/P3 backend not yet merged)"), false);
+      } else if (body.state === "artifact_error") {
+        TOP100_ROWS = [];
+        if (vlist) vlist.setItems([]);
+        t100Meta.textContent = "";
+        showBanner("Top-100 artifact present but unreadable: " + (body.reason || "unknown error"), true);
+      }
+    } catch (e) {
+      t100Meta.textContent = "";
+      showBanner("offline — could not reach the sweep API", true);
+    }
+  }
+
+  // ── story card ───────────────────────────────────────────────────────
+  function clearChildren(node) { BX.clear(node); }
+
+  function metricTile(label, value, cls, explainKey) {
+    var tile = BX.el("div", "story-tile");
+    var v = BX.el("div", "stv" + (cls ? " " + cls : ""), value);
+    if (explainKey) BX.explainMetric(v, explainKey);
+    var l = BX.el("div", "stl", label);
+    tile.appendChild(v);
+    tile.appendChild(l);
+    return tile;
+  }
+
+  function renderStoryTiles(row) {
+    clearChildren(scTiles);
+    var metrics = row.metrics || {};
+    var netPnl = metrics.net_pnl_paisa;
+    var edgeCls = netPnl != null ? (netPnl >= 0 ? "pos" : "neg") : "";
+    scTiles.appendChild(metricTile("Edge — net P&L", fmtRupees(netPnl), edgeCls, "net_pnl_paisa"));
+    scTiles.appendChild(metricTile("Risk — max drawdown", fmtPctVal(metrics.max_drawdown_pct, 2), "neg", "max_drawdown_pct"));
+    scTiles.appendChild(metricTile(
+      "Consistency",
+      "Sharpe " + fmtNumVal(metrics.sharpe) + " · Sortino " + fmtNumVal(metrics.sortino),
+      "",
+      "sharpe"
+    ));
+    var dsrPct = metrics.dsr != null ? fmtPctVal(metrics.dsr * 100, 1) : "—";
+    scTiles.appendChild(metricTile(
+      "Real or fluke",
+      "DSR " + dsrPct + " · CPCV " + fmtPctVal(metrics.cpcv_pass_pct, 1),
+      "",
+      "dsr"
+    ));
+    scTiles.appendChild(metricTile("Trades", fmtInt(metrics.total_trades), "", "total_trades"));
+    scTiles.appendChild(metricTile("Profit factor", fmtNumVal(metrics.profit_factor), "", "profit_factor"));
+  }
+
+  function renderStoryTwins(row) {
+    var members = row.family_members || [];
+    if (!members.length) { scTwinsWrap.hidden = true; return; }
+    scTwinsWrap.hidden = false;
+    scTwinsSummary.textContent = String(members.length) + " behaviorally-identical twin" +
+      (members.length > 1 ? "s" : "") + " — same trade behavior, this row shows the simplest rule";
+    clearChildren(scTwinsList);
+    members.forEach(function (m) {
+      var li = document.createElement("li");
+      li.textContent = "#" + String(m.rank) + " — " + String(m.tf || "") + " " + String(m.direction || "") +
+        " (mask " + String(m.mask_hex || "") + ")";
+      scTwinsList.appendChild(li);
+    });
+  }
+
+  function openStory(row) {
+    currentRow = row;
+    tradesOffset = 0;
+    tradesTotal = 0;
+    scTitle.textContent = "#" + String(row.rank) + " " + String(row.instrument || "—") +
+      " · " + String(row.tf || "") + " · " + String(row.direction || "");
+    var metaBits = ["combo " + String(row.combo_id || "—"), "run " + String(row.sweep_run_id || "—")];
+    if (row.join_key_inferred) metaBits.push("legacy row — some links inferred");
+    scMeta.textContent = metaBits.join(" · ");
+    renderStoryTiles(row);
+    renderStoryTwins(row);
+    var pro = BX.el("span", "jargon", row.pro_sentence || "");
+    var plain = BX.el("span", "plain-eng", row.simple_sentence || "");
+    clearChildren(scSentence);
+    scSentence.appendChild(pro);
+    scSentence.appendChild(plain);
+    switchTab("scStoryPane");
+    storyOverlay.hidden = false;
+    loadTrades();
+  }
+
+  function closeStory() {
+    storyOverlay.hidden = true;
+    currentRow = null;
+  }
+  scClose.addEventListener("click", closeStory);
+  storyOverlay.addEventListener("click", function (ev) {
+    if (ev.target === storyOverlay) closeStory();
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && !storyOverlay.hidden) closeStory();
+  });
+
+  function switchTab(paneId) {
+    [["scStoryPane", scTabStory, scStoryPane], ["scTradesPane", scTabTrades, scTradesPane]].forEach(function (t) {
+      var active = t[0] === paneId;
+      t[1].classList.toggle("active", active);
+      t[2].classList.toggle("active", active);
+    });
+  }
+  scTabStory.addEventListener("click", function () { switchTab("scStoryPane"); });
+  scTabTrades.addEventListener("click", function () { switchTab("scTradesPane"); });
+
+  // ── trades tab (R24/R31/R33) ────────────────────────────────────────
+  function tradeRow(t) {
+    var tr = document.createElement("tr");
+    var cells = [
+      fmtTs(t.entry_ts) + " @ " + fmtNumVal(t.entry_px, 2),
+      fmtTs(t.exit_ts) + " @ " + fmtNumVal(t.exit_px, 2),
+    ];
+    cells.forEach(function (text) {
+      var td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+
+    var whyTd = document.createElement("td");
+    var pro = BX.el("span", "jargon", BX.exitReasonLabel(t.exit_reason, "pro"));
+    var plain = BX.el("span", "plain-eng", BX.exitReasonLabel(t.exit_reason, "simple"));
+    whyTd.appendChild(pro);
+    whyTd.appendChild(plain);
+    tr.appendChild(whyTd);
+
+    var pnlTd = document.createElement("td");
+    pnlTd.className = "num " + (t.pnl_paisa != null ? (t.pnl_paisa >= 0 ? "pos" : "neg") : "");
+    pnlTd.textContent = fmtRupees(t.pnl_paisa);
+    tr.appendChild(pnlTd);
+
+    var costsTd = document.createElement("td");
+    costsTd.className = "num";
+    costsTd.textContent = fmtRupees(t.costs_paisa); // gap-register #18: NULL-by-design until P5 → "—"
+    tr.appendChild(costsTd);
+
+    var lotsTd = document.createElement("td");
+    lotsTd.className = "num";
+    lotsTd.textContent = t.lots === null || t.lots === undefined ? "—" : fmtInt(t.lots);
+    tr.appendChild(lotsTd);
+
+    [t.mae, t.mfe, t.vix_entry, t.vix_exit].forEach(function (v) {
+      var td = document.createElement("td");
+      td.className = "num";
+      td.textContent = fmtNumVal(v, 2);
+      tr.appendChild(td);
+    });
+    return tr;
+  }
+
+  function renderTradesAwaiting(text) {
+    clearChildren(scTradesBody);
+    var tr = document.createElement("tr");
+    var td = document.createElement("td");
+    td.colSpan = 10;
+    td.style.color = "var(--muted)";
+    td.style.whiteSpace = "normal";
+    td.textContent = text;
+    tr.appendChild(td);
+    scTradesBody.appendChild(tr);
+  }
+
+  async function loadTrades() {
+    if (!currentRow) return;
+    scTradesStatus.textContent = "loading…";
+    clearChildren(scTradesBody);
+    var params = new URLSearchParams();
+    params.set("rank", String(currentRow.rank));
+    if (currentRow.sweep_run_id) params.set("run_id", String(currentRow.sweep_run_id));
+    if (currentRow.mask_hex) params.set("mask_hex", String(currentRow.mask_hex));
+    if (currentRow.direction) params.set("direction", String(currentRow.direction));
+    if (currentRow.tf) params.set("tf", String(currentRow.tf));
+    params.set("offset", String(tradesOffset));
+    params.set("limit", String(TRADES_PAGE_SIZE));
+    try {
+      var r = await BX.fetchJSON("/api/v1/sweep/trades?" + params.toString());
+      if (!r.ok) {
+        renderTradesAwaiting("error " + r.status + " loading the trade list");
+        scTradesStatus.textContent = "";
+        return;
+      }
+      var body = r.body;
+      if (body.state === "ok") {
+        tradesTotal = body.total || 0;
+        clearChildren(scTradesBody);
+        (body.rows || []).forEach(function (t) { scTradesBody.appendChild(tradeRow(t)); });
+        var shownFrom = tradesTotal ? tradesOffset + 1 : 0;
+        var shownTo = tradesOffset + (body.rows || []).length;
+        scTradesStatus.textContent = "showing " + fmtInt(shownFrom) + "–" + fmtInt(shownTo) +
+          " of " + fmtInt(tradesTotal) + " trades";
+        scTradesPrev.disabled = tradesOffset <= 0;
+        scTradesNext.disabled = shownTo >= tradesTotal;
+      } else if (body.state === "awaiting_artifact") {
+        tradesTotal = 0;
+        renderTradesAwaiting("Awaiting real artifact — " +
+          (body.reason || "no trade list for this combo yet (P3 backend not yet merged)"));
+        scTradesStatus.textContent = "";
+        scTradesPrev.disabled = true;
+        scTradesNext.disabled = true;
+      } else if (body.state === "artifact_error") {
+        tradesTotal = 0;
+        renderTradesAwaiting("Trade list present but unreadable: " + (body.reason || "unknown error"));
+        scTradesStatus.textContent = "";
+        scTradesPrev.disabled = true;
+        scTradesNext.disabled = true;
+      }
+    } catch (e) {
+      renderTradesAwaiting("offline — could not reach the sweep API");
+      scTradesStatus.textContent = "";
+    }
+  }
+  scTradesPrev.addEventListener("click", function () {
+    tradesOffset = Math.max(0, tradesOffset - TRADES_PAGE_SIZE);
+    loadTrades();
+  });
+  scTradesNext.addEventListener("click", function () {
+    tradesOffset = tradesOffset + TRADES_PAGE_SIZE;
+    loadTrades();
+  });
+
+  loadTop100();
+  } // end init()
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
 </script>
 </body>
 </html>
