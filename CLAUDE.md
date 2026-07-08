@@ -18,8 +18,34 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
-DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
+_Last updated: 2026-07-08 (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1557 / ADR-0019 —
+the UNKILLABLE sweep run core (Phase 2 of the one-click sweep program): all 15 hunt gaps
+G1–G15 + R28/R38–R43/R45 built around a byte-untouched engine — 16 NEW 100%-line+branch
+modules (flight recorder on the COMMON orchestrator `AuditWriter` SHA-256 chain at
+`runs/<run_id>/flight-recorder.jsonl` · contract-exact run manifest + ONE additive
+`RUN_MANIFEST` action on the EXISTING CLI sweep chain · content-hash stage stamps incl.
+stage-3 CELLS validated before the cascade consumes · live tripwires + set-once SUSPECT
+latch · secret-redacting diagnostic bundle · chain map · run-core CM · single-flight flock
++ lake read-guard · stall policy (default exactly 300.0) · progress-liveness verdict (the
+CONFIRMED heal monotonic-vs-wall defect fixed — a LIVE run is never quarantinable, legacy
+⇒ UNKNOWN ⇒ heal refuses) · quarantine-not-abort for corrupt tuple stores + checkpoints ·
+the R45 independent naive reference simulator (AST-pinned import ban, K=200,
+mismatch ⇒ SUSPECT, NEVER adopt) · exit-status artifact served through `read_progress`
+with zero route edits · `--detach` own-session-leader launch · verdicts + artifact guard
+for the P3 joins), run_id = `grid_identity(grid)` (NO timestamp — resume lands in the
+SAME `runs/<run_id>/`), NEW `sweep-rehearsal` CI job (the full chain in miniature every
+push, measured 350.5 s sandbox) + the fault matrix on chaos-race + the MECHANIZED R/G
+traceability gate. PROVEN ENGINE UNCHANGED: A/B byte-identity (run-core ON vs OFF —
+per-tuple store SHA-256 maps identical) + the frozen golden reproduced with every
+Phase-2 default ON incl. diffcheck. HONEST: dashboard sweeps stay IN-PROCESS until the
+1-line detach adapter lands (CLI is detached-capable today); the 5 hard-gate per-door
+kills are ABSENT manifest keys (P3-owned follow-up); TUPLE_DONE is decimated LOSSLESSLY
+(cumulative counters; reconciliation reads SweepProgress exactly); diffcheck covers
+projection+trade-sim+drawdown, NOT the 60 indicators; D-19 mutation floors are ratchets
+below 85% (74–79% measured, raise = named follow-up); the G10 "peer pull" refusal wording
+is pinned debt — follow-up DEC-SWEEP-LOCK-WORDING-001. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+Earlier: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
 MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
 (1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
 ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
@@ -903,7 +929,60 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
+- **Active branch:** `claude/magical-pasteur-y6gmr8` (**DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1557 /
+  ADR-0019** — the UNKILLABLE sweep run core, Phase 2 of the operator's one-click sweep program: all 15
+  hunt gaps G1–G15 + the run-observability requirements R28/R38/R39/R40/R41/R42/R43/R45 delivered around
+  a byte-untouched engine. SIXTEEN new 100%-line+branch modules —
+  `brutex/observability/{flight_recorder, run_manifest, stage_stamp, diag_bundle, chain_map,
+  run_tripwires}.py` + `brutex/engine/{sweep_run_core, sweep_singleflight, sweep_stall_policy,
+  sweep_liveness, sweep_quarantine, sweep_diffcheck, sweep_exit_status, sweep_detach, run_verdicts,
+  sweep_artifact_guard}.py` — wired at the cli `cmd_sweep_all` seam through ONE `with sweep_run_core(...)`
+  block. Laws: run_id = `grid_identity(grid)` (BLAKE3 selection identity, NO timestamp — resume lands in
+  the SAME `runs/<run_id>/`; `attempt` observability-only); the flight recorder reuses the COMMON
+  orchestrator `AuditWriter` SHA-256 chain (`actor="flight"`, verified by `audit_verify.auto_verify` in
+  the rehearsal chain-break gate; the supervisor BLAKE3 chain untouched); ONE additive `RUN_MANIFEST`
+  action on the EXISTING CLI sweep chain (the per-tuple 3-line golden contract untouched); stage-3 CELL
+  stamps validated (run_id + snapshot hash) before the cascade consumes (invalid ⇒ discard + one
+  idempotent pass re-run); fail-soft law (an observability failure NEVER changes results — recorder
+  degraded latch, ONE WARN); never-adopt (the R45 independent naive reference simulator — AST-pinned
+  import ban on the production sim/metrics modules, int/datetime-only compare, deterministic blake3
+  per-tuple seeding, K=200 `BRUTEX_SWEEP_DIFFCHECK` tristate — marks SUSPECT on mismatch, NEVER replaces
+  the production value); SUSPECT = set-once latch fanning out ONCE (record + ERROR + Telegram + manifest
+  + exit-status + progress). Gap fixes at the seams: G1 corrupt tuple trio → `.quarantine/runtime/` +
+  one retry, grid CONTINUES; G2 stall policy (env wins, scaled floor stays exactly 300.0); G3 parallel
+  writer-actor progress tick; G4 the CONFIRMED heal monotonic-vs-wall defect fixed (additive
+  `wall_time_utc`/`pid` progress keys + pure `progress_verdict`; legacy ⇒ UNKNOWN ⇒ heal REFUSES — a
+  LIVE run is never quarantinable); G5 `exit-status.json` served through enriched `read_progress`, ZERO
+  route edits; G6 results-root flock (audit-chain fork class dead); G7 cascade sidecars atomic +
+  snapshot-hash-stamped, replay refuses a changed lake naming both hashes; G8 stamped
+  `runs/<run_id>/verdicts.json` (P3 join = documented 1-line adapter); G9 keep-awake; G10 LOCK_SH lake
+  read-guard across preload on the EXISTING pull lock; G11 progress-write warn-once; G12 corrupt
+  checkpoint quarantine-start-fresh + crash-loop breaker; G13 alerter-first daemon kernel 100%-tested in
+  `sweep_scheduler.py`; G14 typed old-schema degrade via `guarded_load`; G15 progress beats feed the
+  channel pull_jobs actually consumes. CLI `--detach` = own-session-leader survival (R7). CI: NEW
+  `sweep-rehearsal` job in `ci-ok.needs` (full chain in miniature each push — golden tuple hash +
+  chain verify + stamps + verdicts + bundle + diffcheck at CI_K_SAMPLES=8 + adversarial leg; measured
+  350.5 s sandbox / 21 tests), fault matrix on the REQUIRED chaos-race job, the MECHANIZED R/G
+  traceability gate (`test_r16_traceability_matrix.py`; human table `docs/runbooks/sweep-unkillable.md`).
+  PROVEN ENGINE UNCHANGED: A/B byte-identity (run-core ON vs OFF — per-tuple store SHA-256 maps
+  identical; chains content-equal modulo timestamps + the ONE additive line) + the frozen
+  `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` reproduced with EVERY Phase-2 default ON incl. diffcheck.
+  HONEST envelope (#1557 carries the full list): dashboard-launched sweeps stay IN-PROCESS until the
+  1-line detach adapter lands at merge-integration (the CLI/nightly path is detached-capable TODAY);
+  the 5 hard-gate per-door kill counts are ABSENT manifest keys (absent ≠ zero, contract-pinned;
+  P3-owned follow-up); TUPLE_DONE decimation (`ceil(total/10_000)`) is LOSSLESS — cumulative counters,
+  reconciliation reads SweepProgress EXACTLY, milestone/failure records never decimated (the R41
+  wording honesty note is ledgered); diffcheck verifies projection + trade-sim + drawdown from
+  CERTIFIED bar_bits, NOT the 60 indicator evaluators (K=200 ≈ 0.004% of a 5M-mask grid — assurance,
+  not proof); manifest `estimate` is honest null until P1's estimator wires; the D-19 mutation floors
+  are RATCHETS below the 85% target (74.4–78.9% measured; raise = named follow-up); two
+  WP-6-discovered gaps filed (LMDB cache-skip without sentinel cross-check; old-schema store RAW abort
+  on the sweep→cascade spec-loader path); the G10 "peer pull" refusal wording while a sweep holds
+  LOCK_SH is pinned misleading-but-safe debt — follow-up DEC-SWEEP-LOCK-WORDING-001; tripwires mark
+  SUSPECT + alert, never auto-kill; the watchdog detects, never kills (#999 stance); flock is weaker on
+  NFS. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; ruff/ruff-format clean;
+  `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
   DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
   pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
@@ -2696,7 +2775,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/stoic-davinci-7c7xp0`
+- **Active feature branch:** `claude/magical-pasteur-y6gmr8`
   Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
