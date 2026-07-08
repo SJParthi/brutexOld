@@ -4,6 +4,11 @@
 two-tier `seen`/`add`/`add_if_new` (Bloom-negative short-circuit, Bloom-
 positive confirm, and the false-positive case via an injected always-true
 Bloom), the inject-vs-default ctor branches, and batch `unique_option_bars`.
+
+Ordering pins (DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001): a spy exact tier
+proves a Bloom-NEGATIVE never probes the exact backing (bloom-before-exact),
+and an always-true Bloom proves a false positive can never phantom-drop a
+genuinely-new key at either probe entry (`add_if_new` / `unique_option_bars`).
 """
 
 from __future__ import annotations
@@ -58,6 +63,21 @@ class _AlwaysTrueBloom:
     def might_contain(self, content_hash: bytes) -> bool:
         del content_hash
         return True
+
+
+class _SpyExact:
+    """A set-backed exact tier that counts membership probes (the ordering spy)."""
+
+    def __init__(self) -> None:
+        self._backing: set[bytes] = set()
+        self.contains_probes = 0
+
+    def __contains__(self, key: bytes, /) -> bool:
+        self.contains_probes += 1
+        return key in self._backing
+
+    def add(self, key: bytes, /) -> None:
+        self._backing.add(key)
 
 
 class TestKey:
@@ -138,6 +158,32 @@ class TestDedupIndex:
         assert idx.add_if_new(key) is True
         assert idx.add_if_new(key) is False
 
+    def test_bloom_negative_short_circuits_exact_tier(self) -> None:
+        # Ordering pin (DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001): `_seen_locked`
+        # probes the Bloom FIRST — an empty real Bloom is deterministically
+        # negative, and the negative answers "definitely new" WITHOUT ever
+        # touching the exact tier (bloom-before-exact).
+        spy = _SpyExact()
+        idx = OptionDedupIndex(capacity=1024, fpr_target=1e-3, exact=spy)
+        key = option_bar_key(underlying="N", expiry="E", strike="1", side="CE", epoch=1)
+        assert idx.seen(key) is False
+        assert spy.contains_probes == 0  # negative short-circuited the exact probe
+        assert idx.add_if_new(key) is True  # add_if_new's probe short-circuits too
+        assert spy.contains_probes == 0
+        # Once added, the Bloom-positive falls through to the exact confirm.
+        assert idx.seen(key) is True
+        assert spy.contains_probes == 1
+
+    def test_add_if_new_under_false_positive_bloom_admits_new_key(self) -> None:
+        # No-phantom pin (DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001): with an
+        # all-positive Bloom (every probe a false positive) the exact tier
+        # must still admit a genuinely-NEW key — it is NEVER reported seen /
+        # dropped — while a true duplicate still dedups.
+        idx = OptionDedupIndex(bloom=_AlwaysTrueBloom())
+        key = option_bar_key(underlying="N", expiry="E", strike="1", side="CE", epoch=1)
+        assert idx.add_if_new(key) is True  # new key admitted despite the FP
+        assert idx.add_if_new(key) is False  # exact-confirmed duplicate dropped
+
     def test_bloom_false_positive_does_not_false_dedup(self) -> None:
         # Injected Bloom claims membership for everything; the exact tier must
         # still report an unknown key as new (no false dedup).
@@ -179,3 +225,14 @@ class TestUniqueOptionBars:
         bars = [_bar(side="CE", minute=0), _bar(side="PE", minute=0)]
         kept = unique_option_bars(bars, idx, underlying="NIFTY", expiry="E")
         assert len(kept) == 2  # different side → different key → both kept
+
+    def test_unique_option_bars_under_false_positive_bloom_keeps_new_bars(self) -> None:
+        # No-phantom pin at the batch entry (DEC-OPTION-DEDUP-BLOOM-VERIFY-
+        # PIN-001): every genuinely-new bar survives an all-positive Bloom
+        # (the exact tier disambiguates each false positive), and the
+        # idempotent re-pull still collapses to nothing.
+        idx = OptionDedupIndex(bloom=_AlwaysTrueBloom())
+        bars = [_bar(minute=0), _bar(minute=1)]
+        kept = unique_option_bars(bars, idx, underlying="NIFTY", expiry="E")
+        assert [b.timestamp.minute for b in kept] == [0, 1]  # nothing phantom-dropped
+        assert unique_option_bars(bars, idx, underlying="NIFTY", expiry="E") == []

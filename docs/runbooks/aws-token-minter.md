@@ -150,7 +150,10 @@ terraform output reader_brutex_role_arn
 ```
 
 The BruteX read-side code change (point the adapter at the centralized token param
-instead of minting) is a SEPARATE PR — this runbook covers the minter + IaC only.
+instead of minting) LANDED as PR #1015 / DEC-TOKEN-BROKER-AWS-001 (MIGRATION.md
+#1064) and was then made the DEFAULT AND ONLY credential/token source — no flag, no
+local-mint fallback — by DEC-AWS-ONLY-CREDS-001 (MIGRATION.md #1065). This runbook
+covers the minter + IaC only; the read side is `docs/runbooks/aws-token-broker.md`.
 
 ## 7. Alarms
 
@@ -178,8 +181,16 @@ terraform destroy -var 'alert_email=you@example.com'
 `destroy` removes the Lambda, schedule, alarms, SNS topic, the 3 IAM roles, and the
 token param (the `access-token` SecureString). It does **NOT** touch the EXISTING
 credential params or the KMS key (they are `data` sources). With the minter gone,
-each application falls back to its in-process auto-re-mint (DEC-GROWW-TOKEN-REAUTH-001
-#909) until the minter is re-applied.
+**production BruteX does NOT fall back to a local mint — it fails LOUD**: the
+read-only cold start bounded-retries the SSM read, then raises a `GrowwAuthError`
+naming `/tickvault/prod/groww/access-token` + the deploy pointer
+`deploy/aws_token_minter/deploy.sh` (DEC-REAUTH-COLDSTART-READONLY-001, MIGRATION.md
+#1092); a mid-run stale token likewise RE-READS + bounded-waits, never mints
+(DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072). The in-process auto-re-mint
+(DEC-GROWW-TOKEN-REAUTH-001 #909) survives ONLY for explicitly non-read-only
+local-dev configs (CLAUDE.md §6), never the production read-only broker. TickVault's
+rollback behavior is owned by its own repo — not asserted here. Remediation:
+re-apply the minter (`./deploy.sh`).
 
 ## 9. Secret hygiene
 

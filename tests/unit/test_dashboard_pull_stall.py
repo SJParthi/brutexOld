@@ -404,10 +404,10 @@ class TestBackgroundPullJobWatchdog:
         """
         from brutex.observability.progress_beat import (
             emit_progress_beat,
-            reset_progress_beats_for_tests,
+            unregister_progress_beat,
         )
 
-        reset_progress_beats_for_tests()  # clean slate
+        unregister_progress_beat()  # clean slate
         built, factory = _spy_factory()
         job = _job(factory)
         seen_running: list[bool] = []
@@ -428,72 +428,6 @@ class TestBackgroundPullJobWatchdog:
         # After the run the beat is unregistered — a stray emit no longer reaches it.
         emit_progress_beat()
         assert spy.beats == 3
-
-    def test_concurrent_jobs_never_clobber_or_clear_each_others_beat(self) -> None:
-        """Two concurrent jobs keep INDEPENDENT, JOB-SCOPED liveness beats.
-
-        DEC-GREEKS-BULK-REENRICH-001 broke the seam's old single-flight
-        invariant: ``build_app`` owns TWO :class:`BackgroundPullJob` instances
-        (the pull + the Greeks backfill), and a DRY-RUN backfill is sanctioned
-        to run concurrently with a real pull (``cross_process_lock=False`` —
-        the route note says "a concurrent pull on this lake is unaffected").
-        Refuter-confirmed against the old single-slot registry (fix round 3):
-        (a) the backfill's register CLOBBERED the running pull's beat, so every
-        seam beat fed the WRONG watchdog (a healthy pull phase > 600 s silent
-        false-tripped ``_on_hung`` → CRITICAL "pull halted" Telegram alert +
-        STALLED-SUSPECT); (b) whichever job finished FIRST unconditionally
-        CLEARED the slot, stripping the still-running sibling's only
-        defence-in-depth liveness source. Refuter-confirmed against the
-        round-3 BROADCAST (fix round 4): a beat emitted on one job's OWN
-        worker thread reached the SIBLING's watchdog too, so a concurrent
-        dry-run backfill's ~30 min O(files) scan kept a genuinely-WEDGED
-        pull's watchdog HEALTHY — suppressing the HUNG edge, the CRITICAL
-        alert AND the terminal WEDGED verdict (gated on HUNG). Each run now
-        binds its handle as its worker thread's beat SCOPE: own-thread beats
-        route ONLY to the owner's watchdog.
-        """
-        from brutex.observability.progress_beat import (
-            emit_progress_beat,
-            reset_progress_beats_for_tests,
-        )
-
-        reset_progress_beats_for_tests()  # clean slate
-        pull_built, pull_factory = _spy_factory()
-        backfill_built, backfill_factory = _spy_factory()
-        pull_job = _job(pull_factory)
-        backfill_job = _job(backfill_factory)
-
-        def backfill_work(_on_progress: ProgressHook) -> None:
-            # The backfill's own-thread scan beat: it must feed the BACKFILL's
-            # watchdog and — fix round 4 — must NOT feed the (potentially
-            # wedged) pull's watchdog. The old broadcast masked the pull here.
-            emit_progress_beat()
-
-        def pull_work(_on_progress: ProgressHook) -> None:
-            emit_progress_beat()  # baseline: the pull's own seam beat
-            # A dry-run Greeks-backfill scan starts AND finishes MID-PULL (the
-            # sanctioned lock-free concurrency of the dashboard route; the
-            # sync spawner runs it inline here — the Token-based scope restore
-            # hands the thread back to the pull's scope after the nested run).
-            assert backfill_job.start(backfill_work, total=0, cross_process_lock=False) is True
-            # The finished backfill removed ONLY its own handle + restored the
-            # pull's scope — the pull's beat must still be registered AND
-            # routable (the clobber/clear regression).
-            emit_progress_beat()
-
-        assert pull_job.start(pull_work, total=1) is True
-        pull_spy, backfill_spy = pull_built[0], backfill_built[0]
-        # The pull's watchdog received exactly ITS OWN seam beats: the baseline
-        # + the one after the nested backfill finished. NOT the backfill's
-        # scan beat — under the round-3 broadcast this read 3 and a wedged
-        # pull's silence was masked for the backfill's whole lifetime.
-        assert pull_spy.beats == 2
-        # The backfill's watchdog received the seam beat fired while IT ran.
-        assert backfill_spy.beats == 1
-        # Both runs finished: every handle is gone — a stray emit reaches nobody.
-        emit_progress_beat()
-        assert pull_spy.beats == 2
-        assert backfill_spy.beats == 1
 
     def test_hung_edge_alerts_and_marks_stalled_suspect_without_release(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1231,3 +1165,33 @@ class TestWatchdogAliveBeat:
         alive = self._alive(logs)
         assert len(alive) == 1
         assert alive[0]["state"] == "unregistered"
+
+    def test_alive_log_carries_the_stamped_run_id(self) -> None:
+        """DEC-PULL-BEAT-PERRUN-001: ``run_id`` defaults ``""``, is assignable
+        POST-construction (the on_recovery pattern — the factory signature stays
+        ``(on_hung)``), and rides the alive event as an ADDITIVE ``pull_id`` field.
+        Event name + throttle behaviour byte-unchanged."""
+        from structlog.testing import capture_logs
+
+        clock = _FakeClock()
+        _captured, spawn = _capturing_spawn()
+        wd = PullWatchdog(on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock)
+        assert wd.run_id == ""  # the unstamped default
+        wd.start()
+        with capture_logs() as logs:
+            wd.check_once()
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["pull_id"] == ""  # a bare/test watchdog reads honestly empty
+
+        clock2 = _FakeClock()
+        wd2 = PullWatchdog(
+            on_hung=lambda _e: None, timeout_seconds=600.0, spawn=spawn, clock=clock2
+        )
+        wd2.run_id = "abc123def456"  # the job's post-construction stamp
+        wd2.start()
+        with capture_logs() as logs:
+            wd2.check_once()
+        alive = self._alive(logs)
+        assert len(alive) == 1
+        assert alive[0]["pull_id"] == "abc123def456"

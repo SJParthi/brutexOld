@@ -103,7 +103,7 @@ honesty (Golden Rule #10) requires naming the one engine-visible change of
 this change set: :mod:`brutex.engine.sweep_checkpoint` gained fail-loud
 corruption refusals (1 MiB size cap, ``RecursionError`` nesting-bomb mapping,
 same-id ``total_combos`` mismatch refused, parent-mkdir inside the error
-mapping — ledger #1542 fix round 2; the ``int()``-coercion ``OverflowError``
+mapping — ledger #1558 fix round 2; the ``int()``-coercion ``OverflowError``
 of a JSON ``1e999``/``Infinity`` int field mapped alongside
 ``ValueError``/``TypeError`` — fix round 6) that ALSO harden the sweep's own resume
 path (``sweep_supervisor``/``sweep_parallel`` call ``load()`` uncaught, so a

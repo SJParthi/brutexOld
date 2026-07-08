@@ -48,7 +48,7 @@ from brutex.data.timeframe_materialize import MaterializeResult, materialize_tim
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.progress_beat import (
     register_progress_beat,
-    reset_progress_beats_for_tests,
+    reset_progress_beats,
 )
 from brutex.observability.watchdog import WorkerEvent
 from brutex.options.risk_free import FixedRateSource
@@ -83,10 +83,15 @@ def _make_clock() -> tuple[Callable[[], float], _ClockBox]:
 
 @pytest.fixture(autouse=True)
 def _clean_beat_seam() -> Iterator[None]:
-    """Every test starts + ends with NO process-global beat registered."""
-    reset_progress_beats_for_tests()
+    """Every test starts + ends with NO beat registered on ANY channel.
+
+    Repointed to :func:`reset_progress_beats` (DEC-PULL-BEAT-PERRUN-001): the old bare
+    ``unregister_progress_beat()`` cleared only the legacy channel, so a keyed
+    registration leaked by any test could bleed across tests.
+    """
+    reset_progress_beats()
     yield
-    reset_progress_beats_for_tests()
+    reset_progress_beats()
 
 
 @pytest.fixture(autouse=True)

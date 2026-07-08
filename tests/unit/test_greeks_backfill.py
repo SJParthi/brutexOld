@@ -537,11 +537,11 @@ class TestScanner:
         _write_month(lake, _CE, 2024, 2, [_CURRENT_PID])
         _write_month(lake, _PE, 2024, 1, [_CURRENT_PID])
         beats: list[None] = []
-        handle = register_progress_beat(lambda: beats.append(None))
+        register_progress_beat(lambda: beats.append(None))
         try:
             scan = _scan(lake)
         finally:
-            unregister_progress_beat(handle)
+            unregister_progress_beat()
         assert scan.files_probed == 3
         # ≥ one beat per ENUMERATED symbol dir (2 — the manifest-absent walk
         # fallback, fix round 2: enumeration fully materialises BEFORE the
@@ -559,11 +559,11 @@ class TestScanner:
 
         _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
         beats: list[None] = []
-        handle = register_progress_beat(lambda: beats.append(None))
+        register_progress_beat(lambda: beats.append(None))
         try:
             scan = _scan(lake, force=True)
         finally:
-            unregister_progress_beat(handle)
+            unregister_progress_beat()
         assert scan.files_probed == 0 and len(beats) >= 1
 
     def test_per_file_pause_sleeps_between_probes(self, lake: Path) -> None:

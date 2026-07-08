@@ -297,7 +297,7 @@ def test_watchdog_beats_flow_during_pause() -> None:
     refresher = _readonly_refresher(reread)
     advance(_OUTAGE_SECONDS - 25.0)  # 5 ticks from the mint
     beats: list[float] = []
-    handle = register_progress_beat(lambda: beats.append(now()))
+    register_progress_beat(lambda: beats.append(now()))
     try:
         assert (
             refresher.await_token_recovery(
@@ -306,7 +306,7 @@ def test_watchdog_beats_flow_during_pause() -> None:
             == 1
         )
     finally:
-        unregister_progress_beat(handle)
+        unregister_progress_beat()
     assert len(beats) >= 5  # one liveness beat per tick throughout the pause
 
 

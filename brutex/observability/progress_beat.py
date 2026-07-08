@@ -1,82 +1,55 @@
-"""Process-global liveness-beat seam — defence-in-depth for the job watchdogs.
+"""Pull-id-keyed liveness-beat seam — defence-in-depth for the pull watchdog.
 
-DEC-PULL-CONTENTION-ANTISTALL-001 (single-slot origin) + the MULTI-REGISTRANT
-registry of DEC-GREEKS-BULK-REENRICH-001 fix round 3 + the JOB-SCOPED beat
-routing of fix round 4. The
-:class:`~brutex.dashboard.pull_stall.PullWatchdog` declares a job worker HUNG
-when no heartbeat lands for the audited timeout. Its real heartbeat
-(:meth:`brutex.dashboard.pull_jobs.BackgroundPullJob._on_progress`) fires only
-on a COMPLETED unit. A worker that is genuinely PROGRESSING but momentarily
-slow — e.g. a fan-out worker repeatedly retrying a non-blocking partition
-``flock`` against a busy peer, pacing through the per-minute rate governor, or
-walking an O(files) scan — produces NO completed-unit beat for that interval,
-so a long-enough slow patch could FALSELY trip the watchdog.
+DEC-PULL-CONTENTION-ANTISTALL-001 (the seam) + DEC-WATCHDOG-PERRUN-BEAT-001 /
+DEC-PULL-BEAT-PERRUN-001 (per-run channels). The
+:class:`~brutex.dashboard.pull_stall.PullWatchdog` declares a pull worker HUNG when no
+heartbeat lands for the audited timeout. Its real heartbeat
+(:meth:`brutex.dashboard.pull_jobs.BackgroundPullJob._on_progress`) fires only on a
+COMPLETED window. A pull that is genuinely PROGRESSING but momentarily slow — e.g. a
+fan-out worker repeatedly retrying a non-blocking partition ``flock`` against a busy
+peer, or pacing through the per-minute rate governor — produces NO completed-window beat
+for that interval, so a long-enough slow patch could FALSELY trip the watchdog.
 
-This module is the thin, decoupled seam that closes that false-positive: the
-hot liveness paths (the bounded partition lock-wait poll
-:func:`brutex.data.partition_lock.partition_write_lock`, the rate controller's
-:meth:`brutex.adapters.rate_common.RateController.pace` return, the
-greeks-enrich / prebuild / movers-warm / backfill-scan per-unit seams) call
-:func:`emit_progress_beat` after each poll / pace / unit. When nothing is
-registered (a CLI dry-run, a unit test, any non-dashboard caller)
-:func:`emit_progress_beat` is a cheap no-op.
+This module is the thin, decoupled seam that closes that false-positive: the hot
+liveness paths (the bounded partition lock-wait poll
+:func:`brutex.data.partition_lock.partition_write_lock`, and the rate controller's
+:meth:`brutex.adapters.rate_common.RateController.pace` return) call
+:func:`emit_progress_beat` after each poll / pace. When a watchdog has
+:func:`register_progress_beat`-ed its beat callback (the dashboard does so for the
+lifetime of a run), that beat fires — so a slow-but-progressing pull keeps its heartbeat
+alive and is NEVER falsely killed. When nothing is registered (a CLI dry-run, a unit
+test, any non-dashboard caller) :func:`emit_progress_beat` is a cheap no-op.
 
-Design (COMMON · decoupled · best-effort · O(registrants)):
+Design (COMMON · decoupled · best-effort · O(1)):
 
-* **One source of truth.** The hot paths import ONLY :func:`emit_progress_beat`;
-  they know nothing about the watchdogs. A watchdog owner (the dashboard job
-  layer) installs its beat via :func:`register_progress_beat` — which returns
-  an opaque :class:`ProgressBeatHandle` — and removes EXACTLY its own
-  registration via :func:`unregister_progress_beat`, so there is no import
-  edge from the lake / rate layers up into the dashboard.
-* **Process-global MULTI-registrant registry — because one job is no longer
-  guaranteed.** The original single-slot design leaned on "the dashboard pull
-  is SINGLE-FLIGHT, so there is never a second beat to confuse" — an
-  invariant DEC-GREEKS-BULK-REENRICH-001 broke: ``build_app`` now owns TWO
-  :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` instances (the pull
-  + the Greeks backfill), and a DRY-RUN backfill is sanctioned to run
-  CONCURRENTLY with a real pull (``cross_process_lock=False``). Under the
-  single slot the second job's register CLOBBERED the first's beat (its
-  liveness fed the WRONG watchdog → a false CRITICAL "pull halted" alert on
-  a healthy run) and whichever job finished first CLEARED the slot outright,
-  stripping the survivor's only defence-in-depth liveness source
-  (refuter-confirmed, fix round 3). The registry holds EVERY registered beat.
-* **JOB-SCOPED routing (fix round 4, refuter-confirmed).** The naive round-3
-  broadcast ("fire EVERY registered beat") introduced a FALSE-NEGATIVE: a
-  concurrent dry-run backfill's O(files) scan beats — emitted per contract /
-  per month file on ITS OWN job thread — kept a genuinely-WEDGED live pull's
-  watchdog HEALTHY for the whole ~30 min scan, suppressing the HUNG edge and
-  with it the STALLED-SUSPECT marker, the CRITICAL alert, AND the terminal
-  WEDGED verdict (the DEC-PULL-WEDGE-ESCALATE-001 dual signal is gated ON the
-  HUNG edge, so it was never even consulted — the round-3 docstring's "the
-  WEDGED verdict still requires the lake-revision DUAL signal" mitigation
-  claim was VACUOUS and is hereby retracted). Each job worker therefore binds
-  its own registration as the THREAD-scoped beat target
-  (:func:`bind_progress_beat_scope`, a :mod:`contextvars` var): a beat emitted
-  on a job's OWN thread (the backfill scan, the prebuild driver loop, the
-  movers warm) is delivered ONLY to that job's watchdog — one job's
-  synchronous phases can no longer mask a wedged sibling in EITHER direction.
-* **Unscoped emitters still broadcast — fail-open, honestly bounded.** Beats
-  emitted on threads that carry NO scope (the fetch pipeline's fan-out worker
-  threads firing the lock-wait / pace / reauth seams, the prebuild pool
-  workers — threads the spine creates far below the dashboard, where no job
-  token can be plumbed without the #1022-rejected multi-layer threading) are
-  delivered to EVERY registrant: a beat must never be LOST to its own
-  watchdog (losing it would resurrect the round-3 false-CRITICAL class, the
-  worse failure direction). Honest envelope (Golden Rule #10): in that
-  unscoped direction a running job's fan-out beats CAN still delay a wedged
-  sibling's HUNG edge — and therefore its CRITICAL alert AND the WEDGED
-  verdict, since HUNG is their precondition — for the emitter's lifetime; the
-  wedge dual signal does NOT mitigate this (it is only evaluated after the
-  HUNG edge). Detection resumes when the emitting job unregisters in its
-  ``finally``.
-* **Best-effort.** A raising beat callback is swallowed + logged — and never
-  prevents the OTHER registered beats from firing — so a buggy beat can NEVER
-  crash the fetch worker, the lock-wait, or the pacer (Golden Rule #10). The
-  beat is additive liveness signal, never a gate.
-* **No global mutable engine state.** This is observability-only liveness
-  plumbing; it carries no pull data and influences no stored bytes
-  (Rule #1 / #7 untouched).
+* **One source of truth.** The hot paths import ONLY :func:`emit_progress_beat`; they
+  know nothing about the watchdog. The watchdog (the dashboard layer) installs its beat
+  via :func:`register_progress_beat` and removes it via :func:`unregister_progress_beat`,
+  so there is no import edge from the lake / rate layers up into the dashboard.
+* **Per-RUN keyed channels — attribution by the ambient ``pull_id``.** Beats are keyed
+  by the run's 12-hex ``pull_id`` (:mod:`brutex.observability.correlation`): a production
+  run registers its beat KEYED on its own run id, and :func:`emit_progress_beat` routes
+  each beat by the emitting thread's ambient ``pull_id`` — so a foreign / unattributed
+  in-process thread's beat can NEVER refresh a run it does not belong to and mask the
+  ~600 s stall alarm. The :data:`LEGACY_CHANNEL` (``""``) is the unkeyed back-compat
+  slot: a zero-arg register/emit pair behaves exactly as the pre-keyed seam did, and a
+  KEYED emit that finds no keyed registrant falls back OUTWARD to the legacy channel
+  (never the reverse — the anti-masking invariant: nothing ever routes INTO a keyed
+  channel it was not addressed to). A beat during a keyed run that matches NO channel is
+  DROPPED + WARNed once per register-epoch (``progress_beat.foreign_beat_dropped`` —
+  Golden Rule #10 diagnosability for an unattributed emitter). Standing discipline: any
+  NEW emit site running on a pool / consumer thread must copy the canonical
+  capture-then-rebind pattern (``run_ingest.py`` ``_run_pair`` — capture
+  ``current_pull_id()`` on the driver, re-bind ``pull_id_scope`` on the worker) or its
+  beats DROP; the failure direction is a LOUD false stalled-SUSPECT, never a masked true
+  stall.
+* **Best-effort.** A raising beat callback is swallowed + logged so a buggy beat can
+  NEVER crash the fetch worker, the lock-wait, or the pacer (Golden Rule #10). The beat
+  is additive liveness signal, never a gate.
+* **No global mutable engine state.** This is observability-only liveness plumbing; it
+  carries no pull data and influences no stored bytes (Rule #1 / #7 untouched). The
+  callback is invoked OUTSIDE :data:`_BEAT_LOCK` (it does journal I/O and must never run
+  under the registry lock).
 """
 
 from __future__ import annotations
@@ -84,163 +57,225 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from contextvars import ContextVar, Token
 from typing import Final
+
+from brutex.observability.correlation import current_pull_id
 
 logger = logging.getLogger(__name__)
 
 #: A liveness beat — fired by the hot paths, supplied by a watchdog. Takes no args.
 ProgressBeat = Callable[[], None]
 
+#: The unkeyed back-compat channel: a zero-arg :func:`register_progress_beat` /
+#: :func:`emit_progress_beat` pair rides it with the exact pre-keyed semantics, and a
+#: KEYED emit that finds no keyed registrant falls back OUTWARD to it (never inward).
+LEGACY_CHANNEL: Final[str] = ""
 
-class ProgressBeatHandle:
-    """Opaque registration token returned by :func:`register_progress_beat`.
+#: The registered beats, keyed by run ``pull_id`` (:data:`LEGACY_CHANNEL` = the unkeyed
+#: slot). Guarded by :data:`_BEAT_LOCK`; last write wins WITHIN a channel.
+_BEATS: dict[str, ProgressBeat] = {}
 
-    Identity-keyed (no payload): each ``register`` mints a fresh handle, so the
-    SAME beat callable registered twice yields two independent registrations
-    and :func:`unregister_progress_beat` can only ever remove the caller's own
-    — a job finishing can never clear a concurrent sibling job's beat (the
-    fix-round-3 clobber regression).
-    """
+#: Register-epoch counter — bumped on every register / unregister / reset so the
+#: foreign-beat drop WARN fires at most once per epoch (a new registration re-arms it).
+#: Guarded by :data:`_BEAT_LOCK`.
+_EPOCH: int = 0
 
-    __slots__ = ()
+#: The epoch the drop WARN last fired for (``"warned_epoch"``, ``-1`` = never) — a
+#: one-slot mutable holder rather than a bare ``global`` int, because CodeQL's
+#: ``py/unused-global-variable`` query cannot see a read that happens only inside a
+#: function via a ``global`` statement (repo CodeQL Trap 3 — the semantics are
+#: identical, the item write just never rebinds the module name). Guarded by
+#: :data:`_BEAT_LOCK`.
+_WARN_THROTTLE: Final[dict[str, int]] = {"warned_epoch": -1}
 
+#: Count of beats DROPPED in the current register-epoch (the once-per-epoch WARN alone
+#: cannot convey magnitude — one stray beat vs a systematically-unattributed emitter
+#: population). Flushed to a debug ``progress_beat.drop_summary`` line whenever the epoch
+#: closes (register / unregister / reset). Guarded by :data:`_BEAT_LOCK`.
+_DROPPED_IN_EPOCH: int = 0
 
-#: Every registered process-global beat, keyed by its opaque handle (insertion-
-#: ordered — emit fires in registration order). Guarded by :data:`_BEAT_LOCK`.
-_BEATS: dict[ProgressBeatHandle, ProgressBeat] = {}
-
-#: Guards every read / mutation of :data:`_BEATS` — register / unregister run on
-#: the job control threads, while emit runs on the fetch worker threads.
+#: Guards every read / mutation of :data:`_BEATS` / :data:`_EPOCH` / :data:`_WARN_THROTTLE`
+#: — register / unregister run on the dashboard control thread, while emit runs on the
+#: fetch worker threads.
 _BEAT_LOCK = threading.Lock()
 
-#: The emitting context's OWN registration (fix round 4): bound by a job worker
-#: on ITS thread for the run's lifetime, so a beat emitted there routes ONLY to
-#: that job's watchdog. ``None`` (every fan-out / non-job thread) = broadcast.
-_BEAT_SCOPE: Final[ContextVar[ProgressBeatHandle | None]] = ContextVar(
-    "progress_beat_scope", default=None
-)
 
+def _close_epoch_locked() -> int:
+    """Bump the register-epoch + collect the closed epoch's drop count — lock held.
 
-def register_progress_beat(beat: ProgressBeat) -> ProgressBeatHandle:
-    """Register *beat* as A process-global liveness beat; return its handle. O(1).
-
-    Each dashboard job worker registers its watchdog's ``beat`` for the
-    lifetime of a run so the hot liveness paths (lock-wait / pace / per-unit
-    seams, on any fan-out worker thread) keep that watchdog's heartbeat alive.
-    Registrations are INDEPENDENT — a second concurrent job (the pull + the
-    Greeks backfill run side by side by design) adds its own entry and can
-    never displace this one. The caller MUST keep the returned handle and pass
-    it to :func:`unregister_progress_beat` in its ``finally`` — and SHOULD
-    additionally bind it on its worker thread via
-    :func:`bind_progress_beat_scope` so the thread's own beats never feed a
-    sibling's watchdog (fix round 4).
+    The ONE place the epoch advances (register / unregister / reset all funnel here), so
+    the per-epoch drop counter can never straddle two epochs. Returns the closed epoch's
+    drop count so the caller can flush it to :func:`_log_drop_summary` OUTSIDE the lock.
     """
-    handle = ProgressBeatHandle()
+    global _EPOCH, _DROPPED_IN_EPOCH  # noqa: PLW0603 — the seam's epoch state, lock-guarded
+    _EPOCH += 1
+    dropped = _DROPPED_IN_EPOCH
+    _DROPPED_IN_EPOCH = 0
+    return dropped
+
+
+def _log_drop_summary(dropped: int) -> None:
+    """Debug-flush the closed epoch's drop tally (magnitude signal; 0 = silent)."""
+    if dropped:
+        logger.debug(
+            "progress_beat.drop_summary — %d beat(s) dropped in the closed register-epoch "
+            "(the once-per-epoch foreign_beat_dropped WARN carries the first drop only)",
+            dropped,
+        )
+
+
+def register_progress_beat(beat: ProgressBeat, *, pull_id: str = LEGACY_CHANNEL) -> None:
+    """Register *beat* on the *pull_id* channel (last write wins per channel). O(1).
+
+    The dashboard pull worker registers its watchdog's beat KEYED on its own run id for
+    the lifetime of a run, so the hot liveness paths (lock-wait / pace, on any fan-out
+    worker thread carrying the run's re-bound ``pull_id``) keep the heartbeat alive —
+    and a foreign thread's beat can never reach it. The zero-arg call registers on the
+    :data:`LEGACY_CHANNEL` with the exact pre-keyed semantics (back-compat).
+
+    A LIVE-channel collision — overwriting a DIFFERENT callback already registered on
+    the same channel — is always a caller bug (two live runs sharing one ``pull_id``:
+    while both live, the OLDER run's beats then route to the NEWER registrant — a
+    residual cross-run mask this seam cannot discriminate, because the channel key IS
+    the only identity). It is therefore WARNed loudly
+    (``progress_beat.channel_collision``), never silent.
+    """
     with _BEAT_LOCK:
-        _BEATS[handle] = beat
-    return handle
+        collided = pull_id in _BEATS and _BEATS[pull_id] is not beat
+        _BEATS[pull_id] = beat
+        dropped = _close_epoch_locked()
+    _log_drop_summary(dropped)
+    if collided:
+        logger.warning(
+            "progress_beat.channel_collision — channel %s was ALREADY registered by a "
+            "different callback and has been overwritten (last write wins). Two LIVE runs "
+            "sharing one pull_id is a caller bug: while both live, the older run's beats "
+            "route to the NEWER registrant.",
+            repr(pull_id),
+        )
 
 
-def unregister_progress_beat(handle: ProgressBeatHandle) -> None:
-    """Remove exactly the registration behind *handle* (idempotent). O(1).
+def unregister_progress_beat(
+    *, pull_id: str = LEGACY_CHANNEL, beat: ProgressBeat | None = None
+) -> None:
+    """Clear the *pull_id* channel's beat (idempotent). O(1).
 
-    Called from a job worker's ``finally`` so a finished run leaves no stale
-    beat that a later poll could fire into a dead watchdog. Removes ONLY the
-    caller's own entry — a concurrently-running sibling job's beat is
-    untouched (the single-slot design's unconditional clear stripped the
-    survivor's liveness; refuter-confirmed, fix round 3). An unknown /
-    already-removed handle is a no-op.
+    Called from the pull worker's ``finally`` so a finished run leaves no stale beat that
+    a later poll could fire into a dead watchdog. A keyed unregister removes ONLY its OWN
+    channel — never a blanket clear — so a stale worker's unregister can never starve a
+    NEWER run's beat (the latent race the single-slot seam carried).
+
+    *beat* (optional) is an IDENTITY guard: when given, the channel is popped only if it
+    still holds exactly *beat* — so a finished run whose channel was re-keyed by a
+    duplicate-id survivor (see the collision WARN on :func:`register_progress_beat`) can
+    never starve that still-live survivor. ``None`` keeps the unconditional pop
+    (back-compat). A no-op (missing channel / identity mismatch) leaves the epoch — and
+    thus the drop-WARN throttle — untouched.
     """
     with _BEAT_LOCK:
-        _BEATS.pop(handle, None)
+        current = _BEATS.get(pull_id)
+        if current is None or (beat is not None and current is not beat):
+            return  # nothing popped — no channel change, no epoch bump
+        del _BEATS[pull_id]
+        dropped = _close_epoch_locked()
+    _log_drop_summary(dropped)
 
 
-def bind_progress_beat_scope(handle: ProgressBeatHandle) -> Token[ProgressBeatHandle | None]:
-    """Make *handle* the CURRENT thread/context's beat target; return the token.
+def reset_progress_beats() -> None:
+    """Clear EVERY channel + re-arm the drop WARN — THE sanctioned test reset seam.
 
-    Fix round 4 (refuter-confirmed): a job worker binds its own registration
-    on its worker thread right after :func:`register_progress_beat`, so every
-    beat the run emits SYNCHRONOUSLY on that thread (the backfill's O(files)
-    scan, the prebuild driver loop, …) is delivered ONLY to its own watchdog —
-    never to a concurrently-running sibling's, whose genuine wedge it would
-    otherwise mask through the whole phase. Threads the run fans out to do NOT
-    inherit the scope (:mod:`contextvars` do not propagate into pool worker
-    threads) and keep the fail-open broadcast — see the module docstring's
-    honest envelope. The caller MUST reset via
-    :func:`unbind_progress_beat_scope` in the same ``finally`` that
-    unregisters (Token-based restore — nesting-safe for an inline/sync
-    spawner running one job inside another's thread). O(1).
-    """
-    return _BEAT_SCOPE.set(handle)
-
-
-def unbind_progress_beat_scope(token: Token[ProgressBeatHandle | None]) -> None:
-    """Restore the scope bound before the matching :func:`bind_progress_beat_scope`.
-
-    Token-based (LIFO) restore, so an inline-spawned nested job hands the
-    thread back to its outer job's scope exactly. O(1).
-    """
-    _BEAT_SCOPE.reset(token)
-
-
-def emit_progress_beat() -> None:
-    """Fire the emitting context's OWN beat — or broadcast when unscoped. O(registrants).
-
-    The hot liveness paths (the bounded partition lock-wait poll, the
-    rate-controller ``pace`` return, the per-unit scan/enrich/prebuild seams)
-    call this after each poll / pace / unit. Routing (fix round 4):
-
-    * a SCOPED context (a job's own worker thread, bound via
-      :func:`bind_progress_beat_scope`) delivers ONLY to that job's
-      registration — a sibling job's watchdog never sees it, so a long
-      synchronous phase (the backfill scan) can no longer mask a genuinely
-      wedged sibling; a scoped beat whose registration is already gone (the
-      run finished) is delivered to NOBODY — its dying breaths must not feed
-      siblings either;
-    * an UNSCOPED context (fan-out worker threads, any non-job caller) keeps
-      the fail-open broadcast to every registrant — a beat must never be lost
-      to its own watchdog (the round-3 false-CRITICAL class).
-
-    A no-op when nothing is registered (every non-dashboard caller). A raising
-    beat is swallowed + logged — and the remaining beats still fire — so it
-    can never crash the worker that is merely signalling liveness (Golden
-    Rule #10).
-    """
-    scope = _BEAT_SCOPE.get()
-    with _BEAT_LOCK:
-        if scope is not None:
-            own = _BEATS.get(scope)
-            beats = [own] if own is not None else []
-        else:
-            beats = list(_BEATS.values())
-    for beat in beats:
-        try:
-            beat()
-        except Exception:  # pylint: disable=broad-exception-caught — best-effort liveness beat
-            logger.exception("progress_beat.emit failed; the worker is unaffected")
-
-
-def reset_progress_beats_for_tests() -> None:
-    """Clear EVERY registered beat — a TEST-ONLY isolation seam. O(1).
-
-    Production code never calls this (each job removes only its own handle);
-    test fixtures use it to guarantee a clean registry across tests regardless
-    of what a prior test leaked (the :func:`reset_notifier_for_tests`
-    precedent). The thread-local scope var is NOT touched (it dies with the
-    binding thread; tests bind/reset it via the token API).
+    O(registered channels) — the ``dict.clear`` walks every entry (trivially bounded:
+    production holds at most a couple of live channels). Supersedes a bare
+    :func:`unregister_progress_beat` for test fixtures: that clears only the legacy
+    channel, so a keyed registration leaked by a test would bleed into the next one.
+    Production never calls this (each run pops only its own channel).
     """
     with _BEAT_LOCK:
         _BEATS.clear()
+        dropped = _close_epoch_locked()
+        _WARN_THROTTLE["warned_epoch"] = -1
+    _log_drop_summary(dropped)
+
+
+def emit_progress_beat(pull_id: str | None = None) -> None:
+    """Fire the beat registered for this context's run, if any — best-effort.
+
+    O(1) in REGISTERED CHANNELS (a dict lookup, never a scan of the registry); the
+    channel resolution itself costs one full contextvars-context copy + scan
+    (:func:`~brutex.observability.correlation.current_pull_id` — linear in the emitting
+    thread's BOUND contextvars, ≤ ~3 keys in this repo), skipped entirely on the
+    empty-registry fast path below.
+
+    The hot liveness paths (the bounded partition lock-wait poll, the rate-controller
+    ``pace`` return) call this after each poll / pace. Routing: the channel is the
+    explicit *pull_id* when given, else the emitting thread's ambient
+    :func:`~brutex.observability.correlation.current_pull_id`. An exact keyed hit fires
+    that run's beat; a keyed MISS falls back OUTWARD to the :data:`LEGACY_CHANNEL`
+    registrant (never into another keyed channel — the anti-masking invariant). With an
+    EMPTY registry this is a silent cheap no-op (every non-dashboard caller); with a
+    non-empty registry an unroutable beat is DROPPED + counted, WARNed once per
+    register-epoch (a foreign thread can never mask a real stall — it can only be
+    loud; the closed epoch's drop tally is debug-flushed on the next
+    register/unregister/reset). A raising beat is swallowed + logged so it can never
+    crash the worker that is merely signalling liveness (Golden Rule #10).
+    """
+    global _DROPPED_IN_EPOCH  # noqa: PLW0603 — the drop tally, lock-guarded
+    # Empty-registry fast path (every CLI / unit-test caller): skip the contextvars
+    # channel resolution entirely. The UNLOCKED truthiness read is a benign race — the
+    # registry is best-effort liveness signal and a beat straddling a register boundary
+    # is already tolerated (the register itself seeds the watchdog's heartbeat).
+    if pull_id is None and not _BEATS:
+        return
+    # Resolve the channel OUTSIDE the lock — one contextvars-context copy + scan
+    # (current_pull_id), no I/O.
+    channel = pull_id if pull_id is not None else current_pull_id()
+    warn = False
+    channel_count = 0
+    dropped_so_far = 0
+    with _BEAT_LOCK:
+        beat = _BEATS.get(channel)
+        if beat is None and channel != LEGACY_CHANNEL:
+            # Outward-only fallback: a keyed emit with no keyed registrant may reach the
+            # legacy unkeyed slot (the preserved shared-channel back-compat), but an
+            # unkeyed/foreign emit NEVER routes into a keyed run's channel.
+            beat = _BEATS.get(LEGACY_CHANNEL)
+        if beat is None:
+            if not _BEATS:
+                return  # empty registry — the explicit-pull_id silent no-op (no warn)
+            _DROPPED_IN_EPOCH += 1
+            dropped_so_far = _DROPPED_IN_EPOCH
+            warn = _WARN_THROTTLE["warned_epoch"] != _EPOCH
+            if warn:
+                _WARN_THROTTLE["warned_epoch"] = _EPOCH
+            channel_count = len(_BEATS)
+    if beat is None:
+        if warn:
+            logger.warning(
+                "progress_beat.foreign_beat_dropped — a beat from channel %s matched no "
+                "registered run (%d registered channel(s), %d drop(s) this epoch); the "
+                "emitting thread carries no / a foreign run id — either a missing "
+                "capture-then-rebind pull_id binding, or an emitter that genuinely "
+                "belongs to no run (e.g. a heal/maintenance write during a live pull). "
+                "Dropped (never routed into a foreign run — anti-masking); worst case is "
+                "a loud false stalled-SUSPECT, never a masked true stall.",
+                repr(channel),
+                channel_count,
+                dropped_so_far,
+            )
+        return
+    # Copy-then-call preserved: the callback does journal I/O and must never run under
+    # _BEAT_LOCK.
+    try:
+        beat()
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort liveness beat
+        logger.exception("progress_beat.emit failed; the worker is unaffected")
 
 
 __all__ = [
+    "LEGACY_CHANNEL",
     "ProgressBeat",
-    "ProgressBeatHandle",
-    "bind_progress_beat_scope",
     "emit_progress_beat",
     "register_progress_beat",
-    "reset_progress_beats_for_tests",
-    "unbind_progress_beat_scope",
+    "reset_progress_beats",
     "unregister_progress_beat",
 ]

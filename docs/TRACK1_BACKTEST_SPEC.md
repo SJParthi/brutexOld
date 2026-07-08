@@ -842,7 +842,7 @@ Hour 18-20 ──  Generate PnL curves (matplotlib), output JSON + 10 PNG charts
 - 100% test coverage gates (Day 1 = sanity tests on 10 hand-coded scenarios)
 
 **Prerequisites the operator must provide before Phase 0.5 starts:**
-- ⬜ `GROWW_API_KEY` environment variable set (Groww account + token issued)
+- ⬜ Groww credentials provisioned in AWS Parameter Store (`/tickvault/prod/groww/{api-key,totp-secret,access-token}` SecureStrings — AWS-SSM-only, never env vars; the pre-#1065 "`GROWW_API_KEY` environment variable" wording is superseded by DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065 *[reconciled 2026-07-06, DEC-BROKER-DOCS-AWSONLY-RECONCILE-001]*)
 - ⬜ `/Volumes/QuantData` mounted (or alternative path specified)
 
 If both green → Day 1 sprint executes in one continuous session.
