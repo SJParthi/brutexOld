@@ -1597,8 +1597,9 @@ def run_persisted_sweep(
         # stamping every one of the O(kept x trades) inner trades would be
         # pure wasted work with zero observable output. The stream is
         # therefore EXPLICITLY unstamped via this literal (one of the
-        # ENUMERATED sanctioned literal-None seam bindings — four after the
-        # round-2 review — AST-pinned with exact counts by
+        # ENUMERATED sanctioned literal-None seam bindings — five after the
+        # round-6 review also unstamped the cascade candidate re-simulation
+        # — AST-pinned with exact counts by
         # tests/unit/test_vix_stamper_binding_pin.py — never a silent
         # omission). REVERT LEVER: pass ``reference_stamper=reference_stamper``
         # here to stamp the inner stream too (one kwarg; its stamps are
