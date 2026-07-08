@@ -630,6 +630,15 @@ proptest! {
         prop_assert!(a.retrace_50_paisa <= a.retrace_38_paisa);
         prop_assert!(a.retrace_38_paisa <= a.retrace_23_paisa);
         prop_assert!(a.retrace_23_paisa <= a.retrace_level_at_pdh_paisa);
+        // BULLISH ladder (PDL-anchored, DEC-FIB-BULLISH-RETRACE-001):
+        // pdl <= bull23 <= bull38 <= 50% <= bull62 <= bull78 <= pdh — the
+        // shared retrace_50 IS the bullish midpoint (no separate bull_50).
+        prop_assert!(pdl <= a.retrace_bull_23_paisa);
+        prop_assert!(a.retrace_bull_23_paisa <= a.retrace_bull_38_paisa);
+        prop_assert!(a.retrace_bull_38_paisa <= a.retrace_50_paisa);
+        prop_assert!(a.retrace_50_paisa <= a.retrace_bull_62_paisa);
+        prop_assert!(a.retrace_bull_62_paisa <= a.retrace_bull_78_paisa);
+        prop_assert!(a.retrace_bull_78_paisa <= pdh);
         // Stored anchors + range field.
         prop_assert_eq!(a.pdh_paisa, pdh);
         prop_assert_eq!(a.pdl_paisa, pdl);
@@ -649,6 +658,32 @@ proptest! {
         prop_assert!(a.ext_down_262_paisa <= a.ext_down_200_paisa);
         prop_assert!(a.ext_down_200_paisa <= a.ext_down_162_paisa);
         prop_assert!(a.ext_down_424_paisa <= a.ext_down_262_paisa);
+    }
+
+    /// The bullish retracements are a REAL PDL-anchored ladder, NOT the
+    /// reversed bearish (PDH-anchored) ladder: Fibonacci ratios are asymmetric
+    /// (`0.236 + 0.786 = 1.022 ≠ 1.000`), so for a non-degenerate range the
+    /// bull 23/78 rungs sit at DIFFERENT prices than bearish 78/23 — the teeth
+    /// that kill a revert-to-alias mutant (DEC-FIB-BULLISH-RETRACE-001). The
+    /// gap is `0.022 × range`, so a `range ≥ 100` paisa (₹1) guarantees the
+    /// rounded values differ (0.022·100 = 2.2 > the ≤1 rounding slop); the
+    /// 38/62 pair coincides ONLY because `0.382 + 0.618 = 1.000` exactly in
+    /// IEEE — an observation, never relied on, so NOT pinned here.
+    #[test]
+    fn bullish_retracements_are_not_bearish_aliases(
+        pdl in 1i64..=MAX_PAISA,
+        range in 100i64..=MAX_PAISA,
+    ) {
+        let pdh = pdl + range;
+        let a = compute_fib_levels(pdh, pdl);
+        // bull 23% (pdl + 0.236·r) != bearish 78% (pdh − 0.786·r = pdl + 0.214·r)
+        prop_assert_ne!(a.retrace_bull_23_paisa, a.retrace_78_paisa);
+        // bull 78% (pdl + 0.786·r) != bearish 23% (pdh − 0.236·r = pdl + 0.764·r)
+        prop_assert_ne!(a.retrace_bull_78_paisa, a.retrace_23_paisa);
+        // And the bull ladder is anchored bottom-up: 23% sits in the LOWER
+        // half, 78% in the UPPER half of the band.
+        prop_assert!(a.retrace_bull_23_paisa <= a.retrace_50_paisa);
+        prop_assert!(a.retrace_bull_78_paisa >= a.retrace_50_paisa);
     }
 }
 

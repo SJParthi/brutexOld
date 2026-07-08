@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1559 —
+_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -53,12 +53,38 @@ probe-first hooks · bounded 16 MiB shard read · FIFO-shard hang fix · the
 EXECUTED m4pro run 28888100079 A/B gate + 3.0× paging strict-tier
 recalibration · the wired-and-executed zero-survivor mutation gate); the
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
-#1559 — this header deliberately stopped narrating rounds after freezing at
+#1595 — this header deliberately stopped narrating rounds after freezing at
 round 2 once (endgame round 2); a same-`(mtime_ns,size)` in-place
 overwrite stays the documented stat-token residual. Results-safe — never in run identity / partition bytes /
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
 parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
 modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
 Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
@@ -969,7 +995,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1559** — the
+- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
   O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
@@ -1051,7 +1077,7 @@ hostile-review pass._
   landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
   48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
   capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
-  overclaim softened; the #1559 GATES counts refreshed.
+  overclaim softened; the #1595 GATES counts refreshed.
   ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
   closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
   (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`
@@ -1080,7 +1106,7 @@ hostile-review pass._
   pin. Round 2 — the killable-mutant pragma purge above; §2 Rule 5's stale "strict tier DORMANT until the
   operator registers the runner" claim reconciled to the LIVE runner (+ the metadata-sweep allowance now named
   beside the cache-tier one); the frozen `_Last updated:` header's per-round narration replaced with a
-  stale-proof pointer to this blurb + MIGRATION.md #1559; bench-m4pro.yml's paging-gate comments repointed
+  stale-proof pointer to this blurb + MIGRATION.md #1595; bench-m4pro.yml's paging-gate comments repointed
   from the stale "ratio_ceiling() 1.1× tier" to the real `metadata_sweep_ceiling` 3.0× — each with a
   deterministic doc-pin regression (`test_claude_md_branch_consistency.py` + `TestBenchWorkflowWiring`).
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
@@ -1088,6 +1114,30 @@ hostile-review pass._
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
   `lake_heal.py` + `db_view.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
   clean, pyright 0 errors in every touched/new file).
+  Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
   Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
   the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
   twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
@@ -2931,9 +2981,19 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
-  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1559 — the write-time
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 — the write-time
   PER-FILE lake STATS manifest; matches §1's Active branch line)
   Earlier: `claude/stoic-davinci-7c7xp0`
+  Earlier: `claude/peaceful-wright-r7l8l9`
+  (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
+  retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
+  fields replace the wrong bearish alias; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/stoic-davinci-7c7xp0`
+  (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+  DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556 — the doc/spec/ops
+  debt reconciliation pack; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
