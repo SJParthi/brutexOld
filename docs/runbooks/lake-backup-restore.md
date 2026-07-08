@@ -56,6 +56,12 @@ last-good cache, DEC-NTM-CACHE-FIRST-001 #892).
 
 ## 2. Backup (suggested shape)
 
+> **AUTOMATED by `brutex backup` — DEC-BACKUP-OFFBOX-001 (MIGRATION.md
+> #1596), see `docs/runbooks/backup-offbox.md`; the tar recipe below
+> remains the manual fallback.** The restore-ORDER law (§3) and the
+> consistency argument (§4) below stand verbatim and are what the
+> automated system's restore procedure follows.
+
 Never back up during a running pull — take (or wait on) the single-flight
 lock semantics of `data-fetch-runday.md` §6a first (a pull holds
 `<lake_root>/.locks/pull_singleflight.lock` for its whole duration; a quiet

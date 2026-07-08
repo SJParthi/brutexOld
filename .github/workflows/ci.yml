@@ -848,8 +848,13 @@ jobs:
           # wiring sites live in cli.py (no longer omitted — measured at 100%
           # under the aggregate gate, DEC-COV-CLI-HARNESS-001) / the
           # pragma'd live pull path.
+          # DEC-BACKUP-OFFBOX-001: the four backup alert methods
+          # (backup_failed / backup_degraded / backup_overdue /
+          # backup_repo_corrupt) + the module-level emit_backup_failed_alert
+          # are covered by the sibling test_notifications_sweep_alerts_backup
+          # suite added to the invocation.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
-            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_sweep_alerts_nightly.py
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py tests/unit/test_notifications_sweep_alerts_conflict.py tests/unit/test_notifications_sweep_alerts_backup.py tests/unit/test_sweep_alerts_nightly.py
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
           fi
