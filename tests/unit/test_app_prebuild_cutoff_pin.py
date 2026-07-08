@@ -1,12 +1,12 @@
 """Route-arm regression pin — the /pull-pipeline prebuild cutoff stays the PINNED INSTANT.
 
-Hostile-review round-4 MAJOR (the coverage-honesty lens) on the #1557-#1567
+Hostile-review round-4 MAJOR (the coverage-honesty lens) on the #1558-#1568
 polish pack: the #1401 M1 regression — an explicit today-IST **DATE** pin
 (``daily_before=<date>``) in the ``/pull-pipeline`` job body — left
 DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 production-dead, and it shipped
 UNDETECTED because the route's ``_work`` closure rides the pre-existing
 ``# pragma: no cover — runs on the job thread`` shield: no executing test can
-see the cutoff wiring there. The #1558 repair (``prebuild_cutoff_now =
+see the cutoff wiring there. The #1559 repair (``prebuild_cutoff_now =
 now_ist()`` threaded as ``daily_cutoff_now=`` into BOTH the sequential
 ``_materialize`` closure and ``run_pipeline_prebuild_guarded``) was pinned by
 executing tests at the orchestrator + materialize layers — but the ROUTE arm
