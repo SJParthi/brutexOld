@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1601 —
+_Last updated: 2026-07-08 (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 —
 two surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the
 one-click-sweep gap register): (1) a Muhurat-safe prev-day anchor at the
 Stage-1A roll seam — `_roll_to_new_day` rolled `_prev_day_ohlc = self._today_ohlc`
@@ -1213,7 +1213,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/data-edge-guards` (**DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1601** — two
+- **Active branch:** `claude/data-edge-guards` (**DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616** — two
   surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the one-click-sweep gap register):
   (1) a Muhurat-safe prev-day anchor at the Stage-1A roll seam (`brutex/engine/stage1a.py::_roll_to_new_day`
   rolled `_prev_day_ohlc = self._today_ohlc` on every IST-date change with NO calendar guard, so a Diwali
@@ -3199,7 +3199,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/data-edge-guards`
-  (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1601 — two surgical engine
+  (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 — two surgical engine
   data-edge guards for sweep-result correctness: (1) a Muhurat-safe prev-day
   anchor at the Stage-1A roll seam + (2) a bounded bad-tick screen at the engine
   read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
