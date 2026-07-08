@@ -80,6 +80,7 @@ from brutex.data.window_ledger import (
     SKIPPED,
     SKIPPED_AUDIT_PER_PULL,
     SUCCESS,
+    LedgerRowTuple,
     WindowLedger,
     WindowLedgerRecord,
 )
@@ -154,18 +155,23 @@ _CORE_COLUMNS: tuple[str, ...] = (
 
 #: The full on-disk column order — fixed so the Parquet schema is stable + the row
 #: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` then
-#: ``in_pull_fetches`` then ``bars_net_new`` then ``streak_provenance`` were each
-#: appended LAST (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
-#: DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-STREAK-PROVENANCE-001), so a legacy
+#: ``in_pull_fetches`` then ``bars_net_new`` then the ``empty_retries`` /
+#: ``transient_retries`` split then ``streak_provenance`` were each appended
+#: LAST (DEC-WINDOW-LEDGER-001 R1 / DEC-WINDOW-INPULL-FETCHES-001 /
+#: DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001 /
+#: DEC-STREAK-PROVENANCE-001), so a legacy
 #: file written before any of the optional columns existed loads cleanly: the
 #: core columns are read and each optional column is filled per-row (see
-#: :func:`_rows_to_records`; an absent ``bars_net_new`` / ``streak_provenance``
-#: is an honest ``None``). Backward-compatible, never a re-pull.
+#: :func:`_rows_to_records`; an absent ``bars_net_new`` / ``empty_retries`` /
+#: ``transient_retries`` / ``streak_provenance`` is an honest ``None``).
+#: Backward-compatible, never a re-pull.
 _COLUMNS: tuple[str, ...] = (
     *_CORE_COLUMNS,
     "empty_streak",
     "in_pull_fetches",
     "bars_net_new",
+    "empty_retries",
+    "transient_retries",
     "streak_provenance",
 )
 
@@ -248,6 +254,22 @@ def _derive_bars_net_new() -> int | None:
     return None
 
 
+def _derive_retry_count() -> int | None:
+    """Honest ``empty_retries`` / ``transient_retries`` for a LEGACY row: ``None``.
+
+    DEC-RETRY-COUNTER-SPLIT-001, the :func:`_derive_bars_net_new` template
+    verbatim: a legacy pull persisted only the CONFLATED ``in_pull_fetches``
+    total — how that total split between clean-empty re-fetches and transient
+    (429/timeout) re-attempts is genuinely UNRECORDED, and any number (a ``0``
+    especially — it would falsely claim "no retries of that class fired") would
+    be a fabrication (Golden Rule #1). Both absent columns therefore ALWAYS load
+    as ``None``; the next pull's :meth:`WindowLedger.record` stamps the exact
+    split. ONE helper serves both columns — they share this single derivation
+    rationale (CLAUDE.md §11 COMMON).
+    """
+    return None
+
+
 def _derive_streak_provenance() -> str | None:
     """Honest ``streak_provenance`` for a LEGACY row that predates the column: ``None``.
 
@@ -268,21 +290,24 @@ def _derive_streak_provenance() -> str | None:
 
 
 def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 15-field tuple :meth:`WindowLedger.from_rows` expects.
+    """Coerce raw rows to the exact 17-field tuple :meth:`WindowLedger.from_rows` expects.
 
     Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1)
     plus ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) plus ``bars_net_new``
-    (DEC-INGEST-BOUNDARY-INTEGRITY-001) plus ``streak_provenance``
-    (DEC-STREAK-PROVENANCE-001). A ``None`` optional column (a legacy file
-    written before that column) is derived: ``empty_streak`` from
-    ``(status, attempts)`` via :func:`_derive_empty_streak`; ``in_pull_fetches`` from
-    ``status`` via :func:`_derive_in_pull_fetches`; ``bars_net_new`` stays an honest
-    ``None`` via :func:`_derive_bars_net_new` (a NULL cell in a NEW file — e.g. a
-    lake cold-start seed — reads ``None`` the same way); ``streak_provenance``
+    (DEC-INGEST-BOUNDARY-INTEGRITY-001) plus the ``empty_retries`` /
+    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) plus
+    ``streak_provenance`` (DEC-STREAK-PROVENANCE-001). A ``None`` optional
+    column (a legacy file written before that column) is derived: ``empty_streak``
+    from ``(status, attempts)`` via :func:`_derive_empty_streak`;
+    ``in_pull_fetches`` from ``status`` via :func:`_derive_in_pull_fetches`;
+    ``bars_net_new`` stays an honest ``None`` via :func:`_derive_bars_net_new`;
+    ``empty_retries`` / ``transient_retries`` stay an honest ``None`` via
+    :func:`_derive_retry_count` (a NULL cell in a NEW file — e.g. a lake
+    cold-start seed — reads ``None`` the same way); ``streak_provenance``
     stays an honest ``None`` via :func:`_derive_streak_provenance` (unknown
-    lineage, never a fabricated ``""``). A wrong arity /
-    non-coercible element raises here (``ValueError`` / ``TypeError``) and is
-    caught by the caller, degrading to an empty ledger.
+    lineage, never a fabricated ``""``). A wrong arity / non-coercible
+    element raises here (``ValueError`` / ``TypeError``) and is caught by the
+    caller, degrading to an empty ledger.
     """
     coerced: list[tuple[Any, ...]] = []
     for (
@@ -300,6 +325,8 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         empty_streak,
         in_pull_fetches,
         bars_net_new,
+        empty_retries,
+        transient_retries,
         streak_provenance,
     ) in rows:
         status_s = str(status)
@@ -313,6 +340,8 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
             _derive_in_pull_fetches(status_s) if in_pull_fetches is None else int(in_pull_fetches)
         )
         net_new = _derive_bars_net_new() if bars_net_new is None else int(bars_net_new)
+        empties = _derive_retry_count() if empty_retries is None else int(empty_retries)
+        transients = _derive_retry_count() if transient_retries is None else int(transient_retries)
         provenance = (
             _derive_streak_provenance() if streak_provenance is None else str(streak_provenance)
         )
@@ -332,6 +361,8 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 streak,
                 fetches,
                 net_new,
+                empties,
+                transients,
                 provenance,
             )
         )
@@ -351,17 +382,19 @@ _LEDGER_READ_ERRORS: tuple[type[BaseException], ...] = (
 
 
 def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
-    """Read ONE ledger-shaped Parquet into the coerced 15-field row tuples.
+    """Read ONE ledger-shaped Parquet into the coerced 17-field row tuples.
 
     The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
     the per-DELTA fold. The core 11 columns are REQUIRED — a missing one raises
     ``KeyError`` (the wrong-shape guard the caller degrades on). ``empty_streak``
-    + ``in_pull_fetches`` + ``bars_net_new`` + ``streak_provenance`` are OPTIONAL
-    (a legacy file lacks one or more) and derived per-row by
-    :func:`_rows_to_records` (an absent ``bars_net_new`` /
+    + ``in_pull_fetches`` + ``bars_net_new`` + ``empty_retries`` +
+    ``transient_retries`` + ``streak_provenance`` are OPTIONAL (a legacy file
+    lacks one or more) and derived per-row by :func:`_rows_to_records` (an
+    absent ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` /
     ``streak_provenance`` stays an honest ``None`` —
-    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-STREAK-PROVENANCE-001). Raises any of
-    :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
+    DEC-INGEST-BOUNDARY-INTEGRITY-001 / DEC-RETRY-COUNTER-SPLIT-001 /
+    DEC-STREAK-PROVENANCE-001). Raises any
+    of :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
     decides the degrade (base → empty + ``load_failed``; delta → skip that one
     file).
     """
@@ -371,21 +404,24 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
     present = set(table.schema.names)
     columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
     n = len(columns[_CORE_COLUMNS[0]])
-    streaks = table.column("empty_streak").to_pylist() if "empty_streak" in present else [None] * n
-    fetches = (
-        table.column("in_pull_fetches").to_pylist() if "in_pull_fetches" in present else [None] * n
-    )
-    net_new = table.column("bars_net_new").to_pylist() if "bars_net_new" in present else [None] * n
-    provenance = (
-        table.column("streak_provenance").to_pylist()
-        if "streak_provenance" in present
-        else [None] * n
-    )
+
+    def _optional(name: str) -> list[Any]:
+        """One OPTIONAL column's cells — ``None``-filled when the file predates it."""
+        return table.column(name).to_pylist() if name in present else [None] * n
+
+    streaks = _optional("empty_streak")
+    fetches = _optional("in_pull_fetches")
+    net_new = _optional("bars_net_new")
+    empties = _optional("empty_retries")
+    transients = _optional("transient_retries")
+    provenance = _optional("streak_provenance")
     rows = zip(
         *(columns[name] for name in _CORE_COLUMNS),
         streaks,
         fetches,
         net_new,
+        empties,
+        transients,
         provenance,
         strict=True,
     )
@@ -454,28 +490,15 @@ def load_window_ledger(
     return ledger
 
 
-#: One serialised ledger row — EXACTLY the 15-field tuple :meth:`WindowLedger.to_rows`
-#: emits (and :meth:`WindowLedger.from_rows` restores). The merge-on-save operates on
-#: this shape directly so the conflict rule below is pure + unit-testable. The trailing
-#: ``bars_net_new`` (``int | None``) and ``streak_provenance`` (``str | None``) are
-#: nullable (``None`` = honest unknown for a legacy row).
-LedgerRow = tuple[
-    str,
-    str,
-    str,
-    str,
-    str,
-    str,
-    int,
-    int,
-    str | None,
-    str,
-    str | None,
-    int,
-    int,
-    int | None,
-    str | None,
-]
+#: One serialised ledger row — EXACTLY the 17-field tuple :meth:`WindowLedger.to_rows`
+#: emits (and :meth:`WindowLedger.from_rows` restores); the ONE spelling lives on the
+#: ledger module as :data:`~brutex.data.window_ledger.LedgerRowTuple` (CLAUDE.md §11
+#: COMMON) and this store-side name aliases it. The merge-on-save operates on this
+#: shape directly so the conflict rule below is pure + unit-testable. The trailing
+#: ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` (``int | None``)
+#: and ``streak_provenance`` (``str | None``) are nullable (``None`` = honest
+#: unknown for a legacy row).
+LedgerRow = LedgerRowTuple
 
 #: The window identity — the leading 5 fields of a :data:`LedgerRow` (the same 5-tuple
 #: :meth:`WindowLedger._key` derives from a :class:`WindowKey`).
@@ -620,6 +643,10 @@ def _rows_to_table(rows: Sequence[LedgerRow]) -> Any:
             # Nullable by design: a legacy/seeded row's net-new is an honest
             # unknown ``None`` (DEC-INGEST-BOUNDARY-INTEGRITY-001).
             ("bars_net_new", pa.int64()),
+            # Nullable by design: a legacy row's retry SPLIT is an honest
+            # unknown ``None`` (DEC-RETRY-COUNTER-SPLIT-001).
+            ("empty_retries", pa.int64()),
+            ("transient_retries", pa.int64()),
             # Nullable by design: a legacy row's streak lineage is an honest
             # unknown ``None`` (DEC-STREAK-PROVENANCE-001 — never a fabricated
             # ``""`` known-zero).
@@ -938,7 +965,11 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 # The legacy status log never recorded a deduped net-new count —
                 # honest unknown (DEC-INGEST-BOUNDARY-INTEGRITY-001).
                 bars_net_new=_derive_bars_net_new(),
-                # …nor the streak's per-bump lineage — honest unknown
+                # ... nor how its fetch total split between empty and transient
+                # retries — honest unknown (DEC-RETRY-COUNTER-SPLIT-001).
+                empty_retries=_derive_retry_count(),
+                transient_retries=_derive_retry_count(),
+                # ...nor the streak's per-bump lineage — honest unknown
                 # (DEC-STREAK-PROVENANCE-001).
                 streak_provenance=_derive_streak_provenance(),
             )
@@ -961,6 +992,8 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger
                 r.empty_streak,
                 r.in_pull_fetches,
                 r.bars_net_new,
+                r.empty_retries,
+                r.transient_retries,
                 r.streak_provenance,
             )
             for r in by_window.values()
@@ -1658,7 +1691,7 @@ def make_locked_flush(flush: Callable[[], None]) -> Callable[[], None]:
 
 #: The round-robin skipped-audit cursor sidecar (DEC-SKIPPED-AUDIT-ROUNDROBIN-001)
 #: — a tiny JSON next to the ledger, NOT a new ledger Parquet column (the fixed
-#: 13-col ``_COLUMNS`` schema + the cross-process merge rank stay byte-untouched).
+#: ``_COLUMNS`` schema + the cross-process merge rank stay byte-untouched).
 SKIPPED_AUDIT_CURSOR_FILENAME: str = "skipped_audit_cursor.json"
 
 #: The 5-field window identity arity the cursor key must carry.

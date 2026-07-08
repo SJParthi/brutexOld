@@ -1050,7 +1050,11 @@ class TestSessionRateController:
         # DEC-GROWW-NO-DAILY-QUOTA-001: the dashboard controller is built with NO
         # DailyQuotaTracker (Groww backtesting has no daily quota, operator-confirmed),
         # matching the CLI Groww path — so it never halts on a phantom daily cap, while
-        # the 500/min per-minute governor stays wired.
+        # the 500/min per-minute governor stays wired. This is THE production inertness
+        # pin the quota-verdict MOOT decision rests on (DEC-QUOTA-VERDICT-MOOT-001,
+        # with the AST zero-construction pin in test_quota_verdict_moot.py): no
+        # tracker ⇒ quota_exhausted() constant False ⇒ the stop_quota brake + the
+        # quota_exhausted verdict are unreachable from any live dashboard pull.
         from brutex.adapters.groww.constants import (
             GROWW_RATE_LIMIT_PER_MIN,
             GROWW_RATE_LIMIT_RPS_CEILING,

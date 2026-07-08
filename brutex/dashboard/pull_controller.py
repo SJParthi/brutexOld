@@ -947,9 +947,11 @@ DailyQuotaTracker` (DEC-GROWW-NO-DAILY-QUOTA-001): Groww backtesting
     bucket remain the live pacing gates. Consequence: the controller's
     :meth:`~brutex.adapters.rate_common.RateController.quota_exhausted` is always
     ``False`` (no tracker), so the auto-resume ``stop_quota`` branch is DORMANT for the
-    dashboard pull (it never burns a non-existent quota); the separate read-only
-    ``/api/v1/quota`` endpoint keeps its own informational tracker (display only, no
-    enforcement) and is unaffected.
+    dashboard pull (it never burns a non-existent quota). The once-separate read-only
+    ``/api/v1/quota`` endpoint + the /universe gauge are DELETED
+    (DEC-QUOTA-VERDICT-MOOT-001 — nothing ever injected a tracker, so they only ever
+    served the hidden ``-1`` sentinel); the inertness is AST-pinned in
+    ``tests/unit/test_quota_verdict_moot.py``.
     """
     from brutex.adapters.groww.constants import (
         GROWW_RATE_LIMIT_PER_MIN,

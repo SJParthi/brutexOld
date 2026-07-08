@@ -1589,6 +1589,85 @@ def test_enter_pull_singleflight_default_resolver_skips_on_credentials_error(
         assert cli._enter_pull_singleflight(stack, tmp_path / "lake") is True
 
 
+# ── cross-host pull lease, taken LAST (DEC-ACCOUNT-LEASE-CROSSHOST-001) ──
+
+
+def test_enter_pull_singleflight_refuses_on_fresh_foreign_lease(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A FRESH lease from a DIFFERENT host on the shared lake refuses the CLI pull."""
+    import json
+    import time
+
+    from brutex.adapters.groww.pull_singleflight import (
+        pull_lease_path,
+        pull_singleflight_lock,
+        read_pull_lease,
+    )
+
+    lease_path = pull_lease_path(tmp_path)
+    lease_path.parent.mkdir(parents=True)
+    lease_path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "token": "peer-token",
+                "host": "definitely-not-this-host",
+                "pid": 1,
+                "started_wall": time.time(),
+                "wall_time": time.time(),  # FRESH heartbeat
+            }
+        )
+    )
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(stack, tmp_path, account_key_resolver=lambda: None)
+            is False
+        )
+        # Refusal rolled the flocks back (ExitStack unwinding happens at stack exit,
+        # but the lease enter raised BEFORE being registered) — the peer lease intact.
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None and lease.token == "peer-token"
+    # The lake flock was released by the stack — a fresh acquire succeeds.
+    with pull_singleflight_lock(tmp_path):
+        pass
+    captured = capsys.readouterr()
+    assert "another HOST" in captured.err
+    assert "goes " in captured.err  # "the lease goes stale by itself..." honesty note
+
+
+def test_enter_pull_singleflight_holds_lease_and_clears_on_exit(tmp_path: Path) -> None:
+    """A clean CLI acquire writes the cross-host lease and clears it on stack exit."""
+    from brutex.adapters.groww.pull_singleflight import read_pull_lease
+
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(stack, tmp_path, account_key_resolver=lambda: None) is True
+        )
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None  # our lease is on disk while the pull would run
+    assert read_pull_lease(tmp_path) is None  # cleared on release (LIFO stack exit)
+
+
+def test_enter_pull_singleflight_lease_factory_seam_is_injectable(tmp_path: Path) -> None:
+    """The lease_factory seam replaces the live guard (tests never spawn a heartbeat)."""
+    entered: list[Path] = []
+
+    @contextlib.contextmanager
+    def fake_lease(root: Path) -> Any:
+        entered.append(root)
+        yield
+
+    with contextlib.ExitStack() as stack:
+        assert (
+            cli._enter_pull_singleflight(
+                stack, tmp_path, account_key_resolver=lambda: None, lease_factory=fake_lease
+            )
+            is True
+        )
+    assert entered == [tmp_path]
+
+
 def test_cmd_fetch_live_refused_when_peer_pull_holds_lock(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

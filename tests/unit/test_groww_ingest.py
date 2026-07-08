@@ -3410,3 +3410,140 @@ class TestMassAllFilteredBreaker:
         # EXACTLY ONE alarm for the whole pull — the pass-1 trip transition.
         assert len(_events(logs, "allfiltered_breaker.tripped")) == 1
         assert len(pushes) == 1
+
+
+class _ScriptAdapter:
+    """Fake adapter scripting bars OR exceptions per call (clamped to the last entry).
+
+    The DEC-RETRY-COUNTER-SPLIT-001 driver: e.g. ``[[], GrowwRateLimitError(...)]`` is
+    a clean empty followed by a transient — the mixed ladder whose split the ledger
+    must record honestly.
+    """
+
+    def __init__(self, script: Sequence[Sequence[CandleBar] | Exception]) -> None:
+        self._script = list(script)
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        del symbol, exchange, interval, start, end
+        item = self._script[min(self.calls, len(self._script) - 1)]
+        self.calls += 1
+        if isinstance(item, Exception):
+            raise item
+        return list(item)
+
+
+class TestRetryCounterSplitSpot:
+    """DEC-RETRY-COUNTER-SPLIT-001 (spot spine): the ledger rows carry the
+    empty/transient SPLIT of ``in_pull_fetches``, and the spine invariant
+    ``empty + transient + (1 if bars) == in_pull_fetches`` holds at every record."""
+
+    def test_first_try_success_records_known_zero_split(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == SUCCESS
+        assert rec.in_pull_fetches == 1
+        assert rec.empty_retries == 0  # a KNOWN zero — the ladder ran, nothing retried
+        assert rec.transient_retries == 0
+
+    def test_all_empty_run_records_the_empty_half(self) -> None:
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _BarSeqAdapter([[]]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            empty_retry_attempts=3,
+            now_ist=lambda: datetime(2021, 3, 10, 12, 0, tzinfo=UTC),  # RECENT — no settle
+        )
+        rec = ledger.records()[0]
+        assert rec.status == EMPTY
+        assert rec.in_pull_fetches == 3
+        assert rec.empty_retries == 3  # every fetch was a clean empty
+        assert rec.transient_retries == 0
+        # The decomposition invariant (no data-bearing fetch on an EMPTY row).
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+    def test_empty_then_data_splits_the_recovery(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _BarSeqAdapter([[], [], [_bar()]]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            empty_retry_attempts=3,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == SUCCESS
+        assert rec.in_pull_fetches == 3
+        assert rec.empty_retries == 2  # two clean empties before the data landed
+        assert rec.transient_retries == 0
+        assert rec.empty_retries + rec.transient_retries + 1 == rec.in_pull_fetches
+
+    def test_first_fetch_transient_records_the_transient_half(self) -> None:
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _Adapter(error=GrowwRateLimitError("rate limited")),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            max_retry_passes=0,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.in_pull_fetches == 1
+        assert rec.empty_retries == 0
+        assert rec.transient_retries == 1  # the one fetch WAS the transient
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+    def test_empty_then_transient_carries_both_halves(self) -> None:
+        # The mixed ladder #924/#1355 could not express: one clean empty, then a
+        # 429 — the FAILED row now says exactly which class each fetch was.
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _ScriptAdapter([[], GrowwRateLimitError("429")]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 3, 1),
+            ledger=ledger,
+            empty_retry_attempts=3,
+            max_retry_passes=0,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.in_pull_fetches == 2  # the empty re-fetch AND the transient
+        assert rec.empty_retries == 1
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches

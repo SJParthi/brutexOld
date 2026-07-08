@@ -30,7 +30,8 @@ so demotions survive). This suite pins:
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
   SQL fold ≡ the reference Python dict fold, record-for-record;
 * drift pins: ``_WINDOW_KEY_COLUMNS == window_ledger_store._COLUMNS[:5]`` and
-  ``append_ledger_delta`` writing the full 15-column schema — trailing
+  ``append_ledger_delta`` writing the full 17-column schema — trailing
+  ``empty_retries``/``transient_retries`` per DEC-RETRY-COUNTER-SPLIT-001 then
   ``streak_provenance`` per DEC-STREAK-PROVENANCE-001 (the base-less
   probe-skip's safety precondition).
 
@@ -92,11 +93,14 @@ def _row(
     bars: int = 0,
     attempts: int = 1,
 ) -> tuple[Any, ...]:
-    """One 15-field ledger row tuple (the exact ``_COLUMNS`` shape).
+    """One 17-field ledger row tuple (the exact ``_COLUMNS`` shape).
 
-    The trailing ``streak_provenance`` cell (DEC-STREAK-PROVENANCE-001 — the
-    15th/LAST column) rides the ``bars_net_new`` tri-state convention: ``None``
-    here (legacy-unknown), matching what a pre-provenance writer's row loads as.
+    The trailing ``empty_retries``/``transient_retries`` pair is ``None`` — the
+    honest-unknown optional-column default (DEC-RETRY-COUNTER-SPLIT-001,
+    MIGRATION.md #1585), exactly what a pre-split ledger row loads as — and the
+    LAST ``streak_provenance`` cell (DEC-STREAK-PROVENANCE-001) rides the same
+    ``bars_net_new`` tri-state convention: ``None`` here (legacy-unknown),
+    matching what a pre-provenance writer's row loads as.
     """
     return (
         "groww",
@@ -114,11 +118,13 @@ def _row(
         0 if status == "PLANNED" else 1,
         None,
         None,
+        None,
+        None,
     )
 
 
 def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
-    """Write a REAL 15-column base ledger Parquet directly (full status control)."""
+    """Write a REAL 17-column base ledger Parquet directly (full status control)."""
     import pyarrow.parquet as pq
 
     path = wls.ledger_path(lake)
@@ -127,7 +133,7 @@ def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
 
 
 def _write_delta(lake: Path, rows: Sequence[tuple[Any, ...]]) -> Path:
-    """Append one REAL 15-column delta Parquet via the store's own name minting."""
+    """Append one REAL 17-column delta Parquet via the store's own name minting."""
     import pyarrow.parquet as pq
 
     directory = wls.deltas_dir(lake)

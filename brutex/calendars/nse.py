@@ -799,22 +799,124 @@ def daily_derive_cutoff(now_ist: datetime) -> date:
       prebuild writes the run day's own daily bar instead of deferring it to
       the next pipeline run.
     * **still forming / pre-close** (incl. exactly AT the close instant —
-      strict ``>``, conservative; a boundary tightening is a named follow-up)
-      → ``today``: the no-look-ahead exclusion is unchanged.
+      strict ``>``, conservative) → ``today``: the no-look-ahead exclusion is
+      unchanged. The at-close ``>`` → ``>=`` "boundary tightening" follow-up
+      is CLOSED-AS-WONTFIX (DEC-SESSION-CLOSE-BOUNDARY-PIN-001): tightening
+      would only shave a one-minute self-healing window while making the
+      verdict clock-race-dependent (at exactly 15:30:00 the 15:29 bar may not
+      yet be pulled/filtered/written — finalizing risks a partial daily bar),
+      and the grounded arm below covers the real hazard. The pull-side
+      :func:`brutex.adapters.ingest_common.clamp_window_end` DELIBERATELY
+      holds the OPPOSITE at-close verdict (``>=`` — exactly 15:30:00 counts
+      as closed): a request-side earliest-fetch of a finished session is safe
+      (no bar at/after 15:30 can exist under the half-open ingest filter),
+      while the finalize-side here must never write a partial bar. The pair
+      is frozen by the cross-module drift-pin test
+      (``tests/unit/test_session_close_boundary_pin.py``) — any future flip
+      is a conscious, test-breaking act.
 
     HONEST envelope (Golden Rule #10): clock-based proof, not data-grounded —
-    a ``df_1m``-last-bar-vs-close variant is the named follow-up. Uses the
-    unguarded :func:`get_session`, which FABRICATES a regular session for an
-    out-of-coverage weekday (an unknown future holiday): both mis-verdicts are
-    harmless here — pre-"close" keeps ``today`` (nothing to derive on a
-    holiday), post-"close" includes a bar-less date (derives nothing) — so the
-    boot-safe unguarded variant is deliberate. Pure O(1); *now_ist* must be
-    the current IST wall-clock instant.
+    the data-grounded last-bar-vs-close variant is
+    :func:`daily_derive_cutoff_grounded` (DEC-DAILY-CUTOFF-GROUNDED-001, the
+    shipped follow-up; DEFER-only, it delegates here for the clock verdict).
+    Uses the unguarded :func:`get_session`, which FABRICATES a regular session
+    for an out-of-coverage weekday (an unknown future holiday): both
+    mis-verdicts are harmless here — pre-"close" keeps ``today`` (nothing to
+    derive on a holiday), post-"close" includes a bar-less date (derives
+    nothing) — so the boot-safe unguarded variant is deliberate. Pure O(1);
+    *now_ist* must be the current IST wall-clock instant.
     """
     today = now_ist.date()
     session = get_session(today)
     if session is None or now_ist.time() > session.close_time_ist:
         return today + timedelta(days=1)
+    return today
+
+
+def now_ist() -> datetime:
+    """The current IST wall-clock instant — the ONE production IST clock leaf.
+
+    DEC-DAILY-CUTOFF-GROUNDED-001: kills the inline
+    ``datetime.now(UTC).astimezone(IST)`` copies at the prebuild cutoff pin
+    sites (CLAUDE.md §11 COMMON) — callers that need "now, in IST" import
+    THIS. The adapters-layer sibling
+    :func:`brutex.adapters.ingest_common.now_ist` predates it and stays (the
+    calendars package must never import adapters); both return the identical
+    ``Asia/Kolkata``-aware instant. Tests freeze their local injectable clock
+    seam (e.g. ``timeframe_materialize._now_ist``), never this leaf.
+    """
+    return datetime.now(tz=IST)
+
+
+def session_last_bar_complete(session: TradingSession, last_bar_ist: datetime) -> bool:
+    """``True`` iff *last_bar_ist* proves *session* ran to its calendar close.
+
+    The ONE data-grounded completeness predicate
+    (DEC-DAILY-CUTOFF-GROUNDED-001): ``last_bar + 1 minute >= close``,
+    compared on full datetimes (robust against any midnight-adjacent close).
+    The ``+ 1 minute`` is LOAD-BEARING: the ingest session filter is HALF-OPEN
+    ``[open, close)`` (:func:`brutex.data.session.filter_to_trading_session`,
+    pinned close-exclusive), so a complete regular session's LAST stored
+    1-minute bar is labelled 15:29:00 — a naive ``last_bar >= close`` would
+    NEVER fire and would defer every completed session forever. The close is
+    the session's OWN per-date close (regular 15:30, Budget special-weekend,
+    Muhurat afternoon/evening — resolved by :func:`get_session`), never a
+    hardcoded 15:30. Grounding proves the CLOSE EDGE only, never session
+    density (interior gaps stay the pull-side detectors' job). Pure O(1).
+    """
+    close_dt = datetime.combine(session.date, session.close_time_ist, tzinfo=last_bar_ist.tzinfo)
+    return last_bar_ist + timedelta(minutes=1) >= close_dt
+
+
+def daily_derive_cutoff_grounded(now_ist: datetime, *, last_bar_ist: datetime | None) -> date:
+    """The data-grounded forming-session cutoff — DEFER-only over the clock arm.
+
+    DEC-DAILY-CUTOFF-GROUNDED-001, the shipped data-grounded follow-up of
+    :func:`daily_derive_cutoff` (the operator's ``run_day_session_closed``
+    sketch): the clock arm proves "the session SHOULD be over"; this arm
+    additionally demands the stored data AGREES before finalizing the RUN
+    DAY's own daily bar. It can only ever DEFER relative to the clock verdict
+    (``result ∈ {clock, run_day}`` and ``result <= clock`` — zero look-ahead
+    risk, never a promotion past the clock), and it is RUN-DAY-ONLY (it never
+    re-opens a session strictly before the run day — yesterday finalizes
+    exactly as today; no permanent-deferral spiral).
+
+    Resolution (every abstention falls back to the clock verdict — honest
+    unknown, never a fabricated defer):
+
+    * clock verdict already ``<= today`` (mid-session / pre-close / at-close)
+      → clock: the run day is already excluded, nothing to ground (this also
+      makes every mid-session run byte-identical to the clock arm by
+      construction);
+    * *last_bar_ist* is ``None`` (empty frame / non-datetime max) → clock;
+    * the last bar is NOT dated the run day (no run-day bars: deriving writes
+      no run-day bar under either verdict; a FUTURE-dated last bar also lands
+      here — the caller WARNs) → clock;
+    * no session on the run day (bars on a non-trading date —
+      filter-impossible, defensive) → clock;
+    * the run-day session is PROVABLY complete
+      (:func:`session_last_bar_complete`) → clock (finalize the run day);
+    * otherwise → ``today``: the run-day session is provably INCOMPLETE (a
+      pull died mid-day / a stale mid-day frame re-run) — DEFER it rather
+      than finalize a partial daily bar; latest-wins on the derived ``1day``
+      heals it once the data completes.
+
+    Inherits the clock arm's deliberately-unguarded :func:`get_session`
+    stance (out-of-coverage fabrication is proven harmless there — restated,
+    not re-guarded). Pure O(1); *now_ist* is the run's pinned IST instant,
+    *last_bar_ist* the frame's last-bar IST timestamp.
+    """
+    clock = daily_derive_cutoff(now_ist)
+    today = now_ist.date()
+    if clock <= today:
+        return clock
+    if last_bar_ist is None or last_bar_ist.date() != today:
+        return clock
+    session = get_session(today)
+    if session is None:
+        return clock
+    if session_last_bar_complete(session, last_bar_ist):
+        return clock
     return today
 
 

@@ -1584,9 +1584,11 @@ def _row(
     bars: int = 5,
     bars_net_new: int | None = None,
     last_error: str | None = None,
+    empty_retries: int | None = None,
+    transient_retries: int | None = None,
     streak_provenance: str | None = None,
 ) -> LedgerRow:
-    """One serialised ledger row (the exact 15-field ``to_rows`` shape)."""
+    """One serialised ledger row (the exact 17-field ``to_rows`` shape)."""
     return (
         "dhan",
         security,
@@ -1602,6 +1604,8 @@ def _row(
         0,
         1,
         bars_net_new,
+        empty_retries,
+        transient_retries,
         streak_provenance,
     )
 
@@ -2743,6 +2747,8 @@ class TestBarsNetNewBackwardCompat:
             "empty_streak",
             "in_pull_fetches",
             "bars_net_new",
+            "empty_retries",
+            "transient_retries",
             "streak_provenance",
         ]
         assert names.index("bars_net_new") == 13
@@ -2879,7 +2885,7 @@ class TestStreakProvenanceBackwardCompat:
         assert ledger.records()[0].streak_provenance is None
 
     def test_delta_append_and_fold_carry_the_column(self, tmp_path: Path) -> None:
-        # The O(dirty) mid-pull delta rides the SAME 15-col schema + fold.
+        # The O(dirty) mid-pull delta rides the SAME 17-col schema + fold.
         ledger = WindowLedger()
         ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW, pull_id="d1")
         assert append_ledger_delta(ledger, tmp_path) == 1
@@ -3023,3 +3029,118 @@ class TestSeedObservedOverlay:
 
         assert _run(frozenset()) == 0
         assert _run(frozenset({hole[2]})) == 1
+
+
+class TestRetrySplitBackwardCompat:
+    """DEC-RETRY-COUNTER-SPLIT-001: ``empty_retries`` / ``transient_retries`` follow
+    the exact optional-column template — appended LAST (after ``bars_net_new``),
+    absent columns load as an honest ``None`` (NEVER a fabricated 0), new files
+    round-trip the ints."""
+
+    def test_old_format_parquet_loads_split_none(self, tmp_path: Path) -> None:
+        # A pre-split file (14 columns: core 11 + streak + fetches + net-new)
+        # MUST load; the absent split is an honest unknown None on BOTH halves.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["NIFTY"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SUCCESS],
+                "bars": [5],
+                "attempts": [1],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+                "empty_streak": [0],
+                "in_pull_fetches": [3],
+                "bars_net_new": [5],
+            },
+        )
+        ledger = load_window_ledger(tmp_path)
+        rec = ledger.records()[0]
+        assert ledger.count == 1  # loaded, NOT degraded to empty
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+        assert rec.in_pull_fetches == 3  # the conflated total stays byte-intact
+        assert rec.bars_net_new == 5
+        assert ledger.is_skippable(_key()) is True  # the settled row still skips
+
+    def test_new_round_trip_carries_the_ints(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            in_pull_fetches=4,
+            empty_retries=2,
+            transient_retries=1,
+        )
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()
+        rec = restored.records()[0]
+        assert rec.empty_retries == 2
+        assert rec.transient_retries == 1
+
+    def test_new_round_trip_preserves_null_cells(self, tmp_path: Path) -> None:
+        # A NEW file can carry NULL split cells (a cold-start seed / a record
+        # that never observed the ladder) — they round-trip as None, not 0.
+        ledger = WindowLedger()
+        ledger.seed_lake_success(_key(), bars=42, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        rec = restored.records()[0]
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+        assert restored.to_rows() == ledger.to_rows()
+
+    def test_mixed_old_and_new_rows_merge_on_save(self, tmp_path: Path) -> None:
+        # An OLD-format file on disk (no split columns) merges with a NEW
+        # in-memory ledger: the disk row keeps its honest Nones, the new row
+        # its ints — no crash, no fabrication.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan"],
+                "security_id": ["SENSEX"],
+                "interval": ["1minute"],
+                "window_start": ["2021-01-01"],
+                "window_end": ["2021-04-01"],
+                "status": [SUCCESS],
+                "bars": [7],
+                "attempts": [1],
+                "last_error": [None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"],
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"],
+            },
+        )
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            in_pull_fetches=2,
+            empty_retries=1,
+            transient_retries=0,
+        )
+        save_window_ledger(ledger, tmp_path)  # read-merge-write folds the disk row in
+        by_symbol = {r.security_id: r for r in load_window_ledger(tmp_path).records()}
+        assert by_symbol["NIFTY"].empty_retries == 1
+        assert by_symbol["NIFTY"].transient_retries == 0
+        assert by_symbol["SENSEX"].empty_retries is None
+        assert by_symbol["SENSEX"].transient_retries is None
+
+    def test_merge_rows_arity_safe_with_the_split(self) -> None:
+        # merge_ledger_rows conflict resolution still keys off
+        # status/timestamp/attempts; the winning row's split rides along.
+        older = _row(last_attempt="2026-06-08T12:00:00+00:00")
+        newer = _row(last_attempt="2026-06-08T13:00:00+00:00", empty_retries=2, transient_retries=1)
+        assert merge_ledger_rows([older], [newer]) == [newer]
+        assert merge_ledger_rows([newer], [older]) == [newer]

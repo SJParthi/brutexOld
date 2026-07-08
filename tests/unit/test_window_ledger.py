@@ -672,6 +672,8 @@ class TestPruneSuperseded:
                     0,
                     None,
                     None,
+                    None,
+                    None,
                 )
             ]
         )
@@ -2105,12 +2107,17 @@ class TestLedgerRecordRow:
         records = ledger.records()
         assert ledger.to_rows() == [ledger_record_row(r) for r in records]
         row = ledger_record_row(records[0])
-        assert len(row) == 15
+        assert len(row) == 17
         assert row[0] == records[0].market
         assert row[13] == 3  # bars_net_new stays at index 13 (append order preserved)
+        # empty_retries / transient_retries follow (DEC-RETRY-COUNTER-SPLIT-001
+        # append-LAST back-compat order); this caller did not observe the fetch
+        # ladder, so both read honest None.
+        assert row[14] is None
+        assert row[15] is None
         # streak_provenance is the LAST field (DEC-STREAK-PROVENANCE-001
         # back-compat append order): a SUCCESS resets it to the KNOWN-zero "".
-        assert row[14] == ""
+        assert row[16] == ""
 
 
 def _legacy_row(
@@ -2134,9 +2141,11 @@ def _legacy_row(
     int,
     int,
     int | None,
+    int | None,
+    int | None,
     str | None,
 ]:
-    """One 15-field row for `from_rows` — the store's coerced legacy-load shape."""
+    """One 17-field row for `from_rows` — the store's coerced legacy-load shape."""
     return (
         "dhan",
         "NIFTY",
@@ -2151,6 +2160,8 @@ def _legacy_row(
         _NOW.isoformat(),
         empty_streak,
         1,
+        None,
+        None,
         None,
         streak_provenance,
     )
@@ -2924,3 +2935,132 @@ class TestRescindAllFilteredSettles:
         assert ledger.rescind_all_filtered_settles() == 1
         # Idempotent: a second call has nothing tracked (and the row is FAILED).
         assert ledger.rescind_all_filtered_settles() == 0
+
+
+class TestRetryCounterSplit:
+    """``empty_retries`` / ``transient_retries`` — the ``in_pull_fetches`` SPLIT
+    (DEC-RETRY-COUNTER-SPLIT-001, accepting the #924/#1355 named follow-up)."""
+
+    def test_record_stores_the_split_as_given(self) -> None:
+        # The ledger stores the spine's split verbatim (overwrite-per-pull, like
+        # in_pull_fetches) — no derivation, no accumulation.
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_NOW,
+            in_pull_fetches=4,
+            empty_retries=2,
+            transient_retries=1,
+        )
+        rec = ledger.records()[0]
+        assert rec.empty_retries == 2
+        assert rec.transient_retries == 1
+        # The spine invariant the split decomposes: empties + transients + the
+        # one data-bearing fetch == the conflated total.
+        assert (rec.empty_retries or 0) + (rec.transient_retries or 0) + 1 == rec.in_pull_fetches
+
+    def test_record_default_is_honest_unknown_never_zero(self) -> None:
+        # A caller that did not observe the fetch ladder records None (the
+        # bars_net_new honest-unknown template) — a fabricated 0 would claim
+        # "no retries of that class fired".
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+
+    def test_record_overwrites_the_split_per_pull(self) -> None:
+        # Overwrite, not accumulate — a re-run of the SAME pull is bit-identical
+        # (Golden Rule #7), mirroring in_pull_fetches.
+        ledger = WindowLedger()
+        for _ in range(2):
+            ledger.record(
+                _key(),
+                raw_bars=0,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                in_pull_fetches=3,
+                empty_retries=3,
+                transient_retries=0,
+            )
+        rec = ledger.records()[0]
+        assert rec.empty_retries == 3
+        assert rec.transient_retries == 0
+
+    def test_planned_row_is_a_known_zero_split(self) -> None:
+        # A never-fetched PLANNED row KNOWS its split is zero (mirrors
+        # in_pull_fetches=0) — this is not an unknown.
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.status == PLANNED
+        assert rec.empty_retries == 0
+        assert rec.transient_retries == 0
+
+    def test_lake_seed_is_honest_unknown(self) -> None:
+        # A cold-start seed proves data exists but never observed the historical
+        # fetch ladder — the split is None, never a fabricated 0.
+        ledger = WindowLedger()
+        assert ledger.seed_lake_success(_key(), bars=7, now=_NOW)
+        rec = ledger.records()[0]
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+
+    def test_settle_known_gap_is_honest_unknown(self) -> None:
+        # The known-gap settle seam carries no ladder observation either.
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        rec = ledger.records()[0]
+        assert rec.status == SKIPPED
+        assert rec.empty_retries is None
+        assert rec.transient_retries is None
+
+    def test_reopen_preserves_the_split(self) -> None:
+        # An operator re-open demotes SKIPPED → FAILED without a fetch — the
+        # last pull's split rides along untouched (like bars/bars_net_new).
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=3,
+            empty_retries=3,
+            transient_retries=0,
+            settle_empty=True,
+            old_window=True,
+        )
+        assert ledger.records()[0].status == SKIPPED
+        assert ledger.reopen_skipped() == 1
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.empty_retries == 3
+        assert rec.transient_retries == 0
+
+    def test_round_trip_preserves_ints_and_nones(self) -> None:
+        # to_rows/from_rows is a fixed point for BOTH a real split and the
+        # honest-unknown Nones (the back-compat load path's contract).
+        ledger = WindowLedger()
+        ledger.record(
+            _key("NIFTY"),
+            raw_bars=0,
+            error_type="GrowwRateLimitError",
+            bars_appended=0,
+            now=_NOW,
+            in_pull_fetches=2,
+            empty_retries=1,
+            transient_retries=1,
+        )
+        ledger.record(_key("SENSEX"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        restored = WindowLedger.from_rows(ledger.to_rows())
+        assert restored.to_rows() == ledger.to_rows()
+        by_symbol = {r.security_id: r for r in restored.records()}
+        assert by_symbol["NIFTY"].empty_retries == 1
+        assert by_symbol["NIFTY"].transient_retries == 1
+        assert by_symbol["SENSEX"].empty_retries is None
+        assert by_symbol["SENSEX"].transient_retries is None

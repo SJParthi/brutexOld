@@ -3011,6 +3011,69 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
     return resolved
 
 
+class _TransientCliFloorStore:
+    """Per-OPERATION transient vendor-floor sidecar over the lake's instrument master.
+
+    The CLI twin of the dashboard routes' ``floor_store=instrument_store`` seam
+    (DEC-VENDOR-FLOOR-LAZY-PROBE-001 / DEC-CLI-DEPTH-FLOORS-001), structurally
+    satisfying :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore`
+    — the generic ``schema_meta`` key/value sidecar carries the
+    ``groww.vendor_floor.<symbol>`` rows, so a floor learned by either
+    entrypoint clamps both.
+
+    WHY transient (the round-1 review MAJOR fix): the previous helper opened
+    ONE read-write :class:`~brutex.data.instrument_store.InstrumentStore` and
+    held it on the fetch's ExitStack for the WHOLE (often multi-hour) pull. A
+    DuckDB read-write connection takes an EXCLUSIVE cross-process file lock, so
+    (a) ``brutex serve`` booted mid-fetch failed at its own
+    ``InstrumentStore.open`` with ``CatalogError`` — a regression (pre-branch,
+    ``cmd_fetch`` opened this file only transiently inside
+    ``_resolve_brute_force_instruments``), and (b) with a dashboard already
+    running, the CLI's whole-pull open ALWAYS failed, silently disabling depth
+    floors for every concurrent run — the "either entrypoint clamps BOTH"
+    claim held only serially. Every :meth:`get_meta` / :meth:`set_meta` now
+    opens the store, performs the ONE operation, and closes it (milliseconds;
+    O(symbols) reads once at pull start via ``load_vendor_floors`` + at most
+    one write per learned floor per pull) — the DuckDB file is never held
+    across the fetch.
+
+    BEST-EFFORT by the CALLERS' contract: a per-op open/read/write failure
+    raises the store's own error surface, and both consumers
+    (``load_vendor_floors`` + ``VendorFloorLearner._persist``) already swallow
+    + WARN and degrade — the fetch itself is never blocked (the un-clamped
+    pull is always correct, just slower). HONEST residual: while a dashboard
+    PROCESS holds ``instruments.duckdb`` open read-write, each transient op
+    still fails (DuckDB's rw lock excludes every peer connection) — but the
+    degrade is now PER-OP and self-heals the moment the dashboard releases the
+    file, instead of one boot-time failure disabling the feature for the whole
+    pull; the true concurrent-share fix (routing floors through the dashboard
+    process) stays out of scope.
+    """
+
+    def __init__(self, lake_root: Path) -> None:
+        self._path = lake_root / "instruments.duckdb"
+
+    @property
+    def path(self) -> Path:
+        """The sidecar's DuckDB path (diagnostics + tests) — never held open."""
+        return self._path
+
+    def get_meta(self, key: str) -> str | None:
+        """Read one ``schema_meta`` value through a transient open→read→close."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(self._path) as store:
+            value: str | None = store.get_meta(key)
+        return value
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Persist one ``schema_meta`` value through a transient open→write→close."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(self._path) as store:
+            store.set_meta(key, value)
+
+
 def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK + network
     lake_root: Path, catalog: Any = None
 ) -> tuple[Any, Any]:
@@ -3256,7 +3319,9 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
-def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: Any = None) -> bool:
+def _enter_pull_singleflight(
+    stack: Any, lake_root: Path, account_key_resolver: Any = None, lease_factory: Any = None
+) -> bool:
     """Take the cross-process account single-flight lock for the CLI pull; report contention.
 
     DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
@@ -3292,14 +3357,29 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
     against ``pull_jobs.start()``'s identical order. *account_key_resolver* is the
     injectable ``() -> str | None`` key seam (tests); ``None`` (production) resolves via
     the AWS-only source.
+
+    **Cross-host lease, taken LAST (DEC-ACCOUNT-LEASE-CROSSHOST-001):** after both
+    flocks this enters the advisory
+    :func:`~brutex.adapters.groww.pull_singleflight.pull_lease_guard` — a heartbeat
+    lease on the SHARED lake storage, so a pull apparently running on ANOTHER host
+    against the same lake is refused too. Honest envelope: best-effort DETECTION over
+    shared storage + wall clocks, NOT cross-host mutual exclusion (see the guard's
+    module docstring). Entered strictly AFTER the flocks (holding them is what makes
+    ignoring a same-host lease sound); the ExitStack releases LIFO, matching
+    ``pull_jobs``' order. *lease_factory* is the injectable ``(Path) -> CM`` seam
+    (tests); ``None`` (production) uses the live guard.
     """
     import structlog
 
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
         account_pull_singleflight_lock,
+        pull_lease_guard,
         pull_singleflight_lock,
     )
+
+    if lease_factory is None:
+        lease_factory = pull_lease_guard
 
     if account_key_resolver is not None:
         account_key: str | None = account_key_resolver()
@@ -3335,6 +3415,16 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
             f"[brutex] {exc} — refusing to start a second concurrent pull on this lake. "
             "Wait for the running pull to finish (or stop it) before re-running "
             "`brutex fetch`.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        stack.enter_context(lease_factory(lake_root))
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] {exc} — refusing to start a concurrent pull: another HOST appears "
+            "to be pulling into this shared lake. Wait for it to finish (the lease goes "
+            "stale by itself if that pull is dead) before re-running `brutex fetch`.",
             file=sys.stderr,
         )
         return False
@@ -3738,7 +3828,15 @@ def cmd_fetch(
         drain_write_consumer,
         reconcile_pairs_with_pipeline,
     )
-    from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+    from brutex.adapters.groww.run_ingest import (
+        run_groww_spot_ingest_with_retry,
+        with_paced_client,
+    )
+    from brutex.adapters.groww.vendor_floor import (
+        floor_symbol_windows,
+        load_vendor_floors,
+        make_vendor_floor_learner,
+    )
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
@@ -4002,6 +4100,48 @@ def cmd_fetch(
         # so neither touches the real ledger: `_no_persist` passes `dry_run=True`,
         # so the ledger is None (no skip, no disk touch).
         _no_persist = dry_run or inspect
+        # Lazy vendor-depth-floor learning on the CLI path (DEC-CLI-DEPTH-FLOORS-001,
+        # closing DEC-VENDOR-FLOOR-LAZY-PROBE-001's named follow-up "the CLI
+        # `brutex fetch` path stays UNWIRED — no floor_store seam there"). Mirrors
+        # the dashboard build sites exactly: (a) the per-pull learner is built over
+        # the PACED replica of THIS pull's adapter (`with_paced_client(adapter,
+        # pace)` — the live client carries a no-op pace until the spine binds the
+        # controller, so a learner over the raw adapter would probe OUTSIDE the
+        # 8 r/s ceiling + 500/min governor; DEC-RATE-SINGLE-ADMISSION-001), and
+        # (b) a symbol with a PERSISTED learned floor plans + fetches its 1-minute
+        # windows from `max(GROWW_HISTORY_FLOOR, learned floor)` via the EXISTING
+        # per-symbol `symbol_windows` seam — the DAILY interval stays exempt inside
+        # plan_windows / reconcile / `_resolve_spot_window` (a 1-minute-probed
+        # floor never clamps the 1-day series), so one map serves the CLI's
+        # mixed-interval plan honestly. The sidecar is the SAME instrument-master
+        # `schema_meta` the dashboard writes (`groww.vendor_floor.<symbol>`), so a
+        # floor learned by either entrypoint clamps BOTH (CLAUDE.md §11 COMMON).
+        # Armed ONLY for the genuine persisting live pull: `--dry-run` /
+        # `--inspect` open no store, build no learner, and resolve
+        # `floor_windows=None` — byte-identical planning (the same `_no_persist`
+        # gating every other persistence surface here uses). The store handle is
+        # TRANSIENT — opened per get/set and closed immediately, NEVER held for
+        # the multi-hour pull (the round-1 review MAJOR: a whole-pull rw DuckDB
+        # hold blocked `brutex serve` boot and always-failed under a running
+        # dashboard — see _TransientCliFloorStore).
+        floor_store = None if _no_persist else _TransientCliFloorStore(resolved)
+        floor_learner = (
+            None
+            if _no_persist
+            else make_vendor_floor_learner(
+                with_paced_client(adapter, pace),
+                history_floor=GROWW_HISTORY_FLOOR,
+                today=end_dt.date(),
+                store=floor_store,
+            )
+        )
+        floor_symbols = [inst.symbol_name for inst in fetch_instruments]
+        floor_windows = floor_symbol_windows(
+            floor_symbols,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            floors=load_vendor_floors(floor_store, floor_symbols),
+        )
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
         # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
         # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE the
@@ -4034,6 +4174,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                symbol_windows=floor_windows,
             )
             reconcile_ledger_with_lake(
                 ledger,
@@ -4045,6 +4186,7 @@ def cmd_fetch(
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
                 observed=observed_holidays,
+                symbol_windows=floor_windows,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
@@ -4178,6 +4320,13 @@ def cmd_fetch(
                     observed_holidays=observed_holidays,
                     all_filtered_breaker=af_breaker,
                     storm_breaker=storm_breaker,
+                    # Learned-floor clamp + in-pull depth learner
+                    # (DEC-CLI-DEPTH-FLOORS-001): the SAME `floor_windows` the
+                    # plan above tiled (planned keys == fetched keys) + the
+                    # per-pull learner over the paced adapter; both `None` for
+                    # `--dry-run` / `--inspect` — byte-identical.
+                    symbol_windows=floor_windows,
+                    floor_learner=floor_learner,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
