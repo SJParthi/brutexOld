@@ -10,7 +10,7 @@ Stress tests verify that the hot-path modules (audit chain, LMDB store,
 rate limiter, bloom filter) hold their invariants under SUSTAINED burst
 load — not just one-shot correctness.
 
-Execution model (three tiers — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1552)
+Execution model (three tiers — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1566)
 -------------------------------------------------------------------------
 * **PR / unit run** — the pure soak-drift LOGIC
   (:mod:`brutex.observability.soak_drift`) is unit-tested to 100% line+branch on

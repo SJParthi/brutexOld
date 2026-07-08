@@ -1,6 +1,6 @@
 """Real long-soak DRIVER — the wall-clock runner behind the pure drift detector.
 
-DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1552). This is the ONE code path
+DEC-SOAK-REAL-TIER-001 (MIGRATION.md entry #1566). This is the ONE code path
 that a 30-second nightly regression AND a multi-hour self-hosted soak both take
 (SCALABLE — the only difference is the wall-clock budget). It drives the two hot
 paths a real pull exercises — the INGEST audit-chain append

@@ -7,7 +7,7 @@
 # types is STRESS. This workflow runs the stress suite on a nightly
 # schedule (not on every push — they'd blow the per-PR budget).
 #
-# WHAT THIS JOB IS (honest reclassification — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1552)
+# WHAT THIS JOB IS (honest reclassification — DEC-SOAK-REAL-TIER-001, MIGRATION.md #1566)
 # --------------------------------------------------------------------------------------
 # This GitHub-hosted ubuntu-24.04 job is a **~5-minute REGRESSION GATE**, NOT a
 # soak: it proves the stress suite's invariants (audit-chain drift, per-event

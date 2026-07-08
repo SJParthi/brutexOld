@@ -34,7 +34,7 @@ the pyramid.** No single point of failure.
 | 3 — Golden | byte-equality SHA256 | hardcoded fixtures match | <60s/PR |
 | 4 — Integration | pytest tests/integration | all pass | <5 min/PR |
 | 5 — Benchmark | pytest-benchmark + criterion | O(1) ratio ≤ 1.1 at N=1K..1M | <8 min/PR |
-| 6 — Stress | macOS leaks + heaptrack | ~~24h, RSS ±5%~~ RSS/fd/p99 drift flat **(CORRECTED — DEC-SOAK-REAL-TIER-001 #1552: no tier delivers a 24h single run; the nightly is a ~5-min regression gate and the self-hosted soak is ≤ 20 h per dispatch — SEC9-1 GITHUB_TOKEN bound)** | nightly ~5-min gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`) |
+| 6 — Stress | macOS leaks + heaptrack | ~~24h, RSS ±5%~~ RSS/fd/p99 drift flat **(CORRECTED — DEC-SOAK-REAL-TIER-001 #1566: no tier delivers a 24h single run; the nightly is a ~5-min regression gate and the self-hosted soak is ≤ 20 h per dispatch — SEC9-1 GITHUB_TOKEN bound)** | nightly ~5-min gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`) |
 | 7 — Smoke | pytest -m smoke | 10-bar/2-combo sanity | <30s pre-push |
 | 8 — Fuzz | cargo fuzz + atheris | 10 min/target, no panics | nightly |
 | 9 — Mutation | mutmut + cargo-mutants | ≥85% | weekly |
@@ -157,7 +157,7 @@ output: results.parquet — must be byte-identical (SHA256 equal) to
 
 ```
 input:  1 day of NIFTY 1m bars, 50 brute-force combos, mode A and B
-action: 
+action:
   - Run via naive pure-Python reference engine (slow, obviously correct,
     ~50 lines of code, no optimisations, hand-readable)
   - Run via Rust engine (production hot path)
@@ -187,13 +187,13 @@ individual atomic condition.
 
 | Guarantee | Unit (L1) | Property (L2) | Golden (L3) | Integration (L4) | Benchmark (L5) | Stress (L6) | Fuzz (L8) | Mutation (L9) |
 |---|---|---|---|---|---|---|---|---|
-| **G1 O(1)** | indicator+bar accessors | P-11, P-24 | — | smoke combo | ALL 6 hotpath ratios | multi-hour sustained latency p99 flat (weekly soak, ≤ 20 h/dispatch — #1552) | — | mask + lookup mutants |
-| **G2 Reproducibility** | Parquet writer unit | P-19, P-20 | corpora #1, #9 SHA256 frozen | **replay_audit_log** | — | two-machine identity (nightly gate + weekly soak tier — #1552) | Parquet reader fuzz | writer mutants |
+| **G1 O(1)** | indicator+bar accessors | P-11, P-24 | — | smoke combo | ALL 6 hotpath ratios | multi-hour sustained latency p99 flat (weekly soak, ≤ 20 h/dispatch — #1566) | — | mask + lookup mutants |
+| **G2 Reproducibility** | Parquet writer unit | P-19, P-20 | corpora #1, #9 SHA256 frozen | **replay_audit_log** | — | two-machine identity (nightly gate + weekly soak tier — #1566) | Parquet reader fuzz | writer mutants |
 | **G3 No look-ahead** | bar iterator unit | P-06 instrumented accessor | — | reference strategies trace test | — | — | — | iterator mutants |
 | **G4 Correct PnL** | costs.py 100% branch | P-03, P-04, P-08, P-09, P-13, P-14, P-21 | corpus #8 (12-fill paisa) | **python_rust_parity** | — | — | — | costs.py mutants |
-| **G5 33B/2-4 days** | per-trial cost unit (criterion micro-bench) | — | — | 100K micro-sweep correctness | bench_full_sweep_extrapolation projection | multi-hour sustained throughput (weekly soak — #1552) | — | mutation on cost-counter helpers |
+| **G5 33B/2-4 days** | per-trial cost unit (criterion micro-bench) | — | — | 100K micro-sweep correctness | bench_full_sweep_extrapolation projection | multi-hour sustained throughput (weekly soak — #1566) | — | mutation on cost-counter helpers |
 | **G6 Dedup uniqueness** | hash function unit | P-01, P-02, P-05, P-11, P-24 | corpus #9 | resume_from_kill | LMDB O(1) | — | LMDB key fuzz | hash mutants |
-| **G7 Audit chain** | audit.py 100% branch | P-16, P-17 | — | **replay_audit_log** | — | multi-hour log size + verify (weekly soak — #1552) | JSONL reader fuzz | audit mutants |
+| **G7 Audit chain** | audit.py 100% branch | P-16, P-17 | — | **replay_audit_log** | — | multi-hour log size + verify (weekly soak — #1566) | JSONL reader fuzz | audit mutants |
 | **G8 Microstructure** | calendar + session unit | P-22, P-23, P-18 | corpora #1-5 | calendar integration | — | — | calendar TOML fuzz | calendar mutants |
 | **G9 52-condition vocab** | each atom unit | P-11 + per-condition determinism | **condition truth table** (corpus #7) | python_rust_parity | — | — | DSL fuzz | strategy crate mutants |
 

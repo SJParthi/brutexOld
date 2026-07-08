@@ -1,8 +1,19 @@
 # ADR-0004 — GPU acceleration for the brute-force sweep
 
-**Status:** PROPOSED (decision recorded; **no GPU code lands without the
-empirical micro-benchmark gate in §6**). Operator-requested 2026-06-02.
-**Decision ID:** `DEC-GPU-ACCELERATION-ADR-001` (MIGRATION.md #410).
+**Status:** ACCEPTED (2026-07-06, `DEC-GPU-GATE-RECONCILE-001`; was
+PROPOSED since 2026-06-02) — the CPU-first arm is EXECUTED + MEASURED
+(DEC-RUST-SUPERMASK-KERNEL-001 #411: 964 → 1,575 M ops·s⁻¹ bit-exact;
+DEC-RUST-RESIDENT-BARS-001 #413; DEC-RUST-RAYON-SUPERMASK-001 #417; the
+33B SLA is now a hard M4-Pro gate,
+`tests/bench/test_full_sweep_extrapolation.py`). GPU arms DORMANT: the §6
+tri-platform micro-benchmark has NEVER RUN (verified 2026-07-06 — no
+MLX/CuPy code, no CI job; `verify-m4pro.yml:77-80` is informational only)
+and is RETIRED as scheduled work while RETAINED as the fail-closed
+PRECONDITION any future GPU PR must satisfy first (**no GPU code lands
+without the empirical micro-benchmark gate in §6**; mechanically pinned by
+`tests/unit/test_gpu_gate_drift_pin.py`). Operator-requested 2026-06-02.
+**Decision ID:** `DEC-GPU-ACCELERATION-ADR-001` (MIGRATION.md #410);
+reconciled by `DEC-GPU-GATE-RECONCILE-001` (MIGRATION.md).
 **Method:** CLAUDE.md §9 hostile multi-agent review — a hot-path-fitness
 agent + a GPU-tech-landscape/determinism web-research agent, synthesized
 here. Every number is cited (repo `file:line` or external URL) or flagged
@@ -72,9 +83,14 @@ ceiling.
 | **NVIDIA H100** | ≈ 3.35 TB/s HBM3 ([runpod](https://www.runpod.io/articles/guides/nvidia-h100)) | " | **~8–10×+** *(estimate)* — different hardware + $$ |
 
 **The blunt truth:** on the M4 Pro, unified memory means a GPU port of a
-BW-bound kernel buys only ~1.2–2.3× over the (still-to-be-built) Rust NEON
-multi-core CPU kernel — for a whole extra toolchain, a second code path to
-keep bit-identical, and CI cost. The real 3–10× GPU win lives **only on
+BW-bound kernel buys only ~1.2–2.3× over the Rust multi-core CPU kernel
+*[was "(still-to-be-built) … NEON": since built + measured the same day
+this ADR landed — 964 → 1,575 M ops·s⁻¹ single-core, bit-exact (#411,
+scalar-autovec, not hand-NEON), resident buffers (#413), Rayon multi-core
+(#417); the D-7 stale wording flagged by
+`VERIFICATION_2026-06-03_INSTITUTIONAL_ARCH.md:106`, reconciled 2026-07-06
+(DEC-GPU-GATE-RECONCILE-001)]* — for a whole extra toolchain, a second
+code path to keep bit-identical, and CI cost. The real 3–10× GPU win lives **only on
 discrete-VRAM NVIDIA** (cloud), which is *different hardware*. Also note:
 the blended end-to-end sweep speedup is lower than the kernel speedup
 because the **branchy SL/TP/15:20 trade simulation stays on CPU**
@@ -88,11 +104,18 @@ kernel slice).
 1. **O(1) per-operation stays the contract** (already gated); GPU is a
    throughput multiplier for the O(N) sweep, not an O(1) mechanism.
 2. **Do NOT add GPU on the M4 Pro dev box.** The first real speed unlock
-   is the **roadmap Rust `count_supermasks_u64s` PyO3 kernel** (NEON
-   popcount, multi-threaded, tiled to fit the ~770 MB bitset in SLC) —
-   that is what flips the 33B-trial SLA from xfail (~1014-day proxy) toward
-   the 2–4-day M4-Pro target (`TRACK1_PERFORMANCE_BUDGET.md`). **CPU Rust
-   first.**
+   is the **Rust `count_supermasks_u64s` PyO3 kernel** (multi-threaded,
+   tiled to fit the ~770 MB bitset in SLC) — that is what flips the
+   33B-trial SLA from xfail (~1014-day proxy) toward the 2–4-day M4-Pro
+   target (`TRACK1_PERFORMANCE_BUDGET.md`). **CPU Rust first.**
+   *[Reconciled 2026-07-06 (DEC-GPU-GATE-RECONCILE-001): this arm was
+   EXECUTED the same day the ADR landed — the original "roadmap … NEON
+   popcount" wording was stale (D-7,
+   `VERIFICATION_2026-06-03_INSTITUTIONAL_ARCH.md:106`). Measured:
+   964 → 1,575 M ops·s⁻¹ bit-exact (#411, scalar-autovec — not hand-NEON);
+   resident bar buffers (#413); Rayon multi-core (#417); the 33B SLA is
+   now a REAL M4-Pro hard gate
+   (`tests/bench/test_full_sweep_extrapolation.py`).]*
 3. **For discrete-NVIDIA production, adopt CuPy `RawKernel`** for the
    integer AND+popcount stage (fallback Numba-CUDA), behind a
    `BRUTEX_GPU_OFFLOAD` env flag with a **hard CPU↔GPU `assert_array_equal`
@@ -114,18 +137,57 @@ kernel slice).
 
 ## 6. Gate before any GPU code (non-negotiable — Golden Rule #10)
 
+> **AMENDED 2026-07-06 (DEC-GPU-GATE-RECONCILE-001):** this tri-platform
+> micro-benchmark has **NEVER RUN** (verified 2026-07-06 — no MLX/CuPy
+> code anywhere in `brutex/` or `rust/`, no CI job;
+> `verify-m4pro.yml:77-80` reports the GPU device as informational only).
+> It is **RETIRED as scheduled work** — 2 of its 3 legs are unexecutable
+> on current facts (the MLX leg is contingent on an Apple-GPU path §5.2
+> itself rejects for now; the CuPy leg requires cloud NVIDIA hardware
+> outside the CLAUDE.md §8 envelope, none provisioned; ADR-0011 reaffirms
+> the engine is intentionally CPU/Rust-first) — and **RETAINED as a
+> dormant FAIL-CLOSED PRECONDITION**: any future GPU-offload PR must land
+> this benchmark FIRST. The precondition is mechanically pinned by
+> `tests/unit/test_gpu_gate_drift_pin.py` (no `mlx`/`cupy` import and no
+> `BRUTEX_GPU_OFFLOAD` read may appear in `brutex/` or `rust/` source).
+> The CuPy leg stays DORMANT, not deleted — outright deletion of a
+> possibly-operator-contemplated cloud path needs operator direction.
+> Per-bullet status below.
+
 No GPU implementation merges until an **empirical micro-benchmark** lands
-that measures, on the real ~770 MB bitset:
-- the Rust CPU kernel (NEON, multi-threaded) — the baseline,
-- MLX on the M4 Pro GPU,
-- CuPy RawKernel on a cloud NVIDIA box,
+that measures, on the ~770 MB bitset (itself a spec SIZING ESTIMATE,
+`TRACK1_BACKTEST_SPEC.md:182` — the benchmark must first measure the
+actual artifact; the pre-amendment wording "the real ~770 MB bitset"
+mislabeled the estimate as a measured artifact):
+- the Rust CPU kernel (multi-threaded) — the baseline — **kernel BUILT +
+  measured at MICROBENCH scale, NOT yet at this leg's ~770 MB scale**
+  *(round-2 review relabel over the earlier "SATISFIED with measured
+  figures" wording, which conflated the two)*: numpy reference
+  964 M ops·s⁻¹ → Rust kernel 1,575 M ops·s⁻¹, bit-exact parity asserted,
+  was measured SINGLE-core on the dev/CI runner over a 94,000-bar bitset
+  (94,000 × 8 B ≈ 752 KB — cache-resident, not the DRAM-streaming
+  envelope that decides a memory-bandwidth-bound kernel; #411,
+  `tests/bench/test_supermask_kernel_bench.py`; scalar-autovec, not
+  hand-NEON); resident buffers (#413); multi-core scaling measured on a
+  4-core dev/CI CONTAINER, not the M4 Pro (#417). The ~770 MB-bitset
+  MULTI-THREADED baseline measurement this leg defines remains OWED BY
+  the future benchmark itself,
+- MLX on the M4 Pro GPU — **NEVER RUN — DORMANT**: contingent on an
+  operator-requested Apple-GPU path §5.2 itself rejects for now,
+- CuPy RawKernel on a cloud NVIDIA box — **NEVER RUN — DORMANT**: requires
+  cloud NVIDIA hardware outside the CLAUDE.md §8 envelope (none
+  provisioned),
 
 reporting **measured** throughput (bars·masks/s), wall-clock for a fixed
 trial slice, and a CPU↔GPU bit-exact parity check. The ~1.2–2.3× /
 ~3–10× figures above are **BW-ratio estimates, not measurements** — the
-benchmark replaces them before any commitment. The comparison table the
-operator requires will be filled with **measured** Current/Proposed/Δ
-numbers at that point.
+benchmark replaces them before any commitment. The Current/Proposed/Δ
+comparison table the operator required was NEVER produced; it is a
+CONDITIONAL deliverable, produced if-and-only-if a GPU port is proposed —
+at which point this §6 benchmark (all three legs, measured throughput +
+bit-exact CPU↔GPU parity) MUST land BEFORE any GPU code merges (unchanged,
+fail-closed; mechanically pinned by
+`tests/unit/test_gpu_gate_drift_pin.py`).
 
 ---
 

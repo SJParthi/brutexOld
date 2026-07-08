@@ -45,7 +45,7 @@ check**. This is the "no illusion" table.
 | **O(1) latency / time per hot path** | "Same speed on row 1 and row 1-billion" | 🟢 live (ratio-gated) | `p99(big) / p99(small)` ratio gates on bar lookup, the u64 strategy-mask AND, dedup, and the rate limiter — `tests/bench/test_store_o1.py`, `test_throughput_canary.py` *(honest note ▼: tightest 1.1× tier is 🟡)* |
 | **O(1) space per operation** | "RAM per step stays flat as data grows" | 🟢 live | state lives in a memory-mapped LMDB tier off the Python heap — total storage is O(n), **per-operation RAM is O(1)** — `brutex/orchestrator/store.py` |
 | **All worst cases / errors / exceptions / bugs** | "It's tested every way that matters, and bugs can't sneak back" | 🟢 live (core) · 🟡 (full invariant catalog) | property/fuzz tests + golden fixtures + a **red-team harness that plants bugs and asserts the gates catch them** + a runtime look-ahead guard + per-symbol quarantine (one bad symbol can't kill the run). The full 24-invariant catalog is 5 live + 19 planned — `tests/property/`, `tests/golden/`, `brutex/feed/` |
-| **Comprehensively, fully, extremely automated** | "Humans don't babysit it" | 🟢 live | the full CI battery runs on **every push**; one master `CI OK` gate; **auto-merge only on all-green** + nightly ~5-min stress regression gate + weekly self-hosted soak (#1552) + weekly mutation — `.github/workflows/ci.yml`, `auto-merge.yml` |
+| **Comprehensively, fully, extremely automated** | "Humans don't babysit it" | 🟢 live | the full CI battery runs on **every push**; one master `CI OK` gate; **auto-merge only on all-green** + nightly ~5-min stress regression gate + weekly self-hosted soak (#1566) + weekly mutation — `.github/workflows/ci.yml`, `auto-merge.yml` |
 | **Real-time checks, guarantee + assurance** | "You find out the instant something breaks" | 🟢 live | every change triggers the gates immediately; a tamper-proof **hash-chained audit log** (break the chain → CI fails); reproducibility fingerprint on every run — `brutex/orchestrator/`, CLAUDE.md §2 Rule 4 |
 | **All kinds of tests / full coverage** | "Tested every which way, and the code is actually exercised" | 🟢 7 test types · 🟡 coverage | 7 test families live (▼ §3); coverage is a **90% hard floor + 103 modules frozen at 100% line+branch** climbing the rest — `STANDARDS_100PCT.md` §1 |
 
@@ -64,7 +64,7 @@ check**. This is the "no illusion" table.
 | **"Is it correct?"** | you hope so | some tests | a full automated suite + **hash-chained audit log** + reproducibility fingerprint |
 | **"Is this edge real, or just curve-fit?"** | no idea — the best of thousands of tries *always* looks great | rarely measured | **quantified** — the **Deflated Sharpe Ratio** (discounts your Sharpe for *how many* strategies you tried + fat tails) and the **Probability of Backtest Overfitting** (CSCV) put an honest number on it |
 | **Shipping a change** | push and pray | CI if you wrote it | **all gates must be green**, then it auto-merges — never on trust |
-| **Daily operation** | babysit it | babysit it | **designed for zero-click**: auto-merge + nightly stress gate + weekly self-hosted soak (#1552) + red-team harness |
+| **Daily operation** | babysit it | babysit it | **designed for zero-click**: auto-merge + nightly stress gate + weekly self-hosted soak (#1566) + red-team harness |
 
 ---
 
@@ -77,7 +77,7 @@ check**. This is the "no illusion" table.
 | **Property (fuzz)** | edge cases you didn't think of | 🟢 live (`-x`, stops on first falsification) |
 | **Golden-master** | byte-level output drift | 🟢 live (exact-equality fixtures) |
 | **Benchmark** | O(1) speed regressions | 🟢 live (ratio gates) |
-| **Stress / soak** | sustained leaks / drift over hours | 🟢 live — nightly ~5-min stress regression gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, duration-derived timeout; DEC-SOAK-REAL-TIER-001 #1552 — the prior “24-hour (nightly)” claim was false and is retracted) |
+| **Stress / soak** | sustained leaks / drift over hours | 🟢 live — nightly ~5-min stress regression gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`, duration-derived timeout; DEC-SOAK-REAL-TIER-001 #1566 — the prior “24-hour (nightly)” claim was false and is retracted) |
 | **Mutation** | "do the tests actually catch bugs?" | 🟢 live (85% threshold on the critical state module; weekly full run) |
 | **Smoke + Red-team** | fast pre-push + gate-integrity (planted bugs) | 🟢 live |
 
