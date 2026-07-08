@@ -32,7 +32,21 @@ use crate::spec::{Direction, StrategySpec};
 /// PR-2 R5/S5 levels appended (never renumbered; DEC-NIFTY-INDICATORS-001).
 const PIVOT_LEVELS_LEN: usize = 12;
 /// Number of `fib_levels` entries [`evaluate_with_levels`] expects.
+///
+/// FROZEN evaluator ABI — deliberately DISTINCT from [`FIB_COMPUTE_LIST_LEN`]:
+/// before DEC-FIB-BULLISH-RETRACE-001 both surfaces happened to be 15-tuples
+/// (an accidental pun, two different lists); only the COMPUTE projection grew
+/// when the four `retrace_bull_*` fields landed. The evaluator never reads
+/// the bull fields, so this stays 15.
 const FIB_LEVELS_LEN: usize = 15;
+/// Number of entries [`py_compute_fib_levels`] returns (the compute-FFI
+/// projection of [`FibLevels`]).
+///
+/// The original 15 (`retrace_23..ext_down_424`, order UNTOUCHED) plus the four
+/// `retrace_bull_23/38/62/78` APPENDED last (DEC-FIB-BULLISH-RETRACE-001).
+/// Deliberately DISTINCT from the frozen [`FIB_LEVELS_LEN`] evaluator ABI —
+/// see its doc comment.
+const FIB_COMPUTE_LIST_LEN: usize = 19;
 
 /// Overflow-safe magnitude ceiling for a previous-day anchor (paisa).
 ///
@@ -54,7 +68,9 @@ const FIB_LEVELS_LEN: usize = 15;
 /// `4·(p − pdl) ≤ 16M/3 + 4`; therefore
 /// `|r5| ≤ M + 16M/3 + 4 = 19M/3 + 4 ≈ 6.34·M < i64::MAX` (symmetrically for
 /// `s5` via `pdh − p ≤ ⅔·(pdh − pdl) + 1`). The largest fib intermediate is
-/// `pdh + 3.236·range ≤ M + 3.236·2M < 7.5·M` and the pivot sum
+/// `pdh + 3.236·range ≤ M + 3.236·2M < 7.5·M` (the bullish retracements add
+/// nothing new: their max `pdl + 0.786·range < pdh + 3.236·range`, so the
+/// bound is unchanged by DEC-FIB-BULLISH-RETRACE-001) and the pivot sum
 /// `pdh + pdl + pdc` is bounded by `3·M`, so ALL intermediates stay strictly
 /// below `8·M ≤ i64::MAX`: STILL provably overflow-free at coefficient 4 with
 /// the SAME ceiling — the constant did NOT need lowering. A hostile/garbage
@@ -621,6 +637,12 @@ fn evaluate_with_levels_impl(
         range_paisa: 0,
         ext_up_424_paisa: 0,
         ext_down_424_paisa: 0,
+        // The bullish retracement ladder is never read by the conditions
+        // (DEC-FIB-BULLISH-RETRACE-001) — zeroed like the other unread fields.
+        retrace_bull_23_paisa: 0,
+        retrace_bull_38_paisa: 0,
+        retrace_bull_62_paisa: 0,
+        retrace_bull_78_paisa: 0,
     };
     let snapshot = IndicatorSnapshot {
         tod_seconds,
@@ -937,10 +959,14 @@ fn py_compute_pivot_levels_impl(
 /// single-source indicator math BruteX's `compute_fib_levels` wrapper packs into
 /// its `FibLevels` dataclass.
 ///
-/// Returns a 15-element list of the COMPUTED levels (int64 paisa), in order:
+/// Returns a 19-element list ([`FIB_COMPUTE_LIST_LEN`]) of the COMPUTED levels
+/// (int64 paisa), in order:
 /// `[retrace_23, retrace_38, retrace_50, retrace_62, retrace_78,
 ///   ext_up_127, ext_up_162, ext_up_200, ext_up_262, ext_up_424,
-///   ext_down_127, ext_down_162, ext_down_200, ext_down_262, ext_down_424]`.
+///   ext_down_127, ext_down_162, ext_down_200, ext_down_262, ext_down_424,
+///   retrace_bull_23, retrace_bull_38, retrace_bull_62, retrace_bull_78]` —
+/// the original 15 order UNTOUCHED, the four PDL-anchored bullish retracements
+/// APPENDED last (DEC-FIB-BULLISH-RETRACE-001).
 /// `retrace@pdh = pdh`, `retrace@pdl = pdl`, and `range = pdh - pdl` are derived
 /// by the caller. `pdh < pdl` (or an overflow-prone magnitude) is REJECTED at the
 /// boundary with a clean `ValueError` — so a direct FFI caller can never trip the
@@ -958,7 +984,7 @@ fn py_compute_fib_levels(pdh_paisa: i64, pdl_paisa: i64) -> PyResult<Vec<i64>> {
 fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>, String> {
     check_prev_day_hl(pdh_paisa, pdl_paisa)?;
     let f = compute_fib_levels(pdh_paisa, pdl_paisa);
-    Ok(vec![
+    let out = vec![
         f.retrace_23_paisa,
         f.retrace_38_paisa,
         f.retrace_50_paisa,
@@ -974,7 +1000,15 @@ fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>
         f.ext_down_200_paisa,
         f.ext_down_262_paisa,
         f.ext_down_424_paisa,
-    ])
+        // The bullish retracement ladder, APPENDED last so every pre-existing
+        // index is byte-stable (DEC-FIB-BULLISH-RETRACE-001).
+        f.retrace_bull_23_paisa,
+        f.retrace_bull_38_paisa,
+        f.retrace_bull_62_paisa,
+        f.retrace_bull_78_paisa,
+    ];
+    debug_assert_eq!(out.len(), FIB_COMPUTE_LIST_LEN);
+    Ok(out)
 }
 
 /// Compute the full EMA series from a list of `f64` closes — the shared
@@ -1638,9 +1672,13 @@ mod tests {
                 f.ext_down_200_paisa,
                 f.ext_down_262_paisa,
                 f.ext_down_424_paisa,
+                f.retrace_bull_23_paisa,
+                f.retrace_bull_38_paisa,
+                f.retrace_bull_62_paisa,
+                f.retrace_bull_78_paisa,
             ]
         );
-        assert_eq!(got.len(), 15);
+        assert_eq!(got.len(), FIB_COMPUTE_LIST_LEN);
     }
 
     #[test]
@@ -2636,7 +2674,19 @@ mod tests {
             );
 
             let got_f = py_compute_fib_levels_impl(pdh, pdl).unwrap();
-            prop_assert_eq!(got_f.len(), FIB_LEVELS_LEN);
+            // The COMPUTE projection is 19 (bull tail appended) while the frozen
+            // evaluator ABI stays 15 (DEC-FIB-BULLISH-RETRACE-001).
+            prop_assert_eq!(got_f.len(), FIB_COMPUTE_LIST_LEN);
+            let f = compute_fib_levels(pdh, pdl);
+            prop_assert_eq!(
+                &got_f[FIB_LEVELS_LEN..],
+                &[
+                    f.retrace_bull_23_paisa,
+                    f.retrace_bull_38_paisa,
+                    f.retrace_bull_62_paisa,
+                    f.retrace_bull_78_paisa,
+                ]
+            );
         }
 
         /// `pdh < pdl` is ALWAYS rejected (both validators) and never panics —

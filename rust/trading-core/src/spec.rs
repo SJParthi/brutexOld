@@ -284,6 +284,12 @@ mod tests {
                 retrace_62_paisa: 997_640,
                 retrace_78_paisa: 994_280,
                 retrace_level_at_pdl_paisa: 990_000,
+                // Bullish retracement ladder — unread by the evaluator
+                // (DEC-FIB-BULLISH-RETRACE-001), zeroed like the extensions.
+                retrace_bull_23_paisa: 0,
+                retrace_bull_38_paisa: 0,
+                retrace_bull_62_paisa: 0,
+                retrace_bull_78_paisa: 0,
                 ext_up_127_paisa: 0,
                 ext_up_162_paisa: 0,
                 ext_up_200_paisa: 0,
