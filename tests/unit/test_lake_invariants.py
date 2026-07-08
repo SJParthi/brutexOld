@@ -46,6 +46,7 @@ from brutex.data.lake_invariants import (
     classify_option_keys,
     detect_legacy_drift,
     option_key_dtype_error,
+    option_unclassifiable_message,
     scan_lake_invariants,
     utc_aware,
 )
@@ -1567,6 +1568,25 @@ class TestOptionKeyDtypeGate:
         neither_error = option_key_dtype_error(neither)
         assert neither_error is not None
         assert "side" in neither_error  # side checked first — deterministic verdict
+
+    def test_option_unclassifiable_message_exact_shape(self) -> None:
+        # §11 COMMON (round-15 NIT fold): BOTH consumers of a non-None gate
+        # verdict — the healer's consistent-read gate
+        # (``lake_heal._heal_option_foreign``) and the writer's keyed-removal
+        # re-read gate (``OptionParquetWriter.heal_partition``) — raise
+        # ``OptionWriterError(option_unclassifiable_message(path, verdict))``,
+        # so the exact composed shape is pinned here against drift. *path*
+        # rides RAW (the exception-MESSAGE convention; the LOG sites repr()
+        # their path fields per the rounds-8/9 log-injection folds) and
+        # *reason* is a REAL gate verdict, exactly as both call sites pass it.
+        path = Path("/lake/options/SERIES/2024-06.parquet")
+        verdict = option_key_dtype_error(pl.DataFrame({"foo": [1]}))
+        assert verdict == "option side column missing — unclassifiable"
+        message = option_unclassifiable_message(path, verdict)
+        assert message == (
+            "unclassifiable option partition /lake/options/SERIES/2024-06.parquet: "
+            "option side column missing — unclassifiable"
+        )
 
 
 class TestOutOfRangeTimestampGate:
