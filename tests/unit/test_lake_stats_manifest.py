@@ -754,6 +754,13 @@ class TestMutationWorkflowWiring:
     this deterministic pin (the ``TestBenchWorkflowWiring`` precedent) fails
     if the pair is ever dropped. HONEST: it pins the WIRING only — the
     weekly run executes on its own schedule/push triggers.
+
+    Pair format: DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597, merged in from
+    main) restructured the loop onto 3-field ``module:testfile:timeout``
+    pairs — an EMPTY third field keeps the exact historical runner. This
+    module rides the historical runner, so the pinned literal carries the
+    trailing ``:`` (the 2-field form would now mis-parse the TEST PATH as
+    the timeout).
     """
 
     _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
@@ -761,7 +768,7 @@ class TestMutationWorkflowWiring:
     def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
         text = self._WORKFLOW.read_text(encoding="utf-8")
         assert (
-            '"brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py"' in text
+            '"brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:"' in text
         ), "lake_stats_manifest.py is not wired into mutation.yml's per-module mutmut loop"
 
 

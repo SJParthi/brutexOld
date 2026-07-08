@@ -1,0 +1,71 @@
+# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) — the ONE cargo-mutants scope for
+# trading-core, resolved by BOTH the CI matrix jobs (.github/workflows/mutation.yml)
+# and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
+# COMMON; the empirically-INERT repo-root .cargo/mutants.toml was deleted —
+# cargo-mutants resolves config against the examined tree root, never parent
+# dirs, and its exclude_re contradicted this scope by excluding src/python.rs).
+#
+# Scope: evaluator.rs (60-condition decision core, gated since
+# DEC-TRADING-CORE-PROPTEST-MUTANTS-001) WIDENED to the Golden-Rule-#4
+# run-identity stamping surfaces: spec.rs (StrategySpec::canonical_bytes, LE
+# field encoding) and python.rs (spec_canonical_bytes_impl + the *_impl/check_*
+# boundary logic).
+# 627 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
+# dir with this config in place — the count also proves the `features` key parses
+# under cargo-mutants 27.1.0): evaluator.rs 238 + python.rs 376 + spec.rs 13.
+# The 2026-07-07 measurement read 619 (python.rs 368); the race-6 merge
+# (1bb34cc8) then folded main's python.rs swing-getter additions
+# (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — `last_swing_high`/
+# `last_swing_low`, 2 getters × 4 replacements = the exact +8), each killed by
+# the merge-added in-file getter tests; re-measured post-merge, not projected.
+# The getters return `Option<i64>`, NOT `PyResult`, so the 229 PyErr-wrapper
+# UNVIABLE figure below is unaffected by the growth.
+#
+# DELIBERATELY OUT (documented, not silent — Golden Rule #10; the fno-math twin
+# toml sets the disclosure standard; counts re-measured 2026-07-08 on the
+# race-7 merged HEAD via
+# `cargo mutants --list --no-config -f <file> --features python,serde`):
+#   greeks/mod.rs — 266 mutants; the Black-76 kernel behind the STORED F&O
+#                   Greeks enrichment (lake REFERENCE_ONLY surface, not the
+#                   Track-1 engine decision path); exercised end-to-end by the
+#                   enrichment suites incl. the independent stdlib Black-76
+#                   cross-check (DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md
+#                   #1188); gating it is a NAMED follow-up (MIGRATION.md #1597).
+#   indicators/*  — 297 mutants (ema 70 / fib 75 / pivots 49 / market_structure
+#                   47 / vwap 28 / metadata 25 / mod 3; fib.rs +16 from main's
+#                   DEC-FIB-BULLISH-RETRACE-001, PR #1225, folded by the race-7
+#                   merge); the evaluate-time math
+#                   behind vocabulary bits 52-59. Covered today by the frozen
+#                   400-case golden answer-key + the property ordering/
+#                   determinism suites (the DEC-TRADING-CORE-PROPTEST-MUTANTS-001
+#                   honest envelope — restating the disclosure the pre-#1597
+#                   workflow comment carried); extending the mutation gate to
+#                   their (largely unused, e.g. r4/s4/ext_424) fields rides the
+#                   SAME named follow-up (MIGRATION.md #1597).
+#   bits.rs       — 0 mutants (const-only; nothing cargo-mutants can perturb).
+examine_globs = ["src/evaluator.rs", "src/spec.rs", "src/python.rs"]
+
+# python.rs compiles ONLY under `python` (lib.rs:66) and spec.rs's mask_hex only
+# under `serde`; without them those mutants build a byte-identical crate and
+# trivially "survive" (3 mask_hex MISSED measured on default features). Features
+# apply to the baseline AND every mutant build. (Pre-decided fallback if a
+# future cargo-mutants rejects this key: move to the CLI as
+# `--features python,serde` — flag verified present.)
+features = ["python", "serde"]
+
+# GIL-only one-line #[pyfunction]/#[pymethods] delegation shims WOULD be
+# excluded per-function here (one commented entry each, with its reason) IF
+# any ever needed it — the DEC-MUTATION-RUNTIME-003 survivor enumeration found
+# NONE, so ZERO exclusions are configured and the commented `exclude_re` below
+# only documents the reserved format. Load-bearing reason (measured — the
+# src/python.rs test-section header): cargo-mutants 27.1.0 does not resolve
+# the `PyResult` alias and fabricates only non-compiling replacements for the
+# PyErr-constructing wrappers, so every one of those 229 mutants is UNVIABLE
+# (verified 8/8 on `py_greeks` + `_trading_core`); the Rust-callable
+# plain-return wrappers are killed by the in-file delegation-parity tests, and
+# the glue is exercised end-to-end by the Python wheel suites in ci.yml. If a
+# future cargo-mutants version makes wrapper mutants viable they reappear as
+# MISSED and the gate goes red loudly, never silently; the pre-approved
+# fallback is the per-function pattern below — NEVER a blanket python.rs
+# exclude.
+# exclude_re = [ ... one commented entry per excluded wrapper fn ... ]

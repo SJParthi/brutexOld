@@ -1,23 +1,45 @@
-# BruteX — Mutation testing (weekly)
+# BruteX — Mutation testing (weekly deep gate + push-time Python gate)
 #
-# Runs two mutation-testing passes:
+# Three mutation gates + one fan-in verdict (DEC-MUTATION-RUNTIME-003):
 #
-# 1. Python side: `mutmut` over brutex/ — walks the AST, perturbs one
-#    literal / comparison / conditional at a time, and runs the unit
-#    suite against each mutant. Any mutant that **survives** a full
-#    test run means the tests don't actually cover that logic branch.
+# 1. python-mutation — `mutmut` over the critical brutex/ modules (pass 1
+#    ranking/DSR math + a 10-pair per-module loop, now incl.
+#    adapters/rate_common.py). Walks the AST, perturbs one literal /
+#    comparison / conditional at a time, and runs the module's focused
+#    unit suite against each mutant. Any mutant that **survives** means
+#    the tests don't actually cover that logic branch. Runs on EVERY
+#    trigger (push to main, weekly schedule, manual dispatch).
 #
-# 2. Rust side: `cargo-mutants` over rust/fno-math/ — same idea in the
-#    Rust crate. Mirrors tickvault's mutation.yml semantics.
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 6-shard matrix,
+#    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
+#    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
+#
+# 3. rust-mutation-trading-core — `cargo-mutants` over rust/trading-core/,
+#    7-shard matrix, scope + `features python,serde` defined ONCE in
+#    rust/trading-core/.cargo/mutants.toml. Schedule + workflow_dispatch ONLY.
+#
+# 4. mutation-verdict — fan-in: ONE cause-aware issue-filer per Rust gate
+#    (a timeout-kill is decoded as a RUNTIME regression, never mislabelled
+#    as survivors), the scheduled-green auto-close of superseded mutation
+#    issues, and an aggregate fail on any red/cancelled gate.
 #
 # Threshold: **zero surviving mutants on critical modules**. Failing
 # this gate means tests pass but don't detect a behavior change — a
 # direct hit on the NFR-REL-006 never-skip guarantee.
 #
 # Runs on:
-#   - weekly schedule (Monday 04:00 UTC)
-#   - manual dispatch via workflow_dispatch
-#   - push to main (only when brutex/** or rust/fno-math/** touched)
+#   - weekly schedule (Monday 04:00 UTC) — all gates
+#   - manual dispatch via workflow_dispatch — all gates, but NO alert
+#     issues are filed (manual runs are ATTENDED: pre-merge measurement
+#     rehearsals must not spam per-SHA alert issues —
+#     DEC-MUTATION-RUNTIME-003)
+#   - push to main (paths-filtered) — python-mutation ONLY: push-time
+#     Rust mutation signal was measured ZERO (fno-math baseline-broken in
+#     ~14 s since #1258; trading-core burned 120 min to a verdict-less
+#     kill) while the workflow burned ~2.4 runner-hours per push, ~2.0 h
+#     of it on the zero-signal Rust legs (the rest is the python job,
+#     which keeps running on push). ci.yml still runs cargo test on
+#     every push.
 
 name: Mutation testing
 
@@ -36,9 +58,15 @@ on:
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
 
+# Least privilege (DEC-CI-FORK-PR-HARDEN-001 convention; fixer round of
+# DEC-MUTATION-RUNTIME-003): the WORKFLOW default is read-only — the 13 Rust
+# shard jobs execute a broad third-party build surface (taiki-e/install-action,
+# hundreds of crates.io build.rs/proc-macros under cargo-mutants) and, since the
+# per-shard issue filers moved to the fan-in job, never touch issues at all.
+# Only the two jobs that actually FILE/CLOSE issues (python-mutation's in-job
+# filer + mutation-verdict) elevate to issues:write at JOB level.
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   # DEC-MUTATION-RUNTIME-002: the group is keyed by EVENT as well as ref —
@@ -53,9 +81,11 @@ concurrency:
   # cancelling an older run mid-flight would have made the older run's
   # surviving-mutant failure vanish silently. Since
   # DEC-MUTATION-ALERT-CANCELLED-001 the alert steps ALSO fire on
-  # `cancelled()` (a timeout-killed job reports CANCELLED — run 28748795864),
-  # but queueing pushes is still right: finishing the run beats alerting
-  # that it never finished. With cancel-in-progress=false
+  # `cancelled()` (a timeout-killed job reports CANCELLED — run 28748795864;
+  # scope honesty: that covers JOB-level timeout kills — on a RUN-level
+  # cancel GitHub never starts the not-yet-started fan-in job, see the
+  # mutation-verdict comment below), but queueing pushes is still right:
+  # finishing the run beats alerting that it never finished. With cancel-in-progress=false
   # for push, an in-flight push run always runs to completion (and can alert);
   # a newer push queues instead of killing it. schedule + workflow_dispatch
   # keep cancel-in-progress=true: the group is event-keyed, so the weekly
@@ -91,14 +121,56 @@ jobs:
   python-mutation:
     name: Python mutation (mutmut)
     runs-on: ubuntu-24.04
-    # 120: with every pass on a focused per-module runner the whole job is
-    # measured at ~890 mutants × ~2 s ≈ 30 min locally (DEC-MUTATION-RUNTIME-001);
-    # 120 leaves >2× headroom for slower shared runners + the two Rust wheel
-    # builds (fno_math, trading_core). The OLD broad `pytest tests/unit`
-    # runner could never finish here (123/804 mutants at cancellation).
+    # Budget (DEC-MUTATION-RUNTIME-003, re-derived FIXER ROUND 2 — the earlier
+    # "remaining 8 loop modules (~384) / >= 30 min margin" decomposition
+    # back-derived the loop count from the stale -001-era 890 total while
+    # pairing it with TODAY'S compute count, and was ~2.4x low on the loop
+    # modules). Mutant counts measured on THIS tree via mutmut 2.5.1
+    # list_mutations (method validated against two real run logs: audit
+    # 243/243 pre-round-2, rate_common 360/360 pre-round-3): pass 1 = 258;
+    # compute.py = 354; remaining 8 loop modules = 932 (state 58 + retry 77 +
+    # audit 254 post-round-3 + rate_limiter 165 + store 146 + partition 108 +
+    # parser 33 + spec 91).
+    # CI pace ~2.3 s/mutant (rehearsal run 28853009068: pass1 + compute +
+    # state + retry + audit-to-172 ~= 919 mutants in ~35 min).
+    # Nominal: (258 + 354 + 932) x ~2.3 s ~= 59 min; + rate_common 369
+    # (post-round-3: the 9 dropped slot pragmas return 9 mutants to the gate)
+    # at an ASSUMED 5-7 s CI baseline (local 2.5-3.4 s x an assumed 2x
+    # shared-GHA factor — the rehearsal never reached rate_common, so its CI
+    # baseline stays UNMEASURED until the first scheduled verification run; at
+    # its siblings' measured ~2.3-3 s pace it would be ~14-19 min instead)
+    # ~= 31-43 min; + 6 spin mutants x one wrap-kill each (wrap = 5 x the
+    # MIN of the two preflight-measured baselines, capped 30 s -> ~1-3.5 min
+    # across the admitted regime); + the TWO ~2-10 s preflight baseline runs
+    # (~4-20 s total; two samples + min per fixer round 4 R4-2).
+    # Total ~= 94-106 min nominal at that band -> an HONEST 14-26 min margin
+    # under 120 (>= ~35 min if rate_common paces like its siblings — and the
+    # measured-baseline wrap sizing makes a sibling-pace baseline a
+    # first-class admitted regime, NOT a preflight red). A ~20%
+    # shared-runner bad day on the worst end CROSSES the 120-min kill —
+    # pre-decided dial (the Rust shards' "+1 shard" twin): any observed
+    # rehearsal/scheduled run > 100 min => split pass 2 across two parallel
+    # jobs (move rate_common + the slowest loop modules out), a mechanical
+    # edit that needs no new machinery. Admitted-regime honesty (R4-3): the
+    # preflight's [1200, 20000] ms band is CLASSIFIER arithmetic, not a
+    # budget guarantee — a rate_common baseline >= ~9.5-10 s (369 x ~10 s
+    # ~= 61 min on top of the ~59 min loop-module nominal) already crosses
+    # the 120-min kill from INSIDE the admitted band; the failure is LOUD
+    # (budget kill -> cancelled -> cause-aware issue) and the same
+    # >100-min split dial is the remedy.
+    # (The OLD broad `pytest tests/unit` runner could never finish here —
+    # 123/804 mutants at cancellation, DEC-MUTATION-RUNTIME-001.)
     timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write # the in-job failure/cancellation alert filer below
     steps:
+      # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention, cf.
+      # doctor-daily.yml): never persist the job token into .git/config while
+      # later steps execute a broad third-party build surface.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -186,7 +258,7 @@ jobs:
           mutmut results | tee mutmut-results-math.txt
           if grep -qE "^[0-9]+" mutmut-results-math.txt; then
             echo "❌ Surviving mutants detected (ranking/DSR math pass)"
-            mutmut show all 2>&1 | head -200
+            mutmut show all 2>&1 | head -2000
             exit 1
           fi
           echo "✅ No surviving mutants (ranking/DSR math pass)"
@@ -246,28 +318,193 @@ jobs:
           #    subset argument as the rest of the loop) and
           #    TestMutationWorkflowWiring fails the unit suite if this pair
           #    is ever dropped.
+          #
+          # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
+          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) with a
+          # per-pair hard pytest timeout: the module carries bounded fail-open spin
+          # loops (_GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP) whose loop-counter mutants spin
+          # forever; mutmut's internal timeout kills only the `sh` wrapper and the
+          # ORPHANED pytest grandchild holds the stdout pipe, wedging mutmut until the
+          # 120-min job kill (measured 6x locally: mutants 194/195/199/209/210/213).
+          # `timeout -k 5 $wrap_s` — the wrap is SIZED at 5 x the preflight-MEASURED
+          # baseline, capped at the pair's 30 s (fixer round 3, R3-2; supersedes
+          # round 2's FIXED 30 s wrap) — kills the pytest subtree INSIDE the sh, the
+          # pipe closes, and mutmut reads the `|| exit 1` as a kill (an infinite-loop
+          # mutant IS a caught defect). HONEST classifier arithmetic (fixer rounds,
+          # MIGRATION.md #1597 — the round-1 "scores KILLED, never TIMEOUT, locally
+          # verified" claim was FALSE as written, and round 2's own "measured 5-7 s
+          # CI baseline" was NOT measured either — it was local 2.5-3.4 s x an
+          # ASSUMED 2x shared-GHA factor, see the budget comment; a plausible
+          # sibling-pace 2-3 s CI baseline sat INSIDE round 2's own (4, 20) s
+          # refusal band, so the FIRST scheduled verification run risked a designed
+          # preflight red + manual re-size. Sizing the wrap off the baseline the
+          # preflight itself measures removes the assumption entirely):
+          #   * Without `--test-time-base`, mutmut 2.5.1 reclassifies ANY killed
+          #     mutant slower than baseline x test-time-multiplier (default 2.0) as
+          #     OK_SUSPICIOUS (exit bit 8) — a wrap-kill (up to 35 s at the cap)
+          #     would be SUSPICIOUS deterministically, `mutmut results` lists the
+          #     id, and both `set -e` and the zero-survivor grep go red FOREVER.
+          #     `--test-time-base 45` lifts the suspicious threshold to
+          #     45 s + 2 x baseline > wrap + 5 for EVERY wrap <= the 30 s cap, so a
+          #     wrap-killed spin mutant records KILLED deterministically w.r.t.
+          #     that classifier (verified on the local confirmation runs: the spin
+          #     mutants KILLED, 0 suspicious).
+          #   * The wrap must beat mutmut's NON-configurable hard timeout
+          #     (BAD_TIMEOUT, exit bit 4). HONEST two-baseline caveat (fixer
+          #     round 4, R4-2 — round 3's "holds BY CONSTRUCTION" was an
+          #     overclaim): that hard timer is 10 x mutmut's OWN baseline
+          #     b_mut, re-timed on mutmut's later clean run (mutmut 2.5.1
+          #     __main__.py:396 `time_test_suite` -> __init__.py:865/:1096
+          #     `timeout=config.baseline_time_elapsed * 10`; the per-pass
+          #     cache `mv` guarantees the re-time), while the wrap is 5 x the
+          #     SHELL preflight's b_pre — TWO independently-measured samples
+          #     of the same suite, not one symbol b. With wrap = 5 x b_pre
+          #     (integer-truncated), the worst-case kill completion
+          #     wrap + 5 <= 5 x b_pre + 5 < 10 x b_mut holds whenever
+          #     b_mut > b_pre / 2 + 0.5 s — i.e. ASSUMING the two baselines
+          #     agree within ~2x, not unconditionally (round 2's fixed 30 s
+          #     wrap held it only for baselines > ~3.5 s, under the same
+          #     unstated assumption). The preflight therefore times TWO clean
+          #     runs and sizes the wrap from the MIN, removing the dominant
+          #     one-directional skew — cold first-run import/collection/
+          #     pyc-compile lands in preflight sample 1 only and never in
+          #     mutmut's warm re-time. Disclosed residual (LOUD false-RED,
+          #     bounded — the third disclosed residual besides the mid-pass
+          #     false-green + the regime edges below): if b_mut still lands
+          #     under ~b_pre/2 (a transient runner stall spanning BOTH
+          #     preflight samples), mutmut's Timer fires FIRST; it kills only
+          #     the direct `sh` (__init__.py:1036 `process_.kill()`), the
+          #     ORPHANED `timeout` keeps running and SIGKILLs the pytest
+          #     subtree at wrap + 5, the pty closes, and the spin mutant
+          #     records BAD_TIMEOUT (exit bit 4) — a red flake on a clean
+          #     tree that a rerun clears, NOT a recurrence of the 120-min
+          #     orphaned-pipe wedge (that needs an UNBOUNDED orphan; the wrap
+          #     bounds it) and NOT a false green. Local confirmations use the
+          #     same sizing (a ~1.5 s local baseline -> a 7 s wrap; the
+          #     round-2 local run's 8 s wrap was the same idea, hand-sized).
+          #   * The 5x sizing also clears the worst-case LEGITIMATE pass: a ~3x
+          #     shared-runner degradation of the suite stays under the 5x wrap
+          #     for every baseline up to the 30 s cap (baseline > 6 s), beyond
+          #     which the margin decays to 1.5x at the 20 s regime top — a
+          #     smaller wrap would falsely convert a slow-but-passing SURVIVOR
+          #     into a kill-shaped exit (the false-green direction) and could
+          #     wrap-kill the unmutated BASELINE run itself (a hard "Tests don't
+          #     run cleanly" red). HONEST residual (fixer round 2, unchanged by
+          #     the adaptive sizing): mutmut times the baseline ONCE per
+          #     `mutmut run`, so runner degradation arising MID-PASS that pushes
+          #     a legitimately-PASSING (i.e. genuinely SURVIVING) mutant run past
+          #     the wrap is wrap-killed and recorded KILLED — a silent
+          #     false-green with no baseline red, self-correcting only on the
+          #     NEXT weekly run. The baseline-regime PREFLIGHT below turns both
+          #     remaining regime EDGES (baseline <= 1.2 s: the 10x hard timer
+          #     leaves < 1 s of slack over the wrap + the -k 5 grace, so spin
+          #     kills risk BAD_TIMEOUT flake; baseline > 20 s: the capped wrap
+          #     sits < 1.5x a legit pass) into explicit loud refusals at the
+          #     start of the pass; a mid-pass swing INSIDE the (1.2, 20) s
+          #     regime remains the accepted, disclosed residual.
+          # The 10 proven pairs (incl. data/lake_stats_manifest.py, merged in
+          # from DEC-LAKE-STATS-MANIFEST-001 — see its rationale block above)
+          # keep their exact historical runner + no
+          # --test-time-base (minimal diff — their verified interplay is
+          # unchanged). HONEST mechanism note (fixer round 2 — the earlier "no
+          # spin constructs there" justification was FALSE): audit.py DOES carry
+          # spin-capable loop mutants, and the 2026-07-07 branch rehearsal (run
+          # 28853009068) wedged 83m41s on audit mutant 173 via the identical
+          # orphaned-pytest-pipe mechanism until the 120-min job kill. Their kill
+          # today is deliberate FAIL-FAST TEST ORDERING inside
+          # test_orchestrator_audit.py (the scanner-direct classes run early so
+          # `pytest -x` dies in milliseconds — the ordering contract is documented
+          # at the top of that file's survivor-kill pack), validated by the local
+          # 243/243 8m48s run (re-validated 250/250 KILLED after fixer round 2's
+          # pragma un-hiding, then 254/254 KILLED — 0 timeout/suspicious/survived
+          # — post-round-3 on the F1-restructured audit.py, byte-identical to
+          # this tree; MIGRATION.md #1597) but silently defeatable by future test insertion or
+          # a new spin loop without a fail-fast twin. Pre-decided dial: if a
+          # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
+          # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
+          # measured CI baseline. rate_common runs LAST so a survivor there never
+          # masks the 10 proven modules.
           for pair in \
-            "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py" \
-            "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py" \
-            "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py" \
-            "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py" \
-            "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py" \
-            "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py" \
-            "brutex/data/partition.py:tests/unit/test_data_partition.py" \
-            "brutex/data/parser.py:tests/unit/test_data_parser.py" \
-            "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py" \
-            "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py"; do
+            "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
+            "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
+            "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py:" \
+            "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py:" \
+            "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py:" \
+            "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py:" \
+            "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
+            "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
+            "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
+            "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
+            "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
-            tf="${pair##*:}"
+            tmo="${pair##*:}"
+            mid="${pair#*:}"
+            tf="${mid%:*}"
             name="$(basename "$mod" .py)"
-            mutmut run \
-              --paths-to-mutate "$mod" \
-              --runner "sh -c 'pytest $tf -x -q --no-header || exit 1'" \
-              --simple-output
+            if [ -n "$tmo" ]; then
+              # Baseline-regime PREFLIGHT + measured-baseline wrap SIZING (fixer
+              # round 3, R3-2 — supersedes round 2's fixed 30 s wrap over a
+              # (4, 20) s refusal band, which contradicted the budget comment's
+              # own sibling-pace scenario: a plausible ~2-3 s CI baseline sat
+              # inside the refusal band, so the FIRST scheduled verification run
+              # risked a designed preflight red). The wrap is sized from the
+              # MIN of TWO baselines this preflight itself measures — wrap =
+              # 5 x min(sample1, sample2) (integer-truncated seconds), capped
+              # at the pair's $tmo (30 s); two samples + min per the fixer
+              # round 4 R4-2 two-baseline caveat above (sample 1 alone carries
+              # the cold first-run collection/pyc-compile skew that mutmut's
+              # warm re-timed baseline never pays) — so the classifier
+              # arithmetic above holds for every admitted baseline GIVEN the
+              # disclosed ~2x preflight/mutmut agreement assumption; the
+              # pair's 3rd field is now the CAP, not the wrap. Refusal band:
+              # the check admits the CLOSED [1200, 20000] ms band on the MIN
+              # (`-lt 1200 || -gt 20000` refuses strictly outside it) — below
+              # 1.2 s mutmut's 10x-baseline hard timer leaves < 1 s of slack
+              # over the wrap + the `-k 5` grace (spin kills would flake
+              # BAD_TIMEOUT; at exactly 1200 ms — admitted — the slack is
+              # exactly 1.0 s, the monotone floor);
+              # above 20 s the capped wrap sits < 1.5x a legit pass (widening
+              # the mid-pass false-green window and risking a wrap-killed
+              # unmutated baseline). Time two clean runs and REFUSE loudly
+              # outside the regime instead of failing silently in either
+              # direction.
+              start_ms=$(date +%s%3N)
+              pytest "$tf" -x -q --no-header
+              base1_ms=$(( $(date +%s%3N) - start_ms ))
+              start_ms=$(date +%s%3N)
+              pytest "$tf" -x -q --no-header
+              base2_ms=$(( $(date +%s%3N) - start_ms ))
+              base_ms=$(( base1_ms < base2_ms ? base1_ms : base2_ms ))
+              wrap_s=$(( base_ms * 5 / 1000 ))
+              if [ "$wrap_s" -gt "$tmo" ]; then
+                wrap_s="$tmo"
+              fi
+              echo "preflight baselines for $name: ${base1_ms} ms / ${base2_ms} ms -> min ${base_ms} ms -> wrap ${wrap_s} s (5 x min baseline, cap ${tmo} s)"
+              if [ "$base_ms" -lt 1200 ] || [ "$base_ms" -gt 20000 ]; then
+                echo "❌ $name preflight min baseline ${base_ms} ms (samples ${base1_ms}/${base2_ms} ms) is outside the [1200, 20000] ms regime the measured-baseline wrap sizing (5 x min baseline capped at ${tmo} s, -k 5 grace) + --test-time-base 45 classifier arithmetic covers — re-derive the sizing for this runner (see the arithmetic comment above) instead of trusting a mis-regime run"
+                exit 1
+              fi
+              # --test-time-base 45: keep a wrap-killed spin mutant BELOW the
+              # OK_SUSPICIOUS threshold (45 + 2 x baseline > wrap + 5 for every
+              # wrap <= the 30 s cap) so it records KILLED — see the classifier
+              # arithmetic above (DEC-MUTATION-RUNTIME-003 fixer round).
+              runner="sh -c 'timeout -k 5 $wrap_s pytest $tf -x -q --no-header || exit 1'"
+              mutmut run \
+                --paths-to-mutate "$mod" \
+                --runner "$runner" \
+                --test-time-base 45 \
+                --simple-output
+            else
+              runner="sh -c 'pytest $tf -x -q --no-header || exit 1'"
+              mutmut run \
+                --paths-to-mutate "$mod" \
+                --runner "$runner" \
+                --simple-output
+            fi
             mutmut results | tee "mutmut-results-$name.txt"
             if grep -qE "^[0-9]+" "mutmut-results-$name.txt"; then
               echo "❌ Surviving mutants detected ($name)"
-              mutmut show all 2>&1 | head -200
+              mutmut show all 2>&1 | head -2000
               exit 1
             fi
             echo "✅ No surviving mutants ($name)"
@@ -286,17 +523,23 @@ jobs:
         # (completed passes archive theirs via `mv`, so on failure the live
         # cache is exactly the failed pass's) and prints the survivor IDs +
         # unified diffs so a future failure is diagnosable from the log alone.
+        # Cap 400 → 2000 (DEC-MUTATION-RUNTIME-003): the 400-line cap
+        # truncated 6 of the 8 live compute.py survivors out of the CI log.
         if: always()
         run: |
           if [ -f .mutmut-cache ]; then
             echo "── mutmut results (in-flight cache of the failed pass) ──"
             mutmut results || true
             echo "── mutmut show all (survivor diffs, capped) ──"
-            mutmut show all 2>&1 | head -400 || true
+            mutmut show all 2>&1 | head -2000 || true
           else
             echo "No in-flight .mutmut-cache — every pass completed and archived its cache."
           fi
       - name: Upload mutmut cache
+        # include-hidden-files (DEC-MUTATION-RUNTIME-003): `.mutmut-cache*` are
+        # DOTFILES and upload-artifact@v4+ defaults to excluding hidden files —
+        # this step had uploaded NOTHING ever ("No files were found" on every
+        # live run) until the flag was set.
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -304,11 +547,12 @@ jobs:
           path: ".mutmut-cache*"
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true
       - name: Open GitHub issue on failure or cancellation
-        # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
-        # push-to-main). This workflow has no pull_request trigger, so there is
-        # no PR-noise path to suppress — the schedule-only guard used to leave a
-        # push-to-main mutation failure alerting nobody.
+        # R2-CI-3(a): alert on ANY failure event (schedule, push-to-main). This
+        # workflow has no pull_request trigger, so there is no PR-noise path to
+        # suppress — the schedule-only guard used to leave a push-to-main
+        # mutation failure alerting nobody.
         #
         # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
         # killed by its own `timeout-minutes` reports CANCELLED, not FAILED —
@@ -317,13 +561,30 @@ jobs:
         # alert steps SKIPPED, while the genuinely-failed Python job alerted.
         # A timeout-death is a silent mutation-gate outage — it must alert.
         # Honest trade-off: a run superseded by the concurrency group's
-        # cancel-in-progress (schedule/dispatch re-runs) now ALSO alerts —
+        # cancel-in-progress (schedule re-runs) now ALSO alerts —
         # visible-over-silent, per the audit.
-        if: failure() || cancelled()
+        #
+        # DEC-MUTATION-RUNTIME-003: workflow_dispatch runs never file issues —
+        # manual dispatches are ATTENDED (pre-merge measurement rehearsals),
+        # so an operator is already watching; schedule/push alerting unchanged.
+        # This job stays a single job, so its filer stays IN-JOB (no per-shard
+        # dedup race — unlike the Rust matrices, whose filers moved to the
+        # fan-in mutation-verdict job).
+        if: (failure() || cancelled()) && github.event_name != 'workflow_dispatch'
         uses: actions/github-script@v9
         with:
           script: |
-            const title = `mutmut: surviving mutants on ${context.sha.substring(0, 7)}`;
+            // Cause-NEUTRAL title (DEC-MUTATION-RUNTIME-003 fixer round): the old
+            // `mutmut: surviving mutants on <sha>` headline asserted survivors even
+            // when the `if:` fired on `cancelled()` — a 120-min timeout kill with NO
+            // survivor verdict (the same #1207/#1211/#1216 mis-titling class the
+            // Rust fan-in filers already fixed). The body decodes the actual cause,
+            // exactly like the Rust filers; the `on <sha>` suffix stays — it is the
+            // auto-close ancestry key.
+            const title = `mutmut: mutation gate red on ${context.sha.substring(0, 7)}`;
+            const cause = '${{ job.status }}' === 'cancelled'
+              ? 'The job was CANCELLED — usually the 120-minute job timeout. This is a RUNTIME/budget regression: NO survivor verdict was reached, so this is NOT evidence of surviving mutants.'
+              : 'The job FAILED: surviving/suspicious/timed-out mutants in one of the passes, or a broken baseline ("Tests don\'t run cleanly without mutations"). The report step prints the in-flight cache\'s survivor IDs + diffs (up to 2000 lines).';
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -335,22 +596,46 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Python mutation testing failed or was cancelled (e.g. timeout-killed) on commit ${context.sha} — surviving mutants OR a run that never finished. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              body: `${cause}\n\nCommit ${context.sha} — see the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-MUTATION-RUNTIME-003); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'python', 'critical'],
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/
+  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
+  #
+  # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
+  # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
+  # `cargo mutants` from that dir resolves the SAME scope as CI
+  # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
+  # there + in MIGRATION.md #1597 (Golden Rule #10 — out openly, not
+  # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: Rust mutation (cargo-mutants)
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
+    # push-time Rust mutation signal was ZERO (fno-math baseline-broken in ~14 s
+    # since #1258; trading-core burned 120 min to a verdict-less kill) while the
+    # workflow burned ~2.4 runner-hours/push, ~2.0 h of it on these zero-signal
+    # Rust legs (the rest is the python job, which keeps running on push). The
+    # deep Rust gate = the weekly schedule + workflow_dispatch. ci.yml still
+    # runs cargo test on every push.
+    if: github.event_name != 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     defaults:
       run:
         working-directory: rust/fno-math
     steps:
+      # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention): this
+      # job inherits the read-only workflow token AND never needs git auth after
+      # checkout, while cargo-mutants executes hundreds of third-party builds.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -359,107 +644,97 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/fno-math -> target
+          shared-key: "mutation-fno-math"
+          # cache-on-failure (DEC-MUTATION-RUNTIME-003): this job had NEVER
+          # succeeded, so with the default save-on-success the cache NEVER
+          # saved (live restore ~1 s = miss on every run) and every red
+          # iteration cold-compiled the whole dep tree.
+          cache-on-failure: true
       - name: Install cargo-mutants
+        # Version PINNED (fixer round of DEC-MUTATION-RUNTIME-003): the
+        # trading-core zero-exclusion python.rs design is LOAD-BEARING on
+        # cargo-mutants 27.1.0-specific behaviour (229 PyErr-wrapper mutants
+        # are UNVIABLE because 27.1.0 does not resolve the PyResult alias —
+        # rust/trading-core/src/python.rs + .cargo/mutants.toml document it),
+        # and both crates' measured shard budgets were derived under 27.1.0.
+        # An unpinned `latest` could silently flip those mutants to MISSED and
+        # red the gate with a mislabelled cause; version bumps are DELIBERATE
+        # (mirrors the pinned RUST_VERSION above).
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
-      - name: Run cargo-mutants
-        # DEC-MUTATION-RUNTIME-002: `--jobs 2` — the serial pass was MEASURED
-        # hitting the full 120-min job timeout (run 27125614548, 2026-06-08:
-        # the step ran exactly 08:34:48→10:34:48 and was killed). Two parallel
-        # mutant builds on the 4-vCPU shared runner roughly halve wall time
-        # (cargo-mutants' own guidance caps -j low for disk/IO contention).
-        # Completion proof = the next SCHEDULED run finishing green inside the
-        # budget; if it still overruns, the next ratchet rides its own DEC-ID.
+          tool: cargo-mutants@27.1.0
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
         run: |
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
+          # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
+          #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
+          #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
+          #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
+          #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556).
+          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
+          # - --in-place (replaces copy-mode): main's build.rs
+          #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
+          #   baseline in ~14 s (measured, run 28815951509 exit 4).
+          # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
+          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
+          #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
+          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
+          #   ceil(599/6)=100 mutants x 29-40 s/mutant serial (CI per-lane measured
+          #   4-9 s build + 25-31 s test) ~= 48-67 min + ~5.5 min baseline/setup
+          #   ~= 54-72 min nominal, ~86 at +20% on the worst end -> >= 34 min
+          #   margin per shard.
           cargo mutants \
+            --in-place \
+            --shard ${{ matrix.shard }}/6 \
             --test-tool cargo \
             --no-shuffle \
-            --jobs 2 \
             --timeout 300 \
             --output cargo-mutants.out \
             -- \
             --release
-      - name: Upload mutants report
+      - name: Upload cargo-mutants report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cargo-mutants-report
+          name: cargo-mutants-report-fno-math-shard-${{ matrix.shard }}
           path: rust/fno-math/cargo-mutants.out
           retention-days: 14
-      - name: Open GitHub issue on failure or cancellation
-        # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
-        # push-to-main). This workflow has no pull_request trigger, so there is
-        # no PR-noise path to suppress — the schedule-only guard used to leave a
-        # push-to-main mutation failure alerting nobody.
-        #
-        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
-        # killed by its own `timeout-minutes` reports CANCELLED, not FAILED —
-        # live-probed on run 28748795864 (2026-07-05): both Rust cargo-mutants
-        # jobs were timeout-killed at exactly 120 min and their `if: failure()`
-        # alert steps SKIPPED, while the genuinely-failed Python job alerted.
-        # A timeout-death is a silent mutation-gate outage — it must alert.
-        # Honest trade-off: a run superseded by the concurrency group's
-        # cancel-in-progress (schedule/dispatch re-runs) now ALSO alerts —
-        # visible-over-silent, per the audit.
-        if: failure() || cancelled()
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const title = `cargo-mutants: surviving mutants in fno-math on ${context.sha.substring(0, 7)}`;
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'bug,mutation,rust',
-            });
-            if (existing.data.find((i) => i.title === title)) return;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              body: `cargo-mutants failed or was cancelled (e.g. timeout-killed) on commit ${context.sha} — surviving mutants OR a run that never finished. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
-              labels: ['bug', 'mutation', 'rust', 'critical'],
-            });
+      # NO per-shard issue step — per-shard create-only steps RACE the title
+      # dedup (duplicate issues on multi-shard failures); alerts live in the
+      # fan-in mutation-verdict job below (DEC-MUTATION-RUNTIME-003).
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/trading-core/
+  # Rust mutation — cargo-mutants over rust/trading-core/ (7-shard matrix)
   #
-  # The SHARED 52-vocab + indicators kernel (DEC-SHARED-CORE-001) — a
+  # The SHARED 52→60-vocab + indicators kernel (DEC-SHARED-CORE-001) — a
   # silent regression here breaks BOTH BruteX (PyO3 wheel) and TickVault
   # (native) at once, so it gets its own mutation gate
-  # (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
-  #
-  # Scope = `src/evaluator.rs`, the 52-condition DECISION core (the named
-  # "critical module" of §12) — driven to ZERO surviving mutants by the
-  # proptest + golden + boundary/degenerate suite. (An earlier revision of
-  # this comment claimed fno-math has a "scoped examine_re" — verified FALSE
-  # on 2026-06-10: no mutants.toml / examine_re exists anywhere in rust/,
-  # the fno-math job mutates the WHOLE crate with per-mutant release builds
-  # and was cancelled at its 2 h budget; right-scoping it is tracked in
-  # DEC-MUTATION-RUNTIME-001's honest envelope, MIGRATION ledger.)
-  # bits.rs + the pivots/fib indicators are covered by the 400-case golden
-  # answer-key + the property ordering/determinism tests, and extending the
-  # mutation gate to their (largely unused, e.g. r4/s4/ext_424) fields is a
-  # tracked follow-up (DEC-TRADING-CORE-PROPTEST-MUTANTS-001 honest envelope).
-  #
-  # NOTE: `--in-place` (NOT the default copy) is required because the
-  # golden integration test reads the repo-root oracle at
-  # `../../tests/golden/fixtures/vocab_golden_vectors.json`, which lives
-  # OUTSIDE the crate dir and so is absent from cargo-mutants' scratch
-  # copy. In-place mutates the fresh CI checkout in place (reverted after
-  # each mutant), so the fixture resolves. `--in-place` precludes `-j`,
-  # hence the generous 120-minute budget.
+  # (DEC-TRADING-CORE-PROPTEST-MUTANTS-001). DEC-MUTATION-RUNTIME-003
+  # WIDENED the scope from evaluator.rs alone to the Golden-Rule-#4
+  # run-identity stamping surfaces (spec.rs + python.rs), with the scope
+  # AND the load-bearing `features = ["python", "serde"]` defined ONCE in
+  # rust/trading-core/.cargo/mutants.toml.
   # ─────────────────────────────────────────────────────────────────
   rust-mutation-trading-core:
-    name: Rust mutation (cargo-mutants, trading-core)
+    name: "Rust mutation (cargo-mutants, trading-core, shard ${{ matrix.shard }}/7)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003)
+    # — see the rust-mutation job comment for the measured rationale.
+    if: github.event_name != 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6]
     defaults:
       run:
         working-directory: rust/trading-core
     steps:
+      # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -468,59 +743,192 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/trading-core -> target
+          shared-key: "mutation-trading-core"
+          # cache-on-failure (DEC-MUTATION-RUNTIME-003): see the fno-math twin —
+          # a never-green job never saves its cache without this.
+          cache-on-failure: true
       - name: Install cargo-mutants
+        # Version PINNED — see the fno-math twin (the 229-UNVIABLE python.rs
+        # PyResult-alias measurement + shard budgets are 27.1.0-specific).
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
-      - name: Run cargo-mutants
+          tool: cargo-mutants@27.1.0
+      - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
         run: |
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
+          # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
+          #   evaluator.rs + spec.rs + python.rs = 627 mutants measured 2026-07-08
+          #   (`cargo mutants --list | wc -l` on the post-merge HEAD — the race-6
+          #   merge folded main's python.rs swing getters, python.rs 368->376, the
+          #   exact +8, each killed by the merge-added in-file tests; the
+          #   pre-merge 2026-07-07 measurement was 619); features python,serde
+          #   (python.rs is feature-gated at lib.rs:66 — all 376 of its mutants —
+          #   and spec.rs's mask_hex module is serde-gated — 3 of its 13; without
+          #   the features those 376 + 3 = 379 mutants build a byte-identical
+          #   crate and trivially "survive": 3 mask_hex MISSED measured under
+          #   default features, the other 10 spec.rs mutants compile there and
+          #   were killed/unviable — 8 caught + 2 unviable measured. Fixer round
+          #   4, R4-1: the earlier "381" wrongly summed ALL 13 spec.rs mutants
+          #   into the feature-dead count; per-file counts re-verified via
+          #   `cargo mutants --list`, re-measured post-merge in convergence
+          #   round 1).
+          #   spec.rs + python.rs are the Golden-Rule-#4 run-identity stamping
+          #   surfaces, previously UNGATED.
+          # - --in-place: the golden test reads ../../tests/golden/fixtures/... and
+          #   main's build.rs include!s ../source_digest_core.rs — both outside the
+          #   crate dir, so copy-mode baselines break (#1258, measured).
+          # - --in-place precludes --jobs (hard CLI error, measured) => the 120-min
+          #   budget is met by SHARDING: ceil(627/7)=90 mutants x 39-48 s/mutant
+          #   (measured serial: CI 34 s default features, +15% python feature,
+          #   ±20%) ~= 59-72 min + ~6 min baseline/setup ~= 65-78 min nominal,
+          #   ~92 at +20% -> >= 28 min margin per shard.
           cargo mutants \
             --in-place \
-            --file src/evaluator.rs \
+            --shard ${{ matrix.shard }}/7 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \
             --output cargo-mutants.out \
             -- \
             --release
-      - name: Upload mutants report
+      - name: Upload cargo-mutants report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cargo-mutants-report-trading-core
+          name: cargo-mutants-report-trading-core-shard-${{ matrix.shard }}
           path: rust/trading-core/cargo-mutants.out
           retention-days: 14
-      - name: Open GitHub issue on failure or cancellation
-        # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
-        # push-to-main). This workflow has no pull_request trigger, so there is
-        # no PR-noise path to suppress — the schedule-only guard used to leave a
-        # push-to-main mutation failure alerting nobody.
-        #
-        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
-        # killed by its own `timeout-minutes` reports CANCELLED, not FAILED —
-        # live-probed on run 28748795864 (2026-07-05): both Rust cargo-mutants
-        # jobs were timeout-killed at exactly 120 min and their `if: failure()`
-        # alert steps SKIPPED, while the genuinely-failed Python job alerted.
-        # A timeout-death is a silent mutation-gate outage — it must alert.
-        # Honest trade-off: a run superseded by the concurrency group's
-        # cancel-in-progress (schedule/dispatch re-runs) now ALSO alerts —
-        # visible-over-silent, per the audit.
-        if: failure() || cancelled()
+      # NO per-shard issue step — the fan-in mutation-verdict job owns alerts.
+
+  # ─────────────────────────────────────────────────────────────────
+  # Verdict (DEC-MUTATION-RUNTIME-003): ONE issue-filer per Rust gate
+  # (per-shard create-only steps RACE the title dedup) + the zero-click
+  # issue lifecycle: a fully-green SCHEDULED main run auto-closes every
+  # auto-filed mutation issue whose title-SHA is an ancestor of the run's
+  # commit. Gated to schedule+main so a green PUSH run or a branch
+  # workflow_dispatch rehearsal can NEVER close the completion-proof
+  # issues (the first green SCHEDULED run is the proof — Golden Rule #10).
+  #
+  # The DEC-MUTATION-ALERT-CANCELLED-001 semantics survive here for the case
+  # that matters: a shard killed by its JOB-level timeout-minutes reports
+  # CANCELLED while the RUN continues, so this `if: always()` job still
+  # executes and the filer conditions match BOTH failure and cancelled via
+  # needs.<job>.result — and the issue BODY now decodes which it was (a
+  # timeout kill is a RUNTIME regression, NOT evidence of survivors — the
+  # #1207/#1211/#1216 mis-titling defect). Honest residual (R2-EC-2): on a
+  # RUN-level cancellation (concurrency supersede / manual cancel) GitHub
+  # does not START not-yet-started jobs even with `if: always()`, so this
+  # job never runs and no issue is filed — reachability is near-nil (push
+  # runs keep cancel-in-progress: false; the schedule group is superseded
+  # only by next week's schedule while a run lasts <= ~2.5 h; manual cancels
+  # are attended), accepted rather than papered over.
+  # ─────────────────────────────────────────────────────────────────
+  mutation-verdict:
+    name: "Mutation verdict (fan-in alerts + auto-close on green schedule)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write # the fan-in filers + the scheduled-green auto-close below
+    if: always()
+    needs: [python-mutation, rust-mutation, rust-mutation-trading-core]
+    steps:
+      - name: Open GitHub issue — fno-math gate red
+        if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
         uses: actions/github-script@v9
         with:
           script: |
-            const title = `cargo-mutants: surviving mutants in trading-core on ${context.sha.substring(0, 7)}`;
+            const outcome = '${{ needs.rust-mutation.result }}';
+            const sha7 = context.sha.substring(0, 7);
+            const title = `cargo-mutants: mutation gate red in fno-math on ${sha7}`;
+            const cause = outcome === 'cancelled'
+              ? 'A shard hit the 120-minute job timeout (conclusion cancelled). This is a RUNTIME/budget regression — NOT evidence of surviving mutants. Check whether the mutant count or per-mutant build cost grew.'
+              : 'A shard failed: surviving (MISSED) mutants, per-mutant --timeout 300 timeouts, or a baseline/tooling break (cargo-mutants exit 4 = the BASELINE failed — a config/toolchain break, not survivors). The shard log + report artifact distinguish them.';
             const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'bug,mutation,rust',
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug,mutation,rust',
             });
             if (existing.data.find((i) => i.title === title)) return;
             await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              body: `cargo-mutants failed or was cancelled (e.g. timeout-killed) in trading-core on commit ${context.sha} — surviving mutants OR a run that never finished. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-MUTATION-RUNTIME-003); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });
+      - name: Open GitHub issue — trading-core gate red
+        if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result) && github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const outcome = '${{ needs.rust-mutation-trading-core.result }}';
+            const sha7 = context.sha.substring(0, 7);
+            const title = `cargo-mutants: mutation gate red in trading-core on ${sha7}`;
+            const cause = outcome === 'cancelled'
+              ? 'A shard hit the 120-minute job timeout (conclusion cancelled). This is a RUNTIME/budget regression — NOT evidence of surviving mutants. Check whether the mutant count or per-mutant build cost grew.'
+              : 'A shard failed: surviving (MISSED) mutants, per-mutant --timeout 300 timeouts, or a baseline/tooling break (cargo-mutants exit 4 = the BASELINE failed — a config/toolchain break, not survivors). The shard log + report artifact distinguish them.';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-MUTATION-RUNTIME-003); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
+      - name: Auto-close superseded mutation issues (green SCHEDULED main run only)
+        if: >-
+          github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+          && needs.python-mutation.result == 'success'
+          && needs.rust-mutation.result == 'success'
+          && needs.rust-mutation-trading-core.result == 'success'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Zero-click lifecycle (CLAUDE.md §2 Rule 11 AUTOMATED). Close ONLY:
+            // github-actions-authored + mutation-labelled + open + title-SHA an
+            // ANCESTOR of this run's commit (compare API — no checkout needed).
+            // Fail-safe: any parse/lookup miss skips that issue with a log line.
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: 'mutation', per_page: 100,
+            });
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              if (!issue.user || !issue.user.login.startsWith('github-actions')) {
+                core.info(`skip #${issue.number}: not auto-filed`); continue;
+              }
+              const m = issue.title.match(/on ([0-9a-f]{7,40})\s*$/);
+              if (!m) { core.info(`skip #${issue.number}: no SHA in title`); continue; }
+              let status;
+              try {
+                const cmp = await github.rest.repos.compareCommitsWithBasehead({
+                  owner, repo, basehead: `${m[1]}...${context.sha}`,
+                });
+                status = cmp.data.status;
+              } catch { core.info(`skip #${issue.number}: unknown SHA ${m[1]}`); continue; }
+              if (status !== 'ahead' && status !== 'identical') {
+                core.info(`skip #${issue.number}: ${m[1]} not an ancestor`); continue;
+              }
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number,
+                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1597 / STANDARDS row 3.`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',
+              });
+              core.info(`closed #${issue.number} (${m[1]})`);
+            }
+      - name: Fail on any red or cancelled gate
+        # On a push run the two Rust jobs are `skipped` — skipped does NOT
+        # fail the verdict (only failure/cancelled do), so a green python
+        # push run yields a green workflow.
+        if: >-
+          contains(fromJSON('["failure","cancelled"]'), needs.python-mutation.result)
+          || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result)
+          || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result)
+        run: |
+          echo "python:       ${{ needs.python-mutation.result }}"
+          echo "fno-math:     ${{ needs.rust-mutation.result }}"
+          echo "trading-core: ${{ needs.rust-mutation-trading-core.result }}"
+          exit 1
