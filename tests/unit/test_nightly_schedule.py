@@ -384,10 +384,18 @@ def test_newest_nightly_run_age_picks_newest_and_clamps(tmp_path: Path) -> None:
     results = tmp_path / "sweeps"
     old = results / "nightly" / "nightly-OLD"
     new = results / "nightly" / "nightly-NEW"
+    # A THIRD dir sharing the max mtime makes branch coverage of the
+    # ``mtime > newest`` comparison deterministic: whatever order
+    # ``iterdir()`` yields, at least one iteration sees mtime <= newest
+    # (the not-newer arm), which a 2-dir fixture only hits when the OS
+    # happens to yield the newer dir first (the CI flake this pins).
+    tie = results / "nightly" / "nightly-NEW-TIE"
     old.mkdir(parents=True)
     new.mkdir()
+    tie.mkdir()
     os.utime(old, (1_000.0, 1_000.0))
     os.utime(new, (2_000.0, 2_000.0))
+    os.utime(tie, (2_000.0, 2_000.0))
     age = newest_nightly_run_age(results, now=2_600.0)
     assert age == 600.0
     # Clock skew (dir mtime ahead of now) clamps to 0, never negative.
