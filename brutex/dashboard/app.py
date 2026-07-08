@@ -5917,6 +5917,8 @@ def build_app(
             groups=[req.exchange for req in plan.requests],
         )
 
+        any_group_succeeded = False
+
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: run every exchange group's engine run, sequentially.
 
@@ -5934,16 +5936,45 @@ def build_app(
             changes to the shared job framework, surfaces a failed group's
             exit code loudly in the finish detail instead of a false
             "done".
+
+            A round-6 adversarial-refuter review found two follow-on gaps,
+            both fixed here:
+
+            1. A group that RAISES (rather than returning a non-zero code)
+               used to propagate straight out of this loop, aborting every
+               REMAINING group silently — group order is deterministic
+               (alphabetical by exchange), so a BSE-specific failure would
+               systematically starve the NSE (NIFTY/BANKNIFTY) group every
+               time they were requested together. Each group's call is now
+               individually isolated: an exception is folded into the SAME
+               ``failed`` list/note contract as a non-zero exit code, and
+               the loop always continues to the next group.
+            2. ``on_success`` used to fire unconditionally whenever this
+               function returned without raising — including the new
+               all-groups-failed ``{"note": ...}`` shape, wrongly marking
+               the results cache dirty when NO new data had actually
+               landed. ``on_success`` now only fires when at least one
+               group genuinely succeeded (see ``any_group_succeeded``
+               below) — a partial success still invalidates the cache
+               (real new data DID land for that group), but a total
+               failure does not.
             """
-            failed: list[tuple[str, int]] = []
+            nonlocal any_group_succeeded
+            failed: list[tuple[str, str]] = []
             for group_request in plan.requests:
-                code = run_sweep_from_request(
-                    group_request, lake_root=lake, results_root=results_root
-                )
+                try:
+                    code = run_sweep_from_request(
+                        group_request, lake_root=lake, results_root=results_root
+                    )
+                except Exception as exc:  # isolate one group's crash from its siblings
+                    failed.append((group_request.exchange, f"raised {exc!r}"))
+                    continue
                 if code != 0:
-                    failed.append((group_request.exchange, code))
+                    failed.append((group_request.exchange, f"exit {code}"))
+                else:
+                    any_group_succeeded = True
             if failed:
-                summary = ", ".join(f"{exchange} (exit {code})" for exchange, code in failed)
+                summary = ", ".join(f"{exchange} ({detail})" for exchange, detail in failed)
                 return {
                     "note": (
                         f"oneclick sweep {plan.sweep_run_id}: "
@@ -5952,11 +5983,15 @@ def build_app(
                 }
             return 0
 
+        def _on_success() -> None:
+            if any_group_succeeded:
+                _summary_cache.mark_dirty()
+
         started = _pull_job.start(
             _work,
             total=len(plan.requests),
             detail=f"oneclick sweep {plan.sweep_run_id}",
-            on_success=_summary_cache.mark_dirty,
+            on_success=_on_success,
         )
         payload = dict(verdict)
         payload["started"] = started

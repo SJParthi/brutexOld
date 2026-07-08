@@ -251,6 +251,99 @@ def test_run_route_surfaces_a_per_group_failure_not_a_false_done(
     assert len(_CAPTURED["requests"]) == 2  # both groups still ran — no group silently skipped
 
 
+def test_run_route_exception_in_one_group_does_not_abort_the_rest(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-6 adversarial-refuter finding: a group that RAISES (rather than
+    returning a non-zero exit code) used to propagate straight out of the
+    fan-out loop, silently aborting every REMAINING group. Group order is
+    deterministic (alphabetical by exchange, so BSE runs before NSE) — a
+    BSE-specific crash would systematically starve the NSE (NIFTY/BANKNIFTY)
+    group every time they were requested together. Each group's call must
+    now be isolated so a crash in one never skips its siblings."""
+    _CAPTURED.clear()
+    calls: list[str] = []
+
+    def _bse_raises(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        calls.append(request.exchange)
+        if request.exchange == "BSE":
+            raise RuntimeError("boom: disk full mid-BSE-group")
+        _CAPTURED.setdefault("requests", []).append(request)
+        return 0
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _bse_raises)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+        resp = c.post("/api/v1/sweep/oneclick/run", params={"symbols": "NIFTY,SENSEX"})
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert "FAILED" in final["detail"]
+    assert "BSE" in final["detail"]
+    assert calls == ["BSE", "NSE"]  # both groups attempted despite BSE's crash
+    assert len(_CAPTURED["requests"]) == 1  # only NSE's real call recorded (BSE raised)
+
+
+def test_run_route_does_not_mark_cache_dirty_on_total_failure(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-6 adversarial-refuter finding: ``on_success`` used to fire
+    unconditionally whenever the job's work function returned without
+    raising — including the new all-groups-failed ``{"note": ...}`` shape —
+    wrongly marking the results cache dirty when NO new data had actually
+    landed. Must only fire when at least one group genuinely succeeded."""
+    from brutex.dashboard.summary_cache import SummaryCache
+
+    _CAPTURED.clear()
+    mark_dirty_calls: list[int] = []
+    cache = SummaryCache()
+    monkeypatch.setattr(cache, "mark_dirty", lambda: mark_dirty_calls.append(1))
+
+    def _always_fails(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        return 1
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _always_fails)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    with TestClient(build_app(DashboardState(), instrument_store=store, summary_cache=cache)) as c:
+        resp = c.post("/api/v1/sweep/oneclick/run", params={"symbols": "NIFTY,SENSEX"})
+        assert resp.status_code == 200
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert "FAILED" in final["detail"]
+    assert mark_dirty_calls == []
+
+
 def test_run_route_second_click_while_running_is_a_noop(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
