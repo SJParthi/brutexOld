@@ -353,12 +353,30 @@ class TestReconcileFunnel:
         assert verdict["ok"] is None
         assert "per_door_kills[0]" in verdict["lines"][0]
 
-    def test_door_count_mismatch_is_a_fail(self) -> None:
+    def test_door_count_mismatch_abstains_never_a_false_fail(self) -> None:
+        """Hostile-round MINOR-1: the ABSENT-key law makes a sparse kills list
+        a LEGITIMATE real-P2 shape — the reconcile abstains (ok=None, amber),
+        it must NEVER paint a scary red ok=False on a count/name mismatch."""
         body = _manifest_body()
-        body["per_door_kills"] = [{"door": "gates", "killed": 3}]  # 3 stages need 2 doors
+        body["per_door_kills"] = [{"door": "gates", "killed": 3}]  # 3 stages, 1 door
         verdict = ov.reconcile_funnel(ManifestResult("ok", body, "", None))
-        assert verdict["ok"] is False
-        assert "expected 2 doors" in verdict["lines"][0]
+        assert verdict["ok"] is None
+        assert verdict["status"] == "partial"
+        line = verdict["lines"][0]
+        assert "1 door(s)" in line
+        assert "3 stage(s)" in line
+        assert "merge-integration" in line
+        assert "✗" not in line  # abstention, not a verdict
+
+    def test_door_surplus_also_abstains(self) -> None:
+        """The mismatch abstention is symmetric: MORE doors than transitions
+        (a run core observing extra doors) abstains too — never a false red."""
+        body = _manifest_body()
+        body["per_door_kills"].append({"door": "extra", "killed": 0})
+        verdict = ov.reconcile_funnel(ManifestResult("ok", body, "", None))
+        assert verdict["ok"] is None
+        assert verdict["status"] == "partial"
+        assert "3 door(s)" in verdict["lines"][0]
 
     def test_happy_arithmetic_reconciles_to_the_digit(self) -> None:
         verdict = ov.reconcile_funnel(_ok_manifest())
@@ -464,6 +482,39 @@ class TestBuildVerifyPayload:
         assert payload["funnel_reconcile"]["ok"] is True
         assert isinstance(payload["funnel_reconcile"]["lines"], list)
         assert payload["fixture_root_active"] is True
+
+    def test_reconcile_computed_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hostile-round NIT-3: build_verify_payload reconciles ONCE and threads
+        the verdict into verify_checks — never a second reconcile_funnel call."""
+        calls: list[ManifestResult] = []
+        real = ov.reconcile_funnel
+
+        def _counting(manifest: ManifestResult) -> dict[str, object]:
+            calls.append(manifest)
+            return real(manifest)
+
+        monkeypatch.setattr(ov, "reconcile_funnel", _counting)
+        payload = ov.build_verify_payload(
+            "r-once", _ok_manifest(), None, False, fixture_root_active=False
+        )
+        assert len(calls) == 1
+        assert payload["funnel_reconcile"]["ok"] is True
+        assert payload["checks"][6]["state"] == "pass"
+
+    def test_mismatched_funnel_yields_awaiting_check_row(self) -> None:
+        """End-to-end MINOR-1: a sparse per_door_kills flows through the payload
+        as check #7 'awaiting' (amber) with ok=None — never a red 'fail'."""
+        body = _manifest_body()
+        body["per_door_kills"] = [{"door": "gates", "killed": 3}]
+        payload = ov.build_verify_payload(
+            "r-sparse",
+            ManifestResult("ok", body, "", None),
+            None,
+            False,
+            fixture_root_active=False,
+        )
+        assert payload["funnel_reconcile"]["ok"] is None
+        assert payload["checks"][6]["state"] == "awaiting"
 
 
 class TestFixtureFlagStampedEverywhere:

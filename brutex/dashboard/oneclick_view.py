@@ -434,6 +434,11 @@ def reconcile_funnel(manifest: ManifestResult) -> dict[str, Any]:
     ``ok`` iff every ``stage_n == stage_{n-1} − kills_n`` AND
     ``enumerated == tested + skipped``. Missing/malformed keys ⇒
     ``ok=None`` with status ``awaiting``/``partial`` — never a fake verdict.
+    A door/stage COUNT mismatch also abstains (``ok=None``): the P2 contract
+    keeps unobservable doors ABSENT (keyed by name, not positionally tiled to
+    funnel transitions), so a sparse ``per_door_kills`` is a legitimate real
+    manifest — never a false FAIL; name-keyed pairing lands at
+    merge-integration (hostile-round MINOR-1).
 
     Parameters
     ----------
@@ -515,12 +520,17 @@ def reconcile_funnel(manifest: ManifestResult) -> dict[str, Any]:
         kills.append(entry)
     lines: list[str] = []
     if len(kills) != max(0, len(funnel) - 1):
+        # ABSENT-key law: a door the run core cannot observe is ABSENT, so a
+        # sparse kills list is a LEGITIMATE shape — abstain (amber), never a
+        # false red. Positional pairing needs exactly one door per transition.
         return {
-            "ok": False,
-            "status": "ok",
+            "ok": None,
+            "status": "partial",
             "lines": [
-                f"per_door_kills has {len(kills)} doors but actual.funnel has "
-                f"{len(funnel)} stages (expected {max(0, len(funnel) - 1)} doors) ✗"
+                f"funnel reconcile awaiting: per_door_kills has {len(kills)} door(s) "
+                f"but actual.funnel has {len(funnel)} stage(s) — doors may be "
+                "legitimately ABSENT per contract; name-keyed pairing lands at "
+                "merge-integration"
             ],
         }
     ok = True
@@ -550,6 +560,8 @@ def verify_checks(
     manifest: ManifestResult,
     chain: tuple[bool, int, int | None, str] | None,
     trades_available: bool,
+    *,
+    reconcile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the 7 R44 check rows under the 5-state truth table (C-M4/T-M1).
 
@@ -568,6 +580,10 @@ def verify_checks(
         not verified for the current events revision (⇒ awaiting).
     trades_available
         Whether ANY trades source currently serves rows (fixture pre-merge).
+    reconcile
+        An optional precomputed :func:`reconcile_funnel` verdict (so
+        :func:`build_verify_payload` computes it ONCE — hostile-round NIT-3);
+        ``None`` ⇒ computed here.
 
     Returns
     -------
@@ -648,7 +664,8 @@ def verify_checks(
             "detail": "not wired yet — lands at merge-integration (R6 dedup counts)",
         }
     )
-    reconcile = reconcile_funnel(manifest)
+    if reconcile is None:
+        reconcile = reconcile_funnel(manifest)
     if reconcile["ok"] is True:
         funnel_state, funnel_detail = "pass", "funnel reconciles to the digit"
     elif reconcile["ok"] is False:
@@ -697,7 +714,7 @@ def build_verify_payload(
     reconcile = reconcile_funnel(manifest)
     return {
         "run_id": run_id,
-        "checks": verify_checks(manifest, chain, trades_available),
+        "checks": verify_checks(manifest, chain, trades_available, reconcile=reconcile),
         "funnel_reconcile": {"ok": reconcile["ok"], "lines": reconcile["lines"]},
         "fixture_root_active": fixture_root_active,
     }
