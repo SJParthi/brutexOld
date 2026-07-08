@@ -734,6 +734,41 @@ class TestRecountVixDivergence:
             assert finding.severity == "warn"
             assert "India-VIX lake moved" in finding.detail
 
+    def test_store_pair_read_and_hashed_once_per_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sentinel + sidecar re-pair checks share ONE memoised store digest pair.
+
+        Fails-before (round-7 NIT): a VIX-diverged tuple's attribution read +
+        re-hashed BOTH store files once per pairing artifact —
+        ``_hashes_pair_with_stores`` was invoked independently from the
+        sentinel AND the sidecar checks — 3 ``read_bytes`` per store (the
+        artifact byte-diff + 2 re-pair reads). The digests now ride the
+        ``_diff_store`` memo beside the row-level VIX verdict: exactly 2 reads
+        per store (the byte-diff + ONE memoised digest computation).
+        """
+        original, scratch, grid = self._two_trees(
+            tmp_path, _verify_stamper("14.00"), _verify_stamper("20.00")
+        )
+        store_strs = {
+            str(_store_path(original, grid)),
+            str(_store_path(scratch, grid)),
+        }
+        counts: dict[str, int] = {}
+        real_read_bytes = Path.read_bytes
+
+        def counting_read_bytes(self: Path) -> bytes:
+            if str(self) in store_strs:
+                counts[str(self)] = counts.get(str(self), 0) + 1
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert _codes(report) == {"recount_vix_divergence"}  # attribution unchanged
+        assert len(report.findings) == 3
+        assert counts and set(counts.values()) == {2}, counts
+
     def test_stamped_vs_unstamped_recount_is_vix_warn(self, tmp_path: Path) -> None:
         # A RECORDED value the recount can no longer reproduce (value-vs-None)
         # is a VIX-only divergence of the MOVED shape — the recorded stamps
@@ -928,13 +963,19 @@ class TestRecountVixDivergence:
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
         assert _codes(report) == {"recount_vix_divergence", "recount_divergence"}
-        # Direct pin of the final pairing arm.
+        # Direct pin of the final pairing arm (digests computed like the
+        # _diff_store memo — once per store).
+        import hashlib
+
+        store_digests = (
+            hashlib.sha256(_store_path(original, grid).read_bytes()).hexdigest(),
+            hashlib.sha256(_store_path(scratch, grid).read_bytes()).hexdigest(),
+        )
         assert (
             _sentinel_diff_is_the_vix_repair(
                 sentinel,
                 completion_sentinel_path(_store_path(scratch, grid)),
-                _store_path(original, grid),
-                _store_path(scratch, grid),
+                store_digests,
             )
             is False
         )

@@ -920,13 +920,16 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
 
 
 def _hashes_pair_with_stores(
-    ours_hash: str, theirs_hash: str, original_store: Path, scratch_store: Path
+    ours_hash: str, theirs_hash: str, store_digests: tuple[str, str]
 ) -> bool:
-    """``True`` iff each recorded content hash pairs with its OWN store's bytes."""
-    return (
-        ours_hash == hashlib.sha256(original_store.read_bytes()).hexdigest()
-        and theirs_hash == hashlib.sha256(scratch_store.read_bytes()).hexdigest()
-    )
+    """``True`` iff each recorded content hash pairs with its OWN store's digest.
+
+    *store_digests* is the ``(original, scratch)`` sha256 pair computed ONCE
+    per tuple by ``_diff_store``'s memo — the sentinel AND sidecar re-pair
+    checks of one VIX-diverged tuple share it instead of each re-reading +
+    re-hashing both store files (review round-7 NIT).
+    """
+    return (ours_hash, theirs_hash) == store_digests
 
 
 #: The ONE store-pairing hash field the two re-pair checks below exempt from
@@ -957,8 +960,7 @@ def _non_hash_fields_equal(
 def _sentinel_diff_is_the_vix_repair(
     original_sentinel: Path,
     scratch_sentinel: Path,
-    original_store: Path,
-    scratch_store: Path,
+    store_digests: tuple[str, str],
 ) -> bool:
     """``True`` iff the sentinels differ ONLY as the honest re-pair of VIX-moved stores.
 
@@ -980,15 +982,14 @@ def _sentinel_diff_is_the_vix_repair(
     if not _non_hash_fields_equal(ours, theirs):
         return False  # a non-hash field differs — not the VIX re-pair
     return _hashes_pair_with_stores(
-        ours.store_content_hash, theirs.store_content_hash, original_store, scratch_store
+        ours.store_content_hash, theirs.store_content_hash, store_digests
     )
 
 
 def _sidecar_diff_is_the_vix_repair(
     original_sidecar: Path,
     scratch_sidecar: Path,
-    original_store: Path,
-    scratch_store: Path,
+    store_digests: tuple[str, str],
 ) -> bool:
     """``True`` iff the trial-stats sidecars differ ONLY as the VIX-moved re-pair.
 
@@ -1007,7 +1008,7 @@ def _sidecar_diff_is_the_vix_repair(
     if not _non_hash_fields_equal(ours, theirs):
         return False  # a statistic differs — not the VIX re-pair
     return _hashes_pair_with_stores(
-        ours.store_content_hash, theirs.store_content_hash, original_store, scratch_store
+        ours.store_content_hash, theirs.store_content_hash, store_digests
     )
 
 
@@ -1117,6 +1118,7 @@ def compare_recount(
         # run yet from one that ran and honestly abstained.
         vix_only_memo: str | None = None
         vix_memo_computed = False
+        store_digest_memo: tuple[str, str] | None = None
 
         def _vix_only_store_pair() -> str | None:
             nonlocal vix_only_memo, vix_memo_computed
@@ -1124,6 +1126,22 @@ def compare_recount(
                 vix_only_memo = _stores_differ_only_in_vix(store_path, scratch_store)
                 vix_memo_computed = True
             return vix_only_memo
+
+        def _store_pair_digests() -> tuple[str, str]:
+            """The ``(original, scratch)`` store sha256 pair, read + hashed ONCE.
+
+            Both pairing-artifact re-pair checks of a VIX-diverged tuple
+            consult the SAME store bytes — memoised beside the row-level
+            verdict so the sentinel and sidecar checks stop independently
+            re-reading + re-hashing both stores (review round-7 NIT).
+            """
+            nonlocal store_digest_memo
+            if store_digest_memo is None:
+                store_digest_memo = (
+                    hashlib.sha256(store_path.read_bytes()).hexdigest(),
+                    hashlib.sha256(scratch_store.read_bytes()).hexdigest(),
+                )
+            return store_digest_memo
 
         def _artifact_vix_shape(original: Path, scratch: Path) -> str | None:
             """The VIX-divergence SHAPE for this artifact, or None (not attributable)."""
@@ -1139,14 +1157,12 @@ def compare_recount(
             if original == sentinel_path:
                 return (
                     shape
-                    if _sentinel_diff_is_the_vix_repair(
-                        original, scratch, store_path, scratch_store
-                    )
+                    if _sentinel_diff_is_the_vix_repair(original, scratch, _store_pair_digests())
                     else None
                 )
             return (
                 shape
-                if _sidecar_diff_is_the_vix_repair(original, scratch, store_path, scratch_store)
+                if _sidecar_diff_is_the_vix_repair(original, scratch, _store_pair_digests())
                 else None
             )
 
