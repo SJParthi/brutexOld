@@ -17,7 +17,7 @@ via :func:`~brutex.dashboard.sweep_runner.build_sweep_kwargs`, which pins the
 light-mode dashboard defaults (``allow_missing_slices=True``, guards off) and
 dies with the dashboard process. Tonight's locked run must (a) survive a
 dashboard restart, (b) carry the exact operator-locked flag set including the
-honest ``--max-combos`` guard + ``--acknowledge-sla-overrun``, and (c) refuse
+honest ``--max-combos`` guard, and (c) refuse
 loudly on missing lake slices instead of silently skipping them. Launching the
 REAL ``brutex sweep-all`` CLI as a detached process (``start_new_session=True``,
 no ``.wait()``, no owning thread) is therefore a DELIBERATE bypass of the
@@ -42,27 +42,53 @@ futures button is disabled with an honest reason and the spot card stays live.
 Single-flight law: an advisory :func:`fcntl.flock` on a stable sidecar under
 ``<lake_root>/.locks/`` guards the launch critical section, and a pidfile
 (``<lake_root>/sweeps/.launch/active_launch.json``) carries the active run.
-A second click while the run is alive returns HTTP 409 with the existing
-run's info — NEVER a duplicate launch. A DEAD recorded pid self-heals (the
-lock is recoverable) — stale-pid recovery is logged, not silent.
+Under the held flock a "launching" placeholder record is written atomically
+BEFORE the spawn and finalized with the real pid after it (review round-2 M2 —
+a crash/ENOSPC between spawn and record can never leave a LIVE run invisible
+to single-flight: a failed finalize kills the just-spawned session, and a
+stranded placeholder self-heals by age). A second click while the run is
+alive returns HTTP 409 with the existing run's info — NEVER a duplicate
+launch. A DEAD recorded pid self-heals (the lock is recoverable) — stale-pid
+recovery is logged, not silent. The pidfile ALWAYS holds the REAL sweep pid
+(review round-2 M1): the sweep is spawned directly, and keep-awake is a
+SEPARATE detached ``caffeinate -i -s -w <sweep_pid>`` watcher whose death is
+harmless — it never carries run identity and self-exits when the sweep ends.
+
+SLA guard (coordinator delta): ``--acknowledge-sla-overrun`` is NOT
+unconditional — the audit expects the locked 252-tuple grid to PASS
+DEC-SLA-LAUNCH-GUARD-001 without it. The page carries an off-by-default
+acknowledge checkbox; the POST accepts a strict whitelisted boolean and
+appends the flag ONLY when ticked (the operator's deliberate override,
+never a default).
 
 Honest envelope (Golden Rule #10): pid liveness is a *probe*
 (``waitpid(WNOHANG)`` for our own children — which also reaps the zombie a
 detached-but-still-our-child exit leaves — falling back to ``kill(pid, 0)``
-after a dashboard restart re-parents the run), not a supervisor; a recycled
-pid after months could in principle read "running" (started_utc is recorded
-for the operator to judge). The log tail is a bounded seek-read of the last N
-KiB, never a whole-file read. ``fcntl`` is POSIX (Linux + macOS — the Track-1
-envelope); ``caffeinate`` wrapping degrades gracefully where absent.
+after a dashboard restart re-parents the run), not a supervisor; recycled-pid
+disambiguation is best-effort ``/proc/<pid>/cmdline`` on Linux (absent on
+macOS — skipped silently; a probe ERROR never downgrades a live run to
+exited, the safe direction is refusing a duplicate). The log tail is a
+bounded seek-read of the last N KiB, confined under ``<lake_root>/sweeps``
+(a tampered state file cannot read arbitrary files). The lake precondition
+checks PRESENCE of all 21 NIFTY/INDEX interval partitions; TF FRESHNESS is
+deliberately NOT re-derived here — the launched CLI's own preflight verifies
+it at launch (a refusal appears in the log tail within seconds). ``fcntl`` is
+POSIX (Linux + macOS — the Track-1 envelope); the keep-awake watcher degrades
+gracefully where ``caffeinate`` is absent. Deferred to the canonical page
+(disclosed, not implemented): flock critical-section deadline-bounding,
+minimal-env spawn, auth on the launch route, disk-floor vs true sweep
+footprint sizing.
 """
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess  # nosec B404 — fixed argv, no shell, launches the repo's own CLI only
 import sys
 from dataclasses import dataclass
@@ -73,6 +99,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import structlog
 
 from brutex.calendars.nse import now_ist
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
 if TYPE_CHECKING:
@@ -93,12 +120,14 @@ __all__ = [
     "LOCKED_START",
     "LOCKED_SWEEP_WORKERS",
     "LOCKED_TOP",
+    "SLA_ACK_FLAG",
     "ActiveLaunch",
     "CardSpec",
     "FuturesAvailability",
     "LaunchOutcome",
     "PreconditionCheck",
     "build_launch_state",
+    "keepawake_watcher_argv",
     "launch_end_date",
     "launch_lock_path",
     "launch_state_path",
@@ -111,8 +140,8 @@ __all__ = [
     "read_log_tail",
     "register_launch_routes",
     "run_preconditions",
+    "state_liveness",
     "store_lake_root_resolver",
-    "wrap_keepawake",
 ]
 
 # ── Locked run shape (operator-locked 2026-07-08 for tonight's launch) ──
@@ -157,6 +186,18 @@ DEFAULT_MIN_DISK_FREE_BYTES: Final[int] = 20 * 1024**3
 
 #: Bounded log-tail read (last N KiB via seek — never a whole-file read).
 DEFAULT_LOG_TAIL_BYTES: Final[int] = 16 * 1024
+
+#: The REAL SLA-guard acknowledgment flag (DEC-SLA-LAUNCH-GUARD-001).
+#: OPT-IN ONLY (coordinator delta): the audit expects the locked 252-tuple
+#: grid to PASS the guard WITHOUT it — the page's off-by-default checkbox is
+#: the operator's deliberate override, never a default.
+SLA_ACK_FLAG: Final[str] = "--acknowledge-sla-overrun"
+
+#: How long a pre-spawn "launching" placeholder record counts as a live
+#: launch before it self-heals as stranded (a crash between the placeholder
+#: write and the pid finalize — review round-2 M2). Spawn + finalize take
+#: milliseconds; 120 s is a generous crash-detection grace.
+LAUNCHING_GRACE_S: Final[float] = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,15 +249,17 @@ def locked_sweep_argv(
     results_root: Path,
     end_day: date,
     python_executable: str | None = None,
+    acknowledge_sla: bool = False,
 ) -> list[str]:
     """Build the LOCKED ``brutex sweep-all`` argv for *card* (pure, list-args).
 
     Every flag exists on main's ``cli.py`` (verified against the real argparse
-    definitions). ``--acknowledge-sla-overrun`` is the real SLA-guard
-    acknowledgment flag (DEC-SLA-LAUNCH-GUARD-001) — the full 21-TF k≤6 grid
-    legitimately projects past the §8 2-4-day envelope and the operator has
-    locked the run anyway. ``--lake-root`` / ``--results-root`` are passed
-    explicitly so the detached process never depends on inherited env.
+    definitions). ``--lake-root`` / ``--results-root`` are passed explicitly
+    so the detached process never depends on inherited env.
+    :data:`SLA_ACK_FLAG` is appended ONLY when *acknowledge_sla* is True
+    (coordinator delta — the audit expects the locked 252-tuple grid to PASS
+    DEC-SLA-LAUNCH-GUARD-001 without the acknowledgment; the checkbox is the
+    operator's deliberate override, not a default).
 
     Raises
     ------
@@ -227,7 +270,7 @@ def locked_sweep_argv(
     if spec is None:
         raise ValueError(f"unknown launch card {card!r}: expected one of {sorted(LAUNCH_CARDS)}")
     python = python_executable if python_executable is not None else sys.executable
-    return [
+    argv = [
         python,
         "-m",
         "brutex.cli",
@@ -260,24 +303,65 @@ def locked_sweep_argv(
         str(results_root),
         "--lake-root",
         str(lake_root),
-        "--acknowledge-sla-overrun",
     ]
+    if acknowledge_sla:
+        argv.append(SLA_ACK_FLAG)
+    return argv
 
 
-def wrap_keepawake(
-    argv: list[str],
+def keepawake_watcher_argv(
+    sweep_pid: int,
     *,
     which: Callable[[str], str | None] = shutil.which,
-) -> list[str]:
-    """Wrap *argv* in ``caffeinate -i -s`` when the binary exists (macOS).
+) -> list[str] | None:
+    """The SEPARATE keep-awake watcher argv, or ``None`` where unavailable.
 
-    Degrades gracefully on Linux/CI (no caffeinate → the argv is returned
-    unchanged) — the launch never fails for a missing power-assertion binary.
+    Review round-2 M1: keep-awake is ``caffeinate -i -s -w <sweep_pid>`` — a
+    DETACHED WATCHER of the real sweep pid, never a wrapper carrying run
+    identity. Its death is harmless (the pidfile keys on the sweep's own
+    pid) and it self-exits when the sweep ends (``-w``). Degrades gracefully
+    on Linux/CI (no caffeinate → ``None``, launch proceeds).
     """
     caffeinate = which("caffeinate")
     if caffeinate is None:
-        return list(argv)
-    return [caffeinate, "-i", "-s", *argv]
+        return None
+    return [caffeinate, "-i", "-s", "-w", str(sweep_pid)]
+
+
+def _default_watcher_spawner(argv: list[str]) -> int:
+    """Spawn the keep-awake watcher fully detached (all streams devnull)."""
+    proc = subprocess.Popen(  # noqa: S603  # nosec B603 — fixed caffeinate argv, no shell, no user strings
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pid = proc.pid
+    # Disown (mirrors _default_spawner): -w self-exits with the sweep; the
+    # dashboard never waits it — mark finished so GC never warns.
+    proc.returncode = 0
+    return pid
+
+
+def _spawn_keepawake_watcher(
+    sweep_pid: int,
+    *,
+    which: Callable[[str], str | None],
+    watcher_spawner: Callable[[list[str]], int] | None = None,
+) -> int | None:
+    """Best-effort keep-awake watcher spawn — NEVER fails the launch."""
+    argv = keepawake_watcher_argv(sweep_pid, which=which)
+    if argv is None:
+        return None
+    spawn = watcher_spawner if watcher_spawner is not None else _default_watcher_spawner
+    try:
+        watcher_pid = spawn(argv)
+    except OSError as exc:
+        _LOG.warning("launch_button.keepawake_spawn_failed", sweep_pid=sweep_pid, error=str(exc))
+        return None
+    _LOG.info("launch_button.keepawake_spawned", sweep_pid=sweep_pid, watcher_pid=watcher_pid)
+    return watcher_pid
 
 
 # ── Futures-availability probe (PR #1264 alias layer) ──
@@ -382,12 +466,29 @@ def run_preconditions(
         return checks
     checks.append(PreconditionCheck(name="lake_configured", ok=True, detail=str(lake_root)))
 
-    nifty_1m = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute"
+    # Review round-2 M4: the locked 21-TF command (no --allow-missing-slices)
+    # hard-refuses via the CLI's own preflight if ANY interval partition is
+    # missing — so the cheap PRESENCE check must cover all 21, not just
+    # 1minute (21 dir stats; TF FRESHNESS is deliberately NOT re-derived here
+    # — the CLI preflight verifies it at launch, refusal visible in the log
+    # tail within seconds).
+    nifty_root = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY"
+    missing_intervals = [
+        interval for interval in LOCKED_INTERVALS if not (nifty_root / interval).is_dir()
+    ]
     checks.append(
         PreconditionCheck(
-            name="nifty_1minute_partition",
-            ok=nifty_1m.is_dir(),
-            detail=str(nifty_1m),
+            name="nifty_interval_partitions",
+            ok=not missing_intervals,
+            detail=(
+                f"all {len(LOCKED_INTERVALS)} NIFTY/INDEX interval partitions present "
+                f"under {nifty_root}"
+                if not missing_intervals
+                else (
+                    f"missing {len(missing_intervals)}/{len(LOCKED_INTERVALS)} under "
+                    f"{nifty_root}: {', '.join(missing_intervals)}"
+                )
+            ),
         )
     )
 
@@ -418,13 +519,14 @@ def run_preconditions(
             PreconditionCheck(name="no_active_launch", ok=True, detail="no recorded launch")
         )
     else:
-        running = probe_pid(_state_pid(state)) == "running"
+        running = state_liveness(state) == "running"
         checks.append(
             PreconditionCheck(
                 name="no_active_launch",
                 ok=not running,
                 detail=(
-                    f"pid {state.get('pid')} ({state.get('card')}) "
+                    f"pid {state.get('pid')} ({state.get('card')}, "
+                    f"phase {state.get('phase', 'running')}) "
                     + ("is RUNNING" if running else "exited — lock recoverable")
                 ),
             )
@@ -485,6 +587,61 @@ def probe_pid(pid: int) -> Literal["running", "exited"]:
     return "running"
 
 
+def _cmdline_contains_sweep_all(pid: int, *, proc_root: Path = Path("/proc")) -> bool | None:
+    """Best-effort recycled-pid disambiguation via ``/proc/<pid>/cmdline``.
+
+    Review round-2 m4. Returns ``True``/``False`` only on a DEFINITIVE read;
+    ``None`` = unknown (no ``/proc`` — macOS — or unreadable/empty entry).
+    The caller must treat ``None`` as "running" — a probe error must never
+    downgrade a live run to exited (the safe direction is refusing a
+    duplicate launch).
+    """
+    try:
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    return b"sweep-all" in raw
+
+
+def state_liveness(
+    state: dict[str, Any],
+    *,
+    now_utc: Callable[[], datetime] | None = None,
+    cmdline_probe: Callable[[int], bool | None] | None = None,
+) -> Literal["running", "exited"]:
+    """The ONE liveness verdict over a recorded launch state.
+
+    * ``phase == "launching"`` (the pre-spawn placeholder, review round-2
+      M2): counts as RUNNING within :data:`LAUNCHING_GRACE_S` of its
+      ``started_utc`` (spawn + finalize take milliseconds — a fresh
+      placeholder means a launch is mid-flight and must refuse duplicates);
+      older/junk-timestamped placeholders are STRANDED (a crash between the
+      placeholder write and the finalize) and self-heal as exited.
+    * otherwise: :func:`probe_pid` on the recorded pid, plus the best-effort
+      recycled-pid cmdline disambiguation (a DEFINITIVE non-``sweep-all``
+      cmdline reads exited; an unknown probe stays running — never a
+      downgrade on probe error).
+    """
+    clock = now_utc if now_utc is not None else lambda: datetime.now(UTC)
+    if state.get("phase") == "launching":
+        try:
+            started = datetime.fromisoformat(str(state.get("started_utc")))
+        except ValueError:
+            return "exited"  # junk placeholder timestamp — stranded, self-heal
+        age_s = (clock() - started).total_seconds()
+        return "running" if age_s <= LAUNCHING_GRACE_S else "exited"
+    pid = _state_pid(state)
+    if probe_pid(pid) != "running":
+        return "exited"
+    probe = cmdline_probe if cmdline_probe is not None else _cmdline_contains_sweep_all
+    if probe(pid) is False:
+        _LOG.info("launch_button.recycled_pid_detected", pid=pid)
+        return "exited"
+    return "running"
+
+
 def read_launch_state(lake_root: Path) -> dict[str, Any] | None:
     """Read the pidfile; a missing/corrupt file is honestly ``None`` (logged).
 
@@ -514,17 +671,28 @@ def read_launch_state(lake_root: Path) -> dict[str, Any] | None:
 
 
 def _write_launch_state(lake_root: Path, state: dict[str, Any]) -> None:
-    """Atomically persist the pidfile (tmp + ``os.replace``)."""
+    """Atomically persist the pidfile via the COMMON atomic-write core.
+
+    Review round-2 M3: delegates to
+    :func:`~brutex.data.atomic_io.atomic_write_simple` (the guard-free
+    variant — a raw ``OSError`` propagates for the caller to compensate,
+    never a mis-escalated ``LakeWriteHalt``), which also fsyncs before the
+    rename — closing the hand-rolled tmp+replace torn-write weakness.
+    """
     path = launch_state_path(lake_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    payload = json.dumps(state, sort_keys=True)
+    atomic_write_simple(path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
 
 
 @dataclass(frozen=True, slots=True)
 class ActiveLaunch:
-    """The recorded active launch (mirrors the pidfile payload)."""
+    """The recorded active launch (mirrors the finalized pidfile payload).
+
+    ``pid`` is ALWAYS the real sweep pid (review round-2 M1);
+    ``keepawake_pid`` is the separate best-effort caffeinate watcher —
+    informational only, NEVER consulted for liveness/single-flight.
+    """
 
     pid: int
     card: str
@@ -532,16 +700,21 @@ class ActiveLaunch:
     log_path: str
     command: tuple[str, ...]
     started_utc: str
+    keepawake_pid: int | None = None
+    acknowledge_sla: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        """JSON-ready projection."""
+        """JSON-ready projection (the finalized ``phase="running"`` record)."""
         return {
+            "phase": "running",
             "pid": self.pid,
             "card": self.card,
             "results_root": self.results_root,
             "log_path": self.log_path,
             "command": list(self.command),
             "started_utc": self.started_utc,
+            "keepawake_pid": self.keepawake_pid,
+            "acknowledge_sla": self.acknowledge_sla,
         }
 
 
@@ -550,8 +723,30 @@ class LaunchOutcome:
     """The verdict of one POST launch attempt."""
 
     started: bool
-    status: Literal["started", "already_running", "lock_contended"]
+    status: Literal["started", "already_running", "lock_contended", "failed"]
     active: dict[str, Any] | None
+    detail: str = ""
+
+
+def _kill_session(pid: int) -> bool:
+    """Best-effort kill of a just-spawned detached session (M2 compensation).
+
+    The child was started with ``start_new_session=True``, so its process
+    group id == its pid — ``killpg`` reaps the whole session; a raw ``kill``
+    is the fallback. Returns whether a signal was delivered.
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return False
+    # Reap if it is our child so no zombie lingers (best-effort; not our
+    # child / already reaped simply raises — nothing to do).
+    with contextlib.suppress(OSError):
+        os.waitpid(pid, 0)
+    return True
 
 
 def _default_spawner(argv: list[str], log_path: Path) -> int:
@@ -588,15 +783,28 @@ def launch_sweep(
     which: Callable[[str], str | None] = shutil.which,
     now_utc: Callable[[], datetime] | None = None,
     today_ist: Callable[[], date] | None = None,
+    acknowledge_sla: bool = False,
+    watcher_spawner: Callable[[list[str]], int] | None = None,
 ) -> LaunchOutcome:
     """Launch the locked sweep for *card* under the single-flight flock.
 
     Double-click-proof: the flock (``LOCK_EX | LOCK_NB``) serialises the
     critical section — a concurrent second click reads ``lock_contended``;
-    a click while the recorded pid is ALIVE reads ``already_running``. A
+    a click while the recorded run is ALIVE reads ``already_running``. A
     DEAD recorded pid self-heals (logged) and the launch proceeds. Only the
     validated card selector parameterises the command (whitelist —
     :data:`LAUNCH_CARDS`); no user-controlled string reaches the argv.
+
+    M2 ordering (review round-2): under the held flock, a ``launching``
+    placeholder record is written atomically BEFORE the spawn (a placeholder
+    write failure spawns NOTHING); the record is finalized with the real pid
+    after the spawn, and a finalize failure KILLS the just-spawned session
+    (compensation) — a live run can never be invisible to single-flight. A
+    crash-stranded placeholder self-heals after :data:`LAUNCHING_GRACE_S`.
+
+    M1 (review round-2): the recorded pid is ALWAYS the real sweep pid; the
+    keep-awake ``caffeinate -i -s -w <pid>`` watcher is spawned separately,
+    best-effort, and never carries run identity.
 
     Raises
     ------
@@ -623,14 +831,19 @@ def launch_sweep(
 
         state = read_launch_state(lake_root)
         if state is not None:
-            pid = _state_pid(state)
-            if probe_pid(pid) == "running":
-                _LOG.info("launch_button.already_running", card=card, active_pid=pid)
+            if state_liveness(state, now_utc=clock) == "running":
+                _LOG.info(
+                    "launch_button.already_running",
+                    card=card,
+                    active_pid=state.get("pid"),
+                    active_phase=state.get("phase", "running"),
+                )
                 return LaunchOutcome(started=False, status="already_running", active=state)
             _LOG.info(
                 "launch_button.stale_pid_self_heal",
-                stale_pid=pid,
+                stale_pid=state.get("pid"),
                 stale_card=state.get("card"),
+                stale_phase=state.get("phase", "running"),
             )
 
         started = clock()
@@ -638,16 +851,40 @@ def launch_sweep(
         results_root = lake_root / "sweeps" / f"launch-{stamp}-{card}"
         results_root.mkdir(parents=True, exist_ok=True)
         log_path = results_root / "launch.log"
-        argv = wrap_keepawake(
-            locked_sweep_argv(
-                card,
-                lake_root=lake_root,
-                results_root=results_root,
-                end_day=launch_end_date(today_fn()),
-            ),
-            which=which,
+        argv = locked_sweep_argv(
+            card,
+            lake_root=lake_root,
+            results_root=results_root,
+            end_day=launch_end_date(today_fn()),
+            acknowledge_sla=acknowledge_sla,
         )
+
+        # M2 step 1: pre-spawn placeholder — atomic, BEFORE any process
+        # exists. If this write fails, nothing was spawned: honest failure.
+        placeholder = {
+            "phase": "launching",
+            "card": card,
+            "results_root": str(results_root),
+            "log_path": str(log_path),
+            "started_utc": started.isoformat(),
+        }
+        try:
+            _write_launch_state(lake_root, placeholder)
+        except OSError as exc:
+            _LOG.error("launch_button.prespawn_state_write_failed", card=card, error=str(exc))
+            return LaunchOutcome(
+                started=False,
+                status="failed",
+                active=None,
+                detail=f"pre-spawn state write failed — nothing launched: {exc}",
+            )
+
+        # M2 step 2: spawn (the placeholder already guards single-flight).
         pid = spawn(argv, log_path)
+        keepawake_pid = _spawn_keepawake_watcher(pid, which=which, watcher_spawner=watcher_spawner)
+
+        # M2 step 3: finalize with the real pid; on failure, compensate by
+        # killing the just-spawned session — never a live untracked run.
         active = ActiveLaunch(
             pid=pid,
             card=card,
@@ -655,12 +892,35 @@ def launch_sweep(
             log_path=str(log_path),
             command=tuple(argv),
             started_utc=started.isoformat(),
+            keepawake_pid=keepawake_pid,
+            acknowledge_sla=acknowledge_sla,
         )
-        _write_launch_state(lake_root, active.as_dict())
+        try:
+            _write_launch_state(lake_root, active.as_dict())
+        except OSError as exc:
+            killed = _kill_session(pid)
+            _LOG.error(
+                "launch_button.finalize_state_write_failed",
+                card=card,
+                pid=pid,
+                compensating_kill_delivered=killed,
+                error=str(exc),
+            )
+            return LaunchOutcome(
+                started=False,
+                status="failed",
+                active=None,
+                detail=(
+                    f"pid finalize write failed after spawn: {exc}; compensating kill of "
+                    f"session {pid} {'DELIVERED' if killed else 'FAILED — verify manually'}"
+                ),
+            )
         _LOG.info(
             "launch_button.sweep_launched",
             card=card,
             pid=pid,
+            keepawake_pid=keepawake_pid,
+            acknowledge_sla=acknowledge_sla,
             results_root=str(results_root),
         )
         return LaunchOutcome(started=True, status="started", active=active.as_dict())
@@ -683,28 +943,56 @@ def read_log_tail(log_path: Path, *, tail_bytes: int = DEFAULT_LOG_TAIL_BYTES) -
         return ""
 
 
+def _confined_log_tail(lake_root: Path, log_path: str, *, tail_bytes: int) -> str:
+    """Log tail CONFINED under ``<lake_root>/sweeps`` (review round-2 m2).
+
+    Defence-in-depth against a tampered state file: a ``log_path`` resolving
+    outside the sweeps tree is REFUSED with an honest detail — the page can
+    never be steered into reading an arbitrary file.
+    """
+    sweeps_root = (lake_root / "sweeps").resolve()
+    try:
+        resolved = Path(log_path).resolve()
+    except (OSError, ValueError) as exc:
+        # ValueError = e.g. an embedded null byte in a tampered state file;
+        # non-strict resolve() rarely raises OSError but the guard is kept.
+        return f"log path unresolvable — refused ({exc.__class__.__name__})"
+    if not resolved.is_relative_to(sweeps_root):
+        _LOG.warning(
+            "launch_button.log_tail_refused", log_path=log_path, sweeps_root=str(sweeps_root)
+        )
+        return f"log path outside {sweeps_root} — refused (tampered state file?)"
+    return read_log_tail(resolved, tail_bytes=tail_bytes)
+
+
 def launch_status(
     lake_root: Path | None, *, tail_bytes: int = DEFAULT_LOG_TAIL_BYTES
 ) -> dict[str, Any]:
-    """The poll payload: pidfile liveness + bounded log tail."""
+    """The poll payload: pidfile liveness + bounded, confined log tail."""
     if lake_root is None:
         return {"present": False, "running": False}
     state = read_launch_state(lake_root)
     if state is None:
         return {"present": False, "running": False}
     pid = _state_pid(state)
-    running = probe_pid(pid) == "running"
+    running = state_liveness(state) == "running"
     log_path = state.get("log_path")
-    tail = read_log_tail(Path(log_path), tail_bytes=tail_bytes) if isinstance(log_path, str) else ""
+    tail = (
+        _confined_log_tail(lake_root, log_path, tail_bytes=tail_bytes)
+        if isinstance(log_path, str)
+        else ""
+    )
     return {
         "present": True,
         "running": running,
-        "pid": pid,
+        "phase": state.get("phase", "running"),
+        "pid": pid if pid > 0 else None,
         "card": state.get("card"),
         "results_root": state.get("results_root"),
         "log_path": log_path,
         "started_utc": state.get("started_utc"),
         "command": state.get("command"),
+        "keepawake_pid": state.get("keepawake_pid"),
         "log_tail": tail,
     }
 
@@ -715,23 +1003,25 @@ def _card_payload(
     lake_root: Path | None,
     end_day: date,
     futures: FuturesAvailability,
-    which: Callable[[str], str | None],
 ) -> dict[str, Any]:
-    """One card's page projection: locked command preview + enabled verdict."""
+    """One card's page projection: locked command preview + enabled verdict.
+
+    The preview is the SWEEP command itself (unwrapped — M1: keep-awake is a
+    separate watcher) WITHOUT :data:`SLA_ACK_FLAG`; the frontend appends the
+    flag to the display only while the off-by-default acknowledge checkbox
+    is ticked (``sla_ack_flag`` carries the exact token).
+    """
     enabled = lake_root is not None
     reason = "" if enabled else "no lake configured"
     if spec.card == "futures":
         enabled = enabled and futures.available
         if not futures.available:
             reason = futures.reason
-    command = wrap_keepawake(
-        locked_sweep_argv(
-            spec.card,
-            lake_root=lake_root if lake_root is not None else Path("<lake-root>"),
-            results_root=Path("<fresh-timestamped-results-root>"),
-            end_day=end_day,
-        ),
-        which=which,
+    command = locked_sweep_argv(
+        spec.card,
+        lake_root=lake_root if lake_root is not None else Path("<lake-root>"),
+        results_root=Path("<fresh-timestamped-results-root>"),
+        end_day=end_day,
     )
     return {
         "card": spec.card,
@@ -743,6 +1033,7 @@ def _card_payload(
         "reason": reason,
         "command": command,
         "command_display": " ".join(command),
+        "sla_ack_flag": SLA_ACK_FLAG,
     }
 
 
@@ -767,15 +1058,14 @@ def build_launch_state(
         "lake_root": str(lake_root) if lake_root is not None else None,
         "end_day": end_day.isoformat(),
         "grid_note": GRID_HONESTY_NOTE,
+        "keepawake_available": which("caffeinate") is not None,
         "preconditions": [
             {"name": c.name, "ok": c.ok, "detail": c.detail}
             for c in run_preconditions(lake_root, min_free_bytes=min_free_bytes)
         ],
         "futures": {"available": futures.available, "reason": futures.reason},
         "cards": {
-            name: _card_payload(
-                spec, lake_root=lake_root, end_day=end_day, futures=futures, which=which
-            )
+            name: _card_payload(spec, lake_root=lake_root, end_day=end_day, futures=futures)
             for name, spec in LAUNCH_CARDS.items()
         },
         "active": launch_status(lake_root),
@@ -799,6 +1089,15 @@ def store_lake_root_resolver(store: Any) -> Callable[[], Path | None]:
 
     return _resolve
 
+
+#: The precondition names re-checked at POST time (review round-2 m3) — red
+#: refuses with 412, nothing spawned. ``no_active_launch`` is deliberately
+#: excluded (the flock + liveness single-flight is the authority → 409), as
+#: is ``rust_wheels`` (this process imported them to serve the route) and
+#: ``lake_configured`` (the 503 arm above).
+_POST_GATE_CHECKS: Final[frozenset[str]] = frozenset(
+    {"nifty_interval_partitions", "disk_free", "results_root_writable"}
+)
 
 _LAUNCH_TEMPLATE_PATH: Final[Path] = Path(__file__).resolve().parent / "templates" / "launch.html"
 _LAUNCH_TEMPLATE_CACHE: str | None = None
@@ -841,13 +1140,34 @@ def register_launch_routes(
         )
         return JSONResponse(payload)
 
-    async def api_launch_sweep(card: str = Query(...)) -> JSONResponse:
-        """POST /api/v1/launch/sweep?card=futures|spot — single-flight detached launch."""
+    async def api_launch_sweep(
+        card: str = Query(...),
+        acknowledge_sla_overrun: str = Query("false"),
+    ) -> JSONResponse:
+        """POST /api/v1/launch/sweep?card=futures|spot — single-flight detached launch.
+
+        ``acknowledge_sla_overrun`` is a STRICT whitelisted boolean
+        (``"true"``/``"false"`` only — coordinator delta): only an explicit
+        ``true`` (the page's off-by-default checkbox) appends
+        :data:`SLA_ACK_FLAG` to the argv. The cheap preconditions are
+        RE-CHECKED here (m3 — page-load checks alone are cosmetic for launch
+        integrity): any red among the launch-gating set refuses with 412 and
+        spawns nothing.
+        """
         if card not in LAUNCH_CARDS:
             raise HTTPException(
                 status_code=400,
                 detail=f"unknown card {card!r}: expected one of {sorted(LAUNCH_CARDS)}",
             )
+        if acknowledge_sla_overrun not in ("true", "false"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"acknowledge_sla_overrun must be exactly 'true' or 'false', "
+                    f"got {acknowledge_sla_overrun!r}"
+                ),
+            )
+        acknowledge_sla = acknowledge_sla_overrun == "true"
         lake_root = lake_root_resolver()
         if lake_root is None:
             raise HTTPException(status_code=503, detail="no lake configured")
@@ -855,8 +1175,30 @@ def register_launch_routes(
             futures = probe_futures_alias()
             if not futures.available:
                 raise HTTPException(status_code=400, detail=futures.reason)
-        outcome = await run_in_threadpool(launch_sweep, card, lake_root=lake_root, spawner=spawner)
-        payload = {"started": outcome.started, "status": outcome.status, "active": outcome.active}
+        checks = await run_in_threadpool(
+            run_preconditions, lake_root, min_free_bytes=min_free_bytes
+        )
+        failing = [c.name for c in checks if not c.ok and c.name in _POST_GATE_CHECKS]
+        if failing:
+            raise HTTPException(
+                status_code=412,
+                detail=f"launch preconditions failed: {', '.join(failing)} — nothing launched",
+            )
+        outcome = await run_in_threadpool(
+            launch_sweep,
+            card,
+            lake_root=lake_root,
+            spawner=spawner,
+            acknowledge_sla=acknowledge_sla,
+        )
+        payload = {
+            "started": outcome.started,
+            "status": outcome.status,
+            "active": outcome.active,
+            "detail": outcome.detail,
+        }
+        if outcome.status == "failed":
+            return JSONResponse(payload, status_code=500)
         return JSONResponse(payload, status_code=200 if outcome.started else 409)
 
     # Registered by CALL (not decorator syntax) so `mypy --strict` never trips

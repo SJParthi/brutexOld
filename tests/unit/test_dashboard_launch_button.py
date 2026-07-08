@@ -3,9 +3,10 @@
 Drives the REAL routes through ``build_app`` + ``TestClient`` (the house
 convention — mirrors ``test_dashboard_sweep_run_route.py``): the page render,
 the polled ``/api/v1/launch/state`` payload, and the single-flight POST
-(200 started · 409 already-running · 400 invalid card / futures-unavailable ·
-503 no lake). The detached spawner is ALWAYS monkeypatched — no test launches
-a real sweep. Skipped cleanly when the ``[ui]`` extra (FastAPI) is absent.
+(200 started · 409 already-running · 400 invalid card / junk ack /
+futures-unavailable · 412 red preconditions · 500 failed launch · 503 no
+lake). The detached spawner is ALWAYS monkeypatched — no test launches a
+real sweep. Skipped cleanly when the ``[ui]`` extra (FastAPI) is absent.
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def lake(tmp_path: Path) -> Path:
-    (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute").mkdir(parents=True)
+    # M4: the presence precondition covers ALL 21 interval partitions.
+    for interval in lb.LOCKED_INTERVALS:
+        (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / interval).mkdir(parents=True)
     (tmp_path / "sweeps").mkdir()
     return tmp_path
 
@@ -57,6 +60,10 @@ def fake_spawner(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return 34567
 
     monkeypatch.setattr(lb, "_default_spawner", _spawn)
+    # The fake pid 34567 may collide with a REAL sandbox process whose
+    # cmdline is not a sweep — pin the disambiguation probe to "unknown"
+    # so liveness rides the (also monkeypatched where needed) pid probe.
+    monkeypatch.setattr(lb, "_cmdline_contains_sweep_all", lambda pid: None)
     return record
 
 
@@ -71,6 +78,13 @@ class TestLaunchPage:
         assert "/api/v1/launch/state" in body
         assert "/api/v1/launch/sweep" in body
         assert "Restart the dashboard BEFORE launching" in body
+        # coordinator delta: the off-by-default SLA acknowledge checkbox
+        assert 'id="ackSla"' in body
+        assert "acknowledge_sla_overrun" in body
+        # M4 honesty caveat: freshness is the CLI preflight's job
+        assert "FRESHNESS is verified by the CLI" in body
+        # M1: keep-awake is a separate watcher note
+        assert "caffeinate -i -s -w" in body
 
     def test_page_renders_without_store(self, bare_client: TestClient) -> None:
         assert bare_client.get("/launch").status_code == 200
@@ -85,10 +99,12 @@ class TestLaunchStateRoute:
         assert payload["lake_root"] == str(lake)
         assert payload["grid_note"] == lb.GRID_HONESTY_NOTE
         names = {c["name"] for c in payload["preconditions"]}
-        assert "nifty_1minute_partition" in names
+        assert "nifty_interval_partitions" in names
         assert "no_active_launch" in names
         assert payload["cards"]["spot"]["enabled"] is True
-        assert "--acknowledge-sla-overrun" in payload["cards"]["spot"]["command_display"]
+        # coordinator delta: base command display carries NO ack flag
+        assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
+        assert payload["cards"]["spot"]["sla_ack_flag"] == lb.SLA_ACK_FLAG
         # On main the futures alias layer (PR #1264) is absent — honest verdict.
         assert payload["futures"]["available"] is False
         assert payload["cards"]["futures"]["enabled"] is False
@@ -110,6 +126,13 @@ class TestLaunchSweepRoute:
     def test_missing_card_422(self, client: TestClient) -> None:
         assert client.post("/api/v1/launch/sweep").status_code == 422
 
+    def test_junk_ack_param_400_strict_whitelist(self, client: TestClient) -> None:
+        """Coordinator delta: the ack is a STRICT true/false whitelist."""
+        for junk in ("1", "yes", "TRUE", "True", "on", ""):
+            resp = client.post(f"/api/v1/launch/sweep?card=spot&acknowledge_sla_overrun={junk}")
+            assert resp.status_code == 400, junk
+            assert "acknowledge_sla_overrun" in resp.json()["detail"]
+
     def test_no_lake_503(self, bare_client: TestClient) -> None:
         resp = bare_client.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 503
@@ -118,6 +141,36 @@ class TestLaunchSweepRoute:
         resp = client.post("/api/v1/launch/sweep?card=futures")
         assert resp.status_code == 400
         assert "PR #1264" in resp.json()["detail"]
+
+    def test_missing_partitions_412_nothing_spawned(
+        self, tmp_path: Path, fake_spawner: dict[str, Any]
+    ) -> None:
+        """m3: POST-time re-check — red preconditions refuse with 412."""
+        # Only 1minute present — 20 partitions missing.
+        (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute").mkdir(parents=True)
+        store = SimpleNamespace(path=tmp_path / "instruments.duckdb")
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+            resp = c.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 412
+        assert "nifty_interval_partitions" in resp.json()["detail"]
+        assert "argv" not in fake_spawner
+
+    def test_failed_launch_500_with_detail(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M2 surfacing: a failed (compensated) launch is an honest 500."""
+        monkeypatch.setattr(
+            lb,
+            "launch_sweep",
+            lambda card, **kw: lb.LaunchOutcome(
+                started=False, status="failed", active=None, detail="finalize failed"
+            ),
+        )
+        resp = client.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert body["detail"] == "finalize failed"
 
     def test_spot_launch_started_then_409_single_flight(
         self,
@@ -138,7 +191,8 @@ class TestLaunchSweepRoute:
         argv = fake_spawner["argv"]
         assert "--symbols" in argv
         assert argv[argv.index("--symbols") + 1] == "NIFTY"
-        assert argv[-1] == "--acknowledge-sla-overrun"
+        # coordinator delta: default POST carries NO ack flag
+        assert lb.SLA_ACK_FLAG not in argv
         # double-click: HTTP 409, NEVER a duplicate launch
         fake_spawner.pop("argv")
         second = client.post("/api/v1/launch/sweep?card=spot")
@@ -153,6 +207,14 @@ class TestLaunchSweepRoute:
         assert state["active"]["present"] is True
         assert state["active"]["running"] is True
         assert state["active"]["pid"] == 34567
+
+    def test_acknowledged_spot_launch_appends_flag(
+        self, client: TestClient, fake_spawner: dict[str, Any]
+    ) -> None:
+        resp = client.post("/api/v1/launch/sweep?card=spot&acknowledge_sla_overrun=true")
+        assert resp.status_code == 200
+        assert fake_spawner["argv"][-1] == lb.SLA_ACK_FLAG
+        assert resp.json()["active"]["acknowledge_sla"] is True
 
     def test_futures_launch_flows_when_alias_available(
         self,

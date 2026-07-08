@@ -103,12 +103,32 @@
   <section>
     <h2>Preconditions (cheap probes — the launched CLI still enforces its own preflight)</h2>
     <div class="pre-list" id="preList"></div>
+    <div id="freshnessNote" class="sub" style="margin-top:8px">
+      Honest caveat: these probes check PRESENCE of all 21 NIFTY interval partitions only.
+      Timeframe FRESHNESS is verified by the CLI's own preflight at launch — a refusal
+      appears in the log tail below within seconds. Preconditions are re-checked at
+      launch time (a red check refuses with HTTP 412).
+    </div>
   </section>
 
   <section>
     <h2>Locked run cards</h2>
+    <div id="ackRow" style="margin: 0 0 10px; font-size: 13px;">
+      <label>
+        <input type="checkbox" id="ackSla" />
+        Acknowledge projected SLA overrun (appends <code>--acknowledge-sla-overrun</code>) —
+        deliberate operator override, OFF by default. The locked 252-tuple grid is expected
+        to PASS the SLA guard without it; tick only if the launch log shows the guard refusing.
+      </label>
+    </div>
     <div id="flash"></div>
     <div class="cards" id="cards"></div>
+    <div class="sub" style="margin-top:8px">
+      Keep-awake: when <code>caffeinate</code> exists (macOS) a SEPARATE detached
+      <code>caffeinate -i -s -w &lt;sweep-pid&gt;</code> watcher is spawned — the recorded pid
+      is always the sweep's own; the watcher's death is harmless. On Linux this degrades to
+      nothing (Energy-Saver checklist still applies).
+    </div>
   </section>
 
   <section>
@@ -159,12 +179,19 @@
     f.style.color = isError ? "var(--red)" : "var(--green)";
   }
 
+  function ackChecked() {
+    var box = document.getElementById("ackSla");
+    return !!(box && box.checked);
+  }
+
   function launch(card) {
     if (launching) { return; }
     var msg = "Launch the " + card + " sweep now? This starts a MULTI-DAY detached run.";
     if (!window.confirm(msg)) { return; }
     launching = true;
-    fetch("/api/v1/launch/sweep?card=" + encodeURIComponent(card), { method: "POST" })
+    var url = "/api/v1/launch/sweep?card=" + encodeURIComponent(card) +
+      "&acknowledge_sla_overrun=" + (ackChecked() ? "true" : "false");
+    fetch(url, { method: "POST" })
       .then(function (resp) {
         return resp.json().then(function (body) { return { status: resp.status, body: body }; });
       })
@@ -173,6 +200,8 @@
           flash("Launched " + card + " sweep (pid " + out.body.active.pid + ").", false);
         } else if (out.status === 409) {
           flash("Not launched: a run is already active (single-flight).", true);
+        } else if (out.status === 412) {
+          flash("Not launched: " + ((out.body && out.body.detail) || "preconditions failed"), true);
         } else {
           var detail = (out.body && (out.body.detail || out.body.reason)) || ("HTTP " + out.status);
           flash("Not launched: " + detail, true);
@@ -195,7 +224,8 @@
         c.symbol + " · " + c.exchange + "/" + c.segment +
         " · 21 TFs · k≤6 · SL/TP none · top 20 · end " + state.end_day));
       card.appendChild(el("div", "gridnote", state.grid_note));
-      var pre = el("pre", null, c.command_display);
+      var shown = c.command_display + (ackChecked() ? " " + c.sla_ack_flag : "");
+      var pre = el("pre", null, shown);
       card.appendChild(pre);
       card.appendChild(el("div", "reason", c.enabled ? "" : c.reason));
       var btn = el("button", "launch",
@@ -255,6 +285,10 @@
   poll();
   window.setInterval(function () { if (!document.hidden) { poll(); } }, POLL_MS);
   document.addEventListener("visibilitychange", function () { if (!document.hidden) { poll(); } });
+  var ackBox = document.getElementById("ackSla");
+  if (ackBox) {
+    ackBox.addEventListener("change", function () { if (lastState) { render(lastState); } });
+  }
 })();
 </script>
 </body>

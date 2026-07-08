@@ -2,13 +2,16 @@
 
 Covers ``brutex/dashboard/launch_button.py``'s pure/core surface at 100%
 line + branch: the LOCKED command builder (every flag verified against the
-real ``cli.py`` argparse), the ``end = today + 1`` exclusive-end correction,
-the caffeinate wrap + Linux degrade, the dynamic PR #1264 futures-alias
-probe (all three arms), the cheap preconditions, the flock + pidfile
-single-flight with stale-pid self-heal, pid liveness probing (waitpid +
-kill arms), the bounded log tail, and the page-state projections. The
+real ``cli.py`` argparse; the SLA acknowledgment strictly OPT-IN), the
+``end = today + 1`` exclusive-end correction, the SEPARATE keep-awake
+watcher (review round-2 M1 — the pidfile always holds the real sweep pid),
+the dynamic PR #1264 futures-alias probe (all three arms), the cheap
+preconditions (all 21 interval partitions — M4), the flock + pidfile
+single-flight with the pre-spawn placeholder + compensation (M2), pid
+liveness probing (waitpid + kill + best-effort cmdline disambiguation, m4),
+the bounded + confined log tail (m2), and the page-state projections. The
 spawner is ALWAYS injected — no test launches a real sweep (the default
-spawner is exercised once with a harmless ``python -c`` argv).
+spawner is exercised with harmless ``python -c`` argvs).
 """
 
 from __future__ import annotations
@@ -16,9 +19,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,7 +57,6 @@ class TestLockedSweepArgv:
         assert "--top 20" in joined
         assert "--results-root /lake/sweeps/run1" in joined
         assert "--lake-root /lake" in joined
-        assert "--acknowledge-sla-overrun" in joined
 
     def test_spot_card_locked_flags(self) -> None:
         argv = lb.locked_sweep_argv(
@@ -67,6 +70,30 @@ class TestLockedSweepArgv:
         assert "--symbols NIFTY" in joined
         assert "--segment INDEX" in joined
         assert "--exchange NSE" in joined
+
+    def test_sla_ack_is_opt_in_never_default(self) -> None:
+        """Coordinator delta: the flag rides ONLY an explicit acknowledgment.
+
+        The audit expects the locked 252-tuple grid to PASS the SLA guard
+        without the ack — the checkbox is the operator's deliberate
+        override, not a default.
+        """
+        base = lb.locked_sweep_argv(
+            "spot",
+            lake_root=Path("/lake"),
+            results_root=Path("/lake/sweeps/x"),
+            end_day=date(2026, 7, 9),
+        )
+        assert lb.SLA_ACK_FLAG not in base
+        acked = lb.locked_sweep_argv(
+            "spot",
+            lake_root=Path("/lake"),
+            results_root=Path("/lake/sweeps/x"),
+            end_day=date(2026, 7, 9),
+            acknowledge_sla=True,
+        )
+        assert acked[-1] == lb.SLA_ACK_FLAG
+        assert acked[:-1] == base
 
     def test_default_python_executable_is_sys_executable(self) -> None:
         argv = lb.locked_sweep_argv(
@@ -92,14 +119,15 @@ class TestLockedSweepArgv:
         assert lb.LOCKED_INTERVALS[-1] == "1day"
 
     def test_every_locked_flag_exists_on_real_cli_argparse(self) -> None:
-        """The locked command parses through main's REAL argparse tree."""
+        """The locked command (with AND without ack) parses through main's REAL argparse."""
+        parser = build_parser()
         argv = lb.locked_sweep_argv(
             "spot",
             lake_root=Path("/lake"),
             results_root=Path("/lake/sweeps/x"),
             end_day=date(2026, 7, 9),
+            acknowledge_sla=True,
         )
-        parser = build_parser()
         ns = parser.parse_args(argv[3:])  # drop python -m brutex.cli
         assert ns.command == "sweep-all"
         assert ns.symbols == "NIFTY"
@@ -108,6 +136,13 @@ class TestLockedSweepArgv:
         assert ns.top == 20
         assert ns.acknowledge_sla_overrun is True
         assert ns.intervals.count(",") == 20  # 21 timeframes
+        bare = lb.locked_sweep_argv(
+            "spot",
+            lake_root=Path("/lake"),
+            results_root=Path("/lake/sweeps/x"),
+            end_day=date(2026, 7, 9),
+        )
+        assert parser.parse_args(bare[3:]).acknowledge_sla_overrun is False
 
     def test_end_date_is_exclusive_corrected(self) -> None:
         """Audit correction (a): bare-date --end excludes that session ⇒ today+1."""
@@ -115,16 +150,51 @@ class TestLockedSweepArgv:
         assert lb.launch_end_date(date(2026, 12, 31)) == date(2027, 1, 1)
 
 
-class TestWrapKeepawake:
-    def test_wraps_when_caffeinate_found(self) -> None:
-        out = lb.wrap_keepawake(["a", "b"], which=lambda name: f"/usr/bin/{name}")
-        assert out == ["/usr/bin/caffeinate", "-i", "-s", "a", "b"]
+class TestKeepawakeWatcher:
+    """Review round-2 M1: keep-awake is a SEPARATE watcher of the sweep pid."""
+
+    def test_watcher_argv_watches_the_sweep_pid(self) -> None:
+        argv = lb.keepawake_watcher_argv(4242, which=lambda name: f"/usr/bin/{name}")
+        assert argv == ["/usr/bin/caffeinate", "-i", "-s", "-w", "4242"]
 
     def test_degrades_gracefully_without_caffeinate(self) -> None:
-        original = ["a", "b"]
-        out = lb.wrap_keepawake(original, which=lambda name: None)
-        assert out == ["a", "b"]
-        assert out is not original  # defensive copy
+        assert lb.keepawake_watcher_argv(4242, which=lambda name: None) is None
+
+    def test_spawn_watcher_records_pid(self) -> None:
+        record: dict[str, Any] = {}
+
+        def _spawn(argv: list[str]) -> int:
+            record["argv"] = argv
+            return 777
+
+        pid = lb._spawn_keepawake_watcher(
+            4242, which=lambda name: "/usr/bin/caffeinate", watcher_spawner=_spawn
+        )
+        assert pid == 777
+        assert record["argv"][-2:] == ["-w", "4242"]
+
+    def test_spawn_watcher_absent_caffeinate_is_none(self) -> None:
+        assert lb._spawn_keepawake_watcher(1, which=lambda name: None) is None
+
+    def test_spawn_watcher_failure_never_fails_the_launch(self) -> None:
+        def _boom(argv: list[str]) -> int:
+            raise OSError("spawn failed")
+
+        pid = lb._spawn_keepawake_watcher(
+            4242, which=lambda name: "/usr/bin/caffeinate", watcher_spawner=_boom
+        )
+        assert pid is None
+
+    def test_default_watcher_spawner_detached_harmless(self) -> None:
+        pid = lb._default_watcher_spawner([sys.executable, "-c", "pass"])
+        assert pid > 0
+        assert os.getpgid(pid) != os.getpgid(0)  # own session — detached
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if lb.probe_pid(pid) == "exited":
+                break
+            time.sleep(0.05)
+        assert lb.probe_pid(pid) == "exited"
 
 
 # ── futures-alias probe (PR #1264 dependency) ───────────────────────
@@ -195,6 +265,14 @@ def _check(checks: list[lb.PreconditionCheck], name: str) -> lb.PreconditionChec
     return matched[0]
 
 
+def _make_lake(tmp_path: Path, *, intervals: tuple[str, ...] = lb.LOCKED_INTERVALS) -> Path:
+    """A lake with the given NIFTY/INDEX interval partition dirs present."""
+    for interval in intervals:
+        (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / interval).mkdir(parents=True)
+    (tmp_path / "sweeps").mkdir(exist_ok=True)
+    return tmp_path
+
+
 class TestWheelsCheck:
     def test_ok_with_real_wheels(self) -> None:
         check = lb._wheels_check()
@@ -230,20 +308,30 @@ class TestRunPreconditions:
         assert len(checks) == 2
 
     def test_full_lake_all_green(self, tmp_path: Path) -> None:
-        (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute").mkdir(parents=True)
-        (tmp_path / "sweeps").mkdir()
-        checks = lb.run_preconditions(
-            tmp_path, min_free_bytes=1, disk_usage=_fake_usage(10 * 1024**3)
-        )
+        lake = _make_lake(tmp_path)
+        checks = lb.run_preconditions(lake, min_free_bytes=1, disk_usage=_fake_usage(10 * 1024**3))
         assert all(c.ok for c in checks), [c for c in checks if not c.ok]
-        assert _check(checks, "results_root_writable").detail == str(tmp_path / "sweeps")
+        assert _check(checks, "results_root_writable").detail == str(lake / "sweeps")
+        assert "all 21" in _check(checks, "nifty_interval_partitions").detail
 
-    def test_missing_partition_and_low_disk(self, tmp_path: Path) -> None:
+    def test_missing_partitions_named_and_low_disk(self, tmp_path: Path) -> None:
+        """M4: the presence check covers ALL 21 intervals, naming the missing."""
+        _make_lake(tmp_path, intervals=("1minute", "5minute"))
         checks = lb.run_preconditions(
             tmp_path, min_free_bytes=10 * 1024**3, disk_usage=_fake_usage(1)
         )
-        assert _check(checks, "nifty_1minute_partition").ok is False
+        partitions = _check(checks, "nifty_interval_partitions")
+        assert partitions.ok is False
+        assert "missing 19/21" in partitions.detail
+        assert "1day" in partitions.detail
+        assert "3hour" in partitions.detail
         assert _check(checks, "disk_free").ok is False
+
+    def test_empty_lake_all_partitions_missing(self, tmp_path: Path) -> None:
+        checks = lb.run_preconditions(tmp_path, disk_usage=_fake_usage(10**12))
+        partitions = _check(checks, "nifty_interval_partitions")
+        assert partitions.ok is False
+        assert "missing 21/21" in partitions.detail
         # no sweeps dir yet → the writable probe falls back to the lake root
         assert _check(checks, "results_root_writable").detail == str(tmp_path)
 
@@ -256,7 +344,10 @@ class TestRunPreconditions:
         assert check.ok is False
         assert "disk_usage failed" in check.detail
 
-    def test_active_launch_running_blocks(self, tmp_path: Path) -> None:
+    def test_active_launch_running_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(lb, "_cmdline_contains_sweep_all", lambda pid: True)
         lb._write_launch_state(tmp_path, {"pid": os.getpid(), "card": "spot"})
         checks = lb.run_preconditions(tmp_path, disk_usage=_fake_usage(10**12))
         check = _check(checks, "no_active_launch")
@@ -271,7 +362,7 @@ class TestRunPreconditions:
         assert "recoverable" in check.detail
 
 
-# ── pid probing + pidfile ────────────────────────────────────────────
+# ── pid probing + liveness + pidfile ─────────────────────────────────
 
 
 class TestProbePid:
@@ -280,8 +371,6 @@ class TestProbePid:
         assert lb.probe_pid(-1) == "exited"
 
     def test_own_live_child_running_then_reaped_exited(self) -> None:
-        import subprocess
-
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
             assert lb.probe_pid(proc.pid) == "running"
@@ -292,8 +381,6 @@ class TestProbePid:
         assert lb.probe_pid(proc.pid) == "exited"
 
     def test_own_exited_child_zombie_is_reaped_and_exited(self) -> None:
-        import subprocess
-
         proc = subprocess.Popen([sys.executable, "-c", "pass"])
         try:
             # Let it exit WITHOUT wait() — a zombie until probe_pid reaps it.
@@ -338,6 +425,58 @@ class TestProbePid:
         monkeypatch.setattr(lb.os, "waitpid", _not_our_child)
         monkeypatch.setattr(lb.os, "kill", _other_user)
         assert lb.probe_pid(12345) == "running"
+
+
+class TestCmdlineProbe:
+    """Review round-2 m4: best-effort /proc cmdline disambiguation."""
+
+    def test_definitive_sweep_all_true(self, tmp_path: Path) -> None:
+        (tmp_path / "42").mkdir()
+        (tmp_path / "42" / "cmdline").write_bytes(b"python\x00-m\x00brutex.cli\x00sweep-all\x00")
+        assert lb._cmdline_contains_sweep_all(42, proc_root=tmp_path) is True
+
+    def test_definitive_mismatch_false(self, tmp_path: Path) -> None:
+        (tmp_path / "42").mkdir()
+        (tmp_path / "42" / "cmdline").write_bytes(b"someother\x00process\x00")
+        assert lb._cmdline_contains_sweep_all(42, proc_root=tmp_path) is False
+
+    def test_empty_cmdline_is_unknown(self, tmp_path: Path) -> None:
+        (tmp_path / "42").mkdir()
+        (tmp_path / "42" / "cmdline").write_bytes(b"")
+        assert lb._cmdline_contains_sweep_all(42, proc_root=tmp_path) is None
+
+    def test_missing_entry_is_unknown_macos_arm(self, tmp_path: Path) -> None:
+        # No /proc entry (macOS has no /proc at all) → honest unknown.
+        assert lb._cmdline_contains_sweep_all(42, proc_root=tmp_path / "noproc") is None
+
+
+class TestStateLiveness:
+    def test_running_pid_with_unknown_cmdline_stays_running(self) -> None:
+        """m4: a probe ERROR must never downgrade a live run (safe = refuse dup)."""
+        state = {"pid": os.getpid()}
+        assert lb.state_liveness(state, cmdline_probe=lambda pid: None) == "running"
+
+    def test_recycled_pid_definitive_mismatch_reads_exited(self) -> None:
+        state = {"pid": os.getpid()}
+        assert lb.state_liveness(state, cmdline_probe=lambda pid: False) == "exited"
+
+    def test_dead_pid_exited_without_cmdline_probe(self) -> None:
+        assert lb.state_liveness({"pid": -4}) == "exited"
+
+    def test_fresh_launching_placeholder_is_running(self) -> None:
+        now = datetime(2026, 7, 8, 16, 0, tzinfo=UTC)
+        state = {"phase": "launching", "started_utc": now.isoformat()}
+        assert lb.state_liveness(state, now_utc=lambda: now + timedelta(seconds=5)) == "running"
+
+    def test_stranded_launching_placeholder_self_heals(self) -> None:
+        now = datetime(2026, 7, 8, 16, 0, tzinfo=UTC)
+        state = {"phase": "launching", "started_utc": now.isoformat()}
+        late = now + timedelta(seconds=lb.LAUNCHING_GRACE_S + 1)
+        assert lb.state_liveness(state, now_utc=lambda: late) == "exited"
+
+    def test_junk_placeholder_timestamp_is_stranded(self) -> None:
+        state = {"phase": "launching", "started_utc": "not-a-timestamp"}
+        assert lb.state_liveness(state) == "exited"
 
 
 class TestReadLaunchState:
@@ -393,11 +532,18 @@ class TestLaunchSweep:
 
     def test_fresh_launch_writes_pidfile_and_spawns_locked_command(self, tmp_path: Path) -> None:
         record: dict[str, Any] = {}
+        watcher_record: dict[str, Any] = {}
+
+        def _watcher(argv: list[str]) -> int:
+            watcher_record["argv"] = argv
+            return 888
+
         out = lb.launch_sweep(
             "spot",
             lake_root=tmp_path,
             spawner=_spawn_recorder(record, pid=4242),
             which=lambda name: "/usr/bin/caffeinate",
+            watcher_spawner=_watcher,
             now_utc=lambda: datetime(2026, 7, 8, 16, 0, tzinfo=UTC),
             today_ist=lambda: date(2026, 7, 8),
         )
@@ -405,10 +551,18 @@ class TestLaunchSweep:
         assert out.status == "started"
         assert out.active is not None
         assert out.active["pid"] == 4242
-        # caffeinate wrap + the locked command + the end=today+1 correction
+        assert out.active["phase"] == "running"
+        # M1: the SWEEP argv is spawned directly (never caffeinate-wrapped);
+        # keep-awake is the SEPARATE watcher of the real sweep pid.
         argv = record["argv"]
-        assert argv[:3] == ["/usr/bin/caffeinate", "-i", "-s"]
-        assert "--end" in argv
+        assert argv[0] == sys.executable
+        assert "caffeinate" not in " ".join(argv)
+        assert watcher_record["argv"] == ["/usr/bin/caffeinate", "-i", "-s", "-w", "4242"]
+        assert out.active["keepawake_pid"] == 888
+        # coordinator delta: no ack by default
+        assert lb.SLA_ACK_FLAG not in argv
+        assert out.active["acknowledge_sla"] is False
+        # end=today+1 correction
         assert argv[argv.index("--end") + 1] == "2026-07-09"
         # fresh timestamped results root under <lake>/sweeps
         results_root = Path(out.active["results_root"])
@@ -416,13 +570,32 @@ class TestLaunchSweep:
         assert results_root.name == "launch-20260708-160000-spot"
         assert results_root.is_dir()
         assert record["log_path"] == results_root / "launch.log"
-        # durable pidfile
+        # durable pidfile — finalized with the real sweep pid
         state = lb.read_launch_state(tmp_path)
         assert state is not None
         assert state["pid"] == 4242
         assert state["card"] == "spot"
+        assert state["phase"] == "running"
 
-    def test_second_click_while_alive_is_already_running(self, tmp_path: Path) -> None:
+    def test_acknowledged_launch_appends_the_flag(self, tmp_path: Path) -> None:
+        record: dict[str, Any] = {}
+        out = lb.launch_sweep(
+            "spot",
+            lake_root=tmp_path,
+            spawner=_spawn_recorder(record),
+            which=lambda name: None,
+            acknowledge_sla=True,
+            today_ist=lambda: date(2026, 7, 8),
+        )
+        assert out.started is True
+        assert record["argv"][-1] == lb.SLA_ACK_FLAG
+        assert out.active is not None
+        assert out.active["acknowledge_sla"] is True
+
+    def test_second_click_while_alive_is_already_running(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(lb, "_cmdline_contains_sweep_all", lambda pid: True)
         lb._write_launch_state(tmp_path, {"pid": os.getpid(), "card": "spot", "results_root": "x"})
         record: dict[str, Any] = {}
         out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=_spawn_recorder(record))
@@ -432,6 +605,39 @@ class TestLaunchSweep:
         assert out.active["pid"] == os.getpid()
         assert "argv" not in record  # NEVER a duplicate launch
 
+    def test_fresh_launching_placeholder_blocks_duplicates(self, tmp_path: Path) -> None:
+        """M2: a mid-flight launch (placeholder) refuses a second click."""
+        now = datetime.now(UTC)
+        lb._write_launch_state(
+            tmp_path,
+            {"phase": "launching", "card": "spot", "started_utc": now.isoformat()},
+        )
+        record: dict[str, Any] = {}
+        out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=_spawn_recorder(record))
+        assert out.started is False
+        assert out.status == "already_running"
+        assert "argv" not in record
+
+    def test_stranded_placeholder_self_heals(self, tmp_path: Path) -> None:
+        """M2: a crash-stranded placeholder past the grace window recovers."""
+        old = datetime.now(UTC) - timedelta(seconds=lb.LAUNCHING_GRACE_S + 60)
+        lb._write_launch_state(
+            tmp_path,
+            {"phase": "launching", "card": "futures", "started_utc": old.isoformat()},
+        )
+        record: dict[str, Any] = {}
+        out = lb.launch_sweep(
+            "spot",
+            lake_root=tmp_path,
+            spawner=_spawn_recorder(record, pid=555),
+            which=lambda name: None,
+            today_ist=lambda: date(2026, 7, 8),
+        )
+        assert out.started is True
+        state = lb.read_launch_state(tmp_path)
+        assert state is not None
+        assert state["pid"] == 555
+
     def test_stale_dead_pid_self_heals(self, tmp_path: Path) -> None:
         lb._write_launch_state(tmp_path, {"pid": -7, "card": "futures"})
         record: dict[str, Any] = {}
@@ -439,6 +645,7 @@ class TestLaunchSweep:
             "spot",
             lake_root=tmp_path,
             spawner=_spawn_recorder(record, pid=555),
+            which=lambda name: None,
             today_ist=lambda: date(2026, 7, 8),
         )
         assert out.started is True
@@ -460,9 +667,84 @@ class TestLaunchSweep:
         finally:
             os.close(fd)
 
+    def test_prespawn_write_failure_spawns_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M2: a placeholder write failure is an honest FAILED — no process."""
+
+        def _boom(lake_root: Path, state: dict[str, Any]) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(lb, "_write_launch_state", _boom)
+        record: dict[str, Any] = {}
+        out = lb.launch_sweep(
+            "spot", lake_root=tmp_path, spawner=_spawn_recorder(record), which=lambda name: None
+        )
+        assert out.started is False
+        assert out.status == "failed"
+        assert "nothing launched" in out.detail
+        assert "argv" not in record
+
+    def test_finalize_write_failure_kills_the_spawned_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M2 compensation: finalize failure → the just-spawned run is killed."""
+        real_write = lb._write_launch_state
+        calls: list[str] = []
+
+        def _fail_finalize(lake_root: Path, state: dict[str, Any]) -> None:
+            if state.get("phase") == "launching":
+                calls.append("placeholder")
+                real_write(lake_root, state)
+                return
+            calls.append("finalize")
+            raise OSError("torn volume")
+
+        kills: list[int] = []
+
+        def _record_kill(pid: int) -> bool:
+            kills.append(pid)
+            return True
+
+        monkeypatch.setattr(lb, "_write_launch_state", _fail_finalize)
+        monkeypatch.setattr(lb, "_kill_session", _record_kill)
+        record: dict[str, Any] = {}
+        out = lb.launch_sweep(
+            "spot",
+            lake_root=tmp_path,
+            spawner=_spawn_recorder(record, pid=6161),
+            which=lambda name: None,
+        )
+        assert calls == ["placeholder", "finalize"]
+        assert out.started is False
+        assert out.status == "failed"
+        assert kills == [6161]
+        assert "DELIVERED" in out.detail
+
+    def test_finalize_failure_with_failed_kill_is_disclosed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_write = lb._write_launch_state
+
+        def _fail_finalize(lake_root: Path, state: dict[str, Any]) -> None:
+            if state.get("phase") == "launching":
+                real_write(lake_root, state)
+                return
+            raise OSError("torn volume")
+
+        monkeypatch.setattr(lb, "_write_launch_state", _fail_finalize)
+        monkeypatch.setattr(lb, "_kill_session", lambda pid: False)
+        out = lb.launch_sweep(
+            "spot", lake_root=tmp_path, spawner=_spawn_recorder({}), which=lambda name: None
+        )
+        assert out.status == "failed"
+        assert "verify manually" in out.detail
+
     def test_default_clock_and_today_arms(self, tmp_path: Path) -> None:
         record: dict[str, Any] = {}
-        out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=_spawn_recorder(record))
+        out = lb.launch_sweep(
+            "spot", lake_root=tmp_path, spawner=_spawn_recorder(record), which=lambda name: None
+        )
         assert out.started is True
         assert "argv" in record
 
@@ -472,9 +754,25 @@ class TestLaunchSweep:
         """spawner=None resolves the module seam — tests still never launch a sweep."""
         record: dict[str, Any] = {}
         monkeypatch.setattr(lb, "_default_spawner", _spawn_recorder(record, pid=777))
-        out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=None)
+        out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=None, which=lambda name: None)
         assert out.started is True
-        assert record["argv"][-1] == "--acknowledge-sla-overrun"
+        assert record["argv"][-1] == str(tmp_path)  # --lake-root value; NO ack by default
+
+
+class TestKillSession:
+    def test_kills_and_reaps_a_detached_child(self, tmp_path: Path) -> None:
+        log = tmp_path / "kill.log"
+        pid = lb._default_spawner([sys.executable, "-c", "import time; time.sleep(60)"], log)
+        assert lb._kill_session(pid) is True
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if lb.probe_pid(pid) == "exited":
+                break
+            time.sleep(0.05)
+        assert lb.probe_pid(pid) == "exited"
+
+    def test_nonexistent_pid_reports_failure(self) -> None:
+        assert lb._kill_session(2**22 + 12345) is False
 
 
 class TestDefaultSpawner:
@@ -492,6 +790,29 @@ class TestDefaultSpawner:
                 break
             time.sleep(0.05)
         assert "spawned-ok" in log_path.read_text(encoding="utf-8")
+
+    def test_child_runs_in_its_own_session(self, tmp_path: Path) -> None:
+        """m1: kills the start_new_session mutation — the child is DETACHED."""
+        log_path = tmp_path / "session.log"
+        pid = lb._default_spawner([sys.executable, "-c", "import time; time.sleep(30)"], log_path)
+        try:
+            assert os.getpgid(pid) != os.getpgid(0)  # own process group/session
+        finally:
+            lb._kill_session(pid)
+
+    def test_child_stdin_is_devnull(self, tmp_path: Path) -> None:
+        """m1: stdin=DEVNULL pinned — a read returns EOF immediately."""
+        log_path = tmp_path / "stdin.log"
+        pid = lb._default_spawner(
+            [sys.executable, "-c", "import sys; print(len(sys.stdin.read()), flush=True)"],
+            log_path,
+        )
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if lb.probe_pid(pid) == "exited":
+                break
+            time.sleep(0.05)
+        assert log_path.read_text(encoding="utf-8").strip() == "0"
 
     def test_child_env_carries_locked_workers(self, tmp_path: Path) -> None:
         log_path = tmp_path / "env.log"
@@ -531,6 +852,30 @@ class TestReadLogTail:
         assert tail.endswith("TAIL-END")
 
 
+class TestLogTailConfinement:
+    """Review round-2 m2: the tail is confined under <lake>/sweeps."""
+
+    def test_inside_sweeps_is_served(self, tmp_path: Path) -> None:
+        log = tmp_path / "sweeps" / "r1" / "launch.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("ok", encoding="utf-8")
+        assert lb._confined_log_tail(tmp_path, str(log), tail_bytes=64) == "ok"
+
+    def test_outside_sweeps_is_refused(self, tmp_path: Path) -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_text("do not serve", encoding="utf-8")
+        out = lb._confined_log_tail(tmp_path, str(secret), tail_bytes=64)
+        assert "refused" in out
+        assert "do not serve" not in out
+
+    def test_traversal_is_refused(self, tmp_path: Path) -> None:
+        (tmp_path / "sweeps").mkdir()
+        (tmp_path / "secret.txt").write_text("no", encoding="utf-8")
+        sneaky = str(tmp_path / "sweeps" / ".." / "secret.txt")
+        out = lb._confined_log_tail(tmp_path, sneaky, tail_bytes=64)
+        assert "refused" in out
+
+
 class TestLaunchStatus:
     def test_no_lake(self) -> None:
         assert lb.launch_status(None) == {"present": False, "running": False}
@@ -538,12 +883,17 @@ class TestLaunchStatus:
     def test_no_state(self, tmp_path: Path) -> None:
         assert lb.launch_status(tmp_path) == {"present": False, "running": False}
 
-    def test_running_state_with_log_tail(self, tmp_path: Path) -> None:
-        log = tmp_path / "run.log"
+    def test_running_state_with_log_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(lb, "_cmdline_contains_sweep_all", lambda pid: True)
+        log = tmp_path / "sweeps" / "r" / "run.log"
+        log.parent.mkdir(parents=True)
         log.write_text("progress line", encoding="utf-8")
         lb._write_launch_state(
             tmp_path,
             {
+                "phase": "running",
                 "pid": os.getpid(),
                 "card": "spot",
                 "results_root": str(tmp_path / "sweeps" / "r"),
@@ -561,11 +911,27 @@ class TestLaunchStatus:
         status = lb.launch_status(tmp_path)
         assert status["present"] is True
         assert status["running"] is False
+        assert status["pid"] is None  # non-positive pid projected as null
         assert status["log_tail"] == ""
+
+    def test_launching_placeholder_reads_running(self, tmp_path: Path) -> None:
+        lb._write_launch_state(
+            tmp_path,
+            {
+                "phase": "launching",
+                "card": "spot",
+                "started_utc": datetime.now(UTC).isoformat(),
+            },
+        )
+        status = lb.launch_status(tmp_path)
+        assert status["present"] is True
+        assert status["running"] is True
+        assert status["phase"] == "launching"
 
 
 class TestBuildLaunchState:
     def test_full_payload_shape(self, tmp_path: Path) -> None:
+        _make_lake(tmp_path)
         payload = lb.build_launch_state(
             tmp_path,
             which=lambda name: None,
@@ -575,8 +941,10 @@ class TestBuildLaunchState:
         assert payload["lake_root"] == str(tmp_path)
         assert payload["end_day"] == "2026-07-09"
         assert payload["grid_note"] == lb.GRID_HONESTY_NOTE
+        assert payload["keepawake_available"] is False
         assert {c["name"] for c in payload["preconditions"]} >= {
             "lake_configured",
+            "nifty_interval_partitions",
             "disk_free",
             "rust_wheels",
         }
@@ -589,8 +957,15 @@ class TestBuildLaunchState:
             assert futures_card["enabled"] is False
             assert "PR #1264" in futures_card["reason"]
         assert spot_card["enabled"] is True
-        assert "--acknowledge-sla-overrun" in spot_card["command_display"]
+        # coordinator delta: the base display carries NO ack flag; the exact
+        # token ships separately for the checkbox-conditional display.
+        assert lb.SLA_ACK_FLAG not in spot_card["command_display"]
+        assert spot_card["sla_ack_flag"] == lb.SLA_ACK_FLAG
         assert payload["active"] == {"present": False, "running": False}
+
+    def test_keepawake_available_when_caffeinate_found(self, tmp_path: Path) -> None:
+        payload = lb.build_launch_state(tmp_path, which=lambda name: f"/usr/bin/{name}")
+        assert payload["keepawake_available"] is True
 
     def test_no_lake_payload(self) -> None:
         payload = lb.build_launch_state(None, which=lambda name: None)
@@ -641,10 +1016,15 @@ class TestActiveLaunchModel:
             log_path="/r/l.log",
             command=("a", "b"),
             started_utc="2026-07-08T16:00:00+00:00",
+            keepawake_pid=2,
+            acknowledge_sla=True,
         )
         payload = active.as_dict()
         assert json.loads(json.dumps(payload)) == payload
         assert payload["command"] == ["a", "b"]
+        assert payload["phase"] == "running"
+        assert payload["keepawake_pid"] == 2
+        assert payload["acknowledge_sla"] is True
 
 
 class TestTemplateLoader:
@@ -653,3 +1033,11 @@ class TestTemplateLoader:
         first = lb._load_launch_template()
         assert "INTERIM" in first
         assert lb._load_launch_template() is first  # cached arm
+
+
+class TestLogTailUnresolvable:
+    def test_null_byte_log_path_is_refused(self, tmp_path: Path) -> None:
+        """A tampered state file with an embedded null byte cannot crash the page."""
+        out = lb._confined_log_tail(tmp_path, "bad\x00path.log", tail_bytes=64)
+        assert "refused" in out
+        assert "ValueError" in out
