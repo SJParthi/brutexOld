@@ -1,0 +1,12 @@
+{
+  "run_id": "run_legacy_top100_no_join_keys",
+  "state": "complete",
+  "exit_code": 0,
+  "refusal_text": null,
+  "error_type": null,
+  "attempt": 1,
+  "pid": 42123,
+  "wall_started_utc": "2026-06-01T09:00:00Z",
+  "wall_ended_utc": "2026-06-01T12:00:00Z",
+  "suspect": false
+}

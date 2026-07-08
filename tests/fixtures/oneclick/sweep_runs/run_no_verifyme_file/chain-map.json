@@ -1,0 +1,28 @@
+{
+  "run_id": "run_no_verifyme_file",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "sweep": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "stage3": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "cascade": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "artifacts": {
+      "state": "green",
+      "detail": "ok"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-07-06T18:00:00Z",
+  "schema_version": 1
+}

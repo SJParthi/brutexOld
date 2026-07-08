@@ -1,0 +1,119 @@
+{
+  "run_id": "demo-allpass-2026-07-08",
+  "selection": {
+    "symbols": [
+      "NIFTY"
+    ],
+    "intervals": [
+      "1m",
+      "5m",
+      "15m"
+    ],
+    "k": 2,
+    "directions": [
+      "long",
+      "short"
+    ],
+    "from_date": "2020-01-01",
+    "to_date": "2026-07-08",
+    "overfit_gate": true,
+    "stage3_enable": true,
+    "top": 1000,
+    "allow_missing_slices": false
+  },
+  "estimate": {
+    "trials": 1830000,
+    "est_seconds_provisional": 2400,
+    "est_bytes": 18874368
+  },
+  "actual": {
+    "trials": 1830000,
+    "seconds": 3580,
+    "bytes": 19532104,
+    "funnel": [
+      {
+        "stage": "enumerated",
+        "count": 1830000
+      },
+      {
+        "stage": "tested",
+        "count": 1830000
+      },
+      {
+        "stage": "skipped",
+        "count": 0
+      },
+      {
+        "stage": "in_flight",
+        "count": 0
+      }
+    ]
+  },
+  "per_stage_timings": {
+    "preflight_s": 2.9,
+    "sweep_s": 2980.0,
+    "stage3_s": 410.0,
+    "cascade_s": 150.0,
+    "artifacts_s": 3.0
+  },
+  "per_door_kills": [
+    {
+      "door": "min_hits",
+      "killed": 1200000
+    },
+    {
+      "door": "no_bars",
+      "killed": 8500
+    },
+    {
+      "door": "cache_skip",
+      "killed": 0
+    },
+    {
+      "door": "resume_skip",
+      "killed": 0
+    },
+    {
+      "door": "dsr",
+      "killed": 2100
+    },
+    {
+      "door": "spa",
+      "killed": 800
+    },
+    {
+      "door": "cpcv",
+      "killed": 480
+    },
+    {
+      "door": "walk_forward",
+      "killed": 130
+    },
+    {
+      "door": "k_of_n",
+      "killed": 55
+    },
+    {
+      "door": "robustness",
+      "killed": 20
+    }
+  ],
+  "dedup_skips": 0,
+  "tripwires": [],
+  "suspect": false,
+  "schema_version": 1,
+  "attempt": 1,
+  "exit_code": null,
+  "updated_utc": "2026-07-08T06:00:00Z",
+  "suspect_reasons": [],
+  "dedup_skips_detail": {
+    "cache": 0,
+    "resume": 0,
+    "sentinel": 0
+  },
+  "preflight": {
+    "refusals": [],
+    "clamps": []
+  },
+  "recorder_degraded": false
+}

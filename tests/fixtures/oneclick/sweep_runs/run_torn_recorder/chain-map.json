@@ -1,0 +1,28 @@
+{
+  "run_id": "run_torn_recorder",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "sweep": {
+      "state": "running",
+      "detail": "in flight"
+    },
+    "stage3": {
+      "state": "pending",
+      "detail": "awaiting sweep"
+    },
+    "cascade": {
+      "state": "pending",
+      "detail": "awaiting stage3"
+    },
+    "artifacts": {
+      "state": "pending",
+      "detail": "awaiting cascade"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-07-08T02:31:00Z",
+  "schema_version": 1
+}

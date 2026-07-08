@@ -1,0 +1,12 @@
+{
+  "run_id": "run_no_verifyme_file",
+  "state": "complete",
+  "exit_code": 0,
+  "refusal_text": null,
+  "error_type": null,
+  "attempt": 1,
+  "pid": 42123,
+  "wall_started_utc": "2026-07-06T15:00:00Z",
+  "wall_ended_utc": "2026-07-06T18:00:00Z",
+  "suspect": false
+}

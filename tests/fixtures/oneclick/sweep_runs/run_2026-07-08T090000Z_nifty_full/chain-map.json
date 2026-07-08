@@ -1,0 +1,28 @@
+{
+  "run_id": "run_2026-07-08T090000Z_nifty_full",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "preflight passed \u2014 0 refusals, 1 clamp"
+    },
+    "sweep": {
+      "state": "running",
+      "detail": "1,204,318 / 36,050,000 tuples done"
+    },
+    "stage3": {
+      "state": "pending",
+      "detail": "awaiting sweep completion"
+    },
+    "cascade": {
+      "state": "pending",
+      "detail": "awaiting stage3"
+    },
+    "artifacts": {
+      "state": "pending",
+      "detail": "awaiting cascade"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-07-08T09:14:22Z",
+  "schema_version": 1
+}

@@ -1,0 +1,65 @@
+{
+  "run_id": "run_torn_recorder",
+  "selection": {
+    "symbols": [
+      "NIFTY"
+    ],
+    "intervals": [
+      "1m",
+      "5m",
+      "15m"
+    ],
+    "k": 3,
+    "directions": [
+      "long",
+      "short"
+    ],
+    "from_date": "2020-01-01",
+    "to_date": "2026-07-08",
+    "overfit_gate": true,
+    "stage3_enable": true,
+    "top": 1000,
+    "allow_missing_slices": false
+  },
+  "estimate": null,
+  "actual": {
+    "funnel": [
+      {
+        "stage": "enumerated",
+        "count": 500000
+      },
+      {
+        "stage": "tested",
+        "count": 8000
+      }
+    ]
+  },
+  "per_stage_timings": {
+    "preflight_s": 3.0,
+    "sweep_s": 120.0
+  },
+  "per_door_kills": [
+    {
+      "door": "min_hits",
+      "killed": 3000
+    }
+  ],
+  "dedup_skips": 0,
+  "tripwires": [],
+  "suspect": false,
+  "schema_version": 1,
+  "attempt": 1,
+  "exit_code": null,
+  "updated_utc": "2026-07-08T02:31:00Z",
+  "suspect_reasons": [],
+  "dedup_skips_detail": {
+    "cache": 0,
+    "resume": 0,
+    "sentinel": 0
+  },
+  "preflight": {
+    "refusals": [],
+    "clamps": []
+  },
+  "recorder_degraded": false
+}

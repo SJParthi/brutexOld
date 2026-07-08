@@ -1,0 +1,28 @@
+{
+  "run_id": "run_2026-07-07T210000Z_nifty_smoke_complete",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "preflight passed \u2014 0 refusals, 1 clamp"
+    },
+    "sweep": {
+      "state": "green",
+      "detail": "1,830,000 / 1,830,000 tuples done"
+    },
+    "stage3": {
+      "state": "green",
+      "detail": "CMA-ES refinement complete \u2014 4,112 survivors"
+    },
+    "cascade": {
+      "state": "green",
+      "detail": "Stage-4 anti-luck cascade complete \u2014 312 survivors"
+    },
+    "artifacts": {
+      "state": "green",
+      "detail": "top100.json + trades/ written"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-07-07T21:42:09Z",
+  "schema_version": 1
+}

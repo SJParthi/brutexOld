@@ -1,0 +1,85 @@
+{
+  "run_id": "run_2026-07-08T090000Z_nifty_full",
+  "selection": {
+    "symbols": [
+      "NIFTY"
+    ],
+    "intervals": [
+      "1m",
+      "5m",
+      "15m"
+    ],
+    "k": 3,
+    "directions": [
+      "long",
+      "short"
+    ],
+    "from_date": "2020-01-01",
+    "to_date": "2026-07-08",
+    "overfit_gate": true,
+    "stage3_enable": true,
+    "top": 1000,
+    "allow_missing_slices": false
+  },
+  "estimate": null,
+  "actual": {
+    "funnel": [
+      {
+        "stage": "enumerated",
+        "count": 36050000
+      },
+      {
+        "stage": "tested",
+        "count": 1204318
+      },
+      {
+        "stage": "skipped",
+        "count": 41022
+      },
+      {
+        "stage": "in_flight",
+        "count": 64
+      }
+    ]
+  },
+  "per_stage_timings": {
+    "preflight_s": 4.8,
+    "sweep_s": 2612.4
+  },
+  "per_door_kills": [
+    {
+      "door": "min_hits",
+      "killed": 812004
+    },
+    {
+      "door": "no_bars",
+      "killed": 6120
+    },
+    {
+      "door": "cache_skip",
+      "killed": 40022
+    },
+    {
+      "door": "resume_skip",
+      "killed": 1000
+    }
+  ],
+  "dedup_skips": 41022,
+  "tripwires": [],
+  "suspect": false,
+  "schema_version": 1,
+  "attempt": 1,
+  "exit_code": null,
+  "updated_utc": "2026-07-08T09:14:22Z",
+  "suspect_reasons": [],
+  "dedup_skips_detail": {
+    "cache": 40022,
+    "resume": 1000,
+    "sentinel": 0
+  },
+  "preflight": {
+    "refusals": [],
+    "clamps": []
+  },
+  "recorder_degraded": false
+}

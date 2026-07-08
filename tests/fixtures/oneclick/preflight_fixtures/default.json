@@ -1,0 +1,17 @@
+{
+  "match": {},
+  "ok": true,
+  "refusals": [],
+  "clamps": [
+    {
+      "kind": "pre_2020_floor",
+      "detail": "from-date clamped to 2020-01-01 (lake floor)"
+    }
+  ],
+  "estimator": {
+    "trials": 36050,
+    "est_seconds_provisional": 1800,
+    "est_bytes": 52428800
+  },
+  "estimate_basis": "provisional"
+}

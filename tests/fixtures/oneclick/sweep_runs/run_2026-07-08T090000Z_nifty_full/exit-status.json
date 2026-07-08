@@ -1,0 +1,12 @@
+{
+  "run_id": "run_2026-07-08T090000Z_nifty_full",
+  "state": "running",
+  "exit_code": null,
+  "refusal_text": null,
+  "error_type": null,
+  "attempt": 1,
+  "pid": 42123,
+  "wall_started_utc": "2026-07-08T09:00:03Z",
+  "wall_ended_utc": null,
+  "suspect": false
+}

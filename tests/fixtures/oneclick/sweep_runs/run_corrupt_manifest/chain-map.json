@@ -1,0 +1,28 @@
+{
+  "run_id": "run_corrupt_manifest",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "sweep": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "stage3": {
+      "state": "amber",
+      "detail": "partial"
+    },
+    "cascade": {
+      "state": "pending",
+      "detail": "awaiting stage3"
+    },
+    "artifacts": {
+      "state": "pending",
+      "detail": "awaiting cascade"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-07-08T04:00:00Z",
+  "schema_version": 1
+}

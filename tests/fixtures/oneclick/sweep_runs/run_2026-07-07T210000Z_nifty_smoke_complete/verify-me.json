@@ -1,0 +1,33 @@
+{
+  "is_demo": false,
+  "checks": {
+    "determinism": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    },
+    "audit_replay": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    },
+    "trade_chart_match": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    },
+    "plain_english_arithmetic": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    },
+    "kill_resume": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    },
+    "dedup_zero_recomputed": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    },
+    "funnel_reconcile": {
+      "status": "awaiting",
+      "detail": "P2 audit-verify backend not yet merged"
+    }
+  }
+}

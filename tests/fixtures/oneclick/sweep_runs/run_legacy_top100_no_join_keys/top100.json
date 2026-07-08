@@ -1,0 +1,253 @@
+[
+  {
+    "rank": 1,
+    "mask_hex": "400000000a0",
+    "conditions": [
+      "ema20_below_ema200",
+      "near_pivot_r1",
+      "close_in_upper_third"
+    ],
+    "tf": "3m",
+    "direction": "short",
+    "arm": "sl_only",
+    "metrics": {
+      "sharpe": 3.215,
+      "sortino": 3.893,
+      "calmar": 1.246,
+      "profit_factor": 1.406,
+      "win_rate_pct": 60.8,
+      "max_drawdown_pct": 2.66,
+      "recovery_factor": 30582.34,
+      "total_trades": 575,
+      "net_pnl_paisa": 8134903,
+      "avg_trade_pnl_paisa": 14147,
+      "dsr": 0.8643,
+      "spa_pvalue": 0.0099,
+      "cpcv_pass_pct": 95.0
+    },
+    "regime": {
+      "trending_pct": 50.1,
+      "sideways_pct": 31.7,
+      "volatile_pct": 18.2,
+      "per_year": {
+        "2020": -4.51,
+        "2021": -1.23,
+        "2022": 8.93,
+        "2023": 3.2,
+        "2024": 19.67,
+        "2025": 11.03,
+        "2026": 2.58
+      },
+      "one_regime_wonder": false
+    },
+    "vix_band": {
+      "min": 13.1,
+      "avg": 18.4,
+      "max": 23.7,
+      "band_label": "13.1-23.7"
+    },
+    "family_id": "fam-0001"
+  },
+  {
+    "rank": 2,
+    "mask_hex": "9000400",
+    "conditions": [
+      "near_pivot_s1",
+      "near_fib_786",
+      "near_fib_1618"
+    ],
+    "tf": "5m",
+    "direction": "long",
+    "arm": "tp_only",
+    "metrics": {
+      "sharpe": 2.929,
+      "sortino": 3.628,
+      "calmar": 1.106,
+      "profit_factor": 1.434,
+      "win_rate_pct": 61.42,
+      "max_drawdown_pct": 3.07,
+      "recovery_factor": 27852.21,
+      "total_trades": 326,
+      "net_pnl_paisa": 8550630,
+      "avg_trade_pnl_paisa": 26228,
+      "dsr": 0.9431,
+      "spa_pvalue": 0.0098,
+      "cpcv_pass_pct": 94.82
+    },
+    "regime": {
+      "trending_pct": 49.9,
+      "sideways_pct": 10.6,
+      "volatile_pct": 39.5,
+      "per_year": {
+        "2020": 10.67,
+        "2021": 17.45,
+        "2022": 16.46,
+        "2023": 16.66,
+        "2024": 12.28,
+        "2025": 4.33,
+        "2026": 9.46
+      },
+      "one_regime_wonder": false
+    },
+    "vix_band": {
+      "min": 14.8,
+      "avg": 18.1,
+      "max": 21.5,
+      "band_label": "14.8-21.5"
+    },
+    "family_id": "fam-0002"
+  },
+  {
+    "rank": 3,
+    "mask_hex": "8000000034000",
+    "conditions": [
+      "close_below_pdh",
+      "close_below_pdl",
+      "near_pdh",
+      "outside_day"
+    ],
+    "tf": "15m",
+    "direction": "short",
+    "arm": "none",
+    "metrics": {
+      "sharpe": 2.999,
+      "sortino": 3.734,
+      "calmar": 1.165,
+      "profit_factor": 1.372,
+      "win_rate_pct": 61.32,
+      "max_drawdown_pct": 6.08,
+      "recovery_factor": 11986.23,
+      "total_trades": 326,
+      "net_pnl_paisa": 7287629,
+      "avg_trade_pnl_paisa": 22354,
+      "dsr": 0.8383,
+      "spa_pvalue": 0.0024,
+      "cpcv_pass_pct": 94.64
+    },
+    "regime": {
+      "trending_pct": 45.3,
+      "sideways_pct": 24.3,
+      "volatile_pct": 30.4,
+      "per_year": {
+        "2020": 21.56,
+        "2021": 0.61,
+        "2022": -0.81,
+        "2023": 2.21,
+        "2024": -4.42,
+        "2025": 0.43,
+        "2026": 10.64
+      },
+      "one_regime_wonder": false
+    },
+    "vix_band": {
+      "min": 13.1,
+      "avg": 22.5,
+      "max": 31.9,
+      "band_label": "13.1-31.9"
+    },
+    "family_id": "fam-0003"
+  },
+  {
+    "rank": 4,
+    "mask_hex": "48000000001c20",
+    "conditions": [
+      "ema20_below_ema200",
+      "near_pivot_s1",
+      "near_pivot_s2",
+      "near_pivot_s3",
+      "outside_day",
+      "near_pivot_r5"
+    ],
+    "tf": "30m",
+    "direction": "long",
+    "arm": "sl_tp",
+    "metrics": {
+      "sharpe": 3.119,
+      "sortino": 4.001,
+      "calmar": 1.085,
+      "profit_factor": 1.338,
+      "win_rate_pct": 58.19,
+      "max_drawdown_pct": 6.16,
+      "recovery_factor": 4586.1,
+      "total_trades": 554,
+      "net_pnl_paisa": 2825038,
+      "avg_trade_pnl_paisa": 5099,
+      "dsr": 0.8463,
+      "spa_pvalue": 0.0091,
+      "cpcv_pass_pct": 94.46
+    },
+    "regime": {
+      "trending_pct": 47.1,
+      "sideways_pct": 29.3,
+      "volatile_pct": 23.6,
+      "per_year": {
+        "2020": 5.67,
+        "2021": 13.15,
+        "2022": -1.63,
+        "2023": 5.68,
+        "2024": 5.37,
+        "2025": -1.24,
+        "2026": 14.69
+      },
+      "one_regime_wonder": true
+    },
+    "vix_band": {
+      "min": 13.4,
+      "avg": 18.2,
+      "max": 23.0,
+      "band_label": "13.4-23"
+    },
+    "family_id": "fam-0004"
+  },
+  {
+    "rank": 5,
+    "mask_hex": "1000080301",
+    "conditions": [
+      "close_above_ema20",
+      "near_pivot_r2",
+      "near_pivot_r3",
+      "near_fib_0",
+      "long_lower_wick"
+    ],
+    "tf": "1h",
+    "direction": "short",
+    "arm": "sl_only",
+    "metrics": {
+      "sharpe": 2.968,
+      "sortino": 4.027,
+      "calmar": 1.104,
+      "profit_factor": 1.385,
+      "win_rate_pct": 59.32,
+      "max_drawdown_pct": 5.84,
+      "recovery_factor": 2157.73,
+      "total_trades": 173,
+      "net_pnl_paisa": 1260117,
+      "avg_trade_pnl_paisa": 7283,
+      "dsr": 0.8683,
+      "spa_pvalue": 0.0042,
+      "cpcv_pass_pct": 94.29
+    },
+    "regime": {
+      "trending_pct": 51.2,
+      "sideways_pct": 28.7,
+      "volatile_pct": 20.1,
+      "per_year": {
+        "2020": 10.18,
+        "2021": -1.51,
+        "2022": 19.0,
+        "2023": 10.53,
+        "2024": 8.1,
+        "2025": 5.43,
+        "2026": 0.68
+      },
+      "one_regime_wonder": false
+    },
+    "vix_band": {
+      "min": 14.2,
+      "avg": 17.2,
+      "max": 20.3,
+      "band_label": "14.2-20.3"
+    },
+    "family_id": "fam-0005"
+  }
+]

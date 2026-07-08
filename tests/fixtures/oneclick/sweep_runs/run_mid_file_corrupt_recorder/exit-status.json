@@ -1,0 +1,12 @@
+{
+  "run_id": "run_mid_file_corrupt_recorder",
+  "state": "running",
+  "exit_code": null,
+  "refusal_text": null,
+  "error_type": null,
+  "attempt": 1,
+  "pid": 42123,
+  "wall_started_utc": "2026-07-08T03:00:00Z",
+  "wall_ended_utc": null,
+  "suspect": false
+}

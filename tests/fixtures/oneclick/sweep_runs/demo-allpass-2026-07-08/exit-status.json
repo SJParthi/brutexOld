@@ -1,0 +1,12 @@
+{
+  "run_id": "demo-allpass-2026-07-08",
+  "state": "complete",
+  "exit_code": 0,
+  "refusal_text": null,
+  "error_type": null,
+  "attempt": 1,
+  "pid": 42123,
+  "wall_started_utc": "2026-07-08T05:00:00Z",
+  "wall_ended_utc": "2026-07-08T06:00:00Z",
+  "suspect": false
+}

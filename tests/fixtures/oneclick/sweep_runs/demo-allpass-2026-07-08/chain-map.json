@@ -1,0 +1,28 @@
+{
+  "run_id": "demo-allpass-2026-07-08",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "preflight passed \u2014 0 refusals, 0 clamps"
+    },
+    "sweep": {
+      "state": "green",
+      "detail": "1,830,000 / 1,830,000 tuples done"
+    },
+    "stage3": {
+      "state": "green",
+      "detail": "CMA-ES refinement complete"
+    },
+    "cascade": {
+      "state": "green",
+      "detail": "Stage-4 anti-luck cascade complete"
+    },
+    "artifacts": {
+      "state": "green",
+      "detail": "top100.json + trades/ written"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-07-08T06:00:00Z",
+  "schema_version": 1
+}

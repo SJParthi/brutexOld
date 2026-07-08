@@ -1,0 +1,25 @@
+{
+  "match": {
+    "symbols": [
+      "BANKNIFTY"
+    ]
+  },
+  "ok": false,
+  "refusals": [
+    {
+      "symbol": "BANKNIFTY",
+      "tf": "5m",
+      "missing_spans": [
+        "2021-03-15..2021-03-19"
+      ],
+      "reason": "1m coverage hole vs the real NSE calendar (not a holiday)"
+    }
+  ],
+  "clamps": [],
+  "estimator": {
+    "trials": 0,
+    "est_seconds_provisional": 0,
+    "est_bytes": 0
+  },
+  "estimate_basis": "provisional"
+}

@@ -1,0 +1,119 @@
+{
+  "run_id": "run_2026-07-07T210000Z_nifty_smoke_complete",
+  "selection": {
+    "symbols": [
+      "NIFTY"
+    ],
+    "intervals": [
+      "1m",
+      "5m",
+      "15m"
+    ],
+    "k": 2,
+    "directions": [
+      "long",
+      "short"
+    ],
+    "from_date": "2020-01-01",
+    "to_date": "2026-07-07",
+    "overfit_gate": true,
+    "stage3_enable": true,
+    "top": 1000,
+    "allow_missing_slices": false
+  },
+  "estimate": {
+    "trials": 1830000,
+    "est_seconds_provisional": 2400,
+    "est_bytes": 18874368
+  },
+  "actual": {
+    "trials": 1830000,
+    "seconds": 2529,
+    "bytes": 19532104,
+    "funnel": [
+      {
+        "stage": "enumerated",
+        "count": 1830000
+      },
+      {
+        "stage": "tested",
+        "count": 1830000
+      },
+      {
+        "stage": "skipped",
+        "count": 0
+      },
+      {
+        "stage": "in_flight",
+        "count": 0
+      }
+    ]
+  },
+  "per_stage_timings": {
+    "preflight_s": 3.1,
+    "sweep_s": 1980.2,
+    "stage3_s": 402.6,
+    "cascade_s": 143.5,
+    "artifacts_s": 2.7
+  },
+  "per_door_kills": [
+    {
+      "door": "min_hits",
+      "killed": 1288400
+    },
+    {
+      "door": "no_bars",
+      "killed": 9020
+    },
+    {
+      "door": "cache_skip",
+      "killed": 0
+    },
+    {
+      "door": "resume_skip",
+      "killed": 0
+    },
+    {
+      "door": "dsr",
+      "killed": 2211
+    },
+    {
+      "door": "spa",
+      "killed": 890
+    },
+    {
+      "door": "cpcv",
+      "killed": 512
+    },
+    {
+      "door": "walk_forward",
+      "killed": 140
+    },
+    {
+      "door": "k_of_n",
+      "killed": 61
+    },
+    {
+      "door": "robustness",
+      "killed": 22
+    }
+  ],
+  "dedup_skips": 0,
+  "tripwires": [],
+  "suspect": false,
+  "schema_version": 1,
+  "attempt": 1,
+  "exit_code": null,
+  "updated_utc": "2026-07-07T21:42:09Z",
+  "suspect_reasons": [],
+  "dedup_skips_detail": {
+    "cache": 0,
+    "resume": 0,
+    "sentinel": 0
+  },
+  "preflight": {
+    "refusals": [],
+    "clamps": []
+  },
+  "recorder_degraded": false
+}

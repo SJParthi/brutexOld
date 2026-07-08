@@ -1,0 +1,28 @@
+{
+  "run_id": "run_legacy_top100_no_join_keys",
+  "links": {
+    "preflight": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "sweep": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "stage3": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "cascade": {
+      "state": "green",
+      "detail": "ok"
+    },
+    "artifacts": {
+      "state": "green",
+      "detail": "ok"
+    }
+  },
+  "suspect": false,
+  "updated_utc": "2026-06-01T12:00:00Z",
+  "schema_version": 1
+}

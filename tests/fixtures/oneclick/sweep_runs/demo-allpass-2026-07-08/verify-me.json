@@ -1,0 +1,33 @@
+{
+  "is_demo": true,
+  "checks": {
+    "determinism": {
+      "status": "pass",
+      "detail": "re-run byte-identical vs stored top100.json (K=200 sample)"
+    },
+    "audit_replay": {
+      "status": "pass",
+      "detail": "flight-recorder.jsonl chain replayed end-to-end, 0 breaks"
+    },
+    "trade_chart_match": {
+      "status": "pass",
+      "detail": "operator eyeball-matched rank-0001 vs TradingView"
+    },
+    "plain_english_arithmetic": {
+      "status": "pass",
+      "detail": "line-by-line pnl sum matches displayed net P&L"
+    },
+    "kill_resume": {
+      "status": "pass",
+      "detail": "killed at tuple 900000, resumed, identical final numbers"
+    },
+    "dedup_zero_recomputed": {
+      "status": "pass",
+      "detail": "0 recomputed in 4.2s on re-click"
+    },
+    "funnel_reconcile": {
+      "status": "pass",
+      "detail": "enumerated == tested + skipped + in_flight, exact"
+    }
+  }
+}
