@@ -36,7 +36,6 @@ state; a stray tuple parquet is inert without its sentinel pairing.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 from collections.abc import Callable
@@ -54,7 +53,9 @@ from brutex.nightly.backup import (
     BackupEntry,
     BackupManifest,
     BackupManifestError,
+    fsync_file,
     sha256_file,
+    sweep_runs_sibling_root,
 )
 
 logger = structlog.get_logger(__name__)
@@ -231,16 +232,6 @@ def _default_copy(source: Path, dest: Path) -> None:
     shutil.copyfile(source, dest)
 
 
-def _fsync_file(path: Path) -> None:
-    """Best-effort fsync so the per-file replace is durable."""
-    with contextlib.suppress(OSError):
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-
 def _mismatch_message(prefix: str, mismatches: tuple[str, ...]) -> str:
     """Build the human-readable message describing verification mismatches."""
     named = ", ".join(mismatches[:_VERIFY_NAME_CAP])
@@ -280,7 +271,13 @@ def restore_snapshot(
         )
 
     copier = _default_copy if copy_file is None else copy_file
-    roots = {"lake": plan.lake_root, "results": plan.results_root}
+    roots = {
+        "lake": plan.lake_root,
+        "results": plan.results_root,
+        # Ruling 4: the SIBLING run-artifact root the backup's third
+        # namespace covers (`<results_root parent>/sweep_runs/`).
+        "sweep_runs": sweep_runs_sibling_root(plan.results_root),
+    }
 
     # ── Phase C — deterministic ordered copy ─────────────────────────────
     restored = 0
@@ -304,7 +301,7 @@ def restore_snapshot(
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".brutex-restore-tmp")
         copier(plan.snapshot / entry.namespace / entry.relpath, tmp)
-        _fsync_file(tmp)
+        fsync_file(tmp)
         os.replace(tmp, dest)
         restored += 1
         total_bytes += entry.size_bytes

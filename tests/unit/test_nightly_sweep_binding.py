@@ -418,3 +418,35 @@ def test_probe_newest_fresh_run_wins_and_files_ignored(tmp_path: Path) -> None:
     assert probe.found == ("run_manifest", "top100")
     assert probe.absent == ()
     assert probe.paths["top100"] == str(newer / "top100.json")
+
+
+def test_probe_sweep_runs_in_tree_root_wins(tmp_path: Path) -> None:
+    """Ruling 4: `sweep_runs/` supersedes the legacy `runs/` sketch — an
+    in-tree `<results_root>/sweep_runs/<id>/` run dir is probed."""
+    results = tmp_path / "sweeps"
+    run = results / "sweep_runs" / "grid-1"
+    run.mkdir(parents=True)
+    (run / "top100.json").write_text("{}", encoding="utf-8")
+    os.utime(run, (5_000.0, 5_000.0))
+    probe = probe_contract_artifacts(results, since_utc=1_000.0)
+    assert probe.found == ("top100",)
+    assert probe.paths == {"top100": str(run / "top100.json")}
+
+
+def test_probe_sweep_runs_sibling_root_probed(tmp_path: Path) -> None:
+    """The SHIPPED P3 `trade_store.sweep_run_dir` law places run artifacts at
+    `<results_root parent>/sweep_runs/` — probed too, newest-fresh-dir-wins
+    ACROSS roots (a fresher sibling run beats an older legacy `runs/` one)."""
+    results = tmp_path / "sweeps"
+    legacy = results / "runs" / "run-legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text("{}", encoding="utf-8")
+    sibling_run = tmp_path / "sweep_runs" / "grid-2"
+    sibling_run.mkdir(parents=True)
+    (sibling_run / "manifest.json").write_text("{}", encoding="utf-8")
+    (sibling_run / "top100.json").write_text("{}", encoding="utf-8")
+    os.utime(legacy, (2_000.0, 2_000.0))
+    os.utime(sibling_run, (3_000.0, 3_000.0))
+    probe = probe_contract_artifacts(results, since_utc=1_000.0)
+    assert probe.found == ("run_manifest", "top100")
+    assert probe.paths["top100"] == str(sibling_run / "top100.json")

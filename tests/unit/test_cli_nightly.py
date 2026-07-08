@@ -14,6 +14,8 @@ fail-loud pre-chain, dates_required=False fills default_date_range() while
 from __future__ import annotations
 
 import json
+import os
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -784,3 +786,92 @@ def test_backup_retention_prune_is_audited(
     assert "BACKUP_PRUNE" in audit_text
     sealed = [p for p in broot.iterdir() if not p.name.endswith(".partial")]
     assert len(sealed) == 1
+
+
+def test_install_prints_pmset_wake_for_the_actual_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Row 20: the printed guidance MANDATES the scheduled wake, computed
+    from the ACTUAL --at trigger (5 min lead), never a hardcoded 01:25."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = cli.cmd_nightly_install(
+        at="02:15",
+        label="com.brutex.nightly",
+        plist_dir=tmp_path / "LaunchAgents",
+        lake_root=None,
+        backup_root=None,
+        runner=_FakeRunner(),
+        platform="darwin",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "REQUIRED for on-time fires" in out
+    assert "sudo pmset repeat wakeorpoweron MTWRFSU 02:10:00" in out
+    assert "BruteX never runs pmset" in out
+
+
+def _stale_evidence_status_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """Plist installed at 01:30 + a >30 h-old run dir ⇒ dead-man MISSED
+    regardless of the local timezone (30 h > 24 h max-since-fire + 3 h grace)."""
+    lake, results = _mini_lake(tmp_path)
+    plist_dir = tmp_path / "LaunchAgents"
+    plist_dir.mkdir()
+    (plist_dir / "com.brutex.nightly.plist").write_text(
+        "<plist><key>Hour</key><integer>1</integer><key>Minute</key><integer>30</integer></plist>",
+        encoding="utf-8",
+    )
+    run_dir = results / "nightly" / "nightly-OLD"
+    run_dir.mkdir(parents=True)
+    stale = time.time() - 30 * 3600.0
+    os.utime(run_dir, (stale, stale))
+    return lake, plist_dir
+
+
+def test_status_deadman_missed_fires_alert_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Row 20 dead-man: a MISSED verdict prints the line AND fires the
+    Telegram seam best-effort (the surface that notices must alert)."""
+    lake, plist_dir = _stale_evidence_status_fixture(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    class SpyAlerter:
+        def nightly_deadman(self, *, detail: str, newest_run_age_seconds: float | None) -> bool:
+            calls.append({"detail": detail, "age": newest_run_age_seconds})
+            return True
+
+    monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", SpyAlerter)
+    rc = cli.cmd_nightly_status(
+        lake_root=lake,
+        results_root=None,
+        label="com.brutex.nightly",
+        plist_dir=plist_dir,
+        runner=_FakeRunner(list_rc=0),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dead-man: MISSED" in out
+    [call] = calls
+    assert "slept through" in str(call["detail"])
+    assert isinstance(call["age"], float) and call["age"] > 24 * 3600.0
+
+
+def test_status_deadman_alert_raise_never_breaks_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lake, plist_dir = _stale_evidence_status_fixture(tmp_path)
+
+    class ExplodingAlerter:
+        def __init__(self) -> None:
+            raise RuntimeError("notifier bootstrap blew up")
+
+    monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", ExplodingAlerter)
+    rc = cli.cmd_nightly_status(
+        lake_root=lake,
+        results_root=None,
+        label="com.brutex.nightly",
+        plist_dir=plist_dir,
+        runner=_FakeRunner(list_rc=0),
+    )
+    assert rc == 0  # best-effort: the read-only status command never breaks
+    assert "dead-man: MISSED" in capsys.readouterr().out

@@ -44,8 +44,15 @@ position × mode in `tests/property/test_nightly_chain_property.py`).
 brutex nightly install                      # default 01:30 local; --at HH:MM to change
 brutex nightly run --dry-run                # the post-install smoke: probes only, NO locks, ZERO mutation
 brutex notify test                          # prove the Telegram channel BEFORE trusting silence
-sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00   # OPTIONAL, run yourself — see §7
+sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00   # REQUIRED, run yourself — see §7
 ```
+
+The `pmset` scheduled wake is **MANDATED** (gap-register 2026-07-08 row 20):
+launchd cannot wake a sleeping Mac, so without it the nightly silently does
+not run on any night the machine sleeps. `nightly install` prints the exact
+command computed for YOUR `--at` (5 minutes before the trigger —
+`schedule.pmset_wake_command`); BruteX documents + prints it and NEVER runs
+it (sudo, a system-wide power setting).
 
 `install` writes `~/Library/LaunchAgents/com.brutex.nightly.plist`, loads it,
 and then MANDATORILY verifies `launchctl list com.brutex.nightly` succeeds —
@@ -84,10 +91,21 @@ collision ok · disk ok · backup ok (2481 files) · pull ok (52340 bars) · pre
 brutex nightly status
 ```
 
-Four honest lines: schedule (plist present? launchctl listed? next fire),
-last run (`nightly_id`, exit, blocker, age), latest sealed snapshot, and the
-lock-file caveat (existence ≠ held — a flock cannot be observed without
-acquiring it). Deeper forensics, per run:
+Five honest lines: schedule (plist present? launchctl listed? next fire),
+last run (`nightly_id`, exit, blocker, age), latest sealed snapshot, the
+**row-20 dead-man verdict** (`OK` / `MISSED` / `UNKNOWN`), and the lock-file
+caveat (existence ≠ held — a flock cannot be observed without acquiring it).
+
+The dead-man (`schedule.deadman_verdict`, pure + fully tested) is the ONLY
+signal for the perfectly-silent staleness of a Mac asleep at the trigger —
+no process starts, so no in-run alerter can fire. It compares the newest
+per-run dir under `<results_root>/nightly/` (created at chain START, so a
+long-running sweep leg never reads stale; the shared `audit/` dir is
+excluded) against the most recent expected fire + a 3 h grace. A `MISSED`
+verdict also fires `SweepAlerter.nightly_deadman` (CRITICAL, distinct
+`nightly-deadman` dedupe key) best-effort from `nightly status`. The
+dashboard-BANNER half of row 20 is **P4's zone** — the banner wires this
+same `deadman_verdict` seam at merge-integration. Deeper forensics, per run:
 
 | Artifact | Path |
 |---|---|
@@ -108,7 +126,8 @@ Scope (fixed inventory, `brutex/nightly/backup.py::backup_inventory`):
 | In | Out (by law, reason recorded in the manifest) |
 |---|---|
 | `window_ledger/` (ledger.parquet + deltas), `registry.duckdb`, `instruments.duckdb`, `catalog.duckdb`, lake `audit/` | `bars/` — re-pullable; full-lake protection stays the manual path (`lake-backup-restore.md`) |
-| the whole `sweeps/` tree: tuple parquets, `.complete.json` sentinels, trial stats, `audit/*.jsonl`, `checkpoint/`, `dedup-cache/` LMDB, `cascade/`, PRIOR `nightly/<id>/` dirs | `.locks/` (kernel-released flocks), `.rate/` (transient), `.quarantine/` (heal forensics), `sweeps/progress/` (transient — restoring a stale "running" would false-positive the liveness probe), the CURRENT `nightly/<id>/`, the SHARED cross-run `nightly/audit/` chain (live-appended by the very command that snapshots/restores — a restored copy would `os.replace` the writer's open inode, rolling the forensic chain back to snapshot time and losing RESTORE_START/RESTORE_DONE to a dead inode; each run's audit tail is durably captured in its prior `nightly/<id>/bundle/`) |
+| the whole `sweeps/` tree: tuple parquets, `.complete.json` sentinels, trial stats, `audit/*.jsonl`, `checkpoint/`, `dedup-cache/` LMDB, `cascade/`, PRIOR `nightly/<id>/` dirs — incl., when present, the in-tree `<results_root>/sweep_runs/` run artifacts (Ruling 4) + `<results_root>/estimator_calibration.json` (Ruling 13, the R20/R23 calibration store) | `.locks/` (kernel-released flocks), `.rate/` (transient), `.quarantine/` (heal forensics), `sweeps/progress/` (transient — restoring a stale "running" would false-positive the liveness probe), the CURRENT `nightly/<id>/`, the SHARED cross-run `nightly/audit/` chain (live-appended by the very command that snapshots/restores — a restored copy would `os.replace` the writer's open inode, rolling the forensic chain back to snapshot time and losing RESTORE_START/RESTORE_DONE to a dead inode; each run's audit tail is durably captured in its prior `nightly/<id>/bundle/`) |
+| the SIBLING run-artifact root `<results_root parent>/sweep_runs/` — the SHIPPED P3 `trade_store.sweep_run_dir` layout (top100.json, baselines, results-depth sidecars), a third `sweep_runs` manifest namespace, include-if-present | `~/.brutex/runs/` — the Ruling-15 INTERNAL-disk forensics mirror (flight recorder / diagnostic bundle). It exists precisely to survive the external volume this backup lives on, so it is NEVER dragged into the backup; protect it yourself with e.g. `rsync -a ~/.brutex/runs/ <second-volume>/brutex-runs-mirror/` (or Time Machine) |
 
 Consistency: everything in scope is quiescent — the nightly holds the pull
 locks (no ledger/registry/audit writer can run) and the liveness probe
@@ -204,11 +223,16 @@ lake — the liveness probe refuses when they overlap.
 launchd `StartCalendarInterval` does NOT wake a sleeping Mac; a fire missed
 while ASLEEP runs ONCE at next wake (coalesced); missed while POWERED OFF is
 skipped entirely. `keep_awake` (caffeinate) holds the machine awake WHILE the
-chain runs but cannot wake it at 01:30. Guaranteed-on-time fires need the
-operator's one-time `sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00` —
-documented, NEVER run by BruteX (a system-wide power setting; we do not sudo
-on the operator's behalf). A late (next-wake) run that collides with a
-morning manual pull is a LOUD Telegram'd refusal — designed behavior.
+chain runs but cannot wake it at 01:30. On-time fires therefore REQUIRE the
+operator's one-time scheduled wake, MANDATED by §1 (gap-register row 20) —
+`sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00` for the default 01:30
+trigger; `nightly install` prints the exact command for your `--at`.
+Documented + printed, NEVER run by BruteX (a system-wide power setting; we
+do not sudo on the operator's behalf). A late (next-wake) run that collides
+with a morning manual pull is a LOUD Telegram'd refusal — designed behavior.
+The dead-man verdict on `nightly status` (§3) is the detection net for the
+silent non-run; the P4 dashboard banner wires the same seam at
+merge-integration.
 
 ## 8. Crash windows (crash-at-any-point recovery)
 
@@ -275,6 +299,36 @@ morning manual pull is a LOUD Telegram'd refusal — designed behavior.
     nightly (the observe-only sampler is dashboard-owned); pacing itself
     binds identically via the shared `SessionRateController` + 500/min
     governor.
+15. **Daemon-side SLA ruling PENDING (gap-register row 2):** the nightly
+    HARD-refuses `--acknowledge-sla-overrun`, so an institutional-scale grid
+    that trips `check_sweep_sla` is LOUDLY REFUSED every night (exit 1,
+    CRITICAL summary) until P1 lands the acknowledge/calibrate path — never
+    a silent overrun, but also never an unattended institutional run today.
+16. **Incremental nightly = FULL recompute until P2's per-slice re-keying
+    (row 16):** every tuple key folds the GRID-wide `data_snapshot_hash`, so
+    the nightly's fresh pull re-keys EVERY tuple and the sweep leg re-runs
+    the whole grid each night — composing with the §5 `code_commit_sha`
+    caveat (a deploy alone forces the same full re-run). The Telegram
+    `skipped-cache` count is the visibility; P2's per-slice snapshot
+    component is the fix.
+17. **`keep_awake` on the SWEEP leg is PENDING P2 (row 19):** today it wraps
+    only fetch/enrich/pull — the sweep entry points (incl. `cmd_sweep_all`,
+    which the nightly drives) carry no caffeinate assertion. Mitigation, not
+    a fix: the launchd-started nightly holds `keep_awake` around ITS pull
+    leg, and the mandated §7 `pmset` wake gets the machine up — but a
+    display-sleep policy can still sleep the box mid-sweep until P2 wires
+    all six entry points.
+18. **No free-disk preflight inside `cmd_sweep_all` until P1 (row 22):** the
+    sweep itself can still die resumably on ENOSPC hours in. The nightly's
+    OWN fail-closed DISK link floors (§6) mitigate at chain level — they
+    refuse the whole night BEFORE mutation when free space is below the
+    floors — but they are static floors, not the est_bytes arithmetic P1
+    will add at click/launch time.
+19. **SENSEX / multi-symbol fan-out PENDING P1 (Ruling 9):** the nightly
+    forwards ONE `cmd_sweep_all` invocation (one exchange/segment); the
+    one-logical-`sweep_run_id`-wrapping-N-engine-runs fan-out that brings
+    SENSEX (BSE) into the same nightly is P1's entry wiring — until it
+    lands, a default nightly sweeps the NSE selection only.
 
 ## Decision trail
 

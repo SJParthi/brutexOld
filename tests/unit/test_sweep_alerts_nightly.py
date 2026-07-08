@@ -203,3 +203,46 @@ def test_count_or_question_helper() -> None:
     assert _count_or_question(None) == "?"
     assert _count_or_question(0) == "0"
     assert _count_or_question(42) == "42"
+
+
+# ── nightly_deadman (gap-register jul-8 row 20) ──────────────────────────
+
+
+def test_deadman_is_phase_blocked_critical_with_distinct_key() -> None:
+    notifier = FakeNotifier()
+    alerter = SweepAlerter(notifier=notifier)
+    assert alerter.nightly_deadman(detail="the Mac slept", newest_run_age_seconds=93784.5) is True
+    [event] = notifier.published
+    assert event.kind == TelegramEventKind.PHASE_BLOCKED
+    assert event.severity == TelegramSeverity.CRITICAL
+    # DISTINCT from every per-run nightly-refused:<id>:<link> key — a missed
+    # run HAS no nightly_id to key on.
+    assert event.dedupe_key == "nightly-deadman"
+    assert "DEAD\\-MAN" in event.message
+    assert "MISSED" in event.message
+    assert "93784s ago" in event.message
+    assert "the Mac slept" in event.message
+
+
+def test_deadman_never_ran_renders_never_not_zero() -> None:
+    """None age reads 'never' — NEVER a fabricated 0 (Golden Rule #1)."""
+    notifier = FakeNotifier()
+    SweepAlerter(notifier=notifier).nightly_deadman(
+        detail="no evidence", newest_run_age_seconds=None
+    )
+    [event] = notifier.published
+    assert "never" in event.message
+    assert "0s ago" not in event.message
+
+
+def test_deadman_disabled_and_publish_raise_are_best_effort() -> None:
+    assert (
+        SweepAlerter(resolver=lambda: None).nightly_deadman(detail="d", newest_run_age_seconds=1.0)
+        is False
+    )
+    assert (
+        SweepAlerter(notifier=FakeNotifier(raise_on_publish=True)).nightly_deadman(
+            detail="d", newest_run_age_seconds=1.0
+        )
+        is False
+    )

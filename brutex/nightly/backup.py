@@ -6,7 +6,10 @@ root) covers ``window_ledger/`` (ledger.parquet + deltas), ``registry.duckdb``,
 ``instruments.duckdb``, ``catalog.duckdb`` and the lake-level ``audit/``;
 namespace ``results`` (rooted at the results root — default ``<lake>/sweeps``,
 correctly covered even when the operator points ``--results-root`` OUTSIDE the
-lake) covers the whole sweeps tree EXCEPT ``progress/`` (transient, rewritten
+lake) covers the whole sweeps tree — explicitly INCLUDING, when present, the
+in-tree ``<results_root>/sweep_runs/`` run-artifact layout (gap-register
+Ruling 4) and ``<results_root>/estimator_calibration.json`` (Ruling 13, the
+R20/R23 calibration store) — EXCEPT ``progress/`` (transient, rewritten
 every publish — restoring a stale "running" snapshot would false-positive the
 liveness probe), ``.locks/`` (kernel-released flocks), the SHARED cross-run
 ``nightly/audit/`` chain (LIVE-APPENDED by the very command that snapshots —
@@ -16,10 +19,20 @@ RESTORE_START/RESTORE_DONE to it while restoring: an in-scope copy would
 back to snapshot time and losing the restore's own audit records to a dead
 inode — Golden Rule #8; each run's tail is captured durably in its PRIOR
 ``nightly/<id>/bundle/``) and the CURRENT ``nightly/<id>/`` dir (actively
-appended during this run; PRIOR nightly dirs are included). ``bars/`` is
+appended during this run; PRIOR nightly dirs are included). A THIRD
+include-if-present namespace ``sweep_runs`` covers the SIBLING run-artifact
+root ``<results_root parent>/sweep_runs/`` — the SHIPPED P3
+``trade_store.sweep_run_dir`` layout law places run-end artifacts
+(top100.json, baselines, results-depth sidecars) BESIDE the results tree,
+so the results walk alone would silently miss them (gap-register Ruling 4;
+absent dir = not an error). ``bars/`` is
 EXCLUDED BY LAW — re-pullable; full-lake
 protection stays the manual rsync/Time-Machine guidance in
-``docs/runbooks/lake-backup-restore.md``.
+``docs/runbooks/lake-backup-restore.md``. ``~/.brutex/runs/`` (the Ruling-15
+INTERNAL-disk forensics mirror P2 writes) is likewise an EXPLICIT exclusion:
+it exists precisely to survive the external-SSD failure this backup lives on,
+so copying it INTO the backup would defeat its purpose — the operator mirrors
+it with the runbook §4 rsync guidance instead.
 
 Atomicity (spec §5.3): everything is staged under
 ``<backup_root>/<snapshot_id>.partial/`` — per-file tmp→``os.replace``, the
@@ -72,6 +85,7 @@ __all__ = [
     "NIGHTLY_BACKUP_ROOT_ENV",
     "NIGHTLY_BACKUP_VERIFY_ENV",
     "PARTIAL_SUFFIX",
+    "SWEEP_RUNS_DIRNAME",
     "BackupEntry",
     "BackupItem",
     "BackupManifest",
@@ -81,10 +95,12 @@ __all__ = [
     "create_snapshot",
     "default_backup_root",
     "estimate_backup_bytes",
+    "fsync_file",
     "prune_snapshots",
     "resolve_backup_keep",
     "resolve_backup_verify",
     "sha256_file",
+    "sweep_runs_sibling_root",
 ]
 
 BACKUP_SCHEMA_VERSION: Final[int] = 1
@@ -121,6 +137,12 @@ _LAKE_MEMBERS: Final[tuple[str, ...]] = (
 
 #: Results-namespace top-level dirs excluded from the walk.
 _RESULTS_EXCLUDED_TOPLEVEL: Final[frozenset[str]] = frozenset({"progress", ".locks"})
+
+#: The run-artifact dir name of the SHIPPED P3 ``trade_store.sweep_run_dir``
+#: law (gap-register Ruling 4): ``<results_root parent>/sweep_runs/<run_id>/``
+#: — a SIBLING root beside the results tree, so the results walk alone would
+#: miss it; the ``sweep_runs`` namespace includes it when present.
+SWEEP_RUNS_DIRNAME: Final[str] = "sweep_runs"
 
 #: Leading ``results``-relative path parts of the SHARED cross-run nightly
 #: audit chain (``<results_root>/nightly/audit/`` — the
@@ -186,6 +208,24 @@ def resolve_backup_verify(env: Mapping[str, str] | None = None) -> bool:
     if raw == "0":
         return False
     raise NightlyEnvError(f"{NIGHTLY_BACKUP_VERIFY_ENV} must be '0' or '1', got {raw!r}")
+
+
+def fsync_file(path: Path) -> None:
+    """Best-effort fsync of *path*'s CONTENTS so the per-file replace is durable.
+
+    The pre-fix backup fsynced only the backup-root DIRECTORY at seal time —
+    a power loss after the seal rename could still lose copied file bytes
+    sitting in the page cache while the manifest (fsynced by
+    ``atomic_write_simple``) survived, making the snapshot fail its next
+    verify (review MINOR). One fsync per copied tmp file closes that window;
+    :mod:`brutex.nightly.restore` shares this helper (Golden Rule #11 COMMON).
+    """
+    with contextlib.suppress(OSError):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def sha256_file(path: Path) -> str:
@@ -327,6 +367,18 @@ def _as_list(data: Mapping[str, object], key: str) -> list[object]:
     return value
 
 
+def sweep_runs_sibling_root(results_root: Path) -> Path:
+    """The Ruling-4 SIBLING run-artifact root: ``<results_root parent>/sweep_runs/``.
+
+    Mirrors the SHIPPED P3 ``trade_store.sweep_run_dir`` path law (the
+    sweep-parallel integration contracts §2) so the backup covers the run-end
+    artifacts even though they live BESIDE the results tree. When
+    *results_root* is itself named ``sweep_runs`` the sibling would BE the
+    results tree — the inventory guards that degenerate identity.
+    """
+    return results_root.parent / SWEEP_RUNS_DIRNAME
+
+
 def backup_inventory(
     lake_root: Path,
     results_root: Path,
@@ -336,7 +388,11 @@ def backup_inventory(
     """Enumerate the fixed backup scope (deterministic order, O(files) stat walk).
 
     Returns ``(items, skipped_absent)`` — an absent member (e.g. no
-    ``catalog.duckdb`` yet) is an honest note, never an error.
+    ``catalog.duckdb`` yet, or no ``sweep_runs/`` sibling root) is an honest
+    note, never an error. When present, the in-tree
+    ``<results_root>/sweep_runs/`` + ``estimator_calibration.json`` ride the
+    results walk, and the SIBLING ``<results_root parent>/sweep_runs/`` root
+    is walked as the ``sweep_runs`` namespace (gap-register Rulings 4 + 13).
 
     Raises
     ------
@@ -405,6 +461,23 @@ def backup_inventory(
                 )
             )
 
+    sibling = sweep_runs_sibling_root(results_root)
+    if sibling.resolve() == results_root.resolve():
+        # results_root IS named sweep_runs — the walk above already covered it.
+        pass
+    elif not sibling.exists():
+        skipped_absent.append(f"sweep_runs sibling root {sibling}")
+    else:
+        for file in sorted(p for p in sibling.rglob("*") if p.is_file()):
+            items.append(
+                BackupItem(
+                    namespace="sweep_runs",
+                    relpath=file.relative_to(sibling).as_posix(),
+                    source=file,
+                    restore_order=0,
+                )
+            )
+
     items.sort(key=lambda item: (item.namespace, item.relpath))
     return items, skipped_absent
 
@@ -418,6 +491,8 @@ def _excluded_by_law(exclude_nightly_id: str | None) -> tuple[str, ...]:
         ".quarantine/ (heal forensics)",
         "results progress/ (transient)",
         "results nightly/audit/ (live cross-run nightly audit chain)",
+        "~/.brutex/runs/ (internal-disk forensics mirror — exists to survive the "
+        "backup volume's own failure; operator rsync guidance in the runbook §4)",
     ]
     if exclude_nightly_id is not None:
         excluded.append(f"results nightly/{exclude_nightly_id}/ (live nightly dir)")
@@ -505,6 +580,7 @@ def create_snapshot(
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".brutex-copy-tmp")
         copier(item.source, tmp)
+        fsync_file(tmp)  # contents durable BEFORE the replace (review MINOR)
         os.replace(tmp, dest)
         digest = sha256_file(dest)
         size = dest.stat().st_size

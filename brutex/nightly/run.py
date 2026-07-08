@@ -336,7 +336,32 @@ def _run_locked(
     extra_notes: list[str] = []
 
     def on_event(event: str, payload: Mapping[str, object]) -> None:
-        audit.append(action=event, subject=f"nightly:{nightly_id}", payload=dict(payload))
+        # An audit-append failure (SweepAuditWriteError on a mid-chain full
+        # disk / closed writer) must NEVER escape: ``run_chain`` emits these
+        # events OUTSIDE its per-link try, so an unguarded raise aborted the
+        # chain with EMPTY outcomes and the ``finally`` assembled a fabricated
+        # all-green "✅ OK" morning Telegram (review round 6, MAJOR — Golden
+        # Rule #1). The lost line degrades to SUSPECT instead: ONE direct
+        # ``audit_reconcile`` tripwire per failed append (the T2 disk
+        # read-back is subset-based on LINK_START, so a lost START alone
+        # would otherwise reconcile clean) — and T2 still catches lost
+        # DONE/BLOCKED lines independently.
+        try:
+            audit.append(action=event, subject=f"nightly:{nightly_id}", payload=dict(payload))
+        except Exception as exc:
+            logger.warning(
+                "nightly.audit_append_failed",
+                audit_event=event,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            extra_tripwires.append(
+                Tripwire(
+                    name="audit_reconcile",
+                    link=None,
+                    detail=f"audit append failed for {event}: {str(exc)[:200]}",
+                )
+            )
         # Instant refusal signal at the collision/disk gates (spec §9).
         if (
             event == "LINK_DONE"
@@ -571,19 +596,52 @@ def _run_locked(
     outcomes: tuple[LinkOutcome, ...] = ()
     tripwires: tuple[Tripwire, ...] = ()
     try:
-        outcomes, tripwires = run_chain(
-            nightly_id=nightly_id, steps=steps, on_event=on_event, now=seams.now
-        )
-        # T2 reconciles the DURABLE audit (read back from disk — a lost/torn
-        # append is exactly what it exists to catch), never an in-memory echo.
-        t2 = audit_reconcile_tripwire(
-            nightly_id=nightly_id,
-            events=_own_audit_events(nightly_audit_path(plan.results_root), nightly_id),
-            outcomes=outcomes,
-        )
-        if t2 is not None:
-            extra_tripwires.append(t2)
+        try:
+            outcomes, tripwires = run_chain(
+                nightly_id=nightly_id, steps=steps, on_event=on_event, now=seams.now
+            )
+        except Exception as exc:
+            # Belt: run_chain's contract is never-raise (only KeyboardInterrupt
+            # / SystemExit propagate raw). A raise here means the composition
+            # itself is defective and the chain state is UNKNOWN — record a
+            # tripwire so the ``finally``'s report reads SUSPECT (exit >= 2),
+            # never the vacuous all-green "OK" the empty initial tuples would
+            # otherwise assemble, and RETURN that report (the run_nightly
+            # "ALWAYS returns a NightlyReport" contract) instead of escaping
+            # past ``cmd_nightly_run`` (review round 6, MAJOR).
+            logger.error("nightly.chain_aborted", error_type=type(exc).__name__, error=str(exc))
+            extra_tripwires.append(
+                Tripwire(
+                    name="link_transition",
+                    link=None,
+                    detail=(
+                        f"run_chain raised {type(exc).__name__}: {str(exc)[:200]} — "
+                        "chain state unknown; no link outcomes recorded"
+                    ),
+                )
+            )
+        else:
+            # T2 reconciles the DURABLE audit (read back from disk — a lost/torn
+            # append is exactly what it exists to catch), never an in-memory echo.
+            t2 = audit_reconcile_tripwire(
+                nightly_id=nightly_id,
+                events=_own_audit_events(nightly_audit_path(plan.results_root), nightly_id),
+                outcomes=outcomes,
+            )
+            if t2 is not None:
+                extra_tripwires.append(t2)
     finally:
+        if not outcomes and not tripwires and not extra_tripwires:
+            # Belt: an aborted chain (KeyboardInterrupt/SystemExit mid-link, or
+            # any future escape) must never assemble the empty initial tuples
+            # into a vacuous all-green OK report (Golden Rule #1).
+            extra_tripwires.append(
+                Tripwire(
+                    name="link_transition",
+                    link=None,
+                    detail="chain aborted before any link outcome was recorded",
+                )
+            )
         all_tripwires = tuple(tripwires) + tuple(extra_tripwires)
         for wire in extra_tripwires:
             with contextlib.suppress(Exception):

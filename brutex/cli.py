@@ -5237,6 +5237,7 @@ def cmd_nightly_install(
         CRON_GUIDANCE,
         install,
         parse_at,
+        pmset_wake_command,
         resolve_program_arguments,
     )
 
@@ -5273,10 +5274,11 @@ def cmd_nightly_install(
         return EXIT_INTERNAL_ERROR
     print(f"[brutex] {outcome.detail}")
     print(
-        "[brutex] sleep/wake honesty: launchd does NOT wake a sleeping Mac — a fire "
-        "missed while asleep runs ONCE at next wake; powered off = skipped. For "
-        "guaranteed-on-time fires run (one-time, yourself): "
-        "sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00"
+        "[brutex] REQUIRED for on-time fires (gap-register row 20): launchd does NOT "
+        "wake a sleeping Mac — a fire missed while asleep runs ONCE at next wake; "
+        "powered off = skipped. Run this scheduled wake yourself (one-time, sudo — "
+        "BruteX never runs pmset): "
+        f"{pmset_wake_command(hour, minute)}"
     )
     return EXIT_OK
 
@@ -5326,6 +5328,17 @@ def cmd_nightly_status(
     )
     for line in report.lines():
         print(f"[brutex] {line}")
+    if report.deadman.verdict == "MISSED":
+        # Row 20 dead-man: a Mac asleep at the trigger starts NO process, so
+        # only the surface that notices can alert. Best-effort — a disabled
+        # Telegram is a silent no-op; a raise never breaks the status command.
+        with contextlib.suppress(Exception):
+            from brutex.notifications.sweep_alerts import SweepAlerter
+
+            SweepAlerter().nightly_deadman(
+                detail=report.deadman.detail,
+                newest_run_age_seconds=report.deadman.newest_run_age_seconds,
+            )
     return EXIT_OK
 
 

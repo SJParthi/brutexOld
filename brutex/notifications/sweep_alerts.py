@@ -794,6 +794,32 @@ class SweepAlerter:
             dedupe_key=f"nightly-refused:{nightly_id}:{link}",
         )
 
+    def nightly_deadman(self, *, detail: str, newest_run_age_seconds: float | None) -> bool:
+        """The row-20 dead-man alert: the scheduled nightly did NOT run.
+
+        A Mac asleep at the trigger starts no process, so no in-run alerter
+        can fire — this is the ONLY Telegram signal for that perfectly-silent
+        staleness, emitted by the surface that NOTICES it (``brutex nightly
+        status`` today; the P4 dashboard banner wires the same
+        ``deadman_verdict`` seam at merge-integration). CRITICAL with its own
+        DISTINCT dedupe key (``nightly-deadman`` — never colliding with the
+        per-run ``nightly-refused:<id>:<link>`` keys, which require a run to
+        exist). ``newest_run_age_seconds=None`` renders the honest "never" —
+        not a fabricated 0 (Golden Rule #1).
+        """
+        age = (
+            "never (no run evidence)"
+            if newest_run_age_seconds is None
+            else f"{int(newest_run_age_seconds)}s ago"
+        )
+        body = f"🌙💀 Nightly DEAD-MAN: scheduled run MISSED. Last run evidence: {age}. {detail}"
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=escape_markdown_v2(body),
+            dedupe_key="nightly-deadman",
+        )
+
     def lake_heal_report(
         self,
         *,

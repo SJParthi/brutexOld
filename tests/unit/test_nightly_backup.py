@@ -38,10 +38,12 @@ from brutex.nightly.backup import (
     create_snapshot,
     default_backup_root,
     estimate_backup_bytes,
+    fsync_file,
     prune_snapshots,
     resolve_backup_keep,
     resolve_backup_verify,
     sha256_file,
+    sweep_runs_sibling_root,
 )
 from brutex.nightly.probes import NightlyEnvError
 from hypothesis import given
@@ -98,6 +100,16 @@ def _make_lake(tmp_path: Path) -> tuple[Path, Path]:
     (results / "progress" / "sweep-progress.json").write_bytes(b"{}")
     (results / ".locks").mkdir()
     (results / ".locks" / "sweep_singleflight.lock").write_bytes(b"")
+    # Gap-register Rulings 4 + 13: the in-tree run-artifact layout + the
+    # estimator calibration store ride the results walk...
+    (results / "sweep_runs" / "run-IN").mkdir(parents=True)
+    (results / "sweep_runs" / "run-IN" / "top100.json").write_bytes(b"{}")
+    (results / "estimator_calibration.json").write_bytes(b"{}")
+    # ...and the SHIPPED P3 `trade_store.sweep_run_dir` SIBLING root
+    # (`<results_root parent>/sweep_runs/` = `<lake>/sweep_runs/` here) is the
+    # `sweep_runs` namespace — beside the results tree, missed by its walk.
+    (lake / "sweep_runs" / "grid-abc").mkdir(parents=True)
+    (lake / "sweep_runs" / "grid-abc" / "manifest.json").write_bytes(b"{}")
     return lake, results
 
 
@@ -159,6 +171,11 @@ def test_inventory_inclusion_exclusion_table(tmp_path: Path) -> None:
         "results/dedup-cache/data.mdb",
         "results/cascade/cascade-report.json",
         "results/nightly/nightly-OLD/report.json",  # PRIOR nightly dir IS included
+        # Rulings 4 + 13: in-tree run artifacts + calibration store included…
+        "results/sweep_runs/run-IN/top100.json",
+        "results/estimator_calibration.json",
+        # …and the SIBLING `<results parent>/sweep_runs/` root as its own namespace.
+        "sweep_runs/grid-abc/manifest.json",
     }
     assert skipped == []
     # Restore-order law: ledger LAST (2), deltas 1, everything else 0.
@@ -399,7 +416,7 @@ def test_create_snapshot_seals_and_hashes_verifiably(tmp_path: Path) -> None:
     assert manifest.snapshot_id == "nightly-A"
     assert manifest.nightly_id == "nightly-CUR"
     assert manifest.created_utc == 1000.0
-    assert manifest.item_count == result.file_count == 13
+    assert manifest.item_count == result.file_count == 16
     assert result.total_bytes == manifest.total_bytes > 0
     assert result.pruned == ()
     # Independent test-side re-hash of EVERY entry (hand-rolled sha256 — the
@@ -523,9 +540,6 @@ def test_create_snapshot_preseal_verify_catches_post_hash_corruption(
     results = tmp_path / "results"
     results.mkdir()
 
-    import brutex.nightly.backup as backup_mod
-
-    real = backup_mod.sha256_file
     seen: dict[str, int] = {}
 
     def drifting(path: Path) -> str:
@@ -533,9 +547,9 @@ def test_create_snapshot_preseal_verify_catches_post_hash_corruption(
         seen[key] = seen.get(key, 0) + 1
         if seen[key] > 1 and path.name == "registry.duckdb":
             return "0" * 64  # the verify pass sees different bytes
-        return real(path)
+        return sha256_file(path)
 
-    monkeypatch.setattr(backup_mod, "sha256_file", drifting)
+    monkeypatch.setattr("brutex.nightly.backup.sha256_file", drifting)
     backup_root = tmp_path / "bk"
     with pytest.raises(BackupManifestError, match="pre-seal verify FAILED"):
         create_snapshot(
@@ -561,9 +575,6 @@ def test_create_snapshot_verify_unreadable_and_cap_arms(
     results = tmp_path / "results"
     results.mkdir()
 
-    import brutex.nightly.backup as backup_mod
-
-    real = backup_mod.sha256_file
     seen: dict[str, int] = {}
 
     def unreadable_on_verify(path: Path) -> str:
@@ -571,9 +582,9 @@ def test_create_snapshot_verify_unreadable_and_cap_arms(
         seen[key] = seen.get(key, 0) + 1
         if seen[key] > 1:
             raise OSError(5, "io error")
-        return real(path)
+        return sha256_file(path)
 
-    monkeypatch.setattr(backup_mod, "sha256_file", unreadable_on_verify)
+    monkeypatch.setattr("brutex.nightly.backup.sha256_file", unreadable_on_verify)
     with pytest.raises(BackupManifestError) as excinfo:
         create_snapshot(
             lake_root=lake,
@@ -694,3 +705,96 @@ def test_manifest_created_utc_fallbacks(tmp_path: Path, monkeypatch: pytest.Monk
 
 def _raise_oserror(self: Path, **kwargs: object) -> object:
     raise OSError(2, "gone")
+
+
+# ── gap-register jul-8: sweep_runs sibling root + fsync + exclusions ─────
+
+
+def test_sweep_runs_sibling_root_law(tmp_path: Path) -> None:
+    """The Ruling-4 sibling root mirrors `trade_store.sweep_run_dir`'s law."""
+    assert sweep_runs_sibling_root(tmp_path / "lake" / "sweeps") == (
+        tmp_path / "lake" / "sweep_runs"
+    )
+
+
+def test_inventory_absent_sibling_root_is_honest_note(tmp_path: Path) -> None:
+    lake = tmp_path / "lake"
+    lake.mkdir()
+    (lake / "registry.duckdb").write_bytes(b"R")
+    results = tmp_path / "elsewhere" / "results"
+    results.mkdir(parents=True)
+    items, skipped = backup_inventory(lake, results, exclude_nightly_id=None)
+    assert not any(i.namespace == "sweep_runs" for i in items)
+    assert any("sweep_runs sibling root" in s for s in skipped)
+
+
+def test_inventory_results_root_named_sweep_runs_never_double_walks(tmp_path: Path) -> None:
+    """Degenerate identity: results_root itself named `sweep_runs` — the
+    sibling root IS the results tree; walking it twice would duplicate every
+    entry under two namespaces."""
+    lake = tmp_path / "lake"
+    lake.mkdir()
+    (lake / "registry.duckdb").write_bytes(b"R")
+    results = tmp_path / "sweep_runs"
+    (results / "run-1").mkdir(parents=True)
+    (results / "run-1" / "top100.json").write_bytes(b"{}")
+    items, skipped = backup_inventory(lake, results, exclude_nightly_id=None)
+    keys = [f"{i.namespace}/{i.relpath}" for i in items]
+    assert keys.count("results/run-1/top100.json") == 1
+    assert not any(i.namespace == "sweep_runs" for i in items)
+    assert not any("sweep_runs sibling root" in s for s in skipped)
+
+
+def test_excluded_by_law_names_internal_forensics_mirror(tmp_path: Path) -> None:
+    """Ruling 15: `~/.brutex/runs/` is an EXPLICIT exclusion — it exists to
+    survive the backup volume's own failure, so it must never be dragged in;
+    the manifest records the reason + the rsync guidance pointer."""
+    lake, results = _make_lake(tmp_path)
+    result = create_snapshot(
+        lake_root=lake,
+        results_root=results,
+        backup_root=tmp_path / "bk",
+        snapshot_id="s-excl",
+        nightly_id=None,
+    )
+    manifest = BackupManifest.from_dict(
+        json.loads((result.snapshot_path / MANIFEST_NAME).read_text(encoding="utf-8"))
+    )
+    assert any("~/.brutex/runs/" in reason for reason in manifest.excluded_by_law)
+    assert any("rsync" in reason for reason in manifest.excluded_by_law)
+
+
+def test_create_snapshot_fsyncs_every_copied_file_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review MINOR: copied file CONTENTS must be fsynced (per tmp file,
+    BEFORE the replace) — the pre-fix backup fsynced only the backup-root dir
+    at seal time, so a post-seal power loss could lose page-cached bytes while
+    the (fsynced) manifest survived, failing the next verify."""
+    lake, results = _make_lake(tmp_path)
+    synced: list[Path] = []
+
+    def spy_fsync(path: Path) -> None:
+        assert path.exists()  # called BEFORE os.replace consumed the tmp
+        assert path.name.endswith(".brutex-copy-tmp")
+        synced.append(path)
+
+    monkeypatch.setattr("brutex.nightly.backup.fsync_file", spy_fsync)
+    result = create_snapshot(
+        lake_root=lake,
+        results_root=results,
+        backup_root=tmp_path / "bk",
+        snapshot_id="s-fsync",
+        nightly_id=None,
+    )
+    # nightly_id=None keeps the nightly-CUR dir in scope → 17 files here
+    # (the 16-file table + nightly-CUR/report.json); one fsync per copy.
+    assert len(synced) == result.file_count == 17
+
+
+def test_fsync_file_real_and_missing(tmp_path: Path) -> None:
+    """The real helper syncs an existing file and swallows a missing one."""
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"x")
+    fsync_file(target)  # no raise
+    fsync_file(tmp_path / "absent.bin")  # OSError suppressed

@@ -25,7 +25,7 @@ import structlog.testing
 from brutex.adapters.groww import pull_singleflight as ps
 from brutex.config.credentials_types import CredentialsError
 from brutex.data.errors import LakeWriteHalt
-from brutex.engine.sweep_audit import SweepAuditWriter, verify_chain
+from brutex.engine.sweep_audit import SweepAuditWriteError, SweepAuditWriter, verify_chain
 from brutex.engine.sweep_supervisor import SUPERVISOR_ACTION_COMPLETE
 from brutex.nightly.chain import LinkStatus, NightlyLink
 from brutex.nightly.report import nightly_audit_path, nightly_dir
@@ -603,6 +603,15 @@ def test_keyboard_interrupt_still_writes_report_then_reraises(
     reports = list((results / "nightly").glob("*/report.json"))
     assert len(reports) == 1
     assert alerter.summaries  # summary still emitted
+    # Review round 6 belt: the interrupted chain leaves NO outcomes — the
+    # report must read SUSPECT (empty-outcomes tripwire), never a vacuous
+    # all-green OK assembled from the empty initial tuples.
+    written = json.loads(reports[0].read_text(encoding="utf-8"))
+    assert written["ok"] is False
+    assert written["suspect"] is True
+    assert written["exit_code"] == 2
+    assert any(w["name"] == "link_transition" for w in written["tripwires"])
+    assert [s["verdict"] for s in alerter.summaries] == ["SUSPECT"]
 
 
 # ── sweep link ───────────────────────────────────────────────────────────
@@ -793,6 +802,97 @@ def test_t2_fires_when_an_audit_append_is_lost(
     wires = [w for w in report.tripwires if w.name == "audit_reconcile"]
     assert len(wires) == 1
     assert report.exit_code == 2  # SUSPECT is cron-red
+
+
+@pytest.mark.parametrize(
+    ("fail_action", "fail_link"),
+    [
+        pytest.param("LINK_DONE", "pull", id="raise-on-link-done"),
+        # A lost LINK_START alone reconciles CLEAN under T2 (subset check) —
+        # only the direct on_event tripwire catches it.
+        pytest.param("LINK_START", "sweep", id="raise-on-link-start-t2-blind"),
+    ],
+)
+def test_audit_append_failure_mid_chain_never_fabricates_green_ok(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fail_action: str,
+    fail_link: str,
+) -> None:
+    """Review round 6, MAJOR: `on_event` called `audit.append` UNGUARDED, and
+    `run_chain` emits events OUTSIDE its per-link try — a mid-chain
+    `SweepAuditWriteError` (disk-full LINK_DONE append) escaped `run_chain`,
+    left `outcomes == ()`, and the `finally` assembled a fabricated all-green
+    "✅ OK" Telegram while the exception then broke the always-returns-a-report
+    contract. The lost line must degrade to SUSPECT, never a green OK."""
+    lake, results = _lake(tmp_path)
+    from brutex.nightly import report as report_mod
+
+    real_open = report_mod.open_nightly_audit
+
+    class _RaisingAudit:
+        """Wraps the real writer; RAISES on one specific event append."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def append(self, *, action: str, subject: str, payload: dict[str, Any]) -> Any:
+            if action == fail_action and payload.get("link") == fail_link:
+                raise SweepAuditWriteError("audit append failed: No space left on device")
+            return self._inner.append(action=action, subject=subject, payload=payload)
+
+        def close(self) -> None:
+            self._inner.close()
+
+    monkeypatch.setattr(
+        "brutex.nightly.run.open_nightly_audit",
+        lambda results_root: _RaisingAudit(real_open(results_root)),
+    )
+    seams, alerter, _pipeline, calls = _seams(monkeypatch, results)
+    with structlog.testing.capture_logs() as logs:
+        report = run_nightly(_plan(lake, results, tmp_path), seams=seams)  # NO raise
+    # The chain kept running past the failed append — every link executed.
+    assert len(report.links) == 6
+    assert calls["sweep"] == 1
+    # The lost line is a SUSPECT verdict, never a green illusion.
+    wires = [w for w in report.tripwires if w.name == "audit_reconcile"]
+    assert any(f"audit append failed for {fail_action}" in w.detail for w in wires)
+    assert report.ok is False
+    assert report.suspect is True
+    assert report.exit_code == 2  # cron-RED
+    assert [s["verdict"] for s in alerter.summaries] == ["SUSPECT"]  # never "OK"
+    assert any(log["event"] == "nightly.audit_append_failed" for log in logs)
+    # The durable report still landed (the always-returns contract held).
+    run_dir = nightly_dir(results, report.nightly_id)
+    assert json.loads((run_dir / "report.json").read_text(encoding="utf-8"))["ok"] is False
+
+
+def test_run_chain_raise_returns_suspect_report_never_green(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Belt for review round 6: `run_chain`'s contract is never-raise, but if
+    it EVER does, `run_nightly` must still RETURN a non-green report (the
+    empty initial `outcomes`/`tripwires` tuples previously assembled a vacuous
+    all-green OK while the exception escaped past `cmd_nightly_run`)."""
+    lake, results = _lake(tmp_path)
+
+    def exploding_chain(**_kwargs: Any) -> Any:
+        raise RuntimeError("sequencer defect")
+
+    monkeypatch.setattr("brutex.nightly.run.run_chain", exploding_chain)
+    seams, alerter, _pipeline, _calls = _seams(monkeypatch, results)
+    with structlog.testing.capture_logs() as logs:
+        report = run_nightly(_plan(lake, results, tmp_path), seams=seams)  # NO raise
+    assert report.links == ()  # honest: nothing recorded
+    wires = [w for w in report.tripwires if w.name == "link_transition"]
+    assert any("run_chain raised RuntimeError" in w.detail for w in wires)
+    assert report.ok is False
+    assert report.suspect is True
+    assert report.exit_code == 2
+    assert [s["verdict"] for s in alerter.summaries] == ["SUSPECT"]
+    assert any(log["event"] == "nightly.chain_aborted" for log in logs)
+    run_dir = nightly_dir(results, report.nightly_id)
+    assert json.loads((run_dir / "report.json").read_text(encoding="utf-8"))["suspect"] is True
 
 
 # ── Telegram arms ────────────────────────────────────────────────────────

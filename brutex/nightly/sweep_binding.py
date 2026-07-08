@@ -282,35 +282,54 @@ class ContractProbe:
     paths: Mapping[str, str]
 
 
-#: The documented P2/P3 contract artifacts probed per run
-#: (sweep-parallel-integration-contracts: ``<results_root>/runs/<run_id>/``).
+#: The documented P2/P3 contract artifacts probed per run (gap-register
+#: Ruling 4: ``sweep_runs/<sweep_run_id>/`` — the run-level id is named
+#: ``sweep_run_id`` per Ruling 17; ``run_id`` alone is the per-combo store key).
 _CONTRACT_ARTIFACTS: Final[tuple[tuple[str, str], ...]] = (
     ("run_manifest", "manifest.json"),
     ("top100", "top100.json"),
 )
 
 
+def _contract_run_roots(results_root: Path) -> tuple[Path, ...]:
+    """The candidate run-artifact roots, newest-fresh-dir-wins across all.
+
+    Ruling 4 supersedes the original ``<results_root>/runs/`` sketch with
+    ``sweep_runs/`` — probed at BOTH documented locations (the register's
+    in-tree ``<results_root>/sweep_runs/`` and the SHIPPED P3
+    ``trade_store.sweep_run_dir`` SIBLING ``<results_root parent>/sweep_runs/``)
+    plus the legacy ``runs/`` fallback so a pre-ruling artifact tree is still
+    honestly probed, never silently un-probed.
+    """
+    return (
+        results_root / "sweep_runs",
+        results_root.parent / "sweep_runs",
+        results_root / "runs",
+    )
+
+
 def probe_contract_artifacts(results_root: Path, *, since_utc: float) -> ContractProbe:
-    """Probe the newest ``<results_root>/runs/<run_id>/`` dir for P2/P3 artifacts.
+    """Probe the newest ``sweep_runs/<sweep_run_id>/`` dir for P2/P3 artifacts.
 
     Presence-only (the ADAPTER rule): the newest run dir with mtime >=
-    *since_utc* is checked for ``manifest.json`` (P2's run manifest) and
-    ``top100.json`` (P3's artifact — the documented v1.1 seam for the deferred
-    R48 decay diff). No ``runs/`` dir / no fresh run ⇒ both HONESTLY absent.
-    NEVER a hard failure, NEVER fabrication.
+    *since_utc* across :func:`_contract_run_roots` is checked for
+    ``manifest.json`` (P2's run manifest) and ``top100.json`` (P3's artifact —
+    the documented v1.1 seam for the deferred R48 decay diff). No run root /
+    no fresh run ⇒ both HONESTLY absent. NEVER a hard failure, NEVER
+    fabrication.
     """
-    runs_dir = results_root / "runs"
     newest: Path | None = None
     newest_mtime = float("-inf")
-    with contextlib.suppress(OSError):
-        for child in runs_dir.iterdir():
-            if not child.is_dir():
-                continue
-            with contextlib.suppress(OSError):
-                mtime = child.stat().st_mtime
-                if mtime >= since_utc and mtime > newest_mtime:
-                    newest = child
-                    newest_mtime = mtime
+    for runs_dir in _contract_run_roots(results_root):
+        with contextlib.suppress(OSError):
+            for child in runs_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                with contextlib.suppress(OSError):
+                    mtime = child.stat().st_mtime
+                    if mtime >= since_utc and mtime > newest_mtime:
+                        newest = child
+                        newest_mtime = mtime
     found: list[str] = []
     absent: list[str] = []
     paths: dict[str, str] = {}

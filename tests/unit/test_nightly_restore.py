@@ -357,3 +357,39 @@ def test_restore_skips_legacy_live_audit_chain_entry(tmp_path: Path) -> None:
     # The live chain is byte-untouched (Phase C skipped it; Phase D never
     # re-hashed it against the snapshot copy).
     assert live_audit.read_bytes() == b"LIVE-CHAIN-WITH-POST-SNAPSHOT-ENTRIES\n"
+
+
+def test_restore_sweep_runs_namespace_round_trip(tmp_path: Path) -> None:
+    """Ruling 4: the `sweep_runs` SIBLING namespace restores to
+    `<results_root parent>/sweep_runs/` — mutilated/deleted run artifacts
+    come back byte-identical alongside the lake/results namespaces."""
+    lake = tmp_path / "lake"
+    results = lake / "sweeps"
+    (lake / "registry.duckdb").parent.mkdir(parents=True, exist_ok=True)
+    (lake / "registry.duckdb").write_bytes(b"REGISTRY")
+    (results / "sweep_runs" / "run-IN").mkdir(parents=True)
+    (results / "sweep_runs" / "run-IN" / "top100.json").write_bytes(b"IN-TREE")
+    (results / "estimator_calibration.json").write_bytes(b"CALIB")
+    sibling = lake / "sweep_runs"
+    (sibling / "grid-abc").mkdir(parents=True)
+    (sibling / "grid-abc" / "manifest.json").write_bytes(b"SIBLING-MANIFEST")
+    result = create_snapshot(
+        lake_root=lake,
+        results_root=results,
+        backup_root=tmp_path / "bk",
+        snapshot_id="snap-sr",
+        nightly_id=None,
+    )
+    before = _tree(lake)
+    # Mutilate every Ruling-4/13 artifact.
+    (sibling / "grid-abc" / "manifest.json").unlink()
+    (results / "sweep_runs" / "run-IN" / "top100.json").write_bytes(b"POISON")
+    (results / "estimator_calibration.json").unlink()
+    plan = plan_restore(result.snapshot_path, lake_root=lake, results_root=results)
+    keys = {f"{e.namespace}/{e.relpath}" for e in plan.items}
+    assert "sweep_runs/grid-abc/manifest.json" in keys
+    assert "results/sweep_runs/run-IN/top100.json" in keys
+    assert "results/estimator_calibration.json" in keys
+    outcome = restore_snapshot(plan)
+    assert outcome.restored == len(plan.items)
+    assert _tree(lake) == before  # byte-identical, sibling root included

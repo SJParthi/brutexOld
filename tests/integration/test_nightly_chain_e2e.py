@@ -186,6 +186,30 @@ def test_e2e_green_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert (snapshot / "lake" / "window_ledger" / "ledger.parquet").read_bytes() == b"LEDGER-BYTES"
     assert [s["verdict"] for s in alerter.summaries] == ["OK"]
     assert alerter.refused == []
+    # Gap-register row 4 pin: the nightly writes NO .parquet ANYWHERE under
+    # <results_root>/nightly/ — /results discovery, the sweep-verify doctor
+    # and results_report glob every *.parquet under the results tree, and a
+    # foreign parquet there raises an unguarded KeyError → /results 500s.
+    assert list((results / "nightly").rglob("*.parquet")) == []
+
+    # Ruling 17 naming pin: no nightly report field is a bare "run_id" — an
+    # ENGINE run id must be named sweep_run_id (nightly_id stays nightly_id).
+    def _keys(node: object) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                found.add(str(key))
+                found |= _keys(value)
+        elif isinstance(node, list):
+            for value in node:
+                found |= _keys(value)
+        return found
+
+    report_keys = _keys(on_disk)
+    assert "nightly_id" in report_keys
+    assert not any(
+        k == "run_id" or (k.endswith("_run_id") and k != "sweep_run_id") for k in report_keys
+    )
 
 
 def test_e2e_pull_halt_snapshot_intact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
