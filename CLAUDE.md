@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 —
+_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -53,7 +53,7 @@ probe-first hooks · bounded 16 MiB shard read · FIFO-shard hang fix · the
 EXECUTED m4pro run 28888100079 A/B gate + 3.0× paging strict-tier
 recalibration · the wired-and-executed zero-survivor mutation gate); the
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
-#1595 — this header deliberately stopped narrating rounds after freezing at
+#1614 — this header deliberately stopped narrating rounds after freezing at
 round 2 once (endgame round 2); a same-`(mtime_ns,size)` in-place
 overwrite stays the documented stat-token residual. Results-safe — never in run identity / partition bytes /
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
@@ -1228,7 +1228,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595** — the
+- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
   O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
@@ -1310,7 +1310,7 @@ hostile-review pass._
   landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
   48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
   capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
-  overclaim softened; the #1595 GATES counts refreshed.
+  overclaim softened; the #1614 GATES counts refreshed.
   ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
   closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
   (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`
@@ -1339,7 +1339,7 @@ hostile-review pass._
   pin. Round 2 — the killable-mutant pragma purge above; §2 Rule 5's stale "strict tier DORMANT until the
   operator registers the runner" claim reconciled to the LIVE runner (+ the metadata-sweep allowance now named
   beside the cache-tier one); the frozen `_Last updated:` header's per-round narration replaced with a
-  stale-proof pointer to this blurb + MIGRATION.md #1595; bench-m4pro.yml's paging-gate comments repointed
+  stale-proof pointer to this blurb + MIGRATION.md #1614; bench-m4pro.yml's paging-gate comments repointed
   from the stale "ratio_ceiling() 1.1× tier" to the real `metadata_sweep_ceiling` 3.0× — each with a
   deterministic doc-pin regression (`test_claude_md_branch_consistency.py` + `TestBenchWorkflowWiring`).
   Round 3 — the Unicode-digit month-rel hole (MINOR, the ONLY tamper class that SERVED instead of failing
@@ -1349,7 +1349,7 @@ hostile-review pass._
   fixed at root cause with `re.ASCII` grammar + a clause-1 STRUCTURAL chronology law (every rel must parse,
   new fail-closed `rel_grammar` clause; the parsed (year, month) sequence must be strictly increasing —
   subsuming the lexicographic sorted+unique check), each regression pinned fails-before incl. the end-to-end
-  misordered-page repro; plus the #1595 round-2 GATES exactness reconcile (474/148 + 221 → the measured
+  misordered-page repro; plus the #1614 round-2 GATES exactness reconcile (474/148 + 221 → the measured
   476/148 + 222; round-3 tree measures 482/152, 232 tests).
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
   Parquet bytes byte-identical (ON/OFF parity bench). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
@@ -3317,7 +3317,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
-  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 — the write-time
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
   PER-FILE lake STATS manifest; matches §1's Active branch line)
   Earlier: `claude/blissful-curie-gp94rk`
   (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 — see §1 Active

@@ -213,7 +213,7 @@ jobs:
           #    data/lake_stats_manifest.py (the /db paging stats manifest —
           #    a silent mutant here wrong-pages or wrong-totals the viewer)
           #    joined per DEC-LAKE-STATS-MANIFEST-001 review round 8: the
-          #    round-8 refuter caught MIGRATION #1595 claiming the module
+          #    round-8 refuter caught MIGRATION #1614 claiming the module
           #    "rides the weekly Mutation workflow" while NO --paths-to-mutate
           #    named it (an unwired gate presented as a deferred one, Golden
           #    Rule #10). Wired + EXECUTED in-session (mutmut 2.5.1,
@@ -223,7 +223,7 @@ jobs:
           #    exact-message / boundary / log-event-name kills incl. an
           #    os.open O_NONBLOCK flag spy) drove the round-8 enumeration to
           #    456 mutants / ZERO survived / ZERO suspicious. ENDGAME round 2
-          #    (DEC-LAKE-STATS-MANIFEST-001, MIGRATION #1595) then PURGED the
+          #    (DEC-LAKE-STATS-MANIFEST-001, MIGRATION #1614) then PURGED the
           #    round-8 fd-sentinel / bounded-read / dead-"unknown" line
           #    pragmas — the refuter proved they suppressed killable,
           #    NON-equivalent mutants, so calling that residue
