@@ -497,3 +497,180 @@ def test_muhurat_day_excluded_from_rolling_weekly_daily_history() -> None:
     prev = builder._prev_day_ohlc
     assert prev is not None
     assert (prev.high_paisa, prev.low_paisa, prev.close_paisa) == (11000, 9000, 10500)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Muhurat weekly-anchor ABSTAIN (DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The weekly resolvers deliberately REFUSE a non-trading `today` (ValueError —
+# a documented, test-pinned honest refusal for direct callers, byte-untouched:
+# tests/unit/test_weekly_anchors.py pins it). But the ingest boundary KEEPS
+# Muhurat bars (#1294) and every 2020→today sweep span contains Muhurat
+# sessions, so Stage-1A calling the resolver on the Muhurat day's OWN roll
+# aborted EVERY full-scope ROLLING_WEEKLY / WEEKLY_STATIC grid (the ValueError
+# is not a SweepComboError — the grid drivers' tuple-skip quarantine never
+# engaged, killing even the PREV_DAY tuples of the same grid). Stage-1A now
+# honestly ABSTAINS (fib=None → the existing _NON_FIB_MASK clear) with ONE
+# WARN per Muhurat session. These tests FAIL with the fix reverted (the
+# pre-fix builder raises ValueError).
+
+from pathlib import Path  # noqa: E402
+
+from brutex.engine.stage1a import (  # noqa: E402
+    _MUHURAT_WEEKLY_ANCHOR_EVENT,
+    FIB_DEPENDENT_MASK,
+)
+from brutex.strategies.fib_definitions import FibAnchorKind  # noqa: E402
+
+_WEEKLY_ANCHORS = (FibAnchorKind.ROLLING_WEEKLY, FibAnchorKind.WEEKLY_STATIC)
+
+
+@pytest.mark.parametrize("anchor", _WEEKLY_ANCHORS)
+@pytest.mark.parametrize(("prev_reg", "muhurat", "next_reg"), _MUHURAT_BOUNDARIES)
+def test_weekly_anchor_survives_every_real_muhurat_boundary(
+    anchor: FibAnchorKind, prev_reg: _date, muhurat: _date, next_reg: _date
+) -> None:
+    # All six real NSE Diwali Muhurat boundaries 2020-2025, both weekly
+    # anchors: build_bar_bits COMPLETES (pre-fix: uncaught ValueError from the
+    # weekly resolver's non-trading-`today` refusal) and the Muhurat day's own
+    # Group-4 Fib bits read honestly CLEARED, never fabricated.
+    from structlog.testing import capture_logs
+
+    bars = [
+        _day_bar(prev_reg, "100.00", "110.00", "90.00", "105.00"),
+        _day_bar(muhurat, "104.00", "104.50", "103.50", "104.20"),
+        _day_bar(next_reg, "104.00", "104.00", "104.00", "104.00"),
+    ]
+    with capture_logs() as logs:
+        masks = build_bar_bits(bars, fib_anchor=anchor)
+    assert len(masks) == 3
+    # The Muhurat bar's Fib-proximity bits are cleared (combo-ineligible).
+    assert masks[1] & FIB_DEPENDENT_MASK == 0
+    warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+    assert len(warns) == 1  # exactly ONE per Muhurat session
+    assert warns[0]["day"] == muhurat.isoformat()
+    assert warns[0]["fib_anchor"] == anchor.value
+
+
+def test_muhurat_weekly_abstain_keeps_warm_pivots() -> None:
+    # The abstain clears ONLY the Group-4 Fib bits — the Muhurat day's pivots
+    # (anchored on the prior REGULAR session) stay warm, exactly like a cold
+    # rolling-weekly week (the R-2 convention this rides).
+    builder = Stage1AMatrixBuilder(fib_anchor=FibAnchorKind.ROLLING_WEEKLY)
+    builder.build(
+        [
+            _day_bar(_date(2024, 10, 31), "100.00", "110.00", "90.00", "105.00"),
+            _day_bar(_date(2024, 11, 1), "104.00", "104.50", "103.50", "104.20"),
+        ]
+    )
+    assert builder._anchors is not None
+    assert builder._anchors.fib is None  # honest abstain, never fabricated
+    # Pivots are the prior REGULAR session's (PDH 11000 / PDL 9000 / PDC 10500).
+    fixed = compute_pivot_levels(
+        _date(2024, 11, 1), pdh_paisa=11000, pdl_paisa=9000, pdc_paisa=10500
+    )
+    assert builder._anchors.pivots.p_paisa == fixed.p_paisa
+
+
+def test_prev_day_anchor_over_muhurat_bars_unchanged_no_abstain_warn() -> None:
+    # PREV_DAY (the sweep default) is byte-identical: the abstain branch lives
+    # ONLY on the non-PREV_DAY arm — no warn, no raise, same masks as before.
+    from structlog.testing import capture_logs
+
+    bars = [
+        _day_bar(_date(2024, 10, 31), "100.00", "110.00", "90.00", "105.00"),
+        _day_bar(_date(2024, 11, 1), "104.00", "104.50", "103.50", "104.20"),
+        _day_bar(_date(2024, 11, 4), "104.00", "104.00", "104.00", "104.00"),
+    ]
+    with capture_logs() as logs:
+        masks = build_bar_bits(bars)  # default PREV_DAY
+    assert len(masks) == 3
+    assert not [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+
+
+def test_weekly_anchor_regular_days_still_resolve_via_common_resolver() -> None:
+    # The non-Muhurat arm still dispatches to the COMMON resolver: with 5
+    # completed regular sessions in history, the 6th day's rolling-weekly Fib
+    # is WARM (non-None) — the abstain guard never fires on a regular day.
+    from structlog.testing import capture_logs
+
+    days = [
+        _date(2024, 1, 1),
+        _date(2024, 1, 2),
+        _date(2024, 1, 3),
+        _date(2024, 1, 4),
+        _date(2024, 1, 5),
+        _date(2024, 1, 8),
+    ]
+    bars = [_day_bar(d, "100.00", "110.00", "90.00", "105.00") for d in days]
+    with capture_logs() as logs:
+        builder = Stage1AMatrixBuilder(fib_anchor=FibAnchorKind.ROLLING_WEEKLY)
+        builder.build(bars)
+    assert builder._anchors is not None
+    assert builder._anchors.fib is not None  # warm weekly Fib on a regular day
+    assert not [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
+
+
+def test_weekly_anchor_grid_completes_across_muhurat_day(tmp_path: Path) -> None:
+    # The whole-grid abort regression (fails with the fix reverted): a REAL
+    # run_sweep_grid over a bar stream containing the 2024-11-01 Muhurat
+    # session completes with ZERO failed tuples for a ROLLING_WEEKLY grid —
+    # pre-fix the resolver's ValueError escaped build_bar_bits OUTSIDE the
+    # SweepComboError tuple-skip quarantine and aborted the WHOLE grid.
+    from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        Timeframe,
+        make_store_for,
+        run_sweep_grid,
+    )
+    from brutex.engine.sweep_run import ComboDedup
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.strategies.types import Side
+
+    bars = [
+        _bar(
+            datetime(2024, 10, 31, _OPEN_UTC_H, _OPEN_UTC_M, tzinfo=UTC) + timedelta(minutes=m),
+            "100.00",
+            "101.00",
+            "99.00",
+            "100.50",
+        )
+        for m in range(10)
+    ] + [
+        # The real 2024-11-01 Muhurat evening session (~18:00 IST == 12:30 UTC).
+        _bar(
+            datetime(2024, 11, 1, 12, 30, tzinfo=UTC) + timedelta(minutes=m),
+            "104.00",
+            "104.50",
+            "103.50",
+            "104.20",
+        )
+        for m in range(5)
+    ]
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY],
+        k_values=[1],
+        condition_bits=[0, 1, 2],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        fib_anchors=[FibAnchorKind.ROLLING_WEEKLY],
+        mode="A",
+        data_snapshot_hash="snap0001",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+    )
+    dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+    with AuditWriter.open(tmp_path / "audit.jsonl") as audit:
+        summary = run_sweep_grid(
+            grid,
+            bars_for=lambda _i, _t: bars,
+            store_for=make_store_for(tmp_path / "stores", grid),
+            dedup=dedup,
+            audit=audit,
+        )
+    assert summary.tuples_failed == 0

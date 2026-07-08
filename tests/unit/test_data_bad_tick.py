@@ -1,8 +1,11 @@
 """Unit tests for the bounded bad-tick screen (``brutex.data.bad_tick``).
 
 100% line + branch coverage of the spike / fat-finger / vendor-scaling guard at
-the engine read boundary (DEC-SWEEP-DATA-EDGE-GUARDS-001, D-MAJ-2). The
-end-to-end wiring through :func:`arrow_table_to_bars` is exercised in
+the engine read boundary (DEC-SWEEP-DATA-EDGE-GUARDS-001, D-MAJ-2) with the
+EVIDENCE-CONFIRMED session-head seed (DEC-BADTICK-HEAD-SEED-001 — a poison
+FIRST bar is itself dropped by the median-of-first-3 head vote instead of
+becoming an unhealable cascade baseline). The end-to-end wiring through
+:func:`arrow_table_to_bars` is exercised in
 ``tests/integration/test_feed_replay_bad_tick_screen.py`` (stem-named
 ``test_feed_replay*`` so the coverage-gate discovery maps it to
 ``brutex/feed/replay.py``).
@@ -14,8 +17,10 @@ from datetime import date
 
 import pytest
 from brutex.data.bad_tick import (
+    BAD_TICK_HEAD_UNCONFIRMED_EVENT,
     BAD_TICK_MAX_RATIO,
     BAD_TICK_SKIP_EVENT,
+    HEAD_CONFIRM_BARS,
     BadTickScreen,
     bad_tick_screen_enabled,
     is_bad_tick,
@@ -83,88 +88,277 @@ def test_custom_max_ratio() -> None:
     assert is_bad_tick(100.0, 250.0, max_ratio=3.0) is False
 
 
-def test_default_max_ratio_constant() -> None:
+def test_symmetric_in_the_ratio_sense() -> None:
+    # The 2-bar unconfirmable-head rationale: the pair identifies no offender.
+    assert is_bad_tick(100.0, 1000.0) == is_bad_tick(1000.0, 100.0) is True
+    assert is_bad_tick(100.0, 101.0) == is_bad_tick(101.0, 100.0) is False
+
+
+def test_default_constants() -> None:
     assert BAD_TICK_MAX_RATIO == 4.0
+    assert HEAD_CONFIRM_BARS == 3
 
 
 # ────────────────────────────────────────────────────────────────────────
-# BadTickScreen — stateful single-pass in-session screen
+# BadTickScreen.screen_mask — single-pass in-session screen
 # ────────────────────────────────────────────────────────────────────────
 
 _D1 = date(2024, 1, 2)
 _D2 = date(2024, 1, 3)
 
 
-def test_first_bar_of_session_always_kept() -> None:
-    screen = BadTickScreen()
-    # No prior in-session close → exempt, even a wild value.
-    assert screen.keep(ist_date=_D1, close=999999.0) is True
+def _mask(rows: list[tuple[date, float]], *, screen: BadTickScreen | None = None) -> list[bool]:
+    """Run one table's (ist_date, close) rows through the screen."""
+    scr = screen if screen is not None else BadTickScreen()
+    return scr.screen_mask([r[0] for r in rows], [r[1] for r in rows])
 
 
-def test_reopen_gap_across_sessions_never_trips() -> None:
-    screen = BadTickScreen()
-    assert screen.keep(ist_date=_D1, close=27940.0) is True
-    # New session opens far away — first bar of D2 is exempt (no false trip).
-    assert screen.keep(ist_date=_D2, close=2000.0) is True
-
-
-def test_bad_tick_skipped_and_baseline_holds_last_good_close() -> None:
-    screen = BadTickScreen()
-    assert screen.keep(ist_date=_D1, close=27940.0) is True
-    # ÷10 scaled bar → skipped (False).
-    assert screen.keep(ist_date=_D1, close=2794.0) is False
-    # The NEXT good bar is judged against the last KEPT close (27940), not the
-    # skipped spike — so a lone spike cannot cascade-flag its healthy successor.
-    assert screen.keep(ist_date=_D1, close=27950.0) is True
-
-
-def test_two_consecutive_spikes_both_skipped_one_warn() -> None:
+def test_empty_input_returns_empty_mask() -> None:
     with capture_logs() as logs:
+        assert BadTickScreen().screen_mask([], []) == []
+    assert not logs
+
+
+def test_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="length mismatch"):
+        BadTickScreen().screen_mask([_D1], [100.0, 101.0])
+
+
+def test_clean_session_all_kept_no_warn() -> None:
+    rows = [(_D1, 27940.0 + i) for i in range(6)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True] * 6
+    assert not logs
+
+
+# ── the head-seed regression (DEC-BADTICK-HEAD-SEED-001) ────────────────
+# Poison-position permutations over a ≥ 3-bar session: the corrupt head bar is
+# itself dropped by the median vote at EVERY head position, and the healthy
+# remainder of the session survives (the pre-fix screen kept a poison FIRST bar
+# as the baseline and cascade-dropped every healthy successor — these FAIL with
+# the fix reverted).
+
+
+def test_poison_first_bar_dropped_healthy_session_survives() -> None:
+    # THE bug-1 shape: ×10 poison head, 5 healthy successors.
+    rows = [(_D1, 279400.0)] + [(_D1, 27940.0 + i) for i in range(1, 6)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [False, True, True, True, True, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 1
+    # The head skip's reference is the head-window MEDIAN (27942), not a
+    # "previous close" — the field is named accordingly.
+    assert warns[0]["first_ref_close"] == 27942.0
+    assert warns[0]["first_close"] == 279400.0
+
+
+def test_poison_second_bar_dropped() -> None:
+    rows = [(_D1, 27940.0), (_D1, 2794.0), (_D1, 27942.0), (_D1, 27943.0)]
+    assert _mask(rows) == [True, False, True, True]
+
+
+def test_poison_third_bar_dropped_baseline_is_second() -> None:
+    rows = [(_D1, 27940.0), (_D1, 27941.0), (_D1, 279400.0), (_D1, 27942.0)]
+    # Head median = 27941 → bar 3 dropped; baseline = 27941 (last KEPT head
+    # bar) so bar 4 is judged against it and kept.
+    assert _mask(rows) == [True, True, False, True]
+
+
+def test_poison_never_advances_baseline_after_head() -> None:
+    # Mid-session spike AFTER the head resolved: dropped, and the NEXT bar is
+    # judged against the last KEPT close (no cascade).
+    rows = [
+        (_D1, 27940.0),
+        (_D1, 27941.0),
+        (_D1, 27942.0),
+        (_D1, 2794.0),  # ÷10 spike — dropped vs baseline 27942
+        (_D1, 27943.0),  # judged vs 27942 (NOT the spike) — kept
+    ]
+    assert _mask(rows) == [True, True, True, False, True]
+
+
+def test_two_consecutive_mid_session_spikes_one_warn() -> None:
+    with capture_logs() as logs:
+        rows = [
+            (_D1, 27940.0),
+            (_D1, 27941.0),
+            (_D1, 27942.0),
+            (_D1, 2794.0),
+            (_D1, 2795.0),
+        ]
         screen = BadTickScreen(source="NSE/INDEX/NSE-NIFTY/1minute")
-        screen.keep(ist_date=_D1, close=27940.0)  # kept baseline
-        assert screen.keep(ist_date=_D1, close=2794.0) is False  # spike 1
-        assert screen.keep(ist_date=_D1, close=2795.0) is False  # spike 2 (vs 27940)
-        screen.finish()
+        assert _mask(rows, screen=screen) == [True, True, True, False, False]
     warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
     assert len(warns) == 1
     assert warns[0]["skipped"] == 2
     assert warns[0]["session"] == "2024-01-02"
     assert warns[0]["source"] == "NSE/INDEX/NSE-NIFTY/1minute"
-    assert warns[0]["first_prev_close"] == 27940.0
+    assert warns[0]["first_ref_close"] == 27942.0
     assert warns[0]["first_close"] == 2794.0
     assert warns[0]["max_ratio"] == BAD_TICK_MAX_RATIO
 
 
+def test_head_and_mid_session_skips_fold_into_one_warn() -> None:
+    rows = [
+        (_D1, 279400.0),  # poison head (dropped by the median vote)
+        (_D1, 27940.0),
+        (_D1, 27941.0),
+        (_D1, 2794.0),  # mid-session spike
+        (_D1, 27942.0),
+    ]
+    with capture_logs() as logs:
+        assert _mask(rows) == [False, True, True, False, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 2
+
+
 def test_one_warn_per_session_flushed_at_session_boundary() -> None:
     with capture_logs() as logs:
-        screen = BadTickScreen()
-        screen.keep(ist_date=_D1, close=27940.0)
-        screen.keep(ist_date=_D1, close=2794.0)  # D1 spike
-        # Crossing into D2 flushes the D1 warn.
-        screen.keep(ist_date=_D2, close=27000.0)
-        screen.keep(ist_date=_D2, close=2700.0)  # D2 spike
-        screen.finish()
+        rows = [
+            (_D1, 27940.0),
+            (_D1, 27941.0),
+            (_D1, 27942.0),
+            (_D1, 2794.0),  # D1 spike
+            (_D2, 27000.0),
+            (_D2, 27001.0),
+            (_D2, 27002.0),
+            (_D2, 2700.0),  # D2 spike
+        ]
+        assert _mask(rows) == [True, True, True, False, True, True, True, False]
     warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
     assert [w["session"] for w in warns] == ["2024-01-02", "2024-01-03"]
     assert all(w["skipped"] == 1 for w in warns)
 
 
-def test_clean_session_emits_no_warn() -> None:
+def test_reopen_gap_across_sessions_never_trips() -> None:
+    # Cross-session comparison is FORBIDDEN (a stock split must never
+    # false-trip): a ÷10 overnight gap between two internally-consistent
+    # sessions keeps every bar with no warn.
+    rows = [(_D1, 27940.0 + i) for i in range(4)] + [(_D2, 2794.0 + i) for i in range(4)]
     with capture_logs() as logs:
-        screen = BadTickScreen()
-        screen.keep(ist_date=_D1, close=27940.0)
-        screen.keep(ist_date=_D1, close=27950.0)
-        screen.finish()
+        assert _mask(rows) == [True] * 8
+    assert not logs
+
+
+def test_genuine_head_gap_agreeing_bars_never_false_trip() -> None:
+    # A large reopen gap is legitimate when the head bars AGREE with each other
+    # (the median is one of them) — all kept, no warn.
+    rows = [(_D1, 100.0), (_D2, 6000.0), (_D2, 6001.0), (_D2, 6002.0), (_D2, 6003.0)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True] * 5
+    assert not logs
+
+
+# ── head-window permutation corners ─────────────────────────────────────
+
+
+def test_one_bar_session_kept_unconfirmable_silent() -> None:
+    # No second witness at all → kept, no warn (documented honest limit).
+    with capture_logs() as logs:
+        assert _mask([(_D1, 999999.0)]) == [True]
+    assert not logs
+
+
+def test_two_bar_session_consistent_both_kept_no_warn() -> None:
+    with capture_logs() as logs:
+        assert _mask([(_D1, 100.0), (_D1, 101.0)]) == [True, True]
+    assert not logs
+
+
+def test_two_bar_session_inconsistent_both_kept_one_unconfirmed_warn() -> None:
+    # The symmetric ratio test identifies no offender → keep BOTH, disclose.
+    with capture_logs() as logs:
+        screen = BadTickScreen(source="src")
+        assert _mask([(_D1, 100.0), (_D1, 1000.0)], screen=screen) == [True, True]
+    unconfirmed = [e for e in logs if e.get("event") == BAD_TICK_HEAD_UNCONFIRMED_EVENT]
+    assert len(unconfirmed) == 1
+    assert unconfirmed[0]["session"] == "2024-01-02"
+    assert unconfirmed[0]["source"] == "src"
+    assert unconfirmed[0]["first_close"] == 100.0
+    assert unconfirmed[0]["second_close"] == 1000.0
+    assert unconfirmed[0]["max_ratio"] == BAD_TICK_MAX_RATIO
+    # No skip warn — nothing was skipped.
     assert not [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
 
 
-def test_finish_on_empty_screen_is_noop() -> None:
+def test_two_bar_session_flushed_by_next_session_boundary() -> None:
+    # The unconfirmable 2-bar head resolves at the SESSION boundary too, not
+    # only at stream end; the next session screens independently.
+    rows = [
+        (_D1, 100.0),
+        (_D1, 1000.0),  # inconsistent pair — kept + disclosed
+        (_D2, 200.0),
+        (_D2, 201.0),
+        (_D2, 202.0),
+        (_D2, 2000.0),  # a REAL post-head spike in D2 — dropped
+    ]
     with capture_logs() as logs:
-        BadTickScreen().finish()  # never fed a bar → _session None, no warn
-    assert not [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+        assert _mask(rows) == [True, True, True, True, True, False]
+    unconfirmed = [e for e in logs if e.get("event") == BAD_TICK_HEAD_UNCONFIRMED_EVENT]
+    assert [e["session"] for e in unconfirmed] == ["2024-01-02"]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert [w["session"] for w in warns] == ["2024-01-03"]
 
 
-def test_injected_logger_is_used() -> None:
+def test_two_of_three_corrupt_head_beats_the_median() -> None:
+    # DOCUMENTED LIMIT: two same-scaled corrupt head bars out-vote the healthy
+    # one — the median IS the corruption, so the healthy bar is dropped and the
+    # corrupt pair survives. Majority evidence is the best a bounded in-session
+    # screen can do; the per-session WARN still fires.
+    rows = [(_D1, 279400.0), (_D1, 27940.0), (_D1, 279410.0)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True, False, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 1
+
+
+def test_all_three_head_bars_mutually_inconsistent_median_survives() -> None:
+    # Pathological head where every pair is ≥ 4x apart: the median bar always
+    # survives (is_bad_tick(m, m) is False) so a session can never be emptied
+    # by its own head vote.
+    rows = [(_D1, 10.0), (_D1, 100.0), (_D1, 1000.0)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [False, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 2
+
+
+def test_head_median_with_duplicate_closes_tie() -> None:
+    # Ties: median of (100, 100, 1000) = 100 → the odd one out is dropped.
+    rows = [(_D1, 100.0), (_D1, 100.0), (_D1, 1000.0), (_D1, 101.0)]
+    assert _mask(rows) == [True, True, False, True]
+
+
+def test_exactly_three_bar_session_resolves_head_at_third_bar() -> None:
+    rows = [(_D1, 100.0), (_D1, 101.0), (_D1, 1000.0)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+
+
+def test_custom_max_ratio_applies_to_head_and_stream() -> None:
+    screen = BadTickScreen(max_ratio=2.0)
+    rows = [(_D1, 100.0), (_D1, 250.0), (_D1, 101.0), (_D1, 150.0)]
+    # Head median = 101 → 250 is >= 2x → dropped; stream: 150 vs baseline
+    # 101 is < 2x → kept.
+    assert _mask(rows, screen=screen) == [True, False, True, True]
+
+
+def test_screen_instance_reusable_across_tables() -> None:
+    # Config-only instance: a second screen_mask call starts fresh (no state
+    # bleeds across tables).
+    screen = BadTickScreen()
+    rows = [(_D1, 100.0), (_D1, 101.0), (_D1, 102.0), (_D1, 1000.0)]
+    assert _mask(rows, screen=screen) == [True, True, True, False]
+    assert _mask(rows, screen=screen) == [True, True, True, False]
+
+
+def test_injected_logger_is_used_for_both_events() -> None:
     events: list[tuple[str, dict[str, object]]] = []
 
     class _FakeLog:
@@ -172,9 +366,10 @@ def test_injected_logger_is_used() -> None:
             events.append((event, kw))
 
     screen = BadTickScreen(source="src", log=_FakeLog())  # type: ignore[arg-type]
-    screen.keep(ist_date=_D1, close=100.0)
-    screen.keep(ist_date=_D1, close=10.0)  # ÷10 spike
-    screen.finish()
+    # Table 1: a post-head ÷10 spike (skip warn).
+    screen.screen_mask([_D1] * 4, [100.0, 101.0, 102.0, 10.0])
+    # Table 2: an inconsistent 2-bar session (unconfirmed warn).
+    screen.screen_mask([_D2] * 2, [100.0, 1000.0])
     assert events == [
         (
             BAD_TICK_SKIP_EVENT,
@@ -183,8 +378,18 @@ def test_injected_logger_is_used() -> None:
                 "session": "2024-01-02",
                 "skipped": 1,
                 "max_ratio": BAD_TICK_MAX_RATIO,
-                "first_prev_close": 100.0,
+                "first_ref_close": 102.0,
                 "first_close": 10.0,
             },
-        )
+        ),
+        (
+            BAD_TICK_HEAD_UNCONFIRMED_EVENT,
+            {
+                "source": "src",
+                "session": "2024-01-03",
+                "first_close": 100.0,
+                "second_close": 1000.0,
+                "max_ratio": BAD_TICK_MAX_RATIO,
+            },
+        ),
     ]

@@ -110,6 +110,13 @@ _LOG = structlog.get_logger(__name__)
 #: anchor (``DEC-SWEEP-DATA-EDGE-GUARDS-001``).
 _MUHURAT_ANCHOR_SKIP_EVENT: Final[str] = "stage1a.muhurat_prev_day_anchor_skip"
 
+#: Structlog event emitted (exactly once per Muhurat session — each IST day rolls
+#: exactly once) when a NON-prev-day Fib anchor honestly ABSTAINS on the Muhurat
+#: day's OWN bars instead of calling the weekly resolvers, whose deliberate
+#: non-trading-``today`` ``ValueError`` refusal would otherwise abort the WHOLE
+#: sweep grid (``DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001``).
+_MUHURAT_WEEKLY_ANCHOR_EVENT: Final[str] = "stage1a.muhurat_weekly_anchor_ineligible"
+
 #: Paisa per rupee — the lake stores Decimal rupees; the evaluator wants int64
 #: paisa (``DEC-PAISA-DOC-RECONCILE-001``).
 _PAISA_PER_RUPEE: Final[int] = 100
@@ -723,6 +730,28 @@ class Stage1AMatrixBuilder:
                 pdh_paisa=prev_ohlc.high_paisa,
                 pdl_paisa=prev_ohlc.low_paisa,
             )
+        elif has_muhurat_session(today):
+            # Muhurat weekly-anchor ABSTAIN (DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001):
+            # a Diwali Muhurat evening session is NOT a regular trading day, so the
+            # weekly resolvers deliberately REFUSE it (`ValueError: today (...) is
+            # not a trading day` — a documented, test-pinned honest refusal for
+            # direct callers, byte-untouched). But the ingest boundary KEEPS
+            # Muhurat bars (#1294) and every 2020→today sweep span contains
+            # Muhurat sessions, so calling the resolver here aborted EVERY
+            # full-scope ROLLING_WEEKLY / WEEKLY_STATIC grid (the ValueError is
+            # not a SweepComboError — the grid drivers' tuple-skip quarantine
+            # never engaged). The Muhurat day's OWN Fib anchor now honestly
+            # ABSTAINS instead: fib=None rides the EXISTING has_fib_anchor=False
+            # path, clearing ONLY the Group-4 Fib bits via _NON_FIB_MASK (the
+            # ADR-0012 combo-ineligible convention) while the warm prev-day
+            # pivots stay. One WARN per Muhurat session (each IST day rolls
+            # exactly once); look-ahead-clean — keyed on `today`'s own IST date.
+            _LOG.warning(
+                _MUHURAT_WEEKLY_ANCHOR_EVENT,
+                day=today.isoformat(),
+                fib_anchor=self._fib_anchor.value,
+            )
+            fib = None
         else:
             # Multi-day anchor: dispatch through the COMMON resolver over the
             # bounded rolling history. Returns None on a cold week (< 5 sessions

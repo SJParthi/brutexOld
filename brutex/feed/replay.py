@@ -319,19 +319,30 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     open_interests: list[int | None] = table.column("open_interest").to_pylist()
 
     # Bounded bad-tick (spike / fat-finger / vendor-scaling) screen
-    # (DEC-SWEEP-DATA-EDGE-GUARDS-001): a self-consistent SCALED bar — every
-    # OHLC field ×~10 but internally ordered and positive — passes the
-    # positivity + ordering checks above yet would silently flip every
-    # price-relative bit and (via ``TodayOHLC.absorb``) poison the NEXT day's
-    # PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a bar (never value-edits,
-    # never fabricates) comparing each close to the previous IN-SESSION kept
-    # close; the first bar of each session is exempt (no reopen-gap false trip).
-    # Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar.
-    screen = BadTickScreen(source=source) if bad_tick_screen_enabled() else None
+    # (DEC-SWEEP-DATA-EDGE-GUARDS-001 + DEC-BADTICK-HEAD-SEED-001): a
+    # self-consistent SCALED bar — every OHLC field ×~10 but internally ordered
+    # and positive — passes the positivity + ordering checks below yet would
+    # silently flip every price-relative bit and (via ``TodayOHLC.absorb``)
+    # poison the NEXT day's PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a
+    # bar (never value-edits, never fabricates): each session's first up-to-3
+    # bars vote via their median close (so a poison FIRST bar is itself dropped
+    # instead of becoming an unhealable cascade baseline — the head-seed fix),
+    # then every later bar is judged against the last IN-SESSION kept close.
+    # The whole-table mask is computed in ONE O(n) pre-pass (the head vote
+    # needs the ≤ 2 following head bars, so the verdict is per-table, not
+    # per-row-streaming); genuine reopen gaps never false-trip and
+    # cross-session comparison stays forbidden. Default ON,
+    # ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar. IST session dates
+    # drive the per-session grouping (``ts`` is timezone-aware — the
+    # constructor rejects a naive datetime, so ``.astimezone`` is safe).
+    keep_mask: list[bool] | None = None
+    if bad_tick_screen_enabled():
+        ist_dates = [ts.astimezone(IST).date() for ts in timestamps]
+        keep_mask = BadTickScreen(source=source).screen_mask(ist_dates, closes)
 
     bars: list[CandleBar] = []
-    for ts, o, h, lo, c, v, oi in zip(
-        timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
+    for row, (ts, o, h, lo, c, v, oi) in enumerate(
+        zip(timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True)
     ):
         origin = f" in {source}" if source is not None else ""
         # Engine-boundary POSITIVITY (DEC-STORED-DATA-VALIDATION-001): checked
@@ -347,11 +358,12 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                     f"engine (DEC-STORED-DATA-VALIDATION-001)"
                 )
         # Bad-tick screen (post-positivity, pre-construction): a scaled spike is
-        # DROPPED (not built, not appended) and counted; the last kept good close
-        # carries forward as the comparison baseline. IST session date drives the
-        # per-session grouping (``ts`` is timezone-aware — the constructor rejects
-        # a naive datetime, so ``.astimezone`` is safe).
-        if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
+        # DROPPED (not built, not appended) and counted per the pre-computed
+        # keep mask. The positivity raise above deliberately stays FIRST — a
+        # corrupt NON-POSITIVE stored bar is a different, always-loud class
+        # that never rides the skip path (byte-identical to the pre-mask
+        # ordering, where ``screen.keep`` also ran after the positivity check).
+        if keep_mask is not None and not keep_mask[row]:
             continue
         try:
             bars.append(
@@ -371,8 +383,6 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                 f"refusing to serve corrupt data to the engine "
                 f"(DEC-STORED-DATA-VALIDATION-001)"
             ) from exc
-    if screen is not None:
-        screen.finish()
     return bars
 
 
