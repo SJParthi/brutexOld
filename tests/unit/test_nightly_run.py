@@ -37,6 +37,17 @@ from brutex.nightly.run import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_disk_floors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin both disk floors to 0 so the chain never reads the CI machine's
+    REAL free disk (the 20 GiB lake default refused the DISK link on a
+    low-disk GitHub runner and BLOCKED every downstream link — the
+    2026-07-08 run-28948028949 red; test_cli_nightly.py already pins).
+    The floor-breach tests override with their own in-test ``setenv``."""
+    monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_LAKE_BYTES", "0")
+    monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_BACKUP_BYTES", "0")
+
+
 class FakeAlerter:
     """Records nightly_summary / nightly_refused calls; can raise on summary."""
 

@@ -36,6 +36,16 @@ from brutex.nightly.report import nightly_audit_path, nightly_dir
 from brutex.nightly.run import NightlyPlan, NightlySeams, run_nightly
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_disk_floors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin both disk floors to 0 so the e2e chain never reads the CI
+    machine's REAL free disk (the 20 GiB lake default refused the DISK link
+    on a low-disk GitHub runner and BLOCKED every downstream link — the
+    2026-07-08 run-28948028949 red; test_cli_nightly.py already pins)."""
+    monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_LAKE_BYTES", "0")
+    monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_BACKUP_BYTES", "0")
+
+
 class RecordingAlerter:
     def __init__(self) -> None:
         self.summaries: list[dict[str, Any]] = []
