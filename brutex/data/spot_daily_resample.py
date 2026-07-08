@@ -79,7 +79,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 
@@ -114,8 +114,10 @@ __all__ = [
     "DailyDeriveTarget",
     "DailyFillResult",
     "DailyOpenSubstitutionScan",
+    "DailyOpenVerdict",
     "DailyReconcileReport",
     "DailyResampleWindow",
+    "classify_daily_open",
     "derive_daily_for_targets",
     "detect_daily_open_substitutions",
     "emit_daily_open_substitutions",
@@ -137,6 +139,53 @@ __all__ = [
 #: TRUE count, so the cap never lies (Golden Rule #1).
 MAX_OPEN_SUBSTITUTION_WARNS: Final[int] = 20
 
+#: One session's verdict under the ALIGNED daily-open predicate
+#: (DEC-DAILY-OPEN-PREDICATE-ALIGN-001): ``"substituted"`` — the derived 1-day
+#: open is the earliest-present-minute substitute, not the canonical 09:15
+#: price; ``"muhurat_abstained"`` — a Muhurat session, whose open is
+#: off-09:15 BY DESIGN (never a substitution signal); ``"ok"`` — the first
+#: present minute IS exactly 09:15, so the derived open is the canonical one.
+DailyOpenVerdict = Literal["ok", "substituted", "muhurat_abstained"]
+
+
+def classify_daily_open(ist_date: date, first_minute: time) -> DailyOpenVerdict:
+    """The ONE COMMON per-session daily-open-substitution predicate — pure.
+
+    DEC-DAILY-OPEN-PREDICATE-ALIGN-001: BOTH open-substitution surfaces — the
+    prebuild/pipeline headline (:func:`detect_daily_open_substitutions`, which
+    iterates this classifier) AND the /completeness · /universe · /coverage
+    census (the DuckDB per-session CTE in
+    :func:`brutex.dashboard.db_view.summarize_spot_datasets`, whose SQL
+    predicate ``first_ist <> 09:15`` + Muhurat ``NOT IN`` exclusion is the
+    mirror-pinned twin of this function — equivalence proven same-lake
+    same-verdicts by ``test_sql_cte_equivalent_to_classifier_over_one_lake``)
+    — key off this ONE policy (CLAUDE.md §11 COMMON):
+
+    * a **Muhurat** session (:func:`brutex.calendars.nse.has_muhurat_session`)
+      ABSTAINS — its open is off-09:15 BY DESIGN (evening 18:00/18:15 for
+      2020-2024, afternoon 13:45 for 2025), so counting it would flag a
+      perfectly healthy lake every year (the operator-mandated false-positive
+      suppression, previously the detector-only rule);
+    * any other session whose first present minute is NOT exactly
+      :data:`~brutex.calendars.nse.SESSION_OPEN_IST` (09:15:00) is
+      **substituted** — a stray PRE-09:15 first bar (should not survive the
+      ingest session filter) COUNTS too (``!=``, never silently trusted; this
+      closes the census's former strict-``>`` under-count);
+    * exactly 09:15:00 is **ok** — the derived daily open IS the canonical
+      open price.
+
+    The classifier judges ONE (session, first-minute) pair; it deliberately
+    carries NO population rule — the forming-session ``ist_date < before``
+    cutoff (detector) vs all-stored-sessions (census) split is a documented
+    POPULATION difference, not a predicate difference (see
+    :func:`detect_daily_open_substitutions`).
+    """
+    if has_muhurat_session(ist_date):
+        return "muhurat_abstained"
+    if first_minute != SESSION_OPEN_IST:
+        return "substituted"
+    return "ok"
+
 
 @dataclass(frozen=True, slots=True)
 class DailyOpenSubstitutionScan:
@@ -152,10 +201,11 @@ class DailyOpenSubstitutionScan:
         daily ``open`` silently substituted that first-present minute's open
         (the implicit ``open.first()`` in
         :func:`~brutex.data.tf_resampler.resample_1m_to_tf` — no coded branch).
-        The predicate is ``!= 09:15`` exactly: a stray PRE-09:15 bar (should
-        not survive the ingest session filter) also flags, with the actual
-        first minute in the payload — never silently trusted. Muhurat sessions
-        are EXCLUDED (see ``muhurat_abstained``).
+        The predicate is the ONE COMMON :func:`classify_daily_open`
+        (DEC-DAILY-OPEN-PREDICATE-ALIGN-001) — ``!= 09:15`` exactly: a stray
+        PRE-09:15 bar (should not survive the ingest session filter) also
+        flags, with the actual first minute in the payload — never silently
+        trusted. Muhurat sessions are EXCLUDED (see ``muhurat_abstained``).
     sessions
         COMPLETE sessions examined (post-``before``-cutoff, INCLUDING the
         Muhurat-abstained ones).
@@ -204,27 +254,30 @@ def detect_daily_open_substitutions(
     +05:30 offset (:data:`_IST` — the same arithmetic the resampler uses,
     no tz-library drift between scan and write).
 
-    DELIBERATE divergence from the read-side /completeness counter
-    (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267 — the
-    per-session CTE in :func:`brutex.dashboard.db_view.summarize_spot_datasets`,
-    surfaced as the "Open substituted N/M" column + the /universe strip): the
-    two surfaces name the SAME phenomenon with THREE consciously different
-    rules. (1) Muhurat — #1267 COUNTS a Muhurat session (any off-09:15 open
-    honestly means "the derived daily open is not the 09:15 price"); THIS
-    detector ABSTAINS (the operator mandate — a Muhurat open is off-09:15 BY
-    DESIGN, so a pipeline WARN on it would be a false positive). (2) predicate
-    — #1267 uses strict ``>`` 09:15 (a stray pre-09:15 first bar is documented
-    out-of-contract there); this detector uses ``!=`` (a pre-09:15 bar flags,
-    with its real minute in the payload). (3) scope/cutoff — #1267 counts ALL
-    stored sessions of the scored INDEX/CASH ``1minute`` datasets; this
-    detector applies the forming-session ``ist_date < before`` cutoff over
-    every SPOT prebuild target. So the /completeness column and the pipeline
-    ", N daily open(s) substituted" headline CAN legitimately disagree on the
-    same lake (a Muhurat session is the pinned example — the DRIFT-PIN test
-    ``test_muhurat_divergence_pin_vs_honesty_counter_1267`` encodes the
-    expected disagreement, so a silent "reconciliation" of either side fails
-    loudly); actually reconciling the predicates is a named follow-up
-    decision, never a drive-by edit.
+    ALIGNED with the read-side /completeness counter
+    (DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up decision the
+    former three-way divergence of DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001
+    #1267 deferred to): the per-session CTE in
+    :func:`brutex.dashboard.db_view.summarize_spot_datasets` (surfaced as the
+    /completeness "Open substituted N/M" column + the /universe strip) and
+    this detector now share the ONE per-session predicate
+    :func:`classify_daily_open` — Muhurat ABSTAINS on BOTH surfaces (a
+    Muhurat open is off-09:15 BY DESIGN; counting it flagged a healthy lake
+    every year), and the predicate is ``!= 09:15`` on BOTH (a stray pre-09:15
+    first bar COUNTS, closing the census's former strict-``>`` under-count).
+    This detector iterates the classifier directly; the CTE's SQL
+    (``first_ist <> …`` + the :func:`~brutex.dashboard.db_view.
+    _muhurat_exclusion_sql` date exclusion) is its mirror-pinned twin —
+    equivalence proven same-lake same-verdicts by
+    ``test_sql_cte_equivalent_to_classifier_over_one_lake`` and the alignment
+    pinned by ``test_predicate_alignment_pin_vs_honesty_counter_1267``. The
+    ONE remaining deliberate difference is POPULATION, not predicate: the
+    census counts ALL stored sessions of the scored INDEX/CASH ``1minute``
+    datasets (no cutoff), while this detector applies the forming-session
+    ``ist_date < before`` cutoff over every SPOT prebuild target — so the two
+    surfaces can differ ONLY on a not-yet-derived forming session (or a
+    dataset outside the prebuild target set), NEVER on a session both
+    examined (pinned by ``test_population_cutoff_divergence_pin``).
 
     Parameters
     ----------
@@ -256,11 +309,13 @@ def detect_daily_open_substitutions(
     for row in firsts.iter_rows(named=True):
         ist_date: date = row["_ist_date"]
         first_minute: time = row["_first_ist"].time()
-        if has_muhurat_session(ist_date):
+        # The ONE COMMON per-session predicate (DEC-DAILY-OPEN-PREDICATE-
+        # ALIGN-001) — the same policy the /completeness SQL CTE mirrors.
+        verdict = classify_daily_open(ist_date, first_minute)
+        if verdict == "muhurat_abstained":
             # A Muhurat session opens off-09:15 BY DESIGN — abstain, counted.
             muhurat_abstained += 1
-            continue
-        if first_minute != SESSION_OPEN_IST:
+        elif verdict == "substituted":
             substituted.append((ist_date, first_minute))
     return DailyOpenSubstitutionScan(
         substituted=tuple(substituted),
@@ -287,10 +342,11 @@ def emit_daily_open_substitutions(
     on a poisoned scan) — production wires it through the guarded
     :func:`observe_daily_open_substitutions`, mirroring the
     ``emit_underlying_all_empty`` precedent. The counts emitted here follow
-    THIS module's detector rules — deliberately NOT the /completeness
-    counter's (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267);
-    see :func:`detect_daily_open_substitutions` for the stated three-way
-    divergence.
+    the ONE ALIGNED per-session predicate :func:`classify_daily_open`
+    (DEC-DAILY-OPEN-PREDICATE-ALIGN-001) — the SAME rule the /completeness
+    counter's SQL CTE mirrors; only the POPULATION (forming-session cutoff
+    here, all stored sessions there) can differ — see
+    :func:`detect_daily_open_substitutions`.
     """
     if scan.count == 0:
         return
@@ -882,6 +938,10 @@ def reconcile_daily_from_minute(
                 bars_appended=result.bars_written,
                 now=now,
                 in_pull_fetches=0,  # a resample made ZERO vendor fetches (honest provenance)
+                # ... so its retry SPLIT is a KNOWN zero on both halves
+                # (DEC-RETRY-COUNTER-SPLIT-001 — mirrors in_pull_fetches=0).
+                empty_retries=0,
+                transient_retries=0,
             )
             filled += 1
             bars += result.bars_written

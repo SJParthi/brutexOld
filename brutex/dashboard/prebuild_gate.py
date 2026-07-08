@@ -44,10 +44,34 @@ deltas — immune to wall-clock jumps).
 * The gated payload is a **200 with ``gated: true``** and a note — never a 500,
   never a fabricated (or half-fresh) mover row. The page keeps polling and
   recovers by itself the moment the gate lifts.
-* The gate is **process-local** state on the app instance (injected via
-  ``build_app`` — no module-global mutable state, CLAUDE.md §4): a CLI pull in
-  a SEPARATE process does not gate the dashboard movers (stated, not hidden —
-  the dashboard's own pipeline is the surface the decree covers).
+* The gate's BEGIN/RELEASE state is **process-local** on the app instance
+  (injected via ``build_app`` — no module-global mutable state, CLAUDE.md §4),
+  but :meth:`PrebuildGate.snapshot` additionally consults an OPTIONAL
+  **cross-process derive probe** (``cross_probe`` —
+  DEC-DERIVE-LOCK-VISIBILITY-001, closing the named PrebuildGate follow-up of
+  DEC-ENGINE-MISC-PACK-001): while ANY holder — a SEPARATE process (a
+  CLI-launched pipeline / lake heal) OR this process's own out-of-pipeline
+  derive (the dashboard's lake-heal recall) — holds the fixed
+  ``<lake_root>/.locks/derive.lock`` exclusive flock
+  (:func:`~brutex.data.derive_lock.derive_in_progress`), the movers gate
+  honestly reads BLOCKING, with :attr:`GateSnapshot.source` ATTRIBUTED per
+  holder (the round-1 review fold — ``flock`` contends across open file
+  descriptions, so the flock probe alone cannot tell the two apart): the
+  ZERO-I/O same-process registry probe (``local_derive_probe`` →
+  :func:`~brutex.data.derive_lock.derive_lock_held_by_this_process`) is
+  consulted FIRST and yields :data:`SOURCE_LOCAL_DERIVE`; only a lock held by
+  NO thread of this process reads :data:`SOURCE_CROSS_PROCESS` — a
+  half-refreshed derived-TF set (incl. the prev-day ``1day`` baselines the
+  futures/options movers read) is never ranked either way. HONEST envelope:
+  a lock probe cannot know the holder's phase/start instant, so a
+  derive-gated snapshot carries phase :data:`DERIVE_PHASE` and ``None``
+  stamps (never fabricated); the
+  probe is a point-in-time signal refreshed per poll; a probe ``OSError``
+  fails OPEN to idle with ONE ``movers.gate.cross_probe_failed`` WARN per
+  outage (the movers read's own :func:`derive_in_progress` probe + resample
+  fallback still guard the spot stored-first path); the probe does lake-volume
+  I/O, so the route snapshots the gate via ``run_in_threadpool`` — never on
+  the event loop.
 * Only the FULL pipeline route (``/api/v1/universe/pull-pipeline``) gates; a
   ``dry_run`` pipeline (which writes no real data) does NOT gate.
 
@@ -71,6 +95,11 @@ from brutex.dashboard.movers_snapshot import parse_snapshot_date
 _LOG = structlog.get_logger(__name__)
 
 __all__ = [
+    "CROSS_PROCESS_PHASE",
+    "DERIVE_PHASE",
+    "SOURCE_CROSS_PROCESS",
+    "SOURCE_LOCAL_DERIVE",
+    "SOURCE_PIPELINE",
     "STATE_BLOCKING",
     "STATE_IDLE",
     "GateSnapshot",
@@ -84,6 +113,32 @@ STATE_IDLE: Final[str] = "idle"
 #: return the honest gated payload without touching the lake
 #: (DEC-MOVERS-GATE-PREBUILD-SCOPE-001 narrowed the gate to this one phase).
 STATE_BLOCKING: Final[str] = "blocking"
+#: :attr:`GateSnapshot.source` — this process's own pipeline gated (begin/release).
+SOURCE_PIPELINE: Final[str] = "pipeline"
+#: :attr:`GateSnapshot.source` — a SEPARATE process holds the cross-process
+#: derive lock (DEC-DERIVE-LOCK-VISIBILITY-001). Attribution is honest ONLY
+#: because the SAME-process registry probe (:data:`SOURCE_LOCAL_DERIVE`) is
+#: consulted FIRST — ``fcntl.flock`` contends across open file descriptions,
+#: so the flock probe alone reads ``True`` for an own-process holder too (the
+#: round-1 hostile-review attribution fold).
+SOURCE_CROSS_PROCESS: Final[str] = "cross_process"
+#: :attr:`GateSnapshot.source` — THIS process holds the derive lock OUTSIDE
+#: the pipeline gate (the dashboard's own background lake-heal recall — L2
+#: post-pull / L3 startup — deriving via ``materialize_lake_timeframes``
+#: while the process-local gate is idle). Detected by the ZERO-I/O
+#: reentrancy-registry probe
+#: (:func:`~brutex.data.derive_lock.derive_lock_held_by_this_process`), so a
+#: same-process derive is never mislabelled "another process".
+SOURCE_LOCAL_DERIVE: Final[str] = "local_derive"
+#: The phase label a derive-lock gated snapshot carries (local OR
+#: cross-process) — the only honest fact a lock probe yields is "a derive is
+#: in flight" (the derive lock is held EXACTLY for the derived-TF rewrite);
+#: the holder's finer stage / start instant are unknowable from a lock probe
+#: and stay ``None``, never fabricated.
+DERIVE_PHASE: Final[str] = "derive"
+#: Back-compat alias of :data:`DERIVE_PHASE` (the pre-attribution-fix name,
+#: kept so existing importers/tests are byte-unchanged).
+CROSS_PROCESS_PHASE: Final[str] = DERIVE_PHASE
 
 
 def _monotonic() -> float:
@@ -155,6 +210,13 @@ class GateSnapshot:
         DEC-MOVERS-WARM-UNBLOCK-001 honesty: a bare "6/9" read as
         7-of-9-TOTAL to the operator; the label makes it "futures 6/9"), or
         ``None`` when the reporter named none / not blocking.
+    source
+        WHO is gating (DEC-DERIVE-LOCK-VISIBILITY-001):
+        :data:`SOURCE_PIPELINE` = this process's own pipeline (begin/release);
+        :data:`SOURCE_CROSS_PROCESS` = a SEPARATE process holds the
+        cross-process derive lock; ``None`` while idle (and on a snapshot
+        constructed without the field — back-compat honest unknown, the
+        payload note then keeps the pipeline wording).
     """
 
     state: str
@@ -168,6 +230,7 @@ class GateSnapshot:
     progress_done: int | None = None
     progress_total: int | None = None
     progress_segment: str | None = None
+    source: str | None = None
 
     @property
     def blocking(self) -> bool:
@@ -187,8 +250,10 @@ class PrebuildGate:
     warm, which continues un-gated in the background), PLUS unconditionally in
     a ``try/finally`` (the idempotent backstop) so an early stop / raised phase
     / crashed pull can never wedge the movers shut. The ``/api/v1/movers``
-    route reads :meth:`snapshot` per request (O(1) — one lock acquisition, no
-    I/O).
+    route reads :meth:`snapshot` per request — O(1): one lock acquisition,
+    plus (idle, probe wired — DEC-DERIVE-LOCK-VISIBILITY-001) ONE non-blocking
+    flock probe of the lake's derive lock, which is lake-volume I/O, so the
+    route snapshots via ``run_in_threadpool`` (never on the event loop).
     """
 
     def __init__(
@@ -196,9 +261,41 @@ class PrebuildGate:
         *,
         clock: Callable[[], float] = _monotonic,
         wall_clock: Callable[[], float] = _wall_epoch,
+        cross_probe: Callable[[], bool] | None = None,
+        local_derive_probe: Callable[[], bool] | None = None,
     ) -> None:
         self._clock = clock
         self._wall_clock = wall_clock
+        #: Optional cross-process derive-lock probe
+        #: (DEC-DERIVE-LOCK-VISIBILITY-001): a zero-arg callable returning
+        #: ``True`` iff a process holds the lake's exclusive derive flock
+        #: (``build_app`` wires ``derive_in_progress`` over the store's lake
+        #: root). Consulted by :meth:`snapshot` ONLY while this process's own
+        #: gate is idle AND the local registry probe reads ``False`` — the
+        #: flock contends across open file descriptions, so on its own it
+        #: cannot tell a foreign holder from this process's own background
+        #: derive; ``local_derive_probe`` supplies that distinction. A gate
+        #: wired with ``cross_probe`` ALONE therefore attributes every held
+        #: lock ``cross_process`` (documented — the production ``build_app``
+        #: default wires BOTH). ``None`` (the default) keeps the gate purely
+        #: process-local — byte-identical to the pre-DEC-DERIVE-LOCK-VISIBILITY-001
+        #: behaviour (every existing injected-gate test rides this default).
+        self._cross_probe = cross_probe
+        #: Optional SAME-process derive-holder probe (the round-1 review
+        #: attribution fold): a zero-arg callable returning ``True`` iff THIS
+        #: process holds the derive write lock (``build_app`` wires the pure
+        #: reentrancy-registry read
+        #: :func:`~brutex.data.derive_lock.derive_lock_held_by_this_process`
+        #: — ZERO I/O, so it is checked FIRST, before the flock probe). A
+        #: ``True`` gates with the honest :data:`SOURCE_LOCAL_DERIVE`
+        #: provenance (the dashboard's own lake-heal recall) instead of a
+        #: fabricated "another process" claim. Pure computation — a raising
+        #: probe is a genuine code bug and propagates (no bare except).
+        self._local_derive_probe = local_derive_probe
+        #: Warn-once-per-outage flag for a failing probe (reset on the first
+        #: successful probe) — a wedged/permission-broken lake volume logs ONE
+        #: ``movers.gate.cross_probe_failed`` WARN, never a per-poll storm.
+        self._cross_probe_warned = False
         self._lock = threading.Lock()
         self._blocking = False
         self._runs = 0
@@ -294,10 +391,30 @@ class PrebuildGate:
         _LOG.info("pipeline.prebuild.gate_released", ok=ok, was_blocking=was_blocking)
 
     def snapshot(self) -> GateSnapshot:
-        """Return the current :class:`GateSnapshot` — O(1), one lock hold."""
+        """Return the current :class:`GateSnapshot` — O(1), one lock hold.
+
+        Resolution order (DEC-DERIVE-LOCK-VISIBILITY-001 + the round-1 review
+        attribution fold): this process's own pipeline state wins
+        (``source="pipeline"`` with the full phase / stamps / progress echo);
+        only while it is IDLE are the derive probes consulted — OUTSIDE the
+        gate lock, because the flock probe does one O(1) syscall on the lake
+        volume and holding the lock across a wedged volume would block the
+        pipeline job's own ``begin``/``release``. The SAME-process registry
+        probe runs FIRST (pure, zero I/O): a derive held by THIS process
+        outside the pipeline (the dashboard's own lake-heal recall) reads
+        BLOCKING with the honest ``source="local_derive"``; only then is the
+        cross-process flock probe consulted, so its ``source="cross_process"``
+        genuinely means a lock this process does not hold (up to the one-poll
+        probe-ordering race — self-corrected on the next poll). Either
+        derive-gated snapshot carries phase :data:`DERIVE_PHASE` and ``None``
+        stamps (a lock probe cannot know the holder's start instant — never
+        fabricated).
+        """
         now = self._clock()
         with self._lock:
             blocking = self._blocking
+            runs = self._runs
+            last_ok = self._last_ok
             gated_for_s: float | None = None
             elapsed: float | None = None
             if blocking and self._started_monotonic is not None:
@@ -308,19 +425,76 @@ class PrebuildGate:
                 gated_for_s = max(now - self._started_monotonic, 0.0)
                 elapsed = round(gated_for_s, 3)
             progress = self._progress if blocking else None
+            if blocking:
+                return GateSnapshot(
+                    state=STATE_BLOCKING,
+                    runs=runs,
+                    last_ok=last_ok,
+                    phase=self._phase,
+                    started_at=self._started_at,
+                    started_at_epoch=self._started_at_epoch,
+                    elapsed_s=elapsed,
+                    gated_for_s=gated_for_s,
+                    progress_done=progress[0] if progress is not None else None,
+                    progress_total=progress[1] if progress is not None else None,
+                    progress_segment=progress[2] if progress is not None else None,
+                    source=SOURCE_PIPELINE,
+                )
+        # Process-locally idle — a derive-lock holder anywhere still gates,
+        # attributed honestly (the round-1 review attribution fold): the
+        # ZERO-I/O same-process registry probe is consulted FIRST, so this
+        # process's own out-of-pipeline derive (the lake-heal recall) reads
+        # `local_derive`, and only a lock held by NO thread of this process
+        # reads `cross_process` via the flock probe. (No-probe gates
+        # short-circuit to the byte-identical idle snapshot.)
+        if self._local_derive_probe is not None and self._local_derive_probe():
             return GateSnapshot(
-                state=STATE_BLOCKING if blocking else STATE_IDLE,
-                runs=self._runs,
-                last_ok=self._last_ok,
-                phase=self._phase if blocking else None,
-                started_at=self._started_at if blocking else None,
-                started_at_epoch=self._started_at_epoch if blocking else None,
-                elapsed_s=elapsed,
-                gated_for_s=gated_for_s,
-                progress_done=progress[0] if progress is not None else None,
-                progress_total=progress[1] if progress is not None else None,
-                progress_segment=progress[2] if progress is not None else None,
+                state=STATE_BLOCKING,
+                runs=runs,
+                last_ok=last_ok,
+                phase=DERIVE_PHASE,
+                source=SOURCE_LOCAL_DERIVE,
             )
+        if self._cross_derive_blocking():
+            return GateSnapshot(
+                state=STATE_BLOCKING,
+                runs=runs,
+                last_ok=last_ok,
+                phase=DERIVE_PHASE,
+                source=SOURCE_CROSS_PROCESS,
+            )
+        return GateSnapshot(state=STATE_IDLE, runs=runs, last_ok=last_ok)
+
+    def _cross_derive_blocking(self) -> bool:
+        """``True`` iff the cross-process derive probe reports a held lock.
+
+        Best-effort (DEC-DERIVE-LOCK-VISIBILITY-001): no probe wired →
+        ``False`` with zero syscalls. A probe :class:`OSError` (a wedged /
+        permission-broken lake volume) FAILS OPEN to ``False`` — the movers
+        then serve normally, still guarded by the spot stored-first read's own
+        :func:`~brutex.data.derive_lock.derive_in_progress` probe + resample
+        fallback — with ONE ``movers.gate.cross_probe_failed`` WARN per outage
+        (the flag resets on the first successful probe). A non-``OSError`` is
+        a genuine code bug and propagates (CLAUDE.md §4 — no bare except).
+        """
+        if self._cross_probe is None:
+            return False
+        try:
+            held = self._cross_probe()
+        except OSError as exc:
+            with self._lock:
+                first = not self._cross_probe_warned
+                self._cross_probe_warned = True
+            if first:
+                _LOG.warning(
+                    "movers.gate.cross_probe_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            return False
+        with self._lock:
+            self._cross_probe_warned = False
+        return held
 
 
 def gated_movers_payload(
@@ -366,6 +540,17 @@ def gated_movers_payload(
     repaints; the ticking elapsed rides the separate ``elapsed_s`` /
     ``gated_for_s`` fields.
 
+    A derive-lock gated snapshot (DEC-DERIVE-LOCK-VISIBILITY-001 + the round-1
+    review attribution fold) carries its own stable note naming the real
+    release condition per holder: ``source == "local_derive"`` = THIS
+    dashboard process's own background lake-heal recall holds the lock;
+    ``source == "cross_process"`` = a genuinely SEPARATE process does (the
+    same-process registry probe already read ``False``). The payload's
+    additive ``source`` key says WHO gates. The PIPELINE note text is
+    byte-unchanged (pinned), and a legacy snapshot constructed without
+    ``source`` (``None``) keeps the pipeline wording — back-compat, never a
+    fabricated cross-process claim.
+
     Parameters
     ----------
     snapshot
@@ -390,8 +575,43 @@ def gated_movers_payload(
         asset=asset,
         phase=snapshot.phase,
         elapsed_s=snapshot.elapsed_s,
+        source=snapshot.source,
     )
-    phase_clause = f" (current stage: {snapshot.phase})" if snapshot.phase is not None else ""
+    if snapshot.source == SOURCE_LOCAL_DERIVE:
+        # The round-1 review attribution fold: THIS process holds the derive
+        # lock outside the pipeline gate — the dashboard's own background
+        # lake-heal recall rewriting derived TFs. Named honestly (never a
+        # fabricated "another process" claim); the note is STABLE (no ticking
+        # numbers) so the paint-once gated-shell guard keeps skipping
+        # identical repaints.
+        note = (
+            "a background derive in this dashboard process (its own lake-heal "
+            "recall) is rewriting the derived timeframes — movers stay gated "
+            "until it releases the derive lock, so a half-refreshed timeframe "
+            "set is never ranked (this screen retries automatically; no "
+            "action needed)."
+        )
+    elif snapshot.source == SOURCE_CROSS_PROCESS:
+        # DEC-DERIVE-LOCK-VISIBILITY-001: a SEPARATE process holds the lake's
+        # derive lock (the same-process registry probe already read False —
+        # the attribution fold) — name the real (cross-process) release
+        # condition. The note is STABLE (no ticking numbers) so the
+        # paint-once gated-shell guard keeps skipping identical repaints.
+        note = (
+            "a derive in another process (a CLI-launched pipeline or lake heal "
+            "on this lake) is rewriting the derived timeframes — movers stay "
+            "gated until it releases the cross-process derive lock, so a "
+            "half-refreshed timeframe set is never ranked (this screen retries "
+            "automatically; no action needed)."
+        )
+    else:
+        phase_clause = f" (current stage: {snapshot.phase})" if snapshot.phase is not None else ""
+        note = (
+            f"pull pipeline running{phase_clause} — movers stay gated until the final "
+            "prebuild finishes (the movers warm then continues un-gated in the "
+            "background), so a half-filled lake is never ranked (this screen retries "
+            "automatically; no action needed)."
+        )
     return {
         "gated": True,
         "interval": interval,
@@ -411,10 +631,10 @@ def gated_movers_payload(
         "warm_done": snapshot.progress_done,
         "warm_total": snapshot.progress_total,
         "warm_segment": snapshot.progress_segment,
-        "note": (
-            f"pull pipeline running{phase_clause} — movers stay gated until the final "
-            "prebuild finishes (the movers warm then continues un-gated in the "
-            "background), so a half-filled lake is never ranked (this screen retries "
-            "automatically; no action needed)."
-        ),
+        # WHO gates (DEC-DERIVE-LOCK-VISIBILITY-001): "pipeline" (this
+        # process's own pull) / "cross_process" (a separate-process derive) /
+        # None (a legacy snapshot constructed without the field — honest
+        # unknown, the note keeps the pipeline wording). Additive key.
+        "source": snapshot.source,
+        "note": note,
     }
