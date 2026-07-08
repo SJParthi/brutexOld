@@ -37,6 +37,7 @@ import numpy as np
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine import candidate as candidate_mod
 from brutex.engine import cascade_wire as cw
 from brutex.engine import robustness as robustness_mod
 from brutex.engine import stage3_wire as stage3_mod
@@ -48,7 +49,6 @@ from brutex.engine import sweep_run as run_mod
 from brutex.engine import sweep_supervisor as supervisor_mod
 from brutex.engine import trade_sim as trade_sim_mod
 from brutex.engine import validation as validation_mod
-from brutex.engine.candidate import validate_candidate
 from brutex.engine.reference_series import TradeReferenceStamper
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultsStore
@@ -517,13 +517,11 @@ class TestStage3ValidatorsSeam:
     def test_validate_candidate_threads_to_oos_and_cpcv(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.candidate as candidate_mod
-
         with (
             _capture_kwarg(monkeypatch, candidate_mod, "validate_out_of_sample") as oos_captured,
             _capture_kwarg(monkeypatch, candidate_mod, "combo_returns") as returns_captured,
         ):
-            validate_candidate(
+            candidate_mod.validate_candidate(
                 _BARS,
                 0,
                 [],

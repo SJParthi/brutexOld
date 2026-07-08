@@ -103,7 +103,8 @@ def test_legacy_load_reflushes_to_the_current_schema_losslessly(tmp_path: Path) 
     legacy = ResultsStore.load(PRE_VIX_FIXTURE)
     migrated_path = tmp_path / "migrated.parquet"
     migrated = ResultsStore(path=migrated_path)
-    assert migrated.extend(legacy.rows()) == 2
+    migrated_count = migrated.extend(legacy.rows())
+    assert migrated_count == 2
     migrated.flush()
     assert ResultsStore.load(migrated_path).rows() == legacy.rows()
     schema = pl.read_parquet_schema(migrated_path)

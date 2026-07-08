@@ -157,15 +157,19 @@ class TestDirectionalAppendUpgrade:
     def test_identical_stamped_reappend_is_a_noop(self, tmp_path: Path) -> None:
         store = ResultsStore(path=tmp_path / "s.parquet")
         stamped = _row(**_TRIO)
-        assert store.append(stamped) is True
-        assert store.append(stamped) is False  # branch 1: identical value OK
+        first_added = store.append(stamped)
+        assert first_added is True
+        reappend_added = store.append(stamped)
+        assert reappend_added is False  # branch 1: identical value OK
         assert store.get(stamped.run_id) == stamped
 
     def test_backfill_none_to_value_upgrades_and_logs(self, tmp_path: Path) -> None:
         store = ResultsStore(path=tmp_path / "s.parquet")
-        assert store.append(_row()) is True  # unstamped first run
+        unstamped_added = store.append(_row())
+        assert unstamped_added is True  # unstamped first run
         with capture_logs() as logs:
-            assert store.append(_row(**_TRIO)) is True  # branch 2: stamped redo backfills
+            backfill_added = store.append(_row(**_TRIO))
+        assert backfill_added is True  # branch 2: stamped redo backfills
         stored = store.get(_rid(1))
         assert stored is not None
         assert (stored.vix_mean, stored.vix_min, stored.vix_max) == (13.5, 12.25, 15.75)
@@ -177,7 +181,8 @@ class TestDirectionalAppendUpgrade:
     def test_partial_backfill_unions_per_field(self, tmp_path: Path) -> None:
         store = ResultsStore(path=tmp_path / "s.parquet")
         store.append(_row(vix_min=12.0))
-        assert store.append(_row(vix_mean=13.0, vix_max=15.0)) is True
+        partial_added = store.append(_row(vix_mean=13.0, vix_max=15.0))
+        assert partial_added is True
         stored = store.get(_rid(1))
         assert stored is not None
         assert (stored.vix_mean, stored.vix_min, stored.vix_max) == (13.0, 12.0, 15.0)
@@ -187,7 +192,8 @@ class TestDirectionalAppendUpgrade:
         stamped = _row(**_TRIO)
         store.append(stamped)
         # An UNSTAMPED redo is less informed, not conflicting — silent no-op.
-        assert store.append(_row()) is False
+        unstamped_redo_added = store.append(_row())
+        assert unstamped_redo_added is False
         assert store.get(stamped.run_id) == stamped
 
     def test_conflicting_known_values_raise_the_typed_vix_conflict(self, tmp_path: Path) -> None:

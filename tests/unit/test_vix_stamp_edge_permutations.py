@@ -493,11 +493,13 @@ class TestOldStorePartNull:
         legacy = self._legacy_store(tmp_path)
         loaded = ResultsStore.load(legacy)
         # A part-null redo (only min+max known) upgrades exactly those fields …
-        assert loaded.append(_store_row(vix_min=12.25, vix_max=15.75)) is True
+        part_null_added = loaded.append(_store_row(vix_min=12.25, vix_max=15.75))
+        assert part_null_added is True
         (row,) = loaded.rows()
         assert (row.vix_mean, row.vix_min, row.vix_max) == (None, 12.25, 15.75)
         # … a later redo fills the remaining gap without touching the rest …
-        assert loaded.append(_store_row(vix_mean=13.5)) is True
+        gap_fill_added = loaded.append(_store_row(vix_mean=13.5))
+        assert gap_fill_added is True
         (row,) = loaded.rows()
         assert (row.vix_mean, row.vix_min, row.vix_max) == (13.5, 12.25, 15.75)
         # … and the part-null trio round-trips flush → load unchanged.
