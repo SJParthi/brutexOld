@@ -13,7 +13,20 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
 from brutex import cli
+
+
+@pytest.fixture(autouse=True)
+def _inert_sweep_logging_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the dispatch-level logging guard inert here.
+
+    The ``main()`` sweep dispatch now configures PROCESS-GLOBAL structlog
+    state (DEC-SWEEP-LOG-VOLUME-GUARD-001); stubbing it out keeps this
+    file's assertions byte-identical and leak-free — the guard's own
+    behavior is pinned in ``tests/unit/test_cli_sweep_log_level.py``.
+    """
+    monkeypatch.setattr(cli, "_configure_sweep_logging", lambda: None)
 
 
 def test_main_dispatch_sweep_all_threads_cache_knobs_none_when_unset() -> None:

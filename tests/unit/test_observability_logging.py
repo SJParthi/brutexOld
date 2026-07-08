@@ -25,9 +25,11 @@ import pytest
 import structlog
 from brutex.observability.logging import (
     _FILE_HANDLER_TAG,
+    LOG_LEVEL_ENV,
     _level_to_int,
     configure_logging,
     reset_configuration,
+    resolve_env_log_level,
     resolve_log_file,
 )
 
@@ -136,6 +138,47 @@ class TestResetConfiguration:
         configure_logging(level="INFO", json_renderer=True)
         # If we got here without error, reset path is exercised.
         assert len(logging.getLogger().handlers) == 1
+
+
+class TestResolveEnvLogLevel:
+    """$BRUTEX_LOG_LEVEL resolution — DEC-SWEEP-LOG-VOLUME-GUARD-001.
+
+    The fail-loud env wrapper the module contract prescribes: unset/blank →
+    default, the four canonical names accepted case-insensitively, anything
+    else raises (never a silent fallback).
+    """
+
+    def test_unset_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        assert resolve_env_log_level() == "INFO"
+
+    def test_blank_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "   ")
+        assert resolve_env_log_level() == "INFO"
+
+    def test_custom_default_respected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        assert resolve_env_log_level(default="WARNING") == "WARNING"
+
+    @pytest.mark.parametrize("name", ["DEBUG", "INFO", "WARNING", "ERROR"])
+    def test_canonical_names_accepted(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, name)
+        assert resolve_env_log_level() == name
+
+    @pytest.mark.parametrize(("raw", "expected"), [("debug", "DEBUG"), ("  Error  ", "ERROR")])
+    def test_case_insensitive_and_stripped(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, raw)
+        assert resolve_env_log_level() == expected
+
+    @pytest.mark.parametrize("junk", ["TRACE", "DEBG", "15", "CRITICAL"])
+    def test_junk_raises_naming_the_var(self, monkeypatch: pytest.MonkeyPatch, junk: str) -> None:
+        # CRITICAL is deliberately junk here: the env contract is the four
+        # obvious words only (an operator silencing ERROR would hide halts).
+        monkeypatch.setenv(LOG_LEVEL_ENV, junk)
+        with pytest.raises(ValueError, match="invalid BRUTEX_LOG_LEVEL"):
+            resolve_env_log_level()
 
 
 class TestResolveLogFile:

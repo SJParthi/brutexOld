@@ -56,6 +56,20 @@ import structlog
 #: ``level`` argument from a config file or env var.
 _DEFAULT_LEVEL: Final[str] = "INFO"
 
+#: Environment variable read by :func:`resolve_env_log_level` — the operator's
+#: per-process log-level override for entry points that wrap
+#: :func:`configure_logging` with env-var control (per this module's design
+#: contract, the env-var resolution lives BESIDE the core function, never
+#: inside it). First consumer: the CLI sweep entry points
+#: (DEC-SWEEP-LOG-VOLUME-GUARD-001).
+LOG_LEVEL_ENV: Final[str] = "BRUTEX_LOG_LEVEL"
+
+#: The exact level names :func:`resolve_env_log_level` accepts (matched
+#: case-insensitively). Deliberately NARROWER than stdlib
+#: ``getLevelNamesMapping`` — an operator env var wants four obvious words,
+#: not numeric strings or ``FATAL`` aliases; anything else fails loud.
+ENV_ALLOWED_LEVELS: Final[tuple[str, ...]] = ("DEBUG", "INFO", "WARNING", "ERROR")
+
 #: Default rotating-file size before a rollover (10 MiB) and number of
 #: retained backups. Override per-call via :func:`configure_logging`.
 _DEFAULT_MAX_BYTES: Final[int] = 10 * 1024 * 1024
@@ -129,6 +143,48 @@ def resolve_log_file(log_file: Path | str | None = None) -> Path:
     env_dir = os.environ.get("BRUTEX_LOG_DIR")
     base = Path(env_dir).expanduser() if env_dir else Path.home() / ".brutex" / "logs"
     return base / "brutex.log"
+
+
+def resolve_env_log_level(*, default: str = _DEFAULT_LEVEL) -> str:
+    """Resolve the process log level from ``$BRUTEX_LOG_LEVEL`` (fail-loud).
+
+    The env-var wrapper this module's design contract prescribes for callers
+    that want env-var control over :func:`configure_logging` — the core
+    function itself stays env-free. An unset or blank/whitespace-only
+    variable returns *default*; a recognised name (one of
+    :data:`ENV_ALLOWED_LEVELS`, matched case-insensitively after stripping)
+    returns its canonical uppercase form; anything else raises — junk is
+    NEVER silently coerced to a default (Golden Rule #10: a typo'd
+    ``BRUTEX_LOG_LEVEL=DEBG`` silently running at INFO would hide the very
+    events the operator asked for).
+
+    Parameters
+    ----------
+    default
+        The level name returned when the variable is unset or blank.
+
+    Returns
+    -------
+    str
+        A canonical uppercase stdlib level name.
+
+    Raises
+    ------
+    ValueError
+        If the variable is set to anything outside
+        :data:`ENV_ALLOWED_LEVELS`.
+    """
+    raw = os.environ.get(LOG_LEVEL_ENV)
+    if raw is None or not raw.strip():
+        return default
+    candidate = raw.strip().upper()
+    if candidate not in ENV_ALLOWED_LEVELS:
+        allowed = "/".join(ENV_ALLOWED_LEVELS)
+        raise ValueError(
+            f"invalid {LOG_LEVEL_ENV}={raw!r}: expected one of {allowed} "
+            "(case-insensitive) — refusing to guess a log level"
+        )
+    return candidate
 
 
 def _build_file_handler(

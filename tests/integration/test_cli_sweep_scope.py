@@ -43,6 +43,19 @@ pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 pytest.importorskip("lmdb")
 
+
+@pytest.fixture(autouse=True)
+def _inert_sweep_logging_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the dispatch-level logging guard inert here.
+
+    The ``main()`` sweep dispatch now configures PROCESS-GLOBAL structlog
+    state (DEC-SWEEP-LOG-VOLUME-GUARD-001); stubbing it out keeps this
+    file's assertions byte-identical and leak-free — the guard's own
+    behavior is pinned in ``tests/unit/test_cli_sweep_log_level.py``.
+    """
+    monkeypatch.setattr(cli, "_configure_sweep_logging", lambda: None)
+
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 _EXCHANGE = "NSE"
 _SEGMENT = "INDEX"
