@@ -70,6 +70,7 @@ _LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "DERIVE_STAMP_DIR",
+    "DISABLED_ENV_VALUES",
     "DeriveStamp",
     "derive_stamp_path",
     "incremental_prebuild_enabled",
@@ -85,8 +86,13 @@ __all__ = [
 #: (mirrors the ``.locks`` sidecar convention of DEC-LAKE-PARTITION-FLOCK-001).
 DERIVE_STAMP_DIR: Final[str] = ".derive_stamps"
 
-#: The environment toggle. Default ON; these lowercase values disable it.
-_DISABLED_VALUES: Final[frozenset[str]] = frozenset({"0", "off", "false", "no"})
+#: The environment toggle's off-values. Default ON; these lowercase values
+#: disable it. PUBLIC (CLAUDE.md §11 COMMON): the ONE default-ON-env-flag
+#: off-value set — ``BRUTEX_PREBUILD_INCREMENTAL`` here and
+#: ``BRUTEX_DAILY_CUTOFF_GROUNDED``
+#: (:func:`brutex.data.timeframe_materialize.daily_cutoff_grounding_enabled`)
+#: share it, so the two escape hatches can never drift in spelling.
+DISABLED_ENV_VALUES: Final[frozenset[str]] = frozenset({"0", "off", "false", "no"})
 _ENV_VAR: Final[str] = "BRUTEX_PREBUILD_INCREMENTAL"
 
 
@@ -99,7 +105,7 @@ def incremental_prebuild_enabled(env: Mapping[str, str] | None = None) -> bool:
     every prebuild run derives in full.
     """
     source = env if env is not None else os.environ
-    return source.get(_ENV_VAR, "").strip().lower() not in _DISABLED_VALUES
+    return source.get(_ENV_VAR, "").strip().lower() not in DISABLED_ENV_VALUES
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +125,17 @@ class DeriveStamp:
         Whether the stamped run also derived the ``1day`` partition.
     daily_before
         The forming-session cutoff (ISO date) the stamped run used; ``None``
-        for a non-daily run.
+        for a non-daily run. Since DEC-DAILY-CUTOFF-GROUNDED-001 this is the
+        EFFECTIVE cutoff the derive actually consumed — a data-grounded
+        deferral (dense symbol, incomplete run-day session) stamps the
+        DEFERRED value (the run day), not the clock verdict, so the stamp
+        never lies about what was derived. Interplay with
+        :func:`should_skip_derive` (no rule change needed): a deferred stamp
+        fails BOTH skip clauses on the next run (cutoffs unequal AND
+        ``last_1m_ist_date < daily_before`` false, the data's last session
+        IS the deferred date) ⇒ an honest idempotent re-derive per run until
+        the data completes (token moves) or the calendar passes the date —
+        never a wrong skip that strands the run day's bar.
     last_1m_ist_date
         The data's last 1-minute IST session (ISO date) at stamp time; ``None``
         when unknown (a non-daily run, or a zero-row frame).

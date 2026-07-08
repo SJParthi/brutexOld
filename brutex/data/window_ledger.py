@@ -58,6 +58,7 @@ __all__ = [
     "SKIPPED_AUDIT_PER_PULL",
     "SUCCESS",
     "LedgerProgress",
+    "LedgerRowTuple",
     "WindowLedger",
     "WindowLedgerRecord",
     "expired_window_settle_reason",
@@ -308,14 +309,62 @@ class WindowLedgerRecord:
     #: no sink result (a lake cold-start seed) — NEVER fabricated to ``0``
     #: (Golden Rule #1: ``0`` would falsely claim "that pull added nothing new").
     bars_net_new: int | None = None
+    #: The EMPTY half of the :attr:`in_pull_fetches` SPLIT
+    #: (DEC-RETRY-COUNTER-SPLIT-001 — accepts the follow-up #924/#1355 twice
+    #: declined as "heavy new tracking"): clean 0-bar vendor responses this
+    #: window's fetch ladder observed during its MOST-RECENT pull (each one —
+    #: including the first — is one fetch that came back honestly empty; every
+    #: one but a run's last triggered an in-pull re-fetch). OVERWRITTEN each
+    #: pull like :attr:`in_pull_fetches` — NOT cumulative (Golden Rule #7).
+    #: ``None`` = honestly UNKNOWN — a legacy row written before the column
+    #: existed, or a path with no fetch-ladder observation (a lake cold-start
+    #: seed / a known-gap settle) — NEVER fabricated to ``0`` (Golden Rule #1).
+    #: Spine invariant (test-pinned): ``empty_retries + transient_retries +
+    #: (1 if the final fetch returned bars else 0) == in_pull_fetches``.
+    empty_retries: int | None = None
+    #: The TRANSIENT half of the :attr:`in_pull_fetches` SPLIT
+    #: (DEC-RETRY-COUNTER-SPLIT-001): fetches that raised a RETRYABLE transient
+    #: (429 / timeout / 5xx / empty-body throttle) absorbed by this window's
+    #: in-pull ladder during its MOST-RECENT pull. What #924/#1355 could only
+    #: relabel is now measurable: an EMPTY row's depth reads from
+    #: :attr:`empty_retries`, a FAILED row's from here — never conflated.
+    #: HONEST envelope: this counts the ladder the spines OBSERVE (one count per
+    #: raised ``GrowwError``), NOT the deeper in-CALL retry ladder inside each
+    #: ``fetch`` (up to 6× per call — still not persisted, the #924 caveat
+    #: stands). Same ``None`` = honest-unknown / overwrite-per-pull contract as
+    #: :attr:`empty_retries`.
+    transient_retries: int | None = None
 
 
-def ledger_record_row(
-    r: WindowLedgerRecord,
-) -> tuple[
-    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
-]:
-    """Serialise ONE record to the canonical 14-field ledger row tuple.
+#: One serialised ledger row — the canonical 16-field tuple
+#: :func:`ledger_record_row` emits and :meth:`WindowLedger.from_rows` restores.
+#: THE single row-shape spelling (CLAUDE.md §11 COMMON): the durable store's
+#: ``LedgerRow`` aliases it, so the two can never drift. ``empty_retries`` +
+#: ``transient_retries`` (DEC-RETRY-COUNTER-SPLIT-001) were appended LAST —
+#: after ``bars_net_new`` exactly as that column was — for legacy-file
+#: back-compat (an absent column loads ``None`` = honest unknown).
+LedgerRowTuple = tuple[
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    int,
+    str | None,
+    str,
+    str | None,
+    int,
+    int,
+    int | None,
+    int | None,
+    int | None,
+]
+
+
+def ledger_record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
+    """Serialise ONE record to the canonical 16-field ledger row tuple.
 
     The single source of the row shape (CLAUDE.md §11 COMMON —
     DEC-SUSPICION-SWEEP-FIXES-001): :meth:`WindowLedger.to_rows` delegates here,
@@ -323,8 +372,9 @@ def ledger_record_row(
     (:func:`brutex.dashboard.db_view.window_ledger_rows_cached`) reuses it over the
     mtime-cached records, so the two can never drift. Field order matches the
     durable store's :data:`~brutex.data.window_ledger_store.LedgerRow` —
-    ``in_pull_fetches`` then ``bars_net_new`` appended LAST for legacy-file
-    back-compat (see :meth:`WindowLedger.to_rows`).
+    ``in_pull_fetches`` then ``bars_net_new`` then the ``empty_retries`` /
+    ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) each appended LAST
+    for legacy-file back-compat (see :meth:`WindowLedger.to_rows`).
     """
     return (
         r.market,
@@ -341,6 +391,8 @@ def ledger_record_row(
         r.empty_streak,
         r.in_pull_fetches,
         r.bars_net_new,
+        r.empty_retries,
+        r.transient_retries,
     )
 
 
@@ -483,6 +535,10 @@ class WindowLedger:
                 empty_streak=0,
                 in_pull_fetches=0,  # never fetched — a pure PLANNED row
                 bars_net_new=0,  # nothing appended yet (mirrors bars=0)
+                # A never-fetched row's retry split is a KNOWN zero on both
+                # halves (DEC-RETRY-COUNTER-SPLIT-001 — mirrors in_pull_fetches=0).
+                empty_retries=0,
+                transient_retries=0,
             )
             self._dirty.add(wk)
 
@@ -519,6 +575,10 @@ class WindowLedger:
                 # The historical write's keep-first-deduped count is UNRECORDED —
                 # honest unknown, never fabricated (DEC-INGEST-BOUNDARY-INTEGRITY-001).
                 bars_net_new=None,
+                # The historical fetch's retry ladder is likewise UNRECORDED —
+                # honest unknown, never fabricated (DEC-RETRY-COUNTER-SPLIT-001).
+                empty_retries=None,
+                transient_retries=None,
             )
             self._dirty.add(wk)
             return True
@@ -595,6 +655,8 @@ class WindowLedger:
         degraded_reason: str | None = None,
         suppress_settle: bool = False,
         bars_net_new: int | None = None,
+        empty_retries: int | None = None,
+        transient_retries: int | None = None,
     ) -> str:
         """Record *key*'s fetch outcome; classify + bump the attempt count — **O(1)**, atomic.
 
@@ -718,6 +780,14 @@ class WindowLedger:
         alongside ``bars`` (the INPUT batch size, unchanged — the ``>0`` gates
         keep reading it). ``None`` (the default) records an honest UNKNOWN for a
         caller with no sink result — never fabricated to ``0``.
+
+        *empty_retries* / *transient_retries* (DEC-RETRY-COUNTER-SPLIT-001) are
+        the SPLIT of *in_pull_fetches* the #924/#1355 relabels could not show:
+        clean 0-bar responses vs retryable transients (429/timeout/5xx) the
+        window's in-pull ladder observed this pull. Stored as-is (OVERWRITTEN
+        per pull, exactly like *in_pull_fetches*); ``None`` (the default)
+        records an honest UNKNOWN for a caller that did not observe the fetch
+        ladder — never fabricated to ``0`` (the ``bars_net_new`` template).
         """
         classified = classify_window_status(raw_bars, error_type, degraded=degraded)
         # A demoted SUCCESS is recorded FAILED with a completeness reason (not a vendor
@@ -840,6 +910,8 @@ class WindowLedger:
                 empty_streak=empty_streak,
                 in_pull_fetches=in_pull_fetches,
                 bars_net_new=bars_net_new,
+                empty_retries=empty_retries,
+                transient_retries=transient_retries,
             )
             self._dirty.add(wk)
             return status
@@ -883,6 +955,10 @@ class WindowLedger:
                 empty_streak=empty_streak,
                 in_pull_fetches=1,  # the one fetch that returned the known-gap
                 bars_net_new=bars_net_new,
+                # The known-gap seam never observes the fetch ladder — honest
+                # unknown, never fabricated (DEC-RETRY-COUNTER-SPLIT-001).
+                empty_retries=None,
+                transient_retries=None,
             )
             self._dirty.add(wk)
             return SKIPPED
@@ -983,6 +1059,8 @@ class WindowLedger:
                 empty_streak=0,
                 in_pull_fetches=row.in_pull_fetches,
                 bars_net_new=row.bars_net_new,  # no fetch here — preserved
+                empty_retries=row.empty_retries,  # no fetch here — preserved
+                transient_retries=row.transient_retries,
             )
         self._reopened.update(doomed)
         self._dirty.update(doomed)
@@ -1248,12 +1326,8 @@ class WindowLedger:
         )
 
     @staticmethod
-    def _record_row(
-        r: WindowLedgerRecord,
-    ) -> tuple[
-        str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
-    ]:
-        """One record → the canonical serialised 14-tuple (ONE shape — CLAUDE.md §11).
+    def _record_row(r: WindowLedgerRecord) -> LedgerRowTuple:
+        """One record → the canonical serialised 16-tuple (ONE shape — CLAUDE.md §11).
 
         Delegates to the module-level :func:`ledger_record_row` — the SINGLE row-shape
         source shared with the ``/db`` grid's cached projection
@@ -1262,30 +1336,11 @@ class WindowLedger:
         """
         return ledger_record_row(r)
 
-    def dirty_rows(
-        self,
-    ) -> list[
-        tuple[
-            str,
-            str,
-            str,
-            str,
-            str,
-            str,
-            int,
-            int,
-            str | None,
-            str,
-            str | None,
-            int,
-            int,
-            int | None,
-        ]
-    ]:
+    def dirty_rows(self) -> list[LedgerRowTuple]:
         """Serialise ONLY the rows dirtied since the last :meth:`clear_dirty` — sorted.
 
         DEC-LEDGER-DELTA-FLUSH-001: the delta append's row source. Emits the SAME
-        14-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
+        16-tuple shape as :meth:`to_rows`, in the same deterministic key order, but
         restricted to keys stamped by a row-writing mutator since the last cleared
         batch. A dirty key whose row was meanwhile DELETED (a prune) is silently
         skipped — a delta cannot express a deletion (the pull-end full save owns
@@ -1366,33 +1421,17 @@ class WindowLedger:
                 if symbols is None or record.security_id in symbols
             )
 
-    def to_rows(
-        self,
-    ) -> list[
-        tuple[
-            str,
-            str,
-            str,
-            str,
-            str,
-            str,
-            int,
-            int,
-            str | None,
-            str,
-            str | None,
-            int,
-            int,
-            int | None,
-        ]
-    ]:
+    def to_rows(self) -> list[LedgerRowTuple]:
         """Serialise to a deterministic list of plain tuples (for the durable store).
 
         ``in_pull_fetches`` (DEC-WINDOW-INPULL-FETCHES-001) then ``bars_net_new``
-        (DEC-INGEST-BOUNDARY-INTEGRITY-001) were each appended LAST — after
-        ``empty_streak`` exactly as that column was — so a legacy 12/13-tuple
-        Parquet (written before either existed) still loads (the store fills the
-        missing column per-row; an absent ``bars_net_new`` reads ``None``).
+        (DEC-INGEST-BOUNDARY-INTEGRITY-001) then the ``empty_retries`` /
+        ``transient_retries`` split (DEC-RETRY-COUNTER-SPLIT-001) were each
+        appended LAST — after ``empty_streak`` exactly as that column was — so a
+        legacy 12/13/14-tuple Parquet (written before any of them existed) still
+        loads (the store fills the missing column per-row; an absent
+        ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` reads
+        ``None``).
 
         Delegates per-record to the module-level :func:`ledger_record_row` (ONE
         source of the row shape — the ``/db`` grid's cached projection reuses it,
@@ -1403,24 +1442,7 @@ class WindowLedger:
     @classmethod
     def from_rows(
         cls,
-        rows: Iterable[
-            tuple[
-                str,
-                str,
-                str,
-                str,
-                str,
-                str,
-                int,
-                int,
-                str | None,
-                str,
-                str | None,
-                int,
-                int,
-                int | None,
-            ]
-        ],
+        rows: Iterable[LedgerRowTuple],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
     ) -> WindowLedger:
@@ -1441,6 +1463,8 @@ class WindowLedger:
             empty_streak,
             in_pull_fetches,
             bars_net_new,
+            empty_retries,
+            transient_retries,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -1458,6 +1482,8 @@ class WindowLedger:
                     empty_streak=empty_streak,
                     in_pull_fetches=in_pull_fetches,
                     bars_net_new=bars_net_new,
+                    empty_retries=empty_retries,
+                    transient_retries=transient_retries,
                 )
             )
         return ledger

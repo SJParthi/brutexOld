@@ -346,6 +346,17 @@ class _OptionRawWindow:
     #: or a live-contract key reset — deliberately stay unsettled, data-safety first).
     old_window: bool
     attempt: int
+    #: The ``in_pull_fetches`` SPLIT (DEC-RETRY-COUNTER-SPLIT-001), threaded to the
+    #: tail's ``ledger.record(empty_retries=…, transient_retries=…)``: clean 0-bar
+    #: responses vs retryable transients the producer's fetch ladder observed for
+    #: this window. Unlike the spot payload (whose transient half is structurally
+    #: zero — its ladder short-circuits on the first transient) this spine RETRIES
+    #: transients inline, so a clean tail can carry BOTH halves; by construction
+    #: ``fetch_count == empty_fetches + transient_fetches + (1 if raw_bars else 0)``.
+    #: Defaulted 0 (the structural floor of a first-try win) so the fields ride
+    #: the frozen payload additively; the producer always passes the real counts.
+    empty_fetches: int = 0
+    transient_fetches: int = 0
 
 
 def _clamped_window_key(
@@ -517,6 +528,13 @@ def ingest_option_contract(
     # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001); each physical call still rides
     # ``client.pace`` + the call meter, so rate admission sees every real call.
     fetch_count = 0
+    # SPLIT counters (DEC-RETRY-COUNTER-SPLIT-001): how ``fetch_count`` decomposes —
+    # clean 0-bar responses (the outer EMPTY-retry's evidence) vs retryable
+    # transients the inner ladder absorbed — persisted as the ledger's
+    # ``empty_retries`` / ``transient_retries``, so an EMPTY row's depth and a
+    # FAILED row's re-attempts are never conflated again (the #924/#1355 gap).
+    empty_fetches = 0
+    transient_fetches = 0
     raw_bars: list[CandleBar] = []
     # Outer EMPTY-retry loop (DEC-OPTION-EMPTY-RETRY-001): each pass runs the inner
     # transient-retry fetch; a 0-bar SUCCESS is re-fetched up to empty_retry_attempts times.
@@ -573,6 +591,10 @@ def ingest_option_contract(
                         on_rate_limit()
                 elif on_timeout is not None and steps_timeout_ladder(exc):
                     on_timeout()
+                # One more retryable transient absorbed by this window's ladder
+                # (DEC-RETRY-COUNTER-SPLIT-001) — counted BEFORE the record below
+                # so the FAILED row's split includes THIS occurrence.
+                transient_fetches += 1
                 if ledger is not None:
                     ledger.record(
                         key,
@@ -582,6 +604,8 @@ def ingest_option_contract(
                         bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
+                        empty_retries=empty_fetches,
+                        transient_retries=transient_fetches,
                     )
                 _LOG.warning(
                     "option.ingest.window.transient",
@@ -623,6 +647,7 @@ def ingest_option_contract(
                 sleep(attempt - 1)
         if raw_bars:
             break  # bars on this attempt — the (possibly glitched) empty is recovered
+        empty_fetches += 1  # one more clean 0-bar response (DEC-RETRY-COUNTER-SPLIT-001)
         if empty_attempt + 1 < empty_retry_attempts:
             # Still empty + a retry remains: log + (default no-op) backoff, then re-fetch.
             # The backoff arg is 0-based (``empty_attempt``) to TRULY mirror the spot spine
@@ -696,6 +721,8 @@ def ingest_option_contract(
         settle_empty=settle_empty,
         old_window=is_old,
         attempt=attempt,
+        empty_fetches=empty_fetches,
+        transient_fetches=transient_fetches,
     )
     if fetch_pipeline is None:
         # Synchronous, byte-identical path: run the tail inline on THIS thread.
@@ -933,6 +960,11 @@ def _process_option_window_tail(
                 bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
+                # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): the fetch ladder's own
+                # facts — a write defer is OUR stall, not a vendor transient, so
+                # the counts pass through unbumped.
+                empty_retries=raw.empty_fetches,
+                transient_retries=raw.transient_fetches,
             )
         # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
         # ledger row is durably FAILED (so the deferred window is never lost even if the
@@ -981,6 +1013,12 @@ def _process_option_window_tail(
             bars_net_new=result.bars_net_new,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
+            # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): unlike the spot tail this
+            # spine retries transients INLINE, so a clean tail can carry both
+            # halves (e.g. one 429 then bars ⇒ transient_retries=1, empty
+            # retries 0, in_pull_fetches 2).
+            empty_retries=raw.empty_fetches,
+            transient_retries=raw.transient_fetches,
             settle_empty=settle_empty,
             # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001, boundary-
             # widened by DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the vendor
