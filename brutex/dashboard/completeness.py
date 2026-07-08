@@ -829,10 +829,14 @@ def _spot_dimension_detail(row: Mapping[str, Any]) -> dict[str, Any]:
     ``session_ratio`` trio disambiguate WHY (the ratio pair is ``None`` when the audit
     abstained — no lake scalar / dates / calendar coverage).
 
-    Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001): the detail
-    additionally carries ``open_substituted_days`` (how many stored sessions' first present
-    1-minute bar is strictly after the 09:15 IST canonical open — so their DERIVED 1-day open
-    is the earliest-present-minute substitute, not the canonical open price) and the
+    Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, predicate
+    aligned by DEC-DAILY-OPEN-PREDICATE-ALIGN-001): the detail additionally carries
+    ``open_substituted_days`` (how many stored NON-Muhurat sessions' first present
+    1-minute bar is NOT exactly the 09:15 IST canonical open — so their DERIVED 1-day open
+    is the earliest-present-minute substitute, not the canonical open price; the SAME
+    per-session rule as the prebuild detector's
+    :func:`brutex.data.spot_daily_resample.classify_daily_open`, the census counting ALL
+    stored sessions while the detector cuts off the forming session) and the
     ``open_substituted`` flag (``days > 0``). INFORMATIONAL only — the verdict is NEVER
     downgraded by a substitution (the data exists; only its daily open is a substitute). A
     row without the counts (a hand-built / legacy shape) defaults to the honest 0/0/False —
