@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
+_Last updated: 2026-07-08 (DEC-SWEEP-KEEPAWAKE-001, MIGRATION.md #1631 —
+every SWEEP entrypoint now engages the macOS keep-awake guard the pull paths
+already had: DEC-PULL-KEEPAWAKE-001 wrapped ONLY CLI `brutex fetch` +
+`brutex enrich-greeks` + the dashboard pull job, so a §8 2-4 DAY grid run had
+ZERO sleep protection (the guard's own docstring cites a real 6.5 h mid-pull
+host sleep). `cmd_sweep_all` wraps lake preload → supervised grid → stage-3 →
+options-sim → cascade in ONE `keep_awake("brutex sweep-all")`; `cmd_sweep`
+("brutex sweep") wraps its bar load + in-memory sweep; `cmd_sweep_daemon`
+("brutex sweep-daemon") wraps its WHOLE lifetime INCLUDING the between-cycle
+sleep (a host sleeping through a scheduled fire silently skips it; each
+cycle's cmd_sweep_all takes its own nested assertion — two concurrent
+caffeinates are harmless, both watch this pid); the dashboard sweep job
+(`sweep_runner.run_sweep_from_request`) calls `cmd_sweep_all` IN-PROCESS and
+INHERITS the guard (proven end-to-end, ZERO sweep_runner change). Guard
+REUSED verbatim (§11 COMMON — the ONE `power_keepawake.keep_awake`):
+best-effort, never raises — non-darwin / missing caffeinate is ONE logged
+`power.keepawake.unavailable` no-op, so the guard can never fail the sweep;
+sweep results byte-identical (the wrap never touches the body). HONEST: holds
+the HOST awake only — no external-SSD power management, and battery lid-close
+may still sleep (the module's documented envelope). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; 6 new tests
+(exactly-once + reason pins per entrypoint, daemon guard entered BEFORE the
+cycle fires, dashboard in-process inheritance, the REAL guard's darwin
+spawn-failure arm through the REAL call site, all 6 failing with the wrap
+reverted); `power_keepawake.py` untouched at 100% line+branch.)
+Earlier: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
 DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
@@ -1187,7 +1212,27 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
+- **Active branch:** `claude/sweep-keepawake` (**DEC-SWEEP-KEEPAWAKE-001, MIGRATION.md #1631** — every SWEEP
+  entrypoint now engages the macOS keep-awake guard (`power_keepawake.keep_awake`, REUSED verbatim — §11 COMMON)
+  the pull paths already had: DEC-PULL-KEEPAWAKE-001 wrapped ONLY CLI `brutex fetch` + `brutex enrich-greeks` +
+  the dashboard pull job, so a §8 2-4 DAY grid run had ZERO sleep protection (the guard's own docstring cites a
+  real 6.5 h mid-pull host sleep). `cmd_sweep_all` wraps lake preload → supervised grid → stage-3 → options-sim →
+  cascade in ONE `keep_awake("brutex sweep-all")`; `cmd_sweep` ("brutex sweep") wraps its bar load + in-memory
+  sweep; `cmd_sweep_daemon` ("brutex sweep-daemon") wraps its WHOLE lifetime INCLUDING the between-cycle sleep (a
+  host sleeping through a scheduled fire silently skips it; each cycle's `cmd_sweep_all` takes its own nested
+  assertion — two concurrent caffeinates are harmless, both watch this pid); the dashboard sweep job
+  (`dashboard/sweep_runner.run_sweep_from_request`) calls `cmd_sweep_all` IN-PROCESS and INHERITS the guard
+  (proven end-to-end, ZERO sweep_runner change). Best-effort, never raises — non-darwin / missing caffeinate is
+  ONE logged `power.keepawake.unavailable` no-op, so the guard can never fail the sweep; sweep results
+  byte-identical (the wrap never touches the body; `git diff -w` = the three wraps + one line rewrap). HONEST:
+  holds the HOST awake only — no external-SSD power management, and battery lid-close may still sleep (the
+  module's documented envelope); on Linux/CI it is a logged no-op. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  scope/vocab/rate change; 6 new tests in `tests/unit/test_cli_sweep_keepawake.py` (exactly-once + reason pins
+  per entrypoint, the daemon guard entered BEFORE the cycle fires, the dashboard in-process inheritance, the REAL
+  guard's darwin spawn-failure arm driven through the REAL call site — all 6 FAIL with the wrap reverted);
+  `brutex/cli.py` stays 100% line+branch (452-test discovery-gate run measured 100.00%);
+  `power_keepawake.py` untouched at 100% line+branch; ruff/ruff-format clean, `mypy --strict` clean).
+  Earlier: `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
   DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
@@ -3140,7 +3185,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/blissful-curie-gp94rk`
+- **Active feature branch:** `claude/sweep-keepawake`
+  (DEC-SWEEP-KEEPAWAKE-001, MIGRATION.md #1631 — every sweep entrypoint
+  (`cmd_sweep_all` / `cmd_sweep` / `cmd_sweep_daemon`, the dashboard sweep
+  job inheriting in-process) engages the `keep_awake` guard; see §1 Active
+  branch for the full blurb)
+  Earlier: `claude/blissful-curie-gp94rk`
+  (the 11-item POLISH PACK, MIGRATION.md #1582–#1592; see §1 Active branch
+  chain for the full blurb)
   Earlier: `claude/upbeat-tesla-mfrovq`
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
   CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
