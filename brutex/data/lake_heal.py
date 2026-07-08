@@ -95,6 +95,7 @@ from brutex.data.lake_invariants import (
     OptionIntraFileDup,
     is_foreign_timestamp,
     option_key_dtype_error,
+    option_unclassifiable_message,
     scan_lake_invariants,
     utc_aware,
 )
@@ -102,7 +103,7 @@ from brutex.data.lake_manifest import invalidate_manifest
 from brutex.data.models import CandleBar
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
 from brutex.data.parquet_writer import ParquetWriter, PartitionHealResult
-from brutex.data.partition import BAR_DIR_NAME, partition_for_timestamp
+from brutex.data.partition import BAR_DIR_NAME, option_partition_stem, partition_for_timestamp
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.spot_daily_resample import (
     DailyDeriveTarget,
@@ -967,7 +968,7 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
         # its own locks AFTER the merge legs below, and runs the SAME gate on
         # that re-read (round-13 fold — pre-fix a swap in that second, wider
         # window still aborted the batch through the ungated re-read).
-        raise OptionWriterError(f"unclassifiable option partition {src}: {dtype_error}")
+        raise OptionWriterError(option_unclassifiable_message(src, dtype_error))
     home = (finding.year, finding.month)
     foreign = _option_foreign_frame(home, frame)  # keep-first unique foreign rows, all cols
     if foreign.height == 0:
@@ -988,7 +989,7 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     target_months = sorted(rows_by_month)
     for target in target_months:
         group = foreign[rows_by_month[target]]
-        dest = src.parent / f"{target[0]:04d}-{target[1]:02d}.parquet"
+        dest = src.parent / f"{option_partition_stem(*target)}.parquet"
         added += state.option_writer.merge_partition_frame(dest, group)
     result = state.option_writer.heal_partition(
         src, remove_keys=keys, quarantine_to=state.quarantine_path(src)

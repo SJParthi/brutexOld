@@ -53,6 +53,7 @@ from brutex.data.partition import (
     BAR_DIR_NAME,
     SPOT_PROBE_SEGMENTS,
     build_partition_path,
+    option_partition_stem,
     parse_partition_path,
     partition_for_timestamp,
 )
@@ -495,8 +496,23 @@ def log_lake_finding(finding: LakeFinding) -> None:
 
 
 def _read_key_columns(path: Path, columns: Sequence[str]) -> pl.DataFrame:
-    """The ONE per-file read seam (spy tests count calls through this)."""
-    return pl.read_parquet(path, columns=list(columns))
+    """The ONE per-file read seam (spy tests count calls through this).
+
+    ``glob=False`` (hostile-review round-15 MAJOR fold): polars' default
+    ``glob=True`` treats the PATH as a glob, and an options series dir name
+    may legally carry glob metachars (``OptionParquetWriter._safe_segment``
+    rejects only ``/ \\ ..`` and maps ``|``) — a scan of ``options/A*S/…``
+    read the UNION of every sibling series matching the pattern, so the
+    classification described OTHER files' bytes: phantom dup/foreign findings
+    whose literal-read heal skips as stale (``healed != findings`` — the L3
+    sentinel never stamps), wrong census / ``/universe`` numbers, and the
+    targeted canonical-sibling overlap read rode the same seam (all
+    empirically reproduced; a BALANCED bracket set silently misreads — only
+    an UNBALANCED one raises, refuting the round-8 "gracefully scan-skipped"
+    note). Covers the ``bars/`` tree's hand-planted twin for free (the bars
+    writer itself already reads via ``BytesIO``).
+    """
+    return pl.read_parquet(path, columns=list(columns), glob=False)
 
 
 def _pause(per_file_pause: Callable[[], None] | None) -> None:
@@ -615,7 +631,9 @@ def _option_file_month(path: Path) -> tuple[int, int] | None:
     rejects (``"²²".isdigit()`` is True but ``int("²²")`` raises), so the
     ``int()`` calls are guarded — one crafted filename must abstain, never
     crash the whole scan (the bars ``_file_month`` guard twin). Only the
-    CANONICAL zero-padded form the writer renders (``f"{year:04d}-{month:02d}"``)
+    CANONICAL zero-padded form the writer renders
+    (:func:`~brutex.data.partition.option_partition_stem` — the §11 COMMON
+    stem source, round-15 NIT fold)
     parses: a non-canonical-but-parsable stem (``2024-6`` / a non-ASCII-digit
     year) would claim the SAME month as its canonical twin file — two files
     addressing one month is exactly the state the one-file-per-month
@@ -641,7 +659,7 @@ def _option_file_month(path: Path) -> tuple[int, int] | None:
         return None
     if not MINYEAR <= year <= MAXYEAR:
         return None  # a 5+-digit / year-0 stem — no datetime month routes there
-    if path.stem != f"{year:04d}-{month:02d}":
+    if path.stem != option_partition_stem(year, month):
         return None  # non-canonical stem — the same-month twin-file blind spot
     return year, month
 
@@ -701,6 +719,21 @@ def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
     return None
 
 
+def option_unclassifiable_message(path: Path, reason: str) -> str:
+    """The ONE refusal message for an unclassifiable option partition.
+
+    §11 COMMON (review round-15 NIT fold): both consumers of a non-``None``
+    :func:`option_key_dtype_error` verdict — the healer's consistent-read gate
+    (``lake_heal._heal_option_foreign``) and the writer's own keyed-removal
+    re-read gate (``OptionParquetWriter.heal_partition``) — raise
+    ``OptionWriterError`` with this exact message shape; two inline f-string
+    copies could drift apart. Pure formatting — *path* rides raw here (the
+    exception MESSAGE convention; the LOG sites repr() their path fields per
+    the rounds-8/9 log-injection folds).
+    """
+    return f"unclassifiable option partition {path}: {reason}"
+
+
 def _option_foreign_keys(
     home: tuple[int, int], frame: pl.DataFrame
 ) -> set[tuple[str | None, datetime]]:
@@ -739,7 +772,7 @@ def _canonical_option_keys(
     :func:`_canonical_timestamps`: the sibling lives in the SAME directory —
     no ``build_partition_path``, no ``PartitionError`` arm.
     """
-    canonical = series_dir / f"{year:04d}-{month:02d}.parquet"
+    canonical = series_dir / f"{option_partition_stem(year, month)}.parquet"
     if canonical.is_symlink():
         # repr() — the path embeds the vendor-influenceable series dir name
         # (round-8 log-injection fold; the #907 convention the option finding
@@ -1378,6 +1411,7 @@ __all__ = [
     "is_foreign_timestamp",
     "log_lake_finding",
     "option_key_dtype_error",
+    "option_unclassifiable_message",
     "scan_lake_invariants",
     "utc_aware",
 ]

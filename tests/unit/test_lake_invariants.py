@@ -680,6 +680,62 @@ class TestOptionsTree:
         assert report.findings == ()
         assert report.option_files_scanned == 1
 
+    @pytest.mark.parametrize("series", ["A*S", "A?S", "X[12]"])
+    def test_glob_metachar_series_classifies_literal_bytes_only(
+        self, tmp_path: Path, series: str
+    ) -> None:
+        """Round-15 MAJOR regression (refuter-confirmed): the scan read is LITERAL.
+
+        ``_safe_segment`` legally admits polars glob metachars in a series dir
+        name, and the shared ``_read_key_columns`` seam's default ``glob=True``
+        made ``pl.read_parquet(options/A*S/…)`` return the UNION of every
+        sibling series matching the pattern — so the scanner classified the
+        glob-named series over OTHER files' bytes: a dup-poisoned SIBLING
+        produced a phantom ``OptionIntraFileDup`` against the CLEAN literal
+        file (whose literal-read heal then skips as stale — ``healed !=
+        findings``, the L3 sentinel never stamps) and wrong census numbers on
+        every sweep, no TOCTOU needed (empirically reproduced pre-fix,
+        phantom finding on ``A*S`` built from ``ABS``'s rows). ``glob=False``
+        pins the literal read; siblings ``ABS`` (matches all three patterns'
+        shape family) + ``X1``/``X2`` cover balanced-bracket, ``*`` and ``?``.
+        """
+        for sibling in ("ABS", "X1", "X2"):
+            sib = tmp_path / "options" / sibling / "2024-06.parquet"
+            _plant_option_raw(sib, [("CE", _ts(1)), ("CE", _ts(1))])  # dup-poisoned
+        literal = tmp_path / "options" / series / "2024-06.parquet"
+        _plant_option_raw(literal, [("CE", _ts(5))])  # CLEAN
+        report = scan_lake_invariants(tmp_path)
+        assert report.option_files_scanned == 4
+        dups = [f for f in report.findings if isinstance(f, OptionIntraFileDup)]
+        assert len(dups) == len(report.findings) == 3  # exactly the three poisoned siblings
+        flagged = {str(f.path) for f in dups}
+        assert str(literal) not in flagged  # no phantom finding from sibling bytes
+
+    def test_glob_metachar_series_canonical_sibling_read_is_literal(self, tmp_path: Path) -> None:
+        """The targeted canonical-sibling overlap read rides the SAME
+        ``_read_key_columns`` seam: a foreign key in ``X[12]`` whose canonical
+        month sibling is CLEAN must classify ``overlap_rows == 0`` from the
+        LITERAL sibling's bytes — pre-fix the glob read pulled ``X1``/``X2``'s
+        July rows in, fabricating an overlap that the heal (a literal keyed
+        removal) could never converge on."""
+        series_dir = tmp_path / "options" / "X[12]"
+        # June carries one July-routed foreign key; July sibling is clean and
+        # does NOT hold that key. X1/X2's July files DO hold it — a glob read
+        # of the canonical sibling would count a phantom overlap.
+        foreign_ts = _ts(30, month=7, day=1)
+        _plant_option_raw(series_dir / "2024-06.parquet", [("CE", _ts(1)), ("CE", foreign_ts)])
+        _plant_option_raw(series_dir / "2024-07.parquet", [("PE", _ts(2, month=7, day=1))])
+        for sibling in ("X1", "X2"):
+            _plant_option_raw(
+                tmp_path / "options" / sibling / "2024-07.parquet", [("CE", foreign_ts)]
+            )
+        report = scan_lake_invariants(tmp_path)
+        foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
+        (finding,) = foreigns
+        assert str(finding.path) == str(series_dir / "2024-06.parquet")
+        assert finding.foreign_rows == 1
+        assert finding.overlap_rows == 0  # literal sibling read — no phantom overlap
+
     def test_unreadable_option_file_skipped(self, tmp_path: Path) -> None:
         dest = tmp_path / "options" / "SERIES" / "2024-06.parquet"
         dest.parent.mkdir(parents=True, exist_ok=True)

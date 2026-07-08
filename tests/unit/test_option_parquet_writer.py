@@ -1004,6 +1004,92 @@ class TestMergePartitionFrame:
         assert exc_info.value.reason == "disk_full"
 
 
+class TestGlobMetacharSeries:
+    """Round-15 MAJOR regression (refuter-confirmed): the merge read is LITERAL.
+
+    ``_safe_segment`` legally admits polars glob metachars (it rejects only
+    ``/ \\ ..`` and maps ``|``), and ``pl.read_parquet``'s default
+    ``glob=True`` treated the destination PATH as a glob — so a merge into a
+    balanced-bracket series (``X[12]`` with REAL siblings ``X1``/``X2``)
+    glob-matched the SIBLINGS as "existing": the rewrite permanently DROPPED
+    the literal partition's own stored row (no quarantine — the merge leg
+    never quarantines), IMPORTED the siblings' rows cross-series, and falsely
+    emitted ``dedup_healed`` against them. Empirically reproduced pre-fix
+    through BOTH the healer's copy-forward leg (``merge_partition_frame``)
+    and the production ``write()`` merge arm — no symlink/TOCTOU needed, so
+    the containment rail could not see it. ``glob=False`` pins the literal
+    read; ``*`` / ``?`` variants ride the same pin (round-15's second
+    finding).
+    """
+
+    def _frame(self, rows: list[tuple[str, datetime, float]]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "side": pl.Series([side for side, _, _ in rows], dtype=pl.Utf8),
+                "timestamp": pl.Series([ts for _, ts, _ in rows], dtype=pl.Datetime("us", "UTC")),
+                "close": pl.Series([close for _, _, close in rows], dtype=pl.Float64),
+            }
+        )
+
+    def _seed(self, tmp_path: Path, series: str, siblings: list[str]) -> Path:
+        """REAL-writer-seeded literal *series* (close 999.0) + marker *siblings*."""
+        w = _writer(tmp_path)
+        ts9 = datetime(2021, 1, 4, 4, 9, tzinfo=UTC)
+        w.merge_partition_frame(
+            tmp_path / "options" / series / "2021-01.parquet", self._frame([("CE", ts9, 999.0)])
+        )
+        for n, sibling in enumerate(siblings, start=1):
+            ts = datetime(2021, 1, 4, 4, n, tzinfo=UTC)
+            w.merge_partition_frame(
+                tmp_path / "options" / sibling / "2021-01.parquet",
+                self._frame([("CE", ts, float(n) * 111.0)]),
+            )
+        return tmp_path / "options" / series / "2021-01.parquet"
+
+    @pytest.mark.parametrize(
+        ("series", "siblings"),
+        [
+            ("X[12]", ["X1", "X2"]),  # balanced bracket set — silently globbed pre-fix
+            ("A*S", ["ABS"]),
+            ("A?S", ["ABS"]),
+        ],
+    )
+    def test_merge_reads_literal_dest_only(
+        self, tmp_path: Path, series: str, siblings: list[str]
+    ) -> None:
+        w = _writer(tmp_path)
+        dest = self._seed(tmp_path, series, siblings)
+        sibling_bytes = [
+            (tmp_path / "options" / s / "2021-01.parquet").read_bytes() for s in siblings
+        ]
+        ts_new = datetime(2021, 1, 4, 4, 30, tzinfo=UTC)
+        with capture_logs() as logs:
+            added = w.merge_partition_frame(dest, self._frame([("PE", ts_new, 77.0)]))
+        assert added == 1
+        after = pl.read_parquet(dest, glob=False)
+        closes = sorted(after["close"].to_list())
+        assert closes == [77.0, 999.0]  # stored row PRESERVED, new key landed
+        assert not any(c in (111.0, 222.0) for c in closes)  # zero cross-series import
+        # No false dedup_healed against the siblings' rows.
+        assert [e for e in logs if e["event"] == "lake.partition.dedup_healed"] == []
+        for s, before in zip(siblings, sibling_bytes, strict=True):
+            assert (tmp_path / "options" / s / "2021-01.parquet").read_bytes() == before
+
+    def test_production_write_merge_arm_reads_literal_dest_only(self, tmp_path: Path) -> None:
+        """The SAME defect fired from ``write()`` → ``_merge_partition`` (a
+        re-pull into an existing bracket-series month partition) — pinned
+        through the REAL production entry, not just the heal-side one."""
+        w = _writer(tmp_path)
+        w.write(partition_key="X1", coordinate=_COORD, bars=[_bar(minute=1)])
+        w.write(partition_key="X2", coordinate=_COORD, bars=[_bar(minute=2)])
+        w.write(partition_key="X[12]", coordinate=_COORD, bars=[_bar(minute=9)])
+        added = w.write(partition_key="X[12]", coordinate=_COORD, bars=[_bar(minute=30)])
+        assert added == 1
+        stored = pl.read_parquet(tmp_path / "options" / "X[12]" / "2021-01.parquet", glob=False)
+        minutes = sorted(ts.minute for ts in stored["timestamp"].to_list())
+        assert minutes == [9, 30]  # its OWN two bars — the siblings' 1/2 never imported
+
+
 class TestWriteByteParityAfterRefactor:
     """G10: the `_merge_frame_locked` extraction renders byte-identical files."""
 

@@ -252,14 +252,40 @@ quarantine) — verified failing pre-fix with the exact bare
 `KeyError: 'side'`. NIT: the ledger #1482 `TestOptionForeignHeal` count
 corrected again (said 21; carried 22 pre-round-14 — the round-13
 addition was uncounted — now 23).
+ROUND 15 (refuter-confirmed, 2 MAJORs — one root): polars' default
+`glob=True` treats a raw-path `pl.read_parquet` PATH as a glob while
+`_safe_segment` legally admits glob metachars in a series dir name —
+(a) the writer's merge read: a merge into `options/X[12]/…` with REAL
+siblings `X1`/`X2` glob-read the SIBLINGS as "existing", permanently
+DROPPING the literal partition's own stored row (silent loss, no
+quarantine) + IMPORTING the siblings' rows cross-series + falsely
+emitting `dedup_healed` — from the default AUTO-ON healer's
+copy-forward leg AND the production `write()` merge arm, no
+symlink/TOCTOU (the containment rail cannot see it); (b) the shared
+scanner seam `_read_key_columns`: a glob-named series was classified
+over OTHER files' bytes (phantom findings whose literal-read heal
+skips as stale → the L3 sentinel never stamps; wrong census numbers;
+the canonical-sibling overlap read rode the same seam). BOTH sites
+now pass `glob=False` (the healer's BytesIO reads were already
+immune; the bars seam twin covered free); the round-8 "a `[` name
+raises invalid glob pattern — gracefully scan-skipped" note is
+REFUTED (unbalanced-bracket-only) + reworded; 9 regressions all
+verified failing pre-fix. NITs: the 4 load-bearing `YYYY-MM` stem
+f-strings collapse onto ONE `partition.option_partition_stem` + the
+duplicated "unclassifiable option partition" message onto ONE
+`option_unclassifiable_message` (§11 COMMON); the merge's extra
+O(month-rows) unique() baseline pass per flush documented honestly
+(constant-factor, un-benched); two once-seen combined-suite failures
+were unreproducible (suspected sandbox transient — reported, not
+claimed fixed).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
 deterministically (canonical/path-ordered-first wins, originals in
 quarantine); rows move VERBATIM, never validated. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; `lake_invariants.py`/`option_parquet_writer.py`/
-`lake_heal.py` ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict`
-+ pyright at the pre-change baseline).
+`lake_heal.py`/`partition.py` ALL 100% line+branch; ruff/ruff-format clean,
+mypy `--strict` + pyright at the pre-change baseline).
 Earlier: 2026-07-05 (DEC-RAM-BUDGETS-001, MIGRATION.md #1360 —
 RAM-scaled memory budgets: NEW stdlib-only `brutex/hardware_envelope.py`
 (`detect_total_ram_bytes` — POSIX sysconf primary, macOS `sysctl hw.memsize`
@@ -759,8 +785,10 @@ hostile-review pass._
   chars; event name + field names unchanged). Deliberately still RAW + pinned: the `<lake_root>/options` ROOT skip
   (operator-configured root + fixed literal, no vendor component), the BARS writer's `dedup_healed` twin
   (catalogued-coordinate dest) and the bars-tree skips (validated `parse_partition_path` coordinates). En-route
-  honesty note: a `[`-carrying series name makes `pl.read_parquet` raise "invalid glob pattern" (polars treats the
-  path as a glob) — already gracefully scan-skipped, now repr()-rendered. (R8-2·NIT, census cross-contamination)
+  honesty note [REFUTED + SUPERSEDED by round 15: only an UNBALANCED bracket raised "invalid glob pattern"
+  (scan-skipped); a BALANCED set — and `*`/`?` — silently glob-read the WRONG files; every raw-path option read now
+  passes `glob=False`, so any metachar name reads its literal file]: a `[`-carrying series name made `pl.read_parquet`
+  glob-interpret the path — the round-8 fixtures use bracket-free ESC names. (R8-2·NIT, census cross-contamination)
   `build_lake_census` keyed the option findings into the SHARED per-segment dicts under the `"OPTIONS"` sentinel
   label, so a BARS finding whose `coords.segment` read `"OPTIONS"` (`PartitionCoords` is unvalidated; census input
   is ANY `LakeScanReport`, even though `parse_partition_path` rejects that segment at today's scan boundary) merged
@@ -858,11 +886,42 @@ hostile-review pass._
   byte-untouched, canonical sibling untouched, no quarantine dir). (R14·NIT) the ledger #1482
   `TestOptionForeignHeal` count corrected AGAIN per the round-6/rebuild precedent (said 21; the class carried 22
   pre-round-14 — the round-13 mid-heal test was added without bumping the count — now 23 with the new swap pin).
+  HOSTILE-REVIEW FOLDS (round 15, refuter-confirmed 2 MAJORs — ONE root; both empirically reproduced pre-fix through
+  the real writer/scanner on polars 1.42.1, all 9 new regressions verified FAILING pre-fix): (R15·MAJORs,
+  glob-metachar series names) `pl.read_parquet`'s default `glob=True` treats the PATH as a glob and `_safe_segment`
+  legally admits glob metachars in a series dir name (rejects only `/ \ ..`, maps `|`) — TWO raw-path read sites rode
+  the default: (a) `_merge_frame_locked`'s existing-destination read: a merge into `options/X[12]/2024-07.parquet`
+  with REAL siblings `X1`/`X2` glob-matched the SIBLINGS as "existing", so the rewrite PERMANENTLY DROPPED the
+  literal partition's own stored row (silent row LOSS — no quarantine, the merge leg never quarantines), IMPORTED the
+  siblings' rows cross-series into the flagged series, and falsely emitted `lake.partition.dedup_healed` against them
+  — firing from the default AUTO-ON healer's copy-forward leg AND the production `write()` merge arm with NO
+  symlink/TOCTOU (static persistent state the round-2/4/6 containment rail cannot see — no symlink, the path sits
+  literally inside `options/`), violating the round-1 no-silent-row-loss law + the round-6 "cross-series
+  contamination closed" claim; (b) the shared scanner seam `_read_key_columns`: scan classification of a glob-named
+  series described OTHER files' bytes — a dup-poisoned sibling produced a phantom finding against the CLEAN literal
+  file (whose literal-read heal skips as stale → `healed != findings` → the L3 sentinel never stamps, permanent boot
+  re-sweeps) + wrong census/`brutex lake audit-unique`/`/universe` numbers, and the targeted `_canonical_option_keys`
+  overlap read rode the SAME seam (phantom overlaps a literal keyed removal could never converge on); `*`/`?` behave
+  identically (`A*S` alongside `ABS`). FIXED at both raw-path sites with `glob=False`; already immune + unchanged:
+  `read_partition_frame`/`heal_partition` + the bars writer's merge read (BytesIO); the bars `_read_key_columns` twin
+  covered for free. REFUTES the round-8 en-route honesty note (reworded in place — unbalanced-bracket-only).
+  Regressions (all 9 verified failing pre-fix): `TestGlobMetacharSeries` (writer, parametrized `X[12]`/`A*S`/`A?S`
+  merge + the production `write()` arm — literal row preserved, zero cross-series import, no false `dedup_healed`,
+  siblings byte-identical) + the two scanner literal-bytes/literal-sibling-overlap pins + the healer end-to-end
+  bracket-series heal (converges, second sweep clean; `TestOptionForeignHeal` 23 → 24). (R15·NITs) the FOUR
+  load-bearing `YYYY-MM` stem f-string copies (writer dest · `_option_file_month` canonical check ·
+  `_canonical_option_keys` sibling path · the healer's reassignment dest) collapse onto ONE NEW pure
+  `partition.option_partition_stem` (§11 COMMON, MINYEAR/MAXYEAR padding pinned); the duplicated "unclassifiable
+  option partition" refusal message collapses onto ONE NEW `lake_invariants.option_unclassifiable_message` (in
+  `__all__`, both gate consumers); the production merge's extra O(month-rows) `unique()` baseline pass per flush
+  documented honestly in `_merge_frame_locked` (constant factor, accepted un-benched — the merge read dominates);
+  HONEST: two combined-suite failures observed ONCE were unreproducible on re-run (suspected sandbox transient — no
+  evidenced code defect, nothing claimed fixed).
   Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (470/166) + `option_parquet_writer.py`
-  (165/34) + `lake_heal.py` (603/170) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
-  pre-change baseline).
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (472/166) + `option_parquet_writer.py`
+  (165/34) + `lake_heal.py` (603/170) + `partition.py` (83/24) ALL 100% line+branch; ruff/ruff-format clean, mypy
+  `--strict` + pyright at the pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
   test reset seam, any failure → the honest `0` "unknown" sentinel; ONE COMMON `memory_budget_bytes` derivation — env

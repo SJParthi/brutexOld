@@ -63,7 +63,7 @@ import structlog
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
 from brutex.data.models import OptionBar
-from brutex.data.partition import partition_for_timestamp
+from brutex.data.partition import option_partition_stem, partition_for_timestamp
 from brutex.data.partition_lock import BoundedLockRegistry, partition_write_lock
 from brutex.models import BruteXError
 from brutex.money import round_money
@@ -236,7 +236,12 @@ class OptionParquetWriter:
 
         added_total = 0
         for (year, month), group in sorted(groups.items()):
-            dest = self._lake_root / _OPTIONS_SUBDIR / segment / f"{year:04d}-{month:02d}.parquet"
+            dest = (
+                self._lake_root
+                / _OPTIONS_SUBDIR
+                / segment
+                / f"{option_partition_stem(year, month)}.parquet"
+            )
             added_total += self._merge_partition(dest, coordinate, group)
         return added_total
 
@@ -406,6 +411,12 @@ class OptionParquetWriter:
         different partitions never contend; the merge unions by ``(side, timestamp)``,
         so the stored bytes are identical regardless of which window acquires the lock
         first (order-independent — CLAUDE.md §2 Rule 7).
+
+        Cost honesty (Golden Rule #10, review round-15 NIT): the F1
+        unique-stored-key baseline costs the production merge ONE extra
+        O(month-rows) ``unique()`` pass per flush on top of the union — a
+        constant factor over the O(month-rows) read-modify-write this method
+        already is, accepted un-benched (the merge read itself dominates).
         """
         import polars as pl
 
@@ -436,7 +447,21 @@ class OptionParquetWriter:
                 # ENOSPC to a pull-wide LakeWriteHalt, so an OOM here is NOT demoted to a
                 # per-contract quarantine; only an unreadable-FILE fault is.
                 try:
-                    existing = pl.read_parquet(dest)
+                    # glob=False (hostile-review round-15 MAJOR fold): polars'
+                    # default glob=True treats the PATH as a glob, and
+                    # ``_safe_segment`` legally admits glob metachars in a
+                    # series dir name (it rejects only / \ .. and maps |) — a
+                    # merge into ``options/X[12]/…`` glob-matched the REAL
+                    # sibling series X1 + X2 as "existing", so the rewrite
+                    # PERMANENTLY DROPPED the literal partition's own stored
+                    # rows (no quarantine — this leg never quarantines),
+                    # IMPORTED the siblings' rows cross-series, and falsely
+                    # emitted ``dedup_healed`` against them (empirically
+                    # reproduced through the default AUTO-ON healer's
+                    # copy-forward leg AND the production ``write()`` path —
+                    # no symlink/TOCTOU needed, so the containment rail
+                    # cannot see it). The literal read closes both.
+                    existing = pl.read_parquet(dest, glob=False)
                 except parquet_read_skip_errors() as exc:
                     raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
                 # `added` is baselined on the UNIQUE stored key count, NEVER the raw
@@ -646,13 +671,14 @@ class OptionParquetWriter:
                 # to the frame THIS method actually hashes. Function-local
                 # import — ``lake_invariants`` imports nothing from this
                 # module (no cycle) and stays off the writer's import path.
-                from brutex.data.lake_invariants import option_key_dtype_error
+                from brutex.data.lake_invariants import (
+                    option_key_dtype_error,
+                    option_unclassifiable_message,
+                )
 
                 dtype_error = option_key_dtype_error(deduped)
                 if dtype_error is not None:
-                    raise OptionWriterError(
-                        f"unclassifiable option partition {dest}: {dtype_error}"
-                    )
+                    raise OptionWriterError(option_unclassifiable_message(dest, dtype_error))
                 # RAW stored-value boolean-mask removal (never a tz-cast join):
                 # exact membership against the stored (side, timestamp) values.
                 keyset = set(remove_keys)

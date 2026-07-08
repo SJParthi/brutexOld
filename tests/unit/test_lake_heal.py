@@ -1251,8 +1251,9 @@ def _poison_option_foreign(
     series_dir = _opt_series_dir(lake, partition_key=partition_key)
     june = series_dir / "2024-06.parquet"
     july = series_dir / "2024-07.parquet"
-    june_df = pl.read_parquet(june)
-    july_df = pl.read_parquet(july)
+    # glob=False — a round-15 fixture key may carry glob metachars (X[12]).
+    june_df = pl.read_parquet(june, glob=False)
+    july_df = pl.read_parquet(july, glob=False)
     drifted_overlap = july_df[0:1].with_columns((pl.col("close") + 999.0).alias("close"))
     misplaced = july_df[0:1].with_columns(pl.lit("PE").alias("side"), pl.lit(55.0).alias("close"))
     pl.concat([june_df, drifted_overlap, misplaced]).write_parquet(june)
@@ -1913,10 +1914,12 @@ class TestOptionForeignHeal:
         observe-mode ``detail`` list rides the SAME ``_finding_token`` guard
         (the #907 convention, matching the round-8 option-tree fold)."""
         lake = tmp_path / "lake"
-        # A bare ESC (\x1bM, ANSI Reverse Index) — not \x1b[ — because "[" is
-        # a polars glob metacharacter and the SHARED read helpers use the
-        # default glob=True path (an unbalanced bracket is a scan_skip, a
-        # different, already-guarded failure mode).
+        # A bare ESC (\x1bM, ANSI Reverse Index) — not \x1b[ — kept
+        # bracket-free so THIS test exercises ONLY the log-injection guard:
+        # since round 15 every raw-path option read passes glob=False (a
+        # bracket name now reads its literal file, no longer a glob), but a
+        # second metachar dimension here would blur what this pin covers —
+        # the glob-metachar reads have their own round-15 regressions.
         evil_key = "NSE_FNO|13|WEEK\nFORGED log line \x1bM|CALL"
         june, _july = _poison_option_foreign(lake, partition_key=evil_key)
         scan = scan_lake_invariants(lake)
@@ -2314,6 +2317,68 @@ class TestOptionForeignHeal:
         assert june_frame["side"].to_list() == ["CE", "PE"]  # null-TS row stayed home
         rescan = scan_lake_invariants(lake)
         assert rescan.findings == ()  # the second sweep is clean
+
+    def test_option_foreign_heal_glob_metachar_series_no_cross_series_import(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-15 MAJOR regression (refuter-confirmed): a balanced-bracket
+        series name heals LITERALLY. Pre-fix the copy-forward leg's merge read
+        (``pl.read_parquet(dest)`` default ``glob=True``) treated the
+        ``…X[12]/2024-07.parquet`` destination as a GLOB matching the REAL
+        sibling series ``…X1``/``…X2`` — the rewrite permanently DROPPED the
+        literal canonical July row (no quarantine, the merge leg never
+        quarantines), IMPORTED the siblings' rows cross-series into the
+        flagged series, and falsely emitted ``dedup_healed`` against them —
+        from the default AUTO-ON healer, with NO symlink/TOCTOU (static
+        persistent state the containment rail cannot see), violating both the
+        round-1 no-silent-row-loss law and the round-6 "cross-series
+        contamination closed" claim. Post-fix: the heal converges on the
+        literal bytes, siblings byte-untouched."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        bracket_key = "NSE_FNO|13|WEEK|0|ATM|X[12]"
+        june, july = _poison_option_foreign(lake, partition_key=bracket_key)
+        writer = OptionParquetWriter(lake_root=lake)
+        for n, sibling_leaf in enumerate(("X1", "X2"), start=1):
+            writer.write(
+                partition_key=f"NSE_FNO|13|WEEK|0|ATM|{sibling_leaf}",
+                coordinate=_OPT_COORD,
+                bars=[_opt_bar(side="CE", ts=_ts(30 + n, month=7, day=1), close=f"{n * 111}.00")],
+            )
+        siblings = [
+            _opt_series_dir(lake, partition_key=f"NSE_FNO|13|WEEK|0|ATM|{leaf}") / "2024-07.parquet"
+            for leaf in ("X1", "X2")
+        ]
+        sibling_bytes = [p.read_bytes() for p in siblings]
+        scan = scan_lake_invariants(lake)
+        (finding,) = scan.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.foreign_rows == 2  # the LITERAL June bytes, not a glob union
+        assert finding.overlap_rows == 1
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                now=_now,
+            )
+        assert report.healed == 1
+        assert report.errors == 0
+        july_after = pl.read_parquet(july, glob=False).sort(["side", "timestamp"])
+        # Canonical CE (200.0, PRESERVED — pre-fix it was silently dropped) +
+        # the reassigned PE (55.0); the siblings' 111.0/222.0 never imported.
+        assert sorted(july_after["close"].to_list()) == [55.0, 200.0]
+        june_after = pl.read_parquet(june, glob=False)
+        assert june_after["close"].to_list() == [100.0]  # source cleaned
+        for path, before in zip(siblings, sibling_bytes, strict=True):
+            assert path.read_bytes() == before  # siblings byte-untouched
+        # No false dedup_healed against the siblings' rows.
+        assert _events(logs, "lake.partition.dedup_healed") == []
+        rescan = scan_lake_invariants(lake)
+        assert rescan.findings == ()  # converged — the second sweep is clean
 
 
 class TestOptionSymlinkContainment:
