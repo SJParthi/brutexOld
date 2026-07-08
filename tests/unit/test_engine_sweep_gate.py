@@ -22,7 +22,7 @@ import pytest
 from brutex.data.interior_gap_detect import INTERIOR_GAP
 from brutex.data.session import ALL_FILTERED
 from brutex.data.session_coverage import LedgerRowFlag, QuarantineScan
-from brutex.data.window_ledger import FAILED, SKIPPED, WindowLedger
+from brutex.data.window_ledger import FAILED, SKIPPED, LedgerRowTuple, WindowLedger
 from brutex.data.window_ledger_store import ledger_path, save_window_ledger
 from brutex.engine.sweep_data_preflight import RefusalCode, clamp_dates
 from brutex.engine.sweep_estimate import selection_confirm_token, selection_from_raw
@@ -33,6 +33,7 @@ from brutex.engine.sweep_gate import (
 )
 from brutex.engine.sweep_sla_guard import SlaDecision
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 _EXCHANGE = "NSE"
 _SEGMENT = "INDEX"
@@ -92,7 +93,7 @@ def _run(lake: Path, out_root: Path, **overrides: Any) -> SweepPreflightOutcome:
     return run_sweep_data_preflight(**kwargs)
 
 
-def _gate_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _gate_events(logs: list[EventDict]) -> list[EventDict]:
     """Filter the captured structlog events down to the gate's own verdict events."""
     return [entry for entry in logs if entry["event"] in _GATE_EVENTS]
 
@@ -116,9 +117,7 @@ def _ledger_row(
     window_end: str,
     status: str,
     last_error: str | None,
-) -> tuple[
-    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
-]:
+) -> LedgerRowTuple:
     """One raw window-ledger row tuple (the ``WindowLedger.from_rows`` shape)."""
     return (
         "groww",
@@ -134,6 +133,8 @@ def _ledger_row(
         _NOW,
         0,
         1,
+        None,
+        None,
         None,
     )
 

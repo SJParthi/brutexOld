@@ -341,6 +341,8 @@ class TestPayloadKeySetGolden:
                         0,
                         1,
                         None,
+                        None,
+                        None,
                     )
                 ]
             ),
@@ -445,6 +447,8 @@ class TestNegativePins:
                         0,
                         1,
                         None,
+                        None,
+                        None,
                     )
                 ]
             ),
@@ -477,6 +481,8 @@ class TestNegativePins:
                         "2026-07-01T00:00:00+00:00",
                         0,
                         1,
+                        None,
+                        None,
                         None,
                     )
                 ]

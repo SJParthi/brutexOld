@@ -53,7 +53,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
 from brutex.data.sweep_exclusion import sweep_lock_path, sweep_run_guard
-from brutex.data.window_ledger import FAILED, SUCCESS, WindowLedger
+from brutex.data.window_ledger import FAILED, SUCCESS, LedgerRowTuple, WindowLedger
 from brutex.data.window_ledger_store import ledger_path, save_window_ledger
 from brutex.engine.sweep_data_preflight import clamp_dates
 
@@ -181,9 +181,7 @@ def _ledger_row(
     window_end: str,
     status: str,
     last_error: str | None,
-) -> tuple[
-    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
-]:
+) -> LedgerRowTuple:
     """One raw window-ledger row tuple (the ``WindowLedger.from_rows`` shape)."""
     return (
         "groww",
@@ -199,6 +197,8 @@ def _ledger_row(
         _NOW,
         0,
         1,
+        None,
+        None,
         None,
     )
 

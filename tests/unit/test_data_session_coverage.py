@@ -33,6 +33,7 @@ from brutex.data.window_ledger import (
     FAILED,
     SKIPPED,
     SUCCESS,
+    LedgerRowTuple,
     WindowLedger,
     expired_window_settle_reason,
 )
@@ -300,9 +301,7 @@ def _row(
     window_end: str,
     status: str,
     last_error: str | None,
-) -> tuple[
-    str, str, str, str, str, str, int, int, str | None, str, str | None, int, int, int | None
-]:
+) -> LedgerRowTuple:
     return (
         "groww",
         security_id,
@@ -317,6 +316,8 @@ def _row(
         _NOW,
         0,
         1,
+        None,
+        None,
         None,
     )
 
