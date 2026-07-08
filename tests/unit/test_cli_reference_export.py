@@ -218,3 +218,103 @@ def test_dispatch_export_reference_default_date_none(
 
     assert rc == cli.EXIT_OK
     assert seen["date_str"] is None
+
+
+# ── Round-4 refutation regressions: the CLIENT-BUILD failure class ─────────────
+#
+# `boto3.client(...)` raises NON-ReferenceExportConfigError types on config gaps
+# (botocore InvalidRegionError IS a ValueError; ProfileNotFound is its own tree).
+# Pre-fix these escaped both shims' `except ReferenceExportConfigError` guards —
+# traceback + red exit AFTER a persisted green pull. The fix converts EVERY
+# client-build failure to ReferenceExportConfigError INSIDE build_real_s3_uploader,
+# so these tests drive the REAL build (a fake `boto3` module in sys.modules whose
+# `client` raises) — build_real_s3_uploader itself is deliberately NOT mocked.
+
+
+def _install_raising_boto3(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    """Install a stand-in ``boto3`` whose ``client`` raises *exc*."""
+    import sys
+    import types
+
+    def _client(service: str, **kwargs: Any) -> Any:
+        raise exc
+
+    fake = types.ModuleType("boto3")
+    fake.client = _client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+
+
+class _InvalidRegionError(ValueError):
+    """Shape of botocore.exceptions.InvalidRegionError (a ValueError subclass)."""
+
+
+class _ProfileNotFound(Exception):
+    """Shape of botocore.exceptions.ProfileNotFound (generic BotoCoreError tree)."""
+
+
+@pytest.mark.parametrize(
+    "client_exc",
+    [
+        _InvalidRegionError(
+            "Provided region_name 'not a region!' doesn't match a supported format."
+        ),
+        _ProfileNotFound("The config profile (nope) could not be found"),
+    ],
+    ids=["invalid_region_valueerror", "profile_not_found_generic"],
+)
+def test_seam_b_client_build_failure_is_fenced_pull_stays_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_exc: Exception
+) -> None:
+    """A botocore-shaped client-build failure NEVER fails the persisted pull.
+
+    Drives the REAL ``build_real_s3_uploader`` through the REAL
+    ``_run_cli_reference_export`` (only the ``boto3`` module is faked): the build
+    converts the raw error to ``ReferenceExportConfigError``, the shim's guard
+    catches it → the pull returns ``EXIT_OK`` with ONE WARN + ONE alert naming
+    the underlying error type.
+    """
+    import structlog
+
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT", "1")
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT_BUCKET", "tickvault-reference")
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT_REGION", " not a region! ")
+    _wire_live_fakes(monkeypatch)
+    _install_raising_boto3(monkeypatch, client_exc)
+    alerts: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "brutex.notifications.sweep_alerts.emit_reference_export_failed_alert",
+        lambda **kwargs: alerts.append(kwargs),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        rc = _fetch(tmp_path)
+
+    assert rc == cli.EXIT_OK  # the fence holds — the persisted pull never fails
+    assert len(alerts) == 1
+    assert type(client_exc).__name__ in alerts[0]["reason"]  # names the underlying error
+    warn_events = [e for e in logs if e.get("event") == "reference_export.failed"]
+    assert len(warn_events) == 1
+    assert warn_events[0]["error_type"] == "ReferenceExportConfigError"
+
+
+def test_cmd_export_reference_client_build_failure_exits_user_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``export-reference`` maps a client-build failure to ``EXIT_USER_ERROR``.
+
+    The subcommand twin of the Seam B fence: the converted
+    ``ReferenceExportConfigError`` is caught by the guard that already wraps
+    ``resolve_export_bucket`` + ``build_real_s3_uploader`` — a config gap, never
+    a traceback / ``EXIT_INTERNAL_ERROR``.
+    """
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT_BUCKET", "tickvault-reference")
+    _install_raising_boto3(
+        monkeypatch, _InvalidRegionError("Provided region_name 'junk' doesn't match")
+    )
+
+    rc = cli.cmd_export_reference(tmp_path, date_str="2026-07-07")
+
+    assert rc == cli.EXIT_USER_ERROR
+    err = capsys.readouterr().err
+    assert "failed to build the S3 client" in err
+    assert "_InvalidRegionError" in err  # the underlying error type is named

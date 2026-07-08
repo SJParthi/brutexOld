@@ -3756,8 +3756,10 @@ def _run_cli_reference_export(*, lake_root: Path, export_date: date) -> None:
     :func:`~brutex.export.reference_export.run_reference_export_seam`.
 
     Fence hardening: the shim itself NEVER raises. Both config gaps —
-    an unset/misconfigured bucket AND a failed ``build_real_s3_uploader`` (raised
-    when the ``boto3`` extra is not installed, the documented-required config) —
+    an unset/misconfigured bucket AND a failed ``build_real_s3_uploader`` (the
+    ``boto3`` extra missing, or ANY client-build failure — botocore
+    region/profile/partial-install errors — converted to
+    ``ReferenceExportConfigError`` at the build, the round-4 refutation fix) —
     are caught HERE, because that build sits OUTSIDE the seam's own fence. A
     boto3-absent box would otherwise have raised straight out of ``cmd_fetch``
     Seam B AFTER a fully-persisted pull (a red exit + traceback on a green pull —
@@ -3770,10 +3772,10 @@ def _run_cli_reference_export(*, lake_root: Path, export_date: date) -> None:
     """
     from brutex.export.reference_export import (
         REFERENCE_EXPORT_PREFIX,
-        REFERENCE_EXPORT_REGION_ENV,
         ReferenceExportConfigError,
         build_real_s3_uploader,
         resolve_export_bucket,
+        resolve_export_region,
         run_reference_export_seam,
     )
 
@@ -3785,14 +3787,17 @@ def _run_cli_reference_export(*, lake_root: Path, export_date: date) -> None:
         # completed). No alert — an unset bucket is a benign not-configured state.
         print(f"[brutex] reference export skipped — {exc}", file=sys.stderr)
         return
-    region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
+    region = resolve_export_region()
     try:
         uploader = build_real_s3_uploader(bucket=bucket, region=region)
     except ReferenceExportConfigError as exc:
-        # build_real_s3_uploader raises on a missing boto3 extra / client-build
-        # failure — OUTSIDE run_reference_export_seam's fence. FENCE it here
-        # exactly like the seam (one loud WARN + a best-effort Telegram alert +
-        # return): an export dependency gap NEVER fails the completed pull.
+        # build_real_s3_uploader raises on a missing boto3 extra AND converts
+        # EVERY client-build failure — botocore InvalidRegionError (a ValueError
+        # subclass) / ProfileNotFound / partial-install errors, the round-4
+        # refutation class — to this ONE fence type. The build sits OUTSIDE
+        # run_reference_export_seam's fence, so FENCE it here exactly like the
+        # seam (one loud WARN + a best-effort Telegram alert + return): an
+        # export dependency/config gap NEVER fails the completed pull.
         import structlog
 
         from brutex.notifications.sweep_alerts import emit_reference_export_failed_alert
@@ -3841,10 +3846,10 @@ def cmd_export_reference(  # pragma: no cover — real boto3 S3 client + AWS com
     """
     from brutex.export.reference_export import (
         REFERENCE_EXPORT_PREFIX,
-        REFERENCE_EXPORT_REGION_ENV,
         ReferenceExportConfigError,
         build_real_s3_uploader,
         resolve_export_bucket,
+        resolve_export_region,
         run_reference_export_seam,
     )
 
@@ -3866,11 +3871,13 @@ def cmd_export_reference(  # pragma: no cover — real boto3 S3 client + AWS com
             )
             return EXIT_USER_ERROR
         export_date = latest
-    region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
+    region = resolve_export_region()
     try:
         bucket = resolve_export_bucket()
         # build_real_s3_uploader raises ReferenceExportConfigError on a missing
-        # boto3 extra — a config gap, not an internal error: keep it INSIDE the
+        # boto3 extra AND converts every client-build failure (botocore
+        # InvalidRegionError/ProfileNotFound/partial-install — round-4) to that
+        # one type — a config gap, not an internal error: keep it INSIDE the
         # guard so the subcommand exits EXIT_USER_ERROR (never a traceback).
         uploader = build_real_s3_uploader(bucket=bucket, region=region)
     except ReferenceExportConfigError as exc:

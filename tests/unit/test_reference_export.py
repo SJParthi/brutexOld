@@ -418,3 +418,131 @@ def test_emit_helper_swallows_alerter_exception(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(sweep_alerts, "SweepAlerter", _Boom)
     # Must NOT raise.
     sweep_alerts.emit_reference_export_failed_alert(export_date=_DAY, reason="boom")
+
+
+# ── build_real_s3_uploader + resolve_export_region (round-4 refutation fixes) ──
+#
+# The client build is the LAST unfenced link: `boto3.client(...)` raises
+# non-boto3-typed errors on config gaps (botocore InvalidRegionError is a
+# ValueError subclass; ProfileNotFound/DataNotFoundError are their own trees) —
+# none were ReferenceExportConfigError, so they escaped both CLI shims' guards.
+# These tests drive the REAL build (pragma lifted) via a fake `boto3` module in
+# sys.modules — boto3 itself is NOT installed in the test env, by design.
+
+
+def _install_fake_boto3(
+    monkeypatch: pytest.MonkeyPatch, client_factory: Any
+) -> list[dict[str, Any]]:
+    """Install a stand-in ``boto3`` module whose ``client`` records its kwargs."""
+    import sys
+    import types
+
+    calls: list[dict[str, Any]] = []
+
+    def _client(service: str, **kwargs: Any) -> Any:
+        calls.append({"service": service, **kwargs})
+        return client_factory(service, **kwargs)
+
+    fake = types.ModuleType("boto3")
+    fake.client = _client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    return calls
+
+
+def test_resolve_export_region_strips_value() -> None:
+    assert rx.resolve_export_region({rx.REFERENCE_EXPORT_REGION_ENV: " us-east-1 "}) == "us-east-1"
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+def test_resolve_export_region_blank_after_strip_is_none(value: str) -> None:
+    """Whitespace-only region env resolves None (falls back to the default region)."""
+    assert rx.resolve_export_region({rx.REFERENCE_EXPORT_REGION_ENV: value}) is None
+
+
+def test_resolve_export_region_unset_is_none() -> None:
+    assert rx.resolve_export_region({}) is None
+
+
+def test_resolve_export_region_defaults_to_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(rx.REFERENCE_EXPORT_REGION_ENV, " ap-south-1 ")
+    assert rx.resolve_export_region() == "ap-south-1"
+
+
+def test_build_real_s3_uploader_boto3_missing_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing boto3 raises ReferenceExportConfigError naming the extra."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "boto3", None)  # import boto3 → ImportError
+    with pytest.raises(rx.ReferenceExportConfigError, match="boto3 is required"):
+        rx.build_real_s3_uploader(bucket="b")
+
+
+def test_build_real_s3_uploader_converts_invalid_region_valueerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """botocore InvalidRegionError (a ValueError subclass) converts to the fence type."""
+
+    class InvalidRegionError(ValueError):
+        """Shape of botocore.exceptions.InvalidRegionError."""
+
+    def _raise(service: str, **kwargs: Any) -> Any:
+        raise InvalidRegionError(
+            "Provided region_name 'not a region!' doesn't match a supported format."
+        )
+
+    _install_fake_boto3(monkeypatch, _raise)
+    with pytest.raises(rx.ReferenceExportConfigError, match="InvalidRegionError") as excinfo:
+        rx.build_real_s3_uploader(bucket="b", region="not a region!")
+    assert isinstance(excinfo.value.__cause__, InvalidRegionError)  # chained, never dropped
+    assert "not a region!" in str(excinfo.value)  # names the offending region
+
+
+def test_build_real_s3_uploader_converts_generic_botocore_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ProfileNotFound-shaped (non-ValueError) build failure also converts."""
+
+    class ProfileNotFound(Exception):
+        """Shape of botocore.exceptions.ProfileNotFound."""
+
+    def _raise(service: str, **kwargs: Any) -> Any:
+        raise ProfileNotFound("The config profile (nope) could not be found")
+
+    _install_fake_boto3(monkeypatch, _raise)
+    with pytest.raises(rx.ReferenceExportConfigError, match="ProfileNotFound"):
+        rx.build_real_s3_uploader(bucket="b")
+
+
+def test_build_real_s3_uploader_success_binds_default_region_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Success path: default region bound, put_object delegates WRITE-ONLY kwargs."""
+    puts: list[dict[str, Any]] = []
+
+    class _FakeClient:
+        def put_object(self, **kwargs: Any) -> None:
+            puts.append(kwargs)
+
+    calls = _install_fake_boto3(monkeypatch, lambda service, **kwargs: _FakeClient())
+    uploader = rx.build_real_s3_uploader(bucket="tickvault-ref")
+
+    assert calls == [{"service": "s3", "region_name": rx.DEFAULT_REFERENCE_EXPORT_REGION}]
+    uploader.put_object(
+        key="k/file.parquet", body=b"bytes", content_type="application/octet-stream"
+    )
+    assert puts == [
+        {
+            "Bucket": "tickvault-ref",
+            "Key": "k/file.parquet",
+            "Body": b"bytes",
+            "ContentType": "application/octet-stream",
+        }
+    ]
+
+
+def test_build_real_s3_uploader_explicit_region_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_fake_boto3(monkeypatch, lambda service, **kwargs: object())
+    rx.build_real_s3_uploader(bucket="b", region="us-east-1")
+    assert calls == [{"service": "s3", "region_name": "us-east-1"}]

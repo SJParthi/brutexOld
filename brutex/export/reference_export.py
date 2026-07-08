@@ -32,9 +32,24 @@ S3 layout (documented for the TickVault reader)::
   consumer that reads a present manifest whose ``files`` all exist is looking at
   a COMPLETE export; a partial export leaves the per-file objects without a
   matching manifest and is detectable as incomplete (never a false-OK).
+  **Consumer contract — sha256 verification is REQUIRED, not existence-only**:
+  on a same-day RE-export there is a torn window (see below) during which the
+  PRIOR manifest is still present while per-file objects are being overwritten
+  one by one; an existence-only check would false-OK a mixed old/new day,
+  whereas verifying each Parquet's bytes against the manifest's per-file
+  ``sha256`` detects the tear (old manifest hash vs new object bytes) and the
+  reader must retry until the manifest and objects agree.
 
 Idempotence: a same-day re-export overwrites the per-file objects and rewrites
 the manifest last with fresh hashes — bit-for-bit determined by the stored lake.
+HONEST torn-window limit (Golden Rule #10): during a RE-export the PRIOR day's
+manifest persists while the per-file objects are overwritten one-by-one, so a
+consumer reading mid-re-export can see old manifest ``sha256`` values against
+new object bytes. This is why the consumer contract above REQUIRES per-file
+sha256 verification (a mismatch = torn read → retry later), not a bare
+manifest-plus-objects existence check. The manifest-LAST ordering bounds the
+window (a manifest is only ever replaced by a manifest describing fully-written
+objects); it does not eliminate it — S3 has no multi-object transaction.
 
 Cost honesty (Golden Rule #10): the export is O(instruments) per day with a
 per-file streaming write (one instrument's day frame in memory at a time — no
@@ -227,6 +242,35 @@ def resolve_export_bucket(env: Mapping[str, str] | None = None) -> str:
             "an external bucket name)"
         )
     return bucket
+
+
+def resolve_export_region(env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve the optional AWS region override — stripped, blank → ``None``.
+
+    The ONE region-env read shared by both CLI call sites (round-4 refutation
+    fix: each site read ``os.environ.get(...) or None`` UNstripped, so a
+    whitespace-padded ``BRUTEX_REFERENCE_EXPORT_REGION=" us-east-1 "`` — or a
+    value of pure whitespace — reached ``boto3.client(region_name=...)``
+    verbatim and botocore raised ``InvalidRegionError`` out of the shim).
+    Blank / whitespace-only / unset all resolve to ``None`` so
+    :func:`build_real_s3_uploader` falls back to
+    :data:`DEFAULT_REFERENCE_EXPORT_REGION`. A syntactically malformed but
+    non-blank region still reaches the client build — that failure is converted
+    to :class:`ReferenceExportConfigError` there (the ONE fence type).
+
+    Parameters
+    ----------
+    env
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+
+    Returns
+    -------
+    str | None
+        The stripped region name, or ``None`` when unset/blank.
+    """
+    mapping = os.environ if env is None else env
+    region = mapping.get(REFERENCE_EXPORT_REGION_ENV, "").strip()
+    return region or None
 
 
 def resolve_reference_export_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -547,17 +591,24 @@ def run_reference_export_seam(
     return report
 
 
-def build_real_s3_uploader(  # pragma: no cover — needs boto3 + AWS
-    *, bucket: str, region: str | None = None
-) -> S3Uploader:
+def build_real_s3_uploader(*, bucket: str, region: str | None = None) -> S3Uploader:
     """Build the production :class:`S3Uploader` backed by a boto3 S3 client (lazy import).
 
     Mirrors :func:`~brutex.adapters.groww.aws_client.build_real_aws_client`: a
     missing ``boto3`` raises a clear :class:`ReferenceExportConfigError` naming
     the extra. Credentials come from the ambient AWS chain (instance role / SSM
     profile) — NEVER a hardcoded key (the ``config/credentials_aws.py``
-    precedent). *region* defaults to
-    :data:`DEFAULT_REFERENCE_EXPORT_REGION`.
+    precedent). *region* defaults to :data:`DEFAULT_REFERENCE_EXPORT_REGION`.
+
+    EVERY build failure is :class:`ReferenceExportConfigError` — the ONE fence
+    type (round-4 refutation fix): ``boto3.client(...)`` itself raises
+    non-boto3-typed errors on config gaps — botocore ``InvalidRegionError`` (a
+    ``ValueError`` subclass) on a malformed region, ``ProfileNotFound`` on a bad
+    ``AWS_PROFILE``, ``DataNotFoundError``/``UnknownServiceError`` on a partial
+    install — none of which the CLI shims' ``except ReferenceExportConfigError``
+    guards would catch, so they escaped ``cmd_fetch`` AFTER a fully-persisted
+    pull (traceback + red exit on a green pull). Converting HERE fixes every
+    call site at once and keeps the fence contract single-typed.
     """
     try:
         import boto3  # type: ignore[import-not-found, unused-ignore]
@@ -567,11 +618,20 @@ def build_real_s3_uploader(  # pragma: no cover — needs boto3 + AWS
             'pip install -e ".[token-broker]"'
         ) from exc
 
-    client = boto3.client("s3", region_name=region or DEFAULT_REFERENCE_EXPORT_REGION)
+    try:
+        client = boto3.client("s3", region_name=region or DEFAULT_REFERENCE_EXPORT_REGION)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — converted, never swallowed
+        # Deliberately broad: botocore's config-gap errors share no useful base
+        # (InvalidRegionError IS a ValueError; ProfileNotFound is its own tree).
+        # The error is CONVERTED to the one fence type + chained, never dropped.
+        raise ReferenceExportConfigError(
+            f"failed to build the S3 client (region={region or DEFAULT_REFERENCE_EXPORT_REGION!r}"
+            f", bucket={bucket!r}): {type(exc).__name__}: {exc}"
+        ) from exc
     return _Boto3S3Uploader(bucket=bucket, client=client)
 
 
-class _Boto3S3Uploader:  # pragma: no cover — needs boto3 + AWS
+class _Boto3S3Uploader:
     """Adapts the boto3 low-level S3 client to the :class:`S3Uploader` Protocol.
 
     WRITE-ONLY: it only ever calls ``put_object`` on the ONE bound bucket. The
@@ -610,6 +670,7 @@ __all__ = [
     "discover_reference_instruments",
     "export_reference_day",
     "resolve_export_bucket",
+    "resolve_export_region",
     "resolve_reference_export_enabled",
     "run_reference_export_seam",
 ]
