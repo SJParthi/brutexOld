@@ -103,6 +103,29 @@ _CONTEXT_KEYS: Final[tuple[str, ...]] = (
     "code_commit_sha",
 )
 
+#: The parent-side durable LAUNCH-context audit action (review round-7
+#: finding 1): on the PARALLEL sweep driver — the production default — the
+#: EVAL worker itself durably writes the per-tuple store + completion
+#: sentinel, while the tuple's ``SWEEP_START`` reaches the durable ingest
+#: audit only when the parent's strictly in-order apply cursor replays the
+#: buffered records. A parent crash inside the launch window therefore left
+#: fresh-digest sentinels with ZERO fresh-generation audit entries — a state
+#: the resume gate (whose "SWEEP_START precedes the sentinel" premise held
+#: only on the fsync-per-append SEQUENTIAL driver) condemned as a
+#: tail-lossy/restored audit, permanently refusing the sanctioned
+#: crash-resume. ``cmd_sweep_all`` now appends ONE fsynced ``SWEEP_LAUNCH``
+#: line per futures instrument BEFORE grid dispatch — carrying the SAME
+#: context triple + ``params.roll_schedule`` shape a ``SWEEP_START`` records
+#: — making the premise true on BOTH drivers: any crash thereafter leaves
+#: the fresh generation's schedule durably recorded, so a re-launch compares
+#: recorded == fresh instead of refusing.
+SWEEP_LAUNCH_ACTION: Final[str] = "SWEEP_LAUNCH"
+
+#: The audit actions that carry a recorded launch context (the context
+#: triple, plus ``params.roll_schedule`` for a futures instrument) — every
+#: generation-scoped reader below accepts both.
+_CONTEXT_ACTIONS: Final[frozenset[str]] = frozenset({"SWEEP_START", SWEEP_LAUNCH_ACTION})
+
 
 #: The heal protocol's quarantine subtree under a results root
 #: (DEC-SWEEP-HEAL-001) — EXCLUDED from every results-tree glob here and in
@@ -275,13 +298,13 @@ def _context_from_entries(entries: list[AuditEntry], audit_path: Path) -> Record
     """Derive the recorded context from already-read *entries* (one shared parse)."""
     context: RecordedContext | None = None
     for entry in entries:
-        if entry.action != "SWEEP_START":
+        if entry.action not in _CONTEXT_ACTIONS:
             continue
         payload = entry.payload
         missing = [key for key in _CONTEXT_KEYS if key not in payload]
         if missing:
             raise SweepVerifyError(
-                f"SWEEP_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+                f"{entry.action} payload at {audit_path} (seq {entry.seq}) missing {missing}"
             )
         found = RecordedContext(
             data_snapshot_hash=str(payload["data_snapshot_hash"]),
@@ -328,7 +351,7 @@ def _schedules_from_entries(
     """Derive the recorded schedules from already-read *entries* (one shared parse)."""
     schedules: dict[str, tuple[int, ...]] = {}
     for entry in entries:
-        if entry.action != "SWEEP_START":
+        if entry.action not in _CONTEXT_ACTIONS:
             continue
         payload = entry.payload
         params = payload.get("params")
@@ -370,7 +393,11 @@ def _schedules_from_entries(
 
 
 def recorded_audit_facts(
-    audit_path: Path, *, snapshot: str | None = None
+    audit_path: Path,
+    *,
+    snapshot: str | None = None,
+    indicator_version: str | None = None,
+    code_commit_sha: str | None = None,
 ) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
     """Read the audit ONCE and derive ONE generation's context + schedules.
 
@@ -386,35 +413,55 @@ def recorded_audit_facts(
     corruption oracle) out of the flagship production tree, and the explicit
     context flags could not rescue it because the parse raise preceded them.
 
-    Facts are therefore SCOPED to ONE generation: the explicit *snapshot*
-    (``--data-snapshot-hash``) when given, else the LATEST recorded generation
-    (the last ``SWEEP_START``'s ``data_snapshot_hash`` — the audit is
-    append-only, so the last entry belongs to the newest launch). The OTHER
-    generations' snapshots are returned (first-appearance order) for the
-    caller's honest note — a warn-grade observation, no longer a usage
-    refusal. WITHIN the scoped generation, a context or schedule disagreement
-    still raises: one launch records ONE context — a disagreement there is
-    real corruption, not the daemon cadence.
+    A GENERATION is keyed by the FULL context triple ``(data_snapshot_hash,
+    indicator_version, code_commit_sha)`` — review round-7 finding 7: one
+    SNAPSHOT does not imply one LAUNCH. A code-upgrade re-launch into the
+    same root (any git commit lands while the lake does not move) records a
+    SECOND context under the SAME snapshot; snapshot-only keying condemned
+    that sanctioned, launch-gate-accepted root as "inconsistent recorded
+    context" with no flag able to rescue (the raise preceded the flags).
+    Facts scope to the triple of the LAST entry matching every EXPLICIT flag
+    given (``--data-snapshot-hash`` / ``--indicator-version`` /
+    ``--code-commit-sha`` narrow the candidates; the audit is append-only, so
+    the last candidate belongs to the newest matching launch). The OTHER
+    generations' snapshots are returned (first-appearance order, deduped) for
+    the caller's honest note — a warn-grade observation, never a usage
+    refusal; a same-snapshot other generation is still counted (its snapshot
+    string may equal the scoped one). WITHIN the scoped generation a
+    per-instrument schedule disagreement still raises: one context triple's
+    schedules disagreeing is real corruption (the resume gate refuses a
+    schedule-only drift at launch), not any sanctioned cadence.
 
     Returns ``(None, {}, ())`` when the audit file is absent, and
-    ``(None, {}, other_generations)`` when *snapshot* matches no recorded
-    entry (the explicit-flags path — the caller supplies the full context).
+    ``(None, {}, other_generations)`` when the explicit flags match no
+    recorded entry (the explicit-flags path — the caller supplies the full
+    context).
 
     Raises
     ------
     SweepVerifyError
-        If the audit log is unreadable/corrupt, a ``SWEEP_START`` payload is
-        malformed, or the SCOPED generation's context/schedules disagree.
+        If the audit log is unreadable/corrupt, a context-bearing payload is
+        malformed, or the SCOPED generation's schedules disagree.
     """
     if not audit_path.exists():
         return None, {}, ()
     entries = _entries_from_audit(audit_path)
-    pairs = _sweep_start_snapshots(entries, audit_path)
+    pairs = _launch_context_pairs(entries, audit_path)
     if not pairs:
         return None, {}, ()
-    target = snapshot if snapshot is not None else pairs[-1][1]
-    matching = [entry for entry, snap in pairs if snap == target]
-    others = tuple(dict.fromkeys(snap for _entry, snap in pairs if snap != target))
+    candidates = [
+        ctx
+        for _entry, ctx in pairs
+        if (snapshot is None or ctx.data_snapshot_hash == snapshot)
+        and (indicator_version is None or ctx.indicator_version == indicator_version)
+        and (code_commit_sha is None or ctx.code_commit_sha == code_commit_sha)
+    ]
+    if not candidates:
+        others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs))
+        return None, {}, others
+    target = candidates[-1]
+    matching = [entry for entry, ctx in pairs if ctx == target]
+    others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs if ctx != target))
     return (
         _context_from_entries(matching, audit_path),
         _schedules_from_entries(matching, audit_path),
@@ -422,38 +469,49 @@ def recorded_audit_facts(
     )
 
 
-def _sweep_start_snapshots(
+def _launch_context_pairs(
     entries: list[AuditEntry], audit_path: Path
-) -> list[tuple[AuditEntry, str]]:
-    """Return every ``SWEEP_START`` entry paired with its recorded snapshot.
+) -> list[tuple[AuditEntry, RecordedContext]]:
+    """Return every context-bearing entry paired with its recorded context triple.
 
     The ONE context-key validation both generation-scoped readers ride
     (:func:`recorded_audit_facts` + :func:`_matching_snapshot_entries`).
+    Accepts BOTH ``SWEEP_START`` (the per-tuple line) and ``SWEEP_LAUNCH``
+    (the parent's pre-dispatch line — review round-7 finding 1).
 
     Raises
     ------
     SweepVerifyError
-        If a ``SWEEP_START`` payload is missing a context key (a malformed
-        entry makes the recorded snapshot underivable — fail closed).
+        If a context-bearing payload is missing a context key (a malformed
+        entry makes the recorded generation underivable — fail closed).
     """
-    pairs: list[tuple[AuditEntry, str]] = []
+    pairs: list[tuple[AuditEntry, RecordedContext]] = []
     for entry in entries:
-        if entry.action != "SWEEP_START":
+        if entry.action not in _CONTEXT_ACTIONS:
             continue
         payload = entry.payload
         missing = [key for key in _CONTEXT_KEYS if key not in payload]
         if missing:
             raise SweepVerifyError(
-                f"SWEEP_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+                f"{entry.action} payload at {audit_path} (seq {entry.seq}) missing {missing}"
             )
-        pairs.append((entry, str(payload["data_snapshot_hash"])))
+        pairs.append(
+            (
+                entry,
+                RecordedContext(
+                    data_snapshot_hash=str(payload["data_snapshot_hash"]),
+                    indicator_version=str(payload["indicator_version"]),
+                    code_commit_sha=str(payload["code_commit_sha"]),
+                ),
+            )
+        )
     return pairs
 
 
 def _matching_snapshot_entries(
     entries: list[AuditEntry], fresh_snapshot: str, audit_path: Path
 ) -> tuple[list[AuditEntry], list[AuditEntry]]:
-    """Split ``SWEEP_START`` entries into (all, recorded-under-*fresh_snapshot*).
+    """Split context-bearing entries into (all, recorded-under-*fresh_snapshot*).
 
     The resume gate's launch-generation scoping (review round-4 findings
     1/8/11): a multi-launch results root legitimately accretes SWEEP_START
@@ -462,18 +520,21 @@ def _matching_snapshot_entries(
     only rows minted under the SAME ``data_snapshot_hash`` can pair a
     completion sentinel with this launch (the tuple digest folds the
     snapshot, so a foreign-snapshot sentinel can never short-circuit this
-    grid's tuples). Whole-file consistency remains ``sweep-verify``'s
-    separate diagnosis contract (:func:`recorded_context_from_audit`).
+    grid's tuples). The parent's pre-dispatch ``SWEEP_LAUNCH`` line counts as
+    a matching-generation entry too (review round-7 finding 1 — on the
+    parallel driver it is the entry a launch-window crash durably leaves).
+    Whole-file consistency remains ``sweep-verify``'s separate diagnosis
+    contract (:func:`recorded_context_from_audit`).
 
     Raises
     ------
     SweepVerifyError
-        If a ``SWEEP_START`` payload is missing a context key (a malformed
+        If a context-bearing payload is missing a context key (a malformed
         entry makes the recorded snapshot underivable — fail closed).
     """
-    pairs = _sweep_start_snapshots(entries, audit_path)
-    sweep_starts = [entry for entry, _snap in pairs]
-    matching = [entry for entry, snap in pairs if snap == fresh_snapshot]
+    pairs = _launch_context_pairs(entries, audit_path)
+    sweep_starts = [entry for entry, _ctx in pairs]
+    matching = [entry for entry, ctx in pairs if ctx.data_snapshot_hash == fresh_snapshot]
     return sweep_starts, matching
 
 
@@ -613,10 +674,16 @@ def stale_roll_schedule_refusal(
         UNLESS a sentinel already exists at one of THIS launch's expected
         *fresh_sentinel_paths* (review round-6 finding 4 — the round-5
         finding-11 sibling): a fresh-digest sentinel proves a
-        matching-generation ``SWEEP_START`` was once appended, so its total
-        absence is a TAIL-lossy / wrong-backup-restored audit and the resume
-        refuses (zero false positives — a legitimate moved snapshot or
-        crash-resume leaves no sentinel at those exact paths). An
+        matching-generation context entry was once appended — the tuple's
+        ``SWEEP_START`` on the sequential driver, or the parent's
+        pre-dispatch ``SWEEP_LAUNCH`` line on the PARALLEL driver, whose
+        workers write sentinels ahead of the parent's in-order audit apply
+        (review round-7 finding 1) — so its total absence is a TAIL-lossy /
+        wrong-backup-restored audit and the resume refuses (zero false
+        positives — a legitimate moved snapshot or crash-resume leaves no
+        sentinel at those exact paths, and a crashed PARALLEL launch leaves
+        its fsynced ``SWEEP_LAUNCH`` line, so ``matching`` is non-empty and
+        this arm never fires there). An
         unreadable audit, a malformed/inconsistent matching generation, or a
         readable audit recording NO ``SWEEP_START`` at all (a truncated /
         copytruncate-rotated file — review round-4 finding 10) abstains ONLY
@@ -659,15 +726,20 @@ def stale_roll_schedule_refusal(
         )
     if not matching:
         # Review round-6 finding 4 (the round-5 finding-11 sibling): the audit
-        # is readable and holds SWEEP_STARTs — but NONE under THIS launch's
+        # is readable and holds context entries — but NONE under THIS launch's
         # snapshot generation. A legitimate moved snapshot abstains here (its
         # foreign-generation sentinels re-address, so none sits at a fresh
         # expected path) — but an audit that LOST its fresh-generation tail at
         # a line boundary (or a pre-launch backup restore) looks identical
         # from the entries alone. Probe THIS launch's expected sentinel paths:
-        # a fresh-digest sentinel's SWEEP_START is always appended BEFORE its
-        # tuple runs, so its existence with ZERO matching-generation entries
-        # is proof of audit loss, never a moved-snapshot / crash-resume state.
+        # a fresh-digest sentinel can only exist after its generation's
+        # context was durably appended — the tuple's SWEEP_START on the
+        # sequential driver, and (review round-7 finding 1) the parent's
+        # pre-dispatch SWEEP_LAUNCH line on the PARALLEL driver, where the
+        # worker writes the sentinel while its SWEEP_START may still sit in
+        # the parent's apply buffer — so a fresh-digest sentinel with ZERO
+        # matching-generation entries is proof of audit loss, never a
+        # moved-snapshot / crash-resume state.
         for instrument in sorted(roll_schedule_by_instrument):
             fresh_sentinel = _existing_fresh_sentinel(fresh_sentinel_paths, instrument)
             if fresh_sentinel is not None:
@@ -1520,6 +1592,7 @@ def compare_recount(
 __all__ = [
     "QUARANTINE_DIRNAME",
     "SEVERITIES",
+    "SWEEP_LAUNCH_ACTION",
     "RecordedContext",
     "RecordedStage3Audit",
     "RecordedStage3Knobs",

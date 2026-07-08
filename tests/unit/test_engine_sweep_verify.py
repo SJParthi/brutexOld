@@ -472,13 +472,70 @@ class TestRecordedAuditFacts:
         assert schedules == {}
         assert others == ("snap0001", "snap0002")  # first-appearance order
 
-    def test_within_generation_inconsistency_still_raises(self, tmp_path: Path) -> None:
-        # One launch records ONE context: a same-snapshot code_sha
-        # disagreement is real corruption, not the daemon cadence.
+    # ── round-7 finding 7: a generation is the FULL context TRIPLE ──
+
+    def test_same_snapshot_code_upgrade_scopes_to_the_last_triple(self, tmp_path: Path) -> None:
+        # One SNAPSHOT does not imply one LAUNCH: a code-upgrade re-launch
+        # into the same root (any git commit lands, the lake does not move —
+        # the launch gate ACCEPTS it silently) records a SECOND
+        # code_commit_sha under the SAME snapshot. Pre-fix the snapshot-keyed
+        # scoping raised 'inconsistent recorded context' — every tier (incl.
+        # the Tier-3 recount oracle) permanently locked out, with the
+        # explicit flags unable to rescue (the raise preceded them). Now the
+        # two launches are two GENERATIONS; facts scope to the newest triple.
         path = tmp_path / "a.jsonl"
         self._write(path, snapshot="snap0001", code_sha="deadbeef")
         self._write(path, snapshot="snap0001", code_sha="cafef00d")
-        with pytest.raises(SweepVerifyError, match="inconsistent recorded context"):
+        context, schedules, others = recorded_audit_facts(path)
+        assert context == RecordedContext(
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="cafef00d",
+        )
+        assert schedules == {"NSE-NIFTY-FUT": self._SCHEDULE}
+        # The other generation is still NAMED (its snapshot equals the scoped
+        # one — the honest note counts triples, not snapshot strings).
+        assert others == ("snap0001",)
+
+    def test_explicit_code_sha_narrows_within_a_shared_snapshot(self, tmp_path: Path) -> None:
+        # The flags NARROW within the candidates: --code-commit-sha picks the
+        # OLDER same-snapshot generation (the rescue path finding 7 proved
+        # unreachable pre-fix).
+        path = tmp_path / "a.jsonl"
+        self._write(path, snapshot="snap0001", code_sha="deadbeef", schedule=(739428,))
+        self._write(path, snapshot="snap0001", code_sha="cafef00d")
+        context, schedules, _others = recorded_audit_facts(
+            path, snapshot="snap0001", code_commit_sha="deadbeef"
+        )
+        assert context == RecordedContext(
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+        )
+        assert schedules == {"NSE-NIFTY-FUT": (739428,)}
+
+    def test_explicit_indicator_version_narrows_candidates(self, tmp_path: Path) -> None:
+        # The third axis of the triple: an unmatched --indicator-version
+        # derives NOTHING (the explicit-flags path), a matched one scopes.
+        path = tmp_path / "a.jsonl"
+        self._write(path, snapshot="snap0001", code_sha="deadbeef")
+        context, schedules, others = recorded_audit_facts(path, indicator_version="ind-v9")
+        assert context is None
+        assert schedules == {}
+        assert others == ("snap0001",)
+        context, _schedules, _others = recorded_audit_facts(path, indicator_version="ind-v1")
+        assert context is not None
+        assert context.indicator_version == "ind-v1"
+
+    def test_within_generation_schedule_inconsistency_still_raises(self, tmp_path: Path) -> None:
+        # The raise the triple keying KEEPS: two entries of ONE full context
+        # triple disagreeing on an instrument's schedule is real corruption
+        # (the launch resume gate refuses a schedule-only drift up front, so
+        # no sanctioned cadence produces this shape).
+        path = tmp_path / "a.jsonl"
+        self._write(path, snapshot="snap0001", code_sha="deadbeef", schedule=(739428,))
+        self._write(path, snapshot="snap0001", code_sha="deadbeef", schedule=self._SCHEDULE)
+        with pytest.raises(SweepVerifyError, match="inconsistent recorded roll_schedule"):
             recorded_audit_facts(path)
 
     def test_sweep_start_less_audit_returns_no_facts(self, tmp_path: Path) -> None:
@@ -488,6 +545,33 @@ class TestRecordedAuditFacts:
         with AuditWriter.open(path) as audit:
             audit.append(action="OTHER", subject="s", payload={})
         assert recorded_audit_facts(path) == (None, {}, ())
+
+    def test_sweep_launch_line_supplies_context_and_schedule(self, tmp_path: Path) -> None:
+        # Round-7 finding 1: the parent's pre-dispatch SWEEP_LAUNCH line is a
+        # context-bearing entry for EVERY generation-scoped reader — a
+        # crashed parallel launch's audit (launch line only, every buffered
+        # per-tuple SWEEP_START lost) still describes its generation.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_LAUNCH",
+                subject="sweep-all:launch:NSE-NIFTY-FUT",
+                payload={
+                    "instrument": "NSE-NIFTY-FUT",
+                    "data_snapshot_hash": "snap0001",
+                    "indicator_version": "ind-v1",
+                    "code_commit_sha": "deadbeef",
+                    "params": {"roll_schedule": list(self._SCHEDULE)},
+                },
+            )
+        context, schedules, others = recorded_audit_facts(path)
+        assert context == RecordedContext(
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+        )
+        assert schedules == {"NSE-NIFTY-FUT": self._SCHEDULE}
+        assert others == ()
 
 
 # ── The resume-honesty gate (ADR-0012, review round-2 finding 11) ────────────
@@ -1003,6 +1087,76 @@ class TestStaleRollScheduleRefusal:
             )
             is None
         )
+
+    # ── round-7 finding 1: the pre-dispatch SWEEP_LAUNCH line on the parallel driver ──
+
+    def _write_launch_line(
+        self, path: Path, *, snapshot: str = "snap0001", schedule: tuple[int, ...] | None = None
+    ) -> None:
+        """The parent's fsynced pre-dispatch context line — exactly what
+        ``cmd_sweep_all`` appends per futures instrument BEFORE grid dispatch."""
+        with AuditWriter.open(path, resume=path.exists()) as audit:
+            audit.append(
+                action="SWEEP_LAUNCH",
+                subject="sweep-all:launch:NSE-NIFTY-FUT",
+                payload={
+                    "instrument": "NSE-NIFTY-FUT",
+                    "data_snapshot_hash": snapshot,
+                    "indicator_version": "ind-v1",
+                    "code_commit_sha": "deadbeef",
+                    "params": {
+                        "roll_schedule": list(schedule if schedule is not None else self._S2)
+                    },
+                },
+            )
+
+    def test_crashed_parallel_launch_with_launch_line_resumes(self, tmp_path: Path) -> None:
+        # Round-7 finding 1 (MAJOR): on the PARALLEL driver the EVAL worker
+        # durably writes the store + completion sentinel while the tuple's
+        # SWEEP_START reaches the audit only via the parent's in-order apply
+        # cursor — a parent crash in the launch window left fresh-digest
+        # sentinels with ZERO fresh-generation entries, and the round-6 arm
+        # condemned the sanctioned crash-resume as a "tail-lossy/restored
+        # audit" (a PERMANENT wrong-diagnosis refusal: the gate runs before
+        # the audit can ever gain the fresh SWEEP_START). The pre-dispatch
+        # SWEEP_LAUNCH line now records the generation's schedule BEFORE any
+        # tuple can complete: recorded == fresh → the resume proceeds.
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)  # the worker-durable completed tuple
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_launch_line(audit, schedule=self._S2)  # the ONLY surviving line
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
+            )
+            is None
+        )
+
+    def test_crashed_parallel_launch_schedule_drift_still_refuses(self, tmp_path: Path) -> None:
+        # The launch line is a RECORDED schedule, not a gate bypass: a lake
+        # whose contract set drifted since the crash (snapshot unchanged)
+        # still refuses with BOTH schedules named.
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_launch_line(audit, schedule=self._S1)
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+            fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
+        )
+        assert message is not None
+        assert str(list(self._S1)) in message  # the RECORDED (launch-line) schedule
+        assert str(list(self._S2)) in message  # the FRESH schedule
+        assert "contract set changed" in message
 
     def test_recorded_schedule_present_never_probes_sentinels(self, tmp_path: Path) -> None:
         # A matching-generation RECORDED schedule owns the verdict: identical

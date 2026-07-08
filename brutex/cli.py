@@ -4962,6 +4962,40 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         "segment": segment,
                     },
                 )
+            if roll_schedule_by_instrument is not None:
+                # Durable launch-generation context (review round-7 finding 1):
+                # on the PARALLEL driver — the production default — the EVAL
+                # worker durably writes the per-tuple store + completion
+                # sentinel while its SWEEP_START reaches this audit only when
+                # the parent's strictly in-order apply cursor replays the
+                # buffered records, so a parent crash inside the launch window
+                # left fresh-digest sentinels with ZERO fresh-generation audit
+                # entries — and the resume gate above (whose "SWEEP_START
+                # precedes the sentinel" premise held only on the sequential
+                # driver) permanently condemned the sanctioned crash-resume as
+                # a tail-lossy/restored audit. ONE fsynced SWEEP_LAUNCH line
+                # per futures instrument BEFORE grid dispatch makes the
+                # premise true on BOTH drivers: any crash thereafter leaves
+                # this generation's roll_schedule durably recorded, so the
+                # re-launch compares recorded == fresh instead of refusing.
+                # Spot launches append nothing — their audit stays
+                # byte-identical.
+                from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
+
+                for fut_instrument in sorted(roll_schedule_by_instrument):
+                    ingest_audit.append(
+                        action=SWEEP_LAUNCH_ACTION,
+                        subject=f"sweep-all:launch:{fut_instrument}",
+                        payload={
+                            "instrument": fut_instrument,
+                            "data_snapshot_hash": grid.data_snapshot_hash,
+                            "indicator_version": grid.indicator_version,
+                            "code_commit_sha": grid.code_commit_sha,
+                            "params": {
+                                "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
+                            },
+                        },
+                    )
             dedup = plan_launch_dedup(grid, digest_path=True)
             guards = SweepGuards(
                 audit=sup_audit,
@@ -5705,20 +5739,27 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # sweep-daemon root accretes a NEW context + a GROWN futures schedule
     # every moved-snapshot cycle, so the whole-file derivation permanently
     # refused the flagship production tree as 'inconsistent recorded
-    # context' — facts now come from the --data-snapshot-hash generation
-    # when given, else the LATEST recorded one, and the other generations
-    # are an honest warn-grade note below, never a usage refusal.
+    # context'. A generation is keyed by the FULL context TRIPLE (review
+    # round-7 finding 7 — one snapshot does not imply one launch: a
+    # code-upgrade re-launch records a second code_commit_sha under the SAME
+    # snapshot, and snapshot-only keying raised the same lockout with no
+    # flag able to rescue); facts come from the last generation matching
+    # every explicit flag given, else the LATEST recorded one, and the other
+    # generations are an honest warn-grade note below, never a usage refusal.
     try:
         recorded, recorded_schedules, other_generations = recorded_audit_facts(
-            out_root / "audit" / "sweep-all.jsonl", snapshot=data_snapshot_hash
+            out_root / "audit" / "sweep-all.jsonl",
+            snapshot=data_snapshot_hash,
+            indicator_version=indicator_version,
+            code_commit_sha=code_commit_sha,
         )
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
     if other_generations:
         scoped_to = (
-            "the --data-snapshot-hash generation"
-            if data_snapshot_hash
+            "the explicitly flagged generation"
+            if (data_snapshot_hash or indicator_version or code_commit_sha)
             else "the LATEST recorded generation"
         )
         # repr(): audit-sourced strings may embed \n/ESC — never let a
@@ -5731,7 +5772,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             f"[brutex] sweep-verify: the audit records {len(other_generations)} other "
             f"generation(s) (data_snapshot_hash: {shown}) — the sanctioned multi-launch "
             f"daemon root; recorded facts scoped to {scoped_to} (other generations' "
-            "stores verify as unattributed; pass --data-snapshot-hash to scope another)"
+            "stores verify as unattributed; pass --data-snapshot-hash / "
+            "--indicator-version / --code-commit-sha to scope another)"
         )
     snapshot = data_snapshot_hash or (recorded.data_snapshot_hash if recorded else None)
     indicator = indicator_version or (recorded.indicator_version if recorded else None)

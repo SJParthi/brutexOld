@@ -654,6 +654,49 @@ def test_lossy_audit_over_fresh_generation_sentinels_refuses_the_resume(
     assert "--results-root" in err  # the remediation
 
 
+def test_crashed_parallel_launch_prefix_audit_still_resumes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-7 finding 1 (MAJOR), end to end: the durable state a PARENT crash
+    leaves on the parallel driver — workers wrote stores + completion
+    sentinels directly, while every buffered per-tuple SWEEP_START was lost
+    with the parent — must re-launch cleanly, not be condemned as a
+    tail-lossy audit. ``cmd_sweep_all`` now appends one fsynced SWEEP_LAUNCH
+    context line per futures instrument BEFORE grid dispatch, so the audit's
+    pre-dispatch PREFIX (exactly what such a crash leaves durable) records
+    the generation's roll_schedule and the resume gate compares
+    recorded == fresh instead of refusing."""
+    import json
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    audit_path = results_root / "audit" / "sweep-all.jsonl"
+    lines = audit_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    actions = [json.loads(line)["action"] for line in lines]
+    # The ordering guarantee the fix rests on: the launch context line is
+    # durably appended BEFORE any per-tuple SWEEP_START can run (fails
+    # pre-fix: no SWEEP_LAUNCH line exists at all).
+    assert "SWEEP_LAUNCH" in actions
+    assert actions.index("SWEEP_LAUNCH") < actions.index("SWEEP_START")
+    # Truncate the audit to the strict pre-dispatch prefix — a valid
+    # hash-chain prefix (AuditWriter fsyncs per append), byte-identical to
+    # what a parent crash right after dispatch leaves; sentinels + stores
+    # stay (the workers wrote them durably).
+    keep = lines[: actions.index("SWEEP_LAUNCH") + 1]
+    assert len(keep) < len(lines)
+    audit_path.write_text("".join(keep), encoding="utf-8")
+    capsys.readouterr()
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
+    err = capsys.readouterr().err
+    # Pre-fix: EXIT_USER_ERROR — 'the audit records NO SWEEP_START under this
+    # snapshot generation … a tail-lossy/restored audit' (a permanent
+    # wrong-diagnosis refusal of the sanctioned crash-resume).
+    assert "sweep-all REFUSED" not in err
+    assert rc == EXIT_OK
+
+
 def test_lossy_audit_over_foreign_generation_sentinels_still_resumes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
