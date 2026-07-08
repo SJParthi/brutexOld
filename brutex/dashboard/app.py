@@ -5918,6 +5918,13 @@ def build_app(
         )
 
         any_group_succeeded = False
+        # Cap on each individual per-group failure detail BEFORE it is joined
+        # into the shared finish-detail note (round-7 finding) — the note as
+        # a whole is truncated at pull_jobs._FINISH_DETAIL_MAX (500 chars);
+        # capping each group's own contribution keeps every group's
+        # identity+brief reason visible regardless of how verbose any ONE
+        # group's exception message is.
+        per_group_detail_max = 80
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: run every exchange group's engine run, sequentially.
@@ -5958,6 +5965,19 @@ def build_app(
                below) — a partial success still invalidates the cache
                (real new data DID land for that group), but a total
                failure does not.
+
+            A round-7 adversarial-refuter review found a third gap: the
+            job framework's finish detail is truncated at
+            :data:`~brutex.dashboard.pull_jobs._FINISH_DETAIL_MAX` (500
+            chars) — an unusually verbose exception message from the
+            alphabetically-FIRST failing group (e.g. a DuckDB error
+            embedding SQL) could push the note past that cap, silently
+            dropping every LATER group's identity/detail from what the
+            operator ever sees (structurally at most 2 groups today, but
+            never assume that stays true). Each per-group detail is now
+            truncated to ``per_group_detail_max`` chars BEFORE joining, so
+            every group's identity+brief reason always survives regardless
+            of how verbose any one exception's message is.
             """
             nonlocal any_group_succeeded
             failed: list[tuple[str, str]] = []
@@ -5967,7 +5987,8 @@ def build_app(
                         group_request, lake_root=lake, results_root=results_root
                     )
                 except Exception as exc:  # isolate one group's crash from its siblings
-                    failed.append((group_request.exchange, f"raised {exc!r}"))
+                    detail = f"raised {exc!r}"
+                    failed.append((group_request.exchange, detail[:per_group_detail_max]))
                     continue
                 if code != 0:
                     failed.append((group_request.exchange, f"exit {code}"))

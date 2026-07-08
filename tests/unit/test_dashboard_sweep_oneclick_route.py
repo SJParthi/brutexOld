@@ -344,6 +344,51 @@ def test_run_route_does_not_mark_cache_dirty_on_total_failure(
     assert mark_dirty_calls == []
 
 
+def test_run_route_long_exception_from_one_group_does_not_hide_the_other(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-7 adversarial-refuter finding: the job framework's finish
+    detail is truncated at ``_FINISH_DETAIL_MAX`` (500 chars) — an
+    unusually verbose exception message from the alphabetically-FIRST
+    failing group (BSE) used to be able to push the note past that cap,
+    silently dropping the LATER (NSE) group's identity/detail from what the
+    operator ever sees. Each per-group detail must now be capped BEFORE
+    joining, so both groups' identities always survive regardless of how
+    verbose either exception's message is."""
+    _CAPTURED.clear()
+
+    def _bse_raises_verbosely(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        if request.exchange == "BSE":
+            raise RuntimeError("x" * 400)
+        return 2  # NSE fails too, with a short, ordinary exit code
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _bse_raises_verbosely)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
+        resp = c.post("/api/v1/sweep/oneclick/run", params={"symbols": "NIFTY,SENSEX"})
+        assert resp.status_code == 200
+        final = _wait_for_job(c)
+    assert final["state"] == "done"
+    assert "BSE" in final["detail"]
+    assert "NSE" in final["detail"]
+    assert "exit 2" in final["detail"]
+
+
 def test_run_route_second_click_while_running_is_a_noop(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
