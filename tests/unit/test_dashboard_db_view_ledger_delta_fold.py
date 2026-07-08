@@ -25,6 +25,13 @@ so demotions survive). This suite pins:
         ORDER convergence to the DuckDB contract is asserted explicitly);
 * T-a10 the steady-state (no-deltas) SQL text is BYTE-identical to the pre-fold
         fast path (spy conn) + payload golden vs the legacy fold;
+* T-a11 a MIXED-schema fold — a base that PREDATES ``streak_provenance``
+        (14-col, the pre-#1512/#1585 writer shape) unioned with a CURRENT
+        17-col delta — is SERVED by the fast path with the trailing column
+        CARRIED: the delta row surfaces its real lineage, the legacy base row
+        NULL-fills to the honest ``None`` (never a binder error, never a
+        silent column drop); parity with the pyarrow fold (the ``/db`` grid's
+        row source) is pinned;
 * count-cache teeth: composite-stamp keys recount on a delta append AND a
   cross-process base save, never on a mark_dirty/generation storm;
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
@@ -180,7 +187,7 @@ def test_window_key_columns_pinned_to_the_store_schema() -> None:
     assert wls._COLUMNS[:5] == _WINDOW_KEY_COLUMNS
 
 
-def test_append_ledger_delta_emits_all_14_columns(tmp_path: Path) -> None:
+def test_append_ledger_delta_emits_the_full_column_schema(tmp_path: Path) -> None:
     """The base-less probe-skip's precondition: EVERY delta carries the full schema."""
     import pyarrow.parquet as pq
 
@@ -591,6 +598,112 @@ def test_steady_state_sql_text_is_byte_identical(tmp_path: Path) -> None:
     ]
     # Payload golden: byte-parity with the legacy Python fold.
     assert payload == build_window_payload(tmp_path)
+
+
+# ── T-a11 — MIXED-schema fold: pre-provenance base + 17-col delta (#1512) ─────
+
+
+def _write_pre_provenance_base(lake: Path, security_id: str, *, bars: int = 5) -> None:
+    """A 14-column post-R1 base — the EXACT on-disk shape the pre-merge writer
+    produced BEFORE the branch appended ``streak_provenance`` (#1512) and main
+    appended the ``empty_retries``/``transient_retries`` split (#1585): the 11
+    core columns + ``empty_streak`` + ``in_pull_fetches`` + ``bars_net_new``.
+    Carries the base-only probe's columns, so the fast path SERVES it (T-a7's
+    11-column pre-R1 base defers instead)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema(
+        [
+            ("market", pa.string()),
+            ("security_id", pa.string()),
+            ("interval", pa.string()),
+            ("window_start", pa.string()),
+            ("window_end", pa.string()),
+            ("status", pa.string()),
+            ("bars", pa.int64()),
+            ("attempts", pa.int64()),
+            ("last_error", pa.string()),
+            ("first_seen_at", pa.string()),
+            ("last_attempt_at", pa.string()),
+            ("empty_streak", pa.int64()),
+            ("in_pull_fetches", pa.int64()),
+            ("bars_net_new", pa.int64()),
+        ]
+    )
+    # Drift pin: "14-col" IS the store schema's pre-#1512/#1585 prefix, by name.
+    assert tuple(schema.names) == wls._COLUMNS[:14]
+    table = pa.table(
+        {
+            "market": ["groww"],
+            "security_id": [security_id],
+            "interval": ["1minute"],
+            "window_start": ["2021-01-01"],
+            "window_end": ["2021-04-01"],
+            "status": ["SUCCESS"],
+            "bars": [bars],
+            "attempts": [1],
+            "last_error": [None],
+            "first_seen_at": [_ISO],
+            "last_attempt_at": [_ISO],
+            "empty_streak": [0],
+            "in_pull_fetches": [1],
+            "bars_net_new": [None],
+        },
+        schema=schema,
+    )
+    path = wls.ledger_path(lake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)  # type: ignore[no-untyped-call, unused-ignore]
+
+
+def test_mixed_pre_provenance_base_plus_new_delta_folds_on_the_fast_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-a11 (the #1512 × #1238 composition pin — merge finding B): ONE fold
+    unions a base that PREDATES ``streak_provenance`` with a delta the CURRENT
+    17-column production writer produced. ``union_by_name=true`` must CARRY the
+    trailing column — the delta row surfaces its REAL lineage while the legacy
+    base row NULL-fills to the honest ``None`` (never ``""``, never a binder
+    error, never a silent column drop) — and the fast path must SERVE the mixed
+    shape (the base-only probe sees ``empty_streak``/``in_pull_fetches``, so it
+    does NOT defer). The pyarrow-fold parity assertion pins the ``/db`` grid's
+    row source (``ledger_record_row`` over ``load_window_ledger``) to the same
+    answer as the ``/coverage/windows`` DuckDB page — one truth on both routes.
+    """
+    _write_pre_provenance_base(tmp_path, "NIFTY", bars=5)
+    live = wls.load_window_ledger(tmp_path)
+    live.record(
+        _window_key("BANKNIFTY"),
+        raw_bars=0,
+        error_type=None,
+        bars_appended=0,
+        now=_NOW,
+        pull_id="px",
+    )
+    # The REAL 17-col writer appends only the dirty row → a genuinely MIXED union.
+    assert wls.append_ledger_delta(live, tmp_path) == 1
+
+    def _boom(*_a: object, **_k: object) -> tuple[Any, ...]:
+        raise AssertionError("the fast path must not fall back to the Python fold")
+
+    monkeypatch.setattr("brutex.dashboard.db_view._ledger_records_cached", _boom)
+    with capture_logs() as logs:
+        fast = build_window_payload(tmp_path, conn=duckdb.connect())
+    assert _events(logs, "window_payload.duckdb_fallback") == []  # served, never deferred
+    assert fast["source"] == "ledger"
+    by_symbol = {w["symbol"]: w for w in fast["windows"]}
+    assert set(by_symbol) == {"NIFTY", "BANKNIFTY"}
+    # The 17-col delta row's lineage survives the union — no silent column drop.
+    assert by_symbol["BANKNIFTY"]["streak_provenance"] == "EMPTY@px"
+    # The 14-col base row NULL-fills → the honest legacy-unknown None, never "".
+    assert by_symbol["NIFTY"]["streak_provenance"] is None
+    # Parity with the pyarrow fold — the /db window-ledger grid's row source.
+    monkeypatch.undo()
+    legacy = build_window_payload(tmp_path)  # conn=None → the Python fold
+    assert {tuple(sorted(w.items())) for w in legacy["windows"]} == {
+        tuple(sorted(w.items())) for w in fast["windows"]
+    }
 
 
 # ── count-cache teeth — the composite stamp token is the COMPLETE signal ──────
