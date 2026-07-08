@@ -276,7 +276,18 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 120 (2026-07-08, PR #1274 run 28922322988 job 85802830877): killed
+    # at exactly 75:13 wall with EVERY executed step green — pytest+coverage
+    # 54m12 SUCCESS (was 33m05 at the 60->75 raise; the VIX stamping PR adds
+    # ~800 tests incl. spawn-worker parallel byte-parity pins, on top of five
+    # merged-main sibling waves) + strict per-module gate 16m12 SUCCESS (was
+    # 13m25) + the touched-module gate cancelled only 2m54 IN (last measured
+    # 11m43, and this PR touches ~14 brutex modules so it alone outgrew the
+    # remaining budget). Projected full wall ~90-95m; 120 gives evidenced
+    # ~25-30% headroom over the projection while staying an honest hang
+    # guard; wall-clock budget only — no gate is weakened. Continues the
+    # 15->25->40->60->75 ratchet.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:
