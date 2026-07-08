@@ -6,7 +6,9 @@
 > **Companion docs (do not duplicate — read for detail):**
 > `docs/runbooks/aws-token-minter.md` (the minter's exact paths/schedule/rollback,
 > DEC-TOKEN-MINTER-CENTRAL-001 / ADR-0014) and `docs/runbooks/aws-token-broker.md`
-> (BruteX's read-only Parameter-Store reader, PR #1015 — present once that PR merges).
+> (BruteX's read-only Parameter-Store reader — LANDED as PR #1015 /
+> DEC-TOKEN-BROKER-AWS-001, MIGRATION.md #1064, then made the DEFAULT AND ONLY
+> credential/token source by DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065).
 
 ## What this sets up (the 30-second version)
 
@@ -364,8 +366,9 @@ deliberate, one-time, confirm-`yes` step.
 
 ## 3. How BruteX reads it
 
-BruteX reads the token **read-only** from Parameter Store. Two settings on the
-machine that runs the pull:
+BruteX reads the token **read-only** from Parameter Store — **unconditionally**
+(DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065). One setting on the machine that runs
+the pull:
 
 ### 3a. Give BruteX a read-only AWS identity
 
@@ -383,27 +386,34 @@ Get the exact reader role ARN Terraform created (run from `deploy/aws_token_mint
 terraform output reader_brutex_role_arn
 ```
 
-### 3b. Turn on the read-only broker, then pull
+### 3b. Nothing to turn on — just pull
 
-Set the toggle so BruteX resolves the shared token from Parameter Store instead of
-minting locally, then run a pull:
+There is **no toggle**: BruteX resolves the shared token from Parameter Store
+**unconditionally**. The former `BRUTEX_TOKEN_BROKER_READONLY` opt-in flag and the
+"local on-disk cache + local TOTP mint" fallback it guarded were REMOVED — the
+"later change" earlier revisions of this guide promised has MERGED
+(DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065; the removal is quoted verbatim in the
+`brutex/adapters/groww/token_store.py:8-10` module docstring).
 
 ```bash
-export BRUTEX_TOKEN_BROKER_READONLY=true
 # region defaults to ap-south-1; override only if your token lives elsewhere:
 # export BRUTEX_TOKEN_AWS_REGION=ap-south-1
 
 # ...then run your normal BruteX pull (dashboard or CLI).
 ```
 
-**Why the env var:** with `BRUTEX_TOKEN_BROKER_READONLY=true` BruteX **reads** the
-token from `/tickvault/prod/groww/access-token` and **never mints** — a mint attempt
-is a loud fail-fast, never a silent local mint. **Unset / blank / any other value ⇒
-BruteX falls back to the local on-disk cache + local TOTP mint** (byte-identical to
-the pre-broker behavior), so local dev and CI need no AWS at all. This toggle exists
-because BruteX is not yet AWS-only; a later change will make read-only the default and
-retire the flag. (See PR #1015 / `docs/runbooks/aws-token-broker.md` for the reader's
-full contract.)
+**What happens on failure (fail-FAST, never a silent local mint):** a missing
+boto3 extra / an unbuildable SSM client raises a `GrowwAuthError` naming the
+deploy pointer `deploy/aws_token_minter/deploy.sh`
+(`token_store.py::resolve_token_store`, :109-117 — "no `BRUTEX_TOKEN_BROKER_READONLY`
+gate and no local-mint fallback. This is FAIL-FAST"); a credential-read failure
+raises `CredentialsError` (`brutex/config/credentials_aws.py:1-27` — never env vars,
+a local file, or the removed webpage); BruteX **never mints** the shared token —
+the Lambda owns minting, and the read-only cold start cannot even reach the mint
+call (DEC-REAUTH-COLDSTART-READONLY-001, MIGRATION.md #1092). Local dev / CI
+without AWS therefore cannot run a live pull — by design (Golden Rule #1: a token
+comes from AWS or the pull fails LOUD). (See `docs/runbooks/aws-token-broker.md`
+for the reader's full contract.)
 
 > The token param path, the region, and the credential paths are all
 > env-overridable (`BRUTEX_TOKEN_PARAM_ACCESS_TOKEN`, `BRUTEX_TOKEN_AWS_REGION`,
@@ -468,9 +478,10 @@ A `Sum` of `1` (or more) in the last hour means the mint reported success.
 
 ### 4c. Confirm BruteX reads it
 
-With `BRUTEX_TOKEN_BROKER_READONLY=true` set (step 3b) and the read-only AWS identity
-configured, run a small BruteX pull. It authenticates using the token from Parameter
-Store — no local mint. If it authenticates and fetches candles, the read path works.
+With the read-only AWS identity configured (step 3a), run a small BruteX pull.
+BruteX authenticates from Parameter Store **unconditionally** (no flag — step 3b;
+DEC-AWS-ONLY-CREDS-001 #1065) — no local mint. If it authenticates and fetches
+candles, the read path works.
 
 ---
 
