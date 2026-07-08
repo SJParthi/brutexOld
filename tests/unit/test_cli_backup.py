@@ -363,14 +363,29 @@ class TestRedaction:
 
     def test_redact_backup_repo_strips_userinfo(self) -> None:
         """Round-2 finding 10 (NIT): a direct scheme://user:pass@host form must
-        never echo the userinfo — only the host survives; the nested-URL forms
-        now also drop the dangling inner-scheme colon (round-3 colon split)."""
+        never echo the userinfo — only the host survives. Round-6 order flip
+        (userinfo strip BEFORE the path split): the nested-URL forms now
+        surface the real HOST instead of the round-3 dangling inner-scheme
+        token — a deliberate pin update, still secret-free either way."""
         assert _redact_backup_repo("sftp://user:pass@host//srv/restic") == "sftp:host"
         assert _redact_backup_repo("https://user:pass@host/repo") == "https:host"
-        # Nested forms: the inner scheme token carries no '@'; the trailing
-        # ':' is now consumed by the colon-path split (still secret-free).
-        assert _redact_backup_repo("s3:http://key:secret@host/bucket") == "s3:http"
-        assert _redact_backup_repo("rest:https://user:pass@host:8000/repo") == "rest:https"
+        # Nested forms: the LAST '@' bounds the userinfo, so the true host
+        # survives (round-3 read "s3:http" / "rest:https" — no secret in
+        # either output, but the host is the honest scheme+host display).
+        assert _redact_backup_repo("s3:http://key:secret@host/bucket") == "s3:host"
+        assert _redact_backup_repo("rest:https://user:pass@host:8000/repo") == "rest:host"
+
+    def test_redact_backup_repo_slash_in_password_never_echoes_userinfo(self) -> None:
+        """Round-6 NIT pin: a password containing '/' previously truncated the
+        split at the password's slash and echoed the USERNAME (``sftp:user``).
+        The userinfo strip now runs BEFORE the path split — the username and
+        password both vanish, the host survives."""
+        redacted = _redact_backup_repo("sftp://user:pa/ss@host/srv")
+        assert redacted == "sftp:host"
+        assert "user" not in redacted
+        assert "pa" not in redacted
+        # '@' in the PASSWORD too — the LAST '@' still bounds the userinfo.
+        assert _redact_backup_repo("sftp://user:p@/ss@host/srv") == "sftp:host"
 
 
 class TestImportHygiene:

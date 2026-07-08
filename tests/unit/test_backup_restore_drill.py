@@ -557,15 +557,40 @@ class TestDrillIOResilience:
         assert not ok_events[0]["corrupt"]
 
 
+class TestSampleFloor:
+    @pytest.mark.parametrize("bad_sample", [0, -16])
+    def test_nonpositive_sample_override_clamped_loud_tier_still_runs(
+        self, world: DrillWorld, bad_sample: int
+    ) -> None:
+        """Round-6 NIT pin: a typo'd ``--sample -16`` (or 0) must NOT silently
+        degrade the drill to canary-only with a green ``backup.drill.ok`` —
+        the override is clamped LOUDLY to the resolved config default and the
+        stratified byte-verification tier still RUNS."""
+        world.set_script({"ls": {"stdout": world.ls_stdout()}})
+        with structlog.testing.capture_logs() as logs:
+            assert world.drill(sample=bad_sample) == EXIT_OK
+        warns = [e for e in logs if e["event"] == "backup.config.drill_sample_out_of_range"]
+        assert len(warns) == 1
+        assert warns[0]["value"] == bad_sample
+        assert warns[0]["fallback"] == world.cfg.drill_sample
+        ok_events = [e for e in logs if e["event"] == "backup.drill.ok"]
+        assert len(ok_events) == 1
+        assert ok_events[0]["verified"]  # the sampled tier ran — NOT canary-only
+        # TWO restores happened: the canary AND the sampled set.
+        assert sum(1 for call in world.fake.calls() if call[0] == "restore") == 2
+
+
 class TestSingleFlight:
-    def test_drill_busy_when_backup_lock_held_no_alert_no_restic(self, world: DrillWorld) -> None:
-        """Round-5 MAJOR pin (F15): the monthly drill takes the SAME
-        single-flight lock as the nightly run. While a nightly run holds it
-        (the Day-1 04:30 drill firing inside the 03:35 run's verify tail),
-        the drill exits busy (5), fires NO alert, and never invokes restic —
-        so the drill's canary backup/restore can never collide with the
-        nightly ``check``/``forget --prune`` EXCLUSIVE repo locks and read as
-        a false ``drill_restic`` failure or a false corruption page."""
+    def test_drill_busy_skip_warns_drill_skipped_no_restic(self, world: DrillWorld) -> None:
+        """Round-5 MAJOR + round-6 MAJOR pin (F15): the monthly drill takes
+        the SAME single-flight lock as the nightly run — while a nightly run
+        holds it the drill exits busy (5) and never invokes restic (no
+        collision with the nightly ``check``/``forget --prune`` EXCLUSIVE
+        repo locks). Round 6: the skip is no longer perfectly silent — a
+        busy-skipped drill is a month of LOST verification (launchd
+        one-shots never retry), so it emits EXACTLY ONE WARN
+        ``backup_degraded(aspect="drill_skipped")`` instead of vanishing
+        into drill.err.log (§11 zero-clicks; alert-or-explicit-no-alert)."""
         world.cfg.state_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(world.cfg.state_dir / "backup.lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
@@ -575,7 +600,10 @@ class TestSingleFlight:
         finally:
             os.close(fd)
         assert code == EXIT_BUSY
-        assert world.notifier.published == []  # benign overlap — NO alert
+        assert world.dedupe_keys() == ["backup-degraded:drill_skipped"]  # ONE WARN
+        body = world.notifier.published[0].message
+        assert "DRILL SKIPPED" in body
+        assert "restore\\-drill" in body  # names the manual re-run remedy
         assert world.fake.calls() == []  # zero restic invocations
         busy = [entry for entry in logs if entry["event"] == "backup.drill.busy"]
         assert len(busy) == 1

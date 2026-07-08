@@ -329,8 +329,11 @@ def run_restore_drill(
         errors; ``EXIT_CORRUPTION`` on any byte mismatch (CRITICAL alert);
         ``EXIT_RESTIC`` on a restic invocation failure; ``EXIT_CONFIG`` when
         config/snapshot are unusable; ``EXIT_BUSY`` when the nightly run (or
-        another drill) holds the single-flight lock — benign overlap, no
-        alert, re-run manually or move the drill's fire time (F15).
+        another drill) holds the single-flight lock — the drill is SKIPPED
+        with a WARN ``backup_degraded(aspect="drill_skipped")`` (round 6:
+        unlike the F15 run-vs-run overlap, where the other holder does the
+        SAME work, a skipped drill is a month of LOST verification and
+        launchd one-shots never retry — re-run manually).
     """
     del clock  # deliberate: no wall-clock dependence (documented above)
     active_alerter = alerter if alerter is not None else SweepAlerter()
@@ -372,13 +375,16 @@ def run_restore_drill(
 
     try:
         # Round-5 MAJOR: the drill holds the SAME single-flight lock as the
-        # nightly run (F15). The monthly Day-1 04:30 fire can land inside the
-        # nightly 03:35 run's verify tail (§5 egress math) — without the lock
-        # the drill's canary `restic backup`/`restore` collides with the
-        # nightly `check`/`forget --prune` EXCLUSIVE repo locks, reading as a
-        # false `drill_restic` failure or (drill-wins race) mapping the
-        # nightly's lock-conflict `check` rc to the false backup_repo_corrupt
-        # triple. Contention = benign busy: exit 5, no alert.
+        # nightly run (F15). A drill fire landing inside the nightly 03:35
+        # run's verify tail (§5 egress math) would otherwise collide its
+        # canary `restic backup`/`restore` with the nightly `check`/`forget
+        # --prune` EXCLUSIVE repo locks, reading as a false `drill_restic`
+        # failure or (drill-wins race) mapping the nightly's lock-conflict
+        # `check` rc to the false backup_repo_corrupt triple. Round 6 pairs
+        # this with (a) the default fire time moved to Day-1 13:00 — outside
+        # the nightly window, so the busy skip is the exception, not the
+        # deterministic monthly norm — and (b) a WARN on the skip below (a
+        # skipped drill is LOST verification, not the benign F15 redundancy).
         with backup_singleflight_lock(cfg.state_dir):
             return _drill_flow(
                 cfg,
@@ -391,7 +397,23 @@ def run_restore_drill(
                 runner_factory=runner_factory,
             )
     except BackupBusyError:
-        _LOG.info("backup.drill.busy", state_dir=str(cfg.state_dir))
+        # Round-6 MAJOR (observability half): the F15 "no alert on benign
+        # overlap" rationale is for run-vs-run — the other holder does the
+        # SAME work. A busy-skipped DRILL is a month of lost verification
+        # (monthly one-shot, launchd never retries) and was previously
+        # visible only in drill.err.log — violating §11 "zero clicks/day"
+        # and the alert-or-explicit-no-alert law. Monthly cadence makes the
+        # WARN non-spammy; a recurring skip now pages instead of vanishing.
+        _LOG.warning("backup.drill.busy", state_dir=str(cfg.state_dir))
+        active_alerter.backup_degraded(
+            aspect="drill_skipped",
+            detail=(
+                "monthly restore drill skipped: the backup single-flight lock is held "
+                "(nightly run still in its verify tail?) — re-run `brutex backup "
+                "restore-drill` manually; recurring skips mean the drill fire time "
+                "needs moving"
+            ),
+        )
         return EXIT_BUSY
     except OSError as exc:
         # The drill's own F10 direction: canary/tmp setup or verification I/O
@@ -425,6 +447,19 @@ def _drill_flow(
     lake = lake_root
     home_audit = brutex_home() / "audit"
     sample_count = sample if sample is not None else cfg.drill_sample
+    if sample_count < 1:
+        # Round-6 NIT: a typo'd `--sample -16` (or 0) would silently degrade
+        # the monthly drill to canary-only while still logging backup.drill.ok
+        # — the stratified byte-verification lane OFF with a green launchd
+        # job. Clamp LOUDLY to the resolved config default (the env path is
+        # already floored by resolve_backup_env, mirroring its prune_weekday
+        # guard); canary-only is not a silent fall-through mode.
+        _LOG.warning(
+            "backup.config.drill_sample_out_of_range",
+            value=sample_count,
+            fallback=cfg.drill_sample,
+        )
+        sample_count = cfg.drill_sample
     explicit_target = target_dir is not None
     if target_dir is None:
         drill_tmp_dir(cfg).mkdir(parents=True, exist_ok=True)

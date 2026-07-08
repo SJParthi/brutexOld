@@ -159,15 +159,29 @@ class TestArgvGoldens:
                 "check",
                 ("restic", "check", "--read-data-subset=3/56"),
             ),
+            # Round-6 MAJOR pin: --no-lock is LOAD-BEARING — the hourly deep
+            # tick lands in/near the nightly forget/--prune (and drill canary
+            # forget) EXCLUSIVE repo-lock windows; a locking read there rc=1s
+            # into a false CRITICAL state_remote_divergence + /fail pings
+            # every tick until the prune ends.
             (
                 lambda r: r.snapshots_latest_json(),
                 "snapshots",
-                ("restic", "snapshots", "--json", "--latest", "1", "--tag", "brutex"),
+                ("restic", "snapshots", "--no-lock", "--json", "--latest", "1", "--tag", "brutex"),
             ),
             (
                 lambda r: r.snapshots_latest_json(tag="brutex-drill-canary"),
                 "snapshots",
-                ("restic", "snapshots", "--json", "--latest", "1", "--tag", "brutex-drill-canary"),
+                (
+                    "restic",
+                    "snapshots",
+                    "--no-lock",
+                    "--json",
+                    "--latest",
+                    "1",
+                    "--tag",
+                    "brutex-drill-canary",
+                ),
             ),
             (lambda r: r.ls_json("cafe12"), "ls", ("restic", "ls", "--json", "cafe12")),
             (

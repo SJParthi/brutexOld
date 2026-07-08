@@ -76,10 +76,16 @@ class TestTemplateLaw:
         assert "launchd env OVERRIDES ~/.brutex/.env" in note
 
     def test_drill_plist_monthly(self) -> None:
+        """Round-6 MAJOR pin: the drill fires Day-1 13:00 IST — OUTSIDE the
+        nightly run's own §5 envelope (03:35 + the default auto subset read
+        ≈ 3.2 h on the reference lake ⇒ the single-flight lock is held to
+        ~07:00+). The previous 04:30 default made the busy skip the
+        deterministic monthly NORM (launchd one-shots never retry)."""
         plist = render_drill_plist()
         assert "<string>backup</string><string>restore-drill</string>" in plist
         assert "<key>Day</key><integer>1</integer>" in plist
-        assert "<key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer>" in plist
+        assert "<key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer>" in plist
+        assert "<key>Hour</key><integer>4</integer>" not in plist  # never back inside the tail
         assert "{{BRUTEX_BACKUP_REPO}}" in plist  # the drill needs the full backup env
 
     def test_cron_lines_golden(self) -> None:
@@ -89,6 +95,6 @@ class TestTemplateLaw:
             "           >> ~/.brutex/logs/backup.log 2>&1\n"
             "0  * * * *  /path/venv/bin/brutex backup check"
             "                                     >> ~/.brutex/logs/backup.log 2>&1\n"
-            "30 4 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill"
+            "0 13 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill"
             " >> ~/.brutex/logs/backup.log 2>&1\n"
         )

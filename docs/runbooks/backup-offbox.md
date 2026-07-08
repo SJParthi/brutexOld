@@ -22,7 +22,7 @@ The system is three one-shot scheduled jobs plus a CLI:
 |---|---|---|---|
 | `com.brutex.backup` | nightly 03:35 IST | `brutex backup run` | preflight → restic backup → verify (structure + rotating read-data subset) → stamp success → retention (`forget`, Sunday `--prune`) |
 | `com.brutex.backup-deadman` | hourly | `brutex backup check` | O(1) dead-man freshness check; CRITICAL Telegram on breach; healthchecks ping every tick; daily deep remote cross-check self-gated inside the hourly tick |
-| `com.brutex.backup-drill` | monthly (Day 1, 04:30) | `brutex backup restore-drill` | 1 MiB known-bytes canary roundtrip + stratified per-category sample restore + byte verification (audit files: byte-PREFIX law) |
+| `com.brutex.backup-drill` | monthly (Day 1, 13:00) | `brutex backup restore-drill` | 1 MiB known-bytes canary roundtrip + stratified per-category sample restore + byte verification (audit files: byte-PREFIX law) |
 
 Fire time 03:35 IST: after the 02:30 sweep-daemon default, before the
 ~06:05 IST token-minter window. Quiescence is NOT guaranteed and is not
@@ -155,7 +155,7 @@ Emitted by `schedule_render.render_cron_lines()` — same three jobs,
 ```cron
 35 3 * * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup run           >> ~/.brutex/logs/backup.log 2>&1
 0  * * * *  /path/venv/bin/brutex backup check                                     >> ~/.brutex/logs/backup.log 2>&1
-30 4 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill >> ~/.brutex/logs/backup.log 2>&1
+0 13 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill >> ~/.brutex/logs/backup.log 2>&1
 ```
 
 Note cron does not load `~/.brutex/.env` itself — `bootstrap_env()` does at
@@ -171,15 +171,27 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   ENABLED/DISABLED" and "healthcheck ping: SET/UNSET". Exit mirrors the
   shallow dead-man verdict (0/1) with NO alert/ping/sidecar side effects.
 - `brutex backup check [--deep] [--dry-run]` — the dead-man tick. `--deep`
-  forces the remote cross-check (`restic snapshots --json --latest 1 --tag
-  brutex` compared against the local stamp) this tick. THREE tiers: (1) a
+  forces the remote cross-check (`restic snapshots --no-lock --json
+  --latest 1 --tag brutex` compared against the local stamp) this tick;
+  `--no-lock` is load-bearing (round 6) — the read-only metadata call must
+  never collide with the nightly `forget`/Sunday `--prune` (or drill
+  canary forget) EXCLUSIVE repo locks, which would read as a false
+  `state_remote_divergence` CRITICAL + `/fail` pings every tick until the
+  prune ended (verified on restic 0.16.4: `snapshots --no-lock` succeeds
+  under a held exclusive lock). THREE tiers: (1) a
   stamp-PLAUSIBILITY bound is screened FIRST — a `last_success_at` landing
   more than `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` after the REMOTE latest
   snapshot's own time is CRITICAL divergence. The anchor is the remote time
-  ALONE — the one stamp no on-box `state.json` write can move — so ANY
-  stamp forgery that keeps the real snapshot id is caught (bump-only OR
-  success+attempt bumped together; anchoring on the local attempt stamp
-  would let the two-field bump read as agreement)
+  ALONE — the one stamp no on-box `state.json` write can move — so a stamp
+  forgery that keeps the real snapshot id is caught WHEN it moves the
+  success stamp more than `max_runtime_hours` past the remote snapshot's
+  own time (bump-only OR success+attempt bumped together; anchoring on the
+  local attempt stamp would let the two-field bump read as agreement) —
+  worst-case detection latency ≈ `max_runtime_hours` + 24 h under
+  defaults; a SUB-bound inflation is inherently indistinguishable from a
+  slow legit run and stays bounded only by the shallow 30 h threshold, and
+  the deep tier is FRESH-gated so a forged `running_since` bypasses it
+  entirely — honest residuals, §6 item 8
   (keep a seed-window `MAX_RUNTIME` raise in place — in `~/.brutex/.env` so
   the hourly checker resolves the same bound — until the next nightly
   success restamps, step 6); (2) agreement = the remote latest snapshot id
@@ -190,20 +202,27 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   divergence.
 - Exit codes (from `brutex/backup/errors.py`): 0 OK · 1 dead-man breach ·
   2 config · 3 preflight (unmounted/phantom/empty lake) · 4 restic/state
-  failure · 5 busy (benign overlap, no alert) · 6 corruption
+  failure · 5 busy (run-vs-run overlap benign, no alert; a busy-skipped
+  DRILL emits one WARN — round 6) · 6 corruption
   (verify/drill) · 7 maintenance failed (data-success stamp stands).
 - A DIVERGED deep check advances its daily gate ONLY when the CRITICAL was
   actually delivered — an undelivered divergence (Telegram outage/OFF)
   retries the bounded metadata call every hourly tick (exit 1 + `/fail`
   ping each tick) instead of going quiet for 24 h.
 - The monthly drill takes the SAME single-flight lock as the nightly run:
-  if the nightly verify tail is still running at the drill's Day-1 04:30
-  fire time (see the §5 egress math — the rotating read-data subset can
-  hold the repo's exclusive locks for hours), the drill exits busy (5, no
-  alert) rather than colliding on the restic repo lock (which would read
-  as a false `drill_restic` failure or a false corruption page). If that
-  overlap recurs, move the drill's fire time later in the day or run
-  `brutex backup restore-drill` manually.
+  if the nightly run still holds it at the drill's fire time, the drill
+  exits busy (5) rather than colliding on the restic repo lock (which
+  would read as a false `drill_restic` failure or a false corruption
+  page). Round 6: the default fire time is Day-1 **13:00 IST** —
+  deliberately OUTSIDE the nightly run's window (by the §5 math the 03:35
+  run's default `auto` subset read ≈ 3.2 h at the step-6 ~100 Mbit/s
+  envelope holds the lock to ~07:00+, so the previous 04:30 default made
+  the busy skip the deterministic monthly NORM, and launchd one-shots
+  never retry) — and a busy-skipped drill now emits ONE WARN
+  `backup_degraded(aspect="drill_skipped")` (a skipped drill is a month of
+  LOST verification, unlike the benign run-vs-run overlap, which stays
+  no-alert): re-run `brutex backup restore-drill` manually; a recurring
+  skip means the fire time needs moving again.
 - Every failure maps to a deterministic triple (exit code + `backup.*`
   structlog event + alert-or-explicit-no-alert) — the full 23-row
   failure-mode matrix lives in the DEC-BACKUP-OFFBOX-001 PR body and
@@ -275,6 +294,21 @@ the read-data tier is the knob:
    argv is secret-free; `~/.brutex/cache/`, `~/.brutex/.env`, `quota/`,
    `runtime.json` and every credential path are NOT in the backup set
    (creds are AWS-SSM-only, DEC-AWS-ONLY-CREDS-001).
+8. **The deep forgery tier has honest bounds (round 6).** (a) It catches a
+   stamp forgery that keeps the real snapshot id ONLY when the forged
+   `last_success_at` lands more than `BRUTEX_BACKUP_MAX_RUNTIME_HOURS`
+   past the remote latest snapshot's own time — a SUB-bound inflation
+   (≤ 48 h under defaults) is inherently indistinguishable from a slow
+   legit run (worst-case total quiet ≈ the shallow 30 h threshold ON TOP
+   of the inflated stamp); a persistent re-bump is detected 48–72 h after
+   the last real snapshot (bound + 24 h deep cadence), not "~24 h". (b)
+   The deep tier runs only on a FRESH shallow verdict: a forgery that
+   plants/re-bumps `running_since` bypasses it entirely — a ONE-TIME
+   `running_since` poison is caught by the HUNG bound at
+   `max_runtime_hours` (48 h default, via HUNG — not the forgery
+   mechanism), and a PERSISTENT `running_since` re-bump (any cadence
+   < 48 h) is an acknowledged residual: it needs on-box write access to
+   `state.json`, at which point the box is already hostile territory.
 
 ## Decision trail
 

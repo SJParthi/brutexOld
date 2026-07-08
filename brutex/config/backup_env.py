@@ -319,6 +319,21 @@ brutex_home`.
         )
         prune_weekday = _DEFAULT_PRUNE_WEEKDAY
 
+    drill_sample = _int_env(env, BACKUP_DRILL_SAMPLE_ENV, _DEFAULT_DRILL_SAMPLE)
+    if drill_sample < 1:
+        # Round-6 NIT: a nonsensical (≤0) sample count parses as a VALID int,
+        # so the malformed-numeric loud-fallback never fires — yet downstream
+        # it silently degrades the monthly drill to canary-only (the
+        # stratified byte-verification loop runs zero times) while the drill
+        # still exits 0 with backup.drill.ok. Same law as the prune_weekday
+        # guard above: a nonsensical value falls back to its default LOUDLY.
+        _LOG.warning(
+            "backup.config.drill_sample_out_of_range",
+            value=drill_sample,
+            default=_DEFAULT_DRILL_SAMPLE,
+        )
+        drill_sample = _DEFAULT_DRILL_SAMPLE
+
     extra_raw = env.get(BACKUP_EXTRA_EXCLUDES_ENV)
     extra_excludes = _split_excludes(
         extra_raw if extra_raw is not None else _DEFAULT_EXTRA_EXCLUDES
@@ -343,7 +358,7 @@ brutex_home`.
         prune_weekday=prune_weekday,
         verify_subset=_optional(env, BACKUP_VERIFY_SUBSET_ENV) or _DEFAULT_VERIFY_SUBSET,
         healthcheck_url=_optional(env, BACKUP_HEALTHCHECK_URL_ENV),
-        drill_sample=_int_env(env, BACKUP_DRILL_SAMPLE_ENV, _DEFAULT_DRILL_SAMPLE),
+        drill_sample=drill_sample,
         extra_excludes=extra_excludes,
     )
 

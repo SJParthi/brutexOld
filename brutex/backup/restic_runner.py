@@ -365,9 +365,25 @@ class ResticRunner:
         return self._invoke("check", argv)
 
     def snapshots_latest_json(self, *, tag: str = BACKUP_TAG) -> ResticInvocation:
-        """Fetch the latest snapshot's metadata (the F21 deep cross-check)."""
+        """Fetch the latest snapshot's metadata (the F21 deep cross-check).
+
+        ``--no-lock`` is LOAD-BEARING (round-6 MAJOR): this read-only metadata
+        call runs from the hourly dead-man checker, and the deep-due tick
+        naturally lands in/near the nightly maintenance window (step 9 stamps
+        success → shallow FRESH → deep gate open, while step 10 still holds
+        the repo's EXCLUSIVE lock through ``forget``/Sunday ``forget --prune``
+        — hours on an 8 TB repo; the drill's canary forget is a second such
+        window). Without ``--no-lock`` the lock conflict read rc=1 → a false
+        CRITICAL ``state_remote_divergence`` page + healthcheck ``/fail``
+        pings EVERY subsequent tick until the prune ended (a failed call
+        never advances ``last_deep_check_at``); conversely the call's own
+        shared lock could fail the nightly's ``forget`` (false maintenance
+        WARN). Verified on restic 0.16.4: ``snapshots --no-lock`` succeeds
+        with correct JSON while an exclusive lock is held.
+        """
         return self._invoke(
-            "snapshots", (self._binary, "snapshots", "--json", "--latest", "1", "--tag", tag)
+            "snapshots",
+            (self._binary, "snapshots", "--no-lock", "--json", "--latest", "1", "--tag", tag),
         )
 
     def ls_json(self, snapshot_id: str) -> ResticInvocation:

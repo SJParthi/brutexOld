@@ -106,6 +106,27 @@ class TestBackupDegraded:
         alerter = SweepAlerter(resolver=lambda: None)
         assert alerter.backup_degraded(aspect="partial", detail="x") is False
 
+    def test_backup_degraded_drill_skipped_body_is_honest(self) -> None:
+        """Round-6: the drill_skipped arm gets its OWN body — no snapshot ran
+        there at all (the drill was skipped on single-flight contention), so
+        the generic "The snapshot itself succeeded" wording would be false.
+        The body names the lost verification + the manual re-run remedy."""
+        fake = FakeNotifier()
+        assert (
+            SweepAlerter(notifier=fake).backup_degraded(
+                aspect="drill_skipped", detail="single-flight lock held"
+            )
+            is True
+        )
+        event = fake.published[0]
+        assert event.kind == TelegramEventKind.PHASE_BLOCKED
+        assert event.severity == TelegramSeverity.WARN
+        assert event.dedupe_key == "backup-degraded:drill_skipped"
+        assert "DRILL SKIPPED" in event.message
+        assert "The snapshot itself succeeded" not in event.message
+        assert "did NOT run" in event.message
+        assert "restore\\-drill" in event.message  # the manual remedy is named
+
 
 class TestBackupOverdue:
     def test_backup_overdue_kind_severity_dedupe_and_escaped_message(self) -> None:

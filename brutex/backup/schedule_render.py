@@ -17,7 +17,12 @@ Template law (mirrors the shipped supervisor template's own rules):
 
 Fire times (box TZ pinned Asia/Kolkata): nightly run 03:35 (after the 02:30
 sweep-daemon default, before the ~06:05 IST token-minter window); hourly
-check; monthly drill Day 1 04:30.
+check; monthly drill Day 1 13:00 — deliberately OUTSIDE the nightly run's
+own §5 envelope (round-6 MAJOR: 03:35 + the default ``auto`` read-data
+subset ≈ 143 GB/night at the runbook's ~100 Mbit/s WAN ≈ 3.2 h ⇒ the run
+holds the single-flight lock to ~07:00+, so the previous Day-1 04:30 fire
+made the drill's busy skip the deterministic monthly NORM, not an
+exception — and launchd one-shots never retry).
 """
 
 from __future__ import annotations
@@ -114,7 +119,7 @@ def render_deadman_plist() -> str:
 
 
 def render_drill_plist() -> str:
-    """Render the monthly restore-drill LaunchAgent template (Day 1, 04:30)."""
+    """Render the monthly restore-drill LaunchAgent template (Day 1, 13:00)."""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!-- launchd template — monthly BruteX backup restore drill (DEC-BACKUP-OFFBOX-001).
 {_GENERATED_NOTE} -->
@@ -125,7 +130,7 @@ def render_drill_plist() -> str:
   </array>
   <key>StartCalendarInterval</key><dict>
     <key>Day</key><integer>1</integer>
-    <key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer>
+    <key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer>
   </dict>
   <key>RunAtLoad</key><false/>
   <key>ThrottleInterval</key><integer>300</integer>
@@ -149,7 +154,7 @@ def render_cron_lines() -> str:
         "           >> ~/.brutex/logs/backup.log 2>&1\n"
         "0  * * * *  /path/venv/bin/brutex backup check"
         "                                     >> ~/.brutex/logs/backup.log 2>&1\n"
-        "30 4 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill"
+        "0 13 1 * *  BRUTEX_LAKE_ROOT=/path/lake /path/venv/bin/brutex backup restore-drill"
         " >> ~/.brutex/logs/backup.log 2>&1\n"
     )
 

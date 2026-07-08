@@ -157,6 +157,26 @@ class TestNumericFallback:
         assert cfg.prune_weekday == 6
         assert [entry["event"] for entry in logs] == ["backup.config.prune_weekday_out_of_range"]
 
+    @pytest.mark.parametrize("bad", ["0", "-16"])
+    def test_drill_sample_below_one_default_plus_warn(self, tmp_path: Path, bad: str) -> None:
+        """Round-6 NIT pin: a nonsensical (≤0) drill sample parses as a VALID
+        int — the malformed-numeric loud-fallback never fires — yet it would
+        silently degrade the monthly drill to canary-only (the stratified
+        byte-verification loop runs zero times) while still exiting 0 with
+        ``backup.drill.ok``. Same law as the prune_weekday guard above:
+        fall back to the default LOUDLY, never a quiet nonsense value."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_DRILL_SAMPLE_ENV: bad}, home=tmp_path)
+        assert cfg.drill_sample == 16
+        assert [entry["event"] for entry in logs] == ["backup.config.drill_sample_out_of_range"]
+
+    def test_drill_sample_of_one_is_respected_no_warn(self, tmp_path: Path) -> None:
+        """The floor is <1 — a deliberate tiny-but-real sample stays as-is."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_DRILL_SAMPLE_ENV: "1"}, home=tmp_path)
+        assert cfg.drill_sample == 1
+        assert logs == []
+
 
 class TestPasswordSources:
     def test_both_password_sources_set_yields_none_plus_warn(self, tmp_path: Path) -> None:

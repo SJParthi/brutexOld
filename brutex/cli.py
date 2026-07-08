@@ -2098,13 +2098,19 @@ def _redact_backup_repo(repo: str | None) -> str:
     scheme-less local-path repo reads as ``local``; unset reads ``unset``.
     Any userinfo is stripped (``sftp://user:pass@host//srv`` → ``sftp:host``)
     so a mis-configured embedded credential is never echoed by ``status``.
+    The userinfo strip runs BEFORE the path split (round-6 NIT): a password
+    containing ``/`` (``sftp://user:pa/ss@host/srv``) would otherwise
+    truncate at the password's slash and echo the USERNAME (``sftp:user``);
+    ordering is safe because a legit post-host path cannot carry userinfo —
+    the LAST ``@`` bounds it (a rare ``@`` in the path costs only a
+    host-fragment display, never a credential echo).
     """
     if repo is None:
         return "unset"
     scheme, sep, rest = repo.partition(":")
     if not sep:
         return "local"
-    host = rest.lstrip("/").split("/", 1)[0].rsplit("@", 1)[-1].split(":", 1)[0]
+    host = rest.lstrip("/").rsplit("@", 1)[-1].split("/", 1)[0].split(":", 1)[0]
     return f"{scheme}:{host}"
 
 

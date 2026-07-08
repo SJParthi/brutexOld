@@ -188,7 +188,17 @@ class TestEndToEnd:
         assert world.dedupe_keys() == []
         assert load_deadman(deadman_path(world.cfg)).last_deep_check_at == later
         snapshots_calls = [argv for argv in world.fake.calls() if argv[0] == "snapshots"]
-        assert snapshots_calls[-1] == ["snapshots", "--json", "--latest", "1", "--tag", "brutex"]
+        # Round-6 MAJOR: --no-lock — the deep tick must never collide with
+        # the nightly forget/--prune EXCLUSIVE repo locks (false divergence).
+        assert snapshots_calls[-1] == [
+            "snapshots",
+            "--no-lock",
+            "--json",
+            "--latest",
+            "1",
+            "--tag",
+            "brutex",
+        ]
 
     def test_deep_check_against_stub_snapshots_divergence(self, world: World) -> None:
         """F21: a plausible LOCAL stamp diverging from remote truth ALARMS."""

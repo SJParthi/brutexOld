@@ -677,19 +677,33 @@ class SweepAlerter:
         DEC-BACKUP-OFFBOX-001: the snapshot itself succeeded and the data IS
         off-box — a maintenance (``forget``/prune) failure or a partial rc-3
         read, never a data-protection loss (F8/F23). Deduped by *aspect*.
+        The ``drill_skipped`` aspect (round 6) carries its OWN body: no
+        snapshot ran at all there — the monthly restore drill was skipped on
+        single-flight contention, so the generic "the snapshot itself
+        succeeded" wording would be false for it (the partial_streak split
+        precedent, one method over).
 
         Parameters
         ----------
         aspect
-            The degraded aspect token (``"partial"`` / ``"maintenance"``).
+            The degraded aspect token (``"partial"`` / ``"maintenance"`` /
+            ``"drill_skipped"``).
         detail
             Non-secret one-line context.
         """
-        message = escape_markdown_v2(
-            f"⚠️ Off-box backup DEGRADED ({aspect}): {detail}. The snapshot itself succeeded "
-            "and the data IS off-box — this is a maintenance/partial-read warning, not a "
-            "data-protection loss. See `brutex backup status`."
-        )
+        if aspect == "drill_skipped":
+            message = escape_markdown_v2(
+                f"⚠️ Off-box backup restore DRILL SKIPPED: {detail}. The monthly "
+                "byte-verification did NOT run this month (launchd one-shots never "
+                "retry) — the nightly backups themselves are unaffected. Re-run "
+                "`brutex backup restore-drill` manually."
+            )
+        else:
+            message = escape_markdown_v2(
+                f"⚠️ Off-box backup DEGRADED ({aspect}): {detail}. The snapshot itself "
+                "succeeded and the data IS off-box — this is a maintenance/partial-read "
+                "warning, not a data-protection loss. See `brutex backup status`."
+            )
         return self._publish(
             kind=TelegramEventKind.PHASE_BLOCKED,
             severity=TelegramSeverity.WARN,
