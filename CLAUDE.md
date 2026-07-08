@@ -56,6 +56,22 @@ launch), the #1013 D8-stamping consumption, futures→options translation (PR-6)
 round-1 review-fix pack (#1571): the automatic Stage-4 cascade threads
 `roll_schedule_by_instrument`, the manifest carries `roll_schedules` for the MANUAL replay, and
 a schedule-less futures pool SKIPS loudly — never a schedule-blind re-score).
+Earlier: 2026-07-08 (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 —
+the weekly deep mutation gate is made GREEN end-to-end: both cargo-mutants
+jobs restructured onto sharded matrices (6 fno-math + 7 trading-core shards;
+worst shard 65 min vs the 120 min cap), trading-core WIDENED to
+evaluator+python+spec under `--features python,serde`, the python mutmut loop
+wedge-proofed (a timeout-wrapped rate_common runner + fail-fast audit tests)
+and fully DE-SURVIVORED — compute 354 · audit 254 · rate_limiter 165 ·
+store 146 · partition 108 · parser 33 · spec 91 · rate_common 369 mutants,
+ALL zero-survivor (latent main-side debt killed too: 2 rate_limiter sentinel
++ 3 partition probe-order + 70 audit survivors) — with timeout-vs-survivor
+HONEST alert titles; rehearsal run 28922792812 green 15/15 (python loop
+68m52s). COMPLETION PROOF = the first green SCHEDULED `mutation.yml` run
+(next 2026-07-13 04:00 UTC) — STANDARDS row 3 stays 🟡 until it lands.
+rate_common is GATED, its ceilings/floors/governor values byte-untouched
+(§2 Rule 6); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change).
 Earlier: 2026-07-06 (DEC-BACKUP-OFFBOX-001, MIGRATION.md #1596 —
 automated incremental OFF-BOX backup of the lake + ledger + DuckDB masters + sweeps +
 hash-chained audit logs (restic → S3 Object-Lock / B2 immutable; blueprint
@@ -1259,6 +1275,18 @@ hostile-review pass._
   `canonical_trade_params` under the instrument⟺schedule invariant. ENGINE surface = 3 spot indices +
   NSE/FNO/NSE-NIFTY-FUT; spot byte-identical (unmodified goldens green); mypy `--strict` clean, pyright at the
   pre-change baseline, ruff/ruff-format clean).
+  Earlier: `claude/jolly-tesla-miygwt` (**DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597** — the weekly deep
+  mutation gate made GREEN end-to-end: both cargo-mutants jobs restructured onto sharded matrices (6 fno-math +
+  7 trading-core shards; worst shard 65 min vs the 120 min job cap), trading-core WIDENED to evaluator+python+spec
+  under `--features python,serde` (the Golden-Rule-#4 run-identity `src/spec.rs` + `src/python.rs` now gated), the
+  python mutmut per-module loop wedge-proofed (a timeout-wrapped `rate_common` runner + fail-fast audit tests) and
+  fully DE-SURVIVORED — compute 354 · audit 254 · rate_limiter 165 · store 146 · partition 108 · parser 33 · spec 91 ·
+  rate_common 369 mutants, ALL zero-survivor; latent main-side debt killed: 2 rate_limiter sentinel + 3 partition
+  probe-order + 70 audit survivors — plus timeout-vs-survivor HONEST alert titles on the fan-in verdict job.
+  Rehearsal run 28922792812 fully green 15/15 (python loop 68m52s, worst Rust shard 65m). HONEST: the COMPLETION
+  PROOF is the first green SCHEDULED `mutation.yml` run (next 2026-07-13 04:00 UTC) — STANDARDS row 3 stays 🟡 until
+  it lands, never claimed early. `rate_common` is GATED, its ceilings/floors/governor values byte-untouched (§2
+  Rule 6); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change).
   Earlier: `claude/serene-euler-y5ra0z` (**DEC-BACKUP-OFFBOX-001, MIGRATION.md #1596** — automated
   incremental off-box backup: restic → S3 Object-Lock / B2 immutable over the fail-safe WHOLE-ROOT include set
   (`<lake_root>` + `~/.brutex/audit`; `.quarantine/` INCLUDED per DEC-LAKE-HEAL-001 #1175), NEW `brutex/backup/`
@@ -3102,7 +3130,7 @@ hostile-review pass._
    `GROWW_DAILY_QUOTA_UNVERIFIED=None`; ADR-0009 §3.1 risk #4 / §4) — the
    `_UNVERIFIED` suffix carries the honesty requirement in the
    identifier. The adapter paces with the vendor-neutral adaptive
-   token-bucket controller (`brutex/adapters/rate_common.py:327`
+   token-bucket controller (`brutex/adapters/rate_common.py:372`
    `RateController`, injected `ceiling_rps`; the 429/timeout ladders step
    down to a deep floor of **1 r/s** under sustained pressure and recover
    up to the ceiling once it clears). On TOP of the per-second bucket the
@@ -3191,7 +3219,9 @@ hostile-review pass._
     `docs/STANDARDS_100PCT.md` §1, post-DEC-COV-CLI-HARNESS-001
     2026-06-12 — coverage rows 1/2 flipped 🟢 when the omit list was
     deleted at a measured package-wide 100.00% line+branch; the one
-    🟡 is row 3 pending DEC-MUTATION-RUNTIME-002's verification run.
+    🟡 is row 3 pending DEC-MUTATION-RUNTIME-003's verification run
+    (the first green SCHEDULED `mutation.yml` run; supersedes -002's
+    never-verified run — MIGRATION.md #1597).
     Earlier: row 3 honestly re-classified 🟡 while the orchestrator
     mutation pass exceeded its weekly budget, DEC-MUTATION-RUNTIME-001;
     the prior "15/2 (~71%)" wording here was the pre-re-classification
@@ -3238,6 +3268,10 @@ hostile-review pass._
   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1568–#1578 — the ADR-0012
   NIFTY-futures sweep LAUNCH capstone; see §1 Active branch for the full blurb)
+  Earlier: `claude/jolly-tesla-miygwt`
+  (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 — the weekly deep mutation
+  gate made green end-to-end: sharded cargo-mutants matrices + zero-survivor
+  python mutmut loop; see §1 Active branch for the full blurb)
   Earlier: `claude/serene-euler-y5ra0z`
   (DEC-BACKUP-OFFBOX-001, MIGRATION.md #1596 — automated incremental off-box
   backup: restic → S3 Object-Lock / B2 immutable; see §1 Active branch for
@@ -3494,7 +3528,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:327-368`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4310-4311` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4310-4311` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
