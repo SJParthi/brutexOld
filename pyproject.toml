@@ -59,6 +59,14 @@ ui = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
 ]
+# DEC-DASHBOARD-BROWSER-TRUTH-001 (2026-07-07): the headless-browser dashboard
+# truth suite (tests/browser/) drives the REAL templates + static JS in a real
+# Chromium via Playwright. Kept behind an OPTIONAL extra so the main test job
+# and unit-test runners never install it; ONLY the dedicated CI `browser` job
+# (and an operator opting in via BRUTEX_BROWSER_TESTS=1) installs this extra.
+browser = [
+    "playwright>=1.55,<2.0",
+]
 # DEC-STAGE3-OPTIMIZE-EXTRA-001 (ADR-0007 condition 9, Stage-3 slice 1): the
 # BIPOP-CMA-ES refinement optimizer (pycma — PyPI name `cma`, numpy-only).
 # EXACT pin, deliberately violating the DEC-P0-012 "always latest" range
@@ -453,6 +461,7 @@ markers = [
     "stress: sustained-load stress tests (DEC-STRESS-001); run nightly via .github/workflows/stress-nightly.yml — NOT in default unit test run",
     "soak: long multi-hour soak driver (DEC-SOAK-REAL-TIER-001); honors STRESS_DURATION_S, run ONLY on the self-hosted soak-selfhosted.yml tier — NOT nightly, NOT in default unit test run",
     "chaos: randomized-schedule + crash/restart + concurrent-reader chaos tests (DEC-CHAOS-RACE-001); run on every PR via the chaos-race CI job — NOT in default unit test run",
+    "browser: headless-browser dashboard truth tests (Playwright + Chromium, DEC-DASHBOARD-BROWSER-TRUTH-001); opt-in via BRUTEX_BROWSER_TESTS=1 — run by the dedicated CI browser job, NOT the main test job",
 ]
 filterwarnings = [
     "error",

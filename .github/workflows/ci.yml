@@ -2082,6 +2082,118 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────
+  # BROWSER TRUTH — headless Chromium dashboard DOM proofs
+  # (DEC-DASHBOARD-BROWSER-TRUTH-001)
+  # ─────────────────────────────────────────────────────────────────
+  browser:
+    name: Browser truth (headless Chromium dashboard DOM)
+    runs-on: ubuntu-24.04
+    # DEC-DASHBOARD-BROWSER-TRUTH-001: Playwright + Chromium renders the REAL
+    # /universe /movers /db /results templates + static JS against
+    # fixture-backed build_app apps and asserts the pinned DOM behaviors
+    # (db O(page) paging partial, movers gate paint-once/timer-disarm/
+    # recovery, XSS escaping, bxFixed2 ROUND_HALF_UP golden, rate-widget
+    # flow_state). The suite is opt-in (BRUTEX_BROWSER_TESTS=1) and polices
+    # its own zero-flakiness law via tests/browser/_guards.py, enforced in
+    # the MAIN test job by tests/unit/test_browser_suite_discipline.py.
+    # The 15-minute budget is a PROJECTION to MEASURE on the first run
+    # (local suite wall time is seconds; pip + Chromium install dominate —
+    # Golden Rule #10). Deliberately NO job-level `if:` — the ci-ok
+    # aggregate treats skipped==pass, so a conditional here would be a
+    # silent merge-green escape hatch (pinned by the discipline test).
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps (includes [browser] Playwright extra)
+        # [dev,data,ui] mirror the test job (build_app + fixtures need
+        # fastapi/uvicorn/polars/duckdb); [browser] adds ONLY playwright —
+        # the main test job never installs it (the suite stays out of the
+        # coverage paths by design).
+        run: pip install -e ".[dev,data,ui,browser]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # brutex.dashboard.app transitively imports the Rust-backed
+        # fno_math + trading_core wheels (app.py → sweep_results_view →
+        # engine.combo_mask → fno_math), so the browser job needs the same
+        # wheel builds as the test job — verified by a real import probe
+        # during the design round, NOT assumed.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        # Belt-and-suspenders crates.io flake guard (on top of the
+        # workflow-level CARGO_NET_RETRY=10): retry the whole wheel build
+        # up to 3 times with a short backoff, so a hard download failure
+        # AFTER cargo's own retries still gets another full attempt. POSIX
+        # sh; installs exactly the same wheel — no app/test/coverage change.
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # Same dtolnay/rust-toolchain@stable + maturin/abi3 build as
+        # fno-math above; brutex.vocabulary imports it at module load.
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Resolve Playwright version (Chromium cache key)
+        # importlib.metadata — the playwright package exposes NO top-level
+        # __version__ attribute (probing it raises AttributeError). The
+        # assignment form + emptiness check make a resolution failure fail
+        # the STEP loudly: a $(…) substitution inlined into echo would exit 0
+        # under bash -e and silently write an EMPTY version, degrading the
+        # cache key to a constant (round-1 review finding).
+        id: pwver
+        run: |
+          version="$(python -c 'from importlib.metadata import version; print(version("playwright"))')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright Chromium
+        # Keyed on the RESOLVED installed playwright version (not the range
+        # pin in pyproject) so a playwright upgrade invalidates the cache
+        # exactly when the pinned Chromium build changes.
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ steps.pwver.outputs.version }}
+      - name: Install Chromium (Playwright-pinned build)
+        run: python -m playwright install --with-deps chromium
+      - name: Browser truth suite (deliberately cov-free)
+        # NO --cov: the DOM layer is a truth gate, not a coverage surface —
+        # server-side coverage is owned by the main test job; adding --cov
+        # here would double-count brutex modules with no gate value. The
+        # discipline test pins this invocation cov-free.
+        env:
+          BRUTEX_BROWSER_TESTS: "1"
+        run: pytest tests/browser -q
+      - name: Upload failure artifacts (traces + screenshots + ledgers)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-failure-artifacts
+          path: test-artifacts/browser/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────
   # PROPERTY TESTS — hypothesis-driven (CG-12)
   # ─────────────────────────────────────────────────────────────────
   property:
@@ -3640,6 +3752,10 @@ jobs:
       - actionlint
       - type
       - test
+      # DEC-DASHBOARD-BROWSER-TRUTH-001: the headless-Chromium dashboard DOM
+      # truth job. Carries NO job-level `if:` (skipped==pass below would be
+      # a silent escape), so a red browser job HARD-fails this aggregate.
+      - browser
       - property
       - bench
       - golden
@@ -3744,6 +3860,7 @@ jobs:
           echo "  actionlint:    ${{ needs.actionlint.result }}"
           echo "  type:          ${{ needs.type.result }}"
           echo "  test:          ${{ needs.test.result }}"
+          echo "  browser:       ${{ needs.browser.result }}"
           echo "  property:      ${{ needs.property.result }}"
           echo "  bench:         ${{ needs.bench.result }}"
           echo "  golden:        ${{ needs.golden.result }}"
@@ -3779,6 +3896,7 @@ jobs:
             "${{ needs.actionlint.result }}" \
             "${{ needs.type.result }}" \
             "${{ needs.test.result }}" \
+            "${{ needs.browser.result }}" \
             "${{ needs.property.result }}" \
             "${{ needs.bench.result }}" \
             "${{ needs.golden.result }}" \
