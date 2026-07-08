@@ -54,6 +54,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from brutex.calendars.nse import IST
+from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.feed.errors import FeedError, LookAheadError
@@ -316,6 +318,17 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     volumes: list[int] = table.column("volume").to_pylist()
     open_interests: list[int | None] = table.column("open_interest").to_pylist()
 
+    # Bounded bad-tick (spike / fat-finger / vendor-scaling) screen
+    # (DEC-SWEEP-DATA-EDGE-GUARDS-001): a self-consistent SCALED bar — every
+    # OHLC field ×~10 but internally ordered and positive — passes the
+    # positivity + ordering checks above yet would silently flip every
+    # price-relative bit and (via ``TodayOHLC.absorb``) poison the NEXT day's
+    # PDH/PDL/pivots. The screen SKIPS-and-COUNTS such a bar (never value-edits,
+    # never fabricates) comparing each close to the previous IN-SESSION kept
+    # close; the first bar of each session is exempt (no reopen-gap false trip).
+    # Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar.
+    screen = BadTickScreen(source=source) if bad_tick_screen_enabled() else None
+
     bars: list[CandleBar] = []
     for ts, o, h, lo, c, v, oi in zip(
         timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
@@ -333,6 +346,13 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                     f"price is never <= 0) — refusing to serve corrupt data to the "
                     f"engine (DEC-STORED-DATA-VALIDATION-001)"
                 )
+        # Bad-tick screen (post-positivity, pre-construction): a scaled spike is
+        # DROPPED (not built, not appended) and counted; the last kept good close
+        # carries forward as the comparison baseline. IST session date drives the
+        # per-session grouping (``ts`` is timezone-aware — the constructor rejects
+        # a naive datetime, so ``.astimezone`` is safe).
+        if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
+            continue
         try:
             bars.append(
                 CandleBar(
@@ -351,6 +371,8 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
                 f"refusing to serve corrupt data to the engine "
                 f"(DEC-STORED-DATA-VALIDATION-001)"
             ) from exc
+    if screen is not None:
+        screen.finish()
     return bars
 
 
