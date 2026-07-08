@@ -9,6 +9,7 @@ an arbitrarily broken backup env).
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,84 @@ class TestNumericFallback:
             cfg = resolve_backup_env({BACKUP_KEEP_DAILY_ENV: "fourteen"}, home=tmp_path)
         assert cfg.keep_daily == 14
         assert [entry["env_var"] for entry in logs] == [BACKUP_KEEP_DAILY_ENV]
+
+    @pytest.mark.parametrize("bad", ["nan", "NaN", "inf", "Inf", "-inf", "+inf", "Infinity"])
+    def test_deadman_hours_non_finite_falls_back_loud(self, tmp_path: Path, bad: str) -> None:
+        """Round-8 MINOR pin: ``float()`` parses nan/inf cleanly, so the
+        malformed-numeric fallback never fired — yet a non-finite threshold
+        SILENTLY DISABLES the dead-man (``elapsed > nan`` is False for a
+        year-stale backup → verdict FRESH, exit 0, plain success pings; the
+        exact inversion of the "silence = alarm" law). Non-finite must fall
+        back to the default LOUDLY like any other malformed value."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_DEADMAN_HOURS_ENV: bad}, home=tmp_path)
+        assert cfg.deadman_hours == 30.0
+        events = [entry for entry in logs if entry["event"] == "backup.config.malformed_numeric"]
+        assert [entry["env_var"] for entry in events] == [BACKUP_DEADMAN_HOURS_ENV]
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+    def test_max_runtime_non_finite_falls_back_and_timeout_rederives(
+        self, tmp_path: Path, bad: str
+    ) -> None:
+        """Round-8 MINOR pin: ``max_runtime_hours=inf`` (a plausible runbook
+        step-6 "no limit" seed raise) would mute the HUNG lane forever AND
+        derive ``timeout_s=inf`` — every restic deadline unbounded, and
+        ``min(nan, 120.0)`` even defeats the deep-check cap. Both knobs must
+        resolve back to finite defaults."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_MAX_RUNTIME_HOURS_ENV: bad}, home=tmp_path)
+        assert cfg.max_runtime_hours == 48.0
+        assert cfg.timeout_s == 48.0 * 3600.0  # derived from the GUARDED value
+        events = [entry for entry in logs if entry["event"] == "backup.config.malformed_numeric"]
+        assert [entry["env_var"] for entry in events] == [BACKUP_MAX_RUNTIME_HOURS_ENV]
+
+    @pytest.mark.parametrize(
+        ("env_var", "attr", "default"),
+        [
+            (BACKUP_REALERT_HOURS_ENV, "realert_hours", 6.0),
+            (BACKUP_TIMEOUT_S_ENV, "timeout_s", 48.0 * 3600.0),
+            (BACKUP_CLOCK_SKEW_TOLERANCE_S_ENV, "clock_skew_tolerance_s", 300.0),
+        ],
+    )
+    def test_other_float_knobs_reject_non_finite(
+        self, tmp_path: Path, env_var: str, attr: str, default: float
+    ) -> None:
+        """Every float knob rejects non-finite: nan realert mutes every
+        re-alert after the first; nan skew tolerance mutes CLOCK_SKEW."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({env_var: "nan"}, home=tmp_path)
+        assert getattr(cfg, attr) == default
+        events = [entry for entry in logs if entry["event"] == "backup.config.malformed_numeric"]
+        assert [entry["env_var"] for entry in events] == [env_var]
+
+    @pytest.mark.parametrize(
+        ("env_var", "attr", "default"),
+        [
+            (BACKUP_DEADMAN_HOURS_ENV, "deadman_hours", 30.0),
+            (BACKUP_REALERT_HOURS_ENV, "realert_hours", 6.0),
+            (BACKUP_MAX_RUNTIME_HOURS_ENV, "max_runtime_hours", 48.0),
+            (BACKUP_TIMEOUT_S_ENV, "timeout_s", 48.0 * 3600.0),
+        ],
+    )
+    @pytest.mark.parametrize("bad", ["0", "-1.5"])
+    def test_hour_deadline_knobs_reject_non_positive(
+        self, tmp_path: Path, env_var: str, attr: str, default: float, bad: str
+    ) -> None:
+        """The hour/deadline knobs also reject ≤0 (round-8: a zero/negative
+        threshold or subprocess deadline is nonsensical — same loud-fallback
+        law as prune_weekday / drill_sample)."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({env_var: bad}, home=tmp_path)
+        assert getattr(cfg, attr) == default
+        events = [entry for entry in logs if entry["event"] == "backup.config.malformed_numeric"]
+        assert [entry["env_var"] for entry in events] == [env_var]
+
+    def test_clock_skew_zero_is_respected_no_warn(self, tmp_path: Path) -> None:
+        """Zero skew tolerance is a MEANINGFUL strict setting — not gated."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_CLOCK_SKEW_TOLERANCE_S_ENV: "0"}, home=tmp_path)
+        assert cfg.clock_skew_tolerance_s == 0.0
+        assert logs == []
 
     def test_timeout_derived_from_max_runtime(self, tmp_path: Path) -> None:
         """Unset timeout derives from max_runtime_hours × 3600 (one knob, two guards)."""
@@ -348,10 +427,20 @@ class TestResolverTotality:
     )
     @pytest.mark.property
     def test_resolver_never_raises_property(self, env: dict[str, str]) -> None:
-        """TOTAL over arbitrary env maps — check/status must always resolve (graft A)."""
+        """TOTAL over arbitrary env maps — check/status must always resolve (graft A).
+
+        Round-8 invariant: whatever the env says (incl. ``nan``/``inf``
+        strings, which ``float()`` parses cleanly), the resolved float knobs
+        are ALWAYS finite, and the hour/deadline knobs ALWAYS positive — the
+        production-domain guarantee that justifies the finite-only strategies
+        of ``tests/property/test_backup_deadman_property.py``."""
         cfg = resolve_backup_env(env, home=Path("/tmp/hyp-home"))
         assert isinstance(cfg, BackupEnvConfig)
         assert 0 <= cfg.prune_weekday <= 6
+        assert math.isfinite(cfg.clock_skew_tolerance_s)
+        for knob in (cfg.deadman_hours, cfg.realert_hours, cfg.max_runtime_hours, cfg.timeout_s):
+            assert math.isfinite(knob)
+            assert knob > 0.0
 
 
 class TestOsEnvironDefault:

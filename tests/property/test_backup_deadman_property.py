@@ -28,6 +28,12 @@ _aware_dt = st.datetimes(
     timezones=st.just(UTC),
 )
 _opt_dt = st.none() | _aware_dt
+# Finite-only strategies are the PRODUCTION domain, not a convenience gap:
+# since round 8 the ONE config entry point (resolve_backup_env._float_env)
+# rejects non-finite values (and non-positive hour/deadline knobs) with the
+# loud malformed-numeric fallback, so evaluate_deadman can never receive a
+# nan/inf threshold in production — pinned by the resolver's own totality
+# property (tests/unit/test_backup_env.py::TestResolverTotality).
 _hours = st.floats(min_value=0.0, max_value=10_000.0, allow_nan=False, allow_infinity=False)
 _skew = st.floats(min_value=0.0, max_value=86_400.0, allow_nan=False, allow_infinity=False)
 _runtime = st.floats(min_value=0.001, max_value=10_000.0, allow_nan=False, allow_infinity=False)

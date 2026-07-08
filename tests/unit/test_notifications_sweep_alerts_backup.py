@@ -179,6 +179,12 @@ class TestBackupRepoCorrupt:
         # dead-man really does go OVERDUE and escalate — the claim is honest.
         assert "keeps escalating" in event.message
         assert "ONLY automated signal" not in event.message
+        # Round-8 MINOR pin: restic's rc alone cannot distinguish corruption
+        # from a remote outage mid-check (rc=1 both ways, probed on 0.16.4)
+        # — the verify body must name the co-equal causes + point at the
+        # stderr_tail BEFORE the restore-from-older / re-seed direction.
+        assert "cannot distinguish corruption from a remote outage" in event.message
+        assert "stderr\\_tail" in event.message
 
     def test_backup_repo_corrupt_drill_arm_says_deadman_stays_quiet(self) -> None:
         """Round-5 NIT pin: the DRILL-mismatch arm must NOT promise dead-man
@@ -197,6 +203,9 @@ class TestBackupRepoCorrupt:
         assert "keeps escalating" not in event.message
         assert "dead\\-man stays QUIET" in event.message
         assert "ONLY automated signal" in event.message
+        # The drill arm's finding is a byte-VERIFIED mismatch — the round-8
+        # rc-ambiguity caveat belongs to the verify arm ONLY.
+        assert "cannot distinguish" not in event.message
 
     def test_backup_repo_corrupt_disabled_returns_false(self) -> None:
         assert SweepAlerter(resolver=lambda: None).backup_repo_corrupt(detail="x") is False

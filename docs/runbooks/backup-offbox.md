@@ -262,7 +262,15 @@ re-pull work proportional to the mismatch (idempotent keep-first sink), per
 Repo-corruption remediation (`backup_repo_corrupt` alert): human-only —
 restore from an OLDER snapshot or re-seed; NEVER run automated "repair" (an
 automated repair of a corrupt repo can destroy the last good copy) —
-ADR-0017.
+ADR-0017. **Caveat (nightly-verify arm, round 8):** restic exits rc=1 for an
+UNREACHABLE repo exactly as for genuine corruption (probed on restic 0.16.4),
+and a WAN/S3 drop during the read-data tail — the run's LONGEST remote phase
+— lands on this alert. BEFORE starting restore-from-older / re-seed, confirm
+via the `backup.check.failed` `stderr_tail` (network/DNS/auth errors ⇒
+outage, pack/blob/tree integrity errors ⇒ corruption) or simply re-run
+`brutex backup run` once the remote is reachable — a transient outage
+self-heals the next night. The drill-mismatch arm is byte-verified — no such
+ambiguity.
 
 ## 5. Verify-egress cost table (the `BRUTEX_BACKUP_VERIFY_SUBSET` trade)
 

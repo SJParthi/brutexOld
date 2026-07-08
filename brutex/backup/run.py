@@ -501,10 +501,19 @@ def _verify_repo(shell: _RunShell, runner: ResticRunner) -> tuple[bool, str] | i
             rc=structure.returncode,
             stderr_tail=structure.stderr_tail,
         )
+        # Round-8 MINOR: restic exits rc=1 for an UNREACHABLE repo exactly as
+        # for genuine corruption (probed on 0.16.4) — a remote outage during
+        # the check must not be paged as VERIFIED corruption, so the detail
+        # names the co-equal causes (the round-2 init-arm honesty law).
         return shell.fail(
             "check_failed",
             exit_code=EXIT_CORRUPTION,
-            detail=f"restic check failed (rc={structure.returncode}).",
+            detail=(
+                f"restic check failed (rc={structure.returncode}) — repo corruption OR "
+                "the remote became unreachable mid-check (indistinguishable by rc); "
+                "confirm via backup.check.failed stderr_tail before "
+                "restore-from-older / re-seed."
+            ),
             repo_corrupt=True,
         )
     verify_subset = shell.cfg.verify_subset
@@ -530,10 +539,18 @@ def _verify_repo(shell: _RunShell, runner: ResticRunner) -> tuple[bool, str] | i
             rc=data_check.returncode,
             stderr_tail=data_check.stderr_tail,
         )
+        # Same rc ambiguity as the structure arm above — the read-data tier is
+        # the run's LONGEST remote phase, so a WAN/S3 drop lands HERE most
+        # often; never assert corruption as verified fact (round-8 MINOR).
         return shell.fail(
             "check_failed",
             exit_code=EXIT_CORRUPTION,
-            detail=f"restic check --read-data-subset={subset} failed.",
+            detail=(
+                f"restic check --read-data-subset={subset} failed "
+                f"(rc={data_check.returncode}) — repo corruption OR the remote became "
+                "unreachable mid-check (indistinguishable by rc); confirm via "
+                "backup.check.failed stderr_tail before restore-from-older / re-seed."
+            ),
             repo_corrupt=True,
         )
     return verify_subset == "auto", subset

@@ -32,13 +32,17 @@ EXIT_PREFLIGHT: Final[int] = 3
 #: F5/F7/F9/F10/F17a).
 EXIT_RESTIC: Final[int] = 4
 
-#: Another backup already holds the single-flight lock — benign overlap, no
-#: alert (F15; the running backup is making progress).
+#: Another backup already holds the single-flight lock (F15). Run-vs-run arm:
+#: benign overlap, no alert — the running backup is making progress. Drill
+#: arm: the busy skip emits ONE WARN ``backup_degraded(aspect="drill_skipped")``
+#: — a skipped drill is a month of LOST verification, not benign (round 6).
 EXIT_BUSY: Final[int] = 5
 
-#: Verified corruption — ``restic check`` failure or a restore-drill byte
+#: Corruption finding — ``restic check`` failure or a restore-drill byte
 #: mismatch (F11/F20). Nightly-verify arm: success is NOT stamped, so the
-#: dead-man escalates too. Drill arm: nightly successes keep stamping — the
+#: dead-man escalates too; restic's rc alone cannot distinguish corruption
+#: from a remote outage mid-check, so the alert names BOTH causes (round 8).
+#: Drill arm: a byte-VERIFIED mismatch; nightly successes keep stamping — the
 #: dead-man stays QUIET; the CRITICAL page is the ONLY automated signal
 #: (the per-arm honesty of the round-5 alert-body split).
 EXIT_CORRUPTION: Final[int] = 6

@@ -16,7 +16,10 @@ Resolution law (fail-safe, never fail-crash):
   misconfigured).
 * A malformed numeric value falls back to its default LOUDLY (one structlog
   WARN — the :func:`brutex.adapters.empty_circuit_breaker.resolve_int_env`
-  fail-safe idiom, never a silent misconfig; Golden Rule #1).
+  fail-safe idiom, never a silent misconfig; Golden Rule #1). "Malformed"
+  INCLUDES a non-finite float (``nan``/``inf`` — which would silently mute the
+  dead-man: ``elapsed > nan`` is always False) and, for the hour/deadline
+  knobs, a non-positive one (round-8 MINOR).
 * BOTH password sources set is ambiguous (F6): both fields resolve to ``None``
   plus ONE ``backup.config.ambiguous_password_source`` WARN, so run/drill then
   refuse with ``EXIT_CONFIG``.
@@ -24,6 +27,7 @@ Resolution law (fail-safe, never fail-crash):
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -259,16 +263,34 @@ def _optional(env: Mapping[str, str], name: str) -> str | None:
     return raw.strip()
 
 
-def _float_env(env: Mapping[str, str], name: str, default: float) -> float:
-    """Read a float env override; unset/blank → *default*; malformed → *default* + WARN."""
+def _float_env(
+    env: Mapping[str, str], name: str, default: float, *, require_positive: bool = False
+) -> float:
+    """Read a float env override; unset/blank → *default*; malformed → *default* + WARN.
+
+    Non-finite values (``nan`` / ``inf`` / ``-inf``) parse cleanly through
+    ``float()`` yet are ALWAYS rejected here (round-8 MINOR): a non-finite
+    threshold SILENTLY DISABLES the dead-man — ``elapsed > nan`` is False for
+    a year-stale backup (verdict FRESH, exit 0, plain success pings), and
+    ``max_runtime_hours=inf`` (a plausible "no limit" seed-raise value) mutes
+    the HUNG lane AND unbounds every restic subprocess deadline. The exact
+    inversion of the "silence = alarm" law, so it falls back LOUDLY like any
+    other malformed numeric. With ``require_positive`` (the hour/deadline
+    knobs, where a ≤0 value is equally nonsensical) a non-positive value is
+    rejected the same way.
+    """
     raw = _optional(env, name)
     if raw is None:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         _LOG.warning("backup.config.malformed_numeric", env_var=name, value=raw, default=default)
         return default
+    if not math.isfinite(value) or (require_positive and value <= 0.0):
+        _LOG.warning("backup.config.malformed_numeric", env_var=name, value=raw, default=default)
+        return default
+    return value
 
 
 def _int_env(env: Mapping[str, str], name: str, default: int) -> int:
@@ -362,8 +384,12 @@ brutex_home`.
         else brutex_home(home=home) / "backup"
     )
 
-    max_runtime_hours = _float_env(env, BACKUP_MAX_RUNTIME_HOURS_ENV, _DEFAULT_MAX_RUNTIME_HOURS)
-    timeout_s = _float_env(env, BACKUP_TIMEOUT_S_ENV, max_runtime_hours * 3600.0)
+    max_runtime_hours = _float_env(
+        env, BACKUP_MAX_RUNTIME_HOURS_ENV, _DEFAULT_MAX_RUNTIME_HOURS, require_positive=True
+    )
+    timeout_s = _float_env(
+        env, BACKUP_TIMEOUT_S_ENV, max_runtime_hours * 3600.0, require_positive=True
+    )
 
     prune_weekday = _int_env(env, BACKUP_PRUNE_WEEKDAY_ENV, _DEFAULT_PRUNE_WEEKDAY)
     if not 0 <= prune_weekday <= _MAX_WEEKDAY:
@@ -416,8 +442,12 @@ brutex_home`.
         password_command=password_command,
         restic_bin=_optional(env, BACKUP_RESTIC_BIN_ENV) or _DEFAULT_RESTIC_BIN,
         state_dir=state_dir,
-        deadman_hours=_float_env(env, BACKUP_DEADMAN_HOURS_ENV, _DEFAULT_DEADMAN_HOURS),
-        realert_hours=_float_env(env, BACKUP_REALERT_HOURS_ENV, _DEFAULT_REALERT_HOURS),
+        deadman_hours=_float_env(
+            env, BACKUP_DEADMAN_HOURS_ENV, _DEFAULT_DEADMAN_HOURS, require_positive=True
+        ),
+        realert_hours=_float_env(
+            env, BACKUP_REALERT_HOURS_ENV, _DEFAULT_REALERT_HOURS, require_positive=True
+        ),
         clock_skew_tolerance_s=_float_env(
             env, BACKUP_CLOCK_SKEW_TOLERANCE_S_ENV, _DEFAULT_CLOCK_SKEW_TOLERANCE_S
         ),

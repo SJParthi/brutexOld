@@ -820,6 +820,15 @@ class SweepAlerter:
         the deep check id-matches), so the dead-man stays QUIET — that page
         is the only automated signal.
 
+        Cause-honesty is ALSO split per arm (round-8 MINOR): the ``verify``
+        arm rides ``restic check`` rc alone, and restic exits rc=1 for an
+        UNREACHABLE repo exactly as for genuine corruption (probed on
+        0.16.4) — a WAN/S3 drop during the ~hours-long read-data tail must
+        not send the operator into a multi-day re-seed, so the verify body
+        names the co-equal causes and points at ``backup.check.failed``
+        ``stderr_tail`` first. The ``drill`` arm's byte mismatch is a
+        byte-VERIFIED finding — no such caveat.
+
         Parameters
         ----------
         detail
@@ -836,7 +845,12 @@ class SweepAlerter:
                 "wait for escalation."
             )
         else:
-            tail = "The dead-man keeps escalating until a VERIFIED backup succeeds."
+            tail = (
+                "restic's rc cannot distinguish corruption from a remote outage mid-check "
+                "— confirm via the backup.check.failed stderr_tail before acting on "
+                "restore-from-older / re-seed (a transient outage self-heals next night). "
+                "The dead-man keeps escalating until a VERIFIED backup succeeds."
+            )
         message = escape_markdown_v2(
             f"🛑 BACKUP REPO CORRUPT: {detail}. Do NOT run automated repair — follow "
             f"docs/runbooks/backup-offbox.md (restore-from-older / re-seed). {tail}"

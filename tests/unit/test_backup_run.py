@@ -770,6 +770,27 @@ class TestVerify:
         assert state.consecutive_failures == 1
         assert any(entry["event"] == "backup.check.failed" for entry in logs)
 
+    def test_check_failure_alert_names_co_equal_causes(self, tmp_path: Path) -> None:
+        """Round-8 MINOR pin: restic exits rc=1 for an UNREACHABLE repo exactly
+        as for genuine corruption (probed on 0.16.4), so BOTH verify arms'
+        alert details must name the co-equal causes + point at the
+        backup.check.failed stderr_tail — never assert corruption as verified
+        fact (a WAN drop during the read-data tail must not send the operator
+        into a multi-day re-seed)."""
+        harness = Harness(tmp_path)
+        harness.runner.script["check"] = _inv("check", rc=1)
+        assert harness.run() == EXIT_CORRUPTION
+        structure_msg = harness.notifier.published[0].message
+        assert "corruption OR the remote became unreachable" in structure_msg
+        assert "stderr\\_tail" in structure_msg  # MarkdownV2-escaped
+
+        harness2 = Harness(tmp_path, env={"BRUTEX_BACKUP_STATE_DIR": str(tmp_path / "b2")})
+        harness2.runner.script["check-data"] = _inv("check", rc=1)
+        assert harness2.run() == EXIT_CORRUPTION
+        subset_msg = harness2.notifier.published[0].message
+        assert "corruption OR the remote became unreachable" in subset_msg
+        assert "stderr\\_tail" in subset_msg
+
     def test_check_timeout_exit_4(self, tmp_path: Path) -> None:
         harness = Harness(tmp_path)
         harness.runner.script["check"] = _inv("check", timed_out=True)
