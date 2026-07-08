@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Generator, Iterable, Sequence
 from concurrent.futures import Future
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -1480,3 +1481,399 @@ def _stepping_clock(*, step: float) -> Callable[[], float]:
         return holder["t"]
 
     return clock
+
+
+# ───────────────────── heavy-grid-aware stall + OOM quarantine ─────────────────────
+# DEC-SWEEP-STALL-OOM-GUARDS-001: (1) the stall bound scales with the in-flight
+# mask·bar work so a legitimately-slow k=5 tuple is not spuriously aborted near grid
+# completion, while a genuine hang still aborts (finite bound); (2) a worker OOM →
+# BrokenProcessPool is caught DISTINCTLY, the in-flight tuples are durably quarantined
+# (cache-record + checkpoint advance) so a resume never re-dispatches the same OOMing
+# tuple, then the run fails LOUDLY naming the offending tuple(s) + remediation.
+
+
+def _cache_seen(guards: SweepGuards, grid: SweepGridConfig, tuple_: SweepTuple) -> bool:
+    """Probe the SweepCache for *tuple_* (mirrors the driver's cache key)."""
+    from brutex.engine.sweep_supervisor import tuple_cache_params
+
+    return guards.cache.seen(
+        tuple_.k,
+        tuple_.instrument,
+        tuple_.tf.label,
+        "bull" if tuple_.direction is Side.BUY else "bear",
+        tuple_cache_params(tuple_, grid),
+        data_snapshot_hash=grid.data_snapshot_hash,
+        indicator_version=grid.indicator_version,
+        code_commit_sha=grid.code_commit_sha,
+    )
+
+
+class TestStallEnvResolution:
+    """The two positive-float env knobs — unset/valid/invalid, LOUD on bad values."""
+
+    def test_stall_seconds_unset_is_default(self) -> None:
+        assert mod.resolve_stall_seconds(env={}) == mod.DEFAULT_STALL_SECONDS
+
+    def test_stall_seconds_blank_is_default(self) -> None:
+        assert mod.resolve_stall_seconds(env={mod.STALL_SECONDS_ENV: "  "}) == (
+            mod.DEFAULT_STALL_SECONDS
+        )
+
+    def test_stall_seconds_valid_is_verbatim(self) -> None:
+        assert mod.resolve_stall_seconds(env={mod.STALL_SECONDS_ENV: "600"}) == 600.0
+
+    @pytest.mark.parametrize("raw", ["oops", "0", "-5", "inf", "nan"])
+    def test_stall_seconds_invalid_falls_back_and_warns(self, raw: str) -> None:
+        with capture_logs() as logs:
+            got = mod.resolve_stall_seconds(env={mod.STALL_SECONDS_ENV: raw})
+        assert got == mod.DEFAULT_STALL_SECONDS
+        events = [e for e in logs if e["event"] == "sweep.stall_seconds.invalid"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "warning"
+        assert events[0]["requested_env"] == repr(raw)
+
+    def test_stall_seconds_reads_os_environ_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(mod.STALL_SECONDS_ENV, raising=False)
+        assert mod.resolve_stall_seconds() == mod.DEFAULT_STALL_SECONDS
+
+    def test_mask_bars_unset_is_default(self) -> None:
+        assert mod.resolve_stall_min_mask_bars_per_sec(env={}) == (mod.STALL_MIN_MASK_BARS_PER_SEC)
+
+    def test_mask_bars_valid_is_verbatim(self) -> None:
+        assert (
+            mod.resolve_stall_min_mask_bars_per_sec(
+                env={mod.STALL_MASK_BARS_PER_SEC_ENV: "1000000"}
+            )
+            == 1_000_000.0
+        )
+
+    @pytest.mark.parametrize("raw", ["nope", "-1", "0"])
+    def test_mask_bars_invalid_falls_back_and_warns(self, raw: str) -> None:
+        with capture_logs() as logs:
+            got = mod.resolve_stall_min_mask_bars_per_sec(
+                env={mod.STALL_MASK_BARS_PER_SEC_ENV: raw}
+            )
+        assert got == mod.STALL_MIN_MASK_BARS_PER_SEC
+        assert any(e["event"] == "sweep.stall_mask_bars_per_sec.invalid" for e in logs)
+
+
+class TestTupleWorkAndEffectiveStall:
+    """The pure work estimate + the heavy-grid-aware bound (both arms)."""
+
+    def test_tuple_work_is_masks_times_bars(self, tmp_path: Path) -> None:
+        from brutex.engine.combo_mask import count_combos
+
+        grid = _grid()  # condition_bits [0..4] → n_unique = 5
+        tuples = list(iter_sweep_tuples(grid))
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            for t in tuples:
+                assert driver._tuple_work(t, 240) == float(count_combos(t.k, 5)) * 240.0
+
+    def test_effective_stall_light_grid_keeps_base_floor(self, tmp_path: Path) -> None:
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing, stall_seconds=300.0)
+            # A tiny work value / the huge default throughput floor → base wins.
+            assert driver._effective_stall_seconds(2400.0) == 300.0
+
+    def test_effective_stall_heavy_grid_scales_above_base(self, tmp_path: Path) -> None:
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ing,
+                guards=guards,
+                workers=4,
+                stall_seconds=300.0,
+                stall_min_mask_bars_per_sec=1.0,  # 1 mask·bar/s → work == seconds
+            )
+            # work / 1.0 = 5_000_000 s ≫ the 300 s base → the work-scaled bound wins.
+            assert driver._effective_stall_seconds(5_000_000.0) == 5_000_000.0
+
+
+class TestHeavyGridStallBound:
+    """A legitimately-slow heavy tuple is NOT aborted; a real hang STILL aborts."""
+
+    def test_heavy_inflight_tuple_scales_the_wait_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stall wait budget handed to ``_futures_wait`` SCALES with the in-flight
+        work — for a heavy grid it is FAR above the flat 300 s (the pre-fix bound that
+        would abort a legit slow tuple), and the run completes without aborting."""
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+        orig_wait = mod._futures_wait
+        seen_timeouts: list[float] = []
+
+        def _spy(
+            pending: Iterable[Future[mod.TupleWorkResult]],
+            *,
+            timeout: float,
+            return_when: str,
+        ) -> tuple[set[Future[mod.TupleWorkResult]], set[Future[mod.TupleWorkResult]]]:
+            seen_timeouts.append(timeout)
+            return orig_wait(pending, timeout=timeout, return_when=return_when)
+
+        monkeypatch.setattr(mod, "_futures_wait", _spy)
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ing,
+                guards=guards,
+                workers=4,
+                stall_seconds=300.0,
+                stall_min_mask_bars_per_sec=1.0,  # heavy: work == seconds
+            )
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            fake = _FakePool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
+        # The pre-fix flat bound would have been ~300; the heavy bound is ≫ that.
+        assert seen_timeouts, "the drive must have awaited at least one result"
+        assert max(seen_timeouts) > 1000.0
+        assert acc.tuples_run == total  # never aborted
+
+    def test_genuine_hang_on_a_heavy_grid_still_aborts(self, tmp_path: Path) -> None:
+        """Even with a large work-scaled bound, a fully-wedged pool STILL aborts (the
+        bound is FINITE) — proven by a clock that jumps past the scaled deadline."""
+        grid = _grid()
+        clock = _stepping_clock(step=3000.0)  # jumps past any small work-scaled bound
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ing,
+                guards=guards,
+                workers=4,
+                stall_seconds=300.0,
+                stall_min_mask_bars_per_sec=1.0,
+                monotonic=clock,
+            )
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            fake = _FakePool(
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), never_resolve={0, 1}
+            )
+            with pytest.raises(mod.SweepStallError, match="mask"):
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
+
+
+class _BrokenPool:
+    """A fake pool modelling a worker OOM breaking the process pool.
+
+    ``break_on`` selects which enumeration indices' FUTURES carry
+    :class:`BrokenProcessPool` (``None`` = all — a real OOM breaks EVERY in-flight
+    future); ``raise_on_submit`` makes ``submit`` ITSELF raise (the pool broke before
+    any task was accepted). A non-breaking index runs the real in-process worker body.
+    """
+
+    def __init__(
+        self,
+        ctx: mod._WorkerContext,
+        *,
+        break_on: set[int] | None = None,
+        raise_on_submit: bool = False,
+    ) -> None:
+        mod._worker_init(ctx)
+        self._break_on = break_on
+        self._raise_on_submit = raise_on_submit
+
+    def submit(
+        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+    ) -> Future[mod.TupleWorkResult]:
+        if self._raise_on_submit:
+            raise BrokenProcessPool("A child process terminated abruptly (OOM)")
+        fut: Future[mod.TupleWorkResult] = Future()
+        if self._break_on is None or index in self._break_on:
+            fut.set_exception(BrokenProcessPool("A child process terminated abruptly (OOM)"))
+        else:
+            fut.set_result(mod._run_tuple_in_worker(index, tuple_, bars))
+        return fut
+
+
+class _RecordingFakePool(_FakePool):
+    """A normal in-process fake pool that RECORDS every dispatched enumeration index."""
+
+    def __init__(self, ctx: mod._WorkerContext) -> None:
+        super().__init__(ctx)
+        self.submitted: list[int] = []
+
+    def submit(
+        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+    ) -> Future[mod.TupleWorkResult]:
+        self.submitted.append(index)
+        return super().submit(fn, index, tuple_, bars)
+
+
+class TestBrokenProcessPoolQuarantine:
+    def test_broken_pool_quarantines_inflight_and_fails_loud(self, tmp_path: Path) -> None:
+        """A broken pool → SweepWorkerPoolBrokenError naming the tuple(s) + remediation;
+        the in-flight tuples are cache-recorded + the checkpoint advances past them."""
+        grid = _grid()
+        tuples = list(iter_sweep_tuples(grid))
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            fake = _BrokenPool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            with pytest.raises(mod.SweepWorkerPoolBrokenError) as exc_info:
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
+            ckpt = guards.checkpoint.next_index
+            seen0 = _cache_seen(guards, grid, tuples[0])
+            seen1 = _cache_seen(guards, grid, tuples[1])
+        msg = str(exc_info.value)
+        assert "OOM" in msg
+        assert mod.SWEEP_WORKERS_ENV in msg  # remediation names the workers knob
+        assert mod.MEM_BUDGET_ENV in msg  # …and the memory-budget knob
+        assert "NIFTY" in msg  # names the offending tuple(s)
+        # max_inflight=2 → the two in-flight tuples were quarantined.
+        assert acc.tuples_pool_broken == 2
+        assert ckpt == 2  # checkpoint advanced PAST them (no prior failure)
+        assert seen0 is True and seen1 is True  # cache-recorded → a resume skips them
+
+    def test_resume_does_not_redispatch_quarantined_tuples(self, tmp_path: Path) -> None:
+        """After a broken-pool quarantine, a RESUME never re-dispatches the poison
+        tuples into the same OOM — it skips them and makes progress on the rest."""
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver1 = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc1 = mod._Accumulator()
+            broken = _BrokenPool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            with pytest.raises(mod.SweepWorkerPoolBrokenError):
+                driver1._drive(broken, 0, 2, 4, acc1)  # type: ignore[arg-type]
+
+            # RESUME: a fresh drive over the SAME durable guards.
+            resume_from = guards.checkpoint.next_index
+            assert resume_from == 2
+            driver2 = _driver(tmp_path, grid, guards, ing)
+            acc2 = mod._Accumulator()
+            recording = _RecordingFakePool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            driver2._drive(recording, resume_from, 2, 4, acc2)  # type: ignore[arg-type]
+
+        # The quarantined indices 0 & 1 were NEVER re-submitted to a worker.
+        assert 0 not in recording.submitted and 1 not in recording.submitted
+        # …and the rest of the grid made progress.
+        assert acc2.tuples_run == total - 2
+        assert guards.checkpoint.next_index == total
+
+    def test_submit_broken_before_any_task_fails_loud_with_zero_quarantined(
+        self, tmp_path: Path
+    ) -> None:
+        """A pool that breaks at the FIRST ``submit`` (before any tuple is in flight)
+        still fails LOUD (nothing to quarantine — the empty-pending path)."""
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            fake = _BrokenPool(
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), raise_on_submit=True
+            )
+            with pytest.raises(mod.SweepWorkerPoolBrokenError, match="OOM"):
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
+            ckpt = guards.checkpoint.next_index
+        assert acc.tuples_pool_broken == 0
+        assert ckpt == 0
+
+    def test_apply_pool_broken_advances_checkpoint_when_clean(self, tmp_path: Path) -> None:
+        """The pool_broken apply branch: no prior failure → cache-record + checkpoint++."""
+        grid = _grid()
+        tuples = list(iter_sweep_tuples(grid))
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            outcome = mod._Outcome(
+                index=0,
+                tuple_=tuples[0],
+                kind="pool_broken",
+                summary=None,
+                failed_error="BrokenProcessPool: OOM",
+                audit_records=(),
+            )
+            driver._apply(outcome, acc)
+            ckpt = guards.checkpoint.next_index
+            seen0 = _cache_seen(guards, grid, tuples[0])
+        assert acc.tuples_pool_broken == 1
+        assert ckpt == 1  # advanced (contiguous-clean)
+        assert seen0 is True
+
+    def test_apply_pool_broken_after_failure_is_cache_recorded_not_checkpointed(
+        self, tmp_path: Path
+    ) -> None:
+        """A pool_broken quarantine AFTER a prior failure: the checkpoint stays FROZEN,
+        but the tuple is cache-recorded so a resume ALWAYS skips it (the cache belt)."""
+        grid = _grid()
+        tuples = list(iter_sweep_tuples(grid))
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            acc.had_failure = True  # a prior genuine failure froze the checkpoint
+            outcome = mod._Outcome(
+                index=1,
+                tuple_=tuples[1],
+                kind="pool_broken",
+                summary=None,
+                failed_error="BrokenProcessPool: OOM",
+                audit_records=(),
+            )
+            driver._apply(outcome, acc)
+            ckpt = guards.checkpoint.next_index
+            seen1 = _cache_seen(guards, grid, tuples[1])
+        assert acc.tuples_pool_broken == 1
+        assert ckpt == 0  # FROZEN — the post-failure prefix is not advanced
+        assert seen1 is True  # …but cache-recorded → resume skips it anyway
+
+    def test_pool_broken_emits_a_distinct_audit_action(self, tmp_path: Path) -> None:
+        """The quarantine records the distinct SUPERVISOR_TUPLE_POOL_BROKEN audit line."""
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            fake = _BrokenPool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            with pytest.raises(mod.SweepWorkerPoolBrokenError):
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert mod.SUPERVISOR_ACTION_TUPLE_POOL_BROKEN in actions
+
+    def test_run_wraps_a_broken_pool_error_in_an_abort_line(self, tmp_path: Path) -> None:
+        """``run()`` records SUPERVISOR_ABORT then re-raises the DISTINCT broken-pool
+        error (a subclass overriding ``_drive`` — the driver is ``__slots__``-based)."""
+
+        class _BreakingDriver(mod.ParallelGridDriver):
+            def _drive(
+                self,
+                pool: Any,
+                resume_from: int,
+                max_inflight: int,
+                heap_cap: int,
+                acc: mod._Accumulator,
+            ) -> None:
+                raise mod.SweepWorkerPoolBrokenError("worker OOM")
+
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _BreakingDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ing,
+                guards=guards,
+                workers=2,
+            )
+            with pytest.raises(mod.SweepWorkerPoolBrokenError, match="worker OOM"):
+                driver.run()
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert "SUPERVISOR_ABORT" in actions

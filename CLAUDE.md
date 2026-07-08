@@ -18,7 +18,49 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
+_Last updated: 2026-07-08 (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 —
+the parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a
+HEAVY-GRID-AWARE stall watchdog + a distinct `BrokenProcessPool` QUARANTINE,
+closing two round-3 meta-refuter run-killers, additive resilience (a CLEAN run
+is byte-identical; frozen sweep goldens + P-06/suffix-independence UNMODIFIED).
+(1) the stall watchdog no longer fires a flat 300 s: a legitimately-slow k=5
+1-minute tuple (`C(60,5) = 5.46M` masks × hundreds of thousands of bars) runs
+as one worker future FAR longer than 5 min with no sub-tuple progress, so at
+the grid tail — only slow heads in flight, none completing within 300 s — the
+old bound aborted a multi-hour grid near completion. The wait budget is now
+SCALED by the in-flight `mask·bar` work (`_effective_stall_seconds = max(base,
+work / STALL_MIN_MASK_BARS_PER_SEC)`; `work = C(n_unique, k) × N_bars` stored
+per in-flight `_Dispatched`), so a tuple that legitimately needs N minutes gets
+a proportional bound while a genuine hang STILL aborts (the bound is FINITE — a
+wedged worker makes zero progress). Env knobs `BRUTEX_SWEEP_STALL_SECONDS` +
+`BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC` (positive-float, invalid→default+LOUD);
+`stall_seconds`/`stall_min_mask_bars_per_sec` default `None`→env-resolved so
+`run_parallel_grid`/the CLI pick it up with no call-site change. HONEST (Golden
+Rule #10): `2.5e8 mask·bar/s` is a CONSERVATIVE hang-detection floor
+(kernel ~1e9, ~4× headroom), setting only the false-abort-margin ↔
+wedge-detection-latency trade-off, never results. (2) a worker OOM →
+`BrokenProcessPool` is now caught DISTINCTLY (`_drive`; `future.result()` runs
+BEFORE `pending.pop` so the broken future stays quarantinable): every in-flight
+tuple is QUARANTINED (`_quarantine_broken_pool` → a new `"pool_broken"`
+`_Outcome` per tuple → `_apply` `SweepCache.record`s it so a resume ALWAYS
+cache-skips it even under a prior-failure-frozen checkpoint, PLUS a
+contiguous-clean checkpoint advance) then the run fails LOUDLY with the NEW
+`SweepWorkerPoolBrokenError` naming the offending tuple(s) + remediation
+(reduce `BRUTEX_SWEEP_WORKERS` / k, or raise `BRUTEX_SWEEP_MEM_BUDGET_BYTES`).
+So a resume NEVER re-dispatches the same deterministically-OOMing tuple (the
+checkpoint froze at the clean prefix before, causing a silent no-progress
+livelock across resumes) and makes progress on the rest; a distinct
+`SUPERVISOR_TUPLE_POOL_BROKEN` audit action + ERROR log + `tuples_pool_broken`
+counter make the loss LOUD. Fail-loud is chosen over blind pool-rebuild on the
+merits + the memory-budget-division interaction: the per-tuple rank budget
+divides across workers (`memory_budget_bytes` = `total × fraction / workers`),
+so rebuilding into the next heavy tuple would just re-OOM — the honest fix
+tells the operator to reduce pressure while durably quarantining the poison
+tuple. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+scope/vocab/rate/lake/audit-schema change (the new action appears only on a
+broken-pool run, never on a clean run); `sweep_parallel.py` 100% line+branch
+(109 tests); ruff/ruff-format/`mypy --strict`/`pyright` clean.
+Earlier: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
 DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
@@ -1187,7 +1229,18 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
+- **Active branch:** `claude/sweep-stall-oom-guards` (**DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608** — the
+  parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a HEAVY-GRID-AWARE stall watchdog (the wait budget
+  scales by the in-flight `mask·bar` work `C(n_unique, k) × N_bars` so a legitimately-slow k=5 tuple is not
+  false-aborted near grid completion, while a genuine hang still aborts on the FINITE bound; env
+  `BRUTEX_SWEEP_STALL_SECONDS` + `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC`) + a distinct `BrokenProcessPool`
+  QUARANTINE (a worker OOM durably quarantines every in-flight tuple — cache-record so a resume always cache-skips
+  it + a contiguous-clean checkpoint advance — then fails LOUDLY with `SweepWorkerPoolBrokenError` naming the tuple
+  + remediation, so a resume never re-dispatches the same deterministically-OOMing tuple and no silent
+  no-progress livelock occurs). Additive resilience — a CLEAN run is byte-identical, frozen sweep goldens +
+  P-06/suffix-independence UNMODIFIED; `sweep_parallel.py` 100% line+branch. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change).
+  Earlier: `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
   DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
@@ -3140,7 +3193,11 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/blissful-curie-gp94rk`
+- **Active feature branch:** `claude/sweep-stall-oom-guards`
+  (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
+  gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
+  quarantine; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/blissful-curie-gp94rk`
   Earlier: `claude/upbeat-tesla-mfrovq`
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
   CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
