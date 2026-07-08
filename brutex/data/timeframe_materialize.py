@@ -69,7 +69,7 @@ from brutex.data.timeframes import (
 from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
     from datetime import date, datetime
     from pathlib import Path
 
@@ -108,12 +108,36 @@ DAILY_TF_LABEL: Final[str] = "1day"
 def _now_ist() -> datetime:
     """The current IST wall-clock instant — the ONE injectable clock seam for
     the default daily-derive cutoff (tests freeze THIS, never the cutoff law —
-    DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001)."""
-    from datetime import UTC, datetime
+    DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001). Delegates to the COMMON
+    :func:`brutex.calendars.nse.now_ist` clock leaf
+    (DEC-DAILY-CUTOFF-GROUNDED-001) — the name survives as the monkeypatch
+    seam."""
+    from brutex.calendars.nse import now_ist
 
-    from brutex.calendars.nse import IST
+    return now_ist()
 
-    return datetime.now(UTC).astimezone(IST)
+
+#: Env kill switch for the data-grounded daily cutoff
+#: (DEC-DAILY-CUTOFF-GROUNDED-001). Default ON; ``0`` / ``off`` / ``false`` /
+#: ``no`` (case-insensitive) reverts to the pure clock arm of
+#: DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 at runtime (the graceful revert).
+DAILY_CUTOFF_GROUNDED_ENV: Final[str] = "BRUTEX_DAILY_CUTOFF_GROUNDED"
+
+
+def daily_cutoff_grounding_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """``True`` unless :data:`DAILY_CUTOFF_GROUNDED_ENV` is an explicit off-value.
+
+    The escape hatch (the exact ``BRUTEX_PREBUILD_INCREMENTAL`` idiom — ONE
+    shared off-value set, :data:`brutex.data.derive_stamp.DISABLED_ENV_VALUES`):
+    unset / empty / any other value ⇒ grounding is ON for dense (index)
+    symbols; an off-value ⇒ every run resolves the pure clock cutoff.
+    """
+    import os
+
+    from brutex.data.derive_stamp import DISABLED_ENV_VALUES
+
+    source = env if env is not None else os.environ
+    return source.get(DAILY_CUTOFF_GROUNDED_ENV, "").strip().lower() not in DISABLED_ENV_VALUES
 
 
 def month_partition_files(base: Path, months: Iterable[tuple[int, int]]) -> list[str]:
@@ -420,6 +444,7 @@ def materialize_lake_timeframes(
     tfs: Iterable[str] = MATERIALIZABLE_TFS,
     include_daily: bool = False,
     daily_before: date | None = None,
+    daily_cutoff_now: datetime | None = None,
     months: Iterable[tuple[int, int]] | None = None,
     incremental: bool | None = None,
     dense_symbol: bool = False,
@@ -453,14 +478,34 @@ def materialize_lake_timeframes(
       (latest-wins on the derived ``1day``, 2-dp tick snap at the sink). The
       daily bar count joins the result under :data:`DAILY_TF_LABEL`.
 
-    ``daily_before`` is the forming-session cutoff (an IST date); ``None``
-    (production) resolves via
-    :func:`~brutex.calendars.nse.daily_derive_cutoff` on the current IST
-    instant (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001): a still-forming /
+    ``daily_before`` is the forming-session cutoff (an IST date); an EXPLICIT
+    date is absolute LAW (no grounding — the lake-heal months rebuild, the
+    doctor's ``probe_day + 1`` call, and every explicit-cutoff test keep
+    byte-identical semantics). ``None`` (production) resolves via
+    :func:`~brutex.calendars.nse.daily_derive_cutoff` on ``daily_cutoff_now``
+    — the run's PINNED IST instant (the orchestrator pins ONE instant per
+    prebuild run for parallel byte-identity, DEC-HARDWARE-ENVELOPE-001 M1);
+    ``None`` falls back to the injectable ``_now_ist()`` clock seam
+    (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001): a still-forming /
     pre-close session is never written as a final daily bar (no look-ahead),
     while a run on a non-trading day OR provably AFTER the run day's own
     close (per-date close honored — regular, ``SPECIAL_WEEKEND_TRADING_
     SESSIONS`` Budget weekends, Muhurat evenings) includes the run day.
+    **Data-grounded arm (DEC-DAILY-CUTOFF-GROUNDED-001):** on that default
+    path, for a DENSE symbol (``dense_symbol=True`` — a SPOT INDEX per the
+    #1031 gate; an illiquid name's genuine last trade legitimately precedes
+    15:29, so per-symbol grounding would wrongly defer its market-complete
+    sessions) with :func:`daily_cutoff_grounding_enabled` ON, the cutoff is
+    re-grounded AFTER the 1-minute read against the frame's own last bar
+    (:func:`~brutex.calendars.nse.daily_derive_cutoff_grounded` — DEFER-only:
+    a post-close run over a PROVABLY-incomplete run-day session defers that
+    one day instead of finalizing a partial daily bar; a complete session
+    — last bar 15:29 + 1 min == the calendar close — derives byte-identically
+    to the clock arm). The incremental-skip check below stays on the PRE-read
+    clock verdict (the zero-read fast path cannot see the frame), while the
+    STAMP records the EFFECTIVE cutoff the derive consumed (see
+    :class:`~brutex.data.derive_stamp.DeriveStamp`); a grounded deferral
+    therefore honestly re-derives each run until the data completes.
     Rerun-safe: the derived intraday partitions AND the derived daily are
     both latest-wins (DEC-TF-REMAT-LATEST-WINS-001 — a re-derivation of
     identical data is a silent byte-identical no-op, and a bucket recomputed
@@ -557,7 +602,7 @@ def materialize_lake_timeframes(
     with derive_write_lock(lake_root):
         from datetime import UTC, datetime
 
-        from brutex.calendars.nse import daily_derive_cutoff
+        from brutex.calendars.nse import daily_derive_cutoff, daily_derive_cutoff_grounded
         from brutex.data.derive_stamp import (
             DeriveStamp,
             derive_stamp_path,
@@ -582,7 +627,15 @@ def materialize_lake_timeframes(
         # DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001: the production default is the
         # session-close-aware cutoff — a post-close (or non-trading-day) run
         # includes the run day's completed session; a mid-session run excludes it.
-        before: date = daily_before if daily_before is not None else daily_derive_cutoff(_now_ist())
+        # ``cutoff_now`` stays None iff the caller passed an EXPLICIT cutoff —
+        # the "no grounding, daily_before is LAW" marker for the daily branch
+        # below (DEC-DAILY-CUTOFF-GROUNDED-001).
+        cutoff_now: datetime | None = None
+        if daily_before is not None:
+            before: date = daily_before
+        else:
+            cutoff_now = daily_cutoff_now if daily_cutoff_now is not None else _now_ist()
+            before = daily_derive_cutoff(cutoff_now)
         before_iso = before.isoformat() if include_daily else None
 
         # A months-bounded (partial) derive never skips and never stamps
@@ -632,8 +685,13 @@ def materialize_lake_timeframes(
         )
         resampler = intraday_resampler_for(kind)
 
-        def _stamp(last_1m_ist_date: str | None) -> None:
-            """Record the successful full derive (best-effort — never raises)."""
+        def _stamp(last_1m_ist_date: str | None, daily_before_iso: str | None) -> None:
+            """Record the successful full derive (best-effort — never raises).
+
+            ``daily_before_iso`` is the EFFECTIVE cutoff the derive consumed —
+            a grounded deferral stamps the deferred value, never the clock one
+            (DEC-DAILY-CUTOFF-GROUNDED-001; see ``DeriveStamp.daily_before``).
+            """
             if not inc or token is None:
                 return
             save_derive_stamp(
@@ -642,7 +700,7 @@ def materialize_lake_timeframes(
                     token=token,
                     tfs=tuple(sorted(set(requested))),
                     include_daily=include_daily,
-                    daily_before=before_iso,
+                    daily_before=daily_before_iso,
                     last_1m_ist_date=last_1m_ist_date,
                     written_at=datetime.now(UTC).isoformat(timespec="seconds"),
                 ),
@@ -672,7 +730,7 @@ def materialize_lake_timeframes(
             result = materialize_timeframes(
                 tfs=requested, read_1m=read_1m, write_tf=write_tf, resampler=resampler
             )
-            _stamp(last_1m_ist_date=None)
+            _stamp(last_1m_ist_date=None, daily_before_iso=before_iso)
             _log_write_summary(result)
             return result
 
@@ -685,6 +743,39 @@ def materialize_lake_timeframes(
         # Read the 1-minute base ONCE and share the frame between the intraday
         # derivation and the daily derivation (halves the partition I/O).
         df_1m = read_1m()
+        # ONE last-bar extraction, two consumers: the grounded cutoff below and
+        # the incremental stamp's daily-cutoff rule (DEC-DAILY-CUTOFF-GROUNDED-001).
+        last_bar_ist = _last_ist_datetime(df_1m)
+        # Data-grounded cutoff arm (DEC-DAILY-CUTOFF-GROUNDED-001): only on the
+        # default-cutoff path (``cutoff_now`` set ⇔ no explicit ``daily_before``),
+        # only for a dense (index) symbol, and only while the env gate is ON.
+        # DEFER-only: it can demote the clock's "run day closed" verdict when the
+        # frame's own last bar proves the run-day session INCOMPLETE, never the
+        # reverse — so a complete regular session (last bar 15:29) derives
+        # byte-identically to the clock arm.
+        effective_before = before
+        if cutoff_now is not None and dense_symbol and daily_cutoff_grounding_enabled():
+            if last_bar_ist is not None and last_bar_ist.date() > cutoff_now.date():
+                # Observe-only anomaly: a FUTURE-dated bar escaped the pull-side
+                # drop_bars_after guard (clock skew / corruption). The grounded
+                # arm abstains to the clock verdict; the prebuild never crashes
+                # on a diagnostic.
+                _LOG.warning(
+                    "prebuild.daily_cutoff.future_bar_anomaly",
+                    symbol=symbol,
+                    last_bar_ist=last_bar_ist.isoformat(),
+                    run_day=cutoff_now.date().isoformat(),
+                )
+            grounded = daily_derive_cutoff_grounded(cutoff_now, last_bar_ist=last_bar_ist)
+            if grounded != before:
+                _LOG.info(
+                    "prebuild.daily_cutoff.grounded_defer",
+                    symbol=symbol,
+                    last_bar_ist=None if last_bar_ist is None else last_bar_ist.isoformat(),
+                    clock_before=before.isoformat(),
+                    grounded_before=grounded.isoformat(),
+                )
+            effective_before = grounded
         intraday = materialize_timeframes(
             tfs=requested, read_1m=lambda: df_1m, write_tf=write_tf, resampler=resampler
         )
@@ -693,7 +784,7 @@ def materialize_lake_timeframes(
             write_1day=make_lake_write_1day(
                 lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
             ),
-            before=before,
+            before=effective_before,
             resample_fn=daily_resample_fn_for(kind),
         )
         # OBSERVE-ONLY daily-open substitution scan (DEC-CALENDAR-EXPECTED-BARS-
@@ -704,9 +795,12 @@ def materialize_lake_timeframes(
         opens_substituted = 0
         if kind is PrebuildKind.SPOT:
             opens_substituted = observe_daily_open_substitutions(
-                df_1m, before=before, symbol=symbol, dense=dense_symbol
+                df_1m, before=effective_before, symbol=symbol, dense=dense_symbol
             )
-        _stamp(last_1m_ist_date=_last_ist_date(df_1m))
+        _stamp(
+            last_1m_ist_date=None if last_bar_ist is None else last_bar_ist.date().isoformat(),
+            daily_before_iso=effective_before.isoformat(),
+        )
         result = MaterializeResult(
             written={**intraday.written, DAILY_TF_LABEL: daily.bars_written},
             skipped=intraday.skipped,
@@ -716,14 +810,16 @@ def materialize_lake_timeframes(
         return result
 
 
-def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
-    """The frame's last bar's IST calendar date (ISO), or ``None`` when empty.
+def _last_ist_datetime(df_1m: pl.DataFrame) -> datetime | None:
+    """The frame's last bar's full IST timestamp, or ``None`` when empty.
 
-    Feeds the stamp's daily-cutoff rule (DEC-PREBUILD-INCREMENTAL-001): a
-    stamped run whose cutoff already lay strictly AFTER this date finalised
-    every session in the data, so a later cutoff derives identically from the
-    unchanged 1-minute source. A naive (tz-less) timestamp is treated as UTC —
-    the lake's storage convention.
+    The ONE last-bar extraction (one ``max()`` scan, two consumers —
+    DEC-DAILY-CUTOFF-GROUNDED-001): the data-grounded cutoff arm
+    (:func:`~brutex.calendars.nse.daily_derive_cutoff_grounded`) consumes the
+    full instant; the stamp's daily-cutoff rule (DEC-PREBUILD-INCREMENTAL-001)
+    consumes its calendar date via :func:`_last_ist_date`. A naive (tz-less)
+    timestamp is treated as UTC — the lake's storage convention; a non-datetime
+    ``max()`` (defensive) reads ``None`` — honest unknown, never fabricated.
     """
     from datetime import UTC, datetime
 
@@ -736,15 +832,30 @@ def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
         return None
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)
-    return ts.astimezone(IST).date().isoformat()
+    return ts.astimezone(IST)
+
+
+def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
+    """The frame's last bar's IST calendar date (ISO), or ``None`` when empty.
+
+    Feeds the stamp's daily-cutoff rule (DEC-PREBUILD-INCREMENTAL-001): a
+    stamped run whose cutoff already lay strictly AFTER this date finalised
+    every session in the data, so a later cutoff derives identically from the
+    unchanged 1-minute source. Delegates to :func:`_last_ist_datetime` — one
+    extraction, one convention (DEC-DAILY-CUTOFF-GROUNDED-001).
+    """
+    last = _last_ist_datetime(df_1m)
+    return None if last is None else last.date().isoformat()
 
 
 __all__ = [
+    "DAILY_CUTOFF_GROUNDED_ENV",
     "DAILY_TF_LABEL",
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
     "MaterializeResult",
     "PrebuildKind",
+    "daily_cutoff_grounding_enabled",
     "daily_resample_fn_for",
     "frame_to_candle_bars",
     "intraday_resampler_for",
@@ -786,8 +897,22 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     O(affected-months), not O(symbol-history). The "no stored 1minute bars"
     :class:`ValueError` contract is kept in BOTH modes (a months set matching
     nothing on disk raises, mirroring the empty-tree raise).
+
+    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001): the collected frame is
+    validated by the COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (positivity
+    + OHLC ordering, one vectorized pass) BEFORE it reaches any resampler — a
+    corrupt 1m bar (e.g. ``high < low``) previously LAUNDERED into
+    self-consistent-looking derived buckets across all 19 TFs + ``1day``
+    (live-reproduced: an emitted derived ``low: 0.0``). The raised
+    :class:`~brutex.data.errors.ResampleInputError` is already in the
+    prebuild's per-symbol quarantine set, so the symbol is quarantined +
+    NAMED and its derived TFs are NOT written — rows are never silently
+    dropped or "fixed".
     """
     import polars as pl
+
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
     if with_open_interest:
@@ -822,7 +947,13 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             missing_columns="insert",
             extra_columns="ignore",
         ).collect()
-        return df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+        frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+        # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
+        # frame to the resamplers (raises the quarantining ResampleInputError).
+        validate_frame_price_sanity(
+            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+        )
+        return frame
 
     return _read
 

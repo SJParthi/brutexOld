@@ -41,8 +41,8 @@ These tests need only ``duckdb`` (for a real on-disk store) plus light fakes
 is simulated by hiding ``duckdb`` from ``sys.modules``.
 """
 
-# Whitebox edge file (DEC-P0-017 convention, mirroring test_execution_simulator
-# / test_config_runtime): it deliberately imports the module-private reference
+# Whitebox edge file (DEC-P0-017 convention, mirroring test_config_runtime):
+# it deliberately imports the module-private reference
 # helpers ``_INSTR_COLUMNS`` + ``_build_insert_sql`` to pin them at 100%, so the
 # project-wide ``reportPrivateUsage = "warning"`` is silenced file-wide here.
 # pyright: reportPrivateUsage=none
@@ -50,15 +50,18 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import threading
+import time as _time
 import zlib
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.data.coverage_ledger import CoverageRecord
-from brutex.data.errors import CatalogError
+from brutex.data.errors import CatalogError, StoreWriteDeadlineExceeded
 from brutex.data.instrument_store import (
     _INSTR_COLUMNS,
     SCHEMA_VERSION,
@@ -978,3 +981,205 @@ class TestIndexSegmentPkFix:
             assert s.count(in_scope_only=False) == 1
             assert s.get("NIFTY_RESTATED") is not None
             assert s.get("NIFTY") is None
+
+
+# ── coverage-write deadline + wedge fail-fast (DEC-STORE-WRITE-DEADLINE-001) ──
+#
+# The InstrumentStore twin of the RegistryStore guard: ``upsert_coverage`` runs as
+# ONE deadline-guarded batch; a wedged volume raises the TRANSIENT
+# StoreWriteDeadlineExceeded (the metaclass-held writer RLock unwinds on the OWNING
+# thread), later coverage writes fail fast on the latch, the coverage READ family
+# AND the split-read ``connection`` view refuse loudly (fix round 4 — read-cursor
+# survival under an ENGINE-level wedge is UNVERIFIED; these proxy hangs never reach
+# the engine), and ``close()`` skips the raw closes under a zombie. Hangs are
+# DETERMINISTIC (a proxy conn blocking on a gate, released in ``finally``).
+
+
+class _CoverageGateConn:
+    """Proxy over the real writer conn that HANGS on coverage-ledger statements."""
+
+    def __init__(self, real: object, *, hang_on: str = "coverage_ledger") -> None:
+        self._real = real
+        self._hang_on = hang_on
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+        self.close_calls = 0
+
+    def execute(self, sql: str, params: list[object] | None = None) -> object:
+        if self._hang_on in sql:
+            self.entered.set()
+            self.gate.wait(timeout=30.0)
+        real: Any = self._real
+        if params is None:
+            return real.execute(sql)
+        return real.execute(sql, params)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        real: Any = self._real
+        real.close()
+
+
+def _coverage_cell(underlying: str, *, run_id: str = "r1") -> CoverageRecord:
+    return CoverageRecord(
+        exch_id="NSE",
+        underlying_symbol=underlying,
+        year=2026,
+        expiries_pulled=1,
+        contracts_pulled=0,
+        status="expiries_only",
+        last_run_id=run_id,
+        last_fetched_at=datetime(2026, 6, 14, 9, 15, tzinfo=UTC),
+        error_message=None,
+    )
+
+
+def _wait_until_healed(store: InstrumentStore, *, timeout: float = 10.0) -> None:
+    """Poll the guard's wedge latch until the zombie completes (never hangs)."""
+    deadline_at = _time.monotonic() + timeout
+    while store._write_guard.wedged:
+        if _time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
+            pytest.fail("store did not self-heal within the watchdog bound")
+        _time.sleep(0.005)
+
+
+class TestCoverageWriteDeadline:
+    def test_hung_coverage_write_defers_and_releases_the_writer_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE lock-safety regression: a breach frees the SHARED writer RLock.
+
+        Pre-fix a wedged coverage write held the metaclass RLock forever,
+        freezing every dashboard route using a typed store method. Post-fix the
+        transient raise unwinds the ``_synchronized`` wrapper on the OWNING
+        thread, so a second thread acquires the lock within a small bound.
+        """
+        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_coverage(_coverage_cell("NIFTY"))  # healthy prior row
+            # A whitebox view that already HOLDS the read lock from a healthy
+            # execute (no fetch) BEFORE the breach — fix round 4 pins that its
+            # next execute drops the stale hold BEFORE the wedge raise.
+            stale_view = s.connection
+            stale_view.execute("SELECT 1")
+            proxy = _CoverageGateConn(s._conn)
+            s._conn = proxy
+            start = _time.monotonic()
+            try:
+                with pytest.raises(StoreWriteDeadlineExceeded) as excinfo:
+                    s.upsert_coverage(_coverage_cell("BANKNIFTY"))
+                assert proxy.entered.is_set()
+                assert _time.monotonic() - start < 5.0
+                assert excinfo.value.store == "coverage"
+                assert excinfo.value.op == "upsert_coverage"
+                acquired: list[bool] = []
+
+                def _try_acquire() -> None:
+                    got = s._lock.acquire(timeout=2.0)
+                    acquired.append(got)
+                    if got:
+                        s._lock.release()
+
+                t = threading.Thread(target=_try_acquire)
+                t.start()
+                t.join(timeout=5.0)
+                assert acquired == [True]
+                # Wedge latch: the next coverage write fails FAST, fn never runs.
+                fast_start = _time.monotonic()
+                with pytest.raises(StoreWriteDeadlineExceeded) as latched:
+                    s.upsert_coverage(_coverage_cell("SENSEX"))
+                assert _time.monotonic() - fast_start < 0.1
+                assert latched.value.latched is True
+                # Wedged coverage READS refuse loudly instead of freezing.
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.list_coverage()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.get_coverage("NSE", "NIFTY", 2026)
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.list_incomplete_coverage()
+                # Store-wide wedge fail-fast (fix round 2): typed methods OUTSIDE
+                # the coverage family refuse too — pre-fix they blocked unboundedly
+                # on the zombie-held conn mutex WHILE HOLDING the shared writer
+                # RLock, transitively re-freezing the guarded pull lane (the next
+                # upsert_coverage queued on the RLock BEFORE the guard's latch
+                # could raise).
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.get_meta("schema_version")
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.set_meta("k", "v")
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.fno_eligible_underlyings()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.list_index_equity_instruments()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.upsert_many(
+                        [],
+                        snapshot_date=date(2026, 6, 14),
+                        run_id="r-wedged",
+                        csv_source_sha256=hashlib.sha256(b"x").hexdigest(),
+                    )
+                with pytest.raises(CatalogError, match="wedged"):
+                    _ = s.schema_version
+                # /db whitebox read path (fix round 4): read-cursor survival
+                # under an ENGINE-level wedge is UNVERIFIED (the proxy hangs
+                # BEFORE the engine, so no test can exercise it) — the split
+                # read view therefore refuses in O(1) instead of gambling on
+                # DuckDB internals.
+                read_start = _time.monotonic()
+                with pytest.raises(CatalogError, match="wedged"):
+                    s.connection.execute("SELECT 1")
+                assert _time.monotonic() - read_start < 0.1
+                # The refusal leaked no read-lock hold.
+                assert s._read_lock.acquire(timeout=2.0)
+                s._read_lock.release()
+                # A view holding the read lock from a PRIOR healthy execute
+                # drops that hold BEFORE the wedge raise (release-then-check
+                # order) — the read lane can never be frozen by the refusal.
+                with pytest.raises(CatalogError, match="wedged"):
+                    stale_view.execute("SELECT 1")
+                assert s._read_lock.acquire(timeout=2.0)
+                s._read_lock.release()
+            finally:
+                proxy.gate.set()
+            # Recovery: the zombie's idempotent DELETE+INSERT lands late and the
+            # store resumes — prior row intact, deferred row present, reads work
+            # (incl. the store-wide wrapper check self-healing off the latch).
+            _wait_until_healed(s)
+            assert s.get_meta("schema_version") == str(SCHEMA_VERSION)
+            assert s.schema_version == SCHEMA_VERSION
+            # The split read view self-heals off the same latch (fix round 4).
+            assert s.connection.execute("SELECT 1").fetchone() == (1,)
+            cells = {r.underlying_symbol for r in s.list_coverage()}
+            assert cells == {"NIFTY", "BANKNIFTY"}
+            s.upsert_coverage(_coverage_cell("SENSEX", run_id="r2"))
+            assert {r.underlying_symbol for r in s.list_coverage()} == {
+                "NIFTY",
+                "BANKNIFTY",
+                "SENSEX",
+            }
+
+    def test_wedged_close_skips_both_raw_closes_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+        s = InstrumentStore.open(tmp_path / "db")
+        proxy = _CoverageGateConn(s._conn)
+        s._conn = proxy
+        read_conn: Any = s._read_conn
+        try:
+            with pytest.raises(StoreWriteDeadlineExceeded):
+                s.upsert_coverage(_coverage_cell("NIFTY"))
+            with capture_logs() as logs:
+                s.close()  # shutdown must NEVER freeze under a zombie
+            assert proxy.close_calls == 0  # writer close skipped
+            skipped = [r for r in logs if r["event"] == "store.close_skipped_wedged"]
+            assert len(skipped) == 1
+            assert skipped[0]["store"] == "coverage"
+            s.close()  # idempotent
+            with pytest.raises(CatalogError, match="closed"):
+                s.list_coverage()
+            # The read cursor was NOT closed either — it still answers (the skip
+            # covered BOTH raw closes; the daemon dies with the process).
+            assert read_conn.execute("SELECT 1").fetchone() == (1,)
+        finally:
+            proxy.gate.set()

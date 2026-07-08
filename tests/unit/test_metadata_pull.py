@@ -18,11 +18,15 @@ the sink nor the candle ingest). 100% line+branch on
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
+import pytest
 import structlog
 from brutex.adapters.groww.client import GrowwClient
 from brutex.dashboard import metadata_pull as mp
@@ -38,6 +42,7 @@ from brutex.data.coverage_ledger import (
     STATUS_PENDING,
     CoverageRecord,
 )
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.mapping_integrity import (
     attempted_pairs_from_records,
     coverage_years_from_records,
@@ -242,6 +247,7 @@ def test_happy_persist_expiries_and_contracts(tmp_path: Path) -> None:
     assert report.contract_jobs == 2
     assert report.contract_failures == 0
     assert report.contracts_persisted == 3
+    assert report.store_write_deferrals == 0  # healthy path: zero deferrals (pinned)
     assert report.years == (2026,)
     assert report.underlyings == ("NIFTY",)
     assert "persisted 2 expiry" in report.note
@@ -270,6 +276,7 @@ def test_report_to_dict_is_json_safe(tmp_path: Path) -> None:
     )
     payload = report.to_dict()
     assert payload["expiries_persisted"] == 1
+    assert payload["store_write_deferrals"] == 0
     assert payload["years"] == [2026]
     assert payload["underlyings"] == ["NIFTY"]
     assert payload["dry_run"] is False
@@ -749,6 +756,76 @@ def test_dry_run_empty_chain(tmp_path: Path) -> None:
     # The cell still ran + got 0 expiries → pending coverage row.
     assert coverage.list_coverage()[0].status == STATUS_PENDING
     assert "dry-run: set Groww credentials" in report.note
+    registry.close()
+
+
+# ── the register_pull_meter WIRING at the metadata build site ─────────────────
+# (DEC-RATE-METER-LIFECYCLE-001, audit C1: the severed call site left every test
+#  green — these drive the REAL pull_expiries_contracts and assert the effect)
+
+
+def test_live_pull_registers_exact_client_meter(tmp_path: Path) -> None:
+    """MUTANT KILLED: ``register_pull_meter(session_rate, client, ...)`` at the
+    metadata build site severed to ``pass`` → ``peek_meter()`` stays ``None``
+    (the exact audit-C1 sed-mutant site)."""
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)  # type: ignore[arg-type]
+    holder = SessionRateController()
+    registry = _registry(tmp_path)
+    pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=lambda: client,
+        session_rate=holder,
+        now=_NOW,
+        today=_TODAY,
+    )
+    assert holder.peek_meter() is client.meter, (
+        "the metadata build site must register the EXACT client CallMeter"
+    )
+    registry.close()
+
+
+def test_dry_run_never_registers_and_clears_stale_meter(tmp_path: Path) -> None:
+    """The D1 pin (FAILS on pre-#1593 HEAD): the metadata DRY-RUN never registers.
+
+    The real ``_build_dry_run_client`` GrowwClient carries a REAL ``CallMeter``
+    (``client.py`` ``default_factory=CallMeter`` — the pre-#1593 in-code "no
+    ``.meter``" claim was FALSE), so without the gate the dry-run would register
+    its own synthetic meter (a fabricated MEASURED "flowing" in a warm process)
+    AND overwrite a prior real pull's meter. MUTANT KILLED: the ``dry_run=dry_run``
+    kwarg dropped at the site / the ``register_pull_meter`` dry-run branch severed
+    → ``peek_meter()`` would be non-None (the dry-run client's meter or the stale
+    one).
+    """
+    from brutex.adapters.call_meter import CallMeter
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    holder = SessionRateController()
+    stale = CallMeter()
+    holder.register_meter(stale)  # an earlier real pull's meter in a warm process
+    registry = _registry(tmp_path)
+    report = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=True,  # NO client_factory: the REAL offline _build_dry_run_client
+        run_parallel=_sync_run_parallel,
+        session_rate=holder,
+        now=_NOW,
+        today=_TODAY,
+    )
+    assert report.dry_run is True
+    assert holder.peek_meter() is None, (
+        "a dry-run must DEREGISTER — never its own synthetic meter, never the stale one"
+    )
     registry.close()
 
 
@@ -1548,3 +1625,499 @@ def test_progress_counts_registry_rebuilt_jobs_when_all_cells_skipped(tmp_path: 
     # Exactly one tick — the rebuilt contract job — with an honest 1/1 denominator.
     assert collector.calls == [(1, 1, "NSE-NIFTY 2024-06-27 contracts")]
     registry.close()
+
+
+# ── store-write deadline deferral (DEC-STORE-WRITE-DEADLINE-001) ──────────────
+#
+# The metadata twin of the #999 window defer: a WEDGED registry/coverage DuckDB
+# write is bounded by the store-write deadline and the affected UNDERLYING's
+# cell/job is DEFERRED to the next pull — the pull COMPLETES (no raise, no
+# freeze), the deferral is loudly WARNed + counted on the report, and the
+# deferred unit re-attempts on the next pull. The hang is DETERMINISTIC (a proxy
+# conn blocking on a gate with a 30 s safety, released in ``finally``).
+
+
+class _RegistryGateConn:
+    """Proxy over the registry's DuckDB conn that HANGS on a matching statement."""
+
+    def __init__(self, real: object, *, hang_on: str) -> None:
+        self._real = real
+        self._hang_on = hang_on
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+
+    def execute(self, sql: str, params: list[object] | None = None) -> object:
+        if self._hang_on in sql:
+            self.entered.set()
+            self.gate.wait(timeout=30.0)
+        real: Any = self._real
+        if params is None:
+            return real.execute(sql)
+        return real.execute(sql, params)
+
+    def close(self) -> None:
+        real: Any = self._real
+        real.close()
+
+
+class _DeferringCoverageSink:
+    """A coverage sink whose Nth upsert raises the TRANSIENT store-write defer."""
+
+    def __init__(self, *, fail_on_calls: frozenset[int]) -> None:
+        self.inner = _CoverageSink()
+        self.calls = 0
+        self._fail_on_calls = fail_on_calls
+
+    def upsert_coverage(self, record: CoverageRecord) -> None:
+        self.calls += 1
+        if self.calls in self._fail_on_calls:
+            raise StoreWriteDeadlineExceeded(0.2, "coverage", "upsert_coverage")
+        self.inner.upsert_coverage(record)
+
+    def list_coverage(self) -> list[CoverageRecord]:
+        return self.inner.list_coverage()
+
+
+def _wedge_registry(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, *, hang_on: str
+) -> _RegistryGateConn:
+    """Swap the registry's conn for a gate proxy + shrink the deadline to 0.2 s."""
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+    proxy = _RegistryGateConn(registry._conn, hang_on=hang_on)
+    registry._conn = proxy
+    return proxy
+
+
+def _wait_registry_healed(registry: RegistryStore, *, timeout: float = 10.0) -> None:
+    """Poll the wedge latch until the zombie completes (never hangs the suite)."""
+    deadline_at = time.monotonic() + timeout
+    while registry._write_guard.wedged:
+        if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang
+            pytest.fail("registry did not self-heal within the watchdog bound")
+        time.sleep(0.005)
+
+
+def test_phase1_expiry_write_defer_completes_pull_and_defers_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The today-freeze/crash regression: a wedged Phase-1 registry write no longer
+    fails (or hangs) the WHOLE pull — the cell is deferred, loudly, per underlying."""
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"]},
+    )
+    registry = _registry(tmp_path)
+    proxy = _wedge_registry(registry, monkeypatch, hang_on="INSERT OR REPLACE INTO expiries")
+    coverage = _CoverageSink()
+    start = time.monotonic()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            report = pull_expiries_contracts(
+                [_instrument("NIFTY")],
+                registry=registry,
+                coverage_store=coverage,
+                years=[2026],
+                dry_run=False,
+                run_parallel=_sync_run_parallel,
+                client_factory=_factory(sdk),
+                now=_NOW,
+                today=_TODAY,
+                run_id="r-defer",
+            )
+        elapsed = time.monotonic() - start
+        assert proxy.entered.is_set()  # the wedge genuinely engaged
+        assert elapsed < 10.0  # the pull COMPLETED within one small deadline
+        # The deferral is counted + honest: nothing durably persisted. The engine
+        # ALSO counts the cell as a Phase-1 failure (the fetcher raised), so the
+        # pipeline gate is doubly red.
+        assert report.store_write_deferrals == 1
+        assert report.expiry_failures == 1
+        assert report.expiries_persisted == 0
+        assert report.to_dict()["store_write_deferrals"] == 1
+        # A deferred cell contributes NO Phase-2 jobs (no vendor calls against
+        # unpersisted expiries).
+        assert report.contract_jobs == 0
+        assert "get_contracts" not in sdk.calls
+        # THE SETTLE-CORRECTNESS RULE: the cell records ``failed`` — NEVER settled
+        # — with an honest 0 expiries_pulled, so the next pull re-attempts it.
+        (cell,) = coverage.list_coverage()
+        assert cell.status == STATUS_FAILED
+        assert cell.expiries_pulled == 0
+        assert cell.error_message is not None
+        assert "wedged store volume" in cell.error_message
+        # The deferral is LOUD.
+        deferred = [r for r in logs if r["event"] == mp.METADATA_EXPIRY_WRITE_DEFERRED_EVENT]
+        assert len(deferred) == 1
+        assert deferred[0]["exchange"] == "NSE"
+        assert deferred[0]["underlying"] == "NIFTY"
+        assert deferred[0]["year"] == 2026
+        assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
+        assert deferred[0]["defer_seconds"] == 0.2
+        assert deferred[0]["latched"] is False
+    finally:
+        proxy.gate.set()
+    # RE-ATTEMPT ON THE NEXT PULL (the #999 recovery pin): the volume heals, the
+    # failed cell is re-pulled, and everything lands + settles.
+    _wait_registry_healed(registry)
+    report2 = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-recovered",
+    )
+    assert report2.store_write_deferrals == 0
+    assert registry.count_expiries() == 1
+    assert registry.count_contracts() == 1
+    (cell2,) = coverage.list_coverage()
+    assert cell2.status == STATUS_COMPLETE
+    assert cell2.last_run_id == "r-recovered"
+    registry.close()
+
+
+def test_phase2_contract_write_defer_fails_job_latches_sibling_and_repulls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged Phase-2 contract batch defers PER JOB: the breaching job burns ONE
+    deadline, the sibling fails fast on the latch (no deadline stacking), both are
+    counted + WARNed, and the un-persisted job re-pulls on the next run."""
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25", "2026-07-30"]},
+        contracts={
+            ("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"],
+            ("NSE", "NIFTY", "2026-07-30"): ["NSE-NIFTY-30Jul26-24500-PE"],
+        },
+    )
+    registry = _registry(tmp_path)
+    proxy = _wedge_registry(registry, monkeypatch, hang_on="INSERT OR REPLACE INTO contracts")
+    coverage = _CoverageSink()
+    start = time.monotonic()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            report = pull_expiries_contracts(
+                [_instrument("NIFTY")],
+                registry=registry,
+                coverage_store=coverage,
+                years=[2026],
+                dry_run=False,
+                run_parallel=_sync_run_parallel,
+                client_factory=_factory(sdk),
+                now=_NOW,
+                today=_TODAY,
+                run_id="r-p2",
+            )
+        assert time.monotonic() - start < 10.0  # ONE deadline, not one per job
+        # Both jobs deferred: the first burned the 0.2 s deadline, the second hit
+        # the wedge latch instantly.
+        assert report.contract_failures == 2
+        assert report.store_write_deferrals == 2
+        assert report.contracts_persisted == 0
+        deferred = [r for r in logs if r["event"] == mp.METADATA_CONTRACT_WRITE_DEFERRED_EVENT]
+        assert len(deferred) == 2
+        assert [r["latched"] for r in deferred] == [False, True]
+        # Phase 1 was healthy: the cell keeps its honest expiries_only rollup.
+        (cell,) = coverage.list_coverage()
+        assert cell.status == STATUS_EXPIRIES_ONLY
+        assert cell.expiries_pulled == 2
+    finally:
+        proxy.gate.set()
+    # RE-ATTEMPT: the healed registry re-pulls the un-persisted job (the breached
+    # job's zombie batch landed late + idempotently — harmless by construction).
+    _wait_registry_healed(registry)
+    report2 = pull_expiries_contracts(
+        [_instrument("NIFTY")],
+        registry=registry,
+        coverage_store=coverage,
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-p2-recovered",
+    )
+    assert report2.store_write_deferrals == 0
+    assert report2.contract_failures == 0
+    assert registry.count_contracts() == 2  # both legs present after recovery
+    registry.close()
+
+
+def test_phase1_coverage_write_defer_is_swallowed_and_counted(tmp_path: Path) -> None:
+    """A deferred Phase-1 coverage ROLLUP write is swallowed (safe: the cell's
+    persisted status is already non-settled) + counted; the phase continues."""
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"]},
+    )
+    registry = _registry(tmp_path)
+    # Call 1 = the Phase-1 cell rollup (deferred); call 2 = the post-Phase-2
+    # rewrite (healthy — so the final rollup still graduates).
+    coverage = _DeferringCoverageSink(fail_on_calls=frozenset({1}))
+    with structlog.testing.capture_logs() as logs:
+        report = pull_expiries_contracts(
+            [_instrument("NIFTY")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-cov",
+        )
+    assert report.store_write_deferrals == 1
+    deferred = [r for r in logs if r["event"] == mp.METADATA_COVERAGE_WRITE_DEFERRED_EVENT]
+    assert len(deferred) == 1
+    assert deferred[0]["underlying"] == "NIFTY"
+    # The registry write was HEALTHY, so the cell still seeded Phase 2 and the
+    # rewrite (call 2, healthy) graduated the rollup.
+    assert report.expiries_persisted == 1
+    assert report.contracts_persisted == 1
+    (cell,) = coverage.list_coverage()
+    assert cell.status == STATUS_COMPLETE
+    registry.close()
+
+
+def test_rewrite_counts_defer_breaks_and_counts(tmp_path: Path) -> None:
+    """The post-Phase-2 rewrite BREAKS on the first defer (the rest would only
+    fail fast on the latch), WARNs with the remaining-cell count, and folds ONE
+    deferral into the report."""
+    sdk = _FakeSDK(
+        expiries={
+            ("NSE", "AAA", 2026): ["2026-06-25"],
+            ("NSE", "BBB", 2026): ["2026-06-25"],
+        },
+        contracts={
+            ("NSE", "AAA", "2026-06-25"): ["NSE-AAA-25Jun26-100-CE"],
+            ("NSE", "BBB", "2026-06-25"): ["NSE-BBB-25Jun26-100-CE"],
+        },
+    )
+    registry = _registry(tmp_path)
+    # Calls 1+2 = the two Phase-1 rollups (healthy); calls 3+4 would be the two
+    # rewrites — 3 defers, so the loop must BREAK and never attempt call 4.
+    coverage = _DeferringCoverageSink(fail_on_calls=frozenset({3, 4}))
+    with structlog.testing.capture_logs() as logs:
+        report = pull_expiries_contracts(
+            [_instrument("AAA"), _instrument("BBB")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-rw",
+        )
+    assert report.store_write_deferrals == 1  # ONE counted defer — then the break
+    assert coverage.calls == 3  # the second rewrite was never attempted
+    deferred = [r for r in logs if r["event"] == mp.METADATA_COUNTS_WRITE_DEFERRED_EVENT]
+    assert len(deferred) == 1
+    assert deferred[0]["cells_remaining"] == 2
+    assert deferred[0]["latched"] is False
+    # Fail-safe: the un-rewritten cells keep their honest Phase-1 rollup.
+    by_underlying = {r.underlying_symbol: r for r in coverage.list_coverage()}
+    assert by_underlying["AAA"].status == STATUS_EXPIRIES_ONLY
+    assert by_underlying["BBB"].status == STATUS_EXPIRIES_ONLY
+    registry.close()
+
+
+# ── DEC-FORM-WINNER-PERSIST-001: the &-form winner keyed by the PRIMARY ──────
+
+
+class _MetaStore:
+    """A minimal in-memory ``MetaKV`` (the durable form-winner sidecar twin)."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.rows[key] = value
+
+    def get_meta(self, key: str) -> str | None:
+        return self.rows.get(key)
+
+
+def test_form_preference_records_under_the_primary_key_and_serves_phase2(
+    tmp_path: Path,
+) -> None:
+    """The KEY-NORMALIZATION pin (DEC-FORM-WINNER-PERSIST-001 risk #1).
+
+    The metadata pull queries the vendor with SPELLING forms but must key the
+    ``&``-form memory by the PRIMARY F&O underlying — the durable row lands under
+    ``groww.form_winner.M&M`` — and the Phase-1 (expiries) ``%26`` win reorders
+    Phase-2's (contracts) very first call for the same underlying: zero wasted
+    plain fetch inside ONE pull, and a durable row for the NEXT pull.
+    """
+    from brutex.adapters.groww.symbol_form_preference import (
+        PersistentSymbolFormPreference,
+        form_winner_key,
+    )
+
+    sdk = _FakeSDK(
+        expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+        contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+    )
+    registry = _registry(tmp_path)
+    store = _MetaStore()
+    report = pull_expiries_contracts(
+        [_equity("M&M")],
+        registry=registry,
+        coverage_store=_CoverageSink(),
+        years=[2026],
+        dry_run=False,
+        run_parallel=_sync_run_parallel,
+        client_factory=_factory(sdk),
+        now=_NOW,
+        today=_TODAY,
+        run_id="r-form",
+        form_preference=PersistentSymbolFormPreference(store),
+    )
+    assert report.contracts_persisted == 1
+    # Phase 1 learned the hard way (plain empty → encoded win)…
+    assert sdk.expiry_underlying_forms == ["M&M", "M%26M"]
+    # …and Phase 2's FIRST contracts call was already the learned winner.
+    assert sdk.contract_underlying_forms == ["M%26M"]
+    # The durable row is keyed by the PRIMARY underlying, never a spelling form.
+    assert store.rows == {form_winner_key("M&M"): "M%26M"}
+    registry.close()
+
+
+def test_form_preference_default_none_keeps_the_fixed_order(tmp_path: Path) -> None:
+    """Default parity pin: no preference ⇒ plain-first on EVERY phase, every pull."""
+    for run_id in ("r-a", "r-b"):
+        sdk = _FakeSDK(
+            expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+            contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+        )
+        registry = _registry(tmp_path / run_id)
+        pull_expiries_contracts(
+            [_equity("M&M")],
+            registry=registry,
+            coverage_store=_CoverageSink(),
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id=run_id,
+        )
+        assert sdk.expiry_underlying_forms == ["M&M", "M%26M"]  # fixed plain-first
+        assert sdk.contract_underlying_forms == ["M&M", "M%26M"]
+        registry.close()
+
+
+def test_second_pull_over_the_same_store_issues_the_winner_first(tmp_path: Path) -> None:
+    """Cross-pull durability through the METADATA phase: pull 2 re-probes nothing."""
+    from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
+
+    store = _MetaStore()
+
+    def _one_pull(label: str) -> _FakeSDK:
+        sdk = _FakeSDK(
+            expiries={("NSE", "M%26M", 2026): ["2026-06-25"]},
+            contracts={("NSE", "M%26M", "2026-06-25"): ["NSE-M&M-25Jun26-FUT"]},
+        )
+        registry = _registry(tmp_path / label)
+        pull_expiries_contracts(
+            [_equity("M&M")],
+            registry=registry,
+            coverage_store=_CoverageSink(),
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id=label,
+            # A FRESH preference per pull (a fresh process) over the SAME store.
+            form_preference=PersistentSymbolFormPreference(store),
+        )
+        registry.close()
+        return sdk
+
+    sdk1 = _one_pull("pull-1")
+    assert sdk1.expiry_underlying_forms == ["M&M", "M%26M"]  # learned the hard way
+    sdk2 = _one_pull("pull-2")
+    assert sdk2.expiry_underlying_forms == ["M%26M"]  # the winner led — zero waste
+    assert sdk2.contract_underlying_forms == ["M%26M"]
+
+
+# ── metadata pool workers carry the run id (DEC-PULL-BEAT-PERRUN-001 fix round) ──
+
+
+def test_metadata_pool_pace_beat_reaches_the_runs_keyed_channel(tmp_path: Path) -> None:
+    """The DEFAULT :class:`PoolRunParallel` propagates the driver's ambient run id to
+    its workers (contextvars copy per task), so a paced fetcher's
+    ``emit_progress_beat`` during the metadata phase attributes to the run's KEYED
+    channel — zero ``foreign_beat_dropped`` WARNs on a healthy pipeline pull (the
+    fix-round regression: pre-fix these beats resolved to "" and DROPPED, re-opening
+    the DEC-PULL-CONTENTION-ANTISTALL-001 false-stall class)."""
+    import logging
+
+    from brutex.observability.correlation import pull_id_scope
+    from brutex.observability.progress_beat import (
+        register_progress_beat,
+        reset_progress_beats,
+    )
+
+    class _BeatingSDK(_FakeSDK):
+        """The fake SDK, emitting the pace-return-shaped beat per vendor call."""
+
+        def get_expiries(self, **kw: object) -> Mapping[str, object]:
+            from brutex.observability.progress_beat import emit_progress_beat
+
+            emit_progress_beat()  # the RateController.pace return shape
+            return super().get_expiries(**kw)
+
+        def get_contracts(self, **kw: object) -> Mapping[str, object]:
+            from brutex.observability.progress_beat import emit_progress_beat
+
+            emit_progress_beat()
+            return super().get_contracts(**kw)
+
+    drop_records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "foreign_beat_dropped" in record.getMessage():
+                drop_records.append(record)
+
+    handler = _Capture()
+    beat_logger = logging.getLogger("brutex.observability.progress_beat")
+    beat_logger.addHandler(handler)
+    reset_progress_beats()
+    beats: list[int] = []
+    register_progress_beat(lambda: beats.append(1), pull_id="abc123def456")
+    sdk = _BeatingSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NIFTY26JUN25000CE"]},
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    try:
+        with pull_id_scope("abc123def456"):  # the job's run scope shape
+            report = pull_expiries_contracts(
+                [_instrument("NIFTY")],
+                registry=registry,
+                coverage_store=coverage,
+                years=[2026],
+                dry_run=False,
+                client_factory=_factory(sdk),  # DEFAULT run_parallel → the real pool
+                now=_NOW,
+                today=_TODAY,
+            )
+    finally:
+        reset_progress_beats()
+        beat_logger.removeHandler(handler)
+        registry.close()
+    assert report.expiries_persisted == 1
+    assert len(beats) >= 2  # one per vendor call — expiries + contracts, all delivered
+    assert drop_records == []  # a healthy metadata pull emits ZERO foreign-drop WARNs

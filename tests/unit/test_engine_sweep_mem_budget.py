@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from brutex.config.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.engine.sweep_mem_budget import (
     BATCH_RANK_BYTES_PER_KEPT,
     BOUNDED_RANK_MODE_ENV,
@@ -25,7 +26,6 @@ from brutex.engine.sweep_mem_budget import (
     resolve_mem_budget_bytes,
     watermark_message,
 )
-from brutex.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 
 _GIB = 1024**3
 
@@ -40,8 +40,12 @@ def _fresh_ram_cache() -> Iterator[None]:
 
 def _simulate_ram(monkeypatch: pytest.MonkeyPatch, total_bytes: int) -> None:
     """Force RAM detection to *total_bytes* (0 = the undetected sentinel)."""
-    monkeypatch.setattr("brutex.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes)
-    monkeypatch.setattr("brutex.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM)
+    monkeypatch.setattr(
+        "brutex.config.hardware_envelope._sysconf_total_ram_bytes", lambda: total_bytes
+    )
+    monkeypatch.setattr(
+        "brutex.config.hardware_envelope._sysctl_total_ram_bytes", lambda: UNDETECTED_RAM
+    )
     reset_hardware_envelope_cache()
 
 

@@ -32,6 +32,7 @@ from brutex.data.models import CandleBar
 from brutex.engine.rust_metrics import (
     SWEEP_RUST_METRICS_ENV,
     reset_observability_memo_for_tests,
+    reset_self_check_for_tests,
 )
 from brutex.engine.sweep_driver import metrics_from_trades
 from brutex.metrics.compute import ResultMetrics
@@ -101,14 +102,21 @@ def _speedup(
     def _run() -> ResultMetrics:
         return metrics_from_trades(bars, trades, start_equity_paisa=10_000_000, tf_minutes=1)
 
-    monkeypatch.delenv(SWEEP_RUST_METRICS_ENV, raising=False)
+    # Explicit "0" (not delenv): the OFF arm stays the Python tail regardless
+    # of SWEEP_RUST_METRICS_DEFAULT — flip-proof (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).
+    monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "0")
     off_result = _run()  # warm-up + reference
     off = _median_seconds(_run, rounds=9)
     monkeypatch.setenv(SWEEP_RUST_METRICS_ENV, "1")
     reset_observability_memo_for_tests()
+    # Steady state: the bounded burn-in self-check (16 kernel calls/process,
+    # each paying one extra oracle scan) is excluded from the measurement —
+    # the gate pins the per-mask cost the production sweep runs at.
+    reset_self_check_for_tests(remaining=0)
     on_result = _run()  # warm-up + equality teeth
     assert on_result == off_result  # a diverging fast arm must never pass as "fast"
     on = _median_seconds(_run, rounds=9)
+    reset_self_check_for_tests()  # never leak the exhausted budget to siblings
     return off / on
 
 

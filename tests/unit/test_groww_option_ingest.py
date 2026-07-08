@@ -20,6 +20,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
+from brutex.data.window_ledger_store import index_lake_spans
 from brutex.models import BruteXError, OutOfScopeError
 from brutex.orchestrator.parallel import PoolRunParallel, SerialRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
@@ -3640,6 +3642,39 @@ class TestReconcileFnoLedgerWindows:
         assert seeded == 1
         assert ledger.records()[0].status == "SUCCESS"
 
+    def test_prebuilt_span_index_reused_never_rebuilt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-2 review polish (DEC-PULL-SIX-STEP-ORDER-001): a caller-supplied
+        # ``span_index`` (the step-major 4-bucket loop builds it ONCE per phase)
+        # skips the per-call O(spans) rebuild — byte-identical seeding, and the
+        # in-function ``index_lake_spans`` provably NOT invoked.
+        ledger = WindowLedger()
+        contract = _ce()
+        spans = [_fno_span(contract)]
+        prebuilt = index_lake_spans(spans)
+
+        def _must_not_rebuild(_spans: object) -> dict[object, object]:
+            raise AssertionError("index_lake_spans must not run when span_index is supplied")
+
+        monkeypatch.setattr(_oi, "index_lake_spans", _must_not_rebuild)
+        seeded = reconcile_fno_ledger_windows(
+            ledger,
+            spans,
+            contracts=[contract],
+            intervals=["1minute"],
+            start=_FNO_START,
+            end=_FNO_END,
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            now=_FNO_NOW,
+            now_ist=lambda: _FNO_NOW,
+            span_index=prebuilt,
+        )
+        # Byte-identical outcome to the default (rebuild) path over the same spans.
+        assert seeded == 1
+        assert ledger.records()[0].status == "SUCCESS"
+        assert ledger.is_skippable(_fetched_key(contract))
+
 
 class TestReconcileFnoLedgerWithLake:
     """The wired entry point: load_lake_spans + the pure reconcile."""
@@ -4635,3 +4670,196 @@ class TestBreakerCanaryProbe:
             breaker_health_probe=_probe,
         )
         assert captured == [_probe]
+
+
+def test_audit_chain_records_run_and_pairs(tmp_path: Path) -> None:
+    """DEC-INGEST-AUDIT-WIRING-001 (Golden Rule #8): when an AuditWriter is wired,
+    the F&O driver appends a hash-chained RUN_START → per-pair → RUN_COMPLETE
+    trail MIRRORING the spot spine's events — and the chain VERIFIES end to end."""
+    from brutex.observability.correlation import pull_id_scope
+    from brutex.orchestrator.audit import GENESIS_PREV_HASH, AuditWriter, read_entries, verify_chain
+
+    ok1, ok2, bad = _ce(), _ce2(), _ce("NSE-NIFTY-02Jan25-99999-PE")
+    sdk = _FakeSDK(payload=_candles(), raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
+    path = tmp_path / "audit" / "fno-ingest.jsonl"
+    path.parent.mkdir(parents=True)
+    with pull_id_scope("pull-fno"), AuditWriter.open(path) as audit:
+        report = run_groww_option_ingest(
+            _client(sdk),
+            _Sink(),
+            contracts=[ok1, ok2, bad],
+            intervals=["1day"],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            audit=audit,
+        )
+    assert report.failed_pairs == 1
+    # Walk + verify the chain by hand: genesis prev_hash, per-link prev==hash, seq+1.
+    assert verify_chain(path) == 5  # RUN_START + 2×PAIR_DONE + PAIR_FAILED + RUN_COMPLETE
+    entries = read_entries(path)
+    assert entries[0].prev_hash == GENESIS_PREV_HASH
+    for prev, cur in pairwise(entries):
+        assert cur.prev_hash == prev.entry_hash
+        assert cur.seq == prev.seq + 1
+    actions = [e.action for e in entries]
+    assert actions[0] == "INGEST_RUN_START"
+    assert actions[-1] == "INGEST_RUN_COMPLETE"
+    assert actions.count("INGEST_PAIR_DONE") == 2
+    assert actions.count("INGEST_PAIR_FAILED") == 1
+    start_entry = entries[0]
+    assert start_entry.subject == "pull:pull-fno"
+    assert start_entry.payload["contracts"] == 3
+    assert start_entry.payload["jobs"] == 3
+    assert start_entry.payload["market"] == GROWW_OPTION_COVERAGE_MARKET
+    done = next(e for e in entries if e.action == "INGEST_PAIR_DONE")
+    assert done.payload["bars_appended"] == 1
+    failed = next(e for e in entries if e.action == "INGEST_PAIR_FAILED")
+    assert failed.subject == f"{bad.symbol}:1day"
+    assert failed.payload["auth_failure"] is False
+    complete = entries[-1]
+    assert complete.payload == {"pairs_ok": 2, "pairs_failed": 1, "total_bars": 2}
+
+
+def test_audit_none_writes_nothing(tmp_path: Path) -> None:
+    """audit=None (default — dry-run / synthetic callers) leaves no trail file."""
+    sdk = _FakeSDK(payload=_candles())
+    run_groww_option_ingest(
+        _client(sdk),
+        _Sink(),
+        contracts=[_ce()],
+        intervals=["1day"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+    )
+    assert not (tmp_path / "audit").exists()
+
+
+class TestRetryCounterSplitOption:
+    """DEC-RETRY-COUNTER-SPLIT-001 (F&O spine): the ledger rows carry the
+    empty/transient SPLIT of ``in_pull_fetches``. Unlike the spot spine this
+    ladder retries transients INLINE, so a clean tail can carry BOTH halves —
+    the exact conflation #924/#1355 could only relabel."""
+
+    def test_first_try_success_records_known_zero_split(self) -> None:
+        sdk = _FakeSDK()
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            now_ist=_now,
+        )
+        rec = ledger.records()[0]
+        assert rec.in_pull_fetches == 1
+        assert rec.empty_retries == 0  # a KNOWN zero — the ladder ran clean
+        assert rec.transient_retries == 0
+
+    def test_transient_then_data_carries_the_transient_half_on_success(self) -> None:
+        # One timeout absorbed inline, then bars: the SUCCESS row's split shows
+        # the transient the conflated total hid (in_pull_fetches=2 alone could
+        # equally have been an empty re-fetch).
+        sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall"), None])
+        ledger = WindowLedger()
+        report = ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=2,
+            backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        assert report.bars_appended > 0
+        rec = ledger.records()[-1]  # the final SUCCESS re-record of the window
+        assert rec.status == "SUCCESS"
+        assert rec.in_pull_fetches == 2
+        assert rec.empty_retries == 0
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries + 1 == rec.in_pull_fetches
+
+    def test_all_empty_run_records_the_empty_half(self) -> None:
+        sdk = _FakeSDK(payload=_EMPTY)
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            empty_retry_attempts=3,
+            empty_retry_backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        rec = ledger.records()[0]
+        assert rec.in_pull_fetches == 3
+        assert rec.empty_retries == 3  # every fetch was a clean empty
+        assert rec.transient_retries == 0
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+    def test_empty_then_ratelimit_exhaust_splits_the_failed_row(self) -> None:
+        # The #1355 conflation case made honest: empty (fetch 1) then a 429 that
+        # exhausts the budget (fetch 2) — the FAILED row's in_pull_fetches=2 now
+        # decomposes into one of each class.
+        sdk = _FakeSDK(script=[_EMPTY, GrowwAPIRateLimitException("429")])
+        ledger = WindowLedger()
+        ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=0,  # 429 → immediate budget exhaustion
+            empty_retry_attempts=3,
+            empty_retry_backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == "FAILED"
+        assert rec.in_pull_fetches == 2
+        assert rec.empty_retries == 1
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+    def test_mixed_ladder_carries_both_halves_into_the_clean_tail(self) -> None:
+        # 429 (retried inline) → empty → empty → data: the SUCCESS row carries
+        # BOTH halves, proving the tail threads the producer's counters through
+        # the raw payload (empty=2, transient=1, +1 data fetch = 4 total).
+        sdk = _FakeSDK(
+            script=[GrowwAPIRateLimitException("429"), _EMPTY, _EMPTY, None],
+        )
+        ledger = WindowLedger()
+        report = ingest_option_contract(
+            _client(sdk),
+            _Sink(),
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            ledger=ledger,
+            max_attempts=2,
+            backoff=lambda _a: None,
+            empty_retry_attempts=3,
+            empty_retry_backoff=lambda _a: None,
+            now_ist=_now,
+        )
+        assert report.bars_appended > 0
+        assert sdk.calls == 4
+        rec = ledger.records()[-1]
+        assert rec.status == "SUCCESS"
+        assert rec.in_pull_fetches == 4
+        assert rec.empty_retries == 2
+        assert rec.transient_retries == 1
+        assert rec.empty_retries + rec.transient_retries + 1 == rec.in_pull_fetches

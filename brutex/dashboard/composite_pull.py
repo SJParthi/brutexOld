@@ -62,12 +62,17 @@ BRUTE-FORCE ENGINE is UNCHANGED (NIFTY/BANKNIFTY/SENSEX only) — this is the LA
 * **Network-bound, NOT O(1)-total** — both phases are I/O-bound (one
   ``get_expiries`` per cell + one ``get_historical_candles`` per contract-window);
   the phasing optimises the work set, it does NOT make the pull O(1)-total.
+* **A wedged store volume defers, never crashes** — a phase-(a) registry/coverage
+  write-deadline deferral (DEC-STORE-WRITE-DEADLINE-001) skips phase (b) with an
+  honest note instead of letting the wedged registry re-read raise the terminal
+  ``RegistryError`` past the composite; the deferred underlyings re-attempt on
+  the NEXT pull.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -100,6 +105,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from brutex.adapters.groww.option_ingest import ProgressHook
+    from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
+
+    # Type-only (DEC-PULL-SIX-STEP-ORDER-001): the composite only FORWARDS the
+    # sequencer's verdict (annotations, never construction), and the dataclass
+    # lives in the LEAF pipeline_verdict module — never import it from
+    # pipeline_pull here (that re-export edge is a module-level import cycle:
+    # pipeline_pull imports this module at runtime).
+    from brutex.dashboard.pipeline_verdict import PriorStepsVerdict
     from brutex.dashboard.pull_controller import OnLedgerSync, SessionRateController
     from brutex.models import Instrument
 
@@ -132,7 +145,10 @@ class CompositePullReport:
         reference-only — phase (a) never ran).
     historical
         The phase-(b) candle-pull report (``None`` when phase (a) found no tradable
-        underlying OR the freshly-cached registry held no matching contract).
+        underlying, the freshly-cached registry held no matching contract, OR phase
+        (a) deferred ≥1 registry/coverage write batch on a wedged store volume —
+        DEC-STORE-WRITE-DEADLINE-001: phase (b) is skipped and the deferred
+        underlyings re-attempt on the next pull).
     note
         An honest one-line outcome summary.
     """
@@ -199,6 +215,27 @@ def _registry_read_keys(instruments: Sequence[Instrument]) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _underlying_kind_map(instruments: Sequence[Instrument]) -> dict[str, bool]:
+    """Map each tradable instrument's REGISTRY underlying key → ``is_index`` — pure.
+
+    DEC-PULL-SIX-STEP-ORDER-001 — the classification map that drives the strict F&O
+    steps 3-6 ordering inside :func:`~brutex.dashboard.historical_pull.pull_contract_candles`.
+    Keys go through the SAME ``primary_fno_underlying`` + alias resolution
+    :func:`_registry_read_keys` uses to READ the registry the metadata phase WROTE
+    under — so the map joins :class:`~brutex.data.registry_store.ContractRow.underlying`
+    exactly by construction (``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` →
+    ``BAJAJAUTO`` cannot misroute). First-wins on a key collision (two spot
+    spellings sharing one F&O primary), mirroring the read-key de-dup.
+    """
+    aliases = resolve_fno_index_aliases()
+    kinds: dict[str, bool] = {}
+    for inst in instruments:
+        key = primary_fno_underlying(inst.symbol_name, aliases=aliases)
+        if key not in kinds:
+            kinds[key] = inst.is_index
+    return kinds
+
+
 def _select_fresh_contracts(
     registry: RegistryStore, underlyings: Sequence[str]
 ) -> list[ContractRow]:
@@ -241,6 +278,8 @@ def pull_historical_for_underlyings(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    form_preference: SymbolFormPreference | None = None,
+    prior_steps: PriorStepsVerdict | None = None,
 ) -> CompositePullReport:
     """One-click composite: refresh metadata THEN pull candles for the selected underlyings.
 
@@ -319,6 +358,30 @@ def pull_historical_for_underlyings(
         appended-bar delta (the frozen-bars fix); *on_ledger_sync* receives the
         throttled, F&O-scope-filtered absolute ledger counts (the honest
         denominator). ``None`` (defaults) is byte-identical.
+    form_preference
+        ONE learned ``&``-form ordering shared by BOTH phases
+        (DEC-FORM-WINNER-PERSIST-001): a metadata-phase ``%26`` win makes the candle
+        phase's very first fetch for that underlying the encoded form (the memory
+        keys on the PRIMARY underlying in both phases — the cross-phase
+        normalization). Production passes the pipeline's shared
+        :class:`~brutex.adapters.groww.symbol_form_preference.\
+PersistentSymbolFormPreference` (durable across pulls); ``None`` (the default) is
+        byte-identical to the per-phase behaviour.
+    prior_steps
+        Optional :class:`~brutex.dashboard.pipeline_verdict.PriorStepsVerdict`
+        (DEC-PULL-SIX-STEP-ORDER-001) forwarded to phase (b)'s Greeks seam —
+        the sequencer's spot + metadata cleanliness + the strict flag, so the
+        strict barrier can withhold the enrichment on a prior-step
+        uncleanliness. The composite folds its OWN phase-(a) inner metadata
+        re-run gate into ``metadata_clean`` before forwarding (the review fix:
+        the sequencer computes the verdict from the phase-2 gate BEFORE this
+        composite re-enumerates, so a phase-(a) enumeration failure was
+        invisible to the Greeks seam while the sequencer's post-step barrier —
+        which reads the SAME failure via ``historical_phase_ok`` — withheld
+        the prebuild + movers; the fold keeps the strict barrier internally
+        consistent across all three post-steps). A clean phase (a) forwards a
+        verdict EQUAL to the sequencer's; ``None`` (the default — every
+        non-pipeline caller) keeps today's behavior byte-identical.
 
     Returns
     -------
@@ -371,7 +434,40 @@ def pull_historical_for_underlyings(
         session_rate=session_rate,
         now=now,
         today=today,
+        form_preference=form_preference,
     )
+
+    # ── Wedged-store gate (DEC-STORE-WRITE-DEADLINE-001) ────────────────────────
+    # A store-write deadline breach during phase (a) leaves the SHARED registry
+    # WEDGED (the abandoned zombie write still holds the DuckDB connection's
+    # internal mutex), so phase (b)'s registry re-read (``list_contracts`` →
+    # ``_ensure_not_wedged``) would raise the TERMINAL ``RegistryError`` UNCAUGHT —
+    # failing the WHOLE composite job (and the one-click pipeline's phase 3, which
+    # shares ONE registry across the composite) instead of the per-underlying
+    # defer this change guarantees ("defers the CELL, never the pull"). Mirror the
+    # pipeline's phase-2 gate (``metadata_phase_ok``'s deferral arm): skip phase
+    # (b) and return an HONEST report — the deferred underlyings re-attempt on the
+    # NEXT pull (a graceful stop, never a crash, never a halt).
+    if metadata.store_write_deferrals > 0:
+        _LOG.warning(
+            "composite_pull.metadata_write_deferred",
+            tradable=list(tradable_names),
+            store_write_deferrals=metadata.store_write_deferrals,
+        )
+        note = (
+            f"metadata deferred {metadata.store_write_deferrals} registry/coverage "
+            "write batch(es) on a wedged store volume — candle phase skipped; "
+            "deferred underlyings re-attempt next pull"
+        )
+        return CompositePullReport(
+            dry_run=dry_run,
+            requested=requested,
+            tradable=tradable_names,
+            skipped_reference_only=tuple(skipped),
+            metadata=metadata,
+            historical=None,
+            note=note,
+        )
 
     # ── Phase (b) — CANDLE pull over the FRESHLY-cached registry rows (no re-enum) ──
     # Read with the RESOLVED registry keys (the SAME primary form phase (a) persisted
@@ -401,6 +497,26 @@ def pull_historical_for_underlyings(
             note=note,
         )
 
+    # Fold the composite's OWN phase-(a) re-run gate into the threaded verdict
+    # (DEC-PULL-SIX-STEP-ORDER-001 review fix): the sequencer built ``prior_steps``
+    # from the phase-2 metadata gate BEFORE this composite re-enumerated, so a
+    # phase-(a) expiry/contract enumeration failure (exactly what
+    # ``historical_phase_ok``'s inner-metadata clause catches AFTER the fact)
+    # would leave ``metadata_clean=True`` at the Greeks seam — the enrichment
+    # ran while the sequencer then withheld the prebuild + movers on the SAME
+    # blocking signal. AND-ing the inner gate keeps the strict barrier
+    # internally consistent (Greeks / prebuild / movers agree). The import is
+    # function-local: pipeline_pull imports this module at runtime, so a
+    # module-level import would cycle (mirrors the TYPE_CHECKING-only type
+    # import above).
+    if prior_steps is not None:
+        from brutex.dashboard.pipeline_pull import metadata_phase_ok
+
+        prior_steps = replace(
+            prior_steps,
+            metadata_clean=prior_steps.metadata_clean and metadata_phase_ok(metadata),
+        )
+
     historical = pull_contract_candles(
         selected,
         lake_root=lake_root,
@@ -419,6 +535,12 @@ def pull_historical_for_underlyings(
         scope_end=scope_end,
         on_bars=on_bars,
         on_ledger_sync=on_ledger_sync,
+        form_preference=form_preference,
+        # DEC-PULL-SIX-STEP-ORDER-001: the index/stock classification that drives the
+        # strict steps 3-6 bucket order — SAME resolved keys as the registry read above
+        # — and the phase-(a)-folded prior-step verdict for the Greeks strict arm.
+        underlying_kinds=_underlying_kind_map(tradable),
+        prior_steps=prior_steps,
     )
 
     # Display honesty (DEC-FNO-FAR-EXPIRY-WINDOW-001): a clean pull with strict-law

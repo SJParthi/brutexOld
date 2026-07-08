@@ -646,6 +646,13 @@ def normalize_underlying_symbol(symbol: str) -> str:
     (``"MIDCPNIFTY"`` ≠ ``"NIFTY MIDCAP SELECT"``). It NEVER encodes a
     per-index alias (Golden Rule #1); it only folds whitespace + case.
 
+    Documented mirror (DEC-GREEKS-SPOTJOIN-STOCK-001):
+    :func:`brutex.data.lake_keys.stock_drift_fold` EXACTLY mirrors this body —
+    ``lake_keys`` is a pure stdlib leaf that cannot import this module, so the
+    two sites carry this cross-reference and a mirror-pin unit test
+    (``tests/unit/test_lake_keys.py::TestStockDriftFold``) enforces agreement.
+    Change one, change both.
+
     Parameters
     ----------
     symbol

@@ -39,9 +39,16 @@ added a symbol or changed crate version. It does NOT catch same-version,
 symbol-compatible BEHAVIORAL drift (Rust source changed while version +
 symbol surface stayed identical). The RUNTIME defence for that class on
 the trade-sim path is the CI golden/parity suite (the correctness proof
-stays CI-side; this handshake is the runtime stale-wheel tripwire), and
-closing it fully needs a source-content digest baked into the wheel — the
-same named follow-up trading_core carries, deliberately out of scope here.
+stays CI-side; this handshake is the runtime stale-wheel tripwire). The
+formerly-named "source-content digest baked into the wheel" follow-up is
+now CLOSED (DEC-RUST-SOURCE-DIGEST-TWIN-001, MIGRATION.md #1258):
+``build.rs`` bakes the crate-source BLAKE3 digest into the compiled
+module as ``__source_digest__`` and ``brutex doctor``'s
+``wheel_source_digest_fno_math`` stage compares it (WARN, non-fatal)
+against the Python-twin recompute over the repo checkout — LOCAL-machine
+scope only (CI always builds wheels from source, so it can never see a
+stale wheel); this import-time handshake deliberately does NOT gate on
+the digest (an older wheel must keep importing so the doctor can warn).
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ from collections.abc import Sequence
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentBars",
     "ResidentSweepSim",
+    "ResidentSweepSimU128",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
@@ -103,6 +111,7 @@ _assert_compiled_surface(_compiled)
 from ._fno_math import (  # noqa: E402
     ResidentBars,
     ResidentSweepSim,
+    ResidentSweepSimU128,
     __version__,
     add_u64,
     bitand_count_u64s,
@@ -133,6 +142,7 @@ __build_crate_version__: str = __version__
 __all__ = [
     "ResidentBars",
     "ResidentSweepSim",
+    "ResidentSweepSimU128",
     "__version__",
     "add_u64",
     "bitand_count_u64s",

@@ -48,10 +48,14 @@ concurrency:
   # 25 min in), so on busy days the mutation gate never finished at all.
   #
   # R2-CI-3(b): cancel-in-progress is DISABLED for push events. Push-to-main
-  # mutation FAILURES now open an alert issue (the `if: failure()` issue steps
-  # below), but a CANCELLED run is not a failure and emits NO signal — so a
-  # newer push cancelling an older run mid-flight would make the older run's
-  # surviving-mutant failure vanish silently. With cancel-in-progress=false
+  # mutation FAILURES now open an alert issue (the issue steps below). When
+  # this was written a CANCELLED run emitted NO signal — so a newer push
+  # cancelling an older run mid-flight would have made the older run's
+  # surviving-mutant failure vanish silently. Since
+  # DEC-MUTATION-ALERT-CANCELLED-001 the alert steps ALSO fire on
+  # `cancelled()` (a timeout-killed job reports CANCELLED — run 28748795864),
+  # but queueing pushes is still right: finishing the run beats alerting
+  # that it never finished. With cancel-in-progress=false
   # for push, an in-flight push run always runs to completion (and can alert);
   # a newer push queues instead of killing it. schedule + workflow_dispatch
   # keep cancel-in-progress=true: the group is event-keyed, so the weekly
@@ -72,6 +76,13 @@ env:
   # nothing about what is built or run.
   CARGO_NET_RETRY: "10"
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # DEC-TEST-APPARATUS-DEBTS-001(b): deterministic hypothesis — every mutmut
+  # pytest runner loads the `ci` profile registered in tests/conftest.py
+  # (derandomize=True), so a mutant's kill/survive verdict is a pure function
+  # of the mutant, never of seed luck. The scheduled stress-nightly arm
+  # deliberately does NOT set this — the conftest then loads the random
+  # default, overriding hypothesis's built-in auto-CI derandomization.
+  HYPOTHESIS_PROFILE: "ci"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
@@ -256,12 +267,22 @@ jobs:
           path: ".mutmut-cache*"
           retention-days: 7
           if-no-files-found: ignore
-      - name: Open GitHub issue on failure
+      - name: Open GitHub issue on failure or cancellation
         # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
         # push-to-main). This workflow has no pull_request trigger, so there is
         # no PR-noise path to suppress — the schedule-only guard used to leave a
         # push-to-main mutation failure alerting nobody.
-        if: failure()
+        #
+        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
+        # killed by its own `timeout-minutes` reports CANCELLED, not FAILED —
+        # live-probed on run 28748795864 (2026-07-05): both Rust cargo-mutants
+        # jobs were timeout-killed at exactly 120 min and their `if: failure()`
+        # alert steps SKIPPED, while the genuinely-failed Python job alerted.
+        # A timeout-death is a silent mutation-gate outage — it must alert.
+        # Honest trade-off: a run superseded by the concurrency group's
+        # cancel-in-progress (schedule/dispatch re-runs) now ALSO alerts —
+        # visible-over-silent, per the audit.
+        if: failure() || cancelled()
         uses: actions/github-script@v9
         with:
           script: |
@@ -277,7 +298,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `Python mutation testing detected surviving mutants on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              body: `Python mutation testing failed or was cancelled (e.g. timeout-killed) on commit ${context.sha} — surviving mutants OR a run that never finished. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
               labels: ['bug', 'mutation', 'python', 'critical'],
             });
 
@@ -329,12 +350,22 @@ jobs:
           name: cargo-mutants-report
           path: rust/fno-math/cargo-mutants.out
           retention-days: 14
-      - name: Open GitHub issue on failure
+      - name: Open GitHub issue on failure or cancellation
         # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
         # push-to-main). This workflow has no pull_request trigger, so there is
         # no PR-noise path to suppress — the schedule-only guard used to leave a
         # push-to-main mutation failure alerting nobody.
-        if: failure()
+        #
+        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
+        # killed by its own `timeout-minutes` reports CANCELLED, not FAILED —
+        # live-probed on run 28748795864 (2026-07-05): both Rust cargo-mutants
+        # jobs were timeout-killed at exactly 120 min and their `if: failure()`
+        # alert steps SKIPPED, while the genuinely-failed Python job alerted.
+        # A timeout-death is a silent mutation-gate outage — it must alert.
+        # Honest trade-off: a run superseded by the concurrency group's
+        # cancel-in-progress (schedule/dispatch re-runs) now ALSO alerts —
+        # visible-over-silent, per the audit.
+        if: failure() || cancelled()
         uses: actions/github-script@v9
         with:
           script: |
@@ -350,7 +381,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `cargo-mutants detected surviving mutants on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              body: `cargo-mutants failed or was cancelled (e.g. timeout-killed) on commit ${context.sha} — surviving mutants OR a run that never finished. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });
 
@@ -422,12 +453,22 @@ jobs:
           name: cargo-mutants-report-trading-core
           path: rust/trading-core/cargo-mutants.out
           retention-days: 14
-      - name: Open GitHub issue on failure
+      - name: Open GitHub issue on failure or cancellation
         # R2-CI-3(a): alert on ANY failure event (schedule, workflow_dispatch,
         # push-to-main). This workflow has no pull_request trigger, so there is
         # no PR-noise path to suppress — the schedule-only guard used to leave a
         # push-to-main mutation failure alerting nobody.
-        if: failure()
+        #
+        # DEC-MUTATION-ALERT-CANCELLED-001: `|| cancelled()` because a job
+        # killed by its own `timeout-minutes` reports CANCELLED, not FAILED —
+        # live-probed on run 28748795864 (2026-07-05): both Rust cargo-mutants
+        # jobs were timeout-killed at exactly 120 min and their `if: failure()`
+        # alert steps SKIPPED, while the genuinely-failed Python job alerted.
+        # A timeout-death is a silent mutation-gate outage — it must alert.
+        # Honest trade-off: a run superseded by the concurrency group's
+        # cancel-in-progress (schedule/dispatch re-runs) now ALSO alerts —
+        # visible-over-silent, per the audit.
+        if: failure() || cancelled()
         uses: actions/github-script@v9
         with:
           script: |
@@ -443,6 +484,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `cargo-mutants detected surviving mutants in trading-core on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              body: `cargo-mutants failed or was cancelled (e.g. timeout-killed) in trading-core on commit ${context.sha} — surviving mutants OR a run that never finished. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });

@@ -321,7 +321,7 @@ The 10 (now 12) C-checks every workday morning at 07:30 IST.
 | Hash chain intact | always | `brutex doctor C2` daily |
 | CRITICAL alert reaches operator | within 60 sec | Telegram bot heartbeat + delivery receipt |
 | Dashboard accurate | within 5 sec of underlying state | WebSocket push test |
-| `brutex doctor` runs every workday | 07:30 IST cron | systemd timer + alert if missed |
+| `brutex doctor` runs every workday | 07:30 IST cron | GHA cron doctor-daily.yml (CI surface) + verify-m4pro.yml (production surface, M4 Pro); "alert if missed" still open — DEC-DOCTOR-DAILY-CRON-001 |
 | Backtest reproducible | bit-for-bit identical | `audit replay` CLI |
 | No data loss on crash | guaranteed via checkpointing | property test P-AUDIT-1 |
 

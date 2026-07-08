@@ -9,7 +9,10 @@ replaced by OFFLINE fakes (the REAL report dataclasses — never a network call)
 * a ``dry_run`` NEVER writes an intent and NEVER clears a crashed real pull's
   intent (pinned — the dry-run-erases-the-crash-record trap);
 * ``GET /api/v1/liveproof`` carries the resume red-banner ``resume`` section
-  iff the banner holds a payload (absent ⇒ byte-identical payload);
+  iff the banner holds a payload (absent ⇒ byte-identical payload); the banner
+  auto-clear is STARTED-gated (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3
+  hostile-review fold) — a started manual pull retires it, a REFUSED start
+  (peer-held flock) keeps it;
 * ``app.state.brutex_resume_pipeline`` re-fires the SAME persisted quadruple
   through the SAME launch path, bumping the restart token; a stale selection
   clears the intent; an over-cap intent refuses with ONE CRITICAL alert + the
@@ -109,6 +112,25 @@ def client(
 
 def _pin_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
+
+
+def _pin_creds_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the credential gate to a deterministic REFUSAL.
+
+    The refusal test previously left the gate UNpinned, relying on the ambient
+    machine having no reachable AWS Parameter Store — which silently inverted
+    the test on any host where the REAL Groww SSM parameters resolve (an
+    operator laptop / an agent sandbox with live AWS credentials): the launch
+    proceeded, no 503 fired, and ``banner is None`` failed. The module
+    docstring's own contract is "never a network call"; this pin restores it —
+    the 503 → transient-RuntimeError → keep-intent + banner path under test is
+    exercised identically, now hermetically.
+    """
+    monkeypatch.setattr(
+        app_module,
+        "groww_credentials_error",
+        lambda: "credentials unavailable (pinned absent for test)",
+    )
 
 
 def _fake_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
@@ -280,6 +302,65 @@ def test_liveproof_carries_resume_banner_when_set(
     assert "resume" not in client.get("/api/v1/liveproof").json()
 
 
+def test_manual_real_pull_autoclears_the_resume_banner_end_to_end(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DEC-RESUME-BANNER-AUTOCLEAR-001: the banner's remediation is "start the
+    # pull manually from /universe" — following it through the REAL route must
+    # retire the banner (previously it stayed CRITICAL for the process lifetime).
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert intent_store.banner.snapshot() is None, "the manual launch retires the banner"
+    assert "resume" not in client.get("/api/v1/liveproof").json()
+    assert _wait_for_job(client)["state"] == "done"
+
+
+def test_refused_manual_pull_keeps_the_resume_banner_end_to_end(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Round-3 hostile-review regression (DEC-RESUME-BANNER-AUTOCLEAR-001,
+    # started-gated): a peer-held account single-flight flock makes
+    # BackgroundPullJob.start refuse (started=False) — NO pull launches, so the
+    # CRITICAL crash-loop banner must survive the refused attempt (previously
+    # persist_intent_for_launch dropped it BEFORE start() ran, permanently
+    # losing the banner for the process lifetime).
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    with pull_singleflight_lock(intent_store.lake_root):
+        resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+        assert resp.status_code == 200
+        assert resp.json()["started"] is False, "the peer-held flock refuses the launch"
+    assert intent_store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }, "a refused launch resolves no crash loop — the banner stays up"
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
+
+
+def test_dry_run_route_never_clears_the_resume_banner(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Byte-identity pin: a synthetic pull resolves no crash loop — the banner
+    # (and its liveproof section) survives a dry-run untouched.
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    intent_store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"dry_run": "true"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert intent_store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }
+    assert client.get("/api/v1/liveproof").json()["resume"]["level"] == "critical"
+
+
 def test_liveproof_without_intent_store_is_untouched(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -381,9 +462,11 @@ def test_resume_peer_held_flock_burns_no_token_and_fails_no_progress(
 def test_resume_credential_refusal_keeps_intent_for_next_boot(
     client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Creds NOT pinned: the launch's loud-refusal gate raises a 503, which the
-    # seam maps to a TRANSIENT failure — the intent survives (token burnt),
-    # bounded by the cap, and the banner says why.
+    # Creds pinned ABSENT (deterministic — never the ambient AWS reachability):
+    # the launch's loud-refusal gate raises a 503, which the seam maps to a
+    # TRANSIENT failure — the intent survives (token burnt), bounded by the
+    # cap, and the banner says why.
+    _pin_creds_absent(monkeypatch)
     _patch_spines(monkeypatch)
     intent_store.write(
         PullIntent(symbols="NIFTY", symbol=None, from_date=None, to_date=None, restarts=0)

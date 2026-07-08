@@ -63,7 +63,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import sleep as _time_sleep
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -80,7 +80,12 @@ from brutex.adapters.error_storm_breaker import (
     observe_window_success,
 )
 from brutex.adapters.groww.candles import RawPayloadHook, fetch_candle_windows
-from brutex.adapters.groww.client import GrowwClientProtocol, client_self_paces
+from brutex.adapters.groww.client import (
+    GrowwClientProtocol,
+    client_self_paces,
+    client_self_reports_rate_limits,
+    client_self_reports_successes,
+)
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
     GROWW_OPTION_COVERAGE_MARKET,
@@ -113,6 +118,7 @@ from brutex.adapters.ingest_common import (
     OLD_GAP_HORIZON_DAYS,
     clamp_window_end,
     drop_bars_after,
+    maybe_audit,
     summarize_conflicts,
 )
 from brutex.adapters.ingest_common import (
@@ -133,6 +139,7 @@ from brutex.data.session import ALL_FILTERED, filter_to_trading_session, observe
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
+    LakeSpanIndex,
     SeedCandidate,
     index_lake_spans,
     seed_enclosed_windows,
@@ -148,6 +155,9 @@ from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import SerialRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 from brutex.orchestrator.universe_phases import RunParallel
+
+if TYPE_CHECKING:
+    from brutex.orchestrator.audit import AuditWriter
 
 #: Structured logger — per-contract DEBUG detail + the transient/quarantine
 #: WARNING, every event carrying the pull's ``pull_id`` (the per-underlying INFO
@@ -336,6 +346,17 @@ class _OptionRawWindow:
     #: or a live-contract key reset — deliberately stay unsettled, data-safety first).
     old_window: bool
     attempt: int
+    #: The ``in_pull_fetches`` SPLIT (DEC-RETRY-COUNTER-SPLIT-001), threaded to the
+    #: tail's ``ledger.record(empty_retries=…, transient_retries=…)``: clean 0-bar
+    #: responses vs retryable transients the producer's fetch ladder observed for
+    #: this window. Unlike the spot payload (whose transient half is structurally
+    #: zero — its ladder short-circuits on the first transient) this spine RETRIES
+    #: transients inline, so a clean tail can carry BOTH halves; by construction
+    #: ``fetch_count == empty_fetches + transient_fetches + (1 if raw_bars else 0)``.
+    #: Defaulted 0 (the structural floor of a first-try win) so the fields ride
+    #: the frozen payload additively; the producer always passes the real counts.
+    empty_fetches: int = 0
+    transient_fetches: int = 0
 
 
 def _clamped_window_key(
@@ -483,6 +504,20 @@ def ingest_option_contract(
     # solely at the window level).
     if client_self_paces(client):
         pace = None
+    # SINGLE FEEDBACK (DEC-SUSPICION-SWEEP-FIXES-001, D2): a live client self-hooks —
+    # ``build_live_client`` / ``build_live_pool`` bake the shared controller's
+    # ``on_rate_limit`` into ``GrowwClient._call``, which fires it on EVERY 429
+    # occurrence INCLUDING the final one before the exhausted error propagates here.
+    # The spine firing its own hook again on that propagated error double-counted the
+    # final occurrence — 7 ladder hits per exhausted window instead of 6, two+
+    # step-downs from one window's storm — so it stands down (the feedback twin of
+    # the ``client_self_paces`` stand-down above). Same for the per-window
+    # ``on_success`` recovery credit (the client already recovers per clean call).
+    # ``on_timeout`` stays spine-owned — the client never fires the timeout ladder.
+    if client_self_reports_rate_limits(client):
+        on_rate_limit = None
+    if client_self_reports_successes(client):
+        on_success = None
     attempt = 0
     # LOGICAL vendor fetches THIS pull makes for this window (DEC-WINDOW-INPULL-FETCHES-001)
     # — counts BOTH the transient re-attempts and the empty re-fetches, so the ledger row's
@@ -493,6 +528,13 @@ def ingest_option_contract(
     # DEC-GROWW-AMPERSAND-CANDLE-FALLBACK-001); each physical call still rides
     # ``client.pace`` + the call meter, so rate admission sees every real call.
     fetch_count = 0
+    # SPLIT counters (DEC-RETRY-COUNTER-SPLIT-001): how ``fetch_count`` decomposes —
+    # clean 0-bar responses (the outer EMPTY-retry's evidence) vs retryable
+    # transients the inner ladder absorbed — persisted as the ledger's
+    # ``empty_retries`` / ``transient_retries``, so an EMPTY row's depth and a
+    # FAILED row's re-attempts are never conflated again (the #924/#1355 gap).
+    empty_fetches = 0
+    transient_fetches = 0
     raw_bars: list[CandleBar] = []
     # Outer EMPTY-retry loop (DEC-OPTION-EMPTY-RETRY-001): each pass runs the inner
     # transient-retry fetch; a 0-bar SUCCESS is re-fetched up to empty_retry_attempts times.
@@ -549,6 +591,10 @@ def ingest_option_contract(
                         on_rate_limit()
                 elif on_timeout is not None and steps_timeout_ladder(exc):
                     on_timeout()
+                # One more retryable transient absorbed by this window's ladder
+                # (DEC-RETRY-COUNTER-SPLIT-001) — counted BEFORE the record below
+                # so the FAILED row's split includes THIS occurrence.
+                transient_fetches += 1
                 if ledger is not None:
                     ledger.record(
                         key,
@@ -558,6 +604,8 @@ def ingest_option_contract(
                         bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
+                        empty_retries=empty_fetches,
+                        transient_retries=transient_fetches,
                     )
                 _LOG.warning(
                     "option.ingest.window.transient",
@@ -599,6 +647,7 @@ def ingest_option_contract(
                 sleep(attempt - 1)
         if raw_bars:
             break  # bars on this attempt — the (possibly glitched) empty is recovered
+        empty_fetches += 1  # one more clean 0-bar response (DEC-RETRY-COUNTER-SPLIT-001)
         if empty_attempt + 1 < empty_retry_attempts:
             # Still empty + a retry remains: log + (default no-op) backoff, then re-fetch.
             # The backoff arg is 0-based (``empty_attempt``) to TRULY mirror the spot spine
@@ -672,6 +721,8 @@ def ingest_option_contract(
         settle_empty=settle_empty,
         old_window=is_old,
         attempt=attempt,
+        empty_fetches=empty_fetches,
+        transient_fetches=transient_fetches,
     )
     if fetch_pipeline is None:
         # Synchronous, byte-identical path: run the tail inline on THIS thread.
@@ -909,6 +960,11 @@ def _process_option_window_tail(
                 bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
+                # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): the fetch ladder's own
+                # facts — a write defer is OUR stall, not a vendor transient, so
+                # the counts pass through unbumped.
+                empty_retries=raw.empty_fetches,
+                transient_retries=raw.transient_fetches,
             )
         # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
         # ledger row is durably FAILED (so the deferred window is never lost even if the
@@ -957,6 +1013,12 @@ def _process_option_window_tail(
             bars_net_new=result.bars_net_new,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
+            # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): unlike the spot tail this
+            # spine retries transients INLINE, so a clean tail can carry both
+            # halves (e.g. one 429 then bars ⇒ transient_retries=1, empty
+            # retries 0, in_pull_fetches 2).
+            empty_retries=raw.empty_fetches,
+            transient_retries=raw.transient_fetches,
             settle_empty=settle_empty,
             # ALL-FILTERED demotion (DEC-INGEST-BOUNDARY-INTEGRITY-001, boundary-
             # widened by DEC-DATA-HONESTY-ALLFILTERED-SEED-001): the vendor
@@ -1608,6 +1670,7 @@ def reconcile_fno_ledger_windows(
     contract_windows: ContractWindows | None = None,
     now: datetime | None = None,
     now_ist: Callable[[], datetime] | None = None,
+    span_index: LakeSpanIndex | None = None,
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for every F&O window the lake already ENCLOSES — **pure** cold-start.
 
@@ -1641,10 +1704,17 @@ def reconcile_fno_ledger_windows(
     *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans` shape (spot
     AND FNO partitions in one read). *now* stamps the seeded rows; *now_ist* injects the
     current-day clamp clock so the reconcile key equals the plan/fetch key deterministically.
+    *span_index* (round-2 review polish, DEC-PULL-SIX-STEP-ORDER-001): an OPTIONAL
+    pre-built :func:`~brutex.data.window_ledger_store.index_lake_spans` index over the
+    SAME *spans*, so a caller reconciling several buckets of one phase (the step-major
+    4-bucket loop in :mod:`brutex.dashboard.historical_pull`) builds the O(spans) index
+    ONCE instead of once per bucket. ``None`` (the default — every other caller) builds
+    it here, byte-identically.
     """
     stamp = now if now is not None else datetime.now(UTC)
     now_for_clamp = (now_ist or _now_ist)()
-    span_index = index_lake_spans(spans)
+    if span_index is None:
+        span_index = index_lake_spans(spans)
     candidates = _fno_reconcile_candidates(
         contracts=contracts,
         intervals=intervals,
@@ -1829,6 +1899,7 @@ def run_groww_option_ingest(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
+    audit: AuditWriter | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -1971,6 +2042,24 @@ def run_groww_option_ingest(
     :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`
     (the ``capture_hook_factory`` / ``detect_completeness_gaps`` gating pattern).
 
+    *audit* (DEC-INGEST-AUDIT-WIRING-001 — Golden Rule #8): the optional
+    hash-chained :class:`~brutex.orchestrator.audit.AuditWriter` this driver
+    appends its trail to, MIRRORING the spot spine's events —
+    ``INGEST_RUN_START`` → one ``INGEST_PAIR_DONE`` / ``INGEST_PAIR_FAILED``
+    per ``(contract, interval)`` pair → ``INGEST_RUN_COMPLETE`` — via the ONE
+    COMMON :func:`~brutex.adapters.ingest_common.maybe_audit` guard. Every
+    append runs on the single controller drain thread (never a fetch worker),
+    O(1) per event, so wiring it can never block or slow the fetch lane.
+    HONEST envelope (Golden Rule #10): in async-pipeline mode
+    (``fetch_pipeline`` wired — the production pull) the per-pair
+    ``bars_appended`` recorded on the trail is the PRODUCER-resolved count
+    (``0``; the background consumer folds the real durable counts post-drain)
+    — exactly the semantics of the spot chain's pair rows under the same
+    pipeline, never a fabricated number. A pull-wide halt raised out of the
+    drain leaves the chain WITHOUT its ``INGEST_RUN_COMPLETE`` (the honest
+    marker of an aborted pass, mirroring the spot chain). ``None`` (default —
+    dry-run / synthetic / unit-test callers) writes nothing.
+
     Returns
     -------
     GrowwOptionIngestReport
@@ -2005,8 +2094,11 @@ def run_groww_option_ingest(
     # ONE shared symbol-form preference per PASS (DEC-SYMBOL-FORM-PREFERENCE-001):
     # every contract of this run shares the learned `&`-form winners (keyed by
     # underlying inside the candle fetch), so ONE `%26` recovery reorders the whole
-    # chain's subsequent fetches. Process-local + per-run — cross-pull persistence is
-    # a named follow-up. Thread-safe (the pool fan-out records from worker threads).
+    # chain's subsequent fetches. Thread-safe (the pool fan-out records from worker
+    # threads). The production spine threads ONE PersistentSymbolFormPreference over
+    # the instrument master through `form_preference` (DEC-FORM-WINNER-PERSIST-001 —
+    # durable across market buckets, until-clean rounds AND pulls); the fresh
+    # process-local default below serves only the direct/unwired callers.
     preference = form_preference if form_preference is not None else SymbolFormPreference()
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
     # the background pool when wired, freeing the fetch connection from the serial
@@ -2105,6 +2197,22 @@ def run_groww_option_ingest(
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[OptionPairFailure] = []
+    # Golden Rule #8 (DEC-INGEST-AUDIT-WIRING-001): the F&O trail mirrors the spot
+    # spine's — RUN_START before the drain, one PAIR row per outcome on the
+    # controller thread, RUN_COMPLETE after the drain.
+    maybe_audit(
+        audit,
+        "INGEST_RUN_START",
+        f"pull:{pull_id}",
+        {
+            "contracts": len(contract_list),
+            "intervals": list(intervals),
+            "jobs": len(jobs),
+            "market": market,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+    )
     # Drain the fan-out on the controller thread: on_progress + the quarantine WARNING
     # fire here (single-threaded), so the hook need not be thread-safe. A global-stop or
     # a captured code bug surfaces; a terminal DOMAIN error is quarantined.
@@ -2116,6 +2224,16 @@ def run_groww_option_ingest(
             if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[contract.symbol, interval] = report
+            maybe_audit(
+                audit,
+                "INGEST_PAIR_DONE",
+                f"{contract.symbol}:{interval}",
+                {
+                    "bars_appended": report.bars_appended,
+                    "windows": report.windows,
+                    "still_failed_windows": report.still_failed_windows,
+                },
+            )
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
             continue
@@ -2154,6 +2272,12 @@ def run_groww_option_ingest(
                 auth_failure=auth_failed,
             )
         )
+        maybe_audit(
+            audit,
+            "INGEST_PAIR_FAILED",
+            f"{contract.symbol}:{interval}",
+            {"error": str(exc), "auth_failure": auth_failed},
+        )
         _LOG.warning(
             "option.ingest.quarantine",
             pull_id=pull_id,
@@ -2185,6 +2309,16 @@ def run_groww_option_ingest(
             failed_symbols=[f.symbol for f in failures],
             pull_id=pull_id,
         )
+    maybe_audit(
+        audit,
+        "INGEST_RUN_COMPLETE",
+        f"pull:{pull_id}",
+        {
+            "pairs_ok": len(pairs),
+            "pairs_failed": len(failures),
+            "total_bars": sum(report.bars_appended for report in pairs.values()),
+        },
+    )
     run_report = GrowwOptionIngestReport(pairs=pairs, failures=tuple(failures))
     # VISIBLE settled-window skips (DEC-WINDOW-LEDGER-RESCUE-001): ONE INFO line per
     # driver pass with the AGGREGATE count — the per-window skip stays DEBUG (a

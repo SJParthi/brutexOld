@@ -117,6 +117,30 @@ class TestClampWindowEnd:
         ist = datetime(2026, 6, 12, 16, 0, tzinfo=UTC)  # after 15:30
         assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
 
+    # ── the exact at-close instant (DEC-SESSION-CLOSE-BOUNDARY-PIN-001) ──
+    # The previously-untested boundary: exactly 15:30:00.000000 counts as
+    # CLOSED here (`>=`) — the request-side verdict, deliberately opposite to
+    # daily_derive_cutoff's finalize-side strict `>` (see the cross-module
+    # drift-pin in tests/unit/test_session_close_boundary_pin.py).
+
+    def test_intraday_exactly_at_close_allows_today_plus_one(self) -> None:
+        ist = datetime(2026, 6, 12, 15, 30, 0, 0, tzinfo=UTC)
+        assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
+
+    def test_daily_exactly_at_close_still_clamps_to_today(self) -> None:
+        # The daily arm is close-blind: today's 1day candle publishes only the
+        # NEXT day, so even the at-close instant keeps the today clamp.
+        ist = datetime(2026, 6, 12, 15, 30, 0, 0, tzinfo=UTC)
+        assert clamp_window_end("1day", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 12)
+
+    def test_intraday_one_second_before_close_clamps_to_today(self) -> None:
+        ist = datetime(2026, 6, 12, 15, 29, 59, tzinfo=UTC)
+        assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 12)
+
+    def test_intraday_one_second_after_close_allows_today_plus_one(self) -> None:
+        ist = datetime(2026, 6, 12, 15, 30, 1, tzinfo=UTC)
+        assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
+
 
 class TestDropBarsAfter:
     """DEC-CANDLE-DROP-FUTURE-BAR-001: drop a vendor bar timestamped STRICTLY AFTER the
@@ -308,3 +332,26 @@ class TestFetchUntilNonempty:
         fetch_until_nonempty(_fetch, is_empty=lambda r: not r, attempts=3, backoff=backoffs.append)
         # backoff runs before re-fetch on attempts 2 and 3 (not before the first call)
         assert backoffs == [2, 3]
+
+
+class TestMaybeAudit:
+    """`maybe_audit` — the ONE COMMON audit guard both ingest spines share
+    (DEC-INGEST-AUDIT-WIRING-001, Golden Rule #8)."""
+
+    def test_none_is_a_noop(self) -> None:
+        from brutex.adapters.ingest_common import maybe_audit
+
+        maybe_audit(None, "INGEST_RUN_START", "pull:x", {"jobs": 1})  # must not raise
+
+    def test_wired_writer_receives_one_hash_chained_line(self, tmp_path) -> None:
+        from brutex.adapters.ingest_common import maybe_audit
+        from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+        path = tmp_path / "audit.jsonl"
+        with AuditWriter.open(path) as writer:
+            maybe_audit(writer, "INGEST_PAIR_DONE", "NIFTY:1minute", {"bars_appended": 3})
+        assert verify_chain(path) == 1
+        entry = read_entries(path)[0]
+        assert entry.action == "INGEST_PAIR_DONE"
+        assert entry.subject == "NIFTY:1minute"
+        assert entry.payload == {"bars_appended": 3}

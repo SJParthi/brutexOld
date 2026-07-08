@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
@@ -35,7 +35,7 @@ from tests.bench._o1_tiers import ratio_ceiling  # noqa: E402
 if TYPE_CHECKING:  # pragma: no cover - typing only (annotations are lazy)
     # `fno_math` above is a runtime variable (importorskip result); pyright forbids
     # it in a type expression. Import the class name for annotations only.
-    from fno_math import ResidentSweepSim
+    from fno_math import ResidentSweepSim, ResidentSweepSimU128
 
 # Env-var gate — set to "1" on the M4 Pro self-hosted runner (bench-m4pro.yml).
 _ENV_M4PRO_ABS: Final[str] = "BRUTEX_M4PRO_ABS"
@@ -295,4 +295,86 @@ def test_resident_trade_sim_wired_vs_fallback_speedup() -> None:
         f"wired/fallback speedup {ratio:.1f}× fell below the {_WIRED_SPEEDUP_FLOOR:.0f}× floor "
         f"— the Phase-A wiring surface regressed (re-marshalling / object bloat / lost "
         f"release build), or the kernel silently stopped serving."
+    )
+
+
+# ── u128 kernel arm (DEC-TRADE-SIM-U128-KERNEL-001) ───────────────────────────
+#
+# The wide sibling kernel is MEASURED, never claimed-neutral: same window
+# shape as the u64 gates with bar_bits/masks carrying genuine >64-bit words,
+# through `ResidentSweepSimU128.count_trades`. The loose per-combo regression
+# floor applies (a lost release build / catastrophic generic-core regression
+# fails); the absolute number is printed for the operator on every runner.
+# The u64 arm's own gates above are UNTOUCHED — they remain the u64
+# non-regression pin.
+
+
+def _make_sim_u128(n_bars: int) -> ResidentSweepSimU128:
+    """The `_make_sim` window with each bar's bits widened past bit 64."""
+    seed = 0x9E3779B97F4A7C15
+    base = 1_000_000
+    open_p: list[int] = []
+    high_p: list[int] = []
+    low_p: list[int] = []
+    close_p: list[int] = []
+    bar_bits: list[int] = []
+    is_forced: list[bool] = [False] * n_bars
+    for i in range(n_bars):
+        wobble = ((seed * (i + 1)) >> 13) % 200 - 100
+        o = base + wobble
+        open_p.append(o)
+        high_p.append(o + 150)
+        low_p.append(o - 150)
+        close_p.append(o + (wobble % 30))
+        bar_bits.append(((seed * (i + 7)) & 0x000F_FFFF) | (1 << (64 + (i % 50))))
+    session_idx: list[int] = [0] * n_bars
+    return cast(
+        "ResidentSweepSimU128",
+        fno_math.ResidentSweepSimU128(
+            open_p, high_p, low_p, close_p, is_forced, session_idx, bar_bits
+        ),
+    )
+
+
+def _per_combo_seconds_u128(n_bars: int, n_masks: int) -> float:
+    """Best-of-N wall time per combo for the u128 kernel's ``count_trades``."""
+    sim = _make_sim_u128(n_bars)
+    masks = [
+        (((i * 0x100000001B3) | (1 << (i % 20))) & 0x000F_FFFF) | (1 << 64) for i in range(n_masks)
+    ]
+    sl, tp = 8_000, 12_000
+    sim.count_trades(masks, True, sl, tp)  # warm allocator + caches
+    best = float("inf")
+    for _ in range(5):
+        start = time.perf_counter()
+        sim.count_trades(masks, True, sl, tp)
+        best = min(best, time.perf_counter() - start)
+    return best / n_masks
+
+
+@pytest.mark.slow
+@pytest.mark.bench
+def test_trade_sim_u128_kernel_per_combo_measured() -> None:
+    """The u128 arm is MEASURED (printed) and floor-gated on every runner.
+
+    Honest envelope (Golden Rule #10): today's production vocabulary is 60
+    bits, so this arm is future headroom — the measurement documents the wide
+    kernel's real cost (the 128-bit AND is a two-limb compare; expect the same
+    order of magnitude as the u64 arm, never asserted equal).
+    """
+    per_combo_u128 = _per_combo_seconds_u128(n_bars=20_000, n_masks=64)
+    per_combo_u64 = _per_combo_seconds(n_bars=20_000, n_masks=64)
+    print(
+        f"\nRust trade-sim u128 kernel (DEC-TRADE-SIM-U128-KERNEL-001):\n"
+        f"  u128 per-combo (20k bars) = {per_combo_u128 * 1e6:.2f} µs/combo"
+        f"  ({1.0 / per_combo_u128:,.0f} combos/s)\n"
+        f"  u64  per-combo (20k bars) = {per_combo_u64 * 1e6:.2f} µs/combo"
+        f"  ({1.0 / per_combo_u64:,.0f} combos/s)\n"
+        f"  u128/u64 ratio            = {per_combo_u128 / per_combo_u64:.2f}×"
+        f"  (measured, informational — never asserted equal)\n"
+    )
+    assert per_combo_u128 <= _REGRESSION_FLOOR_SECONDS_PER_COMBO, (
+        f"u128 per-combo {per_combo_u128 * 1e3:.2f} ms exceeds the "
+        f"{_REGRESSION_FLOOR_SECONDS_PER_COMBO * 1e3:.0f} ms floor — the wide trade-sim "
+        f"kernel regressed or the maturin wheel lost its release-mode build."
     )

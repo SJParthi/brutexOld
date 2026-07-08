@@ -167,6 +167,14 @@ class RejectReason(Enum):
     #: with zero trades in the minute, so a fill at its open (even with 1-tick
     #: slippage) is unachievable. Opt-out via ``reject_stale_bars=False``.
     STALE_BAR = "stale_bar"
+    #: The signal's entry date falls in a cost-regime window whose statutory
+    #: rate is UNVERIFIED offline (pre-2024-10-01 ETC — NSE/BSE slab-era
+    #: circulars identified but never officially retrieved,
+    #: DEC-ETC-REGIME-HISTORY-001 / COSTS_VERIFIED §20 row 1) — the trade
+    #: cannot be costed honestly, so it is REJECTED per-trade instead of
+    #: charging a fabricated rate or crashing the sim; mirrors
+    #: LOT_SIZE_UNKNOWN.
+    COST_REGIME_UNVERIFIED = "cost_regime_unverified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,14 +475,15 @@ def materialize_trade(
     Returns
     -------
     MaterializedTrade | RejectedTrade
-        The priced trade, or a rejection (lot size unknown / no data /
-        stale bar / tick floor — checked in that deterministic order).
+        The priced trade, or a rejection — checked in the PINNED
+        deterministic order: lot_size → cost_regime → no_data →
+        stale_bar → tick_floor.
     """
     # Lazy import (breaks the options↔costs cycle — see the TYPE_CHECKING block):
     # by pricing time the costs package is always fully initialised.
     from brutex.costs.calculator import compute_trade_cost
-    from brutex.costs.constants import TICK_PAISA
-    from brutex.costs.types import TradeInput
+    from brutex.costs.constants import TICK_PAISA, exchange_charge_bps_x100
+    from brutex.costs.types import TradeInput, UnverifiedCostRegimeError
 
     leg = select_option_leg(signal, rule, delta_chain=delta_chain)
 
@@ -495,6 +504,29 @@ def materialize_trade(
             error=str(exc),
         )
         return RejectedTrade(leg=leg, reason=RejectReason.LOT_SIZE_UNKNOWN)
+
+    # Cost-regime availability guard (DEC-ETC-REGIME-HISTORY-001) — a pure
+    # date precondition checked BEFORE any lake I/O, mirroring the lot-size
+    # ordering above: a pre-2024-10-01 entry date lands on the ETC refusal
+    # row, so the trade cannot be costed honestly and is rejected per-trade
+    # (never priced with a fabricated rate, never a sim crash). The probe
+    # duplicates one O(log 2) lookup vs the real one inside
+    # compute_trade_cost — negligible, and it saves the wasted lake read for
+    # every pre-boundary signal. The except is NARROW: a generic ValueError
+    # from any other layer still propagates.
+    try:
+        exchange_charge_bps_x100(_INSTRUMENT_LITERAL[signal.instrument], signal.entry_ts.date())
+    except UnverifiedCostRegimeError as exc:
+        _LOG.warning(
+            "options.reject.cost_regime_unverified",
+            rule=rule.name,
+            instrument=signal.instrument.value,
+            entry_date=signal.entry_ts.date().isoformat(),
+            window_start=exc.window_start.isoformat(),
+            verified_from=exc.verified_from.isoformat() if exc.verified_from else None,
+            error=str(exc),
+        )
+        return RejectedTrade(leg=leg, reason=RejectReason.COST_REGIME_UNVERIFIED)
 
     pair = source.load_pair(
         instrument=signal.instrument,
@@ -573,6 +605,11 @@ class OptionsRuleResult:
     ``net_pnl_paisa`` alongside ``n_rejected`` — a high reject share means
     a strongly filtered, potentially optimistic sample.
 
+    ``COST_REGIME_UNVERIFIED`` is DATE-KEYED and SYSTEMATIC — it truncates
+    an entire calendar window (every pre-2024-10-01 signal,
+    DEC-ETC-REGIME-HISTORY-001), not a random sample; rule comparisons are
+    therefore within-verified-window comparisons only.
+
     Attributes
     ----------
     rule_name
@@ -598,6 +635,11 @@ class OptionsRuleResult:
     n_rejected_stale_bar
         Signals rejected on a zero-volume entry/exit bar
         (:data:`RejectReason.STALE_BAR`). Defaults to 0 for back-compat.
+    n_rejected_cost_regime_unverified
+        Signals whose entry date falls in an UNVERIFIED cost-regime
+        refusal window (:data:`RejectReason.COST_REGIME_UNVERIFIED` —
+        pre-2024-10-01 ETC, DEC-ETC-REGIME-HISTORY-001). Defaults to 0
+        for back-compat.
 
     Raises
     ------
@@ -617,6 +659,7 @@ class OptionsRuleResult:
     n_losers: int
     n_rejected_lot_size_unknown: int = 0
     n_rejected_stale_bar: int = 0
+    n_rejected_cost_regime_unverified: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -626,6 +669,7 @@ class OptionsRuleResult:
             "n_rejected_tick_floor",
             "n_rejected_lot_size_unknown",
             "n_rejected_stale_bar",
+            "n_rejected_cost_regime_unverified",
             "n_winners",
             "n_losers",
         ):
@@ -646,12 +690,14 @@ class OptionsRuleResult:
 
     @property
     def n_rejected(self) -> int:
-        """Total rejected signals (no-data + tick-floor + lot-unknown + stale-bar)."""
+        """Total rejected signals (no-data + tick-floor + lot-unknown +
+        stale-bar + cost-regime-unverified)."""
         return (
             self.n_rejected_no_data
             + self.n_rejected_tick_floor
             + self.n_rejected_lot_size_unknown
             + self.n_rejected_stale_bar
+            + self.n_rejected_cost_regime_unverified
         )
 
     @property
@@ -713,6 +759,7 @@ def run_rule_over_signals(
     n_tick_floor = 0
     n_lot_unknown = 0
     n_stale_bar = 0
+    n_cost_regime = 0
     gross = 0
     charges = 0
     net = 0
@@ -739,6 +786,8 @@ def run_rule_over_signals(
                 n_lot_unknown += 1
             elif outcome.reason == RejectReason.STALE_BAR:
                 n_stale_bar += 1
+            elif outcome.reason == RejectReason.COST_REGIME_UNVERIFIED:
+                n_cost_regime += 1
             else:
                 n_tick_floor += 1
             continue
@@ -768,6 +817,7 @@ def run_rule_over_signals(
         n_losers=losers,
         n_rejected_lot_size_unknown=n_lot_unknown,
         n_rejected_stale_bar=n_stale_bar,
+        n_rejected_cost_regime_unverified=n_cost_regime,
     )
 
 
@@ -839,6 +889,27 @@ def execute_options_sim(
                     "n_winners": result.n_winners,
                 },
             )
+    # ONE aggregate WARN per sim run when any rule rejected trades on an
+    # UNVERIFIED cost-regime window (DEC-ETC-REGIME-HISTORY-001) — the
+    # operator headline; the per-trade WARNs above remain (mirroring
+    # LOT_SIZE_UNKNOWN — WARN-storm bounding is a named follow-up). The
+    # window spans are derived from the regime-table DATA, never hardcoded.
+    n_unverified = sum(r.n_rejected_cost_regime_unverified for r in results)
+    if n_unverified:
+        from brutex.costs.constants import etc_unverified_windows  # lazy — cycle-safe
+
+        _LOG.warning(
+            "options.sim.unverified_cost_window",
+            n_rejected=n_unverified,
+            windows={
+                exch: [
+                    f"[{'history-start' if s == date.min else s.isoformat()} → "
+                    f"{e.isoformat() if e else 'open'})"
+                    for s, e in spans
+                ]
+                for exch, spans in etc_unverified_windows().items()
+            },
+        )
     return tuple(results)
 
 

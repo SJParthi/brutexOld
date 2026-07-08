@@ -63,6 +63,7 @@ from brutex.data.lake_invariants import (
     OptionForeignMonthRows,
     OptionIntraFileDup,
     PartitionCoords,
+    PriceSanityRows,
     scan_lake_invariants,
 )
 from brutex.data.models import CandleBar, OptionBar
@@ -3068,6 +3069,44 @@ class TestDerivedRecall:
         assert daily["close"].to_list() == [101.0]
         assert daily["volume"].to_list() == [22]
 
+    def test_recall_cutoff_is_session_close_aware(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-DAILY-CUTOFF-GROUNDED-001 Move 1 (the third divergent pin): the
+        recall's ``before`` rides ``daily_derive_cutoff`` — a POST-CLOSE heal
+        on a trading day recalls WITH the run day's completed session
+        (before = today + 1), where the prior plain today-IST date pin would
+        have deferred it (fails-before: the old pin read 2024-07-01). Clock
+        arm only — recall is historical heal, grounding is a named non-goal."""
+        from brutex.calendars.nse import daily_derive_cutoff
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0), close="100.00"), _bar(_ts(1), close="101.00", volume=12)])
+        _replant_with_dup(_dest(lake))
+        scan = scan_lake_invariants(lake)
+
+        captured: list[date] = []
+        real_run_recall = lake_heal._run_recall
+
+        def _spy(state: Any, *, before: date) -> Any:
+            captured.append(before)
+            return real_run_recall(state, before=before)
+
+        monkeypatch.setattr(lake_heal, "_run_recall", _spy)
+        # Mon 2024-07-01 16:00 IST == 10:30 UTC — post-close on a trading day.
+        evening = datetime(2024, 7, 1, 10, 30, tzinfo=UTC)
+        report = heal_findings(
+            scan.findings,
+            lake_root=lake,
+            files_scanned=scan.files_scanned,
+            mode="auto",
+            recall=True,
+            now=lambda: evening,
+        )
+        assert report.recall is not None
+        assert captured == [date(2024, 7, 2)]  # today + 1 — the completed run day derives
+        assert captured[0] == daily_derive_cutoff(evening.astimezone(lake_heal._IST))
+
     def test_recall_removes_the_derive_stamp(self, tmp_path: Path) -> None:
         """DEC-PREBUILD-INCREMENTAL-001: a healed symbol's derive stamp is
         removed outright by the recall (belt-and-braces on top of the source
@@ -4382,3 +4421,77 @@ class TestResidualBranches:
     def test_first_day_after_december_rolls_the_year(self) -> None:
         assert lake_heal._first_day_after(2024, 12) == date(2025, 1, 1)
         assert lake_heal._first_day_after(2024, 6) == date(2024, 7, 1)
+
+
+class TestPriceFindingsObserveOnly:
+    """A PriceSanityRows finding is NEVER healed (DEC-STORED-DATA-VALIDATION-001).
+
+    Healing is strictly row-removing/row-reassigning — "repairing" a price
+    would fabricate data (Golden Rule #1). Fails-before: the new finding type
+    would have fallen through the isinstance dispatch into the option-dup
+    healer and crashed / mis-healed the batch.
+    """
+
+    def _price_finding(self, lake: Path) -> PriceSanityRows:
+        coords = PartitionCoords(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            year=2024,
+            month=6,
+        )
+        return PriceSanityRows(path=lake / Path(coords.relpath()), coords=coords, bad_rows=2)
+
+    def test_price_finding_is_filtered_with_one_warning(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            report = heal_findings(
+                [self._price_finding(tmp_path)],
+                lake_root=tmp_path,
+                files_scanned=10,
+                mode="auto",
+                now=_now,
+            )
+        # Filtered up-front: nothing to heal, nothing quarantined, no crash.
+        assert report.findings == 0
+        assert report.healed == 0
+        assert report.errors == 0
+        assert report.actions == ()
+        warns = _events(logs, "lake_heal.price_findings_observe_only")
+        assert len(warns) == 1
+        assert warns[0]["price_findings"] == 1
+        assert not (tmp_path / ".quarantine").exists()
+
+    def test_mixed_batch_heals_the_actionable_finding_only(self, tmp_path: Path) -> None:
+        # A REAL dup partition + a price finding: the dup heals, the price
+        # finding is observe-only — the batch never crashes on the new type.
+        _poison(_dest(tmp_path), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        scan = scan_lake_invariants(tmp_path)
+        dup_findings = [f for f in scan.findings if isinstance(f, IntraFileDup)]
+        assert len(dup_findings) == 1
+        with capture_logs() as logs:
+            report = heal_findings(
+                [*dup_findings, self._price_finding(tmp_path)],
+                lake_root=tmp_path,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                now=_now,
+            )
+        assert report.findings == 1  # the dup only — price is not counted
+        assert report.healed == 1
+        assert len(_events(logs, "lake_heal.price_findings_observe_only")) == 1
+
+    def test_observe_mode_with_price_finding_stays_zero_mutation(self, tmp_path: Path) -> None:
+        with capture_logs() as logs:
+            report = heal_findings(
+                [self._price_finding(tmp_path)],
+                lake_root=tmp_path,
+                files_scanned=10,
+                mode="observe",
+                now=_now,
+            )
+        assert report.mode == "observe"
+        assert report.findings == 0
+        # No observe_only detail fires for an EMPTY post-filter batch.
+        assert _events(logs, "lake_heal.observe_only") == []
+        assert len(_events(logs, "lake_heal.price_findings_observe_only")) == 1

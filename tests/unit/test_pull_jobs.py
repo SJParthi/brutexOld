@@ -927,12 +927,39 @@ def test_run_finally_skips_clearing_running_when_superseded() -> None:
     assert job._running is True  # pyright: ignore[reportPrivateUsage]  # NOT cleared (superseded)
 
 
-def test_beat_is_a_noop_when_no_watchdog_wired() -> None:
-    """``_beat`` short-circuits (the ``self._watchdog is not None`` ->exit branch) when
-    no watchdog is wired — e.g. before any ``start`` built one."""
+def test_beat_is_a_noop_when_no_watchdog_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_beat`` short-circuits at the UNLOCKED ``self._watchdog is None`` fast exit
+    before any ``start`` built a watchdog — paying NO contextvars scan and NO job-lock
+    acquire (the restored pre-gate short-circuit, review fold round 3): a raising
+    ``current_pull_id`` stand-in proves the scan is never reached."""
     job = BackgroundPullJob(progress=PullProgress(clock=_ticking_clock()), spawn=_sync_spawn)
     assert job._watchdog is None  # pyright: ignore[reportPrivateUsage]
-    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the None guard
+
+    def _must_not_scan() -> str:
+        raise AssertionError("the no-watchdog fast exit must skip the contextvars scan")
+
+    monkeypatch.setattr(pull_jobs, "current_pull_id", _must_not_scan)
+    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — the fast exit
+
+
+def test_beat_lost_race_with_identity_rollback_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-lock ``watchdog is None`` re-check: the unlocked fast exit saw a watchdog,
+    but a refused ``start()``'s identity rollback restored a ``None`` pre-claim token
+    (a FRESH job's refusal — the rollback RESTORES, review fold NIT-2) before the locked
+    snapshot — simulated deterministically by nulling it inside the contextvars scan.
+    The beat is a silent no-op, never an ``AttributeError`` on ``None``."""
+    job = _job()
+    assert job.start(lambda _h: None, total=1) is True  # leaves the retained token
+    assert job._watchdog is not None  # pyright: ignore[reportPrivateUsage]
+
+    def _null_token_and_return_empty() -> str:
+        job._watchdog = None  # pyright: ignore[reportPrivateUsage] — the rollback landing mid-_beat
+        return ""
+
+    monkeypatch.setattr(pull_jobs, "current_pull_id", _null_token_and_return_empty)
+    job._beat()  # pyright: ignore[reportPrivateUsage]  # must not raise — locked None snapshot
 
 
 def test_set_phase_passthrough_reaches_the_snapshot() -> None:
@@ -1155,30 +1182,35 @@ class TestJournalHeartbeat:
         mid-interval one is throttled. Each record carries the BOUND pull_id."""
         from pathlib import Path
 
-        from brutex.observability.correlation import pull_id_scope
         from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
 
         root = Path(str(tmp_path))
         job = self._job(root, self._manual_clock([0.0, 50.0, 150.0]), 100.0)
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → writes
-                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=50 → throttled
-                on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=150 → writes
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → writes
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=50 → throttled
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=150 → writes
 
-        assert job.start(work, total=3) is True
+        # The RUN id is the bound id (DEC-PULL-BEAT-PERRUN-001 fix round: a beat under a
+        # FOREIGN id is now dropped by the _beat ambient gate, so the test binds the id
+        # the sanctioned way — through start()).
+        assert job.start(work, total=3, pull_id="abc123def456") is True
         assert job.snapshot().state == STATE_DONE  # PARITY: the pull is unaffected
         beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
         assert len(beats) == 2
         assert {b.pull_id for b in beats} == {"abc123def456"}
 
-    def test_unbound_pull_id_journals_nothing(self, tmp_path: object) -> None:
-        """A beat outside any ``pull_id_scope`` (no started record could group it) skips
-        the durable write — a missing heartbeat is a weaker signal, never a wrong one."""
+    def test_in_run_beat_without_explicit_scope_journals_under_run_id(
+        self, tmp_path: object
+    ) -> None:
+        """RE-PINNED (DEC-PULL-BEAT-PERRUN-001, was ``test_unbound_pull_id_journals_nothing``):
+        ``_run`` now binds the run's ``pull_id_scope``, so a beat inside the work with NO
+        explicit scope is no longer unbound — the durable heartbeat records the RUN's id
+        (the ``if not pull_id`` skip no longer fires during the run's own phases)."""
         from pathlib import Path
 
-        from brutex.observability.pull_journal import read_journal
+        from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
 
         root = Path(str(tmp_path))
         job = self._job(root, self._manual_clock([0.0, 1.0, 2.0]), 0.5)
@@ -1187,13 +1219,30 @@ class TestJournalHeartbeat:
             on_progress("NSE-NIFTY 1minute", 10, False, False)
 
         assert job.start(work, total=1) is True
+        beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
+        assert beats  # the post-fetch-phase beat is now durably attributed
+        assert {b.pull_id for b in beats} == {job.pull_id}
+        assert len(job.pull_id) == 12  # the minted run id, never ""
+
+    def test_unbound_pull_id_journals_nothing(self, tmp_path: object) -> None:
+        """A beat from a context with NO bound ``pull_id`` (a stale between-runs beat on
+        a foreign thread — nothing could group it) still skips the durable write — a
+        missing heartbeat is a weaker signal, never a wrong one."""
+        from pathlib import Path
+
+        from brutex.observability.pull_journal import read_journal
+
+        root = Path(str(tmp_path))
+        job = self._job(root, self._manual_clock([0.0]), 0.5)
+        # Whitebox: drive the throttle body directly OUTSIDE any pull_id_scope (the
+        # only production shape left with no bound id — _run now always binds one).
+        job._maybe_journal_heartbeat()  # pyright: ignore[reportPrivateUsage]
         assert read_journal(root) == []
 
     def test_none_lake_root_journals_nothing(self, tmp_path: object) -> None:
         """A ``None`` resolved lake root (dry-run / test) skips the write gracefully."""
         from pathlib import Path
 
-        from brutex.observability.correlation import pull_id_scope
         from brutex.observability.pull_journal import read_journal
 
         root = Path(str(tmp_path))
@@ -1206,10 +1255,9 @@ class TestJournalHeartbeat:
         )
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 10, False, False)
+            on_progress("NSE-NIFTY 1minute", 10, False, False)
 
-        assert job.start(work, total=1) is True
+        assert job.start(work, total=1, pull_id="abc123def456") is True
         assert job.snapshot().state == STATE_DONE
         assert read_journal(root) == []  # nothing written anywhere under tmp
 
@@ -1221,7 +1269,6 @@ class TestJournalHeartbeat:
         from pathlib import Path
 
         from brutex.observability import pull_journal
-        from brutex.observability.correlation import pull_id_scope
         from structlog.testing import capture_logs
 
         def _boom(*_a: object, **_kw: object) -> None:
@@ -1232,11 +1279,10 @@ class TestJournalHeartbeat:
         job = self._job(root, self._manual_clock([0.0]), 1.0)
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 42, False, False)
+            on_progress("NSE-NIFTY 1minute", 42, False, False)
 
         with capture_logs() as logs:
-            assert job.start(work, total=1) is True
+            assert job.start(work, total=1, pull_id="abc123def456") is True
         snap = job.snapshot()
         assert snap.state == STATE_DONE  # the pull is UNAFFECTED
         assert snap.bars == 42
@@ -1249,7 +1295,6 @@ class TestJournalHeartbeat:
         with the ``started`` record — the post-mortem 'the run was alive' evidence."""
         from pathlib import Path
 
-        from brutex.observability.correlation import pull_id_scope
         from brutex.observability.pull_journal import last_run, read_journal, record_pull_start
 
         root = Path(str(tmp_path))
@@ -1257,17 +1302,18 @@ class TestJournalHeartbeat:
         job = self._job(root, self._manual_clock([0.0]), 100.0)
 
         def work(on_progress: ProgressHook) -> None:
-            with pull_id_scope("abc123def456"):
-                on_progress("NSE-NIFTY 1minute", 10, False, False)
+            on_progress("NSE-NIFTY 1minute", 10, False, False)
 
-        assert job.start(work, total=1) is True
+        assert job.start(work, total=1, pull_id="abc123def456") is True
         run = last_run(read_journal(root))
         assert run is not None
         assert len(run.heartbeats) == 1
         assert run.interrupted is True  # start + heartbeat, no finish (died-mid-run shape)
 
     def test_stale_beat_between_runs_journals_nothing(self, tmp_path: object) -> None:
-        """A beat with NO active run (``_watchdog is None``) never journals."""
+        """A beat BEFORE the first start (the only shape where ``_watchdog is None``)
+        exits at the unlocked fast path and never journals. The between-RUNS shape —
+        the identity token retained after a finished run — is pinned separately below."""
         from pathlib import Path
 
         from brutex.observability.correlation import pull_id_scope
@@ -1278,6 +1324,37 @@ class TestJournalHeartbeat:
         with pull_id_scope("abc123def456"):
             job._beat()  # pyright: ignore[reportPrivateUsage] — whitebox: no run active
         assert read_journal(root) == []
+
+    def test_finished_run_bound_stale_beat_journals_nothing_between_runs(
+        self, tmp_path: object
+    ) -> None:
+        """REGRESSION (review fold, round 3): the finished run's identity token
+        (``_watchdog`` + ``_pull_id``) is deliberately RETAINED after ``_run``'s
+        ``finally``, so a drain-abandoned thread still bound to the FINISHED run's id
+        passes ``_beat``'s ambient gate between runs — it must inertly beat only the
+        already-STOPPED watchdog and journal NOTHING (a durable heartbeat landing
+        AFTER the run's finish record is forensic noise, not liveness)."""
+        from pathlib import Path
+
+        from brutex.observability.correlation import pull_id_scope
+        from brutex.observability.pull_journal import EVENT_HEARTBEAT, read_journal
+
+        root = Path(str(tmp_path))
+        # ONE scripted clock value — consumed by the in-run beat; a between-runs
+        # journal attempt would pop the exhausted script and fail LOUDLY.
+        job = self._job(root, self._manual_clock([0.0]), 100.0)
+
+        def work(on_progress: ProgressHook) -> None:
+            on_progress("NSE-NIFTY 1minute", 10, False, False)  # t=0 → journals
+
+        assert job.start(work, total=1, pull_id="abc123def456") is True
+        assert job.running is False  # finished — yet the identity token is retained:
+        assert job._watchdog is not None  # pyright: ignore[reportPrivateUsage]
+        assert job.pull_id == "abc123def456"
+        with pull_id_scope("abc123def456"):  # the zombie still bound to the FINISHED id
+            job._beat()  # pyright: ignore[reportPrivateUsage] — gate passes, running=False
+        beats = [e for e in read_journal(root) if e.event == EVENT_HEARTBEAT]
+        assert len(beats) == 1  # ONLY the in-run heartbeat — nothing after the finish
 
 
 # ── the on_finally completion hook (DEC-PULL-INTENT-RESUME-001) ───────────────
@@ -1392,3 +1469,191 @@ class TestOnFinally:
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
         captured[0]()  # drain the stale worker → its finally hits the ->exit branch
         assert fired == [], "a superseded worker must not fire the newer run's clear"
+
+
+# ── the on_run_end per-JOB completion hook (DEC-RATE-METER-LIFECYCLE-001) ──────
+
+
+class TestOnRunEnd:
+    """`BackgroundPullJob(on_run_end=…)` — the per-JOB run-end hook (the production
+    wiring is ``SessionRateController.clear_meter``, the #1593 C0 cross-pull meter-leak
+    fix): fires ONCE per run — success AND failure — inside the identity-gated finally,
+    strictly AFTER ``on_finally`` and strictly BEFORE the single-flight release, in its
+    OWN try/except; never on a refused start; never from a superseded stale worker."""
+
+    def test_on_run_end_fires_on_success_and_on_failure(self) -> None:
+        # MUTANT KILLED: the `_run`-finally `self._on_run_end()` invocation severed →
+        # neither run fires the hook.
+        fired: list[str] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            on_run_end=lambda: fired.append("end"),
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.snapshot().state == STATE_DONE
+        assert fired == ["end"], "the hook fires exactly once on a successful run"
+        assert job.running is False
+
+        def failing(_on_progress: ProgressHook) -> None:
+            raise RuntimeError("boom")
+
+        assert job.start(failing, total=1) is True
+        assert job.snapshot().state == STATE_ERROR
+        assert fired == ["end", "end"], "the hook fires on a FAILED run too (worker exited)"
+        assert job.running is False
+
+    def test_on_run_end_raising_swallowed_and_singleflight_released(self, tmp_path: Path) -> None:
+        # MUTANT KILLED: the hook's OWN try/except removed → the raise would escape
+        # the locked finally and skip the single-flight release below it.
+        order: list[str] = []
+
+        def _boom_end() -> None:
+            order.append("run_end")
+            raise RuntimeError("clear exploded")
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+            on_run_end=_boom_end,
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        assert order == ["run_end", "released"], "the release still happens after a raising hook"
+        assert job.running is False
+        # The job is reusable — a fresh start succeeds after the raising hook.
+        assert job.start(lambda _h: None, total=1) is True
+
+    def test_on_run_end_fires_after_on_finally_and_before_release(self, tmp_path: Path) -> None:
+        # The documented ordering contract: on_finally → on_run_end → flock release
+        # (a peer acquiring the freed flock must never see the pre-clear state).
+        order: list[str] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+            on_run_end=lambda: order.append("run_end"),
+        )
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: order.append("finally"))
+        assert started is True
+        assert order == ["finally", "run_end", "released"]
+
+    def test_on_finally_raising_does_not_skip_on_run_end(self, tmp_path: Path) -> None:
+        # MUTANT KILLED: the two hooks merged into ONE shared try/except → a raising
+        # on_finally would jump past the on_run_end call (the meter clear skipped).
+        order: list[str] = []
+
+        def _boom_finally() -> None:
+            order.append("finally")
+            raise RuntimeError("intent clear exploded")
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+            on_run_end=lambda: order.append("run_end"),
+        )
+        assert job.start(lambda _h: None, total=1, on_finally=_boom_finally) is True
+        assert order == ["finally", "run_end", "released"], (
+            "a raising on_finally must not skip the meter clear nor the release"
+        )
+
+    def test_on_run_end_not_fired_on_refused_start(self) -> None:
+        # A refused single-flight start spawns NO worker → no run ends → no fire.
+        fired: list[str] = []
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+            on_run_end=lambda: fired.append("end"),
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.start(lambda _h: None, total=1) is False  # single-flight refusal
+        assert fired == [], "a refused start must not fire the run-end hook"
+        captured[0]()  # drain the one real worker
+        assert fired == ["end"], "the real run's exit fires it exactly once"
+
+    def test_superseded_run_does_not_fire_on_run_end(self) -> None:
+        # MUTANT KILLED: the hook moved OUTSIDE the `self._watchdog is watchdog`
+        # identity gate → a stale worker would clear a NEWER run's meter.
+        captured: list[Callable[[], None]] = []
+        fired: list[str] = []
+        newer = PullWatchdog(
+            on_hung=lambda _e: None,
+            timeout_seconds=30.0,
+            spawn=_noop_spawn,
+            clock=_ticking_clock(),
+        )
+
+        def factory(_on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            return PullWatchdog(
+                on_hung=_on_hung,
+                timeout_seconds=30.0,
+                spawn=_noop_spawn,
+                clock=_ticking_clock(),
+            )
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+            watchdog_factory=factory,
+            on_run_end=lambda: fired.append("end"),
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        job._running = True  # pyright: ignore[reportPrivateUsage]
+        job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+        captured[0]()  # drain the stale worker → its finally hits the ->exit branch
+        assert fired == [], "a superseded worker must not clear the newer run's meter"
+
+
+# ── the job-kind label + running_job_kind probe (DEC-RATE-METER-LIFECYCLE-001) ─
+
+
+class TestRunningJobKind:
+    """`start(job_kind=…)` + the atomic ``running_job_kind`` property — the C5 fix:
+    the rate route's probe distinguishes a vendor PULL from the zero-vendor-call
+    SWEEP sharing the single-flight job; idle reads ``None``; a refused start never
+    overwrites the running job's kind."""
+
+    def test_running_job_kind_lifecycle(self) -> None:
+        # MUTANTS KILLED: `self._job_kind = job_kind` severed in start (a sweep would
+        # read "pull"); the property ignoring `_running` (idle would read a kind);
+        # the property returning None while running.
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.running_job_kind is None, "a never-started job reads None (no AttributeError)"
+
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.running_job_kind == pull_jobs.JOB_KIND_PULL, "the default start is pull-kind"
+        captured.pop()()  # drain → idle
+        assert job.running_job_kind is None, "an idle job reads None, never a stale kind"
+
+        assert job.start(lambda _h: None, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP) is True
+        assert job.running_job_kind == pull_jobs.JOB_KIND_SWEEP
+        captured.pop()()
+        assert job.running_job_kind is None
+
+    def test_refused_start_does_not_overwrite_running_kind(self) -> None:
+        # MUTANT KILLED: `self._job_kind = job_kind` moved BEFORE the `if
+        # self._running: return False` refusal → a refused sweep start would
+        # relabel the RUNNING pull as a sweep (the rate widget would go dark
+        # mid-pull — a fake "idle" during a live vendor pull).
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.start(lambda _h: None, total=1) is True  # a PULL is running
+        refused = job.start(lambda _h: None, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP)
+        assert refused is False
+        assert job.running_job_kind == pull_jobs.JOB_KIND_PULL, (
+            "the refused sweep start must not relabel the running pull"
+        )
+        captured[0]()
+        assert job.running_job_kind is None

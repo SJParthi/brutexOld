@@ -81,6 +81,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
+from brutex.calendars.nse import daily_derive_cutoff
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -101,6 +102,7 @@ from brutex.data.lake_invariants import (
     LegacyKeyDrift,
     OptionForeignMonthRows,
     OptionIntraFileDup,
+    PriceSanityRows,
     is_foreign_timestamp,
     option_key_dtype_error,
     option_unclassifiable_message,
@@ -238,8 +240,9 @@ def resolve_sweep_throttle_s() -> float:
 class LakeAuditSink(Protocol):
     """The ``append`` slice of the hash-chained audit writer the healer uses.
 
-    Mirrors ``brutex.data.option_sink.OptionAuditSink`` — an injected seam so
-    the data layer never imports :mod:`brutex.orchestrator` at module level.
+    An injected seam so the data layer never imports
+    :mod:`brutex.orchestrator` at module level (the same ``append`` slice
+    :class:`~brutex.orchestrator.audit.AuditWriter` satisfies).
     """
 
     def append(self, *, action: str, subject: str, payload: dict[str, Any] | None = None) -> object:
@@ -414,7 +417,15 @@ def _audit_append(
         _LOG.warning("lake_heal.audit_append_failed", action=action, error=str(exc))
 
 
-def _order_findings(findings: Sequence[LakeFinding]) -> tuple[LakeFinding, ...]:
+#: The finding kinds the healer can ACT on. PriceSanityRows is deliberately
+#: absent (observe-only, DEC-STORED-DATA-VALIDATION-001) — the type system
+#: makes routing it into a healer impossible, not merely untested.
+type _HealableFinding = (
+    LegacyKeyDrift | ForeignMonthRows | IntraFileDup | OptionForeignMonthRows | OptionIntraFileDup
+)
+
+
+def _order_findings(findings: Sequence[_HealableFinding]) -> tuple[_HealableFinding, ...]:
     """Deterministic heal order: drift → foreign → dup → option-foreign → option-dup, by path.
 
     A drift merge changes which files exist, so it heals FIRST; the later
@@ -428,7 +439,7 @@ def _order_findings(findings: Sequence[LakeFinding]) -> tuple[LakeFinding, ...]:
     (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001).
     """
 
-    def key(finding: LakeFinding) -> tuple[int, str]:
+    def key(finding: _HealableFinding) -> tuple[int, str]:
         if isinstance(finding, LegacyKeyDrift):
             return (0, str(finding.drifted_dir))
         if isinstance(finding, ForeignMonthRows):
@@ -1054,8 +1065,16 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     return True
 
 
-def _heal_one(finding: LakeFinding, state: _BatchState) -> bool:
-    """Dispatch one finding to its heal algorithm; ``True`` iff it healed."""
+def _heal_one(finding: _HealableFinding, state: _BatchState) -> bool:
+    """Dispatch one finding to its heal algorithm; ``True`` iff it healed.
+
+    Typed over :data:`_HealableFinding` — a
+    :class:`~brutex.data.lake_invariants.PriceSanityRows` finding NEVER
+    reaches this dispatch (:func:`heal_findings` filters it up-front,
+    observe-only — DEC-STORED-DATA-VALIDATION-001), and the narrowed union
+    makes routing a non-healable type here a TYPE error, not a silent
+    mis-heal.
+    """
     if isinstance(finding, LegacyKeyDrift):
         return _heal_drift(finding, state)
     if isinstance(finding, ForeignMonthRows):
@@ -1351,7 +1370,11 @@ def heal_findings(
     Order: LegacyKeyDrift first (dir merges change which files exist), then
     ForeignMonthRows (reassignment), then IntraFileDup, then
     OptionForeignMonthRows (options reassignment), then OptionIntraFileDup
-    — sorted by path within each class. Observe mode short-circuits with ZERO
+    — sorted by path within each class. A
+    :class:`~brutex.data.lake_invariants.PriceSanityRows` finding is FILTERED
+    OUT up-front (observe-only — never healed, never counted in ``findings``;
+    one ``lake_heal.price_findings_observe_only`` WARNING names the count —
+    DEC-STORED-DATA-VALIDATION-001). Observe mode short-circuits with ZERO
     file mutation of any kind (no quarantine dir, no locks, no catalog writes,
     no stats bump — byte-pinned); the mass-heal rail refuses a
     ``≥ MASS_HEAL_MIN_FILES ∧ > MASS_HEAL_FRACTION`` batch untouched; a
@@ -1396,7 +1419,24 @@ def heal_findings(
     """
     resolved: LakeHealMode = resolve_lake_heal_mode() if mode is None else mode
     now_fn = _utc_now if now is None else now
-    ordered = _order_findings(findings)
+    # DEC-STORED-DATA-VALIDATION-001: a PriceSanityRows finding is OBSERVE-ONLY
+    # by design — the healer is STRICTLY row-removing/row-reassigning, never
+    # value-editing (a machine-"repaired" price would fabricate data, Golden
+    # Rule #1). It is filtered out here (the ONE heal chokepoint) so an L2/L3
+    # scan that surfaces price corruption can never route it into a per-file
+    # healer built for a different finding shape; remediation stays a re-pull /
+    # operator quarantine, guided by the scan's own pinned WARNING + census.
+    actionable: list[_HealableFinding] = []
+    for candidate in findings:
+        if isinstance(candidate, PriceSanityRows):
+            continue
+        actionable.append(candidate)
+    if len(actionable) != len(findings):
+        _LOG.warning(
+            "lake_heal.price_findings_observe_only",
+            price_findings=len(findings) - len(actionable),
+        )
+    ordered = _order_findings(actionable)
     if resolved == "observe":
         report = HealReport(
             mode="observe",
@@ -1578,7 +1618,14 @@ def heal_findings(
             skipped += 1
     recall_report: RecallReport | None = None
     if recall and state.touched_minute:
-        recall_report = _run_recall(state, before=now_fn().astimezone(_IST).date())
+        # Session-close-aware forming-session cutoff (DEC-DAILY-CUTOFF-
+        # GROUNDED-001 Move 1 — the third divergent pin repointed at the ONE
+        # law): a post-close heal recall re-derives the run day's own
+        # completed session instead of deferring it (the prior plain
+        # today-IST date pin regressed DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001
+        # here too). CLOCK arm only, honestly: recall is historical heal —
+        # data-grounding it is a named non-goal.
+        recall_report = _run_recall(state, before=daily_derive_cutoff(now_fn().astimezone(_IST)))
     report = HealReport(
         mode=resolved,
         findings=len(ordered),

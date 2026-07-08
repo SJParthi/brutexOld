@@ -21,8 +21,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
-from brutex.data.instrument_store import Instrument, InstrumentStore
-from brutex.models import Exchange, InstrumentType, Segment
+from brutex.data.instrument_store import InstrumentStore
+from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import build_fno_eligible_underlyings
 
 

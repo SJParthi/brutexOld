@@ -187,9 +187,39 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         Bucket timestamps are left-closed, left-labeled.
 
     Examples:
+        Two 1-minute bars at the 09:15 IST session open (03:45 UTC — IST is
+        a fixed +05:30) collapse into ONE bucket at every coarser TF:
+
+        >>> import datetime as dt
+        >>> import polars as pl
+        >>> df_1m = pl.DataFrame(
+        ...     {
+        ...         "ts_utc": [
+        ...             dt.datetime(2026, 1, 5, 3, 45, tzinfo=dt.timezone.utc),
+        ...             dt.datetime(2026, 1, 5, 3, 46, tzinfo=dt.timezone.utc),
+        ...         ],
+        ...         "open": [100.0, 101.0],
+        ...         "high": [102.0, 103.0],
+        ...         "low": [99.0, 100.0],
+        ...         "close": [101.0, 102.0],
+        ...         "volume": [10, 20],
+        ...     }
+        ... )
+        >>> resample_1m_to_tf(df_1m, 5).height
+        1
+        >>> resample_1m_to_tf(df_1m, 15).height
+        1
+        >>> resample_1m_to_tf(df_1m, 375).height
+        1
+
+        The bucket aggregates OHLCV per the table above — close is the LAST
+        bar's close, volume the SUM:
+
         >>> df_5m = resample_1m_to_tf(df_1m, 5)
-        >>> df_15m = resample_1m_to_tf(df_1m, 15)
-        >>> df_daily = resample_1m_to_tf(df_1m, 375)
+        >>> float(df_5m.get_column("close")[0])
+        102.0
+        >>> int(df_5m.get_column("volume")[0])
+        30
     """
     import polars as pl
 

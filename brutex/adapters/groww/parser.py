@@ -27,6 +27,7 @@ from typing import Final
 
 import structlog
 
+from brutex.adapters.groww.epoch_verdict import classify_epoch_timestamps
 from brutex.data.candle_fields import (
     CandleParseError,
     EmptyCandleRow,
@@ -127,7 +128,12 @@ def parse_timestamp_ist(raw: object) -> datetime:
     would silently shift by +05:30. Parsing behaviour is unchanged, but taking
     the branch now emits ONE loud ``groww.parse.epoch_timestamp`` WARNING per
     pull (:func:`_warn_epoch_timestamp_once`) so the assumption can never fire
-    silently.
+    silently. On top, :func:`parse_candle_rows` cross-checks a whole epoch
+    payload against the real NSE session calendar and emits a per-payload
+    ``groww.parse.epoch_timestamp_verdict``
+    (:mod:`brutex.adapters.groww.epoch_verdict`,
+    DEC-GROWW-EPOCH-VERDICT-001); VERIFYING the semantics needs the live
+    probe of ``docs/runbooks/groww-epoch-timestamp-probe.md``.
     """
     if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
         raise CandleParseError(f"candle timestamp must not be bool: {raw!r}")
@@ -191,6 +197,17 @@ def parse_candle_rows(
     list[CandleBar]
         One row per non-empty candle, in input order. No-trade bars are skipped.
 
+    Notes
+    -----
+    A payload carrying NUMERIC timestamps (the defensive epoch branch,
+    documented native-IST strings expected) additionally emits ONE
+    ``groww.parse.epoch_timestamp_verdict`` WARNING per payload — the
+    deterministic session-plausibility cross-check of the UNVERIFIED Unix-UTC
+    assumption (DEC-GROWW-EPOCH-VERDICT-001,
+    :func:`brutex.adapters.groww.epoch_verdict.classify_epoch_timestamps`).
+    OBSERVE-ONLY: the returned bars are byte-identical; a string-timestamp
+    payload emits nothing.
+
     Raises
     ------
     CandleParseError
@@ -204,6 +221,25 @@ def parse_candle_rows(
         raise CandleParseError(f"'candles' must be an array, got {type(candles).__name__}")
 
     bars: list[CandleBar] = []
+    # OHLC-clamp counter (DEC-STORED-DATA-VALIDATION-001): the vendor-OHLC
+    # normalization (``assemble_candle``'s high=max/low=min clamp,
+    # DEC-OHLC-VENDOR-NORMALIZE-001) used to fire with NO counter and NO log —
+    # a vendor systematically under-reporting highs would never surface.
+    # OBSERVE-ONLY: parsed bars are byte-identical; ONE
+    # ``groww.parse.ohlc_clamped`` WARNING per parsed window payload (this
+    # function is called once per fetched window) carries the count.
+    clamped_bars = 0
+
+    def _count_clamp() -> None:
+        nonlocal clamped_bars
+        clamped_bars += 1
+
+    # Epoch-verdict samples (DEC-GROWW-EPOCH-VERDICT-001): raw NUMERIC row
+    # timestamps, collected at ROW level (before ``assemble_candle``, so even
+    # an all-no-trade epoch payload still yields evidence). Production string
+    # payloads pay only the two isinstance checks per row — no allocation.
+    epoch_ts_samples: list[object] = []
+
     for index, row in enumerate(candles):
         if not isinstance(row, (list, tuple)) or len(row) not in _ACCEPTED_ROW_LENS:
             raise CandleParseError(
@@ -221,6 +257,8 @@ def parse_candle_rows(
             open_interest = None
         else:
             ts_raw, open_, high, low, close, volume, open_interest = row
+        if isinstance(ts_raw, (int, float)) and not isinstance(ts_raw, bool):
+            epoch_ts_samples.append(ts_raw)
         try:
             bar = assemble_candle(
                 ts_raw=ts_raw,
@@ -231,10 +269,42 @@ def parse_candle_rows(
                 close=close,
                 volume=None if drop_volume else volume,
                 open_interest=open_interest,
+                on_clamp=_count_clamp,
             )
         except EmptyCandleRow:
             continue  # graceful skip — no-trade minute
         bars.append(bar)
+    if clamped_bars:
+        _LOG.warning(
+            "groww.parse.ohlc_clamped",
+            clamped_bars=clamped_bars,
+            total_rows=len(candles),
+            pull_id=current_pull_id(),
+        )
+    if epoch_ts_samples:
+        # Deterministic session-plausibility cross-check of the UNVERIFIED
+        # Unix-UTC epoch assumption (DEC-GROWW-EPOCH-VERDICT-001): ONE
+        # ``groww.parse.epoch_timestamp_verdict`` WARNING per parsed window
+        # payload carrying numeric timestamps (mirrors the ohlc_clamped
+        # per-payload precedent). OBSERVE-ONLY — the parsed bars are
+        # byte-identical; the verdict is EVIDENCE, not vendor verification
+        # (only the runbook's live probe can close the UNVERIFIED gap).
+        verdict = classify_epoch_timestamps(epoch_ts_samples)
+        _LOG.warning(
+            "groww.parse.epoch_timestamp_verdict",
+            pull_id=current_pull_id(),
+            verdict=verdict.verdict.value,
+            supports_unix_utc=verdict.supports_unix_utc,
+            supports_ist_naive=verdict.supports_ist_naive,
+            ambiguous=verdict.ambiguous,
+            out_of_session=verdict.out_of_session,
+            abstained=verdict.abstained,
+            invalid=verdict.invalid,
+            epoch_rows=verdict.total,
+            sampled=verdict.sampled,
+            assumed="unix-utc-seconds",
+            runbook="docs/runbooks/groww-epoch-timestamp-probe.md",
+        )
     return bars
 
 

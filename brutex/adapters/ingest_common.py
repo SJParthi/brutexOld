@@ -47,12 +47,14 @@ serve both vendors.
 
 from __future__ import annotations
 
+import enum
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from time import sleep as _time_sleep
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypeAlias
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -65,15 +67,38 @@ from brutex.adapters.protocol import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.window_ledger import CONFIRMED_EMPTY_MIN_FETCHES
-from brutex.models import Exchange, Instrument
+from brutex.models import BruteXError, Exchange, Instrument
 
 if TYPE_CHECKING:
     from brutex.data.parquet_writer import BarConflict
+    from brutex.orchestrator.audit import AuditWriter
 
 #: Structured logger — lights each retry round (``ingest.auto_retry.round``) and
 #: the final residual (``ingest.auto_retry.done``) under the pull's correlation
 #: scope, so an operator can grep the recovery end-to-end (DEC-INGEST-AUTO-RETRY-001).
 _LOG = structlog.get_logger("brutex.adapters.ingest_common")
+
+
+def maybe_audit(
+    audit: AuditWriter | None,
+    action: str,
+    subject: str,
+    payload: dict[str, object],
+) -> None:
+    """Append one hash-chained audit line when an *audit* writer is wired.
+
+    The ONE vendor-neutral guard BOTH ingest spines share (CLAUDE.md §11
+    COMMON — DEC-INGEST-AUDIT-WIRING-001; moved here from the spot spine's
+    private ``run_ingest._maybe_audit`` so the F&O spine reuses it instead of
+    copying). A no-op when ``audit is None`` (a dry-run / inspect / synthetic
+    pull carries no writer). Called ONLY from the single controller thread
+    (each spine's fan-out drain loop), so the not-thread-safe
+    :class:`~brutex.orchestrator.audit.AuditWriter` is never touched
+    concurrently and the O(1)-per-entry append never runs on — and can never
+    block — a fetch worker (Golden Rule #8).
+    """
+    if audit is not None:
+        audit.append(action=action, subject=subject, payload=payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,6 +185,21 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
       ledger and the skip rule would never re-fetch the rest of the day, so
       before close the intraday bound is clamped to ``today`` too; from
       15:30 IST the full session exists and ``today + 1 day`` is allowed.
+
+    At-close boundary (DEC-SESSION-CLOSE-BOUNDARY-PIN-001, pinned by
+    ``tests/unit/test_session_close_boundary_pin.py``): exactly 15:30:00
+    counts as CLOSED here (``>=``) — DELIBERATELY the OPPOSITE of the
+    finalize-side :func:`brutex.calendars.nse.daily_derive_cutoff` (strict
+    ``>``, at-close = still forming). Request-side vs finalize-side rationale:
+    ALLOWING the ``today + 1`` end-exclusive bound at 15:30:00 is safe — no
+    bar at/after 15:30 can exist under the half-open ``[open, close)`` ingest
+    session filter, and the partial-window detector + keep-first sink guard
+    downstream — while FINALIZING a daily bar at 15:30:00 could bake in a
+    15:29 bar not yet pulled. The two verdicts are a pinned, cross-referenced
+    pair (the #1267 drift-pin pattern), not hidden duplication. The date-blind
+    hardcoded 15:30 here remains defended by the #1492 G2 Muhurat enumeration
+    pin; calendar-awareness on this pull-planning side is a separate decision,
+    explicitly NOT claimed.
 
     Pure + clock-injected — every branch unit-testable offline.
     """
@@ -1699,6 +1739,202 @@ def fetch_until_nonempty[T](
     return result
 
 
+# --------------------------------------------------------------------------- #
+# The six-step pull-order vocabulary (DEC-PULL-SIX-STEP-ORDER-001).
+#
+# Operator hard law (2026-07-06): whenever a Groww fetch pull runs — any
+# selection — it executes INDICES-SPOT → STOCKS-SPOT → INDICES-FUTURES →
+# STOCKS-FUTURES → INDICES-OPTIONS → STOCKS-OPTIONS, skipping empty groups.
+# This leaf owns the ONE COMMON vocabulary (CLAUDE.md §11 COMMON) consumed by
+# BOTH execution chokepoints: the spot spine's group loop (steps 1-2, wired in
+# ``pull_controller.pull_all_spot``) and the F&O bucket sort (steps 3-6, wired
+# in ``historical_pull``). Everything here is pure / observe-only — ordering
+# POLICY (the strict post-step gate) lives in the sequencer, not here.
+# --------------------------------------------------------------------------- #
+
+
+@enum.unique
+class PullStep(enum.IntEnum):
+    """The operator's strict pull order (DEC-PULL-SIX-STEP-ORDER-001). value IS the rank."""
+
+    INDICES_SPOT = 1
+    STOCKS_SPOT = 2
+    INDICES_FUTURES = 3
+    STOCKS_FUTURES = 4
+    INDICES_OPTIONS = 5
+    STOCKS_OPTIONS = 6
+
+    @property
+    def label(self) -> str:
+        """The lowercase-hyphenated step name used in every ``pull.step.*`` event."""
+        return _PULL_STEP_LABELS[self]
+
+
+#: The ONE label table — event field values for ``pull.step.started`` /
+#: ``pull.step.settled`` / ``pull.step.halted`` and the ordering diagnostics.
+_PULL_STEP_LABELS: Final[dict[PullStep, str]] = {
+    PullStep.INDICES_SPOT: "indices-spot",
+    PullStep.STOCKS_SPOT: "stocks-spot",
+    PullStep.INDICES_FUTURES: "indices-futures",
+    PullStep.STOCKS_FUTURES: "stocks-futures",
+    PullStep.INDICES_OPTIONS: "indices-options",
+    PullStep.STOCKS_OPTIONS: "stocks-options",
+}
+
+#: One ordered spot step group — the step plus its instruments, input order kept.
+#: Classic ``TypeAlias`` (not a PEP 695 ``type`` statement) because this alias is
+#: exported via ``__all__`` and CodeQL's Python extractor does not recognize a
+#: ``type`` statement as a definition (explicit-export alert on the export list).
+SpotStepGroup: TypeAlias = tuple[PullStep, tuple[Instrument, ...]]  # noqa: UP040
+
+
+def partition_spot_steps(instruments: Sequence[Instrument]) -> tuple[SpotStepGroup, ...]:
+    """Ordered non-empty (INDICES_SPOT, STOCKS_SPOT) groups; empty groups OMITTED.
+
+    Total classification via :attr:`~brutex.models.Instrument.is_index`
+    (``IDX`` ⇒ indices; everything else ⇒ stocks). Stable (input order preserved
+    within a group); every instrument lands in EXACTLY one group (the
+    property-test invariant). Pure, O(n). India VIX (IDX, reference-only) rides
+    INDICES_SPOT; an NTM+F&O dual-class EQ name rides STOCKS and STAYS tradable;
+    reference-only filtering is untouched (it happens before this partition).
+    """
+    indices: list[Instrument] = []
+    stocks: list[Instrument] = []
+    for inst in instruments:
+        if inst.is_index:
+            indices.append(inst)
+        else:
+            stocks.append(inst)
+    groups: list[SpotStepGroup] = []
+    if indices:
+        groups.append((PullStep.INDICES_SPOT, tuple(indices)))
+    if stocks:
+        groups.append((PullStep.STOCKS_SPOT, tuple(stocks)))
+    return tuple(groups)
+
+
+class StepOrderError(BruteXError):
+    """A pull-step rank regression under ``StepOrderMonitor(raise_on_violation=True)``.
+
+    Raised ONLY by the test oracle — the production monitor logs + counts and
+    never raises (the #907/#919 detect-and-warn pattern).
+    """
+
+
+class StepOrderMonitor:
+    """Observe-only ordering oracle for the six-step pull law.
+
+    Thread-safe (one lock), O(1) per call. :meth:`begin_step` — a rank
+    regression logs ERROR ``pull.step.order_violation`` (or raises
+    :class:`StepOrderError` when ``raise_on_violation=True`` — the TEST
+    oracle). :meth:`observe_write` — a write observed for a step BELOW the
+    current one logs WARN ``pull.step.late_write`` + increments
+    :attr:`late_writes` (production observe-only; never raises, never blocks —
+    the #907/#919 detect-and-warn pattern).
+
+    HONEST wiring envelope (Golden Rule #10): both production spines feed
+    :meth:`observe_write` from PRODUCER-side hooks (the spot per-window drain
+    callback; the F&O per-pair ``on_progress`` drain), so it observes the
+    synchronous inline write path and any sequencer wiring regression (a pass
+    still settling after a later ``begin_step``) — it CANNOT see an
+    async-pipeline consumer tail draining a prior step's queued write after
+    the boundary (those tails never touch the monitor; consumer-side
+    attribution needs a submit-time step stamp through ``FetchPipeline`` — a
+    named follow-up, NOT claimed). In the default async-pipeline mode
+    :attr:`late_writes` therefore stays 0 on a healthy pull.
+    """
+
+    def __init__(self, *, raise_on_violation: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._raise_on_violation = raise_on_violation
+        self._current: PullStep | None = None
+        self._late_writes = 0
+
+    @property
+    def current_step(self) -> PullStep | None:
+        """The highest step begun so far (``None`` before the first step)."""
+        with self._lock:
+            return self._current
+
+    @property
+    def late_writes(self) -> int:
+        """Count of writes observed for a step below the current one."""
+        with self._lock:
+            return self._late_writes
+
+    def begin_step(self, step: PullStep) -> None:
+        """Mark *step* as started; a rank regression is a loud ordering violation.
+
+        Re-beginning the CURRENT step is a no-op (an until-clean retry round);
+        the monitor's cursor only ever advances (a regression never rewinds it,
+        so later writes for the lower step stay observable as late writes).
+        """
+        regressed_from: PullStep | None = None
+        with self._lock:
+            current = self._current
+            if current is not None and step < current:
+                regressed_from = current
+            else:
+                self._current = step
+        if regressed_from is not None:
+            if self._raise_on_violation:
+                raise StepOrderError(
+                    f"pull step order violation: began {step.label} (rank {int(step)}) "
+                    f"after {regressed_from.label} (rank {int(regressed_from)})"
+                )
+            _LOG.error(
+                "pull.step.order_violation",
+                step=step.label,
+                current_step=regressed_from.label,
+            )
+
+    def begin_phase(self) -> None:
+        """Start a NEW ordered pass — rewind the step cursor to "no step yet".
+
+        DEC-PULL-SIX-STEP-ORDER-001 dual-interval envelope: the retained
+        defensive spot path that injects ``intervals=("1day", "1minute")``
+        runs the ordered steps 1→2 ONCE PER INTERVAL PHASE, so the minute
+        phase's ``begin_step(INDICES_SPOT)`` after the daily phase's
+        STOCKS_SPOT is a LEGAL phase restart, never a rank regression (which
+        previously logged a false ``pull.step.order_violation`` ERROR and
+        raised under the test oracle). Production resolves ``("1minute",)``
+        — one phase — so this is a no-op there (the cursor starts ``None``).
+
+        HONEST (Golden Rule #10): the six-step law is enforced WITHIN each
+        interval phase; the dual-interval maintenance path stays
+        interval-major by construction (daily stock fetches precede minute
+        index fetches) — a disclosed envelope, not silently blessed as
+        step-major. Rewinding also relaxes the cross-phase cursor, so a
+        caller sharing one monitor across surfaces keeps ordering guarantees
+        only WITHIN each phase-delimited sequence. :attr:`late_writes` is
+        NOT reset — the counter accumulates across phases.
+        """
+        with self._lock:
+            self._current = None
+
+    def observe_write(self, step: PullStep, *, symbol: str | None = None) -> None:
+        """Observe one settle/write for *step*; a below-current write is a counted WARN.
+
+        Never raises, never blocks — pure detect-and-warn, even under
+        ``raise_on_violation=True`` (only :meth:`begin_step` is the hard oracle).
+        Fed from PRODUCER-side hooks in both spines — see the class docstring's
+        honest wiring envelope (an async consumer tail is NOT observable here).
+        """
+        late_behind: PullStep | None = None
+        with self._lock:
+            current = self._current
+            if current is not None and step < current:
+                late_behind = current
+                self._late_writes += 1
+        if late_behind is not None:
+            _LOG.warning(
+                "pull.step.late_write",
+                step=step.label,
+                current_step=late_behind.label,
+                symbol=symbol,
+            )
+
+
 __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
     "CONFIRMED_EMPTY_MIN_FETCHES",
@@ -1713,10 +1949,14 @@ __all__ = [
     "SYNTHETIC_DRY_RUN_LABEL",
     "DateWindow",
     "LoopVerdict",
+    "PullStep",
     "PullVerdict",
     "PullVerdictKind",
     "RetryOutcome",
     "RetryRound",
+    "SpotStepGroup",
+    "StepOrderError",
+    "StepOrderMonitor",
     "SyntheticSpotAdapter",
     "UntilCleanOutcome",
     "UntilCleanRound",
@@ -1730,7 +1970,9 @@ __all__ = [
     "gate_pull_credentials",
     "label_synthetic",
     "mark_synthetic",
+    "maybe_audit",
     "now_ist",
+    "partition_spot_steps",
     "plan_windows",
     "retry_failed_windows",
     "run_until_clean",

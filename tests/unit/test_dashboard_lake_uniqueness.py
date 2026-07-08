@@ -191,6 +191,7 @@ class TestLakeUniquenessRoute:
             "foreign_files": 0,
             "overlap_files": 0,
             "drift_dirs": 0,
+            "price_files": 0,
         }
         assert payload["healed_total"] == 0
         assert payload["last_sweep_utc"] is None
@@ -246,6 +247,7 @@ class TestLakeUniquenessRoute:
             "foreign_files": 1,
             "overlap_files": 1,
             "drift_dirs": 0,
+            "price_files": 0,
         }
 
     def test_present_false_when_lake_root_unresolved(

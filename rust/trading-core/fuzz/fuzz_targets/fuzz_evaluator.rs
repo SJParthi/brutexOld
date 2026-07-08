@@ -1,7 +1,12 @@
 #![no_main]
-//! Fuzz target for the 52-condition u64 evaluator
+//! Fuzz target for the 60-condition u128 evaluator
 //! `trading_core::evaluate_atoms` (`src/evaluator.rs`) — the bit-identical
 //! Stage-3 vocabulary core shared by BruteX (PyO3) and TickVault (native).
+//!
+//! Reconciled to the u64→u128 widening (DEC-VOCAB-U128-CODEGEN-001 / ADR-0012
+//! D4) + the PR-2/PR-2b snapshot growth: `vwap_paisa` (bits 52-53) and the
+//! resolved `market_structure` flags (bits 56-59) are now part of
+//! `IndicatorSnapshot`, and all 60 bits (0..=59) can fire.
 //!
 //! On arbitrary bytes it builds a STRUCTURALLY VALID, in-domain bar snapshot
 //! (see the domain note in `fuzz_pivot_fib.rs`: prices capped at `MAX_PAISA`,
@@ -11,11 +16,16 @@
 //! 1. **Never panics / overflows** — all internal products
 //!    (`close·bps`, `body·10`, `(c−day_low)·3`, `pdc·50`, …) stay far below
 //!    `i64::MAX` within the realistic envelope.
-//! 2. **Only sets bits 0..=51** — bits 52-63 are always clear (documented).
+//! 2. **Only sets bits 0..=59** — bits 60-127 are always clear (reserved).
 //! 3. **Honours every mutually-exclusive condition pair** — a bar cannot be
-//!    both above and below the same level, both bullish and bearish, both a
-//!    gap-up and a gap-down day, in both the upper and lower third, etc. The
-//!    four time-of-day buckets are an `else if` chain → at most one fires.
+//!    both above and below the same level (EMA20/EMA200/VWAP/PDH/PDL), both
+//!    bullish and bearish, both a gap-up and a gap-down day, in both the
+//!    upper and lower third, etc. The four time-of-day buckets are an
+//!    `else if` chain → at most one fires.
+//! 4. **Mirrors the resolved market-structure flags exactly** — the Group-12
+//!    bits (56-59) are a pure pass-through of `snapshot.market_structure`
+//!    (the stateful machine resolves them upstream; the evaluator must never
+//!    invent or drop one).
 //!
 //! Bit-identity vs the Python source is covered by `tests/golden_vectors.rs`
 //! (400-case answer-key); this target proves panic-freedom + the structural
@@ -24,8 +34,8 @@
 use libfuzzer_sys::fuzz_target;
 use trading_core::bits;
 use trading_core::{
-    IndicatorSnapshot, PriorBarHistory, ProximityParams, compute_fib_levels, compute_pivot_levels,
-    evaluate_atoms,
+    IndicatorSnapshot, MarketStructureSignal, PriorBarHistory, ProximityParams, compute_fib_levels,
+    compute_pivot_levels, evaluate_atoms,
 };
 
 const MAX_PAISA: i64 = 10_000_000_000;
@@ -72,8 +82,8 @@ impl<'a> Reader<'a> {
 }
 
 #[inline]
-fn has(mask: u64, bit: u32) -> bool {
-    mask & (1u64 << bit) != 0
+fn has(mask: u128, bit: u32) -> bool {
+    mask & (1u128 << bit) != 0
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -119,6 +129,18 @@ fuzz_target!(|data: &[u8]| {
     let pivots = compute_pivot_levels(pdh, pdl, pdc);
     let fib = compute_fib_levels(pdh, pdl);
 
+    // ── Resolved market-structure flags (Group 12) ──
+    // The upstream state machine guarantees at most ONE of {bos, choch} per
+    // side per bar (the BOS/CHoCH split is a function of the trend); only
+    // machine-producible combinations are fed, mirroring production.
+    let ms_raw = r.u64();
+    let market_structure = MarketStructureSignal {
+        bos_bullish: ms_raw & 0b0001 != 0,
+        choch_bullish: ms_raw & 0b0001 == 0 && ms_raw & 0b0010 != 0,
+        bos_bearish: ms_raw & 0b0100 != 0,
+        choch_bearish: ms_raw & 0b0100 == 0 && ms_raw & 0b1000 != 0,
+    };
+
     let snapshot = IndicatorSnapshot {
         tod_seconds: (r.u64() % 86_400) as u32,
         open_paisa: open,
@@ -127,11 +149,13 @@ fuzz_target!(|data: &[u8]| {
         close_paisa: close,
         ema20_paisa: r.opt_price(),
         ema200_paisa: r.opt_price(),
+        vwap_paisa: r.opt_price(),
         pivots,
         fib,
         day_high_paisa: day_high,
         day_low_paisa: day_low,
         open_of_day_paisa: open_of_day,
+        market_structure,
     };
     let params = ProximityParams {
         pivot_proximity_bps: r.bps(),
@@ -147,8 +171,8 @@ fuzz_target!(|data: &[u8]| {
     // ── 1. Never panics / overflows ──
     let mask = evaluate_atoms(&snapshot, &params, &prior);
 
-    // ── 2. Only bits 0..=51 may be set ──
-    assert_eq!(mask >> 52, 0, "evaluator set a reserved bit (>= 52)");
+    // ── 2. Only bits 0..=59 may be set ──
+    assert_eq!(mask >> 60, 0, "evaluator set a reserved bit (>= 60)");
 
     // ── 3. Mutually-exclusive condition pairs ──
     assert!(
@@ -162,6 +186,10 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         !(has(mask, bits::BIT_EMA20_ABOVE_EMA200) && has(mask, bits::BIT_EMA20_BELOW_EMA200)),
         "EMA20 cannot be both above and below EMA200"
+    );
+    assert!(
+        !(has(mask, bits::BIT_CLOSE_ABOVE_VWAP) && has(mask, bits::BIT_CLOSE_BELOW_VWAP)),
+        "close cannot be both above and below VWAP"
     );
     assert!(
         !(has(mask, bits::BIT_CLOSE_ABOVE_PDH) && has(mask, bits::BIT_CLOSE_BELOW_PDH)),
@@ -188,6 +216,14 @@ fuzz_target!(|data: &[u8]| {
         "close cannot be in both the upper and lower third"
     );
 
+    // A warm-up (None) VWAP must fire NEITHER Group-10 bit.
+    if snapshot.vwap_paisa.is_none() {
+        assert!(
+            !has(mask, bits::BIT_CLOSE_ABOVE_VWAP) && !has(mask, bits::BIT_CLOSE_BELOW_VWAP),
+            "VWAP bits must not fire during warm-up (vwap_paisa = None)"
+        );
+    }
+
     // Time-of-day buckets are an else-if chain → at most one is set.
     let tod_set = [
         bits::BIT_EARLY_MORNING,
@@ -199,4 +235,26 @@ fuzz_target!(|data: &[u8]| {
     .filter(|&&b| has(mask, b))
     .count();
     assert!(tod_set <= 1, "at most one time-of-day bucket may fire");
+
+    // ── 4. Group-12 pass-through: the bits mirror the resolved flags ──
+    assert_eq!(
+        has(mask, bits::BIT_BOS_BULLISH),
+        market_structure.bos_bullish,
+        "BOS-bullish bit must mirror the resolved flag"
+    );
+    assert_eq!(
+        has(mask, bits::BIT_BOS_BEARISH),
+        market_structure.bos_bearish,
+        "BOS-bearish bit must mirror the resolved flag"
+    );
+    assert_eq!(
+        has(mask, bits::BIT_CHOCH_BULLISH),
+        market_structure.choch_bullish,
+        "CHoCH-bullish bit must mirror the resolved flag"
+    );
+    assert_eq!(
+        has(mask, bits::BIT_CHOCH_BEARISH),
+        market_structure.choch_bearish,
+        "CHoCH-bearish bit must mirror the resolved flag"
+    );
 });

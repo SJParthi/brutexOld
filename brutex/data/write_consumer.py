@@ -99,6 +99,7 @@ import structlog
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.partition import partition_for_timestamp
 from brutex.data.sink import BarSink, SinkAppendResult, vendor_surface_from_write_results
+from brutex.observability.correlation import current_pull_id, pull_id_scope
 
 if TYPE_CHECKING:  # pragma: no cover
     from brutex.data.models import CandleBar
@@ -261,6 +262,14 @@ class ShardedWriteConsumer:
         self._stopped = threading.Event()
         self._halt_exc: LakeWriteHalt | None = None
         self._halt_lock = threading.Lock()
+        # Run correlation for the shard threads (DEC-PULL-BEAT-PERRUN-001 fix round): the
+        # consumer is constructed on the DRIVER thread inside the pull's run scope
+        # (strictly per-run — built and drained within one pull), so the ambient pull_id
+        # captured here is the run's id; each shard thread re-binds it once for its whole
+        # loop, so the writers' seam beats (partition lock-wait) attribute to the run's
+        # keyed progress-beat channel instead of dropping. A captured "" (the CLI path —
+        # no scope) binds "" → the legacy channel → byte-identical behaviour there.
+        self._pull_id = current_pull_id()
         self._threads = [
             threading.Thread(
                 target=self._run_shard,
@@ -307,17 +316,23 @@ class ShardedWriteConsumer:
         result (success) OR its exception (failure — captured, never a fabricated success)
         is settled into the request's box; a :class:`~brutex.data.errors.LakeWriteHalt`
         additionally trips the pool-wide stop so the rest of the pull fails fast.
+
+        The whole loop runs inside ``pull_id_scope(self._pull_id)`` — the run id captured
+        at construction (DEC-PULL-BEAT-PERRUN-001 fix round) — so the durable write's seam
+        beats attribute to the run's keyed progress-beat channel.
         """
         q = self._queues[shard]
-        while True:
-            item = q.get()
-            if item is self._poison:
-                return
-            # `item` is a WriteRequest here: the queue only ever carries a WriteRequest or
-            # the unique poison-pill sentinel, and the sentinel already returned above.
-            # `cast` narrows the type for the checkers without a strippable `assert`
-            # (which bandit B101 flags) and without an unreachable runtime branch.
-            self._write_one(cast(WriteRequest, item))
+        with pull_id_scope(self._pull_id):
+            while True:
+                item = q.get()
+                if item is self._poison:
+                    return
+                # `item` is a WriteRequest here: the queue only ever carries a WriteRequest
+                # or the unique poison-pill sentinel, and the sentinel already returned
+                # above. `cast` narrows the type for the checkers without a strippable
+                # `assert` (which bandit B101 flags) and without an unreachable runtime
+                # branch.
+                self._write_one(cast(WriteRequest, item))
 
     def _write_one(self, request: WriteRequest) -> None:
         """Durably write ONE request and settle its box (result XOR captured exception)."""
@@ -577,6 +592,14 @@ class BatchingWriteConsumer:
         self._stopped = threading.Event()
         self._halt_exc: LakeWriteHalt | None = None
         self._halt_lock = threading.Lock()
+        # Run correlation for the writer thread (DEC-PULL-BEAT-PERRUN-001 fix round):
+        # constructed on the DRIVER thread inside the pull's run scope
+        # (``pull_pipeline.build_write_consumer`` is called from the scoped controller
+        # body; strictly per-run), so the writer's partition-flock lock-wait beats —
+        # the EXACT forensic scenario DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15
+        # closed — attribute to the run's keyed channel in BRUTEX_WRITE_BATCH mode.
+        # A captured "" (the CLI path) binds "" → the legacy channel (byte-identical).
+        self._pull_id = current_pull_id()
         self._thread = threading.Thread(target=self._run, name="write-batch-consumer", daemon=True)
         self._thread.start()
 
@@ -628,18 +651,24 @@ class BatchingWriteConsumer:
             cast(WriteRequest, item).box.set_exception(halt)
 
     def _run(self) -> None:
-        """Drain the queue until the poison-pill, coalescing each cycle's pending writes."""
-        while True:
-            batch = self._collect_batch()
-            if batch is None:
-                return
-            self._write_batch(batch)
-            # After a tripped halt every remaining window fails identically — fail-fast
-            # settle the rest of the queue (never loop back to a blocking get, which would
-            # leave a queued-but-uncollected window's box unsettled forever).
-            halt = self._halt_exc
-            if halt is not None:
-                self._drain_queue_with_halt(halt)
+        """Drain the queue until the poison-pill, coalescing each cycle's pending writes.
+
+        Runs inside ``pull_id_scope(self._pull_id)`` — the run id captured at
+        construction (DEC-PULL-BEAT-PERRUN-001 fix round) — so the coalesced write's
+        partition lock-wait beats attribute to the run's keyed progress-beat channel.
+        """
+        with pull_id_scope(self._pull_id):
+            while True:
+                batch = self._collect_batch()
+                if batch is None:
+                    return
+                self._write_batch(batch)
+                # After a tripped halt every remaining window fails identically — fail-fast
+                # settle the rest of the queue (never loop back to a blocking get, which
+                # would leave a queued-but-uncollected window's box unsettled forever).
+                halt = self._halt_exc
+                if halt is not None:
+                    self._drain_queue_with_halt(halt)
 
     def _collect_batch(self) -> list[WriteRequest] | None:
         """Block for one request, then drain up to ``max_coalesce`` more without blocking.

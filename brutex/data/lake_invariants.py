@@ -11,8 +11,14 @@ provably subsumes cross-file overlap — one file per UTC month per series), and
 per ``bars/<exch>/<seg>/`` directory, (c) #911 legacy-key drift; plus, per
 ``options/<series>/`` month file, (d) intra-file duplicate ``(side, timestamp)``
 keys and (e) foreign-month rows (UTC routing, overlap subsumed —
-DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, closing the #1175 named follow-up).
-Findings are frozen value dataclasses consumed by the healer
+DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, closing the #1175 named follow-up); plus,
+per ``bars/`` month file, (f) **price-sanity** violations — non-positive /
+null prices or broken OHLC ordering (DEC-STORED-DATA-VALIDATION-001, riding
+the SAME per-file read via :data:`BAR_SCAN_COLUMNS`; the ``options/`` tree
+stays key-census only — dup + foreign/overlap, no price screen). A price
+finding is OBSERVE-ONLY: the healer explicitly skips it (healing is strictly
+row-removing/row-reassigning, never value-editing — "repairing" a price would
+fabricate data). Findings are frozen value dataclasses consumed by the healer
 (``brutex.data.lake_heal``) and the census surfaces.
 
 **Month invariant (recon-B §1e):** a bar's canonical month file is
@@ -23,12 +29,17 @@ with UTC routing; comparing IST months would false-flag them, so this scanner
 never does.
 
 **Cost honesty (Golden Rule #10):** the scan is O(files-in-scope) TOTAL, per
-file O(footer + ONE key-column read) — the column read scales with the file's
-ROW COUNT, so this is NOT O(1). L2 bounds it by coordinates × months; L3 pays
-the full O(files) once per lake content token. A file with foreign rows costs
-one extra targeted read PER AFFECTED canonical month sibling (memoised per
-series — a multi-month stray pays one read per home month, the round-3
-honesty wording) to split ``overlap_rows``.
+file O(footer + ONE read of the 5 :data:`BAR_SCAN_COLUMNS` columns — the
+timestamp key + OHLC; was 1 column before DEC-STORED-DATA-VALIDATION-001, so
+the per-file read is wider but the pass/file counts are unchanged) — the
+column read scales with the file's ROW COUNT, so this is NOT O(1). L2 bounds
+it by coordinates × months; L3 pays the full O(files) once per lake content
+token. A file with foreign rows costs one extra targeted read PER AFFECTED
+canonical month sibling (memoised per series — a multi-month stray pays one
+read per home month, the round-3 honesty wording) to split ``overlap_rows``.
+A bar file MISSING a price column now skips (unreadable-columns WARN)
+instead of being dup-scanned — such a file violates the canonical 7-column
+schema and is itself a defect.
 
 This module must NOT import ``catalog_reconcile`` (which imports THIS module
 for its free L1 piggyback) or ``lake_heal`` (which imports this module) —
@@ -57,6 +68,7 @@ from brutex.data.partition import (
     parse_partition_path,
     partition_for_timestamp,
 )
+from brutex.data.price_sanity import PRICE_SANITY_COLUMNS, count_price_violations
 
 _LOG = structlog.get_logger("brutex.data.lake_invariants")
 
@@ -66,6 +78,13 @@ UNIQUE_KEY_BARS: Final[tuple[str, ...]] = ("timestamp",)
 #: The uniqueness key of an ``options/<series>/`` month file (the option writer's
 #: own established merge key, ``option_parquet_writer._merge_partition``).
 UNIQUE_KEY_OPTIONS: Final[tuple[str, ...]] = ("side", "timestamp")
+
+#: The columns ONE ``bars/`` month-file scan pass reads: the uniqueness key
+#: PLUS the four OHLC price columns, so the price-sanity check
+#: (DEC-STORED-DATA-VALIDATION-001) rides the SAME per-file read — same file
+#: count, same single pass, the scan stays O(files) total (the per-file read
+#: grows from 1 to 5 columns; honest envelope in the module docstring).
+BAR_SCAN_COLUMNS: Final[tuple[str, ...]] = (*UNIQUE_KEY_BARS, *PRICE_SANITY_COLUMNS)
 
 #: Engine index lake coords (symbol dir = stripped ``trading_symbol``; groww
 #: ``NSE-NIFTY`` etc. per ``adapters/groww/constants.py:97-100``; lake key law
@@ -206,13 +225,36 @@ class OptionForeignMonthRows:
     overlap_rows: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class PriceSanityRows:
+    """Rows violating price positivity / OHLC ordering in ONE ``bars/`` month file.
+
+    DEC-STORED-DATA-VALIDATION-001 — the census/heal scanner previously read
+    NO price column, so its "0 findings" verdict was BLIND to price
+    corruption (a stored negative / ``high < low`` bar). OBSERVE-ONLY by
+    design: the healer NEVER consumes this finding (healing is strictly
+    row-removing/row-reassigning — "repairing" a price would fabricate data,
+    Golden Rule #1); remediation is a re-pull / manual quarantine, guided by
+    the pinned ``lake.invariant.price_sanity_rows`` WARNING + the census.
+    """
+
+    path: Path
+    coords: PartitionCoords
+    bad_rows: int
+
+
 #: Union of every finding kind one scan can emit. Importable by name
 #: (``from brutex.data.lake_invariants import LakeFinding``) but intentionally
 #: NOT listed in ``__all__``: it is a PEP 695 ``type`` statement, which some
 #: static analysers (CodeQL) do not yet model as an ``__all__`` binding, and
 #: type aliases are idiomatically not part of the ``import *`` surface anyway.
 type LakeFinding = (
-    IntraFileDup | ForeignMonthRows | LegacyKeyDrift | OptionIntraFileDup | OptionForeignMonthRows
+    IntraFileDup
+    | ForeignMonthRows
+    | LegacyKeyDrift
+    | OptionIntraFileDup
+    | OptionForeignMonthRows
+    | PriceSanityRows
 )
 
 
@@ -446,7 +488,9 @@ def log_lake_finding(finding: LakeFinding) -> None:
     exchange, segment, files`` — drifted/canonical via ``repr()``, the #907
     convention), ``lake.invariant.option_intra_file_dup`` (``partition,
     physical_rows, unique_keys``), ``lake.invariant.option_foreign_month_rows``
-    (``partition, series, foreign_rows, overlap_rows``). On BOTH option events
+    (``partition, series, foreign_rows, overlap_rows``),
+    ``lake.invariant.price_sanity_rows`` (``partition, bad_rows`` —
+    DEC-STORED-DATA-VALIDATION-001). On BOTH option events
     the ``partition`` token embeds the RAW filesystem series dir name, so it
     rides via ``repr()`` (the #907 convention; joined in the round-7 NIT
     fold — a control-char series name must not inject into the rendered log
@@ -455,7 +499,13 @@ def log_lake_finding(finding: LakeFinding) -> None:
     ``partition`` fields stay raw: they are catalogued coordinates
     (``PartitionCoords.relpath()``), not vendor-derived dir names.
     """
-    if isinstance(finding, IntraFileDup):
+    if isinstance(finding, PriceSanityRows):
+        _LOG.warning(
+            "lake.invariant.price_sanity_rows",
+            partition=finding.coords.relpath(),
+            bad_rows=finding.bad_rows,
+        )
+    elif isinstance(finding, IntraFileDup):
         _LOG.warning(
             "lake.invariant.intra_file_dup",
             partition=finding.coords.relpath(),
@@ -1006,7 +1056,7 @@ def scan_lake_invariants(
             canonical_cache: dict[tuple[int, int], set[datetime] | None] = {}
             for coords, path in entries:
                 try:
-                    frame = _read_key_columns(path, UNIQUE_KEY_BARS)
+                    frame = _read_key_columns(path, BAR_SCAN_COLUMNS)
                 except parquet_read_skip_errors() as exc:
                     _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                     files_skipped += 1
@@ -1034,6 +1084,14 @@ def scan_lake_invariants(
                         )
                     )
                     findings.append(foreign)
+                # Price-sanity census (DEC-STORED-DATA-VALIDATION-001): rides the
+                # SAME per-file read (BAR_SCAN_COLUMNS carries the OHLC columns),
+                # one vectorized pass. OBSERVE-ONLY — the healer never consumes it.
+                bad_rows = count_price_violations(frame)
+                if bad_rows:
+                    price_finding = PriceSanityRows(path=path, coords=coords, bad_rows=bad_rows)
+                    log_lake_finding(price_finding)
+                    findings.append(price_finding)
             if scanned_in_series:
                 series_scanned += 1
             for idx, coords, foreign_ts in pending_overlap:
@@ -1194,7 +1252,14 @@ def scan_lake_invariants(
 
 @dataclass(frozen=True, slots=True)
 class SegmentCensus:
-    """Per-segment clean/poisoned file counts (``OPTIONS`` = the options tree)."""
+    """Per-segment clean/poisoned file counts (``OPTIONS`` = the options tree).
+
+    ``price_files`` (DEC-STORED-DATA-VALIDATION-001) counts month files with at
+    least one price-insane row — a defaulted trailing field so existing
+    constructors stay valid; the ``OPTIONS`` row keeps a structural ``0``
+    (the options tree is dup-census only — honest scope, mirroring the
+    foreign/overlap follow-up note in :func:`build_lake_census`).
+    """
 
     segment: str
     files: int
@@ -1203,6 +1268,7 @@ class SegmentCensus:
     foreign_files: int
     overlap_files: int
     drift_dirs: int
+    price_files: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1244,6 +1310,8 @@ def _engine_offender(finding: LakeFinding) -> str:
         return f"dup {finding.coords.relpath()}"
     if isinstance(finding, ForeignMonthRows):
         return f"foreign {finding.coords.relpath()}"
+    if isinstance(finding, PriceSanityRows):
+        return f"price {finding.coords.relpath()}"
     if isinstance(finding, OptionForeignMonthRows):
         return f"option-foreign {OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
     return f"option-dup {OPTIONS_DIR_NAME}/{finding.series}/{finding.path.name}"
@@ -1278,6 +1346,7 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
     option_dup_paths: set[str] = set()
     option_foreign_paths: set[str] = set()
     option_overlap_paths: set[str] = set()
+    price_paths: dict[str, set[str]] = {}
     drift_dirs: dict[str, int] = {}
     engine_findings: list[LakeFinding] = []
     for finding in report.findings:
@@ -1293,6 +1362,8 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
             drift_dirs[finding.segment] = drift_dirs.get(finding.segment, 0) + 1
         elif isinstance(finding, IntraFileDup):
             dup_paths.setdefault(finding.coords.segment, set()).add(str(finding.path))
+        elif isinstance(finding, PriceSanityRows):
+            price_paths.setdefault(finding.coords.segment, set()).add(str(finding.path))
         else:
             foreign_paths.setdefault(finding.coords.segment, set()).add(str(finding.path))
             if (finding.overlap_rows or 0) > 0:
@@ -1302,15 +1373,17 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
         files = seg_files.get(seg, 0)
         dups = dup_paths.get(seg, set())
         foreigns = foreign_paths.get(seg, set())
+        prices = price_paths.get(seg, set())
         rows.append(
             SegmentCensus(
                 segment=seg,
                 files=files,
-                clean=files - len(dups | foreigns),
+                clean=files - len(dups | foreigns | prices),
                 dup_files=len(dups),
                 foreign_files=len(foreigns),
                 overlap_files=len(overlap_paths.get(seg, set())),
                 drift_dirs=drift_dirs.get(seg, 0),
+                price_files=len(prices),
             )
         )
     rows.append(
@@ -1389,6 +1462,7 @@ def census_to_dict(
                 "foreign_files": row.foreign_files,
                 "overlap_files": row.overlap_files,
                 "drift_dirs": row.drift_dirs,
+                "price_files": row.price_files,
             }
             for row in census.segments
         ],
@@ -1400,6 +1474,7 @@ def census_to_dict(
 
 
 __all__ = [
+    "BAR_SCAN_COLUMNS",
     "ENGINE_INDEX_COORDS",
     "OPTIONS_DIR_NAME",
     "OPTIONS_SEGMENT",
@@ -1413,6 +1488,7 @@ __all__ = [
     "OptionForeignMonthRows",
     "OptionIntraFileDup",
     "PartitionCoords",
+    "PriceSanityRows",
     "SegmentCensus",
     "build_lake_census",
     "census_to_dict",

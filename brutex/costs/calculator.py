@@ -12,6 +12,11 @@ amendments locked 2026-05-16:
 - **DEC-EXEC-008** BUY-only policy: Track 2 only sets ``side`` to
   ``long_call`` or ``long_put``. The short_* branches exist as
   forward-compat stubs but are not used in Track 2 backtests.
+- **DEC-TRACK2-COSTS-SPEC-RECONCILE-001** short-side slippage resolved
+  to the CALCULATOR_SPEC §8 ADVERSE rule (short SELL entry at
+  ``entry_open − 1 tick``, cover BUY at ``exit_open + 1 tick``),
+  superseding the #963 MINOR-4 pin; the branch stays
+  production-unreachable under DEC-EXEC-008.
 
 All math in int64 paise. Pure function: no I/O, no global state,
 deterministic. Designed to be inline-able by Rust/Numba downstream
@@ -134,11 +139,13 @@ def _apply_slippage(
     For Track 2 (BUY-only, per DEC-EXEC-008), only the long branches
     fire. Short branches kept for forward-compat.
 
-    Every returned fill is floored at one tick (MINOR-3): a long exit on a
-    bar that opens at exactly one tick (₹0.05) would otherwise slip to a
-    ₹0.00 sell fill (a "free" sale), which is economically impossible —
-    nothing trades below one tick. The floor only affects that degenerate
-    tick-boundary case; the normal path (prices ≥ 2 ticks) is unchanged.
+    Every returned fill is floored at one tick (MINOR-3): a SELL leg on a
+    bar that opens at exactly one tick (₹0.05) — the long EXIT, or, since
+    the DEC-TRACK2-COSTS-SPEC-RECONCILE-001 adverse re-pin, the short
+    ENTRY — would otherwise slip to a ₹0.00 sell fill (a "free" sale),
+    which is economically impossible — nothing trades below one tick. The
+    floor only affects those degenerate tick-boundary cases; the normal
+    path (prices ≥ 2 ticks) is unchanged.
 
     ``realized_slippage_per_share`` is the slippage TRULY baked into the
     post-floor fills (NIT-1): the buy leg's adverse rise from its raw open
@@ -155,20 +162,17 @@ def _apply_slippage(
         buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
         buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
     else:
-        # short side: BUY at exit_open + tick (cover), SELL at entry_open + tick.
-        #
-        # MINOR-4 — the short SELL leg sign is a documented spec AMBIGUITY: the
-        # CALCULATOR_SPEC §8 table says short entry fill = ``entry_bar_open − 1
-        # tick`` (adverse, LOWER), but the §4 pseudocode comment says "SELL at
-        # entry+1tick" (HIGHER) and is itself flagged "# CHECK SIGN". The two
-        # spec readings disagree. Track 2 is BUY-only (DEC-EXEC-008), so this
-        # branch is never exercised in production; we PIN the current behaviour
-        # (entry_open + tick) and pin it with a byte-exact test rather than
-        # guess-changing an unused path. Resolve the spec contradiction before
-        # any short-side track relies on this fill.
+        # RESOLVED (was MINOR-4): the §8 ADVERSE rule is authoritative
+        # (DEC-TRACK2-COSTS-SPEC-RECONCILE-001, supersedes the #963 MINOR-4
+        # pin, which had byte-pinned the favorable ``entry_open + tick`` sell
+        # fill while the spec disagreed with itself): SELL entry at
+        # ``entry_open − 1 tick``, BUY cover at ``exit_open + 1 tick`` —
+        # adverse on both legs (buy higher, sell lower). The §4 pseudocode +
+        # its "# CHECK SIGN" marker were rewritten to agree with §8. This
+        # branch stays production-unreachable under DEC-EXEC-008 (BUY-only).
         # buy leg (cover) ← exit bar, sell leg ← entry bar.
         buy_raw, sell_raw = exit_open_paisa, entry_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw + tick
+        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
     # Floor every fill at one tick — no instrument trades below ₹0.05.
     buy_fill, sell_fill = max(buy_fill, tick), max(sell_fill, tick)
     # Realized per-share slippage = the adverse movement TRULY baked into the
@@ -216,12 +220,31 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     ------
     UnsupportedTradeOutcomeError
         If ``trade.trade_outcome`` is not ``"NORMAL_CLOSE"`` (MAJOR-1).
+    UnverifiedCostRegimeError
+        If ``entry_dt_ist.date()`` lands on an ETC refusal window
+        (currently every pre-2024-10-01 date; the authoritative spans are
+        DERIVED from the regime tables via ``etc_unverified_windows``,
+        never this prose): the ETC regime for the date is UNVERIFIED —
+        the whole trade cost is
+        refused, no component fabricated (DEC-ETC-REGIME-HISTORY-001;
+        raised out of Step 6's ``exchange_charge_bps_x100``). The options
+        executor prechecks-and-rejects such trades BEFORE calling here,
+        so this raise is the defence-in-depth choke point for direct
+        callers. DEAD-CODE-AUDITOR NOTE: the VERIFIED pre-Oct-2024 STT
+        options regime (6_250) is retained but becomes unreachable
+        THROUGH ``compute_trade_cost`` for options (Step 5 computes it,
+        Step 6 refuses first) — it stays unit-covered directly via
+        ``stt_options_rate_bps_x100`` (test_costs_regime_table.py +
+        test_stt_regime_boundary_oct_2024).
     """
     # ── Step 0: fail loud on an unimplemented outcome (MAJOR-1) ─────────
     # Only NORMAL_CLOSE is implemented. Pricing an expiry outcome with the
     # premium-based NORMAL_CLOSE math would be silently wrong; CALCULATOR_SPEC
     # §4.2 (STT on intrinsic / zero-STT assign / brokerage-only worthless) is
-    # not yet implemented, so we refuse rather than fabricate a cost.
+    # not yet implemented, so we refuse rather than fabricate a cost. This
+    # guard is a fail-loud REFUSAL, not the state machine — see the §4.2
+    # IMPLEMENTATION STATUS block (DEC-TRACK2-COSTS-SPEC-RECONCILE-001;
+    # guard ≠ implementation per MIGRATION.md #963 MAJOR-1).
     if trade.trade_outcome != "NORMAL_CLOSE":
         msg = (
             f"trade_outcome {trade.trade_outcome!r} is not supported: only "
@@ -258,9 +281,11 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
 
     # ── Step 6: exchange transaction charge (both sides on premium) ─────
     # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
-    # the current post-2024-10-01 rates are VERIFIED; pre-boundary dates
-    # ride an explicit UNVERIFIED same-rate placeholder (likely UNDER-
-    # costed) — see brutex.costs.constants' TODO(UNVERIFIED) ETC block.
+    # the dated VERIFIED regimes are encoded; a date on an UNVERIFIED window
+    # lands on an explicit refusal row and RAISES UnverifiedCostRegimeError
+    # here (DEC-ETC-REGIME-HISTORY-001) — the options executor prechecks
+    # and rejects such trades before reaching this point, so this raise is
+    # the authoritative defence-in-depth choke point for direct callers.
     exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument, trade.entry_dt_ist.date())
     exch_buy_paisa = _round_to_paisa(buy_notional_paisa * exch_rate_bps_x100)
     exch_sell_paisa = _round_to_paisa(sell_notional_paisa * exch_rate_bps_x100)

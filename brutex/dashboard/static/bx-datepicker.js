@@ -14,6 +14,20 @@
    candle controls) are enhanced too. */
 (function () {
   "use strict";
+  /* HTML-escape any string before it is interpolated into innerHTML — the SAME
+     helper the dashboard templates + bx-ui.js ship (CLAUDE.md §11 COMMON, the
+     CodeQL/XSS guard). An <option> text like `NIFTY<img src=x onerror=…>`
+     (a vendor-derived instrument/expiry/contract label populated the safe
+     textContent way, whose `.text` returns the raw `<`) renders as inert text
+     in the custom dropdown, never a live tag. */
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
   function ymd(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
   function parse(s) { if (!s) return null; var p = String(s).split("-"); if (p.length !== 3) return null; var d = new Date(+p[0], (+p[1]) - 1, +p[2]); return isNaN(d.getTime()) ? null : d; }
   function fmt(d) { return d ? d.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "2-digit" }) : "—"; }
@@ -154,8 +168,8 @@
     var trig = document.createElement("button"); trig.type = "button"; trig.className = "cs-trigger"; trig.setAttribute("aria-label", "Choose option");
     var menu = document.createElement("div"); menu.className = "cs-menu";
     function label() { return sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : ""; }
-    function setTrig() { trig.innerHTML = '<b>' + label() + '</b> <span class="cs-car">▾</span>'; }
-    function build() { menu.innerHTML = Array.prototype.map.call(sel.options, function (o, i) { return '<div class="cs-opt' + (i == sel.selectedIndex ? " on" : "") + '" data-i="' + i + '">' + o.text + '</div>'; }).join(""); }
+    function setTrig() { trig.innerHTML = '<b>' + esc(label()) + '</b> <span class="cs-car">▾</span>'; }
+    function build() { menu.innerHTML = Array.prototype.map.call(sel.options, function (o, i) { return '<div class="cs-opt' + (i == sel.selectedIndex ? " on" : "") + '" data-i="' + i + '">' + esc(o.text) + '</div>'; }).join(""); }
     function close() { wrap.classList.remove("open"); }
     menu.addEventListener("click", function (e) { var t = e.target.closest("[data-i]"); if (!t) return; sel.selectedIndex = +t.dataset.i; setTrig(); build(); close(); try { sel.dispatchEvent(new Event("change")); } catch (_) { } });
     trig.addEventListener("click", function (e) { e.stopPropagation(); build(); wrap.classList.toggle("open"); });

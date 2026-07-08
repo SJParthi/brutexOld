@@ -41,10 +41,10 @@ BRUTEX_M4PRO_ABS=1 pytest tests/bench/test_sweep_worker_scaling.py \
 ```
 
 `-s` is required — the table, the `SWEEP_WORKER_SCALING` lines and the
-`VERDICT:` line are printed, not asserted. (The bench also runs automatically
-wherever `.github/workflows/bench-m4pro.yml` sets `BRUTEX_M4PRO_ABS=1`, once
-this file is enumerated there — until then the manual command above is the
-procedure.)
+`VERDICT:` line are printed, not asserted. (The bench IS now enumerated as a
+step in `.github/workflows/bench-m4pro.yml`, which sets `BRUTEX_M4PRO_ABS=1`
+— DEC-TEST-APPARATUS-DEBTS-001(i); the manual command above stays valid
+off-CI.)
 
 Expected wall time: the gated body runs a warmup + 4 arms × 3 runs of a
 24-tuple × 3,750-bar sweep — single-digit minutes on the M4 Pro

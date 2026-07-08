@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 
@@ -47,6 +48,7 @@ from brutex.dashboard.historical_pull import (
     HistoricalPullReport,
     pull_contract_candles,
 )
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.registry_store import (
     CANDLE_STATUS_COMPLETE,
     CANDLE_STATUS_NONE,
@@ -57,6 +59,7 @@ from brutex.data.sink import BarSink, SinkAppendResult
 from brutex.orchestrator.parallel import SerialRunParallel
 from brutex.orchestrator.universe_phases import ItemResult
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 pytest.importorskip("duckdb", reason="RegistryStore needs duckdb")
 
@@ -957,28 +960,31 @@ def test_reconcile_round1_success_then_round2_transient_stays_failing() -> None:
         pipeline.drain()
 
 
-def test_market_pull_order_sorts_unknown_market_last() -> None:
-    """The order key sorts the two known markets futures-first, an unknown market LAST.
+def test_bucket_sort_key_sorts_unknown_market_last() -> None:
+    """The bucket key sorts the four known steps 3→4→5→6, an unknown market LAST.
 
-    Covers the ``.get(..., 99)`` deterministic tie-break: an unrecognised market namespace
-    sorts after both known ones, and equal-rank markets fall back to a stable name sort.
+    DEC-PULL-SIX-STEP-ORDER-001 — supersedes the 2-key ``_MARKET_PULL_ORDER``
+    futures-first sort: the ``(ledger-market, is_index)`` buckets rank by their
+    :class:`PullStep` (INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS →
+    STOCKS-OPTIONS); an unrecognised market namespace sorts after all four with
+    a stable ``(market, index-first)`` tie-break.
     """
-    buckets = {
-        GROWW_OPTION_COVERAGE_MARKET: 1,
-        "zzz-unknown-market": 2,
-        GROWW_FUTURE_COVERAGE_MARKET: 0,
-    }
-    ordered = [
-        market
-        for market, _rank in sorted(
-            buckets.items(),
-            key=lambda kv: (hp._MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
-        )
+    buckets = [
+        (GROWW_OPTION_COVERAGE_MARKET, False),
+        ("zzz-unknown-market", False),
+        (GROWW_FUTURE_COVERAGE_MARKET, False),
+        ("zzz-unknown-market", True),
+        (GROWW_OPTION_COVERAGE_MARKET, True),
+        (GROWW_FUTURE_COVERAGE_MARKET, True),
     ]
+    ordered = sorted(buckets, key=hp._bucket_sort_key)
     assert ordered == [
-        GROWW_FUTURE_COVERAGE_MARKET,
-        GROWW_OPTION_COVERAGE_MARKET,
-        "zzz-unknown-market",
+        (GROWW_FUTURE_COVERAGE_MARKET, True),  # 3 indices-futures
+        (GROWW_FUTURE_COVERAGE_MARKET, False),  # 4 stocks-futures
+        (GROWW_OPTION_COVERAGE_MARKET, True),  # 5 indices-options
+        (GROWW_OPTION_COVERAGE_MARKET, False),  # 6 stocks-options
+        ("zzz-unknown-market", True),  # unknowns LAST, index-first tie-break
+        ("zzz-unknown-market", False),
     ]
 
 
@@ -1427,6 +1433,73 @@ def test_pull_contract_candles_live_derives_pool(registry: RegistryStore, tmp_la
     # The run_parallel-is-None live branch built a PoolRunParallel; the pull still completes
     # correctly through the real thread pool (offline fakes), all 3 NIFTY legs landed.
     assert report.contracts_completed == 3
+
+
+# ── the register_pull_meter WIRING at the F&O historical build site ────────────
+# (DEC-RATE-METER-LIFECYCLE-001, audit C1/C2: the severed call site left the
+#  feature's whole named suite green — these drive the REAL pull_contract_candles)
+
+
+def test_contract_pull_registers_exact_pool_meter(registry: RegistryStore, tmp_lake: Path) -> None:
+    """MUTANT KILLED: ``register_pull_meter(session_rate, client, ...)`` at the
+    F&O historical build site severed to ``pass`` → ``peek_meter()`` stays ``None``."""
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    client = _client(sdk)
+    holder = SessionRateController()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: (client, sink),
+        now=_NOW,
+        session_rate=holder,
+    )
+    assert report.contracts_completed == 3
+    assert holder.peek_meter() is client.meter, (
+        "the F&O build site must register the EXACT pool/client CallMeter"
+    )
+
+
+def test_dry_run_contract_pull_clears_and_never_registers(registry: RegistryStore) -> None:
+    """The D1 pin (FAILS on pre-#1593 HEAD): the F&O DRY-RUN never registers.
+
+    The real default ``_build_dry_run_client`` returns a ``GrowwClient`` whose
+    ``CallMeter`` is REAL (``client.py`` ``default_factory=CallMeter`` — the
+    pre-#1593 "empty-candle client with no ``.meter``" claim here was FALSE), so
+    without the gate the dry-run would register its own synthetic meter AND
+    overwrite a prior real pull's. MUTANT KILLED: the ``dry_run=dry_run`` kwarg
+    dropped at the site / the dry-run branch severed → ``peek_meter()`` non-None.
+    """
+    from brutex.adapters.call_meter import CallMeter
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    holder = SessionRateController()
+    stale = CallMeter()
+    holder.register_meter(stale)  # an earlier real pull's meter in a warm process
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,  # NO client_factory: the REAL offline _build_dry_run_client
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        now=_NOW,
+        session_rate=holder,
+    )
+    assert report.dry_run is True
+    assert holder.peek_meter() is None, (
+        "a dry-run must DEREGISTER — never its own synthetic meter, never the stale one"
+    )
 
 
 def test_contract_market_split() -> None:
@@ -3111,6 +3184,448 @@ class TestExpiryScope:
         assert after == before, "an out-of-scope expiry's stored bars must never change"
 
 
+# ── DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001: observe-only telemetry (Session B) ──────
+# Item 8 (in-scope expiry summary at the production chokepoint) + item 7 (deep-budget
+# realized savings + the production kwarg-wiring regression pin). ALL observe-only —
+# every test here also pins that the underlying pull (calls, order, stored counts,
+# report fields) is byte-identical, with logging the ONLY delta.
+
+
+class _EmptyForSDK(_FakeSDK):
+    """A ``_FakeSDK`` returning a CLEAN 200-zero-candles payload for chosen symbols.
+
+    Exactly the vendor shape the EMPTY-retry loop keys off (a clean empty return,
+    never a raised error — DEC-FETCH-PER-WINDOW-GUARANTEE-001's reduction law), so
+    the deep-budget wiring is exercised with the real clean-empty semantics.
+    """
+
+    def __init__(self, empty_for: set[str]) -> None:
+        super().__init__()
+        self._empty_for = set(empty_for)
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        payload = super().get_historical_candles(**kw)
+        if str(kw["groww_symbol"]) in self._empty_for:
+            return {"candles": []}
+        return payload
+
+
+def _seed_nine_strike_chain(tmp_path: Path) -> tuple[RegistryStore, list[str]]:
+    """Seed a 9-strike NIFTY CE chain (≥ the 7-strike bounding minimum); return symbols.
+
+    Strikes 20600..21400 step 100 → grid ranks 0..8, median rank 4 (21000). With
+    ``BRUTEX_FNO_STRIKE_BAND=1`` the in-band set is {20900, 21000, 21100}; the six
+    outer strikes are confirmed-deep (reduced EMPTY-retry budget 1).
+    """
+    store = RegistryStore.open(tmp_path / "registry-chain.duckdb")
+    expiry = date(2024, 1, 25)
+    symbols: list[str] = []
+    for strike in range(20600, 21500, 100):
+        symbol = f"NSE-NIFTY-25Jan24-{strike}-CE"
+        store.upsert_contract(
+            "NSE",
+            "NIFTY",
+            expiry,
+            symbol,
+            side="CE",
+            strike=float(strike),
+            run_id=_RUN_ID,
+            fetched_at=_FETCHED,
+        )
+        symbols.append(symbol)
+    return store, symbols
+
+
+class TestDeepBudgetRealizedTelemetry:
+    """Item 7 — the #1026 budget's production wiring pin + the realized-savings INFO."""
+
+    def test_production_pull_deep_strike_sees_exactly_one_fetch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REGRESSION PIN: the PRODUCTION ``pull_contract_candles`` path applies the budget.
+
+        Before this pin, deleting the ``empty_retry_by_symbol=`` kwarg from the
+        production ``_run_phase`` call passed every gate (silently re-adding ~2
+        fetches per dead strike — hours per full pull). A fetch-COUNTING SDK drives
+        the REAL production entrypoint over a 9-strike chain (band narrowed to ±1
+        via ``BRUTEX_FNO_STRIKE_BAND``): the confirmed-DEEP clean-empty strike must
+        see EXACTLY 1 vendor fetch, while an IN-BAND clean-empty strike keeps the
+        FULL 3-fetch budget (proving the map is applied selectively, not globally).
+        Verified fail-before: with the kwarg dropped the deep strike reads 3.
+        """
+        from collections import Counter
+
+        from brutex.adapters.ingest_common import DEFAULT_EMPTY_RETRY_ATTEMPTS
+
+        monkeypatch.setenv("BRUTEX_FNO_STRIKE_BAND", "1")
+        store, symbols = _seed_nine_strike_chain(tmp_path)
+        deep = "NSE-NIFTY-25Jan24-21400-CE"  # rank 8 — 4 strikes past the ±1 band
+        in_band = "NSE-NIFTY-25Jan24-21000-CE"  # the median strike — never reduced
+        sdk = _EmptyForSDK(empty_for={deep, in_band})
+        sink = _RecordingSink()
+        report = pull_contract_candles(
+            store.list_contracts(),
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=store,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+            now=_NOW,
+        )
+        counts = Counter(sdk.candle_symbols)
+        # THE TEETH: the deep clean-empty strike cost EXACTLY ONE fetch (the reduced
+        # budget) — dropping the production kwarg makes this read 3 and FAILS here.
+        assert counts[deep] == 1
+        # The in-band clean-empty strike keeps the FULL empty-retry budget.
+        assert counts[in_band] == DEFAULT_EMPTY_RETRY_ATTEMPTS == 3
+        # Every data-bearing strike is fetched once — no strike is ever plan-skipped.
+        for symbol in symbols:
+            if symbol not in (deep, in_band):
+                assert counts[symbol] == 1
+        assert report.contracts_selected == 9
+
+    def test_live_pull_emits_one_realized_summary_with_honest_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A LIVE bounded pull emits EXACTLY ONE ``strike_chain.realized`` INFO.
+
+        6 strikes carry the reduced budget (ranks 0-2 + 6-8 of the 9-strike chain at
+        band ±1); ONE of them (21400) confirms clean-EMPTY with 1 in-pull fetch →
+        ``realized_confirms=1`` and ``fetches_saved_estimate = 3 − 1 = 2``. The other
+        five deep strikes return data (attempted but not confirms). Also pins the
+        observe-only contract: the report's counts match the unbounded expectations.
+        """
+        monkeypatch.setenv("BRUTEX_FNO_STRIKE_BAND", "1")
+        store, _symbols = _seed_nine_strike_chain(tmp_path)
+        deep = "NSE-NIFTY-25Jan24-21400-CE"
+        sdk = _EmptyForSDK(empty_for={deep})
+        sink = _RecordingSink()
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        with capture_logs() as logs:
+            report = pull_contract_candles(
+                store.list_contracts(),
+                lake_root=lake,
+                dry_run=False,
+                intervals=("1minute",),
+                registry=store,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+                now=_NOW,
+            )
+        (event,) = [e for e in logs if e["event"] == "strike_chain.realized"]
+        assert event["interval"] == "1minute"
+        assert event["strikes_bounded"] == 6
+        assert event["bounded_windows_attempted"] == 6
+        assert event["realized_confirms"] == 1
+        assert event["fetches_saved_estimate"] == 2  # full 3 − the 1 confirm fetch
+        assert event["full_budget"] == 3
+        # Observe-only pin: the pull's outcome is unchanged by the telemetry — the
+        # 8 data strikes landed complete, the empty one settled honestly.
+        assert report.contracts_selected == 9
+        assert report.failed_pairs == 0
+
+    def test_second_pull_counts_only_this_pulls_windows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THIS-pull honesty: a re-pull's summary never re-counts prior pulls' rows.
+
+        Pull 1 attempts all 6 bounded windows (5 land data → settled SUCCESS; 21400
+        confirms empty — and, under main's old-empty single-confirm law for an
+        EXPIRED window, settles terminally SKIPPED after that ONE clean attempt:
+        "vendor confirmed no trades (1 clean attempt, expired window)"). Pull 2
+        re-runs the SAME selection: EVERY window is now ledger-settled (no
+        attempt), so pull 2's summary reads ``bounded_windows_attempted=0`` /
+        ``realized_confirms=0`` — NOT the lifetime 6 the pre-baseline scan would
+        have reported (the THIS-pull-honesty property under test).
+        """
+        monkeypatch.setenv("BRUTEX_FNO_STRIKE_BAND", "1")
+        store, _symbols = _seed_nine_strike_chain(tmp_path)
+        deep = "NSE-NIFTY-25Jan24-21400-CE"
+        lake = tmp_path / "lake"
+        lake.mkdir()
+
+        def _pull() -> list[EventDict]:
+            sdk = _EmptyForSDK(empty_for={deep})
+            sink = _RecordingSink()
+            with capture_logs() as logs:
+                pull_contract_candles(
+                    store.list_contracts(),
+                    lake_root=lake,
+                    dry_run=False,
+                    intervals=("1minute",),
+                    registry=store,
+                    from_date=_FROM,
+                    to_date=_TO,
+                    client_factory=lambda _root: _factory(cast("_FakeSDK", sdk), sink),
+                    now=_NOW,
+                )
+            return [e for e in logs if e["event"] == "strike_chain.realized"]
+
+        (first,) = _pull()
+        assert first["bounded_windows_attempted"] == 6
+        assert first["realized_confirms"] == 1
+        (second,) = _pull()
+        assert second["bounded_windows_attempted"] == 0  # every window ledger-settled
+        assert second["realized_confirms"] == 0
+        assert second["strikes_bounded"] == 6  # the budget MAP is per-pull, unchanged
+
+    def test_unbounded_default_pull_emits_zero_realized_events(
+        self, registry: RegistryStore, tmp_lake: Path
+    ) -> None:
+        """Default-parity pin: a chain below the 7-strike minimum has NO budget map —
+        the LIVE pull emits ZERO ``strike_chain.realized`` events (no fabricated
+        zero-savings line) and its calls/report are byte-identical to before."""
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        selected = registry.list_contracts(underlying="NIFTY")
+        with capture_logs() as logs:
+            report = pull_contract_candles(
+                selected,
+                lake_root=tmp_lake,
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+            )
+        assert [e for e in logs if e["event"] == "strike_chain.realized"] == []
+        assert [e for e in logs if e["event"] == "strike_chain.realized_error"] == []
+        # Byte-identical control flow: same per-contract fetch set, same clean outcome.
+        assert sorted(set(sdk.candle_symbols)) == sorted(r.contract_symbol for r in selected)
+        assert report.contracts_completed == 3
+        assert report.failed_pairs == 0
+
+    def test_dry_run_bounded_chain_emits_zero_realized_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run has NO ledger — even a bounded chain emits nothing (honest: no
+        durable rows exist to count realized savings from)."""
+        monkeypatch.setenv("BRUTEX_FNO_STRIKE_BAND", "1")
+        store, _symbols = _seed_nine_strike_chain(tmp_path)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        with capture_logs() as logs:
+            pull_contract_candles(
+                store.list_contracts(),
+                lake_root=Path("/unused"),
+                dry_run=True,
+                intervals=("1minute",),
+                registry=store,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+            )
+        assert [e for e in logs if e["event"] == "strike_chain.realized"] == []
+
+
+class TestEmitStrikeChainRealizedUnit:
+    """Direct unit permutations of the guarded ``_emit_strike_chain_realized`` helper."""
+
+    @staticmethod
+    def _ledger_key(symbol: str, *, interval: str = "1minute") -> object:
+        from brutex.data.fetch_coverage import WindowKey
+
+        return WindowKey(
+            market=GROWW_OPTION_COVERAGE_MARKET,
+            security_id=symbol,
+            interval=interval,
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 21),
+        )
+
+    def test_all_row_filters_and_the_saved_clamp(self) -> None:
+        """Every skip branch: unbounded symbol · wrong interval · prior-pull row ·
+        non-empty outcome; plus the ``max(…, 0)`` clamp when a confirm burned the
+        full budget anyway (saved 0, never negative)."""
+        from typing import Any as _Any
+        from typing import cast as _cast
+
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        now = datetime(2026, 6, 14, 10, 0, tzinfo=UTC)
+        key = self._ledger_key
+        # bounded, this pull, clean EMPTY with 1 fetch → confirm, saved 3−1=2
+        ledger.record(
+            _cast(_Any, key("DEEP-1")),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=now,
+            in_pull_fetches=1,
+        )
+        # bounded, this pull, clean EMPTY that burned the FULL budget → saved 0 (clamp)
+        ledger.record(
+            _cast(_Any, key("DEEP-FULL")),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=now,
+            in_pull_fetches=3,
+        )
+        # bounded, this pull, SUCCESS with bars → attempted, NOT a confirm
+        ledger.record(
+            _cast(_Any, key("DEEP-DATA")),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=now,
+        )
+        # bounded but at ANOTHER interval → filtered out entirely
+        ledger.record(
+            _cast(_Any, key("DEEP-1", interval="1day")),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=now,
+        )
+        # NOT in the budget map → filtered out entirely
+        ledger.record(
+            _cast(_Any, key("INBAND")),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=now,
+        )
+        budget = {"DEEP-1": 1, "DEEP-FULL": 1, "DEEP-DATA": 1, "DEEP-PRIOR": 1}
+        # DEEP-PRIOR: a PRIOR pull's row — baseline attempts == current attempts.
+        ledger.record(
+            _cast(_Any, key("DEEP-PRIOR")),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=now,
+        )
+        pre = {
+            (
+                r.market,
+                r.security_id,
+                r.interval,
+                r.window_start,
+                r.window_end,
+            ): r.attempts
+            for r in ledger.records()
+            if r.security_id == "DEEP-PRIOR"
+        }
+        with capture_logs() as logs:
+            hp._emit_strike_chain_realized(
+                ledger,
+                interval="1minute",
+                empty_retry_by_symbol=budget,
+                pre_attempts=pre,
+            )
+        (event,) = [e for e in logs if e["event"] == "strike_chain.realized"]
+        assert event["strikes_bounded"] == 4
+        assert event["bounded_windows_attempted"] == 3  # DEEP-1 + DEEP-FULL + DEEP-DATA
+        assert event["realized_confirms"] == 2  # DEEP-1 + DEEP-FULL (DATA is no confirm)
+        assert event["fetches_saved_estimate"] == 2  # 2 (DEEP-1) + 0 (DEEP-FULL clamped)
+
+    def test_internal_error_is_guarded_and_logged(self) -> None:
+        """A scan-internal error logs ``strike_chain.realized_error`` — never raises."""
+        from typing import Any as _Any
+        from typing import cast as _cast
+
+        class _BoomLedger:
+            def records(self) -> list[object]:
+                raise RuntimeError("boom")
+
+        with capture_logs() as logs:
+            hp._emit_strike_chain_realized(
+                _cast(_Any, _BoomLedger()),
+                interval="1minute",
+                empty_retry_by_symbol={"X": 1},
+                pre_attempts={},
+            )
+        (event,) = [e for e in logs if e["event"] == "strike_chain.realized_error"]
+        assert event["error"] == "boom"
+        assert event["interval"] == "1minute"
+
+    def test_bounded_window_attempts_snapshots_only_bounded_symbols(self) -> None:
+        from typing import Any as _Any
+        from typing import cast as _cast
+
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        now = datetime(2026, 6, 14, 10, 0, tzinfo=UTC)
+        ledger.record(
+            _cast(_Any, self._ledger_key("DEEP-1")),
+            raw_bars=0,
+            error_type=None,
+            bars_appended=0,
+            now=now,
+        )
+        ledger.record(
+            _cast(_Any, self._ledger_key("INBAND")),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=now,
+        )
+        snapshot = hp._bounded_window_attempts(ledger, {"DEEP-1": 1})
+        assert list(snapshot.values()) == [1]
+        ((market, security_id, interval, _ws, _we),) = snapshot.keys()
+        assert (market, security_id, interval) == (
+            GROWW_OPTION_COVERAGE_MARKET,
+            "DEEP-1",
+            "1minute",
+        )
+
+
+class TestExpiryScopeSummaryTelemetry:
+    """Item 8 — the production chokepoint emits ONE bounded-scope summary, none by default."""
+
+    def test_bounded_pull_emits_exactly_one_summary(self, registry: RegistryStore) -> None:
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        with capture_logs() as logs:
+            pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=Path("/unused"),
+                dry_run=True,
+                intervals=("1minute",),
+                registry=registry,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+                scope_start=date(2024, 1, 1),
+                scope_end=date(2024, 1, 31),  # NIFTY Jan-25 chain IN, RELIANCE Feb-29 OUT
+            )
+        (event,) = [e for e in logs if e["event"] == "fno.expiry_scope_summary"]
+        assert event["contracts_in_scope"] == 3
+        assert event["expiries_in_scope"] == 1
+        assert event["contracts_out_of_scope"] == 1
+        assert event["expiries_out_of_scope"] == 1
+        assert event["scope_start"] == "2024-01-01"
+        assert event["scope_end"] == "2024-01-31"
+
+    def test_default_no_dates_pull_emits_zero_summary_events(self, registry: RegistryStore) -> None:
+        """Extends the #1146 default-parity pin: the (None, None) pull emits ZERO
+        ``fno.expiry_scope_summary`` events — the telemetry adds no log on the
+        default path (its calls + windows are already pinned byte-identical by
+        ``test_default_scope_plans_byte_identical_windows``)."""
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        with capture_logs() as logs:
+            pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=Path("/unused"),
+                dry_run=True,
+                intervals=("1minute",),
+                registry=registry,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+            )
+        assert [e for e in logs if e["event"] == "fno.expiry_scope_summary"] == []
+        assert [e for e in logs if e["event"] == "fno.expiry_out_of_scope"] == []
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Vendor-surface threading through the phase result (DEC-VENDOR-CONFLICT-SURFACE-001)
 # ────────────────────────────────────────────────────────────────────────
@@ -3362,3 +3877,312 @@ def test_dry_run_pull_threads_empty_observed_holidays(
     )
     assert seen
     assert all(observed == frozenset() for observed in seen)
+
+
+# ── Golden Rule #8 — the F&O pull writes the hash-chained ingest audit trail ──
+# (DEC-INGEST-AUDIT-WIRING-001: the F&O spine was 100% unaudited on every path
+# before this — the Dhan-era DEC-OPTION-AUDIT-WIRE-001 wiring died in the
+# ADR-0009 Groww cutover.)
+
+
+def _walk_fno_chain(lake_root: Path) -> list[str]:
+    """Verify the F&O chain end-to-end + link-by-link; return the action list."""
+    from brutex.orchestrator.audit import GENESIS_PREV_HASH, read_entries, verify_chain
+
+    path = lake_root / "audit" / "fno-ingest.jsonl"
+    entries = read_entries(path)
+    assert verify_chain(path) == len(entries)
+    assert entries[0].prev_hash == GENESIS_PREV_HASH
+    for prev, cur in pairwise(entries):
+        assert cur.prev_hash == prev.entry_hash
+        assert cur.seq == prev.seq + 1
+    return [e.action for e in entries]
+
+
+def test_fno_pull_writes_verifiable_hash_chain(registry: RegistryStore, tmp_lake: Path) -> None:
+    """A LIVE-shaped F&O pull writes <lake>/audit/fno-ingest.jsonl and the chain verifies.
+
+    The NIFTY selection = 1 FUT + 2 options over 2 market buckets (groww-future runs
+    first, then groww-option — DEC-FNO-PULL-ORDER-LOOKBACK-001), so the trail carries
+    ONE RUN_START/RUN_COMPLETE pair per bucket + one PAIR_DONE per contract, all on
+    one continuous chain.
+    """
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert report.contracts_completed == 3
+    actions = _walk_fno_chain(tmp_lake)
+    assert actions.count("INGEST_RUN_START") == 2  # one per market bucket (FUT, then CE/PE)
+    assert actions.count("INGEST_RUN_COMPLETE") == 2
+    assert actions.count("INGEST_PAIR_DONE") == 3  # one per selected contract
+    assert "INGEST_PAIR_FAILED" not in actions
+
+
+def test_fno_pull_quarantine_lands_on_the_chain(registry: RegistryStore, tmp_lake: Path) -> None:
+    """A terminally-quarantined contract writes INGEST_PAIR_FAILED on the F&O chain."""
+    bad = "NSE-NIFTY-25Jan24-21000-PE"
+    sdk = _FakeSDK(raise_for={bad: GrowwAPIBadRequestException("nope")})
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert report.failed_pairs == 1
+    from brutex.orchestrator.audit import read_entries
+
+    entries = read_entries(tmp_lake / "audit" / "fno-ingest.jsonl")
+    failed = [e for e in entries if e.action == "INGEST_PAIR_FAILED"]
+    # F&O always fetches 1minute ONLY (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — the
+    # requested ("1day",) is echoed in the report but never the fetch granularity.
+    assert [e.subject for e in failed] == [f"{bad}:1minute"]
+    assert failed[0].payload["auth_failure"] is False
+
+
+def test_fno_dry_run_writes_no_audit(registry: RegistryStore, tmp_path: Path) -> None:
+    """A dry-run F&O pull writes no real data → no audit file, no audit dir."""
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_path / "lake-dry",
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert not (tmp_path / "lake-dry" / "audit").exists()
+
+
+# ── _mark_complete store-write deferral (DEC-STORE-WRITE-DEADLINE-001) ────────
+#
+# The completion stamp runs as ONE deadline-guarded registry batch
+# (``mark_candle_statuses``); a wedged registry DEFERS the stamps — one loud
+# WARN, an honest 0 return — and NEVER raises past the seam (the candles already
+# landed durably; the next pull re-marks idempotently).
+
+
+class _DeferringRegistry:
+    """A registry stub whose batch stamp raises the TRANSIENT store-write defer."""
+
+    def __init__(self, *, defer: bool) -> None:
+        self._defer = defer
+        self.batches: list[tuple[list[tuple[str, str, str]], str]] = []
+
+    def mark_candle_statuses(self, rows: Sequence[tuple[str, str, str]], candle_status: str) -> int:
+        if self._defer:
+            raise StoreWriteDeadlineExceeded(0.2, "registry", "mark_candle_statuses")
+        self.batches.append((list(rows), candle_status))
+        return len(rows)
+
+
+def _rebuilt_row(symbol: str) -> tuple[ContractRow, DerivativeContract]:
+    fetched = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
+    row = ContractRow(
+        "NSE", "NIFTY", date(2024, 1, 25), symbol, 21000.0, "CE", "none", "r", fetched
+    )
+    contract = DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol=symbol,
+        contract_type="CE",
+        strike=21000.0,
+    )
+    return (row, contract)
+
+
+class TestMarkCompleteStoreWriteDefer:
+    def test_healthy_batch_marks_and_returns_the_count(self) -> None:
+        registry = _DeferringRegistry(defer=False)
+        rebuilt = [_rebuilt_row("A-CE"), _rebuilt_row("B-CE"), _rebuilt_row("C-CE")]
+        marked = hp._mark_complete(
+            cast("RegistryStore", registry), rebuilt, frozenset({"A-CE", "C-CE"})
+        )
+        assert marked == 2
+        assert registry.batches == [
+            ([("NSE", "NIFTY", "A-CE"), ("NSE", "NIFTY", "C-CE")], CANDLE_STATUS_COMPLETE)
+        ]
+
+    def test_empty_completion_set_never_touches_the_registry(self) -> None:
+        registry = _DeferringRegistry(defer=False)
+        marked = hp._mark_complete(
+            cast("RegistryStore", registry), [_rebuilt_row("A-CE")], frozenset()
+        )
+        assert marked == 0
+        assert registry.batches == []
+
+    def test_deferred_stamp_warns_and_returns_zero_without_raising(self) -> None:
+        """A wedged registry must NEVER fail the pull whose candles already landed."""
+        registry = _DeferringRegistry(defer=True)
+        rebuilt = [_rebuilt_row("A-CE"), _rebuilt_row("B-CE")]
+        with capture_logs() as logs:
+            marked = hp._mark_complete(
+                cast("RegistryStore", registry), rebuilt, frozenset({"A-CE", "B-CE"})
+            )
+        assert marked == 0  # honest: the durably-marked count is unknown
+        deferred = [r for r in logs if r["event"] == hp.HISTORICAL_MARK_COMPLETE_DEFERRED_EVENT]
+        assert len(deferred) == 1
+        assert deferred[0]["contracts"] == 2
+        assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
+        assert deferred[0]["defer_seconds"] == 0.2
+
+
+# ── DEC-FORM-WINNER-PERSIST-001: ONE shared &-form preference per phase ───────
+
+
+class _FormMetaStore:
+    """A minimal in-memory ``MetaKV`` (the durable form-winner sidecar twin)."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.rows[key] = value
+
+    def get_meta(self, key: str) -> str | None:
+        return self.rows.get(key)
+
+
+def test_form_preference_identity_reaches_the_ingest_spine(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SAME injected object reaches ``run_groww_option_ingest`` — no fresh copy.
+
+    DEC-FORM-WINNER-PERSIST-001: with the durable preference threaded, the spine's
+    fresh-per-pass default stands down, so the learning is shared across market
+    buckets, until-clean rounds AND (via the store) pulls.
+    """
+    from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
+
+    seen: list[object] = []
+    real_ingest = hp.run_groww_option_ingest
+
+    def _spy(*args: object, **kwargs: object) -> GrowwOptionIngestReport:
+        seen.append(kwargs.get("form_preference"))
+        return real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy)
+    preference = SymbolFormPreference()
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    pull_contract_candles(
+        registry.list_contracts(underlying="NIFTY"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+        form_preference=preference,
+    )
+    assert seen != []
+    assert all(item is preference for item in seen)  # the IDENTICAL object, every bucket
+
+
+def test_form_preference_default_none_lets_the_spine_build_its_own(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default parity: unwired callers still pass ``None`` (the spine's per-pass default)."""
+    seen: list[object] = []
+    real_ingest = hp.run_groww_option_ingest
+
+    def _spy(*args: object, **kwargs: object) -> GrowwOptionIngestReport:
+        seen.append(kwargs.get("form_preference"))
+        return real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    pull_contract_candles(
+        registry.list_contracts(underlying="NIFTY"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert seen != []
+    assert all(item is None for item in seen)
+
+
+def test_durable_preference_persists_the_candle_phase_winner(tmp_path: Path) -> None:
+    """End-to-end: an ``&``-contract's %26 candle win lands in the durable store.
+
+    Proves the WHOLE thread — pull_contract_candles → _run_phase →
+    run_groww_option_ingest → fetch_candle_windows — records under the contract's
+    UNDERLYING key through the injected PersistentSymbolFormPreference.
+    """
+    from brutex.adapters.groww.symbol_form_preference import (
+        PersistentSymbolFormPreference,
+        form_winner_key,
+    )
+
+    class _AmpersandSDK(_FakeSDK):
+        def get_historical_candles(self, **kw: object) -> dict[str, object]:
+            symbol = str(kw["groww_symbol"])
+            self.candle_symbols.append(symbol)
+            if "%26" in symbol:
+                return _candle_payload()
+            return {"candles": []}  # the plain & form is silently empty (the #898 shape)
+
+    store = RegistryStore.open(tmp_path / "registry.duckdb")
+    store.upsert_contract(
+        "NSE",
+        "M&M",
+        date(2024, 1, 25),
+        "NSE-M&M-25Jan24-2400-CE",
+        side="CE",
+        strike=2400.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    meta = _FormMetaStore()
+    sdk = _AmpersandSDK()
+    sink = _RecordingSink()
+    report = pull_contract_candles(
+        store.list_contracts(underlying="M&M"),
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=store,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+        form_preference=PersistentSymbolFormPreference(meta),
+    )
+    assert report.contracts_completed == 1
+    # First fetch tried plain (empty) then the %26 form (bars) — and the win was
+    # PERSISTED under the underlying key AS THE KEY-LEVEL ROLE FORM (never the
+    # per-contract spelling), so the row seeds the metadata phase and every other
+    # contract of the underlying in the next pull/process.
+    assert sdk.candle_symbols == ["NSE-M&M-25Jan24-2400-CE", "NSE-M%26M-25Jan24-2400-CE"]
+    assert meta.rows == {form_winner_key("M&M"): "M%26M"}
+    store.close()

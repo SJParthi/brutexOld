@@ -27,6 +27,7 @@ from brutex.dashboard.pull_intent import (
     PullIntentStore,
     ResumeAction,
     ResumeBanner,
+    clear_banner_after_start,
     emit_restart_cap_alert,
     persist_intent_for_launch,
     probe_pull_singleflight,
@@ -138,9 +139,9 @@ def test_banner_starts_unset_and_set_clear_roundtrip() -> None:
     assert banner.snapshot() is None
     banner.set(level="critical", message="boom")
     assert banner.snapshot() == {"level": "critical", "message": "boom"}
-    banner.clear()
+    assert banner.clear() is True, "a REAL clear reports the payload it dropped"
     assert banner.snapshot() is None
-    banner.clear()  # idempotent
+    assert banner.clear() is False, "an idempotent no-op clear reports nothing dropped"
     assert banner.snapshot() is None
 
 
@@ -310,6 +311,131 @@ def test_real_launch_persists_quadruple_and_restarts(tmp_path: Path) -> None:
     )
     assert loaded.restarts == 2, "the resume path's bumped counter must survive the re-write"
     assert loaded.created_at != ""
+
+
+# ── resume-banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001, started-gated) ─
+
+
+def test_persist_intent_never_touches_the_banner(tmp_path: Path) -> None:
+    # Round-3 hostile-review regression: persist_intent_for_launch runs BEFORE
+    # BackgroundPullJob.start, where the launch is still only an ATTEMPT — it
+    # must NOT drop the CRITICAL crash-loop banner (previously it cleared it
+    # unconditionally, so a REFUSED start silently retired the banner).
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=False,
+        symbols="NIFTY",
+        symbol=None,
+        from_date=None,
+        to_date=None,
+    )
+    assert wrote is True
+    assert store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }, "the pre-start intent write alone must never retire the banner"
+
+
+def test_started_launch_autoclears_a_stale_resume_banner(tmp_path: Path) -> None:
+    # The banner's own remediation is "start the pull manually from /universe";
+    # following it (start() acquired the guards ⇒ started=True) must retire the
+    # banner instead of leaving a stale CRITICAL up for the process lifetime.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    cleared = clear_banner_after_start(store, dry_run=False, started=True)
+    assert cleared is True
+    assert store.banner.snapshot() is None, "the started real launch retires the banner"
+
+
+def test_refused_start_keeps_the_resume_banner(tmp_path: Path) -> None:
+    # THE round-3 finding: started=False (a pull already running, flock
+    # contention, or the foreign-host lease refusal) launches NOTHING — the
+    # crash-loop banner must survive the refused attempt.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    cleared = clear_banner_after_start(store, dry_run=False, started=False)
+    assert cleared is False
+    assert store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }, "a refused start resolves no crash loop — the banner stays up"
+
+
+def test_dry_run_never_clears_the_resume_banner(tmp_path: Path) -> None:
+    # A synthetic pull resolves no crash loop: neither the dry-run persist
+    # (no intent write) nor a dry-run start touches the banner.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=True,
+        symbols="NIFTY",
+        symbol=None,
+        from_date=None,
+        to_date=None,
+    )
+    assert wrote is False
+    assert not store.path.exists()
+    cleared = clear_banner_after_start(store, dry_run=True, started=True)
+    assert cleared is False
+    assert store.banner.snapshot() == {
+        "level": "critical",
+        "message": "pull auto-resume HALTED: cap",
+    }
+
+
+def test_started_autoclear_is_independent_of_a_failed_intent_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed best-effort intent write never blocks the pull — the started
+    # launch that follows it still retires the banner.
+    store = PullIntentStore(tmp_path)
+    store.banner.set(level="critical", message="pull auto-resume HALTED: cap")
+
+    def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
+        raise OSError("disk exploded mid-write")
+
+    monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=False,
+        symbols=None,
+        symbol="NIFTY",
+        from_date=None,
+        to_date=None,
+    )
+    assert wrote is False
+    cleared = clear_banner_after_start(store, dry_run=False, started=True)
+    assert cleared is True
+    assert store.banner.snapshot() is None
+
+
+def test_started_launch_with_no_banner_stays_silent_and_unchanged(tmp_path: Path) -> None:
+    # The no-op branch: an unset banner is a silent False clear — the launch's
+    # persisted intent is byte-identical to the pre-change behaviour.
+    store = PullIntentStore(tmp_path)
+    assert store.banner.snapshot() is None
+    wrote = persist_intent_for_launch(
+        store,
+        dry_run=False,
+        symbols="NIFTY",
+        symbol=None,
+        from_date="2024-01-01",
+        to_date="2024-02-01",
+    )
+    assert wrote is True
+    cleared = clear_banner_after_start(store, dry_run=False, started=True)
+    assert cleared is False
+    assert store.banner.snapshot() is None
+    loaded = store.load()
+    assert loaded is not None
+    assert (loaded.symbols, loaded.from_date, loaded.to_date) == (
+        "NIFTY",
+        "2024-01-01",
+        "2024-02-01",
+    )
 
 
 # ── probe_pull_singleflight (the REAL flock against a tmp lake root) ──────────

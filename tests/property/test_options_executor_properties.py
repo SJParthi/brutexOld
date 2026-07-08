@@ -35,9 +35,12 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 _IST = ZoneInfo("Asia/Kolkata")
-_ENTRY = datetime(2024, 5, 2, 9, 16, tzinfo=_IST)
-_EXIT = datetime(2024, 5, 2, 15, 20, tzinfo=_IST)
-_EXPIRY = date(2024, 5, 30)
+# Canonical priced-path date: post-2024-10-01 (the verified ETC window —
+# DEC-ETC-REGIME-HISTORY-001 made pre-boundary dates reject) and clear of
+# the 2024-11-20 NIFTY lot transition.
+_ENTRY = datetime(2024, 10, 3, 9, 16, tzinfo=_IST)
+_EXIT = datetime(2024, 10, 3, 15, 20, tzinfo=_IST)
+_EXPIRY = date(2024, 10, 31)
 
 _instruments = st.sampled_from(list(OptionsUnderlying))
 _directions = st.sampled_from(list(TradeDirection))
