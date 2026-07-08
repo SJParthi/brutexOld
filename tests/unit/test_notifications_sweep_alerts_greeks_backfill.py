@@ -77,10 +77,11 @@ class TestGreeksBackfillComplete:
         assert escape_markdown_v2("2 errored (re-runnable)") in event.message
 
     def test_unfixable_contracts_downgrade_to_warning_head(self) -> None:
-        """Fix round 4 (refuter-confirmed): a driver-UNFIXABLE contract (a
-        null-stamped non-finite-OHLC row the enrich driver skips by design)
-        must never ride a green ✅ — the stale null stamp persists and no
-        re-run can clear it (a lake repair can).
+        """Fix rounds 4-7 (refuter-confirmed): a driver-UNFIXABLE contract (a
+        stale/null stamp on a row the enrich driver skips by design —
+        non-finite OHLC — or on a row its dedup/month-bound read never sees)
+        must never ride a green ✅ — the stale stamp persists and no re-run
+        can clear it (a lake repair can).
         """
         fake = FakeNotifier()
         alerter = SweepAlerter(notifier=fake)
@@ -89,7 +90,7 @@ class TestGreeksBackfillComplete:
         (event,) = fake.published
         assert "⚠️ Greeks backfill complete with failures" in event.message
         assert (
-            escape_markdown_v2("1 unfixable (non-finite OHLC — lake repair needed)")
+            escape_markdown_v2("1 unfixable (driver-unactionable rows — lake repair needed)")
             in event.message
         )
 

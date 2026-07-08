@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ from brutex.data.greeks_backfill import (
     _contract_window,
     _month_files,
     _rate_source_value_fingerprint,
-    _stamped_rows_fixable,
+    _suspicious_file_verdict,
     checkpoint_path,
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -140,7 +140,13 @@ def _write_month_prices(
     interval: str = "1minute",
     exchange: str = "NSE",
 ) -> Path:
-    """Write a month partition with REAL OHLC columns (fix-round-4 fixability probes)."""
+    """Write a month partition with REAL OHLC columns (fix-round-4 fixability probes).
+
+    Deliberately timestamp-LESS: exercises the ``_read_driver_frames`` degrade
+    arm (``view == raw`` — no driver view derivable), keeping the rounds-4/6
+    price-predicate pins pure. Use :func:`_write_month_rows` for the round-7
+    driver-view (dedup / month-bound) probes, which need genuine timestamps.
+    """
     dest = (
         lake
         / "bars"
@@ -163,6 +169,50 @@ def _write_month_prices(
         }
     )
     frame.write_parquet(dest)
+    return dest
+
+
+def _write_month_rows(
+    lake: Path,
+    symbol: str,
+    year: int,
+    month: int,
+    rows: list[tuple[datetime, int | None, float | None]],
+    *,
+    interval: str = "1minute",
+    exchange: str = "NSE",
+    with_pid_column: bool = True,
+) -> Path:
+    """Write a month partition with REAL timestamp + OHLC (+ stamp) columns.
+
+    The fix-round-7 driver-view probes (keep-first timestamp dedup +
+    own-UTC-month bound) need genuine timestamps; each row is
+    ``(timestamp, pid, close)`` with fixed finite open/high/low.
+    ``with_pid_column=False`` writes the LEGACY 7-column shape (no stamp
+    column) with real timestamps.
+    """
+    dest = (
+        lake
+        / "bars"
+        / exchange
+        / "FNO"
+        / symbol
+        / interval
+        / f"{year:04d}"
+        / f"{month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = len(rows)
+    data = {
+        "timestamp": pl.Series([ts for ts, _, _ in rows], dtype=pl.Datetime("us", "UTC")),
+        "open": pl.Series([100.0] * n, dtype=pl.Float64),
+        "high": pl.Series([101.0] * n, dtype=pl.Float64),
+        "low": pl.Series([99.0] * n, dtype=pl.Float64),
+        "close": pl.Series([close for _, _, close in rows], dtype=pl.Float64),
+    }
+    if with_pid_column:
+        data["greeks_provenance_id"] = pl.Series([pid for _, pid, _ in rows], dtype=pl.Int32)
+    pl.DataFrame(data).write_parquet(dest)
     return dest
 
 
@@ -511,15 +561,284 @@ class TestScanner:
         assert [t.symbol for t in scan.targets] == [_CE]
         assert scan.stale_null == 1 and scan.stale_unfixable == 0
 
-    def test_fixability_probe_fails_open_without_visible_null_rows(self, lake: Path) -> None:
-        """The defensive no-null-rows arm fails OPEN (re-feed the driver)."""
-        dest = _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID], [100.0])
-        assert _stamped_rows_fixable(dest) is True
+    def test_suspicious_verdict_fails_open_on_a_skewed_clean_null_read(self, lake: Path) -> None:
+        """The defensive probe/read-skew arm fails OPEN (re-feed the driver).
 
-    def test_fixability_probe_fails_open_without_visible_stale_rows(self, lake: Path) -> None:
-        """The stale-pid selector's no-visible-rows arm ALSO fails OPEN."""
+        The stamp probe claimed a null stamp but the verdict's own read sees
+        no staleness anywhere (view OR dropped rows) — feed the driver with
+        the raw probe's verdict; restating a current contract is a no-op.
+        """
         dest = _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID], [100.0])
-        assert _stamped_rows_fixable(dest, [_V1_PID]) is True
+        verdict = _suspicious_file_verdict(
+            dest, rate_source=_RATE, symbol=_CE, fallback_reason="null"
+        )
+        assert verdict == ("null", False, False)
+
+    def test_suspicious_verdict_fails_open_on_a_skewed_clean_stale_read(self, lake: Path) -> None:
+        """The stale-flavoured probe/read skew ALSO fails OPEN (fallback reason)."""
+        dest = _write_month_prices(lake, _CE, 2024, 1, [_CURRENT_PID], [100.0])
+        verdict = _suspicious_file_verdict(
+            dest, rate_source=_RATE, symbol=_CE, fallback_reason="v1"
+        )
+        assert verdict == ("v1", False, False)
+
+    # ── Fix round 7 (refuter-confirmed): every targeting judgment runs over
+    #    the DRIVER's row view (own-UTC-month bound + keep-first timestamp
+    #    dedup — read_option_rows' exact per-file discipline), never the RAW
+    #    physical rows the driver never acts on. ─────────────────────────────
+
+    def test_stale_stamp_only_on_dropped_dup_row_is_stale_unfixable(self, lake: Path) -> None:
+        """Fix round 7 repro 2 (refuter-confirmed): the FINITE dropped-dup escape.
+
+        Every kept row is current v2 with finite prices; ONE physically-later
+        duplicate-timestamp row carries a v1 stamp (finite prices too). The
+        driver's keep-first dedup DROPS that row, so it can never rewrite the
+        stamp — the old raw-row probe re-targeted the contract on EVERY scan
+        while the wet run read ``already_current`` (eternal false-green loop).
+        The driver-view probe folds it into ``stale_unfixable`` + one loud
+        WARN naming lake_heal's intra-file dup heal.
+        """
+        from structlog.testing import capture_logs
+
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        ts1 = datetime(2024, 1, 15, 3, 46, tzinfo=UTC)
+        _write_month_rows(
+            lake,
+            _CE,
+            2024,
+            1,
+            [(ts0, _CURRENT_PID, 100.0), (ts1, _CURRENT_PID, 100.0), (ts0, _V1_PID, 100.0)],
+        )
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1
+        assert scan.stale_v1 == 0 and scan.current == 0
+        (warn,) = [
+            r for r in logs if r["event"] == "greeks_backfill.stale_on_driver_invisible_rows"
+        ]
+        assert warn["dropped_stale_stamps"] == 1 and warn["dropped_null_stamps"] == 0
+        assert "lake_heal" in warn["reason"]
+        assert any(r["event"] == "greeks_backfill.contract_unfixable" for r in logs)
+        # Convergence: a re-scan reproduces the SAME stable census.
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.stale_unfixable == 1
+
+    def test_kept_nonfinite_stale_row_shadowed_by_finite_dup_is_stale_unfixable(
+        self, lake: Path
+    ) -> None:
+        """Fix round 7 repro 1 (refuter-confirmed): the kept-NaN / finite-dup escape.
+
+        The kept-first row carries a v1 stamp on a non-finite close; a
+        physically-later duplicate-timestamp row has FINITE prices and the
+        same v1 stamp. The old raw probe saw the finite dup, judged the stale
+        stamp fixable, and targeted — but the driver dedups the dup away and
+        IVX-2-skips the kept NaN row: ``changed == 0`` → ``already_current``,
+        forever. The driver-view probe judges fixability over the KEPT row
+        only → ``stale_unfixable``.
+        """
+        from structlog.testing import capture_logs
+
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(ts0, _V1_PID, float("nan")), (ts0, _V1_PID, 100.0)])
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1
+        assert scan.stale_v1 == 0 and scan.current == 0
+        assert any(r["event"] == "greeks_backfill.contract_unfixable" for r in logs)
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.stale_unfixable == 1
+
+    def test_null_stamp_only_on_dropped_dup_row_is_stale_unfixable(self, lake: Path) -> None:
+        """The null-stamp flavour of the dropped-dup escape folds the same way."""
+        from structlog.testing import capture_logs
+
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(ts0, _CURRENT_PID, 100.0), (ts0, None, 100.0)])
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1 and scan.stale_null == 0
+        (warn,) = [
+            r for r in logs if r["event"] == "greeks_backfill.stale_on_driver_invisible_rows"
+        ]
+        assert warn["dropped_null_stamps"] == 1 and warn["dropped_stale_stamps"] == 0
+
+    def test_foreign_month_stale_row_is_driver_invisible_unfixable(self, lake: Path) -> None:
+        """A stale stamp on a FOREIGN-month row (unique timestamp) is equally
+        driver-invisible: read_option_rows bounds each file to its OWN UTC
+        month (G-RACE-1), so targeting on its account would loop forever."""
+        from structlog.testing import capture_logs
+
+        jan = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        feb = datetime(2024, 2, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(jan, _CURRENT_PID, 100.0), (feb, _V1_PID, 100.0)])
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1 and scan.stale_v1 == 0
+        (warn,) = [
+            r for r in logs if r["event"] == "greeks_backfill.stale_on_driver_invisible_rows"
+        ]
+        assert warn["dropped_stale_stamps"] == 1
+
+    def test_kept_dup_stale_row_still_targets(self, lake: Path) -> None:
+        """The keep-FIRST winner drives targeting: a stale stamp on the KEPT
+        row of a dup pair is driver-actionable — the view probe must not
+        over-filter it (the dedup drops the LATER row, not the first)."""
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(ts0, _V1_PID, 100.0), (ts0, _CURRENT_PID, 100.0)])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
+
+    def test_dup_poisoned_head_contract_never_wedges_limit_chipping(self, lake: Path) -> None:
+        """A dup-poisoned contract at the head of the sort order must not eat
+        the ``--limit`` slot forever: it classifies ``stale_unfixable`` (never
+        targeted), so the chip reaches the genuinely-stale remainder."""
+        banknifty = "NSE-BANKNIFTY-25Jan24-45000-CE"  # sorts before NIFTY
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(
+            lake, banknifty, 2024, 1, [(ts0, _CURRENT_PID, 100.0), (ts0, _V1_PID, 100.0)]
+        )
+        _write_month(lake, _CE, 2024, 1, [_V1_PID])
+        scan = _scan(lake, limit=1)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_unfixable == 1 and scan.stale_v1 == 1
+
+    def test_junk_timestamp_dtype_fails_open_to_target(self, lake: Path) -> None:
+        """A junk (non-datetime) ``timestamp`` dtype means no driver view can
+        be derived — fail OPEN to targeting: the driver ERRORS such a target
+        loudly (``errored`` → ⚠️ + non-zero exit), never a silent green."""
+        dest = _write_month_prices(lake, _CE, 2024, 1, [_V1_PID], [100.0])
+        frame = pl.read_parquet(dest).with_columns(pl.lit(1, dtype=pl.Int64).alias("timestamp"))
+        frame.write_parquet(dest)
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
+
+    def test_poisoned_stamp_column_with_null_rows_alongside_is_probe_failed(
+        self, lake: Path
+    ) -> None:
+        """A schema-poisoned stamp column folds into ``probe_failed`` even when
+        null stamps sit alongside — the column is ONE repair unit (the
+        deliberate round-7 precedence over the old null-branch-first order)."""
+        poisoned = _write_month(lake, _CE, 2024, 1, [_CURRENT_PID])
+        pl.DataFrame(
+            {"greeks_provenance_id": pl.Series([None, float("nan")], dtype=pl.Float64)}
+        ).write_parquet(poisoned)
+        scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.targets == () and scan.current == 1
+
+    def test_stamp_column_poisoned_between_reads_folds_into_probe_failed(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A concurrent rewrite poisoning the stamp column BETWEEN the probe's
+        two bounded reads folds into ``probe_failed`` (the fix-round-6
+        schema-poisoned posture), never a crash nor a target."""
+        from structlog.testing import capture_logs
+
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        dest = _write_month_rows(lake, _CE, 2024, 1, [(ts0, _V1_PID, 100.0)])
+        real_read = pl.read_parquet
+
+        def _racing(source: Any, *args: Any, **kwargs: Any) -> Any:
+            result = real_read(source, *args, **kwargs)
+            if kwargs.get("columns") == ["greeks_provenance_id"]:
+                # Rewrite AFTER the stamp probe read — the verdict's own read
+                # sees an uncoercible utf8 stamp column.
+                pl.DataFrame(
+                    {
+                        "timestamp": pl.Series([ts0], dtype=pl.Datetime("us", "UTC")),
+                        "open": pl.Series([100.0], dtype=pl.Float64),
+                        "high": pl.Series([101.0], dtype=pl.Float64),
+                        "low": pl.Series([99.0], dtype=pl.Float64),
+                        "close": pl.Series([100.0], dtype=pl.Float64),
+                        "greeks_provenance_id": pl.Series(["poison"], dtype=pl.Utf8),
+                    }
+                ).write_parquet(dest)
+            return result
+
+        monkeypatch.setattr(pl, "read_parquet", _racing)
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.probe_failed == 1 and scan.targets == ()
+        assert any(r["event"] == "greeks_backfill.probe_skip" and "dtype" in r for r in logs)
+
+    # ── Fix round 7, finding 2 (refuter-confirmed): the LEGACY 7-column arm
+    #    rides the same driver-actionability gate instead of an unconditional
+    #    stale-null target. ──────────────────────────────────────────────────
+
+    def test_legacy_all_nonfinite_rows_is_stale_unfixable_never_targeted(self, lake: Path) -> None:
+        """Fix round 7 repro A (refuter-confirmed): a legacy 7-column month
+        file whose EVERY row carries a non-finite OHLC value used to be
+        targeted unconditionally (``ColumnNotFoundError`` → stale-null) while
+        the driver's IVX-2 guard skipped every row: ``already_current``, zero
+        writes, the file stayed 7-column, EXIT_OK ✅ — forever. It now folds
+        into ``stale_unfixable``."""
+        from structlog.testing import capture_logs
+
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(ts0, None, float("inf"))], with_pid_column=False)
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1
+        assert scan.stale_null == 0 and scan.current == 0
+        assert any(r["event"] == "greeks_backfill.contract_unfixable" for r in logs)
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.stale_unfixable == 1
+
+    def test_legacy_fixable_row_targets_stale_null_through_the_gate(self, lake: Path) -> None:
+        """A REAL legacy file (timestamps + finite prices) still targets
+        stale-null — through the driver-actionability gate, not fail-open."""
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(
+            lake,
+            _CE,
+            2024,
+            1,
+            [(ts0, None, float("nan")), (ts0.replace(minute=46), None, 100.0)],
+            with_pid_column=False,
+        )
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_null == 1 and scan.stale_unfixable == 0
+
+    def test_legacy_all_rows_driver_invisible_is_stale_unfixable(self, lake: Path) -> None:
+        """A legacy file whose EVERY row is foreign-month (driver-invisible)
+        folds into ``stale_unfixable`` + the lake_heal-naming WARN — a target
+        would loop as a ``no_bars`` re-feed forever."""
+        from structlog.testing import capture_logs
+
+        feb = datetime(2024, 2, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(feb, None, 100.0)], with_pid_column=False)
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.stale_unfixable == 1
+        (warn,) = [
+            r for r in logs if r["event"] == "greeks_backfill.stale_on_driver_invisible_rows"
+        ]
+        assert warn["dropped_null_stamps"] == 1
+
+    def test_legacy_empty_partition_is_not_targeted(self, lake: Path) -> None:
+        """An EMPTY legacy partition holds nothing the driver could ever stamp
+        — honestly nothing to do (a target would loop as ``no_bars``)."""
+        _write_month_rows(lake, _CE, 2024, 1, [], with_pid_column=False)
+        scan = _scan(lake)
+        assert scan.targets == ()
+        assert scan.current == 1 and scan.stale_unfixable == 0 and scan.stale_null == 0
+
+    def test_legacy_unfixable_file_does_not_mask_stale_sibling_month(self, lake: Path) -> None:
+        """A legacy all-skippable month never masks a genuinely-stale sibling."""
+        ts0 = datetime(2024, 1, 15, 3, 45, tzinfo=UTC)
+        _write_month_rows(lake, _CE, 2024, 1, [(ts0, None, float("nan"))], with_pid_column=False)
+        _write_month(lake, _CE, 2024, 2, [_V1_PID])
+        scan = _scan(lake)
+        assert [t.symbol for t in scan.targets] == [_CE]
+        assert scan.stale_v1 == 1 and scan.stale_unfixable == 0
 
     def test_scan_beats_the_stall_watchdog_per_contract_and_per_file(self, lake: Path) -> None:
         """The O(files) scan feeds the pull stall watchdog (refuter-confirmed):

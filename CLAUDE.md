@@ -111,7 +111,34 @@ values (`inf` crashed the wet run mid-batch, `nan` silently disabled the
 pause); the #1175-style bench pins land
 (`tests/bench/test_greeks_backfill_scan_cost.py` — flat per-file probe cost,
 stamp-column projection spy, O(1) checkpoint bytes) and the ledger's "TESTS
-(7 types touched)" header is honesty-corrected. ENGINE
+(7 types touched)" header is honesty-corrected.
+FIX ROUNDS 5+6 folded (refuter-majority-confirmed, MIGRATION.md #1558):
+eager env validation on BOTH surfaces (CLI `CliUserError` one-liner + route
+400 BEFORE the O(files) scan/lock); driver-unreachable NON-canonical month
+filenames (`2024/1.parquet`) fold into `probe_failed` + ONE loud
+rename-to-canonical WARN, never an eternal false-green re-target; the
+fixability gate generalised to NON-null stale stamps on driver-skippable
+rows; `int(inf)` `OverflowError` mapped at the stamp probe AND
+`SweepCheckpoint.from_dict` (one poisoned file/checkpoint no longer kills
+the scan/run).
+FIX ROUND 7 folded (refuter-majority-confirmed, MIGRATION.md #1558): EVERY
+suspicious-file targeting judgment now runs over the DRIVER's row view
+(`_driver_row_view` — own-UTC-month bound + the COMMON `dedup_bars_frame`
+keep-first, `read_option_rows`' exact per-file discipline) instead of the
+RAW physical rows — a stale stamp carried ONLY by a dropped
+duplicate-timestamp/foreign-month row re-targeted the contract forever
+while the driver read `already_current` under an EXIT_OK ✅ false green
+(both directions escaped: a kept non-finite row shadowed by a finite dup,
+and a dropped dup carrying the ONLY stale stamp); driver-invisible-only
+staleness folds into `stale_unfixable` + the NEW
+`stale_on_driver_invisible_rows` WARN naming lake_heal's row-removing heals;
+the LEGACY 7-column arm rides the SAME driver-actionability gate instead of
+an unconditional stale-null target (a legacy all-non-finite month file — the
+COMMON shape on the CLI-`brutex fetch`-only lake, gap b of #1188 — looped
+identically; an EMPTY legacy partition honestly classifies nothing-to-do);
+the unfixable wordings on note/Telegram/CLI-stderr widened to
+"driver-unactionable rows"; the clean fast path stays the bench-pinned
+single stamp-column read. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
 + `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
@@ -1089,9 +1116,21 @@ hostile-review pass._
   "WEDGED dual-signal backstop" honesty claim retracted as vacuous); NEW `stale_unfixable` census bucket for
   null-stamped non-finite-OHLC rows (driver-skippable IVX-2 class — excluded from targeting so the census CONVERGES,
   ⚠️ Telegram/note/stderr); non-finite `--pause-s`/`_PAUSE_S` refused eagerly; #1175-style bench pins added
-  (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/
-  `sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
+  (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). FIX ROUNDS 5+6 folded
+  (refuter-majority-confirmed, #1558): eager env validation on both surfaces (CLI one-liner + route 400 BEFORE the
+  scan/lock); non-canonical month filenames → `probe_failed` + rename-to-canonical WARN (never an eternal re-target);
+  the fixability gate generalised to NON-null stale stamps on driver-skippable rows; `int(inf)` `OverflowError`
+  mapped at the stamp probe + `SweepCheckpoint.from_dict`. FIX ROUND 7 folded (refuter-majority-confirmed, #1558):
+  every suspicious-file targeting judgment runs over the DRIVER's row view (`_driver_row_view` — own-UTC-month bound
+  + the COMMON `dedup_bars_frame` keep-first, `read_option_rows`' exact per-file discipline), never the RAW rows — a
+  stale stamp only a dropped duplicate-timestamp/foreign-month row carries folds into `stale_unfixable` + the
+  `stale_on_driver_invisible_rows` WARN naming lake_heal (previously an eternal already_current/EXIT_OK-✅
+  false-green re-feed, both directions: kept-NaN shadowed by a finite dup AND a dropped dup with the only stale
+  stamp); the LEGACY 7-column arm rides the same driver-actionability gate instead of an unconditional stale-null
+  target (the CLI-fetch-only-lake shape; empty legacy partition = honestly nothing-to-do); unfixable wordings widened
+  to "driver-unactionable rows"; the clean fast path stays the bench-pinned single stamp-column read. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
+  `sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
   Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish

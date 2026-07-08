@@ -16,6 +16,7 @@ COMMON, never copied).
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -401,6 +402,144 @@ class TestUnfixableConvergence:
         for pid in stamps[1:]:
             assert unpack_greeks_provenance(int(pid)).formula_version == 2
             assert unpack_greeks_provenance(int(pid)).status == STATUS_OK
+
+
+class TestDriverViewConvergence:
+    """Fix round 7 (refuter-confirmed): the probe judges over the DRIVER's row
+    view (own-UTC-month bound + keep-first timestamp dedup), never the RAW
+    physical rows — a stale stamp only a driver-invisible row carries can no
+    longer re-target the contract forever under a false-green ✅/EXIT_OK.
+    """
+
+    def _v1_pid_of(self, frame: pl.DataFrame) -> int:
+        stored = unpack_greeks_provenance(int(frame["greeks_provenance_id"][0]))
+        return pack_greeks_provenance(
+            rate_source_id=stored.rate_source_id,
+            rate_version=stored.rate_version,
+            style_flag=stored.style_flag,
+            status=stored.status,
+            formula_version=1,
+            q_bias_id=stored.q_bias_id,
+            tte_convention_id=stored.tte_convention_id,
+        )
+
+    def test_stale_stamp_on_dropped_dup_row_converges_to_stale_unfixable(self, lake: Path) -> None:
+        """The refuter's repro 2: every kept row current v2 + finite; ONE
+        physically-later duplicate-timestamp row carries a v1 stamp with
+        FINITE prices. The old raw-row probe targeted it on every scan while
+        the driver — whose read_option_rows keep-first dedup drops the dup —
+        reported ``already_current`` with zero writes: '3 wet runs, v1 stamps
+        remaining: 1'. The driver-view probe folds it into
+        ``stale_unfixable``; the census converges and the note says so.
+        """
+        _seed_spot(lake)
+        _seed_option(lake)
+        enrich_greeks_for_targets(targets=_targets(_CE), lake_root=lake, rate_source=_RATE)
+        partition = _option_partition(lake)
+        frame = pl.read_parquet(partition)
+        dup = frame.head(1).with_columns(
+            pl.lit(self._v1_pid_of(frame), dtype=pl.Int32).alias("greeks_provenance_id")
+        )
+        pl.concat([frame, dup]).write_parquet(partition)
+        for _ in range(3):  # every rescan reproduces the SAME stable verdict
+            plan = _scan_plan(lake)
+            assert plan.targets == ()  # never re-targeted — the forever-loop is dead
+            assert plan.scan.stale_unfixable == 1
+            assert plan.scan.stale_v1 == 0 and plan.scan.current == 0
+            report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
+            assert report.stale_unfixable == 1 and report.errored == 0
+            assert "1 contract(s) UNFIXABLE" in report.note
+        # The kept rows keep their v2 OK stamps; the dropped dup row's v1
+        # stamp persists HONESTLY (repair = lake_heal's intra-file dup heal),
+        # no longer under a loop that claimed to be fixing it.
+        stamps = pl.read_parquet(partition)["greeks_provenance_id"].to_list()
+        assert unpack_greeks_provenance(int(stamps[-1])).formula_version == 1
+        for pid in stamps[:-1]:
+            assert unpack_greeks_provenance(int(pid)).formula_version == 2
+
+    def test_kept_nonfinite_stale_row_shadowed_by_finite_dup_converges(self, lake: Path) -> None:
+        """The refuter's repro 1: the kept-first row carries a v1 stamp on a
+        NaN close while a physically-later duplicate-timestamp row has finite
+        prices and the same v1 stamp. The old raw probe saw the finite dup and
+        judged the stale stamp fixable — but the driver dedups the dup away
+        and IVX-2-skips the kept NaN row ('3 wet runs, v1 stamps remaining:
+        2'). The driver-view probe judges fixability over the KEPT row only.
+        """
+        _seed_spot(lake)
+        _seed_option(lake)
+        enrich_greeks_for_targets(targets=_targets(_CE), lake_root=lake, rate_source=_RATE)
+        partition = _option_partition(lake)
+        frame = pl.read_parquet(partition)
+        n = frame.height
+        v1_pid = self._v1_pid_of(frame)
+        poisoned = frame.with_columns(
+            pl.when(pl.arange(0, n) == 0)
+            .then(pl.lit(float("nan"), dtype=pl.Float64))
+            .otherwise(pl.col("close"))
+            .alias("close"),
+            pl.when(pl.arange(0, n) == 0)
+            .then(pl.lit(v1_pid, dtype=pl.Int32))
+            .otherwise(pl.col("greeks_provenance_id"))
+            .alias("greeks_provenance_id"),
+        )
+        dup = poisoned.head(1).with_columns(pl.lit(100.0, dtype=pl.Float64).alias("close"))
+        pl.concat([poisoned, dup]).write_parquet(partition)
+        for _ in range(3):
+            plan = _scan_plan(lake)
+            assert plan.targets == ()
+            assert plan.scan.stale_unfixable == 1
+            assert plan.scan.stale_v1 == 0 and plan.scan.current == 0
+            report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
+            assert report.stale_unfixable == 1 and report.errored == 0
+            assert "1 contract(s) UNFIXABLE" in report.note
+        # The poisoned kept row's v1 stamp persists HONESTLY (a value repair +
+        # lake_heal dup heal are the fixes), never under a false-green loop.
+        stamps = pl.read_parquet(partition)["greeks_provenance_id"].to_list()
+        assert unpack_greeks_provenance(int(stamps[0])).formula_version == 1
+
+    def test_legacy_all_nonfinite_month_file_converges_to_stale_unfixable(self, lake: Path) -> None:
+        """Fix round 7, finding 2 (refuter-confirmed): the legacy no-column arm.
+
+        The refuter's repro A: a previously-enriched contract gains a LEGACY
+        7-column sibling month file whose single row carries ``open=inf`` —
+        the old ``ColumnNotFoundError`` arm returned stale-null
+        UNCONDITIONALLY (the rounds-4/6 fixability gate never ran there, and
+        the old fixability read itself would fail open on the missing stamp
+        column), so every cycle re-targeted the contract while the driver
+        skipped the row: ``scan: targets=1 stale_null=1`` then ``run:
+        enriched=0 already_current=1 errored=0 bars_written=0`` — identical
+        forever, EXIT_OK, ✅ head. The legacy arm now rides the SAME
+        driver-actionability gate and the census converges.
+        """
+        _seed_spot(lake)
+        _seed_option(lake)
+        enrich_greeks_for_targets(targets=_targets(_CE), lake_root=lake, rate_source=_RATE)
+        partition = _option_partition(lake)
+        frame = pl.read_parquet(partition)
+        base = ("timestamp", "open", "high", "low", "close", "volume", "open_interest")
+        legacy = (
+            frame.select(base)
+            .head(1)
+            .with_columns(
+                pl.lit(datetime(2024, 2, 15, 3, 45, tzinfo=UTC))
+                .cast(frame.schema["timestamp"])
+                .alias("timestamp"),
+                pl.lit(float("inf")).cast(frame.schema["open"]).alias("open"),
+            )
+        )
+        dest = partition.parent / "02.parquet"
+        legacy.write_parquet(dest)
+        for _ in range(3):
+            plan = _scan_plan(lake)
+            assert plan.targets == ()  # never re-targeted — the forever-loop is dead
+            assert plan.scan.stale_unfixable == 1
+            assert plan.scan.stale_null == 0 and plan.scan.current == 0
+            report = run_greeks_backfill(lake, plan=plan, rate_source=_RATE)
+            assert report.stale_unfixable == 1 and report.errored == 0
+            assert "1 contract(s) UNFIXABLE" in report.note
+        # The legacy file stays 7-column HONESTLY (a value repair is needed
+        # first), no longer under a loop that claimed to be fixing it.
+        assert "greeks_provenance_id" not in pl.read_parquet_schema(dest)
 
 
 class TestDriverUnreachableConvergence:

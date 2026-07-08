@@ -72,20 +72,34 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   prefix would not be re-gated against the healed spot — delete
   ``<lake>/.greeks_backfill/checkpoint.json`` (or let the force run complete
   afresh) after a heal in that window to guarantee full coverage.
-* A STALE-stamped bar the driver CANNOT act on — a stored row with a
-  non-finite OHLC value, which the driver's per-bar IVX-2 guard SKIPS without
-  a write — is classified ``stale_unfixable`` whether the stale stamp is NULL
-  (fix round 4, refuter-confirmed) or a NON-null v1/inputs-drift value sitting
-  on the skippable row itself (fix round 6, refuter-confirmed — the null-only
-  gate's sibling escape: the driver skipped the row BEFORE its reuse gate,
-  ``changed == 0`` read ``already_current``, the stale stamp persisted, and
-  the contract was re-targeted on every run under a ✅/EXIT_OK false green):
-  counted + logged + surfaced on the report/Telegram honesty heads, NEVER
-  targeted, so the census converges instead of re-feeding the contract forever
-  while the driver honestly reports it ``already_current``. Repairing the
-  poisoned row is a lake-repair task (``lake_heal`` is strictly row-removing,
-  never value-editing — a manual partition fix is required), stated, not
-  hidden.
+* A STALE-stamped bar the driver CANNOT act on is classified
+  ``stale_unfixable``: counted + logged + surfaced on the report/Telegram
+  honesty heads, NEVER targeted, so the census converges instead of re-feeding
+  the contract forever while the driver honestly reports it
+  ``already_current``. Three refuter-confirmed classes fold here: (1) a stored
+  row with a non-finite OHLC value, which the driver's per-bar IVX-2 guard
+  SKIPS without a write — whether the stale stamp is NULL (fix round 4) or a
+  NON-null v1/inputs-drift value sitting on the skippable row itself (fix
+  round 6 — the null-only gate's sibling escape: the driver skipped the row
+  BEFORE its reuse gate, ``changed == 0`` read ``already_current``, the stale
+  stamp persisted, and the contract was re-targeted on every run under a
+  ✅/EXIT_OK false green); (2) staleness carried ONLY by rows the driver's
+  reader NEVER SEES (fix round 7): every suspicious-file judgment now runs
+  over the DRIVER's row view — the month file bounded to its OWN UTC month
+  (the G-RACE-1 guard) then keep-FIRST deduped on ``timestamp``, EXACTLY
+  ``read_option_rows``'s per-file discipline — because judging over the RAW
+  row set re-targeted a contract forever on a stamp only a dropped
+  duplicate-timestamp / foreign-month row carried (both directions escaped:
+  a kept non-finite row shadowed by a finite dup, and a dropped dup carrying
+  the ONLY stale stamp); (3) a LEGACY 7-column partition whose every
+  driver-visible row is skippable (fix round 7 — the legacy arm's
+  unconditional ``stale-null`` verdict bypassed the rounds-4/6 gate, the same
+  eternal false-green loop on the CLI-``brutex fetch``-only lake that is
+  entirely 7-column). Repairing a value-poisoned row is a lake-repair task
+  (``lake_heal`` is strictly row-removing, never value-editing — a manual
+  partition fix is required); a driver-invisible dup/foreign row IS
+  ``lake_heal``'s job (its intra-file dup + foreign-row heals) — both stated
+  loudly, never hidden.
 * The scanner probes ONLY month files the driver's reader can also open —
   canonical zero-padded ``<yyyy>/<mm>.parquet`` names (fix round 5,
   refuter-confirmed): an in-range NON-canonical name (``2024/1.parquet``)
@@ -119,7 +133,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
@@ -139,6 +153,7 @@ from brutex.data.greeks_enrich import (
     stamp_is_current_inputs,
     unpack_greeks_provenance,
 )
+from brutex.data.lake_read import dedup_bars_frame
 from brutex.engine.sweep_checkpoint import SweepCheckpointError, SweepCheckpointStore
 from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.risk_free import (
@@ -148,6 +163,8 @@ from brutex.options.risk_free import (
 )
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from brutex.data.fno_symbol import FnoSymbolParts
     from brutex.options.risk_free import RiskFreeSource
 
@@ -227,7 +244,8 @@ _STALE_V1: Final[str] = "v1"
 _STALE_DRIFT: Final[str] = "drift"
 
 #: The four physical price columns the driver's per-bar IVX-2 guard inspects —
-#: the probe's fixability check mirrors EXACTLY that predicate (fix round 4).
+#: the probe's fixability check mirrors EXACTLY that predicate (fix round 4),
+#: evaluated over the DRIVER's per-file row view (fix round 7).
 _PRICE_COLUMNS: Final[tuple[str, str, str, str]] = ("open", "high", "low", "close")
 
 #: The runner's per-batch progress hook — ABSOLUTE counts, O(1) per batch:
@@ -256,13 +274,18 @@ class BackfillScan:
         Contracts stale on a NON-formula input bit (rate source / rate version
         / q bias / TTE convention drift).
     stale_unfixable
-        Contracts whose ONLY staleness is null-stamped rows the driver CANNOT
-        act on (a non-finite OHLC value — the per-bar IVX-2 skip class): NEVER
-        targeted (the driver would honestly report them ``already_current``
-        forever while the null stamp persisted — the fix-round-4 refuter-
-        confirmed non-convergence), counted + logged + surfaced on the
-        report/Telegram honesty heads instead. Repair is a lake-repair task
-        (``lake_heal`` is strictly row-removing, never value-editing).
+        Contracts whose ONLY staleness is rows the driver CANNOT act on:
+        driver-SKIPPABLE rows (a non-finite OHLC value — the per-bar IVX-2
+        skip class, null-stamped [fix round 4], stale non-null-stamped [fix
+        round 6], or a whole legacy 7-column file's rows [fix round 7]) and
+        driver-INVISIBLE rows (dropped by the driver's keep-first timestamp
+        dedup / own-UTC-month bound — fix round 7). NEVER targeted (the
+        driver would honestly report them ``already_current`` forever while
+        the stale stamp persisted — all refuter-confirmed non-convergence
+        classes), counted + logged + surfaced on the report/Telegram honesty
+        heads instead. Repair: a value-poisoned row needs a manual partition
+        fix (``lake_heal`` is strictly row-removing, never value-editing); a
+        driver-invisible dup/foreign row is ``lake_heal``'s job.
     current
         Contracts whose every probed stamp already matches the current inputs
         — skipped, no target built.
@@ -594,43 +617,83 @@ def _contract_window(files: list[tuple[int, int, Path]]) -> tuple[date, date]:
     return start, after + timedelta(days=1)
 
 
-def _stamped_rows_fixable(path: Path, stale_pids: Sequence[int] | None = None) -> bool:
-    """Whether ANY stale-stamped row in *path* is one the enrich driver can stamp.
+def _driver_row_view(frame: pl.DataFrame, path: Path) -> pl.DataFrame:
+    """The subset of *path*'s rows the enrich driver ACTS on — the read mirror.
 
-    The value-level twin of the driver's per-bar IVX-2 guard: the driver SKIPS
-    a row whose OHLC carries a non-finite value — no bar, no write, the stale
-    stamp persists — so a probe that targeted a contract on such a row's
-    account alone re-fed it forever while the driver honestly reported it
-    ``already_current``. ``stale_pids=None`` selects the NULL-stamped rows
-    (fix round 4, refuter-confirmed); a non-``None`` *stale_pids* selects the
-    rows carrying exactly those stale NON-null stamp values (fix round 6,
-    refuter-confirmed sibling class: a v1 / inputs-drift stamp sitting ON the
-    driver-skippable row itself bypassed the null-only gate — the same eternal
-    re-target + false-green ✅/EXIT_OK the round-4 fix closed for nulls).
-    Mirrors the driver's predicate EXACTLY: a row with all four prices
+    :func:`brutex.data.greeks_enrich.read_option_rows` bounds each month file
+    to its OWN UTC ``(year, month)`` (the G-RACE-1 foreign-row guard) and then
+    keep-FIRST dedups on ``timestamp`` (the COMMON
+    :func:`~brutex.data.lake_read.dedup_bars_frame`) BEFORE the driver ever
+    sees a bar. Judging staleness/fixability over any WIDER row set re-targets
+    a contract the driver can never change (fix round 7, refuter-confirmed):
+    a stale stamp or non-finite price carried ONLY by a dropped
+    duplicate-timestamp row drove targeting while the driver saw only the kept
+    row — ``changed == 0`` read ``already_current``, zero writes, and the
+    contract was re-fed on EVERY run under a ✅/EXIT_OK false green. *path* is
+    a canonical ``<yyyy>/<mm>.parquet`` name (:func:`_month_files` rejects the
+    rest), so the file's own month is recoverable exactly as the driver
+    recovers it. A junk ``timestamp`` dtype raises the polars error to the
+    caller (its fail-open arm — the driver ERRORS such a target loudly).
+    """
+    import polars as pl
+
+    year = int(path.parent.name)
+    month = int(path.stem)
+    bounded = frame.filter(
+        (pl.col("timestamp").dt.year() == year) & (pl.col("timestamp").dt.month() == month)
+    )
+    view, _dropped = dedup_bars_frame(bounded, source=f"greeks_backfill_probe:{path}")
+    return view
+
+
+def _read_driver_frames(
+    path: Path, *, with_stamp: bool
+) -> tuple[pl.DataFrame, pl.DataFrame] | None:
+    """Read *path*'s price(+stamp) columns; return ``(raw, driver_view)``.
+
+    ONE bounded column read per SUSPICIOUS/legacy file — the clean fast path
+    never pays it (the bench-pinned single stamp-column read stands). ``None``
+    is the FAIL-OPEN verdict on any read trouble (a missing price/stamp
+    column, corrupt bytes, a junk ``timestamp`` dtype the month-bound cannot
+    evaluate): feed the driver, whose own guards are total — a missing or
+    junk-typed column ERRORS the target loudly, never a silent green. A file
+    WITHOUT a ``timestamp`` column cannot come from the lake writers and the
+    driver errors loudly on it if ever targeted; it is judged over its raw
+    rows unchanged (``view == raw`` — no driver view is derivable), which can
+    only ever fold it into the LOUD ``stale_unfixable``/target arms, never a
+    silent green.
+    """
+    import polars as pl
+
+    needed: list[str] = list(_PRICE_COLUMNS)
+    if with_stamp:
+        needed.append("greeks_provenance_id")
+    try:
+        schema = pl.read_parquet_schema(path)
+        if any(name not in schema for name in needed):
+            return None
+        has_timestamp = "timestamp" in schema
+        columns = ["timestamp", *needed] if has_timestamp else needed
+        frame = pl.read_parquet(path, columns=columns)
+        view = _driver_row_view(frame, path) if has_timestamp else frame
+    except (pl.exceptions.PolarsError, OSError):
+        return None
+    return frame, view
+
+
+def _any_row_fixable(rows: pl.DataFrame) -> bool:
+    """Whether ANY of *rows* is one the enrich driver can stamp — the IVX-2 twin.
+
+    Mirrors the driver's per-bar predicate EXACTLY: a row with all four prices
     present + finite is FIXABLE (the driver stamps it); a row with a NULL or
     junk-typed price is ALSO treated fixable because the driver ERRORS the
     target LOUDLY on it (``errored`` → ⚠️ head + non-zero CLI exit — never a
     silent green); ONLY the all-prices-present-but-non-finite row is
-    driver-SKIPPABLE. FAIL-OPEN on any read trouble (missing OHLC columns /
-    corrupt bytes / a stamp column the ``is_in`` filter cannot compare →
-    ``True``): feeding the driver is the safe over-approximation this module
-    documents. One extra bounded 5-column read, paid ONLY on the
-    stale/null-stamp branch — the clean fast path stays a single stamp-column
-    read per file.
+    driver-SKIPPABLE. ``False`` for an empty *rows* — the callers own the
+    no-visible-row posture (fail-open target on a probe/read skew, the
+    driver-invisible fold when the view dropped every carrying row).
     """
-    import polars as pl
-
-    try:
-        frame = pl.read_parquet(path, columns=[*_PRICE_COLUMNS, "greeks_provenance_id"])
-        stamp = pl.col("greeks_provenance_id")
-        selector = stamp.is_null() if stale_pids is None else stamp.is_in(list(stale_pids))
-        stale_rows = frame.filter(selector).select(_PRICE_COLUMNS)
-    except (pl.exceptions.PolarsError, OSError):
-        return True  # fail-open: re-feed the driver (its own guards are total)
-    saw_row = False
-    for row in stale_rows.iter_rows():
-        saw_row = True
+    for row in rows.select(_PRICE_COLUMNS).iter_rows():
         if any(value is None for value in row):
             return True  # a NULL price ERRORS the target loudly in the driver
         try:
@@ -639,9 +702,173 @@ def _stamped_rows_fixable(path: Path, stale_pids: Sequence[int] | None = None) -
             return True  # a junk-typed price ERRORS the target loudly too
         if all(math.isfinite(price) for price in prices):
             return True  # the driver CAN stamp this row — genuinely stale
-    # Every visible stale-stamped row is driver-skippable (or none were visible
-    # at all — a probe/read skew, fail-open): unfixable only when rows were seen.
-    return not saw_row
+    return False
+
+
+def _stale_stamp_pairs(series: pl.Series, *, rate_source: RiskFreeSource) -> list[tuple[int, str]]:
+    """The stale ``(pid, reason)`` pairs among *series*' distinct non-null stamps.
+
+    First-seen row order (the census label is the FIRST stale stamp's reason —
+    the pre-round-7 tie-break preserved). Raises ``ValueError`` / ``TypeError``
+    / ``OverflowError`` on a value the ``int()`` coercion rejects — a
+    schema-poisoned stamp column (utf8 / NaN / inf; fix round 6): the callers
+    fold that into ``probe_failed``.
+    """
+    pairs: list[tuple[int, str]] = []
+    for value in series.drop_nulls().unique(maintain_order=True).to_list():
+        pid = int(value)
+        if not stamp_is_current_inputs(pid, rate_source=rate_source):
+            stored = unpack_greeks_provenance(pid)
+            reason = _STALE_V1 if stored.formula_version != GREEKS_FORMULA_VERSION else _STALE_DRIFT
+            pairs.append((pid, reason))
+    return pairs
+
+
+def _warn_driver_invisible(
+    path: Path, *, symbol: str, dropped_stale_stamps: int, dropped_null_stamps: int
+) -> None:
+    """ONE loud WARN for staleness carried ONLY by driver-invisible rows.
+
+    Fix round 7 (refuter-confirmed): such a stamp can never drive targeting —
+    the driver's keep-first timestamp dedup / own-UTC-month bound drops the
+    carrying row before its reuse gate ever sees it, so a target on its
+    account looped forever under a false-green ✅/EXIT_OK. Repair is
+    :mod:`brutex.data.lake_heal`'s intra-file duplicate + foreign-row heal
+    (row-REMOVING is in its power — unlike the value-poison class), stated
+    here, never a silent re-queue.
+    """
+    _LOG.warning(
+        "greeks_backfill.stale_on_driver_invisible_rows",
+        symbol=symbol,
+        file=str(path),
+        dropped_stale_stamps=dropped_stale_stamps,
+        dropped_null_stamps=dropped_null_stamps,
+        reason=(
+            "stale/null stamp(s) sit ONLY on rows the enrich driver never "
+            "sees — its keep-first timestamp dedup / own-UTC-month bound "
+            "(read_option_rows) drops them; lake_heal's intra-file duplicate "
+            "+ foreign-row heal is the repair, never a re-queue"
+        ),
+    )
+
+
+def _suspicious_file_verdict(
+    path: Path, *, rate_source: RiskFreeSource, symbol: str, fallback_reason: str
+) -> tuple[str | None, bool, bool]:
+    """Judge one raw-SUSPICIOUS month file over the DRIVER's row view.
+
+    Called ONLY after the bounded stamp-column probe saw a null or stale stamp
+    among the file's PHYSICAL rows. The verdict re-reads the file ONCE
+    (timestamp + OHLC + stamp) and answers over :func:`_driver_row_view` — the
+    rows the driver actually acts on — so a stamp visible only on a dropped
+    duplicate-timestamp / foreign-month row can never drive targeting (fix
+    round 7, refuter-confirmed: both escapes looped forever under a
+    false-green ✅/EXIT_OK — a kept non-finite row shadowed by a finite dup,
+    and a dropped dup carrying the ONLY stale stamp).
+
+    Returns ``(reason, unfixable, probe_failed)``:
+
+    * ``reason`` non-``None`` — TARGET the contract: driver-actionable
+      staleness in the view, or the fail-open posture (unreadable price/stamp
+      projection, or a probe/read skew where THIS read sees no staleness at
+      all — *fallback_reason* names the raw probe's verdict; feeding the
+      driver is the safe over-approximation: it errors loudly or restates).
+    * ``unfixable`` — staleness exists but the driver cannot act on ANY
+      carrying row: non-finite OHLC in the view (fix rounds 4 + 6), or
+      staleness ONLY on driver-invisible rows (fix round 7 — WARNed here
+      naming ``lake_heal`` as the repair).
+    * ``probe_failed`` — the stamp column turned uncoercible between the two
+      bounded reads (a concurrent rewrite): the schema-poisoned fold, counted
+      by the caller's census discipline.
+    """
+    import polars as pl
+
+    frames = _read_driver_frames(path, with_stamp=True)
+    if frames is None:
+        return fallback_reason, False, False
+    raw, view = frames
+    stamp = pl.col("greeks_provenance_id")
+    raw_series = raw["greeks_provenance_id"]
+    view_series = view["greeks_provenance_id"]
+    unfixable = False
+    if view_series.null_count() > 0:
+        if _any_row_fixable(view.filter(stamp.is_null())):
+            return _STALE_NULL, False, False
+        # Every view null stamp sits on a driver-skippable row (fix round 4).
+        unfixable = True
+    try:
+        view_pairs = _stale_stamp_pairs(view_series, rate_source=rate_source)
+        raw_pairs = _stale_stamp_pairs(raw_series, rate_source=rate_source)
+    except (ValueError, TypeError, OverflowError) as exc:
+        _LOG.warning(
+            "greeks_backfill.probe_skip",
+            symbol=symbol,
+            file=str(path),
+            dtype=str(raw_series.dtype),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return None, False, True
+    if view_pairs:
+        if _any_row_fixable(view.filter(stamp.is_in([pid for pid, _ in view_pairs]))):
+            return view_pairs[0][1], False, False
+        # Every view row carrying a stale stamp is driver-skippable (round 6).
+        unfixable = True
+    view_ids = {pid for pid, _ in view_pairs}
+    dropped_stale = sum(1 for pid, _ in raw_pairs if pid not in view_ids)
+    dropped_nulls = raw_series.null_count() - view_series.null_count()
+    if dropped_stale > 0 or dropped_nulls > 0:
+        _warn_driver_invisible(
+            path,
+            symbol=symbol,
+            dropped_stale_stamps=dropped_stale,
+            dropped_null_stamps=max(dropped_nulls, 0),
+        )
+        unfixable = True
+    if not unfixable:
+        # The stamp probe flagged the file but THIS read sees no staleness
+        # anywhere (view OR dropped rows) — a skew between the two bounded
+        # reads: fail OPEN, feed the driver (restating is a cheap no-op).
+        return fallback_reason, False, False
+    return None, True, False
+
+
+def _legacy_file_verdict(path: Path, *, symbol: str) -> tuple[str | None, bool]:
+    """Judge one LEGACY (no stamp column) month file — every bar is unstamped.
+
+    Fix round 7 (refuter-confirmed): the unconditional stale-null verdict this
+    arm used to return bypassed the rounds-4/6 fixability gate — a legacy
+    7-column partition whose EVERY driver-visible row carries a non-finite
+    OHLC value was targeted on EVERY run while the driver's per-bar IVX-2
+    guard skipped every row: ``changed == 0`` read ``already_current``, zero
+    writes, the file stayed 7-column, and the run exited a ✅/EXIT_OK false
+    green forever. The legacy arm is moreover the COMMON arm for the
+    CLI-``brutex fetch``-only lake (gap b of #1188), which is entirely
+    7-column. The same driver-actionability discipline now applies, judged
+    over the DRIVER's row view (:func:`_driver_row_view`).
+
+    Returns ``(reason, unfixable)``: ``(_STALE_NULL, False)`` targets (at
+    least one driver-actionable row, or the fail-open posture on read
+    trouble); ``(None, True)`` folds into ``stale_unfixable`` (every visible
+    row skippable, or every row driver-INVISIBLE — the latter WARNed naming
+    ``lake_heal``); ``(None, False)`` is the EMPTY partition — nothing the
+    driver could ever stamp, honestly nothing to do (a target would loop as a
+    ``no_bars`` re-feed forever).
+    """
+    frames = _read_driver_frames(path, with_stamp=False)
+    if frames is None:
+        return _STALE_NULL, False  # fail-open: feed the driver — its guards are total
+    raw, view = frames
+    if raw.height == 0:
+        return None, False
+    if _any_row_fixable(view):
+        return _STALE_NULL, False
+    if view.height == 0:
+        # Every physical row is driver-INVISIBLE (duplicate-timestamp /
+        # foreign-month drops) — lake_heal's repair, never a re-queue.
+        _warn_driver_invisible(
+            path, symbol=symbol, dropped_stale_stamps=0, dropped_null_stamps=raw.height
+        )
+    return None, True
 
 
 def _probe_contract_staleness(
@@ -657,29 +884,41 @@ def _probe_contract_staleness(
     Returns ``(stale_reason, files_probed, probe_failed, unfixable_seen)``
     where ``stale_reason`` is one of :data:`_STALE_NULL` / :data:`_STALE_V1` /
     :data:`_STALE_DRIFT` or ``None`` (every probed stamp current or
-    driver-unfixable) and ``unfixable_seen`` flags a file whose null OR stale
-    NON-null stamps sit ONLY on driver-skippable rows (non-finite OHLC — see
-    :func:`_stamped_rows_fixable`; fix rounds 4 + 6, both refuter-confirmed:
-    targeting on such a row's account re-fed the contract forever while the
-    driver read ``already_current``. An unfixable-null file's remaining
-    NON-null stamps are still checked, so a v1/drift sibling stamp on a
-    driver-FIXABLE row still targets the contract — but a stale stamp whose
-    every carrying row is itself skippable no longer does).
-    Short-circuits on the FIRST stale file. A legacy 7-column partition (no
-    ``greeks_provenance_id`` column at all) classifies :data:`_STALE_NULL`. A
-    corrupt/unreadable file is counted + logged and the probe continues — and
-    so is a SCHEMA-POISONED stamp column (a wrong-dtype ``greeks_provenance_id``
-    like utf8, a non-null NaN float, or an inf/1e999 float — values the
-    ``int()`` coercion rejects with ``ValueError``/``TypeError``/
-    ``OverflowError``; the last is the fix-round-6 refuter repro: ``int(inf)``
-    raises ``OverflowError``, which subclasses ``ArithmeticError`` — NOT
-    ``ValueError`` — so one inf-stamped file previously killed the WHOLE
-    scan): all fold into ``probe_failed`` so ONE junk file never kills the
-    scan (the DEC-MOVERS-CORRUPT-SKIP-001 class). A genuine code bug elsewhere
-    still propagates — the read catch is the narrow movers_resilient
-    ``(PolarsError, OSError)`` set, the value catch only the coercion trio;
-    healing is :mod:`brutex.data.lake_heal`'s job, never re-implemented here.
-    Each probed file fires one liveness
+    driver-unfixable) and ``unfixable_seen`` flags a file whose staleness the
+    driver cannot act on. The CLEAN fast path stays ONE bounded
+    ``greeks_provenance_id`` column read per month file (bench-pinned); a file
+    whose PHYSICAL rows show a null or stale stamp takes ONE further bounded
+    read (timestamp + OHLC + stamp) and is judged over the DRIVER's row view
+    (:func:`_suspicious_file_verdict` → :func:`_driver_row_view` — the file
+    bounded to its own UTC month then keep-first deduped on ``timestamp``,
+    EXACTLY ``read_option_rows``'s per-file discipline; fix round 7,
+    refuter-confirmed: judging over the RAW row set re-targeted a contract
+    forever on a stamp only a dropped duplicate-timestamp row carried while
+    the driver read ``already_current`` — the same eternal-re-feed +
+    false-green class as rounds 4-6). Staleness carried ONLY by
+    driver-invisible rows folds into ``unfixable_seen`` + ONE loud WARN naming
+    ``lake_heal`` as the repair; a v1/drift stamp on a driver-FIXABLE view row
+    still targets the contract. Short-circuits on the FIRST targeting file. A
+    legacy 7-column partition (no ``greeks_provenance_id`` column at all)
+    rides the SAME driver-actionability gate (:func:`_legacy_file_verdict` —
+    fix round 7 closed its unconditional stale-null bypass of the rounds-4/6
+    fixability discipline). A corrupt/unreadable file is counted + logged and
+    the probe continues — and so is a SCHEMA-POISONED stamp column (a
+    wrong-dtype ``greeks_provenance_id`` like utf8, a non-null NaN float, or
+    an inf/1e999 float — values the ``int()`` coercion rejects with
+    ``ValueError``/``TypeError``/``OverflowError``; the last is the
+    fix-round-6 refuter repro: ``int(inf)`` raises ``OverflowError``, which
+    subclasses ``ArithmeticError`` — NOT ``ValueError`` — so one inf-stamped
+    file previously killed the WHOLE scan): all fold into ``probe_failed`` so
+    ONE junk file never kills the scan (the DEC-MOVERS-CORRUPT-SKIP-001
+    class). A poisoned stamp column folds into ``probe_failed`` even when
+    null stamps sit alongside — the column is ONE repair unit (a deliberate
+    round-7 precedence over the old null-branch-first order: feeding the
+    driver a schema-poisoned column could never converge either). A genuine
+    code bug elsewhere still propagates — the read catch is the narrow
+    movers_resilient ``(PolarsError, OSError)`` set, the value catch only the
+    coercion trio; healing is :mod:`brutex.data.lake_heal`'s job, never
+    re-implemented here. Each probed file fires one liveness
     :func:`~brutex.observability.progress_beat.emit_progress_beat` (a no-op
     outside a dashboard job) so the O(files) probe never trips the pull stall
     watchdog (DEC-PIPELINE-STALL-HEARTBEAT-001).
@@ -700,8 +939,13 @@ def _probe_contract_staleness(
         try:
             series = pl.read_parquet(path, columns=["greeks_provenance_id"])["greeks_provenance_id"]
         except pl.exceptions.ColumnNotFoundError:
-            # A legacy 7-column partition — every bar is unstamped.
-            return _STALE_NULL, files_probed, probe_failed, unfixable_seen
+            # A legacy 7-column partition — every bar is unstamped; the
+            # driver-actionability gate decides (fix round 7).
+            legacy_reason, legacy_unfixable = _legacy_file_verdict(path, symbol=symbol)
+            if legacy_reason is not None:
+                return legacy_reason, files_probed, probe_failed, unfixable_seen
+            unfixable_seen = unfixable_seen or legacy_unfixable
+            continue
         except (pl.exceptions.PolarsError, OSError) as exc:
             probe_failed += 1
             _LOG.warning(
@@ -711,34 +955,14 @@ def _probe_contract_staleness(
                 error=f"{type(exc).__name__}: {exc}",
             )
             continue
-        stamp_values = series
-        if series.null_count() > 0:
-            if _stamped_rows_fixable(path):
-                return _STALE_NULL, files_probed, probe_failed, unfixable_seen
-            # Every null stamp in this file sits on a driver-skippable row
-            # (non-finite OHLC): targeting on their account would loop forever
-            # (fix round 4). Flag it, then still check the NON-null stamps.
-            unfixable_seen = True
-            stamp_values = series.drop_nulls()
-        stale_reason: str | None = None
-        stale_pids: list[int] = []
         try:
-            for value in stamp_values.unique(maintain_order=True).to_list():
-                pid = int(value)
-                if not stamp_is_current_inputs(pid, rate_source=rate_source):
-                    stale_pids.append(pid)
-                    if stale_reason is None:
-                        stored = unpack_greeks_provenance(pid)
-                        stale_reason = (
-                            _STALE_V1
-                            if stored.formula_version != GREEKS_FORMULA_VERSION
-                            else _STALE_DRIFT
-                        )
+            raw_pairs = _stale_stamp_pairs(series, rate_source=rate_source)
         except (ValueError, TypeError, OverflowError) as exc:
             # A schema-poisoned stamp column (utf8 "poison", a NaN float, an
             # inf/1e999 float — int(inf) raises OverflowError, fix round 6):
             # data corruption, not a code bug — count + log + continue, exactly
-            # like the unreadable-file arm above.
+            # like the unreadable-file arm above (ONE repair unit even when
+            # null stamps sit alongside — round-7 precedence, see docstring).
             probe_failed += 1
             _LOG.warning(
                 "greeks_backfill.probe_skip",
@@ -748,15 +972,20 @@ def _probe_contract_staleness(
                 error=f"{type(exc).__name__}: {exc}",
             )
             continue
-        if stale_reason is not None:
-            if _stamped_rows_fixable(path, stale_pids):
-                return stale_reason, files_probed, probe_failed, unfixable_seen
-            # Every row carrying a stale stamp in this file is itself
-            # driver-skippable (non-finite OHLC) — the fix-round-4 null
-            # class's NON-null sibling (fix round 6, refuter-confirmed):
-            # targeting on its account re-fed the contract forever while the
-            # wet run read a false green. Flag it and keep probing.
-            unfixable_seen = True
+        if series.null_count() == 0 and not raw_pairs:
+            continue  # fully current — the clean fast path stays ONE stamp read
+        fallback_reason = _STALE_NULL if series.null_count() > 0 else raw_pairs[0][1]
+        reason, unfixable, failed = _suspicious_file_verdict(
+            path, rate_source=rate_source, symbol=symbol, fallback_reason=fallback_reason
+        )
+        if failed:
+            # The stamp column turned uncoercible between the two bounded
+            # reads (a concurrent rewrite) — already WARNed by the verdict.
+            probe_failed += 1
+            continue
+        if reason is not None:
+            return reason, files_probed, probe_failed, unfixable_seen
+        unfixable_seen = unfixable_seen or unfixable
     return None, files_probed, probe_failed, unfixable_seen
 
 
@@ -938,22 +1167,25 @@ def scan_stale_greeks_targets(
         probe_failed += failed
         if reason is None:
             if unfixable:
-                # The contract's ONLY staleness is driver-skippable rows
-                # (non-finite OHLC) — null-stamped (fix round 4) or stale
-                # NON-null-stamped (fix round 6), both refuter-confirmed
-                # non-convergence: targeting it would re-feed forever while
-                # the driver honestly reported it already_current. Count +
-                # log LOUDLY — repair is a lake-repair task, never silently
-                # re-queued.
+                # The contract's ONLY staleness is rows the driver cannot act
+                # on — driver-SKIPPABLE (non-finite OHLC: null-stamped, fix
+                # round 4; stale NON-null-stamped, fix round 6; a legacy
+                # 7-column file's rows, fix round 7) or driver-INVISIBLE
+                # (dropped duplicate-timestamp / foreign-month rows, fix
+                # round 7) — all refuter-confirmed non-convergence classes:
+                # targeting would re-feed forever while the driver honestly
+                # reported already_current. Count + log LOUDLY — repair is a
+                # lake-repair task, never silently re-queued.
                 stale_unfixable += 1
                 _LOG.warning(
                     "greeks_backfill.contract_unfixable",
                     symbol=symbol,
                     exchange=exchange,
                     reason=(
-                        "null- or stale-stamped row(s) with non-finite OHLC — "
-                        "the enrich driver skips them by design (IVX-2); lake "
-                        "repair needed"
+                        "stale/null-stamped row(s) the enrich driver cannot "
+                        "act on — non-finite OHLC it skips by design (IVX-2), "
+                        "or rows its keep-first timestamp dedup / "
+                        "own-UTC-month bound never sees; lake repair needed"
                     ),
                 )
             else:
@@ -1080,16 +1312,17 @@ def _unfixable_note_clause(stale_unfixable: int) -> str:
     """The honest completion-note clause for driver-unfixable contracts — O(1).
 
     Empty when none were found (note stability); otherwise a LOUD clause the
-    dashboard headline + CLI print surface verbatim (fix round 4 — the census
-    must never read green while a null stamp persists on a row the driver
-    cannot act on).
+    dashboard headline + CLI print surface verbatim (fix rounds 4-7 — the
+    census must never read green while a stale/null stamp persists on a row
+    the driver cannot act on or never sees).
     """
     if stale_unfixable <= 0:
         return ""
     return (
-        f"; {stale_unfixable} contract(s) UNFIXABLE (null-stamped non-finite-OHLC "
-        "row(s) the enrich driver skips by design — lake repair needed, excluded "
-        "from targeting)"
+        f"; {stale_unfixable} contract(s) UNFIXABLE (stale/null-stamped row(s) "
+        "the enrich driver cannot act on: non-finite OHLC it skips by design, "
+        "or rows its dedup/month-bound read never sees — lake repair needed, "
+        "excluded from targeting)"
     )
 
 

@@ -2055,15 +2055,19 @@ def cmd_greeks_backfill(
         f"scan cost: O(files) — {scan.files_probed} file(s) probed)"
     )
     if scan.stale_unfixable > 0:
-        # Honest loud census (fix round 4): these contracts carry null-stamped
-        # rows the enrich driver SKIPS by design (non-finite OHLC — IVX-2), so
-        # re-targeting them would loop forever while the run read green. They
-        # need a lake repair, not a re-run — say so on stderr, every mode.
+        # Honest loud census (fix rounds 4-7): these contracts carry stale/null
+        # stamps the enrich driver cannot act on — rows it SKIPS by design
+        # (non-finite OHLC — IVX-2) or rows its keep-first dedup / own-month
+        # bound never sees — so re-targeting them would loop forever while the
+        # run read green. They need a lake repair, not a re-run — say so on
+        # stderr, every mode.
         print(
             f"[brutex] greeks-backfill — {scan.stale_unfixable} contract(s) UNFIXABLE "
-            "(null-stamped row(s) with non-finite OHLC; the enrich driver skips such "
-            "rows by design, so they are excluded from targeting — repair the "
-            "poisoned partition(s), lake_heal cannot value-edit them).",
+            "(stale/null-stamped row(s) the enrich driver cannot act on: non-finite "
+            "OHLC it skips by design — repair the poisoned partition(s), lake_heal "
+            "cannot value-edit them — or duplicate-timestamp/foreign-month rows its "
+            "dedup/month-bound read never sees — lake_heal's row-removing heals "
+            "apply; excluded from targeting either way).",
             file=sys.stderr,
         )
     if dry_run:

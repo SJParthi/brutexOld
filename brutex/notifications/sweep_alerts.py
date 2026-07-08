@@ -868,20 +868,22 @@ class SweepAlerter:
         pattern: the ✅ head downgrades to ⚠️ with an ``N errored (re-runnable)``
         clause when any contract was quarantined (an errored contract keeps its
         stale stamp, so the next run retries it automatically — Golden Rule
-        #10) AND when the scan found driver-UNFIXABLE contracts (fix round 4:
-        a null-stamped non-finite-OHLC row the enrich driver skips by design —
-        a ✅ while a stale null stamp persists would be a false green; those
-        need a lake repair, not a re-run). A zero-target run still reads
-        honestly ("0/0 contracts re-stamped") — an operator-initiated one-shot
-        deserves an answer. Best-effort; silent no-op when Telegram is
-        disabled.
+        #10) AND when the scan found driver-UNFIXABLE contracts (fix rounds
+        4-7: a stale/null stamp on a row the enrich driver skips by design —
+        non-finite OHLC — or on a row its keep-first dedup / own-month-bound
+        read never sees; a ✅ while such a stamp persists would be a false
+        green; those need a lake repair, not a re-run). A zero-target run
+        still reads honestly ("0/0 contracts re-stamped") — an
+        operator-initiated one-shot deserves an answer. Best-effort; silent
+        no-op when Telegram is disabled.
         """
         clauses: list[str] = []
         if report.errored > 0:
             clauses.append(f"{report.errored} errored (re-runnable)")
         if report.stale_unfixable > 0:
             clauses.append(
-                f"{report.stale_unfixable} unfixable (non-finite OHLC — lake repair needed)"
+                f"{report.stale_unfixable} unfixable (driver-unactionable rows — "
+                "lake repair needed)"
             )
         if clauses:
             head = (
