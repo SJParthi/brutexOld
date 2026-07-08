@@ -371,6 +371,79 @@ def test_dashboard_cascade_route_400s_a_drifted_lake(tmp_path: Path) -> None:
         assert "zero NIFTY futures contract dirs" in resp.json()["error"]
 
 
+def test_dashboard_cascade_route_200s_a_clean_replay(tmp_path: Path) -> None:
+    """The "Run cascade" route's SUCCESS path: an unchanged lake replays the
+    launch manifest and returns 200 with the pool / candidate / survivor tally
+    (covers the ``run_and_write_from_manifest`` success arm + the 200 return —
+    the drifted-lake test only exercises the 400 refusal arms)."""
+    pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
+    from brutex.dashboard.app import DashboardState, build_app
+    from brutex.data.instrument_store import InstrumentStore
+    from fastapi.testclient import TestClient
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    rc = cmd_sweep_all(
+        **_kwargs(lake_root, catalog_path, lake_root / "sweeps", intervals="1minute")
+    )
+    assert rc == EXIT_OK
+    with (
+        InstrumentStore.open(lake_root / "instruments.duckdb") as store,
+        TestClient(build_app(DashboardState(), instrument_store=store)) as client,
+    ):
+        resp = client.post("/api/v1/cascade/run")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["ok"] is True
+        assert payload["sweep_id"]
+        assert payload["pools"] >= 1
+        assert "candidates" in payload
+        assert "survivors" in payload
+
+
+def test_dashboard_cascade_route_400s_a_missing_manifest(tmp_path: Path) -> None:
+    """The route turns a missing launch manifest (no ``sweep-all`` has run into
+    ``<lake>/sweeps`` yet) into a clean 400 naming the remediation, never a 500
+    (covers the ``load_manifest`` ``CascadeWireError`` arm)."""
+    pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
+    from brutex.dashboard.app import DashboardState, build_app
+    from brutex.data.instrument_store import InstrumentStore
+    from fastapi.testclient import TestClient
+
+    lake_root, _catalog_path = _seed_lake(tmp_path, derive=False)
+    # No cmd_sweep_all — <lake>/sweeps carries no manifest to replay.
+    with (
+        InstrumentStore.open(lake_root / "instruments.duckdb") as store,
+        TestClient(build_app(DashboardState(), instrument_store=store)) as client,
+    ):
+        resp = client.post("/api/v1/cascade/run")
+        assert resp.status_code == 400
+        payload = resp.json()
+        assert payload["ok"] is False
+        assert "no cascade manifest" in payload["error"]
+
+
+def test_dashboard_cascade_route_400s_when_no_lake_is_configured(tmp_path: Path) -> None:
+    """The route refuses with a clear 400 when the wired store exposes no
+    on-disk lake path (``store.path`` is not a ``Path``) — never a 500 (covers
+    the ``isinstance(lake_root, Path)`` guard's refusal arm)."""
+    pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
+    from brutex.dashboard.app import DashboardState, build_app
+    from brutex.data.instrument_store import InstrumentStore
+    from fastapi.testclient import TestClient
+
+    lake_root, _catalog_path = _seed_lake(tmp_path, derive=False)
+    with (
+        InstrumentStore.open(lake_root / "instruments.duckdb") as store,
+        TestClient(build_app(DashboardState(), instrument_store=store)) as client,
+    ):
+        # Drop the store's on-disk path so the route's `isinstance(..., Path)`
+        # guard trips (a store wired without a resolvable lake root).
+        store._path = None  # type: ignore[assignment]
+        resp = client.post("/api/v1/cascade/run")
+        assert resp.status_code == 400
+        assert "no lake configured for cascade" in resp.json()["detail"]
+
+
 def test_manual_cascade_interior_hole_is_a_clean_user_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
