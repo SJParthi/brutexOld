@@ -33,7 +33,7 @@ _TRADES_FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "fixtures"
     / "oneclick"
-    / "runs"
+    / "sweep_runs"
     / RUN_ID
     / "trades"
     / "rank-0001.json"

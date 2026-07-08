@@ -468,7 +468,7 @@ class TestVerifyChecks:
         assert checks[3]["state"] == "ready"
         assert checks[4]["state"] == "ready"
         assert "operator" in checks[3]["detail"]
-        assert "fixture-backed until P3 merges" in checks[3]["detail"]
+        assert "never auto-passes server-side" in checks[3]["detail"]
 
     def test_no_trades_makes_operator_checks_awaiting(self) -> None:
         checks = {check["id"]: check for check in ov.verify_checks(_ok_manifest(), None, False)}
