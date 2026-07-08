@@ -497,20 +497,21 @@ class TestNegativePins:
     def test_probe_pull_singleflight_in_no_preflight_import_graph(self) -> None:
         """AST pin: the WRITING probe is imported by NO preflight module, and no
         preflight module imports ``brutex.adapters`` at all (D6 layering)."""
-        import brutex.data.session_coverage
-        import brutex.data.sweep_exclusion
-        import brutex.engine.sweep_calibration
-        import brutex.engine.sweep_data_preflight
-        import brutex.engine.sweep_estimate
-        import brutex.engine.sweep_gate
+        from brutex.data import session_coverage, sweep_exclusion
+        from brutex.engine import (
+            sweep_calibration,
+            sweep_data_preflight,
+            sweep_estimate,
+            sweep_gate,
+        )
 
         modules = [
-            brutex.engine.sweep_gate,
-            brutex.engine.sweep_data_preflight,
-            brutex.engine.sweep_estimate,
-            brutex.engine.sweep_calibration,
-            brutex.data.session_coverage,
-            brutex.data.sweep_exclusion,
+            sweep_gate,
+            sweep_data_preflight,
+            sweep_estimate,
+            sweep_calibration,
+            session_coverage,
+            sweep_exclusion,
         ]
         for module in modules:
             source_path = module.__file__
@@ -530,19 +531,17 @@ class TestNegativePins:
 class TestStructlogVocabularyPins:
     def test_event_names_exist_verbatim_in_their_owning_modules(self) -> None:
         """The §10.3 vocabulary — the P2 funnel contract, one owner per name."""
-        import brutex.data.sweep_exclusion
-        import brutex.engine.sweep_calibration
-        import brutex.engine.sweep_estimate
-        import brutex.engine.sweep_gate
+        from brutex.data import sweep_exclusion
+        from brutex.engine import sweep_calibration, sweep_estimate, sweep_gate
 
         owners: dict[Any, tuple[str, ...]] = {
-            brutex.engine.sweep_gate: ("sweep.preflight.passed", "sweep.preflight.refused"),
-            brutex.data.sweep_exclusion: (
+            sweep_gate: ("sweep.preflight.passed", "sweep.preflight.refused"),
+            sweep_exclusion: (
                 "sweep.preflight.lock_refused",
                 "pull.sweep_exclusion_refused",
             ),
-            brutex.engine.sweep_estimate: ("sweep.estimate", "sweep.estimate.disk"),
-            brutex.engine.sweep_calibration: (
+            sweep_estimate: ("sweep.estimate", "sweep.estimate.disk"),
+            sweep_calibration: (
                 "sweep.calibration.load_failed",
                 "sweep.calibration.hardware_mismatch",
                 "sweep.estimate_vs_actual",

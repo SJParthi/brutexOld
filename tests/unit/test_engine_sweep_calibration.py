@@ -161,7 +161,7 @@ class TestHardwareFingerprint:
         # Excision #10 negative pin: no hostname enters the key.
         import inspect
 
-        import brutex.engine.sweep_calibration as module
+        from brutex.engine import sweep_calibration as module
 
         assert "import platform" not in inspect.getsource(module)
 

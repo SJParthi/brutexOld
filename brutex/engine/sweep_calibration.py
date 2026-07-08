@@ -34,7 +34,7 @@ import stat as stat_module
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from statistics import median
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from brutex.config.hardware_envelope import HardwareEnvelope
-    from brutex.engine.sweep_estimate import SweepEstimate
 
 logger = structlog.get_logger("brutex.engine.sweep_calibration")
 
@@ -449,10 +448,42 @@ def _derive_snapshot(ring: Sequence[dict[str, object]], *, fingerprint: str) -> 
     )
 
 
+class _EstimateLike(Protocol):
+    """The (trials, est_seconds, est_result_bytes, time_model) slice of one
+    pre-run estimate (structural typing).
+
+    ``sweep_estimate.SweepEstimate`` satisfies this; sweep_calibration cannot
+    import it — even under ``TYPE_CHECKING`` — without closing the two-way
+    module cycle CodeQL ``py/cyclic-import`` flags (``sweep_estimate`` imports
+    THIS module for :class:`CalibrationSnapshot`, the one allowed direction —
+    the ``cascade_wire._RefinedCellLike`` precedent).
+    """
+
+    @property
+    def trials(self) -> int:
+        """Estimated trial count (the ``bloom_capacity_hint`` twin)."""
+        ...  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def est_seconds(self) -> float:
+        """The DISPLAYED time-model estimate, in seconds."""
+        ...  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def est_result_bytes(self) -> int:
+        """The disk-gate NEED basis, in bytes."""
+        ...  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def time_model(self) -> str:
+        """``"calibrated_trials"`` | ``"per_tuple_sla_fallback"``."""
+        ...  # pragma: no cover — Protocol stub, never executed
+
+
 def record_run_calibration(
     out_root: Path,
     *,
-    estimate: SweepEstimate,
+    estimate: _EstimateLike,
     actuals: RunActuals,
     fingerprint: str,
     now: datetime | None = None,
@@ -474,7 +505,9 @@ def record_run_calibration(
     out_root
         The results volume root the sidecar lives under.
     estimate
-        The pre-run :class:`~brutex.engine.sweep_estimate.SweepEstimate`.
+        The pre-run :class:`~brutex.engine.sweep_estimate.SweepEstimate`
+        (structurally, via :class:`_EstimateLike` — this module never imports
+        ``sweep_estimate``, keeping the pair acyclic).
     actuals
         The measured :class:`RunActuals`.
     fingerprint

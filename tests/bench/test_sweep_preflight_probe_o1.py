@@ -30,9 +30,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import brutex.data.session_coverage as session_coverage_module
 import polars as pl
 import pytest
+from brutex.data import session_coverage as session_coverage_module
 from brutex.data.session_coverage import scan_ledger_quarantine, scan_selection_coverage
 from brutex.data.sweep_exclusion import (
     pull_in_progress,

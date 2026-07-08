@@ -15,9 +15,9 @@ from decimal import Decimal
 from math import nan
 from pathlib import Path
 
-import brutex.engine.sweep_estimate as sweep_estimate_module
 import pytest
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+from brutex.engine import sweep_estimate as sweep_estimate_module
 from brutex.engine.sweep_calibration import CalibrationSnapshot
 from brutex.engine.sweep_estimate import (
     ABSURD_K_MAX,

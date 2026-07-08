@@ -241,7 +241,6 @@ class TestSweepRunGuard:
         and RE-probe ends with BOTH sides refusing (fail-closed, no double-run)."""
         real_probe = sweep_exclusion.pull_in_progress
         calls = {"n": 0}
-        pull_fds: list[int] = []
 
         def racing_probe(root: Path) -> bool:
             calls["n"] += 1
@@ -250,21 +249,23 @@ class TestSweepRunGuard:
                 path = pull_lock_path(root)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                pull_fds.append(fd)
-                # …and ITS post-acquire re-probe refuses too (the sweep already
-                # holds SH at this instant) — the pull side of "both refuse".
-                with pytest.raises(SweepRunningError):
-                    check_pull_exclusion(root)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # …and ITS post-acquire re-probe refuses too (the sweep
+                    # already holds SH at this instant) — the pull side of
+                    # "both refuse".
+                    with pytest.raises(SweepRunningError):
+                        check_pull_exclusion(root)
+                    # The sweep's RE-probe runs while the EX lock is LIVE…
+                    return real_probe(root)
+                finally:
+                    # …and the fd is ALWAYS released (the flock dies with it).
+                    os.close(fd)
             return real_probe(root)
 
         monkeypatch.setattr(sweep_exclusion, "pull_in_progress", racing_probe)
-        try:
-            with pytest.raises(PullActiveError), sweep_run_guard(tmp_path):
-                pytest.fail("the sweep side must refuse on the RE-probe")
-        finally:
-            for fd in pull_fds:
-                os.close(fd)
+        with pytest.raises(PullActiveError), sweep_run_guard(tmp_path):
+            pytest.fail("the sweep side must refuse on the RE-probe")
         assert calls["n"] == 2  # pre-probe + re-probe — both ran
         # The guard released its SH on the refusal path.
         assert sweep_in_progress(tmp_path) is False
