@@ -574,7 +574,7 @@ class TestSweepReportSeam:
         surface carries no VIX field, so a stamp there is provably
         unobservable. This is the actual byte-equality regression that claim
         rides on (round-3 panel: the claim shipped in cli.py / MIGRATION.md
-        #1541 / CLAUDE.md §2 Rule 3 citing a test that did not exist — the
+        #1561 / CLAUDE.md §2 Rule 3 citing a test that did not exist — the
         cascade ``serialize_wire_report`` A/B pinned a DIFFERENT surface).
         A future VIX column in the report text fails HERE and forces the
         conscious revert-lever decision (bind a stamper at ``cmd_sweep``).
