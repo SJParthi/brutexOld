@@ -1101,11 +1101,21 @@ hostile-review pass._
   pull = one consistent snapshot; the tolerance+1 refusal flip closed; the session filter deliberately
   overlay-blind; round 7: the run-walker breaks on covered static sessions BEFORE the overlay, so a stale
   entry over a since-backfilled day can never merge flanking runs into a new refusal — shrink-only is
-  structural for every overlay shape, disjointness restriction dropped from the property pin). ENGINE
+  structural for every overlay shape, disjointness restriction dropped from the property pin; endgame
+  round 1: origin/main d2cd283ad MERGED in — the six-step pull order #1221 composed with the breaker's
+  pull/phase scoping preserved (the ONE `af_breaker` resolve stays hoisted above BOTH spot step-groups
+  and the F&O 4-bucket/round loops, injected into every bucket call — cross-bucket pooling + the
+  pull-wide latch survive the step-major split; `reconcile_fno_ledger_windows` carries BOTH the
+  `observed=` overlay AND main's `span_index=` fast path; the #1238 ledger delta fold NULL-fills a
+  legacy file's missing `streak_provenance` via `union_by_name=true` — no 15th-column hazard, its
+  delta-fold suite green on 15-column rows; and the FRACTION rule's docs reconciled to its true
+  RUNNING-PREFIX semantics with the AF-first ordering pin — a below-final-floor population trips
+  when its all-filtered windows complete first, deliberate early detection, NOT a whole-pull
+  population floor). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
-  ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact 37-error/433-warning pre-change
-  baseline (origin/main 83baab8df — the restore-replay rebase target; the earlier 426-warning figure
-  was the pre-rebase d1f9c3e base), 0 new).
+  ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact post-merge origin/main
+  d2cd283ad baseline (1 error/496 warnings, venv-resolved — measured identically on a pristine
+  origin/main worktree; supersedes the pre-merge 83baab8df 37/433 figure), 0 new).
   Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
