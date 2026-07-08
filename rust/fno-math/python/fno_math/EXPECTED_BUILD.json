@@ -1,9 +1,10 @@
 {
-  "_comment": "Wheel-source freshness fingerprint (DEC-FNOMATH-WHEEL-FRESHNESS-001 — the fno_math twin of trading_core's R2-CC-G1 fingerprint). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose. Read by `brutex doctor`'s wheel_freshness_fno_math stage and pinned equal to fno_math._EXPECTED_COMPILED_SYMBOLS by tests. Update this file in the SAME commit as any rust/fno-math surface or version change. HONEST residual gap (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; they do NOT catch same-version symbol-compatible behavioral drift — the CI golden/parity suites remain the correctness proof, and closing the runtime gap needs a source-content digest baked into the wheel (named follow-up, out of this scope).",
-  "crate_version": "0.2.0",
+  "_comment": "Wheel-source freshness fingerprint (DEC-FNOMATH-WHEEL-FRESHNESS-001 — the fno_math twin of trading_core's R2-CC-G1 fingerprint). The crate version + sorted compiled-symbol surface the CURRENT source tree is expected to expose. Read by `brutex doctor`'s wheel_freshness_fno_math stage and pinned equal to fno_math._EXPECTED_COMPILED_SYMBOLS by tests. Update this file in the SAME commit as any rust/fno-math surface or version change. HONEST envelope (Golden Rule #10): version + symbol-set checks catch a stale wheel that dropped/added a symbol or changed crate version; same-version symbol-compatible behavioral drift is now watched by the SHIPPED source-digest handshake (DEC-RUST-SOURCE-DIGEST-TWIN-001, MIGRATION.md #1258) — build.rs bakes the crate-source BLAKE3 FRAMING-v1 digest into the compiled module as `__source_digest__`, and `brutex doctor`'s wheel_source_digest_fno_math stage compares it (WARN, non-fatal) against the Python-twin recompute over the repo crate tree; the CI golden/parity suites remain the behavioral correctness proof. This file deliberately does NOT list `__source_digest__` in `symbols` nor pin a digest value: a pinned value would go stale on every src commit, and the stamp's dunder-invisibility to the symbol-set check keeps old/new wheel × old/new doctor combinations interoperable. The residual `python/` shim-staleness gap (FRAMING v1 excludes the shim the wheel packages) is the named FRAMING-v2 follow-up.",
+  "crate_version": "0.3.0",
   "symbols": [
     "ResidentBars",
     "ResidentSweepSim",
+    "ResidentSweepSimU128",
     "__version__",
     "add_u64",
     "bitand_count_u64s",

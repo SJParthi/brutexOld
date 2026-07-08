@@ -13,6 +13,13 @@ BRUTEX_GROWW_API_KEY=... BRUTEX_GROWW_TOTP_SECRET=... \
   python scripts/groww_probe.py --all | tee docs/groww/probe/probe-$(date +%F).txt
 ```
 
+> **Scope note (2026-07-06, DEC-BROKER-DOCS-AWSONLY-RECONCILE-001):** the
+> `BRUTEX_GROWW_API_KEY` / `BRUTEX_GROWW_TOTP_SECRET` env vars above are PROBE-LOCAL
+> to the standalone Phase-0 `scripts/groww_probe.py` — read by that script only,
+> never by the production pull path, whose credentials are AWS-SSM-only
+> (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065; `docs/runbooks/ENV_VARS.md` §5).
+> Retiring/repointing the probe at SSM is a NAMED follow-up, not done here.
+
 The transcript must resolve the six hard-gates (ADR-0009 §4):
 
 1. India VIX existence on Groww — the HARD-GATE; if absent, ADR-0009 §7

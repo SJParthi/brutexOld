@@ -25,7 +25,8 @@
  * bx-oneclick.js is the first consumer. The pure primitives
  * (bxBackoffDelayMs / bxStalenessState) are node-golden-tested; the stateful
  * factories (bxCreatePoller / bxStalenessTicker) are browser-only and are
- * pinned by SOURCE-STRING tests, not executed (no headless JS runner in CI).
+ * pinned by SOURCE-STRING tests, not executed (the tests/browser
+ * Playwright job — #1557 — does not drive the oneclick pages).
  */
 "use strict";
 

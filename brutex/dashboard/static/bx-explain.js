@@ -20,7 +20,8 @@
  * Honest envelope (Golden Rule #10): the pure primitives (bxExplain /
  * bxTradeArithmetic / bxPaisaToRupees / bxModeText) are node-golden-tested;
  * the DOM helpers (bxApplyMode / bxBindExplainHover) are browser-only and
- * are pinned by SOURCE-STRING tests (no headless JS runner in CI). DOM
+ * are pinned by SOURCE-STRING tests (the tests/browser Playwright job —
+ * #1557 — does not drive the oneclick pages). DOM
  * writes are textContent/classList only — zero string-to-DOM sinks.
  */
 "use strict";

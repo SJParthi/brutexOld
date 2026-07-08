@@ -30,7 +30,8 @@
  *
  * Honest envelope (Golden Rule #10): the pure functions are executed for
  * real under node; the SVG builders are browser-only and are pinned by
- * SOURCE-STRING tests (no headless JS runner in CI).
+ * SOURCE-STRING tests (the tests/browser Playwright job — #1557 —
+ * does not drive /strategy).
  */
 "use strict";
 

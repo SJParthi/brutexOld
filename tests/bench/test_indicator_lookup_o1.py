@@ -96,6 +96,11 @@ def _make_fib_days(n: int) -> dict[date, FibLevels]:
             retrace_62_paisa=2_019_100 + i,
             retrace_78_paisa=2_010_700 + i,
             retrace_level_at_pdl_paisa=2_000_000 + i,
+            # Bullish ladder (PDL-anchored, DEC-FIB-BULLISH-RETRACE-001).
+            retrace_bull_23_paisa=2_011_800 + i,
+            retrace_bull_38_paisa=2_019_100 + i,
+            retrace_bull_62_paisa=2_030_900 + i,
+            retrace_bull_78_paisa=2_039_300 + i,
             ext_up_127_paisa=2_063_600 + i,
             ext_up_162_paisa=2_080_900 + i,
             ext_up_200_paisa=2_100_000 + i,
@@ -172,42 +177,37 @@ def test_fib_value_lookup_is_o1_in_days_loaded() -> None:
 
 
 def _time_vwap_update(prefilled_bars: int) -> float:
-    """Mean ns per ``VwapState.update`` AFTER the session already accumulated
-    ``prefilled_bars`` bars — proving the running-sum cost is O(1) in the number
-    of bars already seen (NOT a re-sum of session history, PR-2 risk #2)."""
+    """Mean ns per ``trading_core.VwapState.update`` AFTER the session already
+    accumulated ``prefilled_bars`` bars — proving the running-sum cost is O(1)
+    in the number of bars already seen (NOT a re-sum of session history, PR-2
+    risk #2). Times the PRODUCTION Rust pyclass ``stage1a`` drives — the single
+    VWAP source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 deleted the
+    hand-synced Python twin this bench previously timed."""
     from datetime import date as _date
+    from typing import Any
 
-    from brutex.indicators.vwap import VwapState
+    import trading_core
 
-    state = VwapState()
-    day = _date(2024, 1, 2)
+    state: Any = trading_core.VwapState()
+    day_ordinal = _date(2024, 1, 2).toordinal()
     base_tod = 9 * 3600 + 16 * 60
     # Prefill the session so cum_pv/cum_vol carry `prefilled_bars` of history.
     for k in range(prefilled_bars):
         state.update(
             2_000_000 + (k % 1000),
             100 + (k % 50),
-            is_pre_open=False,
-            session_key=1,
-            session_day=day,
-            tod_seconds=base_tod + k,
+            False,  # is_pre_open
+            1,  # session_key
+            day_ordinal,
+            base_tod + k,
         )
     iters = 200_000
     tod = base_tod + prefilled_bars
     for k in range(2_000):  # warm up
-        state.update(
-            2_000_000, 100, is_pre_open=False, session_key=1, session_day=day, tod_seconds=tod + k
-        )
+        state.update(2_000_000, 100, False, 1, day_ordinal, tod + k)
     t0 = time.perf_counter_ns()
     for k in range(iters):
-        state.update(
-            2_000_000,
-            100,
-            is_pre_open=False,
-            session_key=1,
-            session_day=day,
-            tod_seconds=tod + 2_000 + k,
-        )
+        state.update(2_000_000, 100, False, 1, day_ordinal, tod + 2_000 + k)
     t1 = time.perf_counter_ns()
     return (t1 - t0) / iters
 
@@ -215,7 +215,8 @@ def _time_vwap_update(prefilled_bars: int) -> float:
 def test_vwap_update_is_o1_in_session_bars() -> None:
     """VWAP ``update`` latency with a 100K-bar-deep session must hold the ceiling
     vs a 1K-bar-deep one — the running cum(pv)/cum(vol) is O(1) per bar (two adds
-    + one divide), never a re-sum of the session (PR-2 — DEC-NIFTY-INDICATORS-001).
+    + one divide, in Rust), never a re-sum of the session (PR-2 —
+    DEC-NIFTY-INDICATORS-001).
     """
     t_small = _time_vwap_update(N_SMALL)
     t_big = _time_vwap_update(N_BIG)

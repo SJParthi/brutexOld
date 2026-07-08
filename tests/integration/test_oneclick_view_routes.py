@@ -25,7 +25,8 @@ via ``build_app`` + ``TestClient`` and pins:
   and the new templates carry ZERO string-to-DOM assignment sinks (F-M2).
 
 HONEST envelope (Golden Rule #10): template/JS assertions are SOURCE-STRING
-pins (presence, not execution — this repo has no headless JS runner); the
+pins (presence, not execution — the tests/browser Playwright job (#1557)
+does not drive the oneclick pages); the
 route assertions ARE executed end-to-end against the committed contract
 fixture corpus.
 """

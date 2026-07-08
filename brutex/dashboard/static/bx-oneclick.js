@@ -29,7 +29,8 @@
  * Honest envelope (Golden Rule #10): the pure primitives (ring buffer,
  * precedence/provenance/line-text builders) are node-golden-testable; the
  * DOM layer is browser-only and pinned by SOURCE-STRING tests (presence,
- * not execution — no headless JS runner in CI). Load order: bx-ui.js,
+ * not execution — the tests/browser Playwright job (#1557) does not
+ * drive the Operator page). Load order: bx-ui.js,
  * bx-poll.js, bx-explain.js (and bx-chart.js on chart pages) must load
  * BEFORE this file.
  */

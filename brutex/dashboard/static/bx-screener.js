@@ -23,7 +23,8 @@
  *
  * Honest envelope (Golden Rule #10): pure primitives node-golden-tested;
  * the page wiring (COLS render, th-click sort) is pinned by SOURCE-STRING
- * tests only (no headless JS runner in CI).
+ * tests only (the tests/browser Playwright job — #1557 — does not
+ * drive /screener).
  */
 "use strict";
 

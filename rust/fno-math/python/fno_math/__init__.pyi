@@ -22,6 +22,7 @@ from collections.abc import Sequence
 __all__ = [
     "ResidentBars",
     "ResidentSweepSim",
+    "ResidentSweepSimU128",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
@@ -202,6 +203,66 @@ class ResidentSweepSim:
         """Per-mask round-trip trade COUNT only (the throughput-bench fast path).
 
         Same state machine as `simulate_masks` without the per-trade allocation.
+        `out[j]` aligns with `masks[j]`.
+        """
+        ...
+
+class ResidentSweepSimU128:
+    """Resident Stage-2 trade-sim buffer over a >64-bit vocabulary (u128 twin).
+
+    DEC-TRADE-SIM-U128-KERNEL-001. Identical contract to `ResidentSweepSim`
+    with `bar_bits` / `masks` widened to u128 — both widths share the ONE
+    width-generic MaskWord core in `rust/fno-math/src/trade_sim.rs`, so the
+    walk semantics cannot drift (an anti-drift test pins the two kernels
+    field-by-field equal on u64-fit inputs). A `bar_bits` / mask value outside
+    `[0, 2**128)` raises `OverflowError` at the PyO3 extraction edge; unequal
+    column lengths raise `ValueError`. Today's production vocabulary is 60
+    bits, so this kernel is future headroom — only tests (and a future >64-bit
+    vocabulary) drive it.
+    """
+
+    def __init__(
+        self,
+        open: list[int],
+        high: list[int],
+        low: list[int],
+        close: list[int],
+        is_forced: list[bool],
+        session_idx: list[int],
+        bar_bits: list[int],
+    ) -> None: ...
+    @property
+    def n_bars(self) -> int: ...
+    def simulate_masks(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool = ...,
+        tp_next_open: bool = ...,
+        tp_first: bool = ...,
+    ) -> list[list[tuple[int, int, int, int, int, int]]]:
+        """Simulate a batch of u128 masks → per-mask round-trip trade tuples.
+
+        `out[j]` is the trades for `masks[j]`, each a tuple
+        `(pnl_paisa, mfe_paisa, mae_paisa, holding_bars, entry_idx, exit_idx)`.
+        Empty `masks` → `[]`.
+        """
+        ...
+
+    def count_trades(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool = ...,
+        tp_next_open: bool = ...,
+        tp_first: bool = ...,
+    ) -> list[int]:
+        """Per-mask round-trip trade COUNT only (no per-trade allocation).
+
         `out[j]` aligns with `masks[j]`.
         """
         ...
