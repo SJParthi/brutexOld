@@ -6576,264 +6576,283 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI still exits non-zero). KeyboardInterrupt/SystemExit are
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
-    with sweep_abort_alert(_emit_pull_halt_alert):
-        with (
-            AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
-            SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
-            SweepCache.open(
-                cache_path,
-                bloom_capacity=cache_knobs.bloom_capacity,
-                map_size_mb=cache_knobs.map_size_mb,
-            ) as cache,
-        ):
-            # Audit the scope override on the hash-chained launch log (Golden Rule
-            # #8): a research launch that let out-of-scope symbols through is a
-            # material action and must be traceable in the tree's own audit.
-            if scope.overridden:
-                ingest_audit.append(
-                    action="SWEEP_SCOPE_OVERRIDE",
-                    subject="sweep-all:scope",
-                    payload={
-                        "scope_override": True,
-                        "symbols": [verdict.symbol for verdict in scope.refused],
-                        "exchange": exchange,
-                        "segment": segment,
-                    },
+    from brutex.engine.sweep_singleflight import (
+        SweepAlreadyRunningError,
+        sweep_singleflight_lock,
+    )
+
+    # DEFECT 1a fix (cross-process CLI sweep single-flight): refuse a SECOND
+    # concurrent CLI sweep on the same results root BEFORE any audit writer
+    # resume-opens and forks the shared hash chain. Acquired OUTSIDE
+    # sweep_abort_alert so a refusal is a clean user error, NOT a 'sweep
+    # aborted' CRITICAL alert; held through the whole run via the ExitStack
+    # (released on any return / raise, incl. across sweep-daemon cycles).
+    with contextlib.ExitStack() as _sweep_singleflight_stack:
+        try:
+            _sweep_singleflight_stack.enter_context(sweep_singleflight_lock(out_root))
+        except SweepAlreadyRunningError as exc:
+            print(f"[brutex] {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        with sweep_abort_alert(_emit_pull_halt_alert):
+            with (
+                AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
+                SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
+                SweepCache.open(
+                    cache_path,
+                    bloom_capacity=cache_knobs.bloom_capacity,
+                    map_size_mb=cache_knobs.map_size_mb,
+                ) as cache,
+            ):
+                # Audit the scope override on the hash-chained launch log (Golden Rule
+                # #8): a research launch that let out-of-scope symbols through is a
+                # material action and must be traceable in the tree's own audit.
+                if scope.overridden:
+                    ingest_audit.append(
+                        action="SWEEP_SCOPE_OVERRIDE",
+                        subject="sweep-all:scope",
+                        payload={
+                            "scope_override": True,
+                            "symbols": [verdict.symbol for verdict in scope.refused],
+                            "exchange": exchange,
+                            "segment": segment,
+                        },
+                    )
+                dedup = plan_launch_dedup(grid, digest_path=True)
+                guards = SweepGuards(
+                    audit=sup_audit,
+                    progress=SweepProgress(),
+                    checkpoint=checkpoint,
+                    cache=cache,
+                    watchdog=watchdog,
                 )
-            dedup = plan_launch_dedup(grid, digest_path=True)
-            guards = SweepGuards(
-                audit=sup_audit,
-                progress=SweepProgress(),
-                checkpoint=checkpoint,
-                cache=cache,
-                watchdog=watchdog,
+                # Multi-core sweep (DEC-MULTICORE-SWEEP-PHASE1-001) — AUTO-default
+                # since ADR-0016 (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): an unset
+                # BRUTEX_SWEEP_WORKERS resolves to max(1, min(cpu_count - 2, 8)), a
+                # SMALL grid (tuple_count < 2 × auto — threaded here, the one call
+                # site that knows the grid) stays sequential, and an explicit
+                # BRUTEX_SWEEP_WORKERS=1 is the sequential opt-out (byte-for-byte
+                # the path below). ``workers > 1`` dispatches the parallel driver on
+                # the PRODUCTION digest path (``run_one_tuple`` always supplies a
+                # tuple digest → ``bypass_dedup`` is always True); ``workers > 1``
+                # on the legacy no-digest path is HARD-REFUSED (this path is always
+                # the digest path, so the guard is a belt-and-braces flag check,
+                # not a real limit).
+                from brutex.engine.sweep_parallel import (
+                    refuse_parallel_on_legacy_path,
+                    resolve_sweep_workers,
+                    run_parallel_grid,
+                )
+
+                workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
+                refuse_parallel_on_legacy_path(workers, digest_path=True)
+                if workers > 1:
+                    print(f"[brutex] sweep-all: parallel mode — {workers} workers (digest path)")
+                    result = run_parallel_grid(
+                        grid,
+                        bars_for=_bars_for,
+                        root=out_root,
+                        ingest_audit=ingest_audit,
+                        guards=guards,
+                        workers=workers,
+                    )
+                else:
+                    result = run_supervised_grid(
+                        grid,
+                        bars_for=_bars_for,
+                        store_for=make_store_for(out_root, grid),
+                        dedup=dedup,
+                        ingest_audit=ingest_audit,
+                        guards=guards,
+                        on_tuple=_on_tuple,
+                        on_progress=_on_progress,
+                        watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    )
+                # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
+                # Runs INSIDE the open audit with-block on this single thread (review
+                # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest
+                # hash chain as the sweep's lines, bracketed by STAGE_3_PASS_START /
+                # STAGE_3_PASS_COMPLETE. Bars come from the in-memory slice memo the
+                # sweep just ran on (review F9); refinement evaluates the
+                # lockbox-excluded train slice only (ADR-0007 condition 7 + A1).
+                from brutex.engine.stage3_wire import run_stage3_pass
+
+                stage3_report = run_stage3_pass(
+                    grid,
+                    results_root=out_root,
+                    bars_for=_bars_for,
+                    audit=ingest_audit,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                )
+            # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
+            # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
+            alerter.sweep_complete(result)
+            print(
+                f"[brutex] sweep-all done — tuples={result.tuples_run}/{result.tuples_total} "
+                f"(no_bars={result.tuples_skipped_no_bars} cached={result.skipped_cache} "
+                f"resumed={result.skipped_resume} failed={result.tuples_failed}) "
+                f"evaluated={result.evaluated} ranked={result.ranked} persisted={result.persisted}"
             )
-            # Multi-core sweep (DEC-MULTICORE-SWEEP-PHASE1-001) — AUTO-default
-            # since ADR-0016 (DEC-MULTICORE-SWEEP-AUTODEFAULT-001): an unset
-            # BRUTEX_SWEEP_WORKERS resolves to max(1, min(cpu_count - 2, 8)), a
-            # SMALL grid (tuple_count < 2 × auto — threaded here, the one call
-            # site that knows the grid) stays sequential, and an explicit
-            # BRUTEX_SWEEP_WORKERS=1 is the sequential opt-out (byte-for-byte
-            # the path below). ``workers > 1`` dispatches the parallel driver on
-            # the PRODUCTION digest path (``run_one_tuple`` always supplies a
-            # tuple digest → ``bypass_dedup`` is always True); ``workers > 1``
-            # on the legacy no-digest path is HARD-REFUSED (this path is always
-            # the digest path, so the guard is a belt-and-braces flag check,
-            # not a real limit).
-            from brutex.engine.sweep_parallel import (
-                refuse_parallel_on_legacy_path,
-                resolve_sweep_workers,
-                run_parallel_grid,
+            if result.tuples_failed > 0:
+                # "Resilient: skip + continue" — surface the non-zero verdict loudly so a
+                # skip is never a silent illusion (Golden Rule #10). The failed tuples are
+                # un-sentineled / un-cached and will redo on the next run; the offending
+                # combos are named on the TUPLE_FAILED audit lines + the structured log.
+                print(
+                    f"[brutex] WARNING: {result.tuples_failed} tuple(s) FAILED mid-sweep and were "
+                    f"SKIPPED — see the TUPLE_FAILED audit lines in {sup_audit_path}; they will "
+                    "redo on the next run (exit code non-zero).",
+                    file=sys.stderr,
+                )
+            if stage3_report.enabled:
+                print(
+                    f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
+                    f"evals={stage3_report.evals_total} cells={len(stage3_report.cells)} "
+                    f"rows_appended={stage3_report.rows_appended} "
+                    f"skipped_empty_train={stage3_report.skipped_empty_train} "
+                    f"train_snapshot={stage3_report.train_snapshot_hash}"
+                )
+            print(
+                f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}"
+            )
+            print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
+
+            # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
+            # non-fatal: skips cleanly when there is no rolling-option lake or a replay fails.
+            if options_sim:
+                _maybe_run_options_sim_on_winners(
+                    out_root=out_root,
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    expiry=options_expiry,
+                    broker=options_broker,
+                    top=top,
+                )
+
+            # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
+            # Re-build the cascade inputs from each tuple's persisted finalists + the
+            # in-memory bars (the SAME slices the sweep ran on), run the nine-filter
+            # cascade per (instrument, tf) pool, and write the manifest + report under
+            # <out_root>/cascade/. `brutex cascade <run-id>` (+ the dashboard button)
+            # replay that manifest to the byte-identical report. The --overfit-gate
+            # behaviour is UNCHANGED (it ran per-leaderboard inside the sweep above).
+            from brutex.engine.cascade_wire import (
+                BarsContext,
+                build_stage2_cascade_specs,
+                cascade_config_for_sweep,
+                run_and_write_from_specs,
+            )
+            from brutex.engine.stage3_wire import (
+                cascade_specs_for_refined_cells,
+                stage3_manifest_record,
             )
 
-            workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
-            refuse_parallel_on_legacy_path(workers, digest_path=True)
-            if workers > 1:
-                print(f"[brutex] sweep-all: parallel mode — {workers} workers (digest path)")
-                result = run_parallel_grid(
-                    grid,
+            # Stage-2 grid winners — each carries its OWN swept fib_anchor so Stage-4
+            # re-scores a non-prev-day survivor against its own Fib levels
+            # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
+            # pragma-free, unit-tested helper (review MAJOR 2).
+            cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
+
+            # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
+            # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
+            # manifest records stage-3 enablement + the refined-cell list.
+            cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
+
+            if cascade_specs:
+                # Freeze the per-leaderboard trial statistics into the manifest
+                # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
+                # the sidecars exactly ONCE here; the MANUAL replay reads only the
+                # frozen numbers, never the sidecars.
+                import dataclasses as _dataclasses
+
+                from brutex.engine.cascade_wire import build_leaderboard_trials
+
+                stage3_grid = (
+                    _dataclasses.replace(grid, data_snapshot_hash=stage3_report.train_snapshot_hash)
+                    if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
+                    else None
+                )
+                leaderboard_trials = build_leaderboard_trials(
+                    out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
+                )
+                sweep_id = grid_identity(grid)
+                cascade_report = run_and_write_from_specs(
+                    out_root,
+                    sweep_id=sweep_id,
+                    specs=cascade_specs,
                     bars_for=_bars_for,
-                    root=out_root,
-                    ingest_audit=ingest_audit,
-                    guards=guards,
-                    workers=workers,
+                    bars_context=BarsContext(
+                        exchange=exchange, segment=segment, start=start, end=end
+                    ),
+                    cascade_config=cascade_config_for_sweep(sweep_id),
+                    stage3=stage3_manifest_record(stage3_report, results_root=out_root),
+                    leaderboard_trials=leaderboard_trials,
+                )
+                print(
+                    f"[brutex] cascade — pools={len(cascade_report.groups)} "
+                    f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
+                    f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
+                )
+            # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
+            # The ONE run-end results-depth block — trade capture → aggregates →
+            # sidecar trio → baselines → the global top-100 artifact — strictly
+            # AFTER the cascade above, fenced inside _run_results_depth_adapter so
+            # a pass failure never changes the sweep's exit path. Reference bars
+            # load best-effort through the SAME Catalog/ReplayFeed path the sweep
+            # preloaded with; a missing series degrades honestly inside the pass
+            # (NULL + counted, never fabricated).
+            if results_depth_enabled:
+                _run_results_depth_adapter(
+                    out_root=out_root,
+                    grid=grid,
+                    bars_for=_bars_for,
+                    minute_bars_for=_depth_reference_loader(
+                        slices=slices,
+                        lake_root=resolved_lake,
+                        catalog_path=catalog,
+                        exchange=exchange,
+                        segment=segment,
+                        start=start,
+                        end=end,
+                        interval="1minute",
+                    ),
+                    daily_bars_for=_depth_reference_loader(
+                        slices=slices,
+                        lake_root=resolved_lake,
+                        catalog_path=catalog,
+                        exchange=exchange,
+                        segment=segment,
+                        start=start,
+                        end=end,
+                        interval="1day",
+                    ),
+                    vix_bars=_depth_reference_loader(
+                        slices={},
+                        lake_root=resolved_lake,
+                        catalog_path=catalog,
+                        exchange=_RESULTS_DEPTH_VIX_EXCHANGE,
+                        segment=_RESULTS_DEPTH_VIX_SEGMENT,
+                        start=start,
+                        end=end,
+                        interval="1minute",
+                    )(_RESULTS_DEPTH_VIX_SYMBOL),
+                    margin_entry_date=_parse_dt(start).date(),
                 )
             else:
-                result = run_supervised_grid(
-                    grid,
-                    bars_for=_bars_for,
-                    store_for=make_store_for(out_root, grid),
-                    dedup=dedup,
-                    ingest_audit=ingest_audit,
-                    guards=guards,
-                    on_tuple=_on_tuple,
-                    on_progress=_on_progress,
-                    watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                print(
+                    "[brutex] results-depth: disabled via BRUTEX_RESULTS_DEPTH — the run-end "
+                    "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
                 )
-            # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
-            # Runs INSIDE the open audit with-block on this single thread (review
-            # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest
-            # hash chain as the sweep's lines, bracketed by STAGE_3_PASS_START /
-            # STAGE_3_PASS_COMPLETE. Bars come from the in-memory slice memo the
-            # sweep just ran on (review F9); refinement evaluates the
-            # lockbox-excluded train slice only (ADR-0007 condition 7 + A1).
-            from brutex.engine.stage3_wire import run_stage3_pass
 
-            stage3_report = run_stage3_pass(
-                grid,
-                results_root=out_root,
-                bars_for=_bars_for,
-                audit=ingest_audit,
-                exchange=exchange,
-                segment=segment,
-                start=start,
-                end=end,
-            )
-        # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
-        # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
-        alerter.sweep_complete(result)
-        print(
-            f"[brutex] sweep-all done — tuples={result.tuples_run}/{result.tuples_total} "
-            f"(no_bars={result.tuples_skipped_no_bars} cached={result.skipped_cache} "
-            f"resumed={result.skipped_resume} failed={result.tuples_failed}) "
-            f"evaluated={result.evaluated} ranked={result.ranked} persisted={result.persisted}"
-        )
-        if result.tuples_failed > 0:
-            # "Resilient: skip + continue" — surface the non-zero verdict loudly so a
-            # skip is never a silent illusion (Golden Rule #10). The failed tuples are
-            # un-sentineled / un-cached and will redo on the next run; the offending
-            # combos are named on the TUPLE_FAILED audit lines + the structured log.
-            print(
-                f"[brutex] WARNING: {result.tuples_failed} tuple(s) FAILED mid-sweep and were "
-                f"SKIPPED — see the TUPLE_FAILED audit lines in {sup_audit_path}; they will "
-                "redo on the next run (exit code non-zero).",
-                file=sys.stderr,
-            )
-        if stage3_report.enabled:
-            print(
-                f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
-                f"evals={stage3_report.evals_total} cells={len(stage3_report.cells)} "
-                f"rows_appended={stage3_report.rows_appended} "
-                f"skipped_empty_train={stage3_report.skipped_empty_train} "
-                f"train_snapshot={stage3_report.train_snapshot_hash}"
-            )
-        print(
-            f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}"
-        )
-        print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
-
-        # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
-        # non-fatal: skips cleanly when there is no rolling-option lake or a replay fails.
-        if options_sim:
-            _maybe_run_options_sim_on_winners(
-                out_root=out_root,
-                lake_root=resolved_lake,
-                catalog_path=catalog,
-                exchange=exchange,
-                segment=segment,
-                start=start,
-                end=end,
-                expiry=options_expiry,
-                broker=options_broker,
-                top=top,
-            )
-
-        # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
-        # Re-build the cascade inputs from each tuple's persisted finalists + the
-        # in-memory bars (the SAME slices the sweep ran on), run the nine-filter
-        # cascade per (instrument, tf) pool, and write the manifest + report under
-        # <out_root>/cascade/. `brutex cascade <run-id>` (+ the dashboard button)
-        # replay that manifest to the byte-identical report. The --overfit-gate
-        # behaviour is UNCHANGED (it ran per-leaderboard inside the sweep above).
-        from brutex.engine.cascade_wire import (
-            BarsContext,
-            build_stage2_cascade_specs,
-            cascade_config_for_sweep,
-            run_and_write_from_specs,
-        )
-        from brutex.engine.stage3_wire import (
-            cascade_specs_for_refined_cells,
-            stage3_manifest_record,
-        )
-
-        # Stage-2 grid winners — each carries its OWN swept fib_anchor so Stage-4
-        # re-scores a non-prev-day survivor against its own Fib levels
-        # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
-        # pragma-free, unit-tested helper (review MAJOR 2).
-        cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
-
-        # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
-        # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
-        # manifest records stage-3 enablement + the refined-cell list.
-        cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
-
-        if cascade_specs:
-            # Freeze the per-leaderboard trial statistics into the manifest
-            # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
-            # the sidecars exactly ONCE here; the MANUAL replay reads only the
-            # frozen numbers, never the sidecars.
-            import dataclasses as _dataclasses
-
-            from brutex.engine.cascade_wire import build_leaderboard_trials
-
-            stage3_grid = (
-                _dataclasses.replace(grid, data_snapshot_hash=stage3_report.train_snapshot_hash)
-                if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
-                else None
-            )
-            leaderboard_trials = build_leaderboard_trials(
-                out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
-            )
-            sweep_id = grid_identity(grid)
-            cascade_report = run_and_write_from_specs(
-                out_root,
-                sweep_id=sweep_id,
-                specs=cascade_specs,
-                bars_for=_bars_for,
-                bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
-                cascade_config=cascade_config_for_sweep(sweep_id),
-                stage3=stage3_manifest_record(stage3_report, results_root=out_root),
-                leaderboard_trials=leaderboard_trials,
-            )
-            print(
-                f"[brutex] cascade — pools={len(cascade_report.groups)} "
-                f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
-                f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
-            )
-        # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
-        # The ONE run-end results-depth block — trade capture → aggregates →
-        # sidecar trio → baselines → the global top-100 artifact — strictly
-        # AFTER the cascade above, fenced inside _run_results_depth_adapter so
-        # a pass failure never changes the sweep's exit path. Reference bars
-        # load best-effort through the SAME Catalog/ReplayFeed path the sweep
-        # preloaded with; a missing series degrades honestly inside the pass
-        # (NULL + counted, never fabricated).
-        if results_depth_enabled:
-            _run_results_depth_adapter(
-                out_root=out_root,
-                grid=grid,
-                bars_for=_bars_for,
-                minute_bars_for=_depth_reference_loader(
-                    slices=slices,
-                    lake_root=resolved_lake,
-                    catalog_path=catalog,
-                    exchange=exchange,
-                    segment=segment,
-                    start=start,
-                    end=end,
-                    interval="1minute",
-                ),
-                daily_bars_for=_depth_reference_loader(
-                    slices=slices,
-                    lake_root=resolved_lake,
-                    catalog_path=catalog,
-                    exchange=exchange,
-                    segment=segment,
-                    start=start,
-                    end=end,
-                    interval="1day",
-                ),
-                vix_bars=_depth_reference_loader(
-                    slices={},
-                    lake_root=resolved_lake,
-                    catalog_path=catalog,
-                    exchange=_RESULTS_DEPTH_VIX_EXCHANGE,
-                    segment=_RESULTS_DEPTH_VIX_SEGMENT,
-                    start=start,
-                    end=end,
-                    interval="1minute",
-                )(_RESULTS_DEPTH_VIX_SYMBOL),
-                margin_entry_date=_parse_dt(start).date(),
-            )
-        else:
-            print(
-                "[brutex] results-depth: disabled via BRUTEX_RESULTS_DEPTH — the run-end "
-                "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
-            )
-
-        # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
-        # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
-        return sweep_all_exit_code(result.tuples_failed)
+            # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
+            # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
+            return sweep_all_exit_code(result.tuples_failed)
 
 
 def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler
@@ -7339,6 +7358,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         compare_recount,
         plan_expected_stores,
         recorded_context_from_audit,
+        verify_audit_chains,
         verify_identity,
         verify_structural,
     )
@@ -7353,6 +7373,14 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         return EXIT_USER_ERROR
     print(structural.render())
     reports = [structural]
+
+    # DEFECT 1b fix (Tier 0 — audit-chain integrity): the structural/identity/
+    # recount tiers only NON-verifyingly parse the audit logs, so a forked /
+    # interleaved hash chain (two concurrent resume-writers — the damage DEFECT
+    # 1a's single-flight now prevents) reads CLEAN. Verify each present chain
+    # end-to-end; a corruption flips the OVERALL verdict at BOTH exit points.
+    audit_chains = verify_audit_chains(out_root)
+    print(audit_chains.render())
 
     # The recorded context (review condition 2a): the tree describes itself
     # via its audit chain; explicit flags override; NEVER the operator's memory.
@@ -7370,7 +7398,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             "and no --data-snapshot-hash/--indicator-version/--code-commit-sha "
             "overrides — identity/recount tiers skipped (structural-only verdict)"
         )
-        return EXIT_OK if structural.clean else EXIT_VERIFY_FINDINGS
+        return EXIT_OK if structural.clean and audit_chains.ok else EXIT_VERIFY_FINDINGS
 
     from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
     from brutex.feed.resampler import INTERVAL_SECONDS
@@ -7818,7 +7846,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     print("[brutex] no heal plan emitted: recount found no corruption")
 
     return sweep_verify_exit_code(
-        has_findings=any(not report.clean for report in reports),
+        has_findings=any(not report.clean for report in reports) or not audit_chains.ok,
         inconclusive=inconclusive_only,
     )
 
@@ -7848,6 +7876,7 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         execute_heal,
         read_heal_plan,
     )
+    from brutex.engine.sweep_progress import progress_running_fresh
     from brutex.engine.sweep_supervisor import read_progress
     from brutex.orchestrator.audit import AuditWriter
 
@@ -7860,11 +7889,15 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         return EXIT_USER_ERROR
 
     # C6 best-effort guard: a fresh "running" progress snapshot refuses. A
-    # snapshot older than this is a crashed sweep's leftover, not a live one.
-    progress_fresh_seconds = 600.0
+    # snapshot older than the freshness window is a crashed sweep's leftover.
+    # DEFECT 2 fix: freshness compares the WALL-clock `updated_wall` stamp
+    # against `time.time()` — the old inline `time.time() - updated_at` compared
+    # wall-clock to a MONOTONIC stamp (~1.7e9 vs a small per-process value), so
+    # `fresh` was ALWAYS False, `sweep_running` ALWAYS False, and the C6 refusal
+    # NEVER fired even while a sweep was LIVE. The pure helper reads the correct
+    # stamp (and safety-refuses an old-format / malformed snapshot).
     progress = read_progress(out_root / "progress" / "sweep-progress.json")
-    fresh = (time.time() - float(progress.get("updated_at") or 0.0)) < progress_fresh_seconds
-    sweep_running = bool(progress.get("running")) and fresh
+    sweep_running = progress_running_fresh(progress, now_wall=time.time())
 
     try:
         assessment = assess_heal(

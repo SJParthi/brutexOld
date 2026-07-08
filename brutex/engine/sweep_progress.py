@@ -41,8 +41,9 @@ CLAUDE.md §2 Rule 7).
 
 from __future__ import annotations
 
+import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -51,6 +52,13 @@ STATE_IDLE: Final[str] = "idle"
 STATE_RUNNING: Final[str] = "running"
 STATE_DONE: Final[str] = "done"
 STATE_ERROR: Final[str] = "error"
+
+#: Default freshness window for the cross-process liveness check
+#: (:func:`progress_running_fresh`): a ``running`` snapshot whose wall-clock
+#: heartbeat is younger than this is treated as a LIVE sweep (e.g. the
+#: ``sweep-heal`` C6 refusal). 600 s tolerates a slow poll cadence yet bounds
+#: the post-crash false-live window.
+HEAL_FRESH_SECONDS: Final[float] = 600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +84,19 @@ class SweepProgressSnapshot:
     detail
         Free-text status / error message (empty unless set).
     started_at
-        The injected clock's value at :meth:`SweepProgress.start`.
+        The injected MONOTONIC clock's value at :meth:`SweepProgress.start`
+        (for in-process elapsed / ETA math — NOT comparable across processes).
     updated_at
-        The injected clock's value at the last mutation.
+        The injected MONOTONIC clock's value at the last mutation (in-process
+        ETA only).
+    updated_wall
+        The injected WALL clock's value (``time.time()``) at the last mutation.
+        Unlike :attr:`updated_at` this IS comparable across processes / hosts,
+        so a cross-process reader (``sweep-heal``'s C6 liveness gate) can judge
+        whether a durable ``sweep-progress.json`` is a live sweep or a crashed
+        leftover — the monotonic ``updated_at`` is meaningless across the
+        process boundary (its epoch differs per process). See the
+        :mod:`brutex.data.rate_bridge` "wall-clock across processes" precedent.
     """
 
     state: str
@@ -90,6 +108,7 @@ class SweepProgressSnapshot:
     detail: str
     started_at: float
     updated_at: float
+    updated_wall: float
 
     @property
     def running(self) -> bool:
@@ -163,14 +182,22 @@ class SweepProgressSnapshot:
             "survivor_rate": self.survivor_rate,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
+            "updated_wall": self.updated_wall,
         }
 
 
 def _monotonic() -> float:
-    """Default clock — the monotonic wall clock (injected for testability)."""
+    """Default MONOTONIC clock — for in-process elapsed / ETA (injected for testability)."""
     import time
 
     return time.monotonic()
+
+
+def _wall_clock() -> float:
+    """Default WALL clock (``time.time()``) — the ONLY clock comparable across processes."""
+    import time
+
+    return time.time()
 
 
 class SweepProgress:
@@ -179,13 +206,24 @@ class SweepProgress:
     Parameters
     ----------
     clock
-        Zero-arg time source stamped on every mutation (defaults to
+        Zero-arg MONOTONIC time source stamped on every mutation (defaults to
         :func:`time.monotonic`). Injected so ETA / rate are deterministic
-        under test.
+        under test. Drives ``started_at`` / ``updated_at`` (in-process only).
+    wall_clock
+        Zero-arg WALL time source (defaults to :func:`time.time`) stamped on
+        every mutation as ``updated_wall`` — the cross-process liveness stamp
+        (:func:`progress_running_fresh`). Injected so tests can pin a realistic
+        epoch independently of the monotonic ``clock``.
     """
 
-    def __init__(self, *, clock: Callable[[], float] = _monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = _monotonic,
+        wall_clock: Callable[[], float] = _wall_clock,
+    ) -> None:
         self._clock = clock
+        self._wall_clock = wall_clock
         self._lock = threading.Lock()
         self._state = STATE_IDLE
         self._enumerated = 0
@@ -196,6 +234,7 @@ class SweepProgress:
         self._detail = ""
         self._started_at = 0.0
         self._updated_at = 0.0
+        self._updated_wall = 0.0
 
     def start(self, *, enumerated: int, detail: str = "") -> None:
         """Begin a sweep of *enumerated* combos — resets all counters to ``running``.
@@ -215,6 +254,7 @@ class SweepProgress:
             self._detail = detail
             self._started_at = now
             self._updated_at = now
+            self._updated_wall = self._wall_clock()
 
     def advance(
         self,
@@ -239,6 +279,7 @@ class SweepProgress:
             if current:
                 self._current = current
             self._updated_at = self._clock()
+            self._updated_wall = self._wall_clock()
 
     def finish(self, *, detail: str = "") -> None:
         """Mark the sweep cleanly complete (``done``) — O(1)."""
@@ -246,6 +287,7 @@ class SweepProgress:
             self._state = STATE_DONE
             self._detail = detail
             self._updated_at = self._clock()
+            self._updated_wall = self._wall_clock()
 
     def fail(self, detail: str) -> None:
         """Mark the sweep terminally failed (``error``) with a reason — O(1)."""
@@ -253,6 +295,7 @@ class SweepProgress:
             self._state = STATE_ERROR
             self._detail = detail
             self._updated_at = self._clock()
+            self._updated_wall = self._wall_clock()
 
     def snapshot(self) -> SweepProgressSnapshot:
         """Return an immutable, consistent O(1) view of the current state."""
@@ -267,14 +310,69 @@ class SweepProgress:
                 detail=self._detail,
                 started_at=self._started_at,
                 updated_at=self._updated_at,
+                updated_wall=self._updated_wall,
             )
 
 
+def progress_running_fresh(
+    snapshot: Mapping[str, Any],
+    *,
+    now_wall: float,
+    fresh_seconds: float = HEAL_FRESH_SECONDS,
+) -> bool:
+    """Is *snapshot* a LIVE (running + freshly-heartbeating) sweep? — pure, O(1).
+
+    The cross-process liveness verdict a durable ``sweep-progress.json`` reader
+    (``sweep-heal``'s C6 refusal) needs: ``True`` iff the snapshot's ``running``
+    flag is set AND its WALL-clock heartbeat ``updated_wall`` is younger than
+    *fresh_seconds* against *now_wall* (also wall clock). Freshness MUST use
+    ``updated_wall``, never the monotonic ``updated_at`` — the two epochs are
+    incomparable across process boundaries (``time.time()`` ≈ 1.7e9 vs a
+    per-process ``time.monotonic()``), the exact defect this replaces (a
+    ``time.time() - updated_at`` compare was ALWAYS stale ⇒ never detected a
+    live sweep).
+
+    Safety-first for a guard that PREVENTS corruption (Golden Rule #1): when the
+    sweep is ``running`` but no VALID wall-clock stamp is present — an
+    old-format snapshot with no ``updated_wall`` key, or a malformed / non-finite
+    value — this returns ``True`` (treat as live → refuse the heal). A false
+    REFUSAL is safe; a false PERMIT is the exact live-sweep corruption this gate
+    exists to prevent.
+
+    Parameters
+    ----------
+    snapshot
+        The progress dict (as read from ``sweep-progress.json``).
+    now_wall
+        The current wall-clock instant (``time.time()``), injected for tests.
+    fresh_seconds
+        Freshness window (defaults to :data:`HEAL_FRESH_SECONDS`).
+    """
+    if not bool(snapshot.get("running")):
+        return False
+    raw_wall = snapshot.get("updated_wall")
+    if raw_wall is None:
+        # Missing key (old-format file) or an explicit null: a running sweep with
+        # no wall stamp is treated as LIVE (safety-first refuse).
+        return True
+    try:
+        updated_wall = float(raw_wall)
+    except (TypeError, ValueError):
+        # A non-numeric value (hand-edited / alien file) — same safety-first rule.
+        return True
+    if not math.isfinite(updated_wall):
+        # nan / inf stamp — same safety-first rule.
+        return True
+    return (now_wall - updated_wall) < fresh_seconds
+
+
 __all__ = [
+    "HEAL_FRESH_SECONDS",
     "STATE_DONE",
     "STATE_ERROR",
     "STATE_IDLE",
     "STATE_RUNNING",
     "SweepProgress",
     "SweepProgressSnapshot",
+    "progress_running_fresh",
 ]

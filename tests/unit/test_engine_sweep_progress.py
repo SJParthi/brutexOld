@@ -19,13 +19,16 @@
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 from brutex.engine.sweep_progress import (
+    HEAL_FRESH_SECONDS,
     STATE_DONE,
     STATE_ERROR,
     STATE_IDLE,
     STATE_RUNNING,
     SweepProgress,
+    progress_running_fresh,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -34,8 +37,8 @@ from hypothesis import strategies as st
 class _Clock:
     """A manually-advanced fake clock."""
 
-    def __init__(self) -> None:
-        self.t = 0.0
+    def __init__(self, start: float = 0.0) -> None:
+        self.t = start
 
     def __call__(self) -> float:
         return self.t
@@ -194,6 +197,7 @@ def test_to_dict_shape() -> None:
         "survivor_rate",
         "started_at",
         "updated_at",
+        "updated_wall",
     }
     assert d["state"] == STATE_RUNNING
     assert d["evaluated"] == 1
@@ -242,3 +246,100 @@ def test_thread_safe_concurrent_advance() -> None:
     s = sp.snapshot()
     assert s.evaluated == 1000  # no lost updates
     assert s.survivors == 1000
+
+
+# ── DEFECT 2: wall-clock heartbeat + cross-process liveness verdict ──────────
+#
+# The bug: `sweep-heal`'s C6 guard compared `time.time()` (~1.7e9) against the
+# snapshot's `updated_at`, which is a MONOTONIC stamp (a small per-process
+# value), so `time.time() - updated_at` was ALWAYS >> 600 ⇒ never "fresh" ⇒
+# `sweep_running` ALWAYS False ⇒ the heal proceeded even while a sweep was LIVE.
+# The fix stamps a separate WALL-clock `updated_wall` and judges freshness on it.
+
+
+def _live_snapshot(*, mono_t: float = 1234.0, wall_t: float = 1_750_000_000.0) -> dict[str, Any]:
+    """Build a snapshot dict EXACTLY as a live sweep does — a small monotonic
+    ``updated_at`` alongside a realistic wall-clock ``updated_wall``."""
+    sp = SweepProgress(clock=_Clock(mono_t), wall_clock=_Clock(wall_t))
+    sp.start(enumerated=10)
+    sp.advance(current="NIFTY/1minute")
+    return sp.snapshot().to_dict()
+
+
+def test_wall_clock_is_stamped_independently_of_monotonic() -> None:
+    snap = _live_snapshot(mono_t=1234.0, wall_t=1_750_000_000.0)
+    # updated_at is the MONOTONIC stamp; updated_wall the WALL stamp — distinct.
+    assert snap["updated_at"] == 1234.0
+    assert snap["updated_wall"] == 1_750_000_000.0
+
+
+def test_running_fresh_detects_a_just_updated_live_sweep() -> None:
+    # FAILS-BEFORE / PASSES-AFTER regression: a running sweep updated 5 s ago in
+    # wall time is LIVE.
+    snap = _live_snapshot(mono_t=1234.0, wall_t=1_750_000_000.0)
+    assert progress_running_fresh(snap, now_wall=1_750_000_000.0 + 5) is True
+    # And the OLD (buggy) expression — wall-now minus the MONOTONIC updated_at —
+    # is falsely stale, proving why the dead guard never fired. A revert of the
+    # helper to read `updated_at` fails the assertion above.
+    old_fresh = (1_750_000_000.0 + 5 - float(snap["updated_at"])) < HEAL_FRESH_SECONDS
+    assert old_fresh is False
+
+
+def test_running_stale_snapshot_is_not_fresh() -> None:
+    snap = _live_snapshot(wall_t=1_750_000_000.0)
+    # A wall heartbeat far in the past → not fresh → heal allowed.
+    assert progress_running_fresh(snap, now_wall=1_750_000_000.0 + 10_000) is False
+
+
+def test_running_exactly_at_boundary_is_not_fresh() -> None:
+    # Strict `<` boundary: an age exactly == fresh_seconds is NOT fresh.
+    snap = _live_snapshot(wall_t=1_000_000.0)
+    assert progress_running_fresh(snap, now_wall=1_000_000.0 + HEAL_FRESH_SECONDS) is False
+
+
+def test_not_running_is_never_fresh() -> None:
+    sp = SweepProgress(clock=_Clock(1.0), wall_clock=_Clock(1_750_000_000.0))
+    sp.start(enumerated=1)
+    sp.finish()  # state = done, running = False
+    snap = sp.snapshot().to_dict()
+    assert snap["running"] is False
+    # Even with a brand-new wall stamp, a NON-running sweep is not live.
+    assert progress_running_fresh(snap, now_wall=1_750_000_000.0) is False
+
+
+def test_missing_updated_wall_running_refuses_safely() -> None:
+    # Old-format file (no updated_wall) that is running → treat as LIVE (safety).
+    assert progress_running_fresh({"running": True}, now_wall=1_750_000_000.0) is True
+
+
+def test_missing_updated_wall_not_running_is_not_fresh() -> None:
+    assert progress_running_fresh({"running": False}, now_wall=1_750_000_000.0) is False
+    # A totally empty snapshot (no running key) is not-running → not fresh.
+    assert progress_running_fresh({}, now_wall=1_750_000_000.0) is False
+
+
+def test_malformed_updated_wall_running_refuses_safely() -> None:
+    # Non-numeric / non-finite stamp on a running sweep → treat as LIVE (safety).
+    assert progress_running_fresh({"running": True, "updated_wall": "junk"}, now_wall=1.0) is True
+    assert progress_running_fresh({"running": True, "updated_wall": None}, now_wall=1.0) is True
+    assert (
+        progress_running_fresh({"running": True, "updated_wall": float("nan")}, now_wall=1.0)
+        is True
+    )
+    assert (
+        progress_running_fresh({"running": True, "updated_wall": float("inf")}, now_wall=1.0)
+        is True
+    )
+
+
+def test_default_wall_clock_is_time_time() -> None:
+    # The default wall_clock is a real epoch (~1.7e9), distinct from monotonic.
+    sp = SweepProgress()  # default monotonic + wall clocks
+    sp.start(enumerated=1)
+    sp.advance()
+    snap = sp.snapshot().to_dict()
+    assert snap["updated_wall"] > 1_000_000_000.0  # a real Unix epoch
+    # A just-created running snapshot reads fresh against a now taken right after.
+    import time
+
+    assert progress_running_fresh(snap, now_wall=time.time()) is True

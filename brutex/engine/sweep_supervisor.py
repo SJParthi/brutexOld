@@ -175,6 +175,7 @@ _IDLE_PROGRESS: Final[dict[str, Any]] = {
     "survivor_rate": 0.0,
     "started_at": 0.0,
     "updated_at": 0.0,
+    "updated_wall": 0.0,
 }
 
 

@@ -21,6 +21,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
+from brutex.engine.sweep_audit import SweepAuditWriter
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -31,6 +32,8 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.engine.sweep_verify import (
+    AuditChainResult,
+    AuditChainVerdict,
     RecordedContext,
     SweepVerifyError,
     TreeVerifyReport,
@@ -39,6 +42,7 @@ from brutex.engine.sweep_verify import (
     plan_expected_stores,
     recorded_context_from_audit,
     recorded_stage3_from_audit,
+    verify_audit_chains,
     verify_identity,
     verify_structural,
 )
@@ -781,3 +785,168 @@ class TestCellRecountCodes:
         assert record.knobs is None
         assert record.consistent is True
         assert record.optimizer_versions == ()
+
+
+# ── DEFECT 1b: Tier-0 audit-chain integrity ─────────────────────────────────
+#
+# The structural/identity/recount tiers only NON-verifyingly `read_entries`, so
+# a FORKED / interleaved hash chain — two concurrent resume-writers stamping the
+# same seq + prev_hash, exactly what a missing CLI sweep single-flight lock
+# produces — parses cleanly and every tier reports CLEAN. `verify_audit_chains`
+# runs each chain's OWN end-to-end verifier so the fork is DETECTED.
+
+_INGEST_AUDIT = "sweep-all.jsonl"
+_SUPERVISOR_AUDIT = "sweep-all-supervisor.jsonl"
+
+
+def _audit_dir(root: Path) -> Path:
+    d = root / "audit"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_clean_ingest_chain(root: Path) -> Path:
+    path = _audit_dir(root) / _INGEST_AUDIT
+    with AuditWriter.open(path) as w:
+        w.append(action="SWEEP_START", subject="sweep:x", payload={"n": 1})
+        w.append(action="TUPLE_DONE", subject="tuple:y", payload={"n": 2})
+    return path
+
+
+def _fork_last_line(path: Path) -> None:
+    # A second interleaved resume-writer re-commits a DUPLICATE of the last
+    # committed line (same seq + prev_hash) — the fork a missing single-flight
+    # lock produces. verify_chain rejects the duplicate seq.
+    last_line = path.read_bytes().splitlines(keepends=True)[-1]
+    with path.open("ab") as f:
+        f.write(last_line)
+
+
+def _write_clean_supervisor_chain(root: Path) -> Path:
+    path = _audit_dir(root) / _SUPERVISOR_AUDIT
+    with SweepAuditWriter.open(path) as w:
+        w.append(action="SWEEP_START", subject="sweep:x", payload={"total": 3})
+        w.append(action="COMBO_DONE", subject="combo:1", payload={"mask": 7})
+    return path
+
+
+class TestAuditChainResult:
+    def test_result_fields(self) -> None:
+        ok = AuditChainResult(filename="a.jsonl", ok=True, entries=5, reason=None)
+        assert ok.ok and ok.entries == 5 and ok.reason is None
+        bad = AuditChainResult(filename="a.jsonl", ok=False, entries=0, reason="boom")
+        assert not bad.ok and bad.reason == "boom"
+
+
+class TestAuditChainVerdict:
+    def test_ok_when_every_chain_verified(self) -> None:
+        verdict = AuditChainVerdict(
+            root="/r",
+            results=(
+                AuditChainResult(filename="a", ok=True, entries=3, reason=None),
+                AuditChainResult(filename="b", ok=True, entries=1, reason=None),
+            ),
+        )
+        assert verdict.ok is True
+        assert verdict.corrupt == ()
+
+    def test_empty_results_is_vacuously_ok(self) -> None:
+        verdict = AuditChainVerdict(root="/r", results=())
+        assert verdict.ok is True
+        assert verdict.corrupt == ()
+
+    def test_corrupt_when_any_chain_failed(self) -> None:
+        good = AuditChainResult(filename="a", ok=True, entries=2, reason=None)
+        bad = AuditChainResult(filename="b", ok=False, entries=0, reason="seq out of order")
+        verdict = AuditChainVerdict(root="/r", results=(good, bad))
+        assert verdict.ok is False
+        assert verdict.corrupt == (bad,)
+
+    def test_render_ok_singular_and_plural(self) -> None:
+        verdict = AuditChainVerdict(
+            root="/r",
+            results=(
+                AuditChainResult(filename="one.jsonl", ok=True, entries=1, reason=None),
+                AuditChainResult(filename="many.jsonl", ok=True, entries=4, reason=None),
+            ),
+        )
+        rendered = verdict.render()
+        assert "verdict: CLEAN" in rendered
+        assert "one.jsonl: 1 entry verified" in rendered  # singular
+        assert "many.jsonl: 4 entries verified" in rendered  # plural
+
+    def test_render_corrupt(self) -> None:
+        verdict = AuditChainVerdict(
+            root="/r",
+            results=(AuditChainResult(filename="x.jsonl", ok=False, entries=0, reason="forked"),),
+        )
+        rendered = verdict.render()
+        assert "verdict: CORRUPT (1 chain(s))" in rendered
+        assert "[CORRUPT] x.jsonl: forked" in rendered
+
+
+class TestVerifyAuditChains:
+    def test_missing_audit_dir_is_vacuously_ok(self, tmp_path: Path) -> None:
+        # A fresh / other-shaped root with no audit files → skipped, not a failure.
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.results == ()
+        assert verdict.ok is True
+
+    def test_clean_ingest_chain_verifies(self, tmp_path: Path) -> None:
+        _write_clean_ingest_chain(tmp_path)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is True
+        assert [r.filename for r in verdict.results] == [_INGEST_AUDIT]
+        assert verdict.results[0].entries == 2
+
+    def test_clean_both_chains_verify(self, tmp_path: Path) -> None:
+        _write_clean_ingest_chain(tmp_path)
+        _write_clean_supervisor_chain(tmp_path)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is True
+        assert {r.filename for r in verdict.results} == {_INGEST_AUDIT, _SUPERVISOR_AUDIT}
+
+    def test_forked_ingest_chain_is_detected_and_old_reader_is_blind(self, tmp_path: Path) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: a forked ingest chain (two interleaved
+        # resume-writers) — the pre-fix code path parsed it fine via
+        # `read_entries` (verified below) and every legacy tier read CLEAN. The
+        # new Tier-0 verifier flips it to CORRUPT.
+        from brutex.orchestrator.audit import read_entries
+
+        path = _write_clean_ingest_chain(tmp_path)
+        _fork_last_line(path)
+        # The GAP: the non-verifying reader the legacy tiers use parses the
+        # forked file WITHOUT error, so it never noticed the corruption.
+        assert len(read_entries(path)) == 3  # duplicate seq parsed, not rejected
+        # The FIX: the chain verifier rejects the duplicate seq.
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is False
+        (corrupt,) = verdict.corrupt
+        assert corrupt.filename == _INGEST_AUDIT
+        assert corrupt.reason is not None and "seq" in corrupt.reason.lower()
+
+    def test_forked_supervisor_chain_is_detected(self, tmp_path: Path) -> None:
+        # The supervisor BLAKE3 chain fork is detected by its OWN verifier.
+        _write_clean_ingest_chain(tmp_path)  # clean ingest alongside
+        sup = _write_clean_supervisor_chain(tmp_path)
+        _fork_last_line(sup)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is False
+        assert {r.filename for r in verdict.corrupt} == {_SUPERVISOR_AUDIT}
+
+    def test_malformed_ingest_chain_is_reported_corrupt(self, tmp_path: Path) -> None:
+        # A garbage (non-JSON) line makes the SHA-256 verifier raise AuditError,
+        # surfaced as a corrupt "unreadable or malformed" result.
+        (_audit_dir(tmp_path) / _INGEST_AUDIT).write_text("not-a-valid-audit-line\n")
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is False
+        (corrupt,) = verdict.corrupt
+        assert corrupt.reason is not None and "malformed" in corrupt.reason.lower()
+
+    def test_malformed_supervisor_chain_is_reported_corrupt(self, tmp_path: Path) -> None:
+        (_audit_dir(tmp_path) / _SUPERVISOR_AUDIT).write_text("}{ not json\n")
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is False
+        (corrupt,) = verdict.corrupt
+        assert corrupt.filename == _SUPERVISOR_AUDIT
+        assert corrupt.reason is not None and "malformed" in corrupt.reason.lower()

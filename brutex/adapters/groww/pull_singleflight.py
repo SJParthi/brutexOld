@@ -171,6 +171,7 @@ __all__ = [
     "account_pull_singleflight_lock",
     "account_singleflight_lock_path",
     "default_account_lock_dir",
+    "flock_singleflight",
     "foreign_pull_lease",
     "nightly_singleflight_lock",
     "nightly_singleflight_lock_path",
@@ -500,6 +501,32 @@ resolve_groww_aws_credentials` — the SOLE credential source, DEC-AWS-ONLY-CRED
 
 
 @contextmanager
+def flock_singleflight(lock_path: Path) -> Generator[None, None, None]:
+    """Public COMMON non-blocking exclusive-flock gate over *lock_path*.
+
+    The reusable core behind :func:`pull_singleflight_lock` /
+    :func:`account_pull_singleflight_lock`, exposed so a SIBLING single-flight gate —
+    e.g. the engine sweep lock
+    (:func:`brutex.engine.sweep_singleflight.sweep_singleflight_lock`) — reuses the
+    SAME lake-write-guarded flock instead of hand-rolling its own os.open/flock/
+    lake_write_guard logic (Golden Rule #11 COMMON). Takes ``LOCK_EX | LOCK_NB`` on
+    *lock_path* for the ``with`` block; on contention raises
+    :class:`PullAlreadyRunningError` (a sibling caller may translate it into a
+    domain-specific refusal). The mechanics — lake-write-guarded dir/file creation
+    and fd-close release — live in :func:`_flock_singleflight`.
+
+    Raises
+    ------
+    PullAlreadyRunningError
+        If the lock is already held by another process (non-blocking acquire).
+    LakeWriteHalt
+        If creating the lock dir / file hits a full disk (ENOSPC) / OOM.
+    """
+    with _flock_singleflight(lock_path):
+        yield
+
+
+@contextmanager
 def _flock_singleflight(
     lock_path: Path,
     *,
@@ -516,7 +543,7 @@ def _flock_singleflight(
     prior holder can never lie about who holds it now) and *holder_note*, when given,
     is written for contended peers' refusal messages
     (DEC-SWEEP-NIGHTLY-AUTOMATION-001) — a write failure is swallowed (advisory only,
-    never a lock failure).
+    never a lock failure). Reused publicly via :func:`flock_singleflight`.
     """
     # The lock-file creation runs inside ``lake_write_guard`` so a full disk at that step
     # becomes a ``LakeWriteHalt`` (the same contract the partition lock honours), never a

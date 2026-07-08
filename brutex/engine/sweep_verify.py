@@ -1039,9 +1039,159 @@ def compare_recount(
     return report
 
 
+# ── Tier 0 — AUDIT-CHAIN INTEGRITY (DEFECT 1b) ───────────────────────────────
+#
+# The structural/identity/recount tiers above only ever ``read_entries`` (a
+# NON-verifying parse) for recorded CONTEXT — they never verify the audit hash
+# chain, so a FORKED / interleaved chain (two concurrent resume-writers stamping
+# the same seq + prev_hash, the exact damage the CLI sweep single-flight of
+# DEFECT 1a now prevents) parses fine and every tier reports CLEAN. This tier
+# calls the two chains' OWN end-to-end verifiers so that damage is DETECTED.
+
+#: The sweep tree's two hash-chained audit logs under ``<out_root>/audit/`` —
+#: each with its OWN chain format + verifier: ``sweep-all.jsonl`` is the
+#: orchestrator SHA-256 ``AuditWriter`` chain, ``sweep-all-supervisor.jsonl`` is
+#: the engine BLAKE3 ``SweepAuditWriter`` chain.
+_INGEST_AUDIT_FILENAME: Final[str] = "sweep-all.jsonl"
+_SUPERVISOR_AUDIT_FILENAME: Final[str] = "sweep-all-supervisor.jsonl"
+
+
+@dataclass(frozen=True, slots=True)
+class AuditChainResult:
+    """One audit log's end-to-end hash-chain verification outcome.
+
+    Parameters
+    ----------
+    filename
+        The audit log's basename (under ``<out_root>/audit/``).
+    ok
+        ``True`` iff the chain verified end-to-end (seq ordering, ``prev_hash``
+        linkage, recomputed ``entry_hash``).
+    entries
+        Entries verified (``0`` on any failure).
+    reason
+        The corruption / read-failure explanation when ``ok`` is ``False``
+        (``None`` when ``ok``).
+    """
+
+    filename: str
+    ok: bool
+    entries: int
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AuditChainVerdict:
+    """The sweep tree's audit-chain integrity verdict over every present chain.
+
+    A MISSING audit file is skipped (not a failure — a fresh tree, or another
+    root) so :attr:`results` carries only the chains that actually exist.
+    """
+
+    root: str
+    results: tuple[AuditChainResult, ...]
+
+    @property
+    def corrupt(self) -> tuple[AuditChainResult, ...]:
+        """The failed chains only."""
+        return tuple(r for r in self.results if not r.ok)
+
+    @property
+    def ok(self) -> bool:
+        """``True`` iff every present chain verified (no chain, vacuously ok)."""
+        return not self.corrupt
+
+    def render(self) -> str:
+        """Render the deterministic human report (one line per checked chain)."""
+        verdict = "CLEAN" if self.ok else f"CORRUPT ({len(self.corrupt)} chain(s))"
+        lines = [
+            f"sweep-verify [audit-chain] — {self.root}",
+            f"  chains checked: {len(self.results)} · verdict: {verdict}",
+        ]
+        for result in self.results:
+            if result.ok:
+                noun = "entry" if result.entries == 1 else "entries"
+                lines.append(f"  [OK] {result.filename}: {result.entries} {noun} verified")
+            else:
+                lines.append(f"  [CORRUPT] {result.filename}: {result.reason}")
+        return "\n".join(lines)
+
+
+def _verify_ingest_chain(path: Path) -> AuditChainResult:
+    """Verify the orchestrator SHA-256 ``AuditWriter`` chain (``sweep-all.jsonl``)."""
+    from brutex.orchestrator.audit import AuditChainCorruption, AuditError, verify_chain
+
+    try:
+        verified = verify_chain(path)
+    except AuditChainCorruption as exc:
+        # AuditChainCorruption subclasses AuditError — caught FIRST so an integrity
+        # break reports its offending seq, not the generic read message.
+        return AuditChainResult(
+            filename=path.name,
+            ok=False,
+            entries=0,
+            reason=f"hash-chain corruption at seq={exc.seq}: {exc.reason}",
+        )
+    except AuditError as exc:
+        return AuditChainResult(
+            filename=path.name, ok=False, entries=0, reason=f"unreadable or malformed: {exc}"
+        )
+    return AuditChainResult(filename=path.name, ok=True, entries=verified, reason=None)
+
+
+def _verify_supervisor_chain(path: Path) -> AuditChainResult:
+    """Verify the engine BLAKE3 ``SweepAuditWriter`` chain (``sweep-all-supervisor.jsonl``)."""
+    from brutex.engine.sweep_audit import (
+        SweepAuditChainCorruption,
+        SweepAuditError,
+        verify_chain,
+    )
+
+    try:
+        verified = verify_chain(path)
+    except SweepAuditChainCorruption as exc:
+        return AuditChainResult(
+            filename=path.name,
+            ok=False,
+            entries=0,
+            reason=f"hash-chain corruption at seq={exc.seq}: {exc.reason}",
+        )
+    except SweepAuditError as exc:
+        return AuditChainResult(
+            filename=path.name, ok=False, entries=0, reason=f"unreadable or malformed: {exc}"
+        )
+    return AuditChainResult(filename=path.name, ok=True, entries=verified, reason=None)
+
+
+def verify_audit_chains(out_root: Path) -> AuditChainVerdict:
+    """Tier 0: verify every present sweep audit hash chain end-to-end.
+
+    Runs each of ``<out_root>/audit/sweep-all.jsonl`` (SHA-256 ingest chain) and
+    ``sweep-all-supervisor.jsonl`` (BLAKE3 supervisor chain) that EXISTS through
+    its own :func:`verify_chain`, capturing the entry count or the corruption /
+    read-failure reason. A missing chain is SKIPPED — a fresh or otherwise-shaped
+    root is not a failure. The verdict is ``ok`` iff every present chain verified;
+    a forked/interleaved chain (duplicate seq or broken ``prev_hash``) flips it to
+    CORRUPT. Pure + O(entries)-streamed (O(1) memory); never mutates the tree.
+    """
+    audit_dir = out_root / "audit"
+    results: list[AuditChainResult] = []
+    for filename, verifier in (
+        (_INGEST_AUDIT_FILENAME, _verify_ingest_chain),
+        (_SUPERVISOR_AUDIT_FILENAME, _verify_supervisor_chain),
+    ):
+        path = audit_dir / filename
+        if not path.exists():
+            continue
+        results.append(verifier(path))
+    return AuditChainVerdict(root=str(out_root), results=tuple(results))
+
+
 __all__ = [
     "QUARANTINE_DIRNAME",
     "SEVERITIES",
+    "AuditChainResult",
+    "AuditChainVerdict",
     "RecordedContext",
     "RecordedStage3Audit",
     "RecordedStage3Knobs",
@@ -1052,6 +1202,7 @@ __all__ = [
     "plan_expected_stores",
     "recorded_context_from_audit",
     "recorded_stage3_from_audit",
+    "verify_audit_chains",
     "verify_identity",
     "verify_structural",
 ]
