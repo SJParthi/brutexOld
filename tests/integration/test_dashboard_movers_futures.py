@@ -544,13 +544,17 @@ class TestRunFuturesSnapshot:
 
     def test_intraday_cutoff_path(self, tmp_path: Path) -> None:
         _seed_futures_lake(tmp_path)
-        # 5-minute interval at 09:15 → only the 09:15 future bar (close 20050).
+        # 5-minute interval at 09:15 → the COMPLETED [09:15, 09:20) bucket
+        # (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001): 09:15 is a 5-minute anchor, so the
+        # effective cut resolves forward to 09:19 and the last AVAILABLE minute is
+        # 09:16 → the completed bucket close 20100 (was the partial 09:15 close
+        # 20050 before the explicit-bucket-asof fix).
         payload = run_futures_snapshot(
             lake_root=tmp_path, interval="5minute", date="2024-06-13", time="09:15", top_n=10
         )
         assert payload["instrument_count"] == 1
         row = payload["price_gainers"][0] if payload["price_gainers"] else payload["volume"][0]
-        assert row["ltp"] == "₹20,050.00"
+        assert row["ltp"] == "₹20,100.00"
 
 
 # ── route wiring (FastAPI TestClient) ─────────────────────────────────────

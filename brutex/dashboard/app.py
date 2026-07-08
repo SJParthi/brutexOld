@@ -151,6 +151,7 @@ from brutex.dashboard.movers_options import (
 from brutex.dashboard.movers_snapshot import (
     DEFAULT_INTERVAL,
     DEFAULT_TOP_N,
+    asof_through_label,
     build_snapshot_payload,
     compute_spot_candidates,
     is_intraday_interval,
@@ -5214,6 +5215,11 @@ def build_app(
                             lake_root, parse_snapshot_date(date_str)
                         ),
                     )
+                # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: display-only provenance — the
+                # completed-bucket final "HH:MM" an explicit bucket-anchor `time` was
+                # resolved forward to (`None` for daily / latest / TF-1minute / non-anchor,
+                # keeping the payload byte-identical). O(1) pure; shared by all three tabs.
+                resolved_through = asof_through_label(interval, time)
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -5297,6 +5303,7 @@ def build_app(
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
                         pcr=opt_cands.pcr,
                         latest_time=latest_time,
+                        resolved_through=resolved_through,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -5336,6 +5343,7 @@ def build_app(
                         expiry_tier=fut_cands.expiry_tier,
                         min_volume=min_volume,
                         latest_time=latest_time,
+                        resolved_through=resolved_through,
                     )
                 key = candidate_key(
                     asset="spot",
@@ -5376,6 +5384,7 @@ def build_app(
                     stored_reads=spot_cands.stored_reads,
                     resampled_reads=spot_cands.resampled_reads,
                     latest_time=latest_time,
+                    resolved_through=resolved_through,
                 )
 
             payload = await run_in_threadpool(_resolve)

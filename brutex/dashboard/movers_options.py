@@ -119,15 +119,14 @@ from brutex.dashboard.movers_futures import (
 from brutex.dashboard.movers_pcr import PcrLeg, UnderlyingPcr, compute_pcr_rows, pcr_row_json
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
-    _DAILY_MIN_FLOOR,
     _calendar_exchange,
-    _cutoff_minute,
     _NoncontiguousWarnState,
     interval_minutes,
     make_expected_session_resolver,
     normalize_min_volume,
     parse_snapshot_date,
     prev_baseline_provenance,
+    resolve_asof_cutoff,
     resolve_candle_datasets,
     resolve_prev_close,
     value_meets_volume_floor,
@@ -636,6 +635,7 @@ def build_options_payload(
     calendar_only_expiry: bool = False,
     pcr: Sequence[UnderlyingPcr] = (),
     latest_time: str | None = None,
+    resolved_through: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -686,6 +686,12 @@ def build_options_payload(
         (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
         ``latest (HH:MM)`` while the default cut stays whole-day; ``None`` for an
         explicit *time* / daily interval / empty lake. Never affects a number.
+    resolved_through
+        ADDITIVE display-only provenance echoed as ``asof_through``
+        (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): the completed-bucket final
+        ``"HH:MM"`` an explicit bucket-anchor *time* was resolved forward to;
+        ``None`` (default) for daily / whole-day / TF-1minute / non-anchor keeps
+        the payload + note byte-identical. Never affects a number.
 
     Returns
     -------
@@ -711,6 +717,12 @@ def build_options_payload(
     tier_label = f"{expiry_tier.capitalize()}{track_suffix}"
     instrument_count = len(movers) + skipped
     floor_note = f" Min volume ≥ {floor:,}." if floor > 0 else ""
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 provenance (ADDITIVE, empty by default).
+    bucket_note = (
+        f" {time} bucket · through {resolved_through}."
+        if resolved_through is not None and time
+        else ""
+    )
     if instrument_count == 0 and calendar_only_expiry:
         # HONEST NO-DATA (DEC-MOVERS-CALENDAR-TIERS-001): the vendor calendar KNOWS the
         # tier expiry but no contract candles were pulled for it — say so, never imply
@@ -738,7 +750,9 @@ def build_options_payload(
             "reference-only lake view "
             "(CLAUDE.md §3); the contract's expiry nearest the selected date "
             "(Near/Next/Far) on the chosen cadence track (All/Monthly/Weekly); "
-            "% is vs the contract's previous close, OI change is vs its prior day." + floor_note
+            "% is vs the contract's previous close, OI change is vs its prior day."
+            + bucket_note
+            + floor_note
         )
     return {
         "interval": interval,
@@ -749,6 +763,7 @@ def build_options_payload(
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "latest_time": latest_time,
+        "asof_through": resolved_through,
         "note": note,
         "pcr": [pcr_row_json(row) for row in pcr],
         **ranked,
@@ -1157,7 +1172,10 @@ def compute_options_candidates(
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
-    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: the ONE COMMON as-of seam — an explicit
+    # bucket-anchor pick resolves FORWARD to the bucket's final minute (the completed
+    # candle); daily/blank whole-day + TF=1minute identity are byte-unchanged.
+    cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
     tier, track = normalize_options_selectors(expiry_tier, expiry_track)
     contracts = _discover_options(lake_root, exchange=exchange, datasets=datasets)

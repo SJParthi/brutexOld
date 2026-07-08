@@ -18,7 +18,25 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+_Last updated: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
+an explicit `/movers` bucket-anchor TIME pick now resolves to the COMPLETED bucket
+(broker-matching close) instead of a PARTIAL forming bucket. The TIME dropdown on a
+coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the backend
+treated a picked anchor as an as-of INSTANT, so 3-minute @ 15:27 showed the partial
+15:27 minute close (₹27,932.80) rather than the completed 15:27–15:29 bucket close
+(₹27,940.85 = the broker's = 2min@15:29 = 1min@latest); the stored derived-TF partitions
+were always CORRECT, only the read-time as-of resolution was wrong. FIX: ONE COMMON as-of
+seam `movers_snapshot.resolve_asof_cutoff(interval, time)` (consumed by all three tabs)
+resolves an anchor pick FORWARD to the bucket's final minute `min(anchor + minutes − 1,
+15:29)`, and the downstream `<= cutoff` `filter_to_ist_minute` caps at the day's latest
+available minute (NO look-ahead). TF=1minute identity, "Latest"/blank whole-day
+byte-identical (DEC-MOVERS-ASOF-LATEST-DEFAULT-001), non-anchor picks keep as-of-instant
+semantics, prev-close %CHNG untouched; additive `asof_through` payload echo + note
+provenance. Value TF-invariance (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001) now holds PER
+shared *resolved* as-of. READ-ONLY dashboard — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
+no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options 100%
+line+branch; ruff/ruff-format/`mypy --strict` clean, pyright at the pre-change baseline.
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
 the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
 pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
@@ -1081,7 +1099,26 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593** — the #1056
+- **Active branch:** `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
+  MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
+  COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
+  dropdown on a coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the
+  backend treated a picked anchor as an as-of INSTANT, so 3-minute @ 15:27 cut at 15:27 and
+  showed the partial 15:27 minute close (₹27,932.80) instead of the completed 15:27–15:29
+  bucket close (₹27,940.85 = the broker's = 2min@15:29 = 1min@latest). The stored derived-TF
+  partitions were always CORRECT; only the read-time as-of resolution was wrong. FIX: ONE
+  COMMON as-of seam `movers_snapshot.resolve_asof_cutoff(interval, time)` (consumed by all
+  three tabs — spot/futures/options) resolves an anchor pick FORWARD to the bucket's final
+  minute `min(anchor + minutes − 1, 15:29)`, and the downstream `<= cutoff`
+  `filter_to_ist_minute` caps at the day's latest available minute (NO look-ahead). Laws:
+  TF=1minute identity; "Latest"/blank whole-day byte-identical (DEC-MOVERS-ASOF-LATEST-DEFAULT-001
+  preserved); non-anchor picks keep as-of-instant semantics; prev-close %CHNG untouched. Honest
+  provenance: additive `asof_through` payload echo + " HH:MM bucket · through HH:MM" note
+  (default `None` → byte-identical). Value TF-invariance (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001)
+  now holds PER shared *resolved* as-of (a sanctioned narrowing). READ-ONLY dashboard — ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX); no lake/schema/scope/vocab/rate change; the three touched
+  movers modules 100% line+branch; ruff/ruff-format/`mypy --strict` clean, pyright at baseline).
+  Earlier: `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593** — the #1056
   pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
   set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
   `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
@@ -3011,11 +3048,18 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/upbeat-tesla-mfrovq`
+- **Active feature branch:** `claude/movers-bucket-asof-fix`
+  (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`
+  bucket-anchor TIME pick resolves to the COMPLETED bucket (broker-matching close)
+  via the ONE COMMON `movers_snapshot.resolve_asof_cutoff` seam shared by all three
+  tabs; READ-ONLY dashboard, ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/upbeat-tesla-mfrovq`
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
   CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
   full blurb)
   Earlier: `claude/sleepy-hawking-l87497`
+  (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 — the durable `&`-form winner
+  map across pulls and processes; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
   retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel

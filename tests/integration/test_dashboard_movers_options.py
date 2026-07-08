@@ -384,14 +384,18 @@ class TestRunOptionsSnapshot:
 
     def test_intraday_cutoff_path(self, tmp_path: Path) -> None:
         _seed_options_lake(tmp_path)
-        # 5-minute interval at 09:15 → only the 09:15 CE/PE bars (CE close 150).
+        # 5-minute interval at 09:15 → the COMPLETED [09:15, 09:20) CE bucket
+        # (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001): 09:15 is a 5-minute anchor, so the
+        # effective cut resolves forward to 09:19 and the last AVAILABLE minute is
+        # 09:16 → the completed bucket CE close 164 / OI 1100 (was the partial 09:15
+        # close 150 / OI 1050 before the explicit-bucket-asof fix).
         payload = run_options_snapshot(
             lake_root=tmp_path, interval="5minute", date="2024-06-13", time="09:15", top_n=10
         )
         assert payload["instrument_count"] == 2
         ce_row = payload["highest_oi"][0]
-        assert ce_row["ltp"] == "₹150.00"
-        assert ce_row["oi"] == 1050
+        assert ce_row["ltp"] == "₹164.00"
+        assert ce_row["oi"] == 1100
 
 
 # ── run_options_snapshot WITHIN a cadence track (DEC-MOVERS-OPTIONS-TRACK-001) ──
