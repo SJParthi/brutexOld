@@ -1187,8 +1187,8 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1598** (renumbered
-  #1538→#1557→#1581→#1598 — the first three hops across the 2026-07-08 origin/main merges (main's #1538 is DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, main's #1557 is DEC-DASHBOARD-BROWSER-TRUTH-001), the last hop to the coordinator-reserved fresh tail ≥ #1598 per the PR #1275 directive — in-flight waves reserve #1558–#1597) — Phase-3
+- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1610** (renumbered
+  #1538→#1557→#1581→#1598→#1610 — the first three hops across the 2026-07-08 origin/main merges (main's #1538 is DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, main's #1557 is DEC-DASHBOARD-BROWSER-TRUTH-001), the fourth to the then-fresh tail #1598, the final hop to the coordinator-reserved PR-#1275 band number #1610 on the 2026-07-08 conflict-resolution treadmill) — Phase-3
   "results depth" for the one-click institutional sweep, delivered as ONE fenced RUN-END post-hoc pass
   (`brutex/engine/results_depth_pass.py`) that re-simulates ONLY the persisted finalists on the pure-Python oracle
   (per-combo PARITY TOOTH vs the stored row — a mismatch is counted + excluded, never a silently wrong trade list),
@@ -1221,10 +1221,10 @@ hostile-review pass._
   junk env, fence). HONEST: the pass is O(persisted finalists) oracle re-sims at run-end, NOT free and NOT on the
   ~33B-trial hot path (which receives ZERO diffs — the frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` pins pass
   UNMODIFIED); trade pages are O(page) with a disclosed O(row-groups-up-to-offset) deep-offset scan (the db_view
-  envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1598); the
+  envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1610); the
   contracts memory-file additive-key update (`trade_seq`/`path_1m_status`/`mae_granularity` + the top100 object
   root) is a coordinator obligation. RULINGS-CONFORMANCE AMENDMENT (2026-07-08, same branch — the gap-register
-  coordinator rulings folded in pre-merge, ledgered in #1598): Ruling 4 — every run-end artifact relocated to the
+  coordinator rulings folded in pre-merge, ledgered in #1610): Ruling 4 — every run-end artifact relocated to the
   `sweep_runs/` SIBLING root via the ONE `sweep_run_dir` seam (the `<sweeps>/results-depth/` + `<sweeps>/runs/`
   layouts SUPERSEDED; branch-introduced goldens regenerated, origin/main goldens untouched); Ruling 18 —
   `lots`/`costs_paisa` NULL-BY-DESIGN `None` until P5's futures translation sidecar (the fabricated `1`/`0`
@@ -3199,9 +3199,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/elegant-johnson-cgufi7`
-  (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1598 — renumbered
-  #1538→#1557→#1581→#1598; the last hop to the coordinator-reserved
-  fresh tail ≥ #1598, PR #1275 directive 2026-07-08)
+  (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1610 — renumbered
+  #1538→#1557→#1581→#1598→#1610; the final hop to the coordinator-reserved
+  PR-#1275 band number #1610, conflict-resolution directive 2026-07-08)
   Earlier: `claude/blissful-curie-gp94rk`
   (the 11-item POLISH PACK, MIGRATION.md #1582–#1592; see §1 Active-branch
   chain for the full blurb)
