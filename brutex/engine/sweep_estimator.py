@@ -33,7 +33,7 @@ is a closed-form ``C(n, k)`` — true O(1) per call.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import prod
+from math import isfinite, prod
 from typing import TYPE_CHECKING, Final
 
 from brutex.engine.combo_mask import count_combos
@@ -73,6 +73,17 @@ VWAP_DEAD_BITS: Final[frozenset[int]] = frozenset({52, 53})
 #: Segments whose spot candles are volume=0 by construction (index segment —
 #: gap-hunt finding #8's "zero-volume (INDEX-segment) selection").
 _ZERO_VOLUME_SEGMENTS: Final[frozenset[str]] = frozenset({"INDEX"})
+
+#: Sanity ceiling on ``est_seconds_provisional`` — an absurd but FINITE,
+#: JSON-safe value (~31.7 billion years). ``trials`` (an arbitrary-precision
+#: Python int, unbounded by :func:`count_true_trials`) times even a
+#: :data:`~brutex.engine.estimator_calibration._MAX_SECONDS_PER_TRIAL`-capped
+#: ``seconds_per_trial`` can still overflow the ``int * float`` multiply to
+#: ``inf`` or raise ``OverflowError`` outright converting a huge int to
+#: float (an adversarial-refuter review found the calibration file's own
+#: caps only bound one operand, not the product) — clamping the PRODUCT
+#: here closes that gap regardless of which operand made it large.
+_MAX_EST_SECONDS: Final[float] = 1e18
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +242,12 @@ def estimate_sweep_cost(
         raise ValueError(f"top must be >= 0; got {top!r}")
     trials = count_true_trials(k_values, other_axes_product=other_axes_product, n=n)
     nominal, effective = effective_condition_count(segment=segment, n=n)
-    est_seconds = trials * calibration.seconds_per_trial
+    try:
+        est_seconds = trials * calibration.seconds_per_trial
+    except OverflowError:
+        est_seconds = _MAX_EST_SECONDS
+    if not isfinite(est_seconds) or est_seconds > _MAX_EST_SECONDS:
+        est_seconds = _MAX_EST_SECONDS
     est_bytes = tuple_count * top * calibration.bytes_per_row
     basis = CALIBRATED_BASIS if calibration.calibrated else PROVISIONAL_BASIS
     return EstimatorEstimate(

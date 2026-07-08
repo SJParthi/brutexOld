@@ -228,21 +228,39 @@ def clamp_sweep_window(start: date, end: date, *, today: date) -> WindowClamp:
     Parameters
     ----------
     start, end
-        The requested window bounds. Precondition: ``start <= end`` —
+        The requested window bounds. ``start <= end`` is normally already
         enforced upstream by :func:`brutex.dashboard.sweep_runner.resolve_sweep_request`'s
-        ``end < start`` refusal at the request-validation boundary, before
-        this internal engine function is ever reached. Given that
-        precondition, whichever side of ``[floor, ceiling]`` the whole
-        window falls outside of, BOTH endpoints necessarily differ from the
-        single collapse point (see below) — there is no partial-collapse
-        case to guard against.
+        ``end < start`` refusal at the request-validation boundary — but
+        :func:`run_oneclick_preflight` (and this function) are reachable
+        directly, bypassing that boundary, so the invariant is ALSO enforced
+        HERE (an adversarial-refuter review found that without this check, a
+        reversed ``(start, end)`` pair both sitting inside ``[floor,
+        ceiling]`` silently returned unmodified with `start > end` and ZERO
+        clamps recorded — a caller bug masquerading as a clean, unclamped
+        result). Given the invariant holds, whichever side of ``[floor,
+        ceiling]`` the whole window falls outside of, BOTH endpoints
+        necessarily differ from the single collapse point (see below) —
+        there is no partial-collapse case to guard against.
     today
         The injected "now" date (never read from the clock here — Golden
         Rule #4 reproducibility).
+
+    Raises
+    ------
+    ValueError
+        If ``end < start`` — a caller-contract violation, never a data
+        problem this function can honestly clamp around.
     """
+    if end < start:
+        raise ValueError(f"end {end.isoformat()!r} must not precede start {start.isoformat()!r}")
     clamps: list[Clamp] = []
     floor = date(HOLIDAY_COVERAGE_FIRST_YEAR, 1, 1)
-    ceiling = min(date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31), today)
+    # `today` is Golden-Rule-#4 injected and in real (non-test) use is always
+    # the genuine current date — always >= floor, since floor predates the
+    # earliest possible "now". A test injecting an unrealistic `today` before
+    # `floor` must not be allowed to invert the valid span (`ceiling < floor`)
+    # — clamp the ceiling to never fall below the floor.
+    ceiling = max(floor, min(date(HOLIDAY_COVERAGE_LAST_YEAR, 12, 31), today))
     floor_reason = (
         f"pre-{HOLIDAY_COVERAGE_FIRST_YEAR} floor clamp — no published "
         f"NSE holiday-calendar coverage before {HOLIDAY_COVERAGE_FIRST_YEAR}"
@@ -444,6 +462,13 @@ def run_oneclick_preflight(
         per-group, or a single one-click launch pays the full-lake scan N
         times over. ``None`` (the single-call/test default) computes it
         fresh, once, for this call only.
+
+    Raises
+    ------
+    ValueError
+        If ``end < start`` — propagated from :func:`clamp_sweep_window`,
+        a caller-contract violation, never a data problem this preflight
+        can honestly clamp/refuse around.
     """
     refusals: list[Refusal] = []
     clamps: list[Clamp] = []

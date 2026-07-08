@@ -135,6 +135,25 @@ def test_clamp_window_entirely_after_ceiling_collapses_without_crashing() -> Non
     assert all("clamped ceiling" in c.reason for c in result.clamps)
 
 
+def test_clamp_rejects_reversed_window() -> None:
+    """Adversarial-refuter finding: a reversed ``(start, end)`` pair that
+    ALSO sits inside ``[floor, ceiling]`` used to sail through unmodified —
+    silently returning ``start > end`` with zero clamps recorded, a caller
+    bug masquerading as a clean result. Must now raise loudly instead."""
+    with pytest.raises(ValueError, match="must not precede"):
+        clamp_sweep_window(date(2022, 6, 1), date(2022, 1, 1), today=_TODAY)
+
+
+def test_clamp_ceiling_never_inverts_below_floor_for_an_unrealistic_today() -> None:
+    """Adversarial-refuter finding: an unrealistic injected ``today`` before
+    the coverage floor used to produce ``ceiling < floor`` (an inverted valid
+    span), collapsing the window to a date YEARS after the injected "now" —
+    contradicting the function's own future-to-date guarantee. The ceiling
+    must never fall below the floor."""
+    result = clamp_sweep_window(date(2010, 1, 1), date(2010, 6, 1), today=date(2005, 1, 1))
+    assert result.start == result.end == date(2020, 1, 1)
+
+
 # ── missing_1m_partitions ──────────────────────────────────────────────────────
 
 

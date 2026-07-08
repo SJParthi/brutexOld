@@ -151,9 +151,14 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
     NEVER raises: a missing file, a non-regular file (directory, FIFO,
     socket, device — anything that could block forever or isn't a plain
     file), an oversized file, unreadable permissions, non-UTF-8 content,
-    malformed JSON, a non-object top level, a schema-version mismatch, or
-    any required field that is missing / wrong-typed / non-positive /
-    non-finite / absurdly large all resolve to :data:`UNCALIBRATED` — an
+    malformed JSON, a deeply-nested JSON array/object that would otherwise
+    blow Python's parser recursion limit (an adversarial-refuter review
+    found a ~64 KB deeply-nested array — well under the size cap — raised
+    an uncaught ``RecursionError`` from ``json.loads`` instead of the
+    expected ``JSONDecodeError``; now also caught), a non-object top level,
+    a schema-version mismatch, or any required field that is missing /
+    wrong-typed / non-positive / non-finite / absurdly large all resolve to
+    :data:`UNCALIBRATED` — an
     unbenchmarked estimate must never crash the preflight click (Golden Rule
     #10: honest fallback, not a fabricated hard failure). The upper-bound
     sanity caps (:data:`_MAX_SECONDS_PER_TRIAL`/:data:`_MAX_BYTES_PER_ROW`)
@@ -162,8 +167,13 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
     ``trials * seconds_per_trial`` multiply to ``inf`` — which then raises
     inside FastAPI's JSON encoder at serialize time (Starlette's
     ``JSONResponse`` calls ``json.dumps(..., allow_nan=False)``), an
-    unhandled 500 one layer downstream of this "never raises" promise. O(1):
-    one small fixed-shape JSON file, no lake I/O.
+    unhandled 500 one layer downstream of this "never raises" promise. These
+    caps bound the ``seconds_per_trial``/``bytes_per_row`` OPERAND only —
+    :func:`~brutex.engine.sweep_estimator.estimate_sweep_cost` separately
+    clamps the PRODUCT itself (an adversarial-refuter review found ``trials``,
+    the OTHER operand, is independently unbounded and can overflow the same
+    multiply even with a capped ``seconds_per_trial``). O(1): one small
+    fixed-shape JSON file, no lake I/O.
 
     Parameters
     ----------
@@ -186,7 +196,7 @@ def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
         return UNCALIBRATED
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return UNCALIBRATED
     if not isinstance(payload, dict):
         return UNCALIBRATED

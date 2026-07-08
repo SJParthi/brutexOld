@@ -523,6 +523,64 @@ def test_oneclick_preflight_for_plan_effective_condition_count_is_min_across_gro
     assert result["estimator"]["effective_condition_count"] < nominal
 
 
+def _sla_boundary_group(*, exchange: str, symbol: str) -> SweepRunRequest:
+    """A single-group request whose OWN tuple_count (6000) is comfortably
+    under the SLA envelope's 11520-tuple ceiling (345600s / 30s-per-tuple) —
+    but where TWO such groups combined (12000) blow well past it."""
+    sl = ",".join(str(50 + i) for i in range(60))
+    tp = ",".join(str(100 + i) for i in range(100))
+    return SweepRunRequest(
+        symbols=symbol,
+        intervals="1minute",
+        directions="BUY",
+        k="1",
+        sl=sl,
+        tp=tp,
+        exchange=exchange,
+        segment="FNO",
+        start=_TODAY.isoformat(),
+        end=_TODAY.isoformat(),
+        mode=DEFAULT_MODE,
+        top=10,
+    )
+
+
+def test_oneclick_preflight_for_plan_refuses_on_combined_sla_overrun(tmp_path: Path) -> None:
+    """Adversarial-refuter finding: each exchange group's OWN per-group SLA
+    check can independently land right at ALLOWED while the true combined
+    wall-clock (every group runs SEQUENTIALLY in one background job) blows
+    past the CLAUDE.md §8 envelope — a silent overrun with no refusal
+    anywhere. A multi-group plan must re-check the SUMMED tuple count."""
+    plan = OneClickSweepPlan(
+        sweep_run_id="sla-combined-id",
+        requests=(
+            _sla_boundary_group(exchange="NSE", symbol="NIFTY"),
+            _sla_boundary_group(exchange="BSE", symbol="SENSEX"),
+        ),
+    )
+    result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
+    assert result["ok"] is False
+    assert any("projected wall-clock" in r["reason"] for r in result["refusals"])
+
+
+def test_oneclick_preflight_for_plan_acknowledged_combined_sla_overrun_proceeds(
+    tmp_path: Path,
+) -> None:
+    """The same combined-overrun scenario, but with the operator's
+    acknowledge flag set — a Clamp note, never a refusal (ruling #2)."""
+    from dataclasses import replace
+
+    groups = (
+        _sla_boundary_group(exchange="NSE", symbol="NIFTY"),
+        _sla_boundary_group(exchange="BSE", symbol="SENSEX"),
+    )
+    acknowledged_groups = tuple(replace(g, acknowledge_sla_overrun=True) for g in groups)
+    plan = OneClickSweepPlan(sweep_run_id="sla-ack-id", requests=acknowledged_groups)
+    result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
+    assert not any("projected wall-clock" in r["reason"] for r in result["refusals"])
+    assert any(c["field"] == "sla_overrun" for c in result["clamps"])
+
+
 def test_oneclick_preflight_for_plan_calibrated_basis_when_calibration_file_present(
     tmp_path: Path,
 ) -> None:

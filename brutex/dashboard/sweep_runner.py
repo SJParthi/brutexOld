@@ -666,6 +666,21 @@ def oneclick_preflight_for_plan(
     WHOLE logical run; the estimator sums trials/seconds/bytes across
     groups — ``O(#groups)``, at most 2 today).
 
+    **Multi-group SLA re-check (adversarial-refuter fix):** each per-group
+    call to :func:`~brutex.engine.sweep_oneclick_preflight.run_oneclick_preflight`
+    only checks THAT group's own tuple count against the CLAUDE.md §8
+    envelope — but the dashboard's ``/oneclick/run`` route executes every
+    group SEQUENTIALLY on one background job, so the TRUE wall-clock is the
+    SUM across groups. Two groups that each individually project right at
+    the envelope ceiling (``ALLOWED``) would otherwise combine into a
+    silent ~2x overrun with no refusal and no acknowledge-prompt anywhere —
+    exactly the invisible-refusal failure mode ruling 2 exists to prevent.
+    When *plan* has more than one group, this function ADDITIONALLY re-runs
+    :func:`~brutex.engine.sweep_sla_guard.check_sweep_sla` once more against
+    the SUMMED tuple count and folds that verdict in (a single-group plan's
+    existing per-group check already covers it exactly — re-checking would
+    only duplicate the same finding).
+
     Cost honesty (Golden Rule #10, hostile-review fix): the free-disk-space
     check (:func:`~brutex.data.lake_footprint.evaluate_disk_guard`) measures
     the WHOLE lake's footprint — ``O(files in the lake)``, not scoped to any
@@ -698,7 +713,8 @@ def oneclick_preflight_for_plan(
     """
     from brutex.data.lake_footprint import evaluate_disk_guard
     from brutex.engine.sweep_estimator import CALIBRATED_BASIS, PROVISIONAL_BASIS
-    from brutex.engine.sweep_oneclick_preflight import run_oneclick_preflight
+    from brutex.engine.sweep_oneclick_preflight import Clamp, Refusal, run_oneclick_preflight
+    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
 
     results_root = default_results_root(lake_root)
     disk_decision = evaluate_disk_guard(lake_root, observed_multiplier=None, free_bytes=free_bytes)
@@ -707,6 +723,7 @@ def oneclick_preflight_for_plan(
     total_trials = 0
     total_seconds = 0.0
     total_bytes = 0
+    total_tuple_count = 0
     any_provisional = False
     nominal_condition_count = 0
     effective_condition_count: int | None = None
@@ -736,6 +753,7 @@ def oneclick_preflight_for_plan(
         total_trials += verdict.estimator.trials
         total_seconds += verdict.estimator.est_seconds_provisional
         total_bytes += verdict.estimator.est_bytes
+        total_tuple_count += tuple_count
         if verdict.estimator.estimate_basis != CALIBRATED_BASIS:
             any_provisional = True
         nominal_condition_count = verdict.estimator.nominal_condition_count
@@ -744,6 +762,28 @@ def oneclick_preflight_for_plan(
             if effective_condition_count is None
             else min(effective_condition_count, verdict.estimator.effective_condition_count)
         )
+
+    if len(plan.requests) > 1:
+        # A single group's own per-group check (inside the loop above) is
+        # already the exact combined check for that case — only a REAL
+        # multi-group fan-out needs the summed re-check.
+        acknowledge = plan.requests[0].acknowledge_sla_overrun
+        combined_sla = check_sweep_sla(total_tuple_count, acknowledge=acknowledge)
+        if combined_sla.decision is SlaDecision.REFUSED:
+            all_refusals.append(
+                Refusal(
+                    symbol="*", tf="*", missing_spans=(), reason=combined_sla.refusal_message()
+                ).to_dict()
+            )
+        elif combined_sla.decision is SlaDecision.ACKNOWLEDGED:
+            all_clamps.append(
+                Clamp(
+                    field="sla_overrun",
+                    requested=str(total_tuple_count),
+                    applied="acknowledged",
+                    reason=combined_sla.acknowledged_warning(),
+                ).to_dict()
+            )
 
     return {
         "sweep_run_id": plan.sweep_run_id,

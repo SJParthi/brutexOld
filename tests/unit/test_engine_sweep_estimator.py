@@ -164,6 +164,56 @@ def test_estimate_sweep_cost_bytes_scale_with_tuple_count_and_top() -> None:
     assert large.est_bytes == small.est_bytes * 2
 
 
+def test_estimate_sweep_cost_clamps_overflow_to_inf() -> None:
+    """Adversarial-refuter finding: even the MAX-allowed calibrated
+    ``seconds_per_trial`` (3600.0) can overflow ``trials * seconds_per_trial``
+    to ``inf`` when ``trials`` itself (via ``other_axes_product``, unbounded
+    by :func:`count_true_trials`) is astronomically large — the calibration
+    file's own caps only bound one operand. This produces a silent ``inf``
+    without raising (float*float overflow, not an int-to-float conversion
+    failure) — must be clamped to the finite JSON-safe ceiling."""
+    calibration = EstimatorCalibration(
+        calibrated=True,
+        seconds_per_trial=3600.0,
+        bytes_per_row=100,
+        sample_trials=1,
+        measured_at_utc=None,
+        source="x",
+    )
+    estimate = estimate_sweep_cost(
+        k_values=[30],
+        other_axes_product=10**291,
+        tuple_count=1,
+        top=1,
+        segment="FNO",
+        calibration=calibration,
+    )
+    assert estimate.est_seconds_provisional == 1e18
+
+
+def test_estimate_sweep_cost_clamps_overflow_error_to_inf() -> None:
+    """Same overflow gap, but with ``trials`` large enough that converting it
+    to a Python ``float`` raises ``OverflowError`` outright (rather than
+    silently producing ``inf``) — both overflow shapes must clamp the same way."""
+    calibration = EstimatorCalibration(
+        calibrated=True,
+        seconds_per_trial=3600.0,
+        bytes_per_row=100,
+        sample_trials=1,
+        measured_at_utc=None,
+        source="x",
+    )
+    estimate = estimate_sweep_cost(
+        k_values=[30],
+        other_axes_product=10**305,
+        tuple_count=1,
+        top=1,
+        segment="FNO",
+        calibration=calibration,
+    )
+    assert estimate.est_seconds_provisional == 1e18
+
+
 def test_estimate_sweep_cost_negative_tuple_count_raises() -> None:
     with pytest.raises(ValueError, match="tuple_count must be >= 0"):
         estimate_sweep_cost(
