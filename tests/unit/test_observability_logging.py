@@ -28,6 +28,7 @@ from brutex.observability.logging import (
     LOG_LEVEL_ENV,
     _level_to_int,
     configure_logging,
+    configure_process_logging_best_effort,
     reset_configuration,
     resolve_env_log_level,
     resolve_log_file,
@@ -301,3 +302,57 @@ class TestFileSink:
         assert isinstance(fh, logging.handlers.RotatingFileHandler)
         assert fh.maxBytes == 1024
         assert fh.backupCount == 2
+
+
+class TestConfigureProcessLoggingBestEffort:
+    """The spawn-worker bound — DEC-SWEEP-LOG-VOLUME-GUARD-001 R4 fold.
+
+    Best-effort by contract: junk env falls back to the INFO default (the
+    parent entries already failed loud pre-pool), an existing configuration
+    is deferred to, and ANY configuration failure is swallowed — the caller
+    (a pool initializer) must never die over logging.
+    """
+
+    def test_default_binds_info_and_suppresses_debug(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        assert not structlog.is_configured()
+        configure_process_logging_best_effort()
+        assert structlog.is_configured()
+        log = structlog.get_logger("worker")
+        log.debug("trade_sim.entry", idx=1)
+        log.warning("sweep.quarantine", symbol="NIFTY")
+        err = capsys.readouterr().err
+        assert "trade_sim.entry" not in err
+        assert "sweep.quarantine" in err
+
+    def test_debug_env_binds_debug(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "DEBUG")
+        configure_process_logging_best_effort()
+        structlog.get_logger("worker").debug("trade_sim.exit", pnl_paisa=1)
+        assert "trade_sim.exit" in capsys.readouterr().err
+
+    def test_junk_env_falls_back_to_info_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "DEBG")
+        configure_process_logging_best_effort()  # must NOT raise
+        assert structlog.is_configured()
+        structlog.get_logger("worker").debug("should_not_appear")
+        assert "should_not_appear" not in capsys.readouterr().err
+
+    def test_defers_to_existing_configuration(self, capsys: pytest.CaptureFixture[str]) -> None:
+        configure_logging(level="DEBUG", json_renderer=False)
+        configure_process_logging_best_effort()  # would bind INFO if it did not defer
+        structlog.get_logger("worker").debug("still_debug_bound")
+        assert "still_debug_bound" in capsys.readouterr().err
+
+    def test_config_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(**_kw: object) -> None:
+            raise RuntimeError("configure blew up")
+
+        monkeypatch.setattr("brutex.observability.logging.configure_logging", _boom)
+        configure_process_logging_best_effort()  # must NOT raise

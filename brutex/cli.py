@@ -140,6 +140,21 @@ def _configure_sweep_logging() -> None:
     ``cmd_dashboard`` configured INFO + the rotating file sink at startup —
     reconfiguring here would drop that file sink, and structlog's first-use
     logger cache would ignore a mid-process swap anyway.
+
+    PARALLEL WORKERS (R4 fold): the production sweep is parallel — SPAWN
+    workers start from a CLEAN interpreter and do NOT inherit this process's
+    structlog config, so the pool initializer
+    (``engine.sweep_parallel._worker_init``) applies the SAME bound
+    worker-side via
+    :func:`brutex.observability.logging.configure_process_logging_best_effort`
+    (``$BRUTEX_LOG_LEVEL`` propagates to spawn children through the
+    environment). The dashboard-launched sweep inherits that automatically —
+    it funnels into the same ``run_parallel_grid`` → ``_worker_init`` path.
+
+    OPERATOR NOTE: ``BRUTEX_LOG_LEVEL=ERROR`` also silences the WARNING-level
+    operational events (stall-watchdog / quarantine / skip warnings) an
+    unattended long sweep relies on — INFO (the default) or WARNING is
+    recommended; ERROR is an opt-in hazard, accepted deliberately.
     """
     import structlog
 

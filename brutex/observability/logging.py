@@ -187,6 +187,47 @@ def resolve_env_log_level(*, default: str = _DEFAULT_LEVEL) -> str:
     return candidate
 
 
+def configure_process_logging_best_effort(*, json_renderer: bool = False) -> None:
+    """Best-effort structlog bound for a SPAWNED worker process — never raises.
+
+    The worker-side twin of the CLI sweep dispatch guard
+    (DEC-SWEEP-LOG-VOLUME-GUARD-001, R4 fold): a ``spawn`` multiprocessing
+    child starts from a CLEAN interpreter, so the parent's structlog
+    configuration is NOT inherited — but ``$BRUTEX_LOG_LEVEL`` DOES propagate
+    via the environment, and the child's stdout/stderr are the parent's
+    inherited fds. Without this bound, the engine's per-trade DEBUG events
+    fire UNFILTERED inside every worker. Called by pool initializers
+    (``sweep_parallel._worker_init``).
+
+    Semantics differ from the fail-loud CLI entry deliberately:
+
+    * a junk ``$BRUTEX_LOG_LEVEL`` falls back to the INFO default instead of
+      raising — the parent entry points already failed loud on junk BEFORE
+      any pool was built, and a worker must never die over logging;
+    * an already-configured process is deferred to (mirrors the dispatch
+      guard — relevant only to in-process test callers, since a real spawn
+      child can never start configured);
+    * ANY configuration failure is swallowed — the worker stays fully
+      functional even if logging setup raises (best-effort by contract).
+
+    Parameters
+    ----------
+    json_renderer
+        Renderer choice forwarded to :func:`configure_logging`
+        (default console, matching the CLI sweep guard).
+    """
+    try:
+        try:
+            level = resolve_env_log_level()
+        except ValueError:
+            level = _DEFAULT_LEVEL
+        if structlog.is_configured():
+            return
+        configure_logging(level=level, json_renderer=json_renderer)
+    except Exception:
+        return
+
+
 def _build_file_handler(
     path: Path,
     *,

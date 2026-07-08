@@ -35,9 +35,17 @@ WARNING/ERROR untouched, and the Golden-Rule-#8 audit JSONL hash chain
 audit records are byte-untouched (pinned). An already-configured process (the
 dashboard's in-process sweep job via `run_sweep_from_request`) is deferred to —
 its rotating file sink survives; the guard validates the env var first, so junk
-still fails loud there too. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-scope/vocab/rate change; `cli.py` + `observability/logging.py` 100%
-line+branch.)
+still fails loud there too. R4 FOLD: the guard covers the PARALLEL path —
+`sweep_parallel._worker_init` applies the SAME bound inside every SPAWN
+worker via the NEW `configure_process_logging_best_effort` (spawn children
+never inherit the parent's structlog config; `BRUTEX_LOG_LEVEL` propagates
+via env; junk → INFO fallback worker-side, never a dead worker; REAL
+2-worker spawn regression via capfd), and the dashboard-launched sweep
+inherits it automatically. OPERATOR NOTE: `BRUTEX_LOG_LEVEL=ERROR` silences
+the WARNING-level watchdog/quarantine events — INFO or WARNING recommended.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; `cli.py` + `observability/logging.py` +
+`engine/sweep_parallel.py` 100% line+branch.)
 Earlier: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
@@ -1215,7 +1223,11 @@ hostile-review pass._
   DEBUG events unfiltered to stderr (measured 870 MB on a ~200-session fixture; disk-fill →
   `LakeWriteHalt` run-killer on the 2-4 day grid). Sink-level threshold only; audit JSONL hash chain
   untouched (structlog-free, pinned); an already-configured process (the dashboard sweep job) is
-  deferred to. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+  deferred to; R4 FOLD — the SAME bound is applied INSIDE every spawn worker at
+  `sweep_parallel._worker_init` via `configure_process_logging_best_effort` (spawn workers never inherit
+  the parent config; real 2-worker spawn regression), the dashboard sweep inherits it automatically, and
+  `BRUTEX_LOG_LEVEL=ERROR` is documented as an opt-in hazard (silences watchdog/quarantine WARNINGs).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
   Earlier: `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
@@ -3172,8 +3184,9 @@ hostile-review pass._
 - **Active feature branch:** `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
-  `main()` sweep dispatch; audit JSONL hash chain untouched; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX)
+  `main()` sweep dispatch AND inside every spawn worker
+  (`sweep_parallel._worker_init`, R4 fold); audit JSONL hash chain untouched;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/blissful-curie-gp94rk`
   (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 — see §1 Active branch)
   Earlier: `claude/upbeat-tesla-mfrovq`
