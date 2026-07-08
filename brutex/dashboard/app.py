@@ -61,6 +61,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
+from brutex.config.paths import resolve_lake_root
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
     build_completeness_scoreboard,
@@ -205,6 +206,7 @@ from brutex.dashboard.pull_intent import (
     PullIntentStore,
     clear_banner_after_start,
     persist_intent_for_launch,
+    probe_pull_singleflight,
     run_auto_resume,
 )
 from brutex.dashboard.pull_jobs import (
@@ -254,6 +256,15 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.greeks_backfill import (
+    dry_run_backfill_report,
+    plan_greeks_backfill,
+    resolve_backfill_batch_size,
+    resolve_backfill_pause_s,
+    run_greeks_backfill,
+    scan_stale_greeks_targets,
+)
+from brutex.data.greeks_enrich import resolve_risk_free_source
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
@@ -276,6 +287,7 @@ from brutex.data.timeframe_materialize import MaterializeResult, materialize_lak
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
+from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
 from brutex.observability.correlation import request_id_scope
 from brutex.observability.power_keepawake import keep_awake
 from brutex.orchestrator.pipeline import (
@@ -2378,8 +2390,37 @@ def build_app(
     # "no in-process
     # pull running ⇒ no meter registered" is a process invariant, so a dead pull's
     # meter can never feed a later sampler tick.
+    # Both jobs key their cross-process single-flight flock on the STORE-derived
+    # WRITE root (`_job_lake_root_resolver` — the same root `_resolve_pull_lake_root`
+    # gives their `_work` bodies), so a `brutex dashboard --lake-root X` launch with
+    # a divergent/unset $BRUTEX_LAKE_ROOT still contends with a CLI pull/backfill
+    # flocking X (DEC-GREEKS-BULK-REENRICH-001 fix round 2 — the lock root and the
+    # write root can no longer diverge).
     _pull_job = BackgroundPullJob(
-        summary_cache=_summary_cache, on_run_end=_session_rate.clear_meter
+        summary_cache=_summary_cache,
+        on_run_end=_session_rate.clear_meter,
+        lake_root_resolver=_job_lake_root_resolver(instrument_store),
+    )
+
+    # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
+    # SEPARATE BackgroundPullJob so its progress feed never collides with a
+    # pull's. The ACCOUNT-keyed lock is skipped via the existing graceful-skip
+    # path (`account_key_resolver` returning None — the backfill makes ZERO
+    # vendor calls, so there is no account rate to protect); the WRITE-root
+    # lake single-flight is KEPT for the WET run, so a backfill and a pull
+    # against the SAME lake serialise (one lake-writer job at a time — the
+    # honest posture; the per-partition flocks of DEC-LAKE-PARTITION-FLOCK-001
+    # protect regardless). A DRY-RUN start skips the cross-process lock
+    # entirely (`cross_process_lock=False` at the route — zero writes, the CLI
+    # `--dry-run` lock-free posture). NO ``on_run_end`` meter clear here: the
+    # backfill makes zero vendor calls and never registers a CallMeter, and the
+    # clear is UNCONDITIONAL — wiring it would let a backfill finish evict a
+    # concurrent pull's live meter (DEC-RATE-METER-LIFECYCLE-001 blast-radius
+    # note). Owned by this app instance (no module global — CLAUDE.md §4).
+    _greeks_backfill_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        account_key_resolver=lambda: None,
+        lake_root_resolver=_job_lake_root_resolver(instrument_store),
     )
 
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
@@ -4072,6 +4113,10 @@ def build_app(
                     raise ValueError(str(exc.detail)) from exc
                 raise RuntimeError(str(exc.detail)) from exc
 
+        _probe_job_singleflight = _resume_singleflight_probe(
+            _job_lake_root_resolver(instrument_store)
+        )
+
         def _resume_pipeline_from_intent() -> None:
             """Boot-time seam: run the intent auto-resume decision + dispatch.
 
@@ -4081,9 +4126,15 @@ def build_app(
             single-flight probe, restart-cap refusal + CRITICAL alert + red
             banner, bump-before-launch, stale-intent clear — lives in the
             100 %-tested :func:`~brutex.dashboard.pull_intent.run_auto_resume`;
-            this binding only supplies the real launcher. Never raises.
+            this binding supplies the real launcher + the JOB-root-keyed
+            single-flight probe (never the env default — the two must probe
+            one lock). Never raises.
             """
-            run_auto_resume(_intent_store, launch=_resume_launch)
+            run_auto_resume(
+                _intent_store,
+                launch=_resume_launch,
+                probe_singleflight=_probe_job_singleflight,
+            )
 
         app.state.brutex_resume_pipeline = _resume_pipeline_from_intent
 
@@ -4200,6 +4251,184 @@ def build_app(
                 "until_clean": until_clean,
             }
         )
+
+    @app.post("/api/v1/universe/greeks-backfill")
+    async def api_universe_greeks_backfill(
+        dry_run: bool = Query(default=False),
+        force: bool = Query(default=False),
+        expired_only: bool = Query(default=False),
+        batch: int | None = Query(default=None),
+        limit: int | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/greeks-backfill — start the bulk Greeks v1→v2 re-enrich.
+
+        DEC-GREEKS-BULK-REENRICH-001 (the MIGRATION.md #1188 named follow-up):
+        scan the F&O options lake for contracts whose ``greeks_provenance_id``
+        stamps are UNSTAMPED / v1 / inputs-drifted, then re-enrich them in
+        bounded batches through the EXISTING
+        :func:`~brutex.data.greeks_enrich.enrich_greeks_for_targets` driver on
+        the background job (returns at once; poll ``/greeks-backfill-progress``).
+        The scan runs ON the job thread — it is HONESTLY O(files), never O(1) —
+        so the total is unknown at POST time; the first per-batch sync sets it.
+
+        NO credential gate, deliberately (unlike the pull routes): the backfill
+        makes ZERO vendor calls, and a credential-less CLI-lake box MUST be able
+        to run it — that IS gap (b) of #1188. ``dry_run`` is an explicit query
+        param (default false) and stops at the PLAN boundary: zero writes, zero
+        checkpoint, zero Telegram — and it takes NO cross-process lake lock
+        (``cross_process_lock=False``): a zero-write scan must never exclude a
+        real pull for its whole O(files) duration (the CLI ``--dry-run``
+        lock-free posture; DEC-GREEKS-BULK-REENRICH-001 fix round 2). WET
+        single-flight: a second click — or a pull on the same lake — refuses
+        with ``started: false`` (the flock is keyed on the store-derived WRITE
+        root, so it contends with a CLI pull/backfill regardless of
+        ``$BRUTEX_LAKE_ROOT``). A disk-full / broken pool halts through the
+        job's existing ``is_pull_halt`` handling (one CRITICAL Telegram alert;
+        the durable checkpoint survives for resume). ``force`` + ``limit``
+        together is a 400: force-mode selection is stamp-independent, so a
+        limited force run re-selects the SAME first N contracts every run —
+        chipping works only in the default mode. The batch/pause ENV twins
+        (``$BRUTEX_GREEKS_BACKFILL_BATCH`` / ``$BRUTEX_GREEKS_BACKFILL_PAUSE_S``)
+        are resolved EAGERLY here (fix round 5): a misconfigured env is a 400
+        at POST time, never a job-thread error AFTER the paid O(files) scan;
+        the echoed ``batch`` is the resolved EFFECTIVE value.
+        """
+        if batch is not None and batch < 1:
+            raise HTTPException(status_code=400, detail=f"batch must be >= 1, got {batch}")
+        if limit is not None and limit < 1:
+            raise HTTPException(status_code=400, detail=f"limit must be >= 1, got {limit}")
+        if force and limit is not None:
+            # force+limit never progresses: force-mode selection is stamp-
+            # independent, so every run re-selects the SAME first N sorted
+            # contracts — the incremental-chipping promise holds only for the
+            # default stamp-driven mode (Golden Rule #1, no illusions).
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "force with limit never progresses (force-mode selection is "
+                    "stamp-independent, so every run re-selects the same first "
+                    "N contracts) — drop force or drop limit"
+                ),
+            )
+        if batch is None:
+            # ENV twin resolved EAGERLY at POST time (fix round 5, refuter-
+            # confirmed): a misconfigured $BRUTEX_GREEKS_BACKFILL_BATCH used to
+            # detonate on the job thread only AFTER the whole O(files) scan —
+            # a wasted multi-hour scan ending in an error state, the exact
+            # lateness class the sibling `batch < 1` query check refuses
+            # eagerly. 400 now, before the job even starts.
+            try:
+                batch = resolve_backfill_batch_size()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            # The pause env twin ($BRUTEX_GREEKS_BACKFILL_PAUSE_S) — same eager
+            # posture ("inf" would otherwise crash the wet job mid-batch).
+            pause_s = resolve_backfill_pause_s()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        _LOG.info(
+            "universe.greeks_backfill.requested",
+            dry_run=dry_run,
+            force=force,
+            expired_only=expired_only,
+            batch=batch,
+            limit=limit,
+            lake_root=str(lake_root),
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: scan → plan → (dry-run report | run + ONE Telegram summary)."""
+            rate_source = resolve_risk_free_source()
+            # Honest live label for the O(files) scan phase (the poller would
+            # otherwise show a blank ""). Liveness itself is owned by the
+            # scan's own per-contract/per-file emit_progress_beat seams
+            # (DEC-PIPELINE-STALL-HEARTBEAT-001 — the 600 s watchdog stays fed).
+            _greeks_backfill_job.sync_from_ledger(
+                completed=0,
+                total=0,
+                bars=None,
+                failed=0,
+                current="scanning lake for stale Greeks stamps (O(files)) …",
+            )
+            scan = scan_stale_greeks_targets(
+                lake_root,
+                rate_source=rate_source,
+                expired_only=expired_only,
+                force=force,
+                limit=limit,
+            )
+            plan = plan_greeks_backfill(
+                scan, rate_source=rate_source, force=force, expired_only=expired_only
+            )
+            if dry_run:
+                # INERT by construction: no runner, no checkpoint, no alert.
+                return dry_run_backfill_report(plan).to_dict()
+
+            def _sync(completed: int, total: int, bars: int, errored: int, label: str) -> None:
+                # Absolute per-batch counts → the job's ledger-sync channel
+                # (sets the total the POST could not know; marks the summary
+                # cache dirty so overlay readers recompute — Golden Rule #1).
+                _greeks_backfill_job.sync_from_ledger(
+                    completed=completed, total=total, bars=bars, failed=errored, current=label
+                )
+
+            report = run_greeks_backfill(
+                lake_root,
+                plan=plan,
+                rate_source=rate_source,
+                batch_size=batch,
+                pause_s=pause_s,
+                on_progress=_sync,
+            )
+            # EXACTLY-ONCE completion summary — the one dashboard chokepoint
+            # (the halt path is covered by the job's is_pull_halt handling).
+            emit_greeks_backfill_complete_alert(report)
+            return report.to_dict()
+
+        # total=0 + ledger_synced=True: the scan (O(files), on the job thread)
+        # discovers the real total; the first _sync sets it. The "note" of the
+        # returned report dict becomes the completion headline (_finish_detail).
+        # A DRY-RUN skips the cross-process lake lock (zero writes to protect —
+        # a read-only scan must never refuse a real pull; the wet run keeps it).
+        started = _greeks_backfill_job.start(
+            _work,
+            total=0,
+            detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
+            ledger_synced=True,
+            cross_process_lock=not dry_run,
+        )
+        return JSONResponse(
+            {
+                "started": started,
+                "dry_run": dry_run,
+                "force": force,
+                "expired_only": expired_only,
+                "batch": batch,
+                "limit": limit,
+                "note": (
+                    "scan is O(files) — the total appears once the scan completes; "
+                    + (
+                        "dry-run takes no lake lock (zero writes — a concurrent "
+                        "pull on this lake is unaffected)"
+                        if dry_run
+                        else "a pull on the same lake is refused while the backfill "
+                        "runs (one lake-writer job at a time)"
+                    )
+                ),
+            }
+        )
+
+    @app.get("/api/v1/universe/greeks-backfill-progress")
+    async def api_universe_greeks_backfill_progress() -> JSONResponse:
+        """GET /api/v1/universe/greeks-backfill-progress — the O(1) backfill snapshot.
+
+        The backfill job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
+        (state / total / completed / failed / bars / current / detail / percent …)
+        — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001).
+        """
+        return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
@@ -6843,8 +7072,10 @@ def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | No
     :func:`brutex.dashboard.lake_revision.lake_revision` — one O(1) ``os.stat``
     of the window-ledger Parquet plus the bounded O(dirs) sweeps-tree digest
     (DEC-RESULTS-SURFACE-HONESTY-001; instruments × timeframes directory stats,
-    never O(files)) per call, never raising (every ``OSError`` maps to ``None``
-    = "no signal" inside ``lake_revision``).
+    never O(files)) plus one O(1) ``os.stat`` of the Greeks-backfill freshness
+    marker (DEC-GREEKS-BULK-REENRICH-001 fix round 2 — a CLI backfill's
+    overlay writes reach the caches without a restart) per call, never raising
+    (every ``OSError`` maps to ``None`` = "no signal" inside ``lake_revision``).
     """
     store_path = getattr(instrument_store, "path", None)
     if not isinstance(store_path, Path):
@@ -6854,6 +7085,68 @@ def _lake_revision_probe_or_none(instrument_store: Any) -> Callable[[], str | No
     def _probe() -> str | None:
         """The composite ledger-stat + sweeps-digest token for the wired lake root."""
         return lake_revision(lake_root)
+
+    return _probe
+
+
+def _job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
+    """Build the background jobs' single-flight lake-root resolver — the WRITE root.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2 (refuter-confirmed MAJOR): the
+    jobs' cross-process ``flock`` used to key off the DEFAULT
+    :func:`brutex.dashboard.pull_jobs._default_lake_root_resolver`
+    (``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``), while their ``_work`` bodies
+    scan and WRITE :func:`_resolve_pull_lake_root` — the wired
+    :class:`~brutex.data.instrument_store.InstrumentStore`'s on-disk parent.
+    ``brutex dashboard --lake-root /data/lake`` with ``$BRUTEX_LAKE_ROOT``
+    unset (the exact launch mode :func:`_resolve_pull_lake_root`'s own error
+    message prescribes) therefore flocked ``~/.brutex/lake`` while writing
+    ``/data/lake`` — a CLI ``brutex greeks-backfill --lake-root /data/lake``
+    (which flocks the REAL root) never contended, silently re-opening the
+    stale-read → latest-wins NO_SPOT-NULL clobber the lock exists to prevent
+    (the backfill deliberately has NO account-lock second belt). The lock root
+    and the write root are now derived from the SAME source: the store's
+    parent when a path-carrying store is wired (mirrors
+    :func:`_lake_revision_probe_or_none`), else the COMMON
+    :func:`~brutex.config.paths.resolve_lake_root` env default — byte-identical
+    to the prior behaviour for a store-less app (where every live pull is
+    refused by :func:`_resolve_pull_lake_root` anyway). O(1), pure path
+    computation per call.
+    """
+
+    def _resolve() -> Path | None:
+        store_path = getattr(instrument_store, "path", None)
+        if isinstance(store_path, Path):
+            return store_path.parent
+        return resolve_lake_root()
+
+    return _resolve
+
+
+def _resume_singleflight_probe(
+    lake_root_resolver: Callable[[], Path | None],
+) -> Callable[[], bool]:
+    """Build the intent-resume peer probe keyed on the JOBS' single-flight root.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 2 re-keyed the background jobs'
+    cross-process ``flock`` onto the STORE-derived WRITE root
+    (:func:`_job_lake_root_resolver`); the boot-time intent resume's peer
+    probe must probe the IDENTICAL lock file, or a live peer holding the job
+    lock at the store parent reads "acquirable" on the intent store's
+    env-derived lake root — burning a restart token (and re-persisting the
+    intent with ``restarts+1``) on a HEALTHY concurrent system, the exact
+    false-positive :attr:`~brutex.dashboard.pull_intent.ResumeAction.PEER_ACTIVE`
+    exists to prevent. A ``None`` root mirrors
+    :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._acquire_singleflight`
+    exactly: with no root the jobs take NO lock, so there is nothing to
+    probe and the resume may fire (``True``).
+    """
+
+    def _probe() -> bool:
+        root = lake_root_resolver()
+        if root is None:
+            return True
+        return probe_pull_singleflight(root)
 
     return _probe
 

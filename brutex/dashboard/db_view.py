@@ -111,6 +111,7 @@ from brutex.data.window_ledger import (
     streak_provenance_counts,
 )
 from brutex.money import round_money
+from brutex.observability.progress_beat import emit_progress_beat
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
 #: (a single corrupt / version-incompatible Parquet file is SKIPPED, logged as
@@ -1127,10 +1128,19 @@ def _walk_candle_datasets(
 ) -> list[dict[str, str]]:
     """The legacy O(files) ``bars/`` tree walk (the manifest-miss fallback).
 
-    The pre-manifest :func:`list_candle_datasets` body, byte-unchanged: one
-    entry per interval dir holding at least one ``.parquet``, invalid
-    coordinate names skipped, missing ``bars/`` → ``[]``. Kept as the fallback
-    + the manifest's rebuild source (the lake tree stays the source of truth).
+    The pre-manifest :func:`list_candle_datasets` body: one entry per interval
+    dir holding at least one ``.parquet``, invalid coordinate names skipped,
+    missing ``bars/`` → ``[]``. Kept as the fallback + the manifest's rebuild
+    source (the lake tree stays the source of truth). Result byte-unchanged;
+    one liveness :func:`~brutex.observability.progress_beat.emit_progress_beat`
+    fires per walked symbol directory (DEC-GREEKS-BULK-REENRICH-001 fix
+    round 2): the walk is the measured 29.7-minute O(files) segment on the
+    production 2.36M-file lake — ~3× the 600 s pull stall watchdog timeout —
+    and it runs BEFORE any per-contract/per-file scan beat can fire, so
+    beat-less it false-tripped a CRITICAL "pull halted" alert on a healthy
+    dashboard Greeks backfill whose manifest was absent/stale (a CLI-pulled
+    lake / the first discovery after any pull). A no-op outside a dashboard
+    job (the documented ``emit_progress_beat`` contract); O(1) per symbol.
     """
     bars = lake_root / "bars"
     if not bars.is_dir():
@@ -1143,6 +1153,10 @@ def _walk_candle_datasets(
             if seg_dir.name not in VALID_SEGMENTS or seg_dir.name in exclude_segments:
                 continue
             for sym_dir in sorted(p for p in seg_dir.iterdir() if p.is_dir()):
+                # Liveness beat per walked symbol dir — keeps the 600 s stall
+                # watchdog fed through the enumeration phase of an O(files)
+                # walk (best-effort; no-op when no beat is registered).
+                emit_progress_beat()
                 for tf_dir in sorted(p for p in sym_dir.iterdir() if p.is_dir()):
                     if tf_dir.name not in VALID_INTERVALS:
                         continue

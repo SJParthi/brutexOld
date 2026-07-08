@@ -42,12 +42,14 @@ from brutex.data.greeks_enrich import (
     GreeksEnrichTarget,
     _SpotJoinMemo,
     _target_sort_key,
+    current_inputs_pack,
     enrich_greeks_for_targets,
     enrich_option_bars,
     expiry_instant_utc,
     pack_greeks_provenance,
     rate_source_id_for,
     resolve_risk_free_source,
+    stamp_is_current_inputs,
     t_years_act365,
     unpack_greeks_provenance,
 )
@@ -185,6 +187,68 @@ class TestProvenancePacking:
                 return None
 
         assert rate_source_id_for(_Other()) == RATE_SOURCE_ID_NONE
+
+
+class TestStampPredicate:
+    """``stamp_is_current_inputs`` / ``current_inputs_pack`` — the exported
+    staleness predicate the bulk-backfill scanner keys on
+    (DEC-GREEKS-BULK-REENRICH-001)."""
+
+    #: A stamp packed EXACTLY as the current pass packs an OK bar (v2 / fixed rate).
+    _CURRENT_PID = pack_greeks_provenance(
+        rate_source_id=RATE_SOURCE_ID_FIXED, style_flag=STYLE_EUROPEAN_EXACT, status=STATUS_OK
+    )
+    #: The same inputs stamped under formula v1 — the #1188 frozen-expired class.
+    _V1_PID = pack_greeks_provenance(
+        rate_source_id=RATE_SOURCE_ID_FIXED,
+        style_flag=STYLE_EUROPEAN_EXACT,
+        status=STATUS_OK,
+        formula_version=1,
+    )
+    #: Current formula but a drifted rate VERSION — the inputs-drift class.
+    _DRIFT_PID = pack_greeks_provenance(
+        rate_source_id=RATE_SOURCE_ID_FIXED,
+        style_flag=STYLE_EUROPEAN_EXACT,
+        status=STATUS_OK,
+        rate_version=2,
+    )
+
+    def test_none_is_never_current(self) -> None:
+        assert stamp_is_current_inputs(None, rate_source=_RATE) is False
+
+    def test_current_v2_stamp_is_current(self) -> None:
+        assert stamp_is_current_inputs(self._CURRENT_PID, rate_source=_RATE) is True
+
+    def test_v1_stamp_is_stale(self) -> None:
+        assert stamp_is_current_inputs(self._V1_PID, rate_source=_RATE) is False
+
+    def test_rate_version_drift_is_stale(self) -> None:
+        assert stamp_is_current_inputs(self._DRIFT_PID, rate_source=_RATE) is False
+
+    def test_rate_source_kind_drift_is_stale(self) -> None:
+        csv_stamped = pack_greeks_provenance(
+            rate_source_id=RATE_SOURCE_ID_CSV, style_flag=0, status=0
+        )
+        assert stamp_is_current_inputs(csv_stamped, rate_source=_RATE) is False
+
+    def test_style_and_status_bits_do_not_affect_the_inputs_verdict(self) -> None:
+        """Style + status are per-bar DESCRIPTIONS, not inputs (bits 20-26)."""
+        demoted = pack_greeks_provenance(
+            rate_source_id=RATE_SOURCE_ID_FIXED, style_flag=0, status=STATUS_NO_SPOT
+        )
+        assert stamp_is_current_inputs(demoted, rate_source=_RATE) is True
+
+    def test_pack_matches_the_driver_gate_bytes(self) -> None:
+        """The predicate's pack IS the gate's pack — ONE source of truth."""
+        expected = pack_greeks_provenance(
+            rate_source_id=RATE_SOURCE_ID_FIXED, style_flag=0, status=0
+        ) & ((1 << 20) - 1)
+        assert current_inputs_pack(_RATE) == expected
+
+    def test_frozen_current_pack_golden(self) -> None:
+        """Golden pin: the v2/fixed-rate input bits are exactly this integer."""
+        # formula=2 | rate_source=1<<8 | rate_version=1<<12 | q_bias=1<<16 | tte=1<<18
+        assert current_inputs_pack(_RATE) == 2 + (1 << 8) + (1 << 12) + (1 << 16) + (1 << 18)
 
 
 class TestResolveRiskFreeSource:
