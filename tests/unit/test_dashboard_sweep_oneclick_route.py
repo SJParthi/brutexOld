@@ -207,6 +207,50 @@ def test_run_route_launches_every_group_when_preflight_ok(
     assert {r.exchange for r in _CAPTURED["requests"]} == {"NSE", "BSE"}
 
 
+def test_run_route_surfaces_a_per_group_failure_not_a_false_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-5 adversarial-refuter finding: a bare non-zero exit code from
+    one exchange group's real ``cmd_sweep_all`` run used to be silently
+    discarded by ``BackgroundPullJob`` — the finish detail stayed the
+    generic "done" even though a group genuinely failed, and a sibling
+    group's real success could mask it entirely (worse than the
+    single-group case, where a lone failure was at least the only signal).
+    The fan-out must surface a failed group's exit code in the finish
+    detail instead of a false "done"."""
+    _CAPTURED.clear()
+
+    def _one_group_fails(request: Any, *, lake_root: Path, results_root: Path) -> int:
+        _CAPTURED.setdefault("requests", []).append(request)
+        return 2 if request.exchange == "BSE" else 0
+
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _one_group_fails)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    resp = client.post("/api/v1/sweep/oneclick/run", params={"symbols": "NIFTY,SENSEX"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    final = _wait_for_job(client)
+    assert final["state"] == "done"  # the job thread itself never raises
+    assert "FAILED" in final["detail"]
+    assert "BSE" in final["detail"]
+    assert len(_CAPTURED["requests"]) == 2  # both groups still ran — no group silently skipped
+
+
 def test_run_route_second_click_while_running_is_a_noop(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

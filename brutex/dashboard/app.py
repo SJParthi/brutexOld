@@ -5918,15 +5918,39 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: run every exchange group's engine run, sequentially."""
-            exit_code = 0
+            """Background body: run every exchange group's engine run, sequentially.
+
+            A round-5 adversarial-refuter review found a bare non-zero
+            exit-code return is SILENTLY discarded by
+            :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` — the
+            finish detail stays the generic ``"done"`` and ``on_success``
+            still fires, so a genuine per-group ``cmd_sweep_all`` failure
+            inside this multi-exchange fan-out was invisible to the
+            operator (worse than the single-group case: a sibling group's
+            real success could mask it entirely). ``BackgroundPullJob``/
+            ``_finish_detail`` already special-case a ``Mapping`` carrying
+            a non-empty ``"note"`` string (the pipeline's own honesty
+            convention) — reusing that EXISTING contract here, with zero
+            changes to the shared job framework, surfaces a failed group's
+            exit code loudly in the finish detail instead of a false
+            "done".
+            """
+            failed: list[tuple[str, int]] = []
             for group_request in plan.requests:
                 code = run_sweep_from_request(
                     group_request, lake_root=lake, results_root=results_root
                 )
-                if code != 0 and exit_code == 0:
-                    exit_code = code
-            return exit_code
+                if code != 0:
+                    failed.append((group_request.exchange, code))
+            if failed:
+                summary = ", ".join(f"{exchange} (exit {code})" for exchange, code in failed)
+                return {
+                    "note": (
+                        f"oneclick sweep {plan.sweep_run_id}: "
+                        f"{len(failed)}/{len(plan.requests)} exchange group(s) FAILED — {summary}"
+                    )
+                }
+            return 0
 
         started = _pull_job.start(
             _work,
