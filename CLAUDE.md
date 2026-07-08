@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-SCALE-GUARDS-001, MIGRATION.md #1601 —
+_Last updated: 2026-07-08 (DEC-SWEEP-SCALE-GUARDS-001, MIGRATION.md #1615 —
 the sweep scale-guards pack, THREE fixes as ONE change set, required before the
 institutional k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM
 fix) — `sweep_mem_budget.resolve_mem_budget_bytes()` is a WHOLE-MACHINE figure
