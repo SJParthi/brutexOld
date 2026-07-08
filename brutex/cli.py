@@ -5142,17 +5142,46 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
 
-    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001): project the grid's
-    # wall-clock as tuple_count × an UNBENCHMARKED per-tuple estimate
-    # (BRUTEX_SWEEP_PER_TUPLE_SECONDS overrides) and REFUSE a launch projected
-    # past the CLAUDE.md §8 2-4-day envelope unless the operator passed
-    # --acknowledge-sla-overrun (then WARN loudly and proceed). Honest per
-    # Golden Rule #10: an estimate-based plausibility screen — it never
-    # certifies the §8 SLA (which remains UNMEASURED) either way.
-    from brutex.engine.sweep_sla_guard import SlaDecision, check_sweep_sla
+    # SLA-honesty launch guard (DEC-SLA-LAUNCH-GUARD-001 + DEC-SWEEP-SCALE-GUARDS-001):
+    # project the grid's wall-clock and REFUSE a launch projected past the
+    # CLAUDE.md §8 2-4-day envelope unless the operator passed
+    # --acknowledge-sla-overrun (then WARN loudly and proceed). The projection is
+    # now k-AWARE: one TupleCostCell per (instrument, tf, k) group weights the
+    # per-tuple cost by C(n_bits, k) × N_bars (the direction/SL/TP/prox/fib axes
+    # fold into a multiplicity), so a k=5-heavy grid — 91,000× the mask
+    # population of k=1 — projects orders higher than a flat 30 s/tuple would.
+    # Honest per Golden Rule #10: still an UNBENCHMARKED plausibility screen that
+    # never certifies the §8 SLA either way (the base rate stays operator-tunable
+    # via BRUTEX_SWEEP_PER_TUPLE_SECONDS).
+    from brutex.engine.sweep_sla_guard import SlaDecision, TupleCostCell, check_sweep_sla
 
+    n_condition_bits = len(set(grid.condition_bits))
+    per_group_multiplicity = (
+        len(grid.directions)
+        * len(grid.stop_losses)
+        * len(grid.take_profits)
+        * len(grid.proximities)
+        * len(grid.fib_anchors)
+    )
+    sla_cells = [
+        TupleCostCell(
+            label=f"{inst} {tf.label} k={k_value}",
+            k=k_value,
+            n_bits=n_condition_bits,
+            n_bars=len(slices.get((inst, tf.label), ())),
+            multiplicity=per_group_multiplicity,
+        )
+        for inst in grid.instruments
+        for tf in grid.timeframes
+        for k_value in grid.k_values
+        if slices.get((inst, tf.label))
+    ]
     try:
-        sla = check_sweep_sla(count_sweep_tuples(grid), acknowledge=acknowledge_sla_overrun)
+        sla = check_sweep_sla(
+            count_sweep_tuples(grid),
+            acknowledge=acknowledge_sla_overrun,
+            cells=sla_cells or None,
+        )
     except ValueError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -5220,6 +5249,13 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         sweep_id=grid_identity(grid),
         total_combos=count_sweep_tuples(grid),
     )
+    # keep_awake (DEC-SWEEP-SCALE-GUARDS-001 / DEC-PULL-KEEPAWAKE-001): a 2-4-day
+    # institutional sweep must hold the macOS host awake for its WHOLE lifetime —
+    # a sleeping Mac silently pauses the run mid-flight (the same failure the pull
+    # path already guards). Best-effort: non-darwin / missing caffeinate is a
+    # logged no-op, never a raise. Wraps the entire launch/grid/stage-3 span.
+    from brutex.observability.power_keepawake import keep_awake
+
     # Sweep-abort Telegram alert (R2-SL-F8 / R2-CC-G4) — the sweep twin of
     # cmd_fetch's DEC-TELEGRAM-PULL-HALT-001 pattern (_one_fetch_pass): any
     # abort propagating out of the launch/grid/stage-3/options-sim/cascade
@@ -5228,7 +5264,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # CLI still exits non-zero). KeyboardInterrupt/SystemExit are
     # BaseException, so an operator Ctrl-C never alerts; the clean path fires
     # only alerter.sweep_complete below (never both).
-    with sweep_abort_alert(_emit_pull_halt_alert):
+    with keep_awake("brutex sweep-all"), sweep_abort_alert(_emit_pull_halt_alert):
         with (
             AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
             SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,

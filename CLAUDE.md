@@ -18,7 +18,41 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+_Last updated: 2026-07-08 (DEC-SWEEP-SCALE-GUARDS-001, MIGRATION.md #1601 —
+the sweep scale-guards pack, THREE fixes as ONE change set, required before the
+institutional k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM
+fix) — `sweep_mem_budget.resolve_mem_budget_bytes()` is a WHOLE-MACHINE figure
+(RAM×1/6 = 8 GiB on the §8 48 GB box) consumed once per tuple, but BLIND to the
+8-worker `ProcessPoolExecutor`: 8 concurrent k=5 tuples each retain ~5.21 GB
+(C(60,5)=5,461,512 masks × 1024 B/kept) ≈ 41.7 GB at once → OOM, and 5.21 GB sat
+JUST UNDER the undivided 8 GiB per-tuple gate so the bounded columnar rank NEVER
+engaged. NEW pure `per_worker_mem_budget_bytes(total, sweep_concurrency)` divides
+the TOTAL by the resolved worker count at the plan seam, threaded from the driver
+with NO global (`run_persisted_sweep(sweep_concurrency=)` ←
+`run_one_tuple(sweep_concurrency=)` ← `_WorkerContext.sweep_concurrency =
+ParallelGridDriver._workers`; sequential defaults 1 = byte-for-byte the old
+budget). Under 8 workers a k=5 tuple plans against 8 GiB//8 = 1 GiB, so 5.21 GB >
+1 GiB → the bounded rank ENGAGES (result-safe — bounded ≡ batch bit-identical)
+and 8×1 GiB = 8 GiB concurrent retention stays under RAM/2 = 24 GiB; the
+`BRUTEX_SWEEP_MEM_BUDGET_BYTES` override stays a TOTAL, divided the same way.
+(2) k-aware SLA projection — `check_sweep_sla` gains OPTIONAL per-(instrument,
+tf, k) `TupleCostCell`s driving `project_weighted_grid_cost`: per-tuple weight =
+C(n_bits, k) × N_bars, projected = `per_tuple_seconds × Σ(weight×mult) /
+reference_weight` (reference = the mean weight of the SMALLEST-k cells), so the
+30 s calibration maps to the current average small-k tuple, a k=1-only grid
+projects EXACTLY the flat model's order, a k=5-heavy MIXED grid projects orders
+higher (the ~91,000× C(60,1)→C(60,5) spread), and the refusal NAMES the dominant
+tuples. Without cells it is byte-for-byte the flat model. HONEST: grid-RELATIVE
+and STILL UNBENCHMARKED (Golden Rule #10). (3) keep_awake on the sweep entry
+points — `cmd_sweep_all` (cli.py) + `run_sweep_from_request` (dashboard job body)
+wrap their span in the existing `keep_awake` context (the pull path's pattern),
+so a 2-4-day overnight sweep never sleeps mid-flight; best-effort, non-darwin is
+a logged no-op. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake
+REFERENCE_ONLY, no scope/vocab/rate change; touched engine modules 100%
+line+branch (seq-vs-parallel byte-identity goldens + suffix-independence gates
+pass unchanged); ruff/ruff-format clean, `mypy --strict` clean, pyright at the
+pre-change baseline).
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
 the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
 pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL

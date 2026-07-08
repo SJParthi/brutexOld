@@ -449,3 +449,62 @@ class TestGridTupleSkip:
         failed = [line for line in audit_lines if line["action"] == "TUPLE_FAILED"]
         assert len(failed) == 1
         assert MEM_BUDGET_ENV in failed[0]["payload"]["error"]
+
+
+# ── worker-aware memory budget (DEC-SWEEP-SCALE-GUARDS-001, the OOM fix) ──
+
+
+class TestWorkerAwareBudget:
+    """End-to-end: ``sweep_concurrency`` divides the budget at the plan seam.
+
+    The whole point of the OOM fix — the SAME grid + SAME total budget flips
+    from "fits" (one resident tuple) to "refused/bounded" (N concurrent tuples),
+    proving the resolved worker count reaches ``plan_rank_memory`` through
+    ``run_persisted_sweep``.
+    """
+
+    def _run_conc(
+        self,
+        tmp_path: Path,
+        tag: str,
+        *,
+        concurrency: int,
+    ) -> SweepRunSummary:
+        store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+        dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+        with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+            return run_persisted_sweep(
+                _BARS,
+                _make_config(),
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                trial_stats_digest="cafe0123cafe0123",
+                sweep_concurrency=concurrency,
+            )
+
+    def test_single_worker_fits_but_concurrent_refuses_same_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Budget between the per-tuple projection (5 masks × 1024 = 5120 B) and
+        # 2× it: at concurrency=1 the tuple fits (5120 < 8000); at concurrency=2
+        # the divided budget (8000 // 2 = 4000) is below the projection → the
+        # graceful typed refusal fires — the OOM fix in miniature.
+        _set_env(monkeypatch, "off", "8000")
+        # concurrency=1 completes (byte-for-byte the pre-change behavior).
+        summary = self._run_conc(tmp_path, "single", concurrency=1)
+        assert isinstance(summary, SweepRunSummary)
+        # concurrency=2 is refused BEFORE any evaluation (nothing persisted).
+        with pytest.raises(SweepMemoryBudgetError, match=MEM_BUDGET_ENV):
+            self._run_conc(tmp_path, "concurrent", concurrency=2)
+
+    def test_concurrent_engages_bounded_rank_under_auto(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Under mode `auto`, the divided budget ENGAGES the bounded columnar rank
+        # (loudly) instead of refusing — and still completes byte-correctly.
+        _set_env(monkeypatch, "auto", "8000")
+        with capture_logs() as logs:
+            summary = self._run_conc(tmp_path, "auto_conc", concurrency=2)
+        assert isinstance(summary, SweepRunSummary)
+        assert any(e["event"] == "sweep_run.bounded_rank_engaged" for e in logs)
