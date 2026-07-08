@@ -12,7 +12,9 @@ Per `docs/TRACK1_VOCABULARY.md` — 9 indicator groups:
 - candle
 
 Modules:
-- `fib_levels`     — Static Daily Fib (17 levels), bullish + bearish stored.
+- `fib_levels`     — Static Daily Fib (21 levels), bullish + bearish stored
+                     (4 PDL-anchored bullish retracements added by
+                     DEC-FIB-BULLISH-RETRACE-001).
 - `weekly_anchors` — Rolling-weekly + weekly-static Fib anchors (PR-2).
 - `pivots`         — Standard Pivot Points (P, R1-R5, S1-S5 — R5/S5 added PR-2).
 - `ema`            — EMA (alpha=2/(N+1), SMA-seed at bar N-1).
