@@ -92,15 +92,18 @@ jobs:
           # DEC-DRIFT-EXPECTED-SUBSET-DOC-001 (R2-CI-6): POLICY — the DIRECT
           # branch-protection required-status-check contexts below are a curated
           # SUBSET of ci.yml's ci-ok `needs:` list, NOT "every gate in that list"
-          # (the prior comment here was FALSE — ci-ok has 32 needs, this set has
-          # 22). The aggregate context "CI OK (aggregate gate)" is ITSELF required
+          # (the prior comment here was FALSE — ci-ok has 33 needs, this set has
+          # 22; counts reconciled by DEC-DASHBOARD-BROWSER-TRUTH-001, which added
+          # the `browser` need). The aggregate context "CI OK (aggregate gate)" is
+          # ITSELF required
           # below, and ci-ok fails if ANY of its needs is red, so every ci-ok need
           # is transitively enforced through that one aggregate context even when it
-          # is not its own direct required context. The 11 ci-ok needs deliberately
+          # is not its own direct required context. The 12 ci-ok needs deliberately
           # enforced VIA ci-ok (and therefore intentionally ABSENT from this set) are:
           #   actionlint, rust-trading-core, ledger-numbering, no-dhan-guard,
           #   zplus-pr-guard, definition-of-ready, dec-id-validator,
-          #   bugfix-regression-scan, no-hallucination-scan, conv-commits, chaos-race.
+          #   bugfix-regression-scan, no-hallucination-scan, conv-commits,
+          #   chaos-race, browser.
           # Do NOT add those to expected_required_checks: they are never registered
           # as DIRECT required contexts, so they never appear in `live_checks`, so the
           # UNEXPECTED-context drift check below never false-flags them — and adding
