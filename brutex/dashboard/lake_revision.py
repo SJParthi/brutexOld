@@ -29,16 +29,22 @@ token with three components:
   results-store flush is a tempfile + ``os.replace`` into its
   ``<instrument>/<tf>/`` directory, which moves that directory's mtime — the
   digest sees it on the next poll.
-* the **Greeks-backfill marker** component — ``os.stat`` of
+* the **Greeks-overlay marker** component — ``os.stat`` of
   ``<lake_root>/.greeks_backfill/revision.json``
-  (DEC-GREEKS-BULK-REENRICH-001 fix round 2). The bulk Greeks backfill is a
-  sanctioned production lake WRITER (it rewrites option 1-minute partitions'
-  iv/delta overlay latest-wins) that never touches the window ledger, so —
-  exactly the CLI-``fetch``/CLI-``sweep-all`` staleness class the first two
-  components closed — a CLI ``brutex greeks-backfill`` never moved the token
-  and a running dashboard's ``/movers`` kept serving the PRE-backfill
-  iv/delta the backfill was run to fix, until an unrelated pull or a restart.
-  Every wet backfill batch that writes bars touches the marker (atomic
+  (DEC-GREEKS-BULK-REENRICH-001 fix round 2; widened to BOTH overlay writers
+  in fix round 8). TWO sanctioned production lake WRITERS rewrite option
+  1-minute partitions' iv/delta overlay latest-wins WITHOUT ever touching the
+  window ledger: the bulk Greeks backfill (``brutex greeks-backfill``) and
+  the DEC-CLI-GREEKS-ENRICH-001 enrich pass (standalone ``brutex
+  enrich-greeks``, plus the ``brutex fetch`` post-pull tail — which runs
+  AFTER the pull's final ledger save, so its overlay writes land after the
+  last ledger-token movement). So — exactly the
+  CLI-``fetch``/CLI-``sweep-all`` staleness class the first two components
+  closed — either run never moved the token and a running dashboard's
+  ``/movers`` kept serving the PRE-write iv/delta the run existed to fix,
+  until an unrelated pull or a restart. Every wet backfill batch / enrich
+  pass that writes bars touches the SHARED marker
+  (:func:`brutex.data.greeks_revision.touch_greeks_revision_marker`, atomic
   ``os.replace``), moving this component on the next poll.
 
 :class:`~brutex.dashboard.summary_cache.SummaryCache` polls the composite token
@@ -56,9 +62,14 @@ Honest envelope (Golden Rule #10 — stated, not hidden)
 ------------------------------------------------------
 * The ledger component moves ONLY when a writer touches the window ledger. **All
   production pulls do** (the per-window checkpoint of
-  DEC-CLI-LEDGER-CHECKPOINT-001 plus the end-of-pull save); the ONE sanctioned
-  production writer that does NOT — the bulk Greeks backfill — carries its own
-  marker component above. An out-of-band raw
+  DEC-CLI-LEDGER-CHECKPOINT-001 plus the end-of-pull save); the sanctioned
+  production writers that do NOT — the bulk Greeks backfill AND the
+  DEC-CLI-GREEKS-ENRICH-001 enrich pass (``brutex enrich-greeks`` / the
+  ``brutex fetch`` post-ledger tail) — carry the shared Greeks-overlay marker
+  component above (fix round 8: the pre-fix wording claimed the backfill was
+  "the ONE" such writer, which the merge-absorbed enrich pass falsified — and
+  the pass indeed left a running dashboard stale until it gained the marker
+  touch). An out-of-band raw
   bar-Parquet write that BYPASSES both the ledger and the marker (e.g.
   hand-copying a partition file
   into ``bars/``) is **NOT detected** — explicitly out of scope; detecting it
@@ -106,11 +117,13 @@ ABSENT_TOKEN: Final[str] = "absent"  # noqa: S105  # nosec B105 — a freshness 
 #: precedent).
 _SWEEPS_DIRNAME: Final[str] = "sweeps"
 
-#: The Greeks-backfill sidecar dir + freshness-marker filename. MUST equal
-#: ``brutex.data.greeks_backfill.CHECKPOINT_DIR_NAME`` /
-#: ``…REVISION_MARKER_FILE_NAME`` — pinned by test, not imported: that module
-#: pulls the greeks-enrich (polars/trading_core-wheel) import graph, and this
-#: probe must stay lean stdlib-only (the ``_SWEEPS_DIRNAME`` precedent).
+#: The Greeks sidecar dir + overlay freshness-marker filename. MUST equal
+#: ``brutex.data.greeks_revision.GREEKS_SIDECAR_DIR_NAME`` /
+#: ``…REVISION_MARKER_FILE_NAME`` (the canonical home since fix round 8;
+#: ``greeks_backfill.CHECKPOINT_DIR_NAME`` re-exports the dir) — pinned by
+#: test, not imported: the historical consumer ``greeks_backfill`` pulls the
+#: greeks-enrich (polars/trading_core-wheel) import graph, and this probe
+#: stays lean stdlib-only (the ``_SWEEPS_DIRNAME`` precedent).
 _GREEKS_BACKFILL_DIRNAME: Final[str] = ".greeks_backfill"
 _GREEKS_REVISION_FILENAME: Final[str] = "revision.json"
 

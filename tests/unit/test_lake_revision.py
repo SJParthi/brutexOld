@@ -501,11 +501,23 @@ class TestGreeksBackfillComponent:
         ``lake_revision`` deliberately does NOT import ``greeks_backfill``
         (that module pulls the greeks-enrich polars/trading_core-wheel import
         graph; the probe must stay stdlib-lean) — this pin is the drift guard,
-        the ``_SWEEPS_DIRNAME`` precedent.
+        the ``_SWEEPS_DIRNAME`` precedent. Since fix round 8 the canonical
+        home is the wheel-free ``greeks_revision`` (shared with the
+        DEC-CLI-GREEKS-ENRICH-001 enrich pass); ``greeks_backfill`` re-exports
+        it — BOTH are pinned so neither surface can drift.
         """
+        from brutex.dashboard import lake_revision as probe_mod
+        from brutex.data.greeks_revision import (
+            GREEKS_SIDECAR_DIR_NAME,
+        )
+        from brutex.data.greeks_revision import (
+            REVISION_MARKER_FILE_NAME as CANONICAL_MARKER_FILE_NAME,
+        )
+
+        assert probe_mod._GREEKS_BACKFILL_DIRNAME == GREEKS_SIDECAR_DIR_NAME
+        assert probe_mod._GREEKS_REVISION_FILENAME == CANONICAL_MARKER_FILE_NAME
         pytest.importorskip("trading_core", reason="greeks_backfill needs the wheel")
         pytest.importorskip("polars", reason="greeks_backfill imports the enrich driver")
-        from brutex.dashboard import lake_revision as probe_mod
         from brutex.data.greeks_backfill import CHECKPOINT_DIR_NAME, REVISION_MARKER_FILE_NAME
 
         assert probe_mod._GREEKS_BACKFILL_DIRNAME == CHECKPOINT_DIR_NAME

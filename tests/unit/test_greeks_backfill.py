@@ -1034,6 +1034,73 @@ class TestScanner:
         assert target.end == date(2024, 2, 2)  # window from CANONICAL months only
         assert scan.probe_failed == 1  # the reject still surfaces in the census
 
+    def test_month_files_rejects_canonical_named_directory_entries(self, lake: Path) -> None:
+        """Fix round 8 (refuter-confirmed): a canonical-NAMED entry that is not
+        a regular file — a pyarrow/Spark dataset-style DIRECTORY
+        ``2024/01.parquet/`` — round-trips the round-5 zero-padded name check
+        yet the driver's reader (``ist_span_partition_files``) gates every
+        candidate on ``is_file()`` and skips the month entirely. Such an entry
+        is a driver-unreachable reject, never a probe-able month file; an
+        EMPTY canonical-named directory rides the same fold (caught by the
+        type gate BEFORE any polars read)."""
+        base = lake / "1minute"
+        (base / "2024").mkdir(parents=True)
+        (base / "2024" / "02.parquet").write_bytes(b"x")  # canonical regular file
+        dataset_dir = base / "2024" / "01.parquet"
+        dataset_dir.mkdir()
+        (dataset_dir / "part-0.parquet").write_bytes(b"x")  # dataset-style layout
+        empty_dir = base / "2025" / "03.parquet"
+        empty_dir.mkdir(parents=True)  # the empty-directory variant
+        files, unreachable = _month_files(base)
+        assert [(y, m) for y, m, _ in files] == [(2024, 2)]
+        assert unreachable == [dataset_dir, empty_dir]
+
+    def test_canonical_named_parquet_directory_folds_into_probe_failed_never_targeted(
+        self, lake: Path
+    ) -> None:
+        """Fix round 8 (refuter-confirmed): a DIRECTORY named ``2024/01.parquet``
+        holding a parquet file with stale/unstamped rows defeated the round-5
+        driver-unreachable guard through filesystem TYPE — polars reads the
+        parquet INSIDE the directory, so the probe classified the contract
+        STALE and targeted it, while the enrich driver's ``is_file()``-gated
+        reader read ZERO bars: ``errored=0``/``no_bars=1`` → EXIT_OK + a ✅
+        Telegram head, and the NEXT scan re-targeted the identical contract —
+        the eternal-re-feed false-green non-convergence loop. The scanner now
+        mirrors the driver's reachability predicate exactly (canonical name
+        AND regular file), folding the directory into ``probe_failed`` + the
+        loud WARN."""
+        from datetime import date as _date
+
+        from brutex.data.spot_daily_resample import ist_span_partition_files
+        from structlog.testing import capture_logs
+
+        minute_dir = lake / "bars" / "NSE" / "FNO" / _CE / "1minute"
+        dataset_dir = minute_dir / "2024" / "01.parquet"
+        dataset_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {"greeks_provenance_id": pl.Series([None, _V1_PID], dtype=pl.Int32)}
+        ).write_parquet(dataset_dir / "part-0.parquet")
+        # Driver-parity pin: the enrich driver's reader sees NO month file in
+        # this tree — targeting it could never write a bar.
+        assert ist_span_partition_files(minute_dir, _date(2024, 1, 1), _date(2024, 3, 1)) == []
+        with capture_logs() as logs:
+            scan = _scan(lake)
+        assert scan.targets == ()  # never targeted — the driver could not read it
+        assert scan.probe_failed == 1  # surfaced in the census, not hidden
+        assert scan.no_files == 1  # nothing probe-able remains for the contract
+        assert scan.stale_null == 0 and scan.files_probed == 0
+        (warn,) = [r for r in logs if r["event"] == "greeks_backfill.month_file_driver_unreachable"]
+        assert warn["symbol"] == _CE and warn["count"] == 1
+        assert warn["files"] == [str(dataset_dir)]
+        assert "regular" in warn["reason"] and "rename" in warn["reason"]
+        # Convergence: a re-scan reproduces the SAME stable census — never a
+        # re-queued target (the refuter-reproduced forever-loop); force mode
+        # (stamp-independent selection) converges identically.
+        rescan = _scan(lake)
+        assert rescan.targets == () and rescan.probe_failed == 1
+        forced = _scan(lake, force=True)
+        assert forced.targets == () and forced.no_files == 1
+
     def test_contract_window_non_december(self) -> None:
         files = [(2024, 3, Path("a")), (2024, 5, Path("b"))]
         assert _contract_window(files) == (date(2024, 3, 1), date(2024, 6, 2))

@@ -138,9 +138,25 @@ COMMON shape on the CLI-`brutex fetch`-only lake, gap b of #1188 — looped
 identically; an EMPTY legacy partition honestly classifies nothing-to-do);
 the unfixable wordings on note/Telegram/CLI-stderr widened to
 "driver-unactionable rows"; the clean fast path stays the bench-pinned
-single stamp-column read. ENGINE
+single stamp-column read.
+FIX ROUND 8 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
+scanner's month-file reachability predicate now mirrors the driver's EXACTLY
+— canonical zero-padded name AND `is_file()` — so a canonical-NAMED
+dataset-style DIRECTORY (`2024/01.parquet/`, probe-readable by polars yet
+invisible to `ist_span_partition_files`' `is_file()` gate) folds into
+`probe_failed` + the driver-unreachable WARN instead of the eternal-re-feed
+✅/exit-0 false green escaping through filesystem TYPE; and the
+merge-absorbed DEC-CLI-GREEKS-ENRICH-001 enrich pass (`brutex enrich-greeks`
++ the `brutex fetch` post-ledger tail) — the SECOND sanctioned ledger-less
+Greeks-overlay writer — now touches the SHARED cross-process freshness
+marker via the NEW wheel-free COMMON `brutex/data/greeks_revision.py`
+(`greeks_backfill` re-exports/delegates byte-identically) whenever it wrote
+bars, closing the round-2 staleness class on that surface and reconciling
+`lake_revision`'s falsified "the ONE sanctioned production writer" honesty
+claim to name BOTH marker-carrying writers. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
-`greeks_backfill.py`/`greeks_enrich.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
+`greeks_backfill.py`/`greeks_enrich.py`/`greeks_enrich_pass.py`/
+`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
 + `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
 every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
 Earlier: 2026-07-07 (DEC-SOAK-REAL-TIER-001, MIGRATION.md #1580 —
@@ -1167,9 +1183,20 @@ hostile-review pass._
   false-green re-feed, both directions: kept-NaN shadowed by a finite dup AND a dropped dup with the only stale
   stamp); the LEGACY 7-column arm rides the same driver-actionability gate instead of an unconditional stale-null
   target (the CLI-fetch-only-lake shape; empty legacy partition = honestly nothing-to-do); unfixable wordings widened
-  to "driver-unactionable rows"; the clean fast path stays the bench-pinned single stamp-column read. ENGINE
+  to "driver-unactionable rows"; the clean fast path stays the bench-pinned single stamp-column read. FIX ROUND 8
+  folded (refuter-majority-confirmed, #1558): `_month_files` mirrors the driver's reachability predicate EXACTLY —
+  canonical zero-padded name AND `is_file()` — so a canonical-NAMED dataset-style DIRECTORY (`2024/01.parquet/`,
+  probe-readable by polars yet invisible to `ist_span_partition_files`' `is_file()` gate) folds into `probe_failed` +
+  the driver-unreachable WARN instead of an eternal-re-feed ✅/EXIT_OK false green (the rounds-5/7 class escaping
+  through filesystem TYPE); and the merge-absorbed DEC-CLI-GREEKS-ENRICH-001 enrich pass (`brutex enrich-greeks` + the
+  `brutex fetch` post-ledger tail via `run_greeks_enrich_pass`) — the SECOND sanctioned ledger-less Greeks-overlay
+  writer — touches the SHARED cross-process freshness marker on every bar-writing pass through the NEW wheel-free
+  COMMON `brutex/data/greeks_revision.py` (`greeks_backfill` re-exports/delegates byte-identically; best-effort, a
+  zero-write pass fabricates no signal), closing the round-2 dashboard-staleness class on that surface and
+  reconciling `lake_revision`'s falsified "the ONE sanctioned production writer" honesty claim. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
-  `sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean).
+  `greeks_enrich_pass.py`/`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/pyright clean).
   Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish

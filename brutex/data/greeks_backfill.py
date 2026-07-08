@@ -100,14 +100,20 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   partition fix is required); a driver-invisible dup/foreign row IS
   ``lake_heal``'s job (its intra-file dup + foreign-row heals) — both stated
   loudly, never hidden.
-* The scanner probes ONLY month files the driver's reader can also open —
+* The scanner probes ONLY month entries the driver's reader can also open —
   canonical zero-padded ``<yyyy>/<mm>.parquet`` names (fix round 5,
+  refuter-confirmed) that are REGULAR FILES (fix round 8,
   refuter-confirmed): an in-range NON-canonical name (``2024/1.parquet``)
   passed the round-3 range guard yet is invisible to
-  ``ist_span_partition_files``'s zero-padded path construction, so the
-  contract was re-targeted on EVERY run while the wet run wrote nothing and
-  read green. Such a file now folds into ``probe_failed`` + ONE loud WARN
-  (repair = rename to the canonical form), never an eternal re-queue.
+  ``ist_span_partition_files``'s zero-padded path construction, and a
+  canonical-NAMED dataset-style DIRECTORY (``2024/01.parquet/``) passed the
+  round-5 name check AND probed successfully (polars reads the parquet
+  inside a directory) yet is invisible to the same reader's ``is_file()``
+  gate — either way the contract was re-targeted on EVERY run while the wet
+  run wrote nothing and read green. Such an entry now folds into
+  ``probe_failed`` + ONE loud WARN (repair = rename to the canonical form /
+  move the directory's data into a regular month file), never an eternal
+  re-queue.
 * No wall-clock SLA is claimed — the first wet pass is O(stale bars) kernel
   compute + O(changed partitions) latest-wins rewrites.
 
@@ -129,7 +135,6 @@ written.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import os
 import time
@@ -141,7 +146,6 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
@@ -152,6 +156,12 @@ from brutex.data.greeks_enrich import (
     rate_source_id_for,
     stamp_is_current_inputs,
     unpack_greeks_provenance,
+)
+from brutex.data.greeks_revision import (
+    GREEKS_SIDECAR_DIR_NAME,
+    REVISION_MARKER_FILE_NAME,
+    revision_marker_path,
+    touch_greeks_revision_marker,
 )
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.engine.sweep_checkpoint import SweepCheckpointError, SweepCheckpointStore
@@ -206,26 +216,30 @@ DEFAULT_BACKFILL_BATCH_SIZE: Final[int] = 25
 
 #: The checkpoint sidecar's dot-directory under the lake root — OUTSIDE
 #: ``bars/`` + ``options/`` like ``.locks`` / ``.lake_heal``, so no lake
-#: scanner ever sees it.
-CHECKPOINT_DIR_NAME: Final[str] = ".greeks_backfill"
+#: scanner ever sees it. The canonical definition lives in the WHEEL-FREE
+#: :mod:`brutex.data.greeks_revision` (fix round 8 — the marker touch is
+#: shared with the DEC-CLI-GREEKS-ENRICH-001 enrich pass, a second sanctioned
+#: ledger-less overlay writer); re-exported here so every existing consumer +
+#: the ``lake_revision`` literal pin stay byte-identical.
+CHECKPOINT_DIR_NAME: Final[str] = GREEKS_SIDECAR_DIR_NAME
 
 #: The checkpoint JSON file name inside :data:`CHECKPOINT_DIR_NAME`.
 CHECKPOINT_FILE_NAME: Final[str] = "checkpoint.json"
 
-#: The durable cross-process FRESHNESS marker inside :data:`CHECKPOINT_DIR_NAME`
-#: (DEC-GREEKS-BULK-REENRICH-001 fix round 2). The backfill rewrites option
-#: 1-minute partitions but never touches the window ledger, so the
-#: :func:`brutex.dashboard.lake_revision.lake_revision` token — which a running
-#: dashboard's SummaryCache probes for cross-process invalidation
-#: (DEC-HARDENING-LEFTOVERS-001) — never moved on a CLI ``brutex
-#: greeks-backfill``: ``/movers`` kept serving the PRE-backfill iv/delta the
-#: backfill was run to fix, until an unrelated pull or a restart. Every WET
-#: batch that wrote bars now touches this marker (atomic tmp→``os.replace``),
-#: and ``lake_revision`` folds one ``os.stat`` of it into the composite token —
-#: the dashboard sees the new Greeks on its next poll. The literals are
-#: duplicated in ``lake_revision`` (that module is deliberately lean
-#: stdlib-only — the ``_SWEEPS_DIRNAME`` precedent) and pinned equal by test.
-REVISION_MARKER_FILE_NAME: Final[str] = "revision.json"
+# REVISION_MARKER_FILE_NAME (re-exported above from greeks_revision,
+# DEC-GREEKS-BULK-REENRICH-001 fix round 2 → COMMON in fix round 8): the
+# durable cross-process FRESHNESS marker inside CHECKPOINT_DIR_NAME. The
+# backfill rewrites option 1-minute partitions but never touches the window
+# ledger, so the `brutex.dashboard.lake_revision.lake_revision` token — which
+# a running dashboard's SummaryCache probes for cross-process invalidation
+# (DEC-HARDENING-LEFTOVERS-001) — never moved on a CLI `brutex
+# greeks-backfill`: `/movers` kept serving the PRE-backfill iv/delta the
+# backfill was run to fix, until an unrelated pull or a restart. Every WET
+# batch that wrote bars touches this marker (atomic tmp→`os.replace`), and
+# `lake_revision` folds one `os.stat` of it into the composite token — the
+# dashboard sees the new Greeks on its next poll. The literals are duplicated
+# in `lake_revision` (that module is deliberately lean stdlib-only — the
+# `_SWEEPS_DIRNAME` precedent) and pinned equal by test.
 
 #: The one Greeks-bearing interval (DEC-1MINUTE-ONLY-DERIVE-1DAY-001) — derived
 #: TFs never carry the overlay and are deliberately never scanned.
@@ -303,10 +317,14 @@ class BackfillScan:
     probe_failed
         Month files the backfill could not act on: corrupt Parquet / I/O
         error, PLUS (fix round 5) in-range NON-canonical month filenames the
-        driver's zero-padded reader can never open (``2024/1.parquet``) —
+        driver's zero-padded reader can never open (``2024/1.parquet``),
+        PLUS (fix round 8) canonical-NAMED entries that are not regular
+        files (a dataset-style directory ``2024/01.parquet/`` — probe-readable
+        by polars yet invisible to the driver's ``is_file()``-gated reader) —
         each skipped + logged, never targeted; repair is
         :mod:`brutex.data.lake_heal`'s job (or a rename to the canonical
-        zero-padded form for the non-canonical class).
+        zero-padded form / a move into a regular month file for the
+        driver-unreachable classes).
     files_probed
         Month files whose stamp column was actually read (the O(files) cost,
         stated honestly).
@@ -426,47 +444,22 @@ def checkpoint_path(lake_root: Path) -> Path:
     return lake_root / CHECKPOINT_DIR_NAME / CHECKPOINT_FILE_NAME
 
 
-def revision_marker_path(lake_root: Path) -> Path:
-    """The cross-process freshness marker path under *lake_root* — pure, O(1).
-
-    See :data:`REVISION_MARKER_FILE_NAME` for why the marker exists (the
-    lake-revision component a running dashboard probes so a CLI backfill's
-    freshly-written Greeks overlay is served without a restart).
-    """
-    return lake_root / CHECKPOINT_DIR_NAME / REVISION_MARKER_FILE_NAME
-
-
 def _touch_revision_marker(lake_root: Path, *, backfill_id: str, bars_written: int) -> None:
     """Move the cross-process lake-revision token after a bar-writing batch.
 
-    Writes a tiny JSON marker (atomic tmp→``fsync``→``os.replace`` via the
-    COMMON :func:`~brutex.data.atomic_io.atomic_write_simple`) whose
-    ``mtime``/size :func:`brutex.dashboard.lake_revision.lake_revision` stats
-    into its composite token, so a running dashboard's generation-keyed caches
-    (``/movers`` iv/delta overlays, ``/db`` totals, …) recompute on the next
-    poll instead of serving the pre-backfill Greeks until an unrelated pull or
-    a restart (Golden Rule #1). BEST-EFFORT — an :class:`OSError` (including a
-    stray non-directory file at the sidecar dir) logs ONE
-    ``greeks_backfill.revision_marker_failed`` warning and never affects the
-    run: the marker is a freshness signal, never data (the dashboard-run
-    backfill also bumps in-process via ``mark_dirty``; a lost marker there
-    costs nothing, and on the CLI it degrades to the pre-fix staleness window,
-    never a wrong value). O(1) per batch.
+    A thin delegator into the COMMON
+    :func:`~brutex.data.greeks_revision.touch_greeks_revision_marker` (fix
+    round 8 — the touch is shared with the DEC-CLI-GREEKS-ENRICH-001 enrich
+    pass, the second sanctioned ledger-less Greeks-overlay writer), keeping
+    the backfill's payload keys + its
+    ``greeks_backfill.revision_marker_failed`` best-effort WARN byte-identical.
+    O(1) per batch.
     """
-    dest = revision_marker_path(lake_root)
-    payload = json.dumps(
-        {"backfill_id": backfill_id, "bars_written": bars_written, "updated_at": time.time()},
-        sort_keys=True,
-    ).encode("utf-8")
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_simple(dest, lambda tmp: tmp.write_bytes(payload))
-    except OSError as exc:
-        _LOG.warning(
-            "greeks_backfill.revision_marker_failed",
-            path=str(dest),
-            error=str(exc),
-        )
+    touch_greeks_revision_marker(
+        lake_root,
+        fields={"backfill_id": backfill_id, "bars_written": bars_written},
+        failure_event="greeks_backfill.revision_marker_failed",
+    )
 
 
 def resolve_backfill_batch_size(env: Mapping[str, str] | None = None) -> int:
@@ -572,12 +565,22 @@ def _month_files(minute_dir: Path) -> tuple[list[tuple[int, int, Path]], list[Pa
     ``f"{year:04d}/{month:02d}.parquet"`` candidates — probing/targeting such
     a file would re-select the contract on EVERY run while the driver read
     ZERO bars, wrote nothing, and the run exited a false green with the stale
-    stamp persisting forever. The caller surfaces the rejects loudly
-    (``probe_failed`` + WARN); repair is a rename-to-canonical lake task.
+    stamp persisting forever. A canonical-NAMED entry that is NOT a regular
+    file rides the SAME reject list (fix round 8, refuter-confirmed): a
+    pyarrow/Spark dataset-style DIRECTORY named ``2024/01.parquet/``
+    round-trips the name check AND probes successfully (polars reads the
+    parquet file(s) INSIDE a directory), yet the driver's reader gates every
+    candidate on ``is_file()`` and skips the month entirely — the identical
+    eternal-re-feed false green escaping through filesystem TYPE instead of
+    filename shape. The reachability predicate here mirrors
+    ``ist_span_partition_files`` EXACTLY: canonical name AND ``is_file()``.
+    The caller surfaces the rejects loudly (``probe_failed`` + WARN); repair
+    is a rename-to-canonical / move-the-data-into-a-regular-file lake task.
 
-    No lake writer produces non-canonical names; the guard is the same
-    foreign-file tolerance the probe already grants corrupt bytes.
-    O(contract's month files).
+    No lake writer produces non-canonical names or dataset directories; the
+    guard is the same foreign-tree tolerance the probe already grants corrupt
+    bytes. O(contract's month files) — the ``is_file()`` stat is O(1) per
+    candidate.
     """
     out: list[tuple[int, int, Path]] = []
     driver_unreachable: list[Path] = []
@@ -591,6 +594,14 @@ def _month_files(minute_dir: Path) -> tuple[list[tuple[int, int, Path]], list[Pa
         if not (1 <= month <= _DECEMBER) or not (date.min.year <= year <= max_window_year):
             continue
         if candidate.parent.name != f"{year:04d}" or candidate.stem != f"{month:02d}":
+            driver_unreachable.append(candidate)
+            continue
+        if not candidate.is_file():
+            # Fix round 8 (refuter-confirmed): a canonical-named NON-file (a
+            # dataset-style directory `2024/01.parquet/`) is probe-readable
+            # but driver-INVISIBLE (`ist_span_partition_files` requires
+            # `is_file()`) — targeting it re-fed the contract on EVERY run
+            # under an errored=0 ✅/EXIT_OK false green.
             driver_unreachable.append(candidate)
             continue
         out.append((year, month, candidate))
@@ -1126,14 +1137,17 @@ def scan_stale_greeks_targets(
         minute_dir = lake_root / "bars" / exchange / FNO_CANDLE_LAKE_SEGMENT / symbol
         files, driver_unreachable = _month_files(minute_dir / _MINUTE_INTERVAL)
         if driver_unreachable:
-            # Fix round 5 (refuter-confirmed): an in-range NON-canonical month
-            # name ("2024/1.parquet") is a file the driver's zero-padded reader
-            # (ist_span_partition_files) can NEVER open — probing/targeting it
-            # would re-select the contract on EVERY run while the wet run wrote
-            # zero bars and exited a false green (the stale stamp persisting
-            # forever, the census never converging). Fold into probe_failed +
-            # WARN loudly: repair is a rename-to-canonical lake task, never a
-            # re-queue.
+            # Fix rounds 5 + 8 (both refuter-confirmed): an in-range
+            # NON-canonical month name ("2024/1.parquet") or a canonical-named
+            # NON-regular-file (a dataset-style DIRECTORY "2024/01.parquet/")
+            # is an entry the driver's reader (ist_span_partition_files —
+            # zero-padded names, is_file()-gated) can NEVER open —
+            # probing/targeting it would re-select the contract on EVERY run
+            # while the wet run wrote zero bars and exited a false green (the
+            # stale stamp persisting forever, the census never converging).
+            # Fold into probe_failed + WARN loudly: repair is a
+            # rename-to-canonical / move-into-a-regular-file lake task, never
+            # a re-queue.
             probe_failed += len(driver_unreachable)
             _LOG.warning(
                 "greeks_backfill.month_file_driver_unreachable",
@@ -1142,9 +1156,11 @@ def scan_stale_greeks_targets(
                 count=len(driver_unreachable),
                 files=[str(path) for path in driver_unreachable[:5]],
                 reason=(
-                    "non-canonical month filename (not zero-padded "
-                    "<yyyy>/<mm>.parquet) — the enrich driver reads ONLY "
-                    "canonical names; rename the file to its canonical form"
+                    "non-canonical month name or non-regular-file entry — "
+                    "the enrich driver reads ONLY canonical zero-padded "
+                    "<yyyy>/<mm>.parquet REGULAR files; rename the file to "
+                    "its canonical form (a dataset-style directory needs its "
+                    "parquet data moved into a canonical month file)"
                 ),
             )
         if not files:
