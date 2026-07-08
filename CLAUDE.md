@@ -59,6 +59,208 @@ overwrite stays the documented stat-token residual. Results-safe — never in ru
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
 parity-pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; all five touched
 modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 —
+the bulk Greeks v1→v2 re-enrichment BACKFILL closing the #1188 named follow-up:
+NEW `brutex/data/greeks_backfill.py` — a stamp-driven target-DISCOVERY +
+batching layer feeding the EXISTING `enrich_greeks_for_targets` driver
+UNMODIFIED (its value-checked reuse gate + honest NO_RATE/NO_SPOT/
+BELOW_INTRINSIC/BAD_INPUT/AT_EXPIRY demotions do ALL the correctness work; a
+Greek is NEVER fabricated), so EXPIRED contracts frozen at formula v1 AND
+CLI-`brutex fetch`-only lakes are now re-stamped to the current formula/inputs.
+Scanner (manifest-first enumeration, 1minute-only, per-contract
+`greeks_provenance_id` column probe via the NEW exported
+`stamp_is_current_inputs`/`current_inputs_pack` predicate — ONE pack shared
+with the driver gate, property-pinned) → content-addressed plan (`backfill_id`
+sha256 over formula ‖ rate-source ‖ modes ‖ sorted target keys) → bounded
+batches with a DURABLE advisory checkpoint (`SweepCheckpointStore` reused
+verbatim at `<lake>/.greeks_backfill/checkpoint.json`; crash → resume; deleted
+on completion — the stamps are the durable done-record). Surfaces: `POST
+/api/v1/universe/greeks-backfill` (+ O(1) progress route, a dedicated
+`BackgroundPullJob` — account lock skipped, lake-root single-flight KEPT for
+the WET run so a backfill and a pull on the same lake serialise — since fix
+round 2 keyed on the STORE-derived WRITE root, and a dry-run start is
+lock-free) + a `universe.html` panel
+(textContent-only), and `brutex greeks-backfill` with a FULLY INERT
+`--dry-run` (zero writes / checkpoint / Telegram — whole-tree sha-pinned; the
+one documented read side effect is the shared `.manifest/` cache self-heal);
+exactly ONE best-effort Telegram completion summary
+(`greeks_backfill_complete`, ✅/⚠️ honesty heads, MarkdownV2-escaped);
+`LakeWriteHalt`/`GreeksEnrichPoolBroken` never caught below the job/CLI
+boundary (checkpoint survives → next run resumes). HONEST: the scan is
+O(files) NEVER O(1); no wall-clock SLA claimed; the stamp prefilter is blind
+to a rate/spot VALUE drift under unchanged source kinds — `--force` routes
+every contract through the driver's value-checked gate, which catches exactly
+that class. NO formula bump (the enrich goldens stay frozen).
+ADVERSARIAL-REVIEW FIX ROUND folded (same branch, pre-merge): the CLI wet run
+HOLDS the lake-root `pull_singleflight_lock` (contention → loud refusal;
+`--dry-run` lock-free); the scan/probe fire per-contract/per-file watchdog
+liveness beats + an honest "scanning…" job label (no false CRITICAL stall
+alert on a deep-lake backfill); `force`+`limit` REFUSED at scanner/CLI/route
+(chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects a
+valid-JSON non-object payload as `SweepCheckpointError` (never a wedging
+`AttributeError`); a schema-poisoned stamp column + an out-of-range month
+filename fold into `probe_failed`/skip instead of crashing the scan; the
+`expired_only` expiry==today boundary regression-pinned.
+FIX ROUND 2 folded (refuter-majority-confirmed, MIGRATION.md #1558): BOTH
+dashboard jobs' cross-process flock re-keyed onto the STORE-derived WRITE
+root (`app._job_lake_root_resolver` — a `--lake-root X`/env-divergent launch
+no longer yields disjoint lock files that let a CLI backfill race a dashboard
+writer on the SAME lake); the dashboard DRY-RUN backfill skips the lake lock
+(`BackgroundPullJob.start(cross_process_lock=False)` — the CLI posture, a
+zero-write scan never refuses a real pull); the manifest-miss enumeration
+WALK (`db_view._walk_candle_datasets`) beats the stall watchdog per symbol
+dir (round 1's beats covered the probe only — honesty-corrected in the
+ledger); `SweepCheckpointStore` maps EVERY corruption class to
+`SweepCheckpointError` (1 MiB size cap pre-read, `RecursionError` nesting
+bomb, same-id `total_combos` mismatch refused, parent-mkdir inside the
+mapping — a stray file at `.greeks_backfill` logs + continues per the
+advisory contract); every bar-writing wet batch touches
+`<lake>/.greeks_backfill/revision.json` and `lake_revision` stats it as a
+THIRD component, so a CLI backfill's Greeks reach a running dashboard's
+caches on the next poll; the wet report's scan-census carry gains killing
+tests.
+FIX ROUND 3 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
+durable checkpoint FREEZES at the last fully-clean prefix boundary (`record`
+only while the run's CUMULATIVE `errored == 0` — an errored contract keeps its
+stale stamps, so an identical-plan crash-resume could silently SKIP it and
+report a false-clean `errored=0` exit-0 ✅ run; the "plan shrinks so the stale
+checkpoint self-ignores" resume claim is corrected for the errored-prefix
+case); the two now-concurrent `BackgroundPullJob`s keep INDEPENDENT
+watchdog liveness — MECHANISM SUPERSEDED at the merge-reconcile (merge
+040b2aec): the branch's interim multi-registrant beat registry (and round
+4's `bind_progress_beat_scope` scoping over it) was resolved AWAY in favour
+of main's DEC-PULL-BEAT-PERRUN-001 (#1537) per-run pull-id-KEYED beat
+channels — `progress_beat.py` at HEAD is main's, byte-identical, and the
+clobber/clear false-CRITICAL class stays closed by keyed registration
+(see the #1558 supersession note); a stray FILE at
+`.greeks_backfill` (ENOTDIR) reads the stable `absent` token instead of
+muting the ENTIRE composite `lake_revision` probe.
+FIX ROUND 4 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
+`backfill_id` binds a rate-source VALUE fingerprint (exact fixed rate / sha256
+of the loaded CSV curve), so a crashed FORCE run's surviving checkpoint
+self-ignores across a rate-value change instead of exempting the recorded
+prefix from the driver's value-checked gate (false-clean green run; a
+SPOT-heal inside the crash window stays a DOCUMENTED residue — delete the
+checkpoint after a heal) [COMPLETED by FIX ROUND 10 below for the rate
+A→B→A round-trip / intervening-writer class the fingerprint cannot see]; a concurrent dry-run backfill's O(files) scan can
+no longer mask a genuinely-WEDGED pull's HUNG→CRITICAL→WEDGED chain — SHIPPED
+as main's DEC-PULL-BEAT-PERRUN-001 (#1537) pull-id-keyed channels after the
+merge-reconcile superseded the interim `bind_progress_beat_scope` design
+(which no longer exists in the tree): `BackgroundPullJob._run` runs its
+worker inside `pull_id_scope` with its beat registered on its OWN run id, an
+unattributed beat is DROPPED + WARNed (loud false stalled-SUSPECT, never a
+masked true stall — keyed routing, NOT a fail-open broadcast), and the
+round-3 "the WEDGED dual signal backstops the masking" claim stays RETRACTED
+as vacuous — WEDGED is gated on the HUNG edge (see the #1558 supersession
+note); a null-stamped row with non-finite OHLC
+(driver-skippable by IVX-2 design) classifies the NEW `stale_unfixable`
+census bucket — never re-targeted (the census converges instead of a forever
+re-feed reported `already_current`), surfaced with ⚠️ Telegram head + note +
+CLI stderr; `--pause-s`/`BRUTEX_GREEKS_BACKFILL_PAUSE_S` refuse non-finite
+values (`inf` crashed the wet run mid-batch, `nan` silently disabled the
+pause); the #1175-style bench pins land
+(`tests/bench/test_greeks_backfill_scan_cost.py` — flat per-file probe cost,
+stamp-column projection spy, O(1) checkpoint bytes) and the ledger's "TESTS
+(7 types touched)" header is honesty-corrected.
+FIX ROUNDS 5+6 folded (refuter-majority-confirmed, MIGRATION.md #1558):
+eager env validation on BOTH surfaces (CLI `CliUserError` one-liner + route
+400 BEFORE the O(files) scan/lock); driver-unreachable NON-canonical month
+filenames (`2024/1.parquet`) fold into `probe_failed` + ONE loud
+rename-to-canonical WARN, never an eternal false-green re-target; the
+fixability gate generalised to NON-null stale stamps on driver-skippable
+rows; `int(inf)` `OverflowError` mapped at the stamp probe AND
+`SweepCheckpoint.from_dict` (one poisoned file/checkpoint no longer kills
+the scan/run).
+FIX ROUND 7 folded (refuter-majority-confirmed, MIGRATION.md #1558): EVERY
+suspicious-file targeting judgment now runs over the DRIVER's row view
+(`_driver_row_view` — own-UTC-month bound + the COMMON `dedup_bars_frame`
+keep-first, `read_option_rows`' exact per-file discipline) instead of the
+RAW physical rows — a stale stamp carried ONLY by a dropped
+duplicate-timestamp/foreign-month row re-targeted the contract forever
+while the driver read `already_current` under an EXIT_OK ✅ false green
+(both directions escaped: a kept non-finite row shadowed by a finite dup,
+and a dropped dup carrying the ONLY stale stamp); driver-invisible-only
+staleness folds into `stale_unfixable` + the NEW
+`stale_on_driver_invisible_rows` WARN naming lake_heal's row-removing heals;
+the LEGACY 7-column arm rides the SAME driver-actionability gate instead of
+an unconditional stale-null target (a legacy all-non-finite month file — the
+COMMON shape on the CLI-`brutex fetch`-only lake, gap b of #1188 — looped
+identically; an EMPTY legacy partition honestly classifies nothing-to-do);
+the unfixable wordings on note/Telegram/CLI-stderr widened to
+"driver-unactionable rows"; the clean fast path stays the bench-pinned
+single stamp-column read.
+FIX ROUND 8 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
+scanner's month-file reachability predicate now mirrors the driver's EXACTLY
+— canonical zero-padded name AND `is_file()` — so a canonical-NAMED
+dataset-style DIRECTORY (`2024/01.parquet/`, probe-readable by polars yet
+invisible to `ist_span_partition_files`' `is_file()` gate) folds into
+`probe_failed` + the driver-unreachable WARN instead of the eternal-re-feed
+✅/exit-0 false green escaping through filesystem TYPE; and the
+merge-absorbed DEC-CLI-GREEKS-ENRICH-001 enrich pass (`brutex enrich-greeks`
++ the `brutex fetch` post-ledger tail) — the SECOND sanctioned ledger-less
+Greeks-overlay writer — now touches the SHARED cross-process freshness
+marker via the NEW wheel-free COMMON `brutex/data/greeks_revision.py`
+(`greeks_backfill` re-exports/delegates byte-identically) whenever it wrote
+bars, closing the round-2 staleness class on that surface and reconciling
+`lake_revision`'s falsified "the ONE sanctioned production writer" honesty
+claim to name BOTH marker-carrying writers.
+FIX ROUND 9 folded (refuter-majority-confirmed, MIGRATION.md #1558): the
+schema-poisoned stamp fold moved from the raising-`int()` VALUE gate to a
+DTYPE gate (NEW `_stamp_dtype_poisoned` — ANY non-integer
+`greeks_provenance_id` dtype folds into `probe_failed` at BOTH the raw probe
+and the verdict, BEFORE the null branch): a COERCIBLE-but-non-integer stamp
+(utf8 `"7"`, Boolean, fractional float) sailed past the rounds-1/6
+coercion-trio catches and detonated the un-fenced `is_in` driver-view
+filter — ONE junk file killed the WHOLE scan (raw CLI traceback on wet AND
+`--dry-run`; dashboard job error, no Telegram) and a fractional float
+mis-classified `stale_unfixable` — the now-unreachable trio catches removed,
+whole-float columns now fold `probe_failed` (sanctioned narrowing); the
+`universe.html` backfill panel poll is SELF-RECOVERING (the
+DEC-PULL-UI-STALENESS-001 posture: quick retries then a 3 s→30 s capped
+exponential backoff, NEVER a give-up — the bounded give-up that painted
+"live progress feed dropped" after ~3 s of blips on a multi-hour wet run
+and re-enabled the run-starting button is REMOVED; a non-ok/malformed poll
+never settles the panel; a hidden tab fires zero fetches with a
+visibilitychange catch-up; and `gbAttachIfRunning()` re-attaches on page
+load AND on a started:false refusal — the previously-FALSE "re-open the
+page" remedy now works); this file's + #1558's rounds-3/4 progress-beat
+mechanism claims reconciled to the shipped #1537 keyed-channel design (see
+the supersession notes).
+FIX ROUND 10 folded (refuter-majority-confirmed, MIGRATION.md #1558):
+checkpoint ADOPTION is freshness-gated (the round-4 fingerprint attests
+plan-vs-checkpoint rate EQUALITY only — it cannot see an INTERVENING overlay
+writer): a rate A→B→A round trip (a crashed force run under A, a rate-B force
+run whose errored first batch FREEZES the id-A checkpoint while genuinely
+rewriting the recorded prefix under rate B, then the natural revert to A —
+or, with NO second crash, an intervening `brutex enrich-greeks` / pull-tail
+enrich pass under the changed rate env) reproduced id-A exactly and ADOPTED
+the stale checkpoint, skipping the rate-B residue into a false-clean ✅
+`errored=0` exit with the wrong-rate Greeks stamped CURRENT forever; a loaded
+checkpoint now self-ignores LOUDLY — and the stale file is DELETED — when the
+shared overlay freshness marker was last touched by a FOREIGN writer at/after
+the checkpoint's `updated_at` (own-plan touches identity-exempt, so a
+legitimate same-plan resume still adopts) or the window ledger moved at/after
+it (`_checkpoint_superseded_reason` + the additive engine
+`SweepCheckpointStore.discard_adoption()`; every ambiguity biases to the
+fresh correct-by-stamps start; NEW documented residue: a mid-pass-crashed
+intervening writer leaves no signal — delete the checkpoint, the spot-heal
+remediation); and the round-9 `universe.html` gb-poller gains the TWO
+sibling-parity pieces round 9 omitted — every gb fetch (poll, start POST,
+attach probe) rides ONE `gbFetchJson` helper arming the sibling's
+FEED_FETCH_TIMEOUT_MS hung-fetch abort bound through the BODY read (a
+headers-then-stalled-body response previously threw nothing: catch/backoff
+unreachable, nothing scheduled, panel wedged at "running · …" with the Run
+button disabled until a tab flip/reload) plus the `gbPollGen` re-entrancy
+guard (a visibilitychange catch-up SUPERSEDES an in-flight chain instead of
+forking it; a stale late response never overwrites a newer status line).
+ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+`greeks_backfill.py`/`greeks_enrich.py`/`greeks_enrich_pass.py`/
+`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
++ `pull_jobs.py`/`lake_revision.py` ALL 100% line+branch (`progress_beat.py`
+is NOT touched by this branch — byte-identical to main's #1537 keyed design,
+dropped from this list at the round-9 honesty reconcile);
+every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
 Earlier: 2026-07-08 (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 —
 the parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a
 HEAVY-GRID-AWARE stall watchdog + a distinct `BrokenProcessPool` QUARANTINE,
@@ -1511,6 +1713,97 @@ hostile-review pass._
   `lake_stats_manifest.py` + `parquet_writer.py` + `option_parquet_writer.py` +
   `lake_heal.py` + `db_view.py` ALL 100% line+branch; ruff/ruff-format clean, `mypy --strict`
   clean, pyright 0 errors in every touched/new file).
+  Earlier: `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558** — the bulk
+  Greeks v1→v2 re-enrichment BACKFILL closing the two #1188 named gaps: EXPIRED option contracts frozen at formula v1 +
+  CLI-`brutex fetch`-only lakes that never enriched. NEW `brutex/data/greeks_backfill.py` — a stamp-driven
+  target-DISCOVERY + batching layer feeding the EXISTING `enrich_greeks_for_targets` driver UNMODIFIED (value-checked
+  reuse gate + every honest demotion ride through; a Greek is NEVER fabricated; NO formula bump — the enrich goldens
+  stay frozen). Scanner: manifest-first enumeration, `1minute`-only, per-contract `greeks_provenance_id` column probe
+  through the NEW exported `stamp_is_current_inputs`/`current_inputs_pack` (ONE pack shared with the driver gate),
+  honest census (unstamped/v1/inputs-drift/current/futures/undecodable/probe_failed), targets sorted
+  (underlying, exchange, symbol), `force`/`expired_only`/`limit`/`per_file_pause` modes. Runner: bounded batches
+  (default 25; fail-loud `BRUTEX_GREEKS_BACKFILL_BATCH`/`_PAUSE_S`), DURABLE advisory checkpoint =
+  `SweepCheckpointStore` reused verbatim at `<lake>/.greeks_backfill/checkpoint.json` (corrupt/foreign-id → ignored
+  loudly; record failure → logged + continue; DELETED on completion — the stamps are the durable done-record);
+  `LakeWriteHalt`/`GreeksEnrichPoolBroken` never caught below the job/CLI boundary. Surfaces: `POST
+  /api/v1/universe/greeks-backfill` + O(1) progress route on a dedicated `BackgroundPullJob` (account lock skipped —
+  zero vendor calls; lake-root single-flight KEPT so a backfill and a pull on one lake serialise) + a `universe.html`
+  panel (textContent-only); `brutex greeks-backfill` with a FULLY INERT `--dry-run` (zero writes/checkpoint/Telegram,
+  whole-tree sha-pinned; the one documented read side effect is the shared `.manifest/` cache self-heal); exactly ONE
+  Telegram completion summary (`greeks_backfill_complete` ✅/⚠️ + `emit_greeks_backfill_complete_alert`). HONEST: the
+  scan is O(files) NEVER O(1); no wall-clock SLA; the stamp prefilter is blind to rate/spot VALUE drift under
+  unchanged source kinds — `--force` routes everything through the driver's value-checked gate. ADVERSARIAL-REVIEW FIX
+  ROUND folded (same branch, pre-merge; details in #1558): CLI wet run HOLDS the lake-root single-flight (refusal on
+  contention; `--dry-run` lock-free); scan/probe per-contract/per-file watchdog liveness beats + honest scanning label
+  (the DEC-PIPELINE-STALL-HEARTBEAT-001 false-CRITICAL class closed on the new phase); `force`+`limit` REFUSED at
+  scanner/CLI/route (chipping is default-stamp-mode-only); `SweepCheckpoint.from_dict` rejects non-object JSON with
+  `SweepCheckpointError`; schema-poisoned stamp columns + out-of-range month filenames fold into `probe_failed`/skip
+  instead of crashing the scan; expiry==today boundary pinned (kills the `>=`→`>` mutant). FIX ROUND 3 folded
+  (refuter-majority-confirmed, #1558): the checkpoint freezes at the last fully-clean prefix boundary (an errored
+  contract is always re-fed on resume — never a false-clean `errored=0` skip); two concurrent jobs keep independent
+  watchdog liveness (the interim multi-registrant beat registry was SUPERSEDED at merge 040b2aec by main's
+  DEC-PULL-BEAT-PERRUN-001 #1537 pull-id-keyed channels — see the #1558 supersession note); a stray file at
+  `.greeks_backfill` reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
+  (refuter-majority-confirmed, #1558): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
+  checkpoint self-ignores across a rate-value change, so the recorded prefix is re-routed through the driver's
+  value-checked gate (spot-heal-in-crash-window = documented residue) [COMPLETED by FIX ROUND 10 for the A→B→A
+  round-trip / intervening-writer class the fingerprint cannot see]; a concurrent backfill scan no longer masks a
+  wedged pull's HUNG→WEDGED chain (shipped as #1537's keyed channels after the merge-reconcile superseded the interim
+  `bind_progress_beat_scope` design — `BackgroundPullJob._run` runs inside `pull_id_scope` with its beat keyed on its
+  own run id; the round-3 broadcast's "WEDGED dual-signal backstop" honesty claim stays retracted as vacuous); NEW
+  `stale_unfixable` census bucket for
+  null-stamped non-finite-OHLC rows (driver-skippable IVX-2 class — excluded from targeting so the census CONVERGES,
+  ⚠️ Telegram/note/stderr); non-finite `--pause-s`/`_PAUSE_S` refused eagerly; #1175-style bench pins added
+  (flat per-file probe · stamp-column projection spy · O(1) checkpoint bytes). FIX ROUNDS 5+6 folded
+  (refuter-majority-confirmed, #1558): eager env validation on both surfaces (CLI one-liner + route 400 BEFORE the
+  scan/lock); non-canonical month filenames → `probe_failed` + rename-to-canonical WARN (never an eternal re-target);
+  the fixability gate generalised to NON-null stale stamps on driver-skippable rows; `int(inf)` `OverflowError`
+  mapped at the stamp probe + `SweepCheckpoint.from_dict`. FIX ROUND 7 folded (refuter-majority-confirmed, #1558):
+  every suspicious-file targeting judgment runs over the DRIVER's row view (`_driver_row_view` — own-UTC-month bound
+  + the COMMON `dedup_bars_frame` keep-first, `read_option_rows`' exact per-file discipline), never the RAW rows — a
+  stale stamp only a dropped duplicate-timestamp/foreign-month row carries folds into `stale_unfixable` + the
+  `stale_on_driver_invisible_rows` WARN naming lake_heal (previously an eternal already_current/EXIT_OK-✅
+  false-green re-feed, both directions: kept-NaN shadowed by a finite dup AND a dropped dup with the only stale
+  stamp); the LEGACY 7-column arm rides the same driver-actionability gate instead of an unconditional stale-null
+  target (the CLI-fetch-only-lake shape; empty legacy partition = honestly nothing-to-do); unfixable wordings widened
+  to "driver-unactionable rows"; the clean fast path stays the bench-pinned single stamp-column read. FIX ROUND 8
+  folded (refuter-majority-confirmed, #1558): `_month_files` mirrors the driver's reachability predicate EXACTLY —
+  canonical zero-padded name AND `is_file()` — so a canonical-NAMED dataset-style DIRECTORY (`2024/01.parquet/`,
+  probe-readable by polars yet invisible to `ist_span_partition_files`' `is_file()` gate) folds into `probe_failed` +
+  the driver-unreachable WARN instead of an eternal-re-feed ✅/EXIT_OK false green (the rounds-5/7 class escaping
+  through filesystem TYPE); and the merge-absorbed DEC-CLI-GREEKS-ENRICH-001 enrich pass (`brutex enrich-greeks` + the
+  `brutex fetch` post-ledger tail via `run_greeks_enrich_pass`) — the SECOND sanctioned ledger-less Greeks-overlay
+  writer — touches the SHARED cross-process freshness marker on every bar-writing pass through the NEW wheel-free
+  COMMON `brutex/data/greeks_revision.py` (`greeks_backfill` re-exports/delegates byte-identically; best-effort, a
+  zero-write pass fabricates no signal), closing the round-2 dashboard-staleness class on that surface and
+  reconciling `lake_revision`'s falsified "the ONE sanctioned production writer" honesty claim. FIX ROUND 9 folded
+  (refuter-majority-confirmed, #1558): the poisoned-stamp fold moved to a DTYPE gate (`_stamp_dtype_poisoned` — any
+  non-integer `greeks_provenance_id` dtype → `probe_failed` at both the raw probe and the verdict, before the null
+  branch; a coercible-but-non-integer stamp — utf8 `"7"`, Boolean, fractional float — previously sailed past the
+  rounds-1/6 raising-`int()` catches and detonated the un-fenced driver-view `is_in`, ONE junk file killing the WHOLE
+  scan; the unreachable coercion-trio catches removed, whole-float columns fold `probe_failed` — sanctioned
+  narrowing); the `universe.html` backfill panel poll never gives up (quick retries then 3 s→30 s capped backoff —
+  the DEC-PULL-UI-STALENESS-001 posture; non-ok/malformed polls never settle; hidden tab fires zero fetches +
+  visibilitychange catch-up; `gbAttachIfRunning()` re-attaches on page load and on a started:false refusal — the
+  button re-enables only on an observed terminal state); the rounds-3/4 progress-beat mechanism claims reconciled to
+  the shipped #1537 keyed-channel design (supersession notes in #1558). FIX ROUND 10 folded
+  (refuter-majority-confirmed, #1558): checkpoint ADOPTION is freshness-gated — the round-4 fingerprint attests
+  plan-vs-checkpoint rate EQUALITY only, so a rate A→B→A round trip (a rate-B force run's errored first batch froze
+  the id-A checkpoint while genuinely rewriting the recorded prefix under rate B; the revert to A reproduced id-A and
+  ADOPTED the stale checkpoint — a false-clean ✅ `errored=0` skip of the residue, stamped current forever; same
+  vector crash-free via an intervening enrich pass under a changed rate env) now self-ignores LOUDLY + deletes the
+  stale file when the shared overlay marker's LAST writer is foreign at/after the checkpoint's `updated_at` (own-plan
+  touches identity-exempt — legitimate same-plan resumes still adopt) or the window ledger moved at/after it
+  (`_checkpoint_superseded_reason` + the additive engine `SweepCheckpointStore.discard_adoption()`; ambiguity biases
+  to the fresh correct-by-stamps start; NEW residue documented: a mid-pass-crashed intervening writer leaves no
+  signal — delete the checkpoint, the spot-heal remediation); and the gb-poller gains the sibling-parity pieces
+  round 9 omitted: ONE `gbFetchJson` helper arming the FEED_FETCH_TIMEOUT_MS hung-fetch abort bound through the BODY
+  read on all three gb call sites (a stalled body previously wedged the panel forever on a visible tab — nothing
+  thrown, nothing scheduled) + the `gbPollGen` re-entrancy guard (catch-ups supersede in-flight chains; stale late
+  responses never repaint). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
+  `greeks_enrich_pass.py`/`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch;
+  ruff/ruff-format/`mypy --strict`/pyright clean).
   Earlier: `claude/sweep-stall-oom-guards` (**DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608** — the
   parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a HEAVY-GRID-AWARE stall watchdog (the wait budget
   scales by the in-flight `mask·bar` work `C(n_unique, k) × N_bars` so a legitimately-slow k=5 tuple is not
@@ -3622,6 +3915,11 @@ hostile-review pass._
 - **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
   PER-FILE lake STATS manifest; matches §1's Active branch line)
+  Earlier: `claude/peaceful-newton-fehcc3`
+  (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks
+  v1→v2 re-enrichment backfill: expired contracts + CLI-only lakes
+  re-stamped to the current formula/inputs; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/sweep-stall-oom-guards`
   (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
   gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
@@ -3907,7 +4205,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4515-4516` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4816-4817` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

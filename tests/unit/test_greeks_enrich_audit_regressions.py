@@ -654,9 +654,10 @@ class TestFormulaV2Restamp:
     ``GREEKS_FORMULA_VERSION`` 1 → 2 (plan §15.3): every v1-era stored bar —
     including IVX-1 degenerate-band artifacts and stale-style/rate bars —
     mismatches the current inputs and recomputes + restamps on the next
-    enrich pass over its window. HONEST ENVELOPE: the re-enrich reaches only
-    contracts still inside a live pull window; expired contracts keep v1
-    stamps (bulk re-enrich surface = named follow-up in the ledger).
+    enrich pass over its window. The pull-side pass reaches only contracts
+    still inside a live pull window; expired contracts (and CLI-pulled lakes)
+    are reached by the bulk re-enrich backfill surface
+    (:mod:`brutex.data.greeks_backfill` — DEC-GREEKS-BULK-REENRICH-001).
     """
 
     def test_formula_version_is_2(self) -> None:

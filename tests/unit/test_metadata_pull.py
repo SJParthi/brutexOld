@@ -1704,14 +1704,19 @@ def _wait_registry_healed(
 ) -> None:
     """Poll the wedge latch until the zombie completes, then RESTORE the real deadline.
 
-    The shrink exists ONLY to make the run-1 wedge breach fast. Leaving it active
-    for the healed recovery pull turns every healthy DuckDB write into a
-    load-timing hazard: on CI run 28972139338 (job 85970218005) a healthy
-    ``upsert_expiries`` in the recovery pull breached the then-0.2 s shrink
-    (``latched=False`` — a genuine wall-clock breach on a loaded 2-core runner),
-    latched the store, and the two rebuilt contract jobs fail-fasted →
-    ``store_write_deferrals == 3`` where the test asserts 0. "Healed" therefore
-    implies "back on the real 90 s default".
+    The shrink exists ONLY to make the run-1 wedge breach fast (the guard
+    re-reads the env on EVERY write batch via
+    ``resolve_store_write_deadline_seconds``). Leaving it active for the healed
+    recovery pull turns every healthy DuckDB write into a load-timing hazard —
+    hit TWICE on the loaded 2-core shared runners: CI run 28924020943 and CI run
+    28972139338 (job 85970218005), where a healthy ``upsert_expiries`` in the
+    recovery pull breached the then-0.2 s shrink (``latched=False`` — a genuine
+    wall-clock breach, not the latch), latched the store, and the two rebuilt
+    contract jobs fail-fasted → ``store_write_deferrals == 3`` where the test
+    asserts 0. "Healed" therefore implies "back on the real 90 s default": every
+    wedge/defer tooth already ran under the shrink, and the recovery pin asserts
+    the PRODUCTION posture (a healed volume defers nothing) instead of racing an
+    artificial micro-deadline.
     """
     deadline_at = time.monotonic() + timeout
     while registry._write_guard.wedged:
