@@ -694,7 +694,8 @@ class TestLaunchSweep:
 
         def _fail_finalize(lake_root: Path, state: dict[str, Any]) -> None:
             if state.get("phase") == "launching":
-                calls.append("placeholder")
+                # both the pre-spawn placeholder AND the FIX-A pid-stamp
+                calls.append("placeholder" if state.get("pid") is None else "pid_stamp")
                 real_write(lake_root, state)
                 return
             calls.append("finalize")
@@ -715,7 +716,7 @@ class TestLaunchSweep:
             spawner=_spawn_recorder(record, pid=6161),
             which=lambda name: None,
         )
-        assert calls == ["placeholder", "finalize"]
+        assert calls == ["placeholder", "pid_stamp", "finalize"]
         assert out.started is False
         assert out.status == "failed"
         assert kills == [6161]
@@ -1041,3 +1042,173 @@ class TestLogTailUnresolvable:
         out = lb._confined_log_tail(tmp_path, "bad\x00path.log", tail_bytes=64)
         assert "refused" in out
         assert "ValueError" in out
+
+
+class TestLaunchingRecordWithPid:
+    """Round-2 refuter FIX-A: a pid-bearing launching record is PROBED, not aged."""
+
+    def test_live_pid_beats_stale_age(self) -> None:
+        """A dashboard death before finalize can no longer age a LIVE sweep out."""
+        old = datetime.now(UTC) - timedelta(seconds=lb.LAUNCHING_GRACE_S + 600)
+        state = {"phase": "launching", "pid": os.getpid(), "started_utc": old.isoformat()}
+        verdict = lb.state_liveness(state, cmdline_probe=lambda pid: True)
+        assert verdict == "running"
+
+    def test_dead_pid_self_heals_even_within_grace(self) -> None:
+        import subprocess
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()  # reap — the pid is definitively gone
+        state = {
+            "phase": "launching",
+            "pid": proc.pid,
+            "started_utc": datetime.now(UTC).isoformat(),
+        }
+        assert lb.state_liveness(state) == "exited"
+
+    def test_pidless_placeholder_still_uses_age_grace(self) -> None:
+        now = datetime.now(UTC)
+        fresh = {"phase": "launching", "started_utc": now.isoformat()}
+        assert lb.state_liveness(fresh, now_utc=lambda: now) == "running"
+
+    def test_launch_blocked_by_stale_aged_but_live_launching_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: the refuter's duplicate-launch repro now refuses 409-style."""
+        monkeypatch.setattr(lb, "_cmdline_contains_sweep_all", lambda pid: True)
+        old = datetime.now(UTC) - timedelta(seconds=lb.LAUNCHING_GRACE_S + 600)
+        lb._write_launch_state(
+            tmp_path,
+            {
+                "phase": "launching",
+                "pid": os.getpid(),
+                "card": "spot",
+                "started_utc": old.isoformat(),
+            },
+        )
+        record: dict[str, Any] = {}
+        out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=_spawn_recorder(record))
+        assert out.started is False
+        assert out.status == "already_running"
+        assert "argv" not in record  # the live sweep is never duplicated
+
+    def test_fresh_launch_stamps_pid_onto_launching_record_before_finalize(
+        self, tmp_path: Path
+    ) -> None:
+        """The launching record carries the real pid the moment Popen returns."""
+        seen: list[dict[str, Any]] = []
+        real_write = lb._write_launch_state
+
+        def _spawn_and_snoop(argv: list[str], log_path: Path) -> int:
+            return 4243
+
+        def _snoop_write(lake_root: Path, state: dict[str, Any]) -> None:
+            seen.append(dict(state))
+            real_write(lake_root, state)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(lb, "_write_launch_state", _snoop_write):
+            out = lb.launch_sweep(
+                "spot", lake_root=tmp_path, spawner=_spawn_and_snoop, which=lambda name: None
+            )
+        assert out.started is True
+        phases = [(s.get("phase"), s.get("pid")) for s in seen]
+        assert phases == [
+            ("launching", None),  # pre-spawn placeholder — no pid exists yet
+            ("launching", 4243),  # FIX-A: real pid stamped right after Popen
+            ("running", 4243),  # finalize
+        ]
+
+
+class TestSpawnFailureUnwind:
+    """Round-2 refuter FIX-B: a fork/exec OSError is a clean failed, no lockout."""
+
+    def test_spawn_oserror_failed_placeholder_removed_retry_possible(self, tmp_path: Path) -> None:
+        def _boom(argv: list[str], log_path: Path) -> int:
+            raise OSError("EAGAIN: resource temporarily unavailable")
+
+        out = lb.launch_sweep("spot", lake_root=tmp_path, spawner=_boom, which=lambda name: None)
+        assert out.started is False
+        assert out.status == "failed"
+        assert "nothing launched" in out.detail
+        assert "EAGAIN" in out.detail
+        # the placeholder is unwound — no 120 s lockout
+        assert lb.read_launch_state(tmp_path) is None
+        # an IMMEDIATE retry succeeds
+        record: dict[str, Any] = {}
+        retry = lb.launch_sweep(
+            "spot",
+            lake_root=tmp_path,
+            spawner=_spawn_recorder(record, pid=515),
+            which=lambda name: None,
+        )
+        assert retry.started is True
+        assert record["argv"][0] == sys.executable
+
+    def test_pid_stamp_write_failure_kills_the_spawned_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FIX-A's stamp write failing compensates exactly like the finalize arm."""
+        real_write = lb._write_launch_state
+
+        def _fail_stamp(lake_root: Path, state: dict[str, Any]) -> None:
+            if state.get("phase") == "launching" and state.get("pid") is not None:
+                raise OSError("torn volume")
+            real_write(lake_root, state)
+
+        kills: list[int] = []
+        monkeypatch.setattr(lb, "_write_launch_state", _fail_stamp)
+        monkeypatch.setattr(lb, "_kill_session", lambda pid: kills.append(pid) or True)
+        out = lb.launch_sweep(
+            "spot",
+            lake_root=tmp_path,
+            spawner=_spawn_recorder({}, pid=6262),
+            which=lambda name: None,
+        )
+        assert out.status == "failed"
+        assert kills == [6262]
+        assert "pid stamp write failed" in out.detail
+
+    def test_remove_launch_state_missing_file_is_noop(self, tmp_path: Path) -> None:
+        lb._remove_launch_state(tmp_path)  # nothing recorded — silently fine
+        assert lb.read_launch_state(tmp_path) is None
+
+    def test_remove_launch_state_suppresses_oserror(self, tmp_path: Path) -> None:
+        # A DIRECTORY at the pidfile path makes unlink raise IsADirectoryError
+        # (an OSError) — suppressed; the placeholder then ages out instead.
+        lb.launch_state_path(tmp_path).mkdir(parents=True)
+        lb._remove_launch_state(tmp_path)  # must not raise
+
+
+class TestReapKeepawake:
+    """Round-2 refuter FIX-C: exited watcher zombies are opportunistically reaped."""
+
+    def test_exited_watcher_zombie_is_reaped_via_status(self, tmp_path: Path) -> None:
+        watcher_pid = lb._default_watcher_spawner([sys.executable, "-c", "pass"])
+        # wait for the child to EXIT (zombie — nothing has reaped it yet)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            try:
+                if Path(f"/proc/{watcher_pid}/stat").read_text().split(") ")[1][0] == "Z":
+                    break
+            except OSError:
+                break
+            time.sleep(0.05)
+        lb._write_launch_state(tmp_path, {"pid": -1, "card": "spot", "keepawake_pid": watcher_pid})
+        lb.launch_status(tmp_path)  # the reap rides the status path
+        # after the reap the pid is fully gone — kill(0) raises
+        with pytest.raises((ProcessLookupError, PermissionError)):
+            os.kill(watcher_pid, 0)
+
+    def test_guarded_arms_never_raise(self) -> None:
+        lb._reap_keepawake({})  # no keepawake_pid
+        lb._reap_keepawake({"keepawake_pid": None})
+        lb._reap_keepawake({"keepawake_pid": -2})
+        lb._reap_keepawake({"keepawake_pid": "junk"})
+        lb._reap_keepawake({"keepawake_pid": 2**22 + 999})  # not our child → suppressed
+
+    def test_reap_never_affects_liveness(self, tmp_path: Path) -> None:
+        lb._write_launch_state(tmp_path, {"pid": -1, "card": "spot", "keepawake_pid": 2**22 + 998})
+        status = lb.launch_status(tmp_path)
+        assert status["running"] is False  # verdict from the SWEEP pid only

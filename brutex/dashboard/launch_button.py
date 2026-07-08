@@ -43,12 +43,20 @@ Single-flight law: an advisory :func:`fcntl.flock` on a stable sidecar under
 ``<lake_root>/.locks/`` guards the launch critical section, and a pidfile
 (``<lake_root>/sweeps/.launch/active_launch.json``) carries the active run.
 Under the held flock a "launching" placeholder record is written atomically
-BEFORE the spawn and finalized with the real pid after it (review round-2 M2 —
-a crash/ENOSPC between spawn and record can never leave a LIVE run invisible
-to single-flight: a failed finalize kills the just-spawned session, and a
-stranded placeholder self-heals by age). A second click while the run is
-alive returns HTTP 409 with the existing run's info — NEVER a duplicate
-launch. A DEAD recorded pid self-heals (the lock is recoverable) — stale-pid
+BEFORE the spawn; immediately after ``Popen`` returns, the placeholder is
+atomically REWRITTEN with the real pid (still phase ``launching`` — round-2
+refuter FIX-A), then finalized (review round-2 M2). A failed spawn removes
+the placeholder (no 120 s lockout — FIX-B); a failed pid-stamp/finalize
+write KILLS the just-spawned session (compensation). A pid-BEARING
+launching record is judged by PROBING its pid; ONLY a pid-less placeholder
+self-heals by age. HONEST residual (Golden Rule #10): a dashboard death in
+the tiny window between ``Popen`` returning and the pid-stamp write still
+strands a pid-less placeholder over a live sweep — after the 120 s grace it
+self-heals and a duplicate launch becomes possible; FIX-A SHRINKS that
+window from spawn+watcher+finalize to a single atomic write, it does NOT
+vanish. A second click while the run is alive returns HTTP 409 with the
+existing run's info — never a duplicate launch on any probed-alive record.
+A DEAD recorded pid self-heals (the lock is recoverable) — stale-pid
 recovery is logged, not silent. The pidfile ALWAYS holds the REAL sweep pid
 (review round-2 M1): the sweep is spawned directly, and keep-awake is a
 SEPARATE detached ``caffeinate -i -s -w <sweep_pid>`` watcher whose death is
@@ -613,19 +621,23 @@ def state_liveness(
 ) -> Literal["running", "exited"]:
     """The ONE liveness verdict over a recorded launch state.
 
-    * ``phase == "launching"`` (the pre-spawn placeholder, review round-2
-      M2): counts as RUNNING within :data:`LAUNCHING_GRACE_S` of its
-      ``started_utc`` (spawn + finalize take milliseconds — a fresh
-      placeholder means a launch is mid-flight and must refuse duplicates);
-      older/junk-timestamped placeholders are STRANDED (a crash between the
-      placeholder write and the finalize) and self-heal as exited.
-    * otherwise: :func:`probe_pid` on the recorded pid, plus the best-effort
-      recycled-pid cmdline disambiguation (a DEFINITIVE non-``sweep-all``
-      cmdline reads exited; an unknown probe stays running — never a
-      downgrade on probe error).
+    * ``phase == "launching"`` WITHOUT a pid (the pre-spawn placeholder,
+      review round-2 M2): counts as RUNNING within
+      :data:`LAUNCHING_GRACE_S` of its ``started_utc`` (spawn + pid-stamp
+      take milliseconds — a fresh placeholder means a launch is mid-flight
+      and must refuse duplicates); older/junk-timestamped pid-LESS
+      placeholders are STRANDED and self-heal as exited.
+    * any pid-BEARING record — INCLUDING a ``launching`` record whose pid
+      was stamped right after ``Popen`` returned (round-2 refuter FIX-A:
+      the age-only grace NEVER applies once a pid is recorded, so a
+      dashboard death before the finalize can no longer age a LIVE sweep
+      into "exited" and a duplicate launch): :func:`probe_pid` on the
+      recorded pid, plus the best-effort recycled-pid cmdline
+      disambiguation (a DEFINITIVE non-``sweep-all`` cmdline reads exited;
+      an unknown probe stays running — never a downgrade on probe error).
     """
     clock = now_utc if now_utc is not None else lambda: datetime.now(UTC)
-    if state.get("phase") == "launching":
+    if state.get("phase") == "launching" and _state_pid(state) <= 0:
         try:
             started = datetime.fromisoformat(str(state.get("started_utc")))
         except ValueError:
@@ -683,6 +695,34 @@ def _write_launch_state(lake_root: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(state, sort_keys=True)
     atomic_write_simple(path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+
+
+def _remove_launch_state(lake_root: Path) -> None:
+    """Best-effort pidfile removal (the FIX-B spawn-failure unwind).
+
+    Runs under the held flock, so nothing else can be writing; a removal
+    failure is suppressed — the stranded pid-less placeholder then simply
+    ages out via :data:`LAUNCHING_GRACE_S` (the pre-FIX-B behaviour).
+    """
+    with contextlib.suppress(OSError):
+        launch_state_path(lake_root).unlink(missing_ok=True)
+
+
+def _reap_keepawake(state: dict[str, Any]) -> None:
+    """Opportunistically reap an exited keep-awake watcher (round-2 FIX-C).
+
+    The watcher Popen handle is disowned at spawn, so its exit leaves one
+    zombie per launch in the dashboard process until reaped. A guarded
+    ``waitpid(WNOHANG)`` on the recorded ``keepawake_pid`` clears it from
+    the status/probe path; every failure (not our child after a restart /
+    already reaped / junk pid) is suppressed — this NEVER affects liveness
+    verdicts (the watcher never carries run identity, M1).
+    """
+    raw = state.get("keepawake_pid")
+    if not isinstance(raw, int) or raw <= 0:
+        return
+    with contextlib.suppress(OSError):
+        os.waitpid(raw, os.WNOHANG)
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,8 +922,49 @@ def launch_sweep(
                 detail=f"pre-spawn state write failed — nothing launched: {exc}",
             )
 
-        # M2 step 2: spawn (the placeholder already guards single-flight).
-        pid = spawn(argv, log_path)
+        # M2 step 2: spawn — wrapped (round-2 refuter FIX-B): a transient
+        # fork/exec failure (EAGAIN/ENOMEM) must surface as an honest
+        # "failed", and the just-written placeholder must NOT strand a
+        # 120 s lockout when nothing was spawned.
+        try:
+            pid = spawn(argv, log_path)
+        except OSError as exc:
+            _remove_launch_state(lake_root)
+            _LOG.error("launch_button.spawn_failed", card=card, error=str(exc))
+            return LaunchOutcome(
+                started=False,
+                status="failed",
+                active=None,
+                detail=f"sweep spawn failed — nothing launched: {exc}",
+            )
+
+        # FIX-A (round-2 refuter): stamp the REAL pid onto the launching
+        # record IMMEDIATELY after Popen returns — a dashboard death before
+        # the finalize then leaves a PROBE-able record, never a pid-less
+        # placeholder that ages into a duplicate launch over a live sweep.
+        # (The residual window is now this single atomic write — disclosed
+        # in the module docstring, it shrinks, it does not vanish.)
+        try:
+            _write_launch_state(lake_root, {**placeholder, "pid": pid})
+        except OSError as exc:
+            killed = _kill_session(pid)
+            _LOG.error(
+                "launch_button.pid_stamp_write_failed",
+                card=card,
+                pid=pid,
+                compensating_kill_delivered=killed,
+                error=str(exc),
+            )
+            return LaunchOutcome(
+                started=False,
+                status="failed",
+                active=None,
+                detail=(
+                    f"pid stamp write failed after spawn: {exc}; compensating kill of "
+                    f"session {pid} {'DELIVERED' if killed else 'FAILED — verify manually'}"
+                ),
+            )
+
         keepawake_pid = _spawn_keepawake_watcher(pid, which=which, watcher_spawner=watcher_spawner)
 
         # M2 step 3: finalize with the real pid; on failure, compensate by
@@ -977,6 +1058,7 @@ def launch_status(
     state = read_launch_state(lake_root)
     if state is None:
         return {"present": False, "running": False}
+    _reap_keepawake(state)  # FIX-C: clear an exited watcher zombie; never affects verdicts
     pid = _state_pid(state)
     running = state_liveness(state) == "running"
     log_path = state.get("log_path")
