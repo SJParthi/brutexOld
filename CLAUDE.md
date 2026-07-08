@@ -1290,7 +1290,65 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/data-edge-guards` (**DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616** — two
+- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617** (renumbered
+  #1538→#1557→#1581→#1598→#1610→#1617 — the first three hops across the 2026-07-08 origin/main merges (main's #1538 is DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, main's #1557 is DEC-DASHBOARD-BROWSER-TRUTH-001), the fourth to the then-fresh tail #1598, the fifth to the then-reserved PR-#1275 band number #1610, and the final hop to #1617 = main-max(#1616, DEC-SWEEP-DATA-EDGE-GUARDS-001) + 1 on merge round 5 of the 2026-07-08 conflict-resolution treadmill) — Phase-3
+  "results depth" for the one-click institutional sweep, delivered as ONE fenced RUN-END post-hoc pass
+  (`brutex/engine/results_depth_pass.py`) that re-simulates ONLY the persisted finalists on the pure-Python oracle
+  (per-combo PARITY TOOTH vs the stored row — a mismatch is counted + excluded, never a silently wrong trade list),
+  captures every trade with exit reason + real fill prices (additive `TradeSimWalker(detail_sink=)`, default `None`
+  byte-identical), 1-minute-path MAE/MFE + intraday-path equity (R22; honest `no_1m_data` when 1m is absent), VIX
+  stamps via the FIRST production `TradeReferenceStamper.from_vix_bars` construction (R31; NULL + counted when the
+  UNVERIFIED VIX series is absent), folds per-combo aggregates + regime/VIX-band/entry-hour/event lenses (R46/R51 —
+  event flags are ONLY the four calendar-verifiable classes; weekday Budget/election days honestly untagged), writes
+  the deterministic per-tuple sidecar trio + stamp under the per-run `sweep_runs/<run_id>/results-depth/` subtree
+  (gap-register Ruling 4 — a SIBLING root beside the `**/*.parquet`-globbed sweeps tree, built EXCLUSIVELY through
+  the ONE `trade_store.sweep_run_dir` seam; idempotent stamp-skip resume, R42), buy-&-hold baselines from the
+  sweep's own bars (R27), groups behavioral twin
+  families (R34), and builds the global cross-bucket top-100 artifact at the binding contract path
+  `sweep_runs/<grid_identity>/top100.json` + stage stamp (R21/R26 — `load_top100` O(1) by construction, ≤100
+  entries; any damage → None → deterministic rebuild to identical bytes). The R30 preset law lives in ONE home
+  `brutex/ranking/presets.py` (`min_dd_first` default = smallest max-drawdown → composite tiebreak, None-after-scored
+  → fewest consecutive losses → run_id ASC; alternates composite/PF/win%/Calmar DESC on the RAW value;
+  `top100_artifact` DELEGATES via `sort_by_preset`, byte-identical order — its golden passes unmodified); R33 ships
+  as the FIXED hand-written 60-entry `brutex/ranking/phrases.py` table (import-time cross-pin vs `NAME_TO_BIT`,
+  golden-digest-locked wording, O(k) mechanical assembly — never generated text); R47 ships as the refusal-only
+  `brutex/engine/margin_history.py` regime table (the DEC-ETC-REGIME-HISTORY-001 template — ZERO verified SPAN rows
+  exist anywhere, so every winner honestly reads `margin_roi: unverified`; override paths are DATA only). WP6
+  wiring: ONE comment-fenced CLI adapter in `cmd_sweep_all` — the fail-loud `BRUTEX_RESULTS_DEPTH` kill switch
+  resolves EAGERLY pre-sweep (junk → clean `EXIT_USER_ERROR` before any compute), the pass runs post-cascade wired
+  to the WP3 providers (phrases reasons + margin ROI at a 1-lot SIZING hypothetical — the refusal-only mechanism is
+  all-UNVERIFIED regardless, never a trade-row value), reference bars (per-instrument 1m/1day +
+  `NSE-INDIAVIX` 1m) load best-effort through the SAME Catalog/ReplayFeed path, and a pass failure prints LOUD +
+  logs `cli.results_depth.pass_failed` but NEVER fails the sweep — integration-proven over a REAL lake through
+  `cmd_sweep_all` (post-cascade order pinned, artifacts + `reasons_wired`/`margin_roi_wired` flags, kill switch,
+  junk env, fence). HONEST: the pass is O(persisted finalists) oracle re-sims at run-end, NOT free and NOT on the
+  ~33B-trial hot path (which receives ZERO diffs — the frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` pins pass
+  UNMODIFIED); trade pages are O(page) with a disclosed O(row-groups-up-to-offset) deep-offset scan (the db_view
+  envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1617); the
+  contracts memory-file additive-key update (`trade_seq`/`path_1m_status`/`mae_granularity` + the top100 object
+  root) is a coordinator obligation. RULINGS-CONFORMANCE AMENDMENT (2026-07-08, same branch — the gap-register
+  coordinator rulings folded in pre-merge, ledgered in #1617): Ruling 4 — every run-end artifact relocated to the
+  `sweep_runs/` SIBLING root via the ONE `sweep_run_dir` seam (the `<sweeps>/results-depth/` + `<sweeps>/runs/`
+  layouts SUPERSEDED; branch-introduced goldens regenerated, origin/main goldens untouched); Ruling 18 —
+  `lots`/`costs_paisa` NULL-BY-DESIGN `None` until P5's futures translation sidecar (the fabricated `1`/`0`
+  constants REMOVED); Ruling 5 — `ResultsStore.load` wraps EVERY decode failure into the NEW typed
+  `ResultsStoreSchemaError` naming the store path (G14) + presence-tolerant optional-column reads defaulting `None`
+  (the WindowLedgerRecord precedent), guarded by the NEW frozen pre-extension golden fixture; Ruling 1 — top-1000
+  storage-side pins (no silent cap, tie law intact, flush/load round trip); Ruling 12 — NEW
+  `brutex.ranking.gate_reasons`, the reason-returning twin of `passes_gates` over the STABLE `GATE_REASON_ORDER`
+  wire vocabulary (fail-closed `non_finite_input`; property-pinned `passes_gates(m) == (gate_reasons(m) == ())`;
+  P2 folds the per-door counters); Ruling 10 — `/api/v1/sweep/leaderboard` gains the OPTIONAL `?preset=` token
+  (absent/blank = legacy ordering byte-identical; known token orders via the ONE presets law with non-persisted
+  axes surfaced as `preset_inert_axes`, never faked; unknown = clean 400) + the C3 `store_error_payload` degrade
+  (typed store fault → honest 200 error markers, never a 500/blank illusion); Ruling 7 — capped
+  `results_depth.vix_miss` WARNs (cap 20, misses stay counted) + the integration proof the CLI's NSE-INDIAVIX lake
+  coordinate is REAL (production-writer bars found + every captured trade stamped); the lake-read bypass allowlist
+  admits `trade_store`/`results_depth_pass` with explicit not-lake-bars reasons; `minute_path` max-dd pct now the
+  honest INDEPENDENT max ratio (review NIT (a)); baseline JSON `allow_nan=False`. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; every
+  new/touched module 100% line+branch; ruff/ruff-format clean, `mypy --strict` clean + pyright 0 new errors vs the
+  origin/main baseline).
+  Earlier: `claude/data-edge-guards` (**DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616** — two
   surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the one-click-sweep gap register):
   (1) a Muhurat-safe prev-day anchor at the Stage-1A roll seam (`brutex/engine/stage1a.py::_roll_to_new_day`
   rolled `_prev_day_ohlc = self._today_ohlc` on every IST-date change with NO calendar guard, so a Diwali
@@ -3298,7 +3356,11 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/data-edge-guards`
+- **Active feature branch:** `claude/elegant-johnson-cgufi7`
+  (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617 — renumbered
+  #1538→#1557→#1581→#1598→#1610→#1617; the final hop past main's #1616
+  (DEC-SWEEP-DATA-EDGE-GUARDS-001) on merge round 5, 2026-07-08)
+  Earlier: `claude/data-edge-guards`
   (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 — two surgical engine
   data-edge guards for sweep-result correctness: (1) a Muhurat-safe prev-day
   anchor at the Stage-1A roll seam + (2) a bounded bad-tick screen at the engine
@@ -3310,15 +3372,22 @@ hostile-review pass._
   python mutmut loop; see §1 Active branch for the full blurb)
   Earlier: `claude/serene-euler-y5ra0z`
   (DEC-BACKUP-OFFBOX-001, MIGRATION.md #1596 — automated incremental off-box
-  backup: restic → S3 Object-Lock / B2 immutable; see §1 Active branch for
+  backup: restic → S3 Object-Lock / B2 immutable, NEW `brutex/backup/` package
+  + `brutex backup {run,check,restore-drill,status}` CLI + the O(1) dead-man
+  freshness check + the monthly byte-verified restore drill; ops tooling ONLY —
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active-branch chain for
   the full blurb)
   Earlier: `claude/blissful-curie-gp94rk`
-  (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 — see §1 Active branch
-  for the full blurb)
+  (the 11-item POLISH PACK, MIGRATION.md #1582–#1592; see §1 Active-branch
+  chain for the full blurb)
   Earlier: `claude/upbeat-tesla-mfrovq`
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
-  CallMeter lifecycle + rate-widget truth pack)
+  CallMeter lifecycle + rate-widget truth pack; see §1 Active-branch chain for
+  the full blurb)
   Earlier: `claude/sleepy-hawking-l87497`
+  (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 — the durable `&`-form
+  winner map persisted via `schema_meta` + the `--ampersand-probe` doctor
+  stage; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
   retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel

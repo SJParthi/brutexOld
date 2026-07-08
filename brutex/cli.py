@@ -5358,6 +5358,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 1 of 2 ──
+    # Resolve the run-end results-depth kill switch EAGERLY: a junk
+    # BRUTEX_RESULTS_DEPTH is a clean pre-sweep user-config error, never a
+    # failure discovered AFTER an already-completed multi-day sweep.
+    from brutex.engine.results_depth_pass import resolve_results_depth_enabled
+
+    try:
+        results_depth_enabled = resolve_results_depth_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
     # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). The catalog FILE is
     # deliberately NOT gated — sweep-all reconciles the catalog from the lake
@@ -5822,6 +5834,57 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
+        # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
+        # The ONE run-end results-depth block — trade capture → aggregates →
+        # sidecar trio → baselines → the global top-100 artifact — strictly
+        # AFTER the cascade above, fenced inside _run_results_depth_adapter so
+        # a pass failure never changes the sweep's exit path. Reference bars
+        # load best-effort through the SAME Catalog/ReplayFeed path the sweep
+        # preloaded with; a missing series degrades honestly inside the pass
+        # (NULL + counted, never fabricated).
+        if results_depth_enabled:
+            _run_results_depth_adapter(
+                out_root=out_root,
+                grid=grid,
+                bars_for=_bars_for,
+                minute_bars_for=_depth_reference_loader(
+                    slices=slices,
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    interval="1minute",
+                ),
+                daily_bars_for=_depth_reference_loader(
+                    slices=slices,
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=exchange,
+                    segment=segment,
+                    start=start,
+                    end=end,
+                    interval="1day",
+                ),
+                vix_bars=_depth_reference_loader(
+                    slices={},
+                    lake_root=resolved_lake,
+                    catalog_path=catalog,
+                    exchange=_RESULTS_DEPTH_VIX_EXCHANGE,
+                    segment=_RESULTS_DEPTH_VIX_SEGMENT,
+                    start=start,
+                    end=end,
+                    interval="1minute",
+                )(_RESULTS_DEPTH_VIX_SYMBOL),
+                margin_entry_date=_parse_dt(start).date(),
+            )
+        else:
+            print(
+                "[brutex] results-depth: disabled via BRUTEX_RESULTS_DEPTH — the run-end "
+                "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
+            )
+
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
         return sweep_all_exit_code(result.tuples_failed)
@@ -7486,6 +7549,186 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
             print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
             continue
         print(_render_options_leaderboard(row, results))
+
+
+# ════════════════════════════════════════════════════════════════════════
+# P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) — the ONE thin,
+# clearly-marked run-end results-depth block: after `cmd_sweep_all`'s cascade
+# completes, the COMMON `brutex.engine.results_depth_pass` runs over the
+# persisted stores (trade capture → aggregates → sidecars → baselines →
+# global top-100), wired to the WP3 providers (dual-language reasons +
+# margin-true ROI). Default ON; `BRUTEX_RESULTS_DEPTH=0` is the fail-loud
+# kill switch (resolved EAGERLY pre-sweep). Fenced: a pass failure prints
+# loud + logs and NEVER fails the sweep (the `_maybe_run_options_sim_on_
+# winners` precedent) — the artifacts are rebuildable (stamp-skip resume).
+# ════════════════════════════════════════════════════════════════════════
+
+#: The India VIX lake coordinates (CLAUDE.md §6 — `NSE-INDIAVIX`, an INDEX-
+#: segment spot dataset; REFERENCE_ONLY: stamped on trades, never swept).
+_RESULTS_DEPTH_VIX_EXCHANGE: Final[str] = "NSE"
+_RESULTS_DEPTH_VIX_SEGMENT: Final[str] = "INDEX"
+_RESULTS_DEPTH_VIX_SYMBOL: Final[str] = "INDIAVIX"
+
+
+def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _maybe_run_options_sim_on_winners precedent; the fenced orchestration in _run_results_depth_adapter is the covered surface)
+    *,
+    slices: Mapping[tuple[str, str], list[Any]],
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    interval: str,
+) -> Callable[[str], list[Any] | None]:
+    """Best-effort per-symbol reference-bar loader for the results-depth pass.
+
+    Serves the sweep's own in-memory slice when the coordinate was already
+    preloaded (zero re-read); otherwise loads through the SAME
+    Catalog/ReplayFeed path ``cmd_sweep_all`` preloads with (reconcile first,
+    so an unregistered-but-on-disk partition still reads). ANY load failure
+    or an empty read returns ``None`` — the pass then degrades honestly
+    (``no_1m_data`` / empty lens / NULL VIX, all counted) instead of failing
+    an already-completed sweep. KeyboardInterrupt/SystemExit/MemoryError
+    always re-raise raw.
+    """
+
+    def _load(symbol: str) -> list[Any] | None:
+        cached = slices.get((symbol, interval))
+        if cached:
+            return cached
+        try:
+            from brutex.data.catalog import Catalog
+            from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+            from brutex.feed.replay import ReplayFeed
+
+            with Catalog.open(catalog_path) as cat:
+                reconcile_catalog_from_lake(
+                    lake_root=lake_root,
+                    catalog=cat,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                )
+                feed = ReplayFeed(
+                    catalog=cat,
+                    lake_root=lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbols=[symbol],
+                    interval=interval,
+                    start=_parse_dt(start),
+                    end=_parse_dt(end),
+                )
+                bars = [event.bar for event in feed]
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            print(
+                f"[brutex] WARNING: results-depth could not load {symbol}/{interval} "
+                f"reference bars ({type(exc).__name__}: {exc}) — degrading honestly "
+                "(the pass NULL-counts the missing series, it never fabricates)",
+                file=sys.stderr,
+            )
+            return None
+        return bars or None
+
+    return _load
+
+
+def _run_results_depth_adapter(
+    *,
+    out_root: Path,
+    grid: Any,
+    bars_for: Callable[[str, str], Sequence[Any]],
+    minute_bars_for: Callable[[str], Sequence[Any] | None],
+    daily_bars_for: Callable[[str], Sequence[Any] | None],
+    vix_bars: Sequence[Any] | None,
+    margin_entry_date: date,
+    pass_runner: Callable[..., Any] | None = None,
+) -> bool:
+    """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
+
+    Wires the WP3 providers into the COMMON pass — R33 dual-language reasons
+    (:func:`brutex.ranking.phrases.reason_payload`) + R47 margin-true ROI
+    (:func:`brutex.engine.margin_history.margin_roi_payload`, honest
+    ``unverified`` today) — runs it, and prints the honest report line.
+
+    The fence mirrors the options-sim/greeks-enrich precedent: a pass failure
+    prints LOUD on stderr + logs ``cli.results_depth.pass_failed`` and NEVER
+    changes the sweep's exit path (the sweep itself succeeded; every depth
+    artifact is rebuildable via the idempotent stamp-skip resume);
+    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
+    raw (global stops are never swallowed). Returns ``True`` iff the pass
+    completed and its report printed.
+
+    ``pass_runner`` is an injection seam for tests; ``None`` runs the real
+    :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
+    """
+    import structlog
+
+    from brutex.engine.margin_history import margin_roi_payload
+    from brutex.engine.results_depth_pass import run_results_depth_pass
+    from brutex.ranking.phrases import reason_payload
+
+    runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    def _margin_roi(candidate: Any) -> dict[str, object]:
+        # lots=1 here is a margin-SIZING hypothetical for the refusal-only
+        # (all-UNVERIFIED) ROI mechanism — NOT a trade-row value: captured
+        # trades carry lots=None by design until P5's translation sidecar
+        # lands (gap-register Ruling 18). The regime date is the sweep
+        # window START — the v1 all-refusal tables answer "unverified" for
+        # EVERY in-window date, so no per-trade date threading is needed
+        # until a sourced row lands.
+        return margin_roi_payload(
+            candidate.row.net_pnl_paisa,
+            instrument=candidate.row.instrument,
+            entry_date=margin_entry_date,
+            lots=1,
+        )
+
+    try:
+        report = runner(
+            out_root=out_root,
+            grid=grid,
+            bars_for=bars_for,
+            minute_bars_for=minute_bars_for,
+            daily_bars_for=daily_bars_for,
+            vix_bars=vix_bars,
+            reason_provider=reason_payload,
+            margin_roi_provider=_margin_roi,
+        )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        print(
+            f"[brutex] WARNING: results-depth pass FAILED ({type(exc).__name__}: {exc}) — "
+            "the sweep itself SUCCEEDED; re-run 'brutex sweep-all' with the same selection "
+            "to rebuild the depth artifacts (idempotent stamp-skip resume).",
+            file=sys.stderr,
+        )
+        structlog.get_logger("brutex.cli").error(
+            "cli.results_depth.pass_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return False
+    print(
+        f"[brutex] results-depth — tuples={report.tuples_processed} "
+        f"skipped_current={report.tuples_skipped_current} "
+        f"missing_store={report.tuples_missing_store} errored={report.tuples_errored} "
+        f"captured={report.combos_captured} parity_failed={report.combos_parity_failed} "
+        f"pool={report.pool} gate_passers={report.gate_passers} "
+        f"baselines={report.baselines_written} "
+        f"top100={'written' if report.top100_written else 'FAILED'} "
+        f"entries={report.top100_entries}"
+    )
+    return True
+
+
+# ════ END P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001) ════
 
 
 # ────────────────────────────────────────────────────────────────────────
