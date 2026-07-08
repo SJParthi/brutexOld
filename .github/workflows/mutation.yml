@@ -59,7 +59,7 @@ on:
       - ".github/workflows/mutation.yml"
 
 # Least privilege (DEC-CI-FORK-PR-HARDEN-001 convention; fixer round of
-# DEC-MUTATION-RUNTIME-003): the WORKFLOW default is read-only — the 12 Rust
+# DEC-MUTATION-RUNTIME-003): the WORKFLOW default is read-only — the 13 Rust
 # shard jobs execute a broad third-party build surface (taiki-e/install-action,
 # hundreds of crates.io build.rs/proc-macros under cargo-mutants) and, since the
 # per-shard issue filers moved to the fan-in job, never touch issues at all.
