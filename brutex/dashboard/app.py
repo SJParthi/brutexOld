@@ -174,6 +174,7 @@ from brutex.dashboard.oneclick_artifacts import (
     read_run_status,
     read_top100,
     read_trades_page,
+    read_verify_me,
 )
 from brutex.dashboard.pipeline_prebuild import (
     PrebuildOutcome,
@@ -5641,6 +5642,26 @@ def build_app(
         """
         return _load_strategy_template()
 
+    @app.get("/verify-me", response_class=HTMLResponse)
+    async def verify_me_page() -> str:
+        """GET /verify-me — the R44 "VERIFY ME" operator-acceptance panel (P4 stage 5 of 6).
+
+        The 7-check acceptance verdict (determinism, audit-replay,
+        trade-chart-match, plain-English arithmetic, kill/resume, dedup-zero-
+        recomputed, funnel-reconcile) is RENDER ONLY per gap-register
+        Ruling 11 — this page never computes or triggers a check, it displays
+        whatever ``GET /api/v1/sweep/verify-me`` already says (honestly
+        ``"awaiting"`` per-check until P2's audit-verify backend merges).
+        Served as a plain cached static file with ZERO server-side token
+        substitution (same discipline as ``/strategy`` / ``_load_reports_template``)
+        — the client parses ``run_id`` from its own URL query string and, when
+        absent, resolves it itself via ``GET /api/v1/sweep/runs`` (never
+        defaulting to a demo run). Reachable via a "VERIFY ME" link on the
+        Operator page's run-status strip — deliberately NOT a ``nav.py``
+        NAV_LINKS entry (same contextual-link preference as ``/strategy``).
+        """
+        return _load_verify_me_template()
+
     @app.post("/api/v1/cascade/run")
     async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
         """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
@@ -6122,6 +6143,27 @@ def build_app(
                 offset=offset,
                 limit=limit,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/verify-me")
+    async def api_sweep_verify_me(
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/verify-me — the 7-key R44 operator-acceptance verdict.
+
+        Thin wrapper over
+        :func:`~brutex.dashboard.oneclick_artifacts.read_verify_me`. RENDER
+        ONLY (gap-register Ruling 11): this route never computes or triggers
+        a check — it serves whatever P2's ``verify-me.json`` (or, honestly,
+        its absence) already says, defaulting every one of the 7 checks to
+        ``"awaiting"`` when the file or the backend that writes it does not
+        exist yet. A malformed *run_id* is HTTP 400.
+        """
+        lake_root = _oneclick_lake_root()
+        try:
+            payload = await run_in_threadpool(read_verify_me, lake_root, run_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
@@ -7452,6 +7494,28 @@ def _load_strategy_template() -> str:
     if _STRATEGY_TEMPLATE_CACHE is None:
         _STRATEGY_TEMPLATE_CACHE = _STRATEGY_TEMPLATE_PATH.read_text(encoding="utf-8")
     return _STRATEGY_TEMPLATE_CACHE
+
+
+_VERIFY_ME_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "verify_me.html"
+_VERIFY_ME_TEMPLATE_CACHE: str | None = None
+
+
+def _load_verify_me_template() -> str:
+    """Load + cache the R44 VERIFY-ME panel template (DEC-INSTITUTIONAL-ONECLICK-001).
+
+    Ships as ``brutex/dashboard/templates/verify_me.html``. Named ``_load_*``
+    rather than ``_render_*_html`` for the SAME reason as
+    ``_load_strategy_template`` — this page carries no canonical top-nav (it
+    is reached only via a contextual link, per the grounding-fact preference
+    over a new ``nav.py`` NAV_LINKS row), so it is intentionally outside the
+    ``_render_*_html`` naming convention ``test_dashboard_nav_consistency.py``
+    scans. Loaded once, then served verbatim with ZERO token substitution
+    (the page parses its own ``run_id`` query string client-side).
+    """
+    global _VERIFY_ME_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _VERIFY_ME_TEMPLATE_CACHE is None:
+        _VERIFY_ME_TEMPLATE_CACHE = _VERIFY_ME_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _VERIFY_ME_TEMPLATE_CACHE
 
 
 def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:

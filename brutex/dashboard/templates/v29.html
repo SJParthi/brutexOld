@@ -2492,6 +2492,8 @@
   <div class="rc-head">
     <h2>Run status</h2>
     <select id="rsRunPicker" aria-label="Pick a run"><option value="">(latest)</option></select>
+    <a class="bx-btn ghost" id="rsVerifyMeLink" href="/verify-me" target="_blank" rel="noopener"
+      title="Open the R44 operator acceptance panel (VERIFY-ME) for this run">VERIFY ME &rarr;</a>
   </div>
   <div class="rc-idline" id="rsIdLine">no sweep run has ever launched</div>
   <div class="rc-banner rc-banner-red" id="rsSuspectBanner" hidden></div>
@@ -4767,6 +4769,12 @@
 
   function renderIdLine(runId, exitStatus) {
     var el = $('rsIdLine');
+    var verifyLink = $('rsVerifyMeLink');
+    if (verifyLink) {
+      // Property assignment (never a markup string) — safe against a hostile
+      // run_id, and the "/verify-me" path prefix is fixed, never caller-built.
+      verifyLink.href = runId ? ('/verify-me?run_id=' + encodeURIComponent(String(runId))) : '/verify-me';
+    }
     if (!el) return;
     if (!runId) { el.textContent = 'no sweep run has ever launched'; return; }
     var ok = exitStatus && exitStatus.state === 'ok';

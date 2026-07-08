@@ -1,0 +1,1042 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — VERIFY ME</title>
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C;
+    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
+    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
+    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(ellipse at top, rgba(157,123,255,0.07), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
+      var(--bg);
+  }
+  header { display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px; background:linear-gradient(90deg,var(--purple),var(--blue),var(--green)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .backlinks { display:flex; gap:12px; font-size:13px; }
+  .backlinks a { color:var(--blue); text-decoration:none; }
+  .backlinks a:hover { color:var(--text-bright); }
+  .modebtn { margin-left:auto; cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-pill);
+    min-height:32px; padding:0 14px; font:inherit; font-size:12px; font-weight:700;
+    color:var(--text-bright); background:var(--surface-2); }
+  .modebtn:hover { border-color:var(--blue); }
+  .modebtn .cur { color:var(--green); }
+
+  main { max-width:1180px; width:min(100% - 2 * var(--gutter), 1180px); margin:0 auto; padding:20px var(--gutter) 60px; flex:1 1 auto; }
+
+  .hdrcard { background:linear-gradient(160deg,var(--surface),var(--surface-2)); border:1px solid var(--border-strong);
+    border-radius:16px; padding:18px 22px; margin-bottom:18px; }
+  .hdrcard .title { font-size:17px; font-weight:800; color:var(--text-bright); }
+  .hdrcard .meta { color:var(--muted); font-size:12px; margin-top:6px; font-family: ui-monospace, monospace; }
+
+  .demo-ribbon { margin-top:10px; padding:8px 14px; border-radius:var(--r-md); font-size:12px; font-weight:800;
+    letter-spacing:.05em; text-transform:uppercase; background:rgba(255,183,77,.14); border:1px solid rgba(255,183,77,.45); color:var(--yellow); }
+  .demo-ribbon[hidden] { display:none; }
+
+  .banner { margin-top:10px; padding:10px 14px; border:1px solid var(--border-strong);
+    border-radius:var(--r-md); background:var(--surface-2); color:var(--muted); font-size:13px; }
+  .banner.err { border-color:var(--red); color:var(--red); background:rgba(255,92,92,.08); }
+  .banner.warn { border-color:var(--yellow); color:var(--yellow); background:rgba(255,183,77,.08); }
+  .banner[hidden] { display:none; }
+
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px 20px; margin-bottom:18px; }
+  .panel h2 { margin:0 0 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
+  .panel .sub { font-size:12px; color:var(--muted); margin-bottom:10px; }
+
+  .idline { font-size:11.5px; color:var(--muted); font-family: ui-monospace, monospace; }
+
+  /* Overall verdict banner — computed CLIENT-SIDE purely from the 7 rendered
+     check statuses (never a separate hidden source of truth). */
+  .verdict-banner { border-radius:var(--r-lg); padding:16px 20px; margin-bottom:18px; font-size:15px; font-weight:800;
+    border:1px solid var(--border-strong); background:var(--surface); }
+  .verdict-banner.accepted { color:var(--green); border-color:rgba(38,217,176,.5); background:rgba(38,217,176,.08); }
+  .verdict-banner.notaccepted { color:var(--red); border-color:rgba(255,92,92,.5); background:rgba(255,92,92,.08); }
+  .verdict-banner.awaiting { color:var(--yellow); border-color:rgba(255,183,77,.5); background:rgba(255,183,77,.08); }
+
+  .checks-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:14px; margin-bottom:18px; }
+  .check-card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
+  .check-card.wide { grid-column: 1 / -1; }
+  .check-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
+  .check-title { font-size:13px; font-weight:800; color:var(--text-bright); }
+  .check-detail { font-size:12.5px; color:var(--muted); line-height:1.5; }
+  .check-actions { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  .check-actions button, .check-actions a.bx-btn { cursor:pointer; }
+  .check-actions button[disabled] { cursor:not-allowed; opacity:.45; }
+  .check-extra { margin-top:12px; }
+
+  .combo-picker { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; font-size:12px; color:var(--muted); }
+  .combo-picker select { background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+    border-radius:var(--r-sm); padding:5px 8px; font:inherit; font-size:12px; min-width:220px; }
+
+  .chartwrap svg { width:100%; height:260px; display:block; background:var(--surface-2); border-radius:10px; }
+
+  .arith-lines { max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:10px; padding:8px 12px;
+    font-family: ui-monospace, monospace; font-size:12px; margin-top:6px; }
+  .arith-line { display:flex; justify-content:space-between; gap:10px; padding:2px 0; }
+  .arith-line.pos { color:var(--green); } .arith-line.neg { color:var(--red); } .arith-line.na { color:var(--muted); }
+  .arith-total { display:flex; justify-content:space-between; gap:10px; padding:8px 0 0; margin-top:6px; border-top:1px solid var(--border-strong);
+    font-weight:800; color:var(--text-bright); font-family: ui-monospace, monospace; font-size:13px; }
+  .arith-compare { margin-top:8px; font-size:12.5px; }
+  .arith-compare.match { color:var(--green); } .arith-compare.mismatch { color:var(--red); } .arith-compare.unknown { color:var(--muted); }
+
+  .recon-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+  .recon-table th, .recon-table td { text-align:left; padding:5px 10px; border-bottom:1px solid var(--border); }
+  .recon-table th { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:10px; letter-spacing:.05em; }
+  .recon-table td { color:var(--text); font-variant-numeric:tabular-nums; }
+  .recon-table tr.recon-row td { font-weight:800; }
+  .recon-row.match td { color:var(--green); } .recon-row.mismatch td { color:var(--red); } .recon-row.unknown td { color:var(--muted); }
+
+  .dedup-line { font-size:12.5px; color:var(--text); margin-top:6px; font-family: ui-monospace, monospace; }
+
+  .footer-links { text-align:center; font-size:12px; color:var(--muted); margin-top:8px; }
+  .footer-links a { color:var(--blue); text-decoration:none; }
+  .footer-links a:hover { color:var(--text-bright); }
+
+  /* Run timeline (footer) — mirrors templates/v29.html's .tl-* look. */
+  .tl-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .tl-controls input[type=text] { background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+    border-radius:var(--r-md); padding:7px 11px; font-size:12.5px; min-width:220px; }
+  .tl-kinds { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .tl-kind-chip { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-pill); background:var(--surface-2);
+    color:var(--muted); padding:3px 10px; font-size:11px; font-weight:700; }
+  .tl-kind-chip.active { color:var(--text-bright); border-color:var(--blue); background:rgba(91,141,239,.14); }
+  .tl-list { margin-top:12px; max-height:320px; overflow-y:auto; border:1px solid var(--border); border-radius:var(--r-sm); }
+  .tl-row { display:flex; gap:10px; padding:6px 12px; font-size:11.5px; border-bottom:1px solid var(--border); align-items:baseline; }
+  .tl-row:last-child { border-bottom:none; }
+  .tl-row .ts { color:var(--muted); font-family: ui-monospace, monospace; flex:0 0 150px; }
+  .tl-row .kind { flex:0 0 130px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; font-size:10.5px; }
+  .tl-row .payload { flex:1; color:var(--text); word-break:break-word; }
+  .rc-empty { color:var(--muted); font-size:12.5px; padding:10px 0; }
+
+  .bx-hoverable { border-bottom:1px dotted var(--muted); cursor:help; }
+  body.bx-mode-beginner .jargon { display:none !important; }
+  body.bx-mode-pro .plain-eng { display:none !important; }
+
+  a:focus-visible, button:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
+  }
+</style>
+<link rel="stylesheet" href="/static/bx-theme.css">
+<link rel="stylesheet" href="/static/bx-design.css">
+<!-- Shared one-click sweep display helpers (esc/el, Beginner/Pro mode,
+     hover-explain) — reused verbatim, same as /strategy. -->
+<script defer src="/static/bx-oneclick.js"></script>
+<!-- The IDENTICAL SVG candle+arrow renderer /strategy mounts — check-3
+     (trade_chart_match) uses this SAME code path, per the FINAL APPROVED
+     SPEC's chart_arrows_approach. -->
+<script defer src="/static/bx-oneclick-chart.js"></script>
+</head>
+<body data-accent="purple">
+  <header>
+    <div class="brandmark" aria-hidden="true">B</div>
+    <div class="logo">BruteX</div>
+    <nav class="backlinks" aria-label="Back">
+      <a href="/">&larr; Operator</a>
+      <a href="/results">Results</a>
+    </nav>
+    <button class="modebtn" id="modeToggleBtn" type="button"
+      title="Beginner mode shows plain English everywhere; Pro mode shows technical masks/stats.">
+      Mode: <span class="cur" id="modeToggleCur">beginner</span>
+    </button>
+  </header>
+
+  <main>
+    <!-- ── Header: run identity chip + DEMO ribbon (R44) ───────────────────── -->
+    <div class="hdrcard">
+      <div class="title" id="hdrTitle">Loading VERIFY-ME…</div>
+      <div class="meta" id="hdrMeta"></div>
+      <div class="demo-ribbon" id="demoRibbon" hidden>DEMO DATA — this is the all-pass sample fixture, not a real acceptance run</div>
+      <div class="banner err" id="hdrErrorBanner" hidden></div>
+      <div class="banner warn" id="noRealRunBanner" hidden>
+        No real sweep run has been launched yet, so every check below honestly reads "awaiting". Use
+        <a href="#" id="noRealRunDemoLink">view demo (all-pass) fixture</a> to see what a fully accepted run looks like.
+      </div>
+    </div>
+
+    <!-- ── Run identity strip (R43) ─────────────────────────────────────────── -->
+    <div class="panel">
+      <h2>Run identity</h2>
+      <div class="idline" id="idLine">no sweep run has ever launched</div>
+      <div class="banner err" id="suspectBanner" hidden></div>
+    </div>
+
+    <!-- ── Overall verdict (computed client-side from the 7 checks below) ──── -->
+    <div class="verdict-banner awaiting" id="overallVerdict">Loading the 7 R44 checks…</div>
+
+    <!-- ── The 7 R44 checks, in fixed order ─────────────────────────────────── -->
+    <div class="checks-grid" id="checksGrid"></div>
+
+    <!-- ── Footer: flight-recorder RUN TIMELINE (R41) ───────────────────────── -->
+    <div class="panel" id="timelinePanel">
+      <h2>Run timeline</h2>
+      <div class="sub">search + kind filters are explicit actions (bounded scan); the list below live-tails otherwise (cheap cursor read).</div>
+      <div class="tl-controls">
+        <input id="tlSearch" type="text" placeholder="search timeline…" aria-label="Search timeline">
+        <button class="bx-btn" id="tlSearchBtn" type="button">Search</button>
+        <button class="bx-btn ghost" id="tlLiveBtn" type="button">&#9201; back to live tail</button>
+      </div>
+      <div class="tl-kinds" id="tlKinds"></div>
+      <div class="tl-list" id="tlList"></div>
+    </div>
+
+    <div class="footer-links">
+      <a href="#" id="viewDemoFooterLink">view demo (all-pass) fixture</a>
+      &nbsp;·&nbsp;
+      <a href="#" id="viewRealFooterLink" hidden>back to the real run</a>
+    </div>
+  </main>
+
+<script>
+/* ── BruteX VERIFY-ME operator acceptance panel (DEC-INSTITUTIONAL-ONECLICK-001, R44).
+   RENDER ONLY (gap-register Ruling 11): this page never computes or triggers a
+   check — every status/detail string comes verbatim from
+   GET /api/v1/sweep/verify-me (P2's canned verdict, honestly "awaiting" until
+   P2's audit-verify backend merges). The overall accept/reject banner is
+   computed CLIENT-SIDE purely as a function of the 7 already-rendered check
+   statuses — never a separate hidden source of truth.
+
+   Client parses `run_id` from its OWN URL query string; when absent, resolves
+   the most-recently-known REAL (non-demo) run via an explicit fetch to
+   GET /api/v1/sweep/runs — NEVER defaulting to a demo run_id. A dedicated
+   "view demo (all-pass) fixture" toggle swaps to demo-allpass-2026-07-08 and
+   stays visibly DEMO-ribbon-wrapped throughout (its `is_demo` flag comes
+   verbatim from the verify-me response, regardless of how the run_id was
+   selected).
+
+   XSS HARD RULE: every server-derived string reaches the DOM via
+   .textContent / BX.el(...) (itself textContent-only) — never innerHTML.
+   See tests/unit/test_dashboard_verify_me_template_xss.py. */
+(function () {
+  "use strict";
+  var BX = window.BXOneclick;
+  var BXChart = window.BXChart;
+
+  var SENTINEL_NO_REAL_RUN = "no-real-run-selected";
+  var DEMO_RUN_ID = "demo-allpass-2026-07-08";
+
+  //: The 7 R44 checks, in the FIXED display order the backend also uses
+  //: (brutex.dashboard.oneclick_artifacts.VERIFY_ME_CHECKS) — a title +
+  //: the DOM id prefix used for every element belonging to that card.
+  var CHECKS = [
+    { key: "determinism", id: "chkDeterminism", title: "1 · Determinism" },
+    { key: "audit_replay", id: "chkAuditReplay", title: "2 · Audit replay" },
+    { key: "trade_chart_match", id: "chkTradeChart", title: "3 · Trade ↔ chart match" },
+    { key: "plain_english_arithmetic", id: "chkArithmetic", title: "4 · Plain-English arithmetic", wide: true },
+    { key: "kill_resume", id: "chkKillResume", title: "5 · Kill / resume" },
+    { key: "dedup_zero_recomputed", id: "chkDedup", title: "6 · Dedup — zero recomputed" },
+    { key: "funnel_reconcile", id: "chkFunnel", title: "7 · Funnel reconcile" },
+  ];
+
+  //: STATUS_STYLE mirrors brutex.dashboard.oneclick_badges.check_badge_for()
+  //: verbatim (the module docstring there documents this as the canonical
+  //: mapping) — kept as a small local JS object because this dashboard has
+  //: no server-side template rendering to import a Python module into.
+  var STATUS_STYLE = {
+    pass: { cls: "ok", label: "PASS" },
+    fail: { cls: "bad", label: "FAIL" },
+    awaiting: { cls: "warn", label: "AWAITING" },
+  };
+
+  function qs(name) {
+    var v = new URLSearchParams(window.location.search).get(name);
+    return v === null || v === "" ? null : v;
+  }
+  var Q = { run_id: qs("run_id") };
+
+  var currentRunId = null;
+  var comboRows = []; // top100 rows for the current run
+  var comboTradesCache = {}; // rank -> trades response body
+
+  var hdrTitle = document.getElementById("hdrTitle");
+  var hdrMeta = document.getElementById("hdrMeta");
+  var demoRibbon = document.getElementById("demoRibbon");
+  var hdrErrorBanner = document.getElementById("hdrErrorBanner");
+  var noRealRunBanner = document.getElementById("noRealRunBanner");
+  var idLine = document.getElementById("idLine");
+  var suspectBanner = document.getElementById("suspectBanner");
+  var overallVerdict = document.getElementById("overallVerdict");
+  var checksGrid = document.getElementById("checksGrid");
+  var modeBtn = document.getElementById("modeToggleBtn");
+  var modeCur = document.getElementById("modeToggleCur");
+  var viewDemoFooterLink = document.getElementById("viewDemoFooterLink");
+  var viewRealFooterLink = document.getElementById("viewRealFooterLink");
+  var noRealRunDemoLink = document.getElementById("noRealRunDemoLink");
+
+  function fmtRupees(paisa) {
+    if (paisa === null || paisa === undefined) return "—";
+    var n = Number(paisa) / 100;
+    if (!isFinite(n)) return "—";
+    return "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  }
+  function fmtInt(v) {
+    if (v === null || v === undefined || !isFinite(Number(v))) return "—";
+    return Number(v).toLocaleString("en-IN");
+  }
+
+  function showBanner(el, text, cls) {
+    el.textContent = text;
+    el.className = "banner" + (cls ? " " + cls : "");
+    el.hidden = false;
+  }
+  function hideBanner(el) {
+    el.hidden = true;
+    el.textContent = "";
+  }
+
+  // ── Beginner/Pro mode toggle (shared, persisted) ──────────────────────
+  if (BX) {
+    BX.mode.init();
+    modeCur.textContent = BX.mode.get();
+    modeBtn.addEventListener("click", function () {
+      BX.mode.toggle();
+      modeCur.textContent = BX.mode.get();
+    });
+  }
+
+  // ── status pill builder (mirrors oneclick_badges.check_badge_for) ─────
+  function statusPill(status) {
+    var style = STATUS_STYLE[status] || STATUS_STYLE.awaiting;
+    var chip = BX.el("span", "bx-chip " + style.cls, style.label);
+    return chip;
+  }
+
+  // ── check card skeleton ─────────────────────────────────────────────
+  function buildCheckCards() {
+    BX.clear(checksGrid);
+    CHECKS.forEach(function (spec) {
+      var card = BX.el("div", "check-card" + (spec.wide ? " wide" : ""));
+      card.id = spec.id;
+      var head = BX.el("div", "check-head");
+      head.appendChild(BX.el("span", "check-title", spec.title));
+      var pillHolder = BX.el("span", "");
+      pillHolder.id = spec.id + "Pill";
+      head.appendChild(pillHolder);
+      card.appendChild(head);
+      var detail = BX.el("div", "check-detail");
+      detail.id = spec.id + "Detail";
+      card.appendChild(detail);
+      var extra = BX.el("div", "check-extra");
+      extra.id = spec.id + "Extra";
+      card.appendChild(extra);
+      checksGrid.appendChild(card);
+    });
+  }
+
+  function renderCheckHeader(spec, checkObj) {
+    var pillHolder = document.getElementById(spec.id + "Pill");
+    var detail = document.getElementById(spec.id + "Detail");
+    var status = (checkObj && checkObj.status) || "awaiting";
+    BX.clear(pillHolder);
+    pillHolder.appendChild(statusPill(status));
+    detail.textContent = (checkObj && checkObj.detail) || "P2 audit-verify backend not yet merged";
+    return status;
+  }
+
+  // ── check 1: Determinism — read-only, disabled re-run button ──────────
+  function renderDeterminism(checkObj) {
+    var spec = CHECKS[0];
+    renderCheckHeader(spec, checkObj);
+    var extra = document.getElementById(spec.id + "Extra");
+    BX.clear(extra);
+    var actions = BX.el("div", "check-actions");
+    var btn = document.createElement("button");
+    btn.className = "bx-btn";
+    btn.type = "button";
+    btn.disabled = true;
+    btn.textContent = "Re-run verification";
+    btn.title = "Awaiting P2's scratch-root recount backend — a fake button that appears to verify would itself violate the no-hallucination rule.";
+    actions.appendChild(btn);
+    extra.appendChild(actions);
+  }
+
+  // ── check 2: Audit replay — read-only, disabled replay button + a REAL
+  //    jump-to-timeline link (the timeline panel itself already works). ────
+  function renderAuditReplay(checkObj) {
+    var spec = CHECKS[1];
+    renderCheckHeader(spec, checkObj);
+    var extra = document.getElementById(spec.id + "Extra");
+    BX.clear(extra);
+    var actions = BX.el("div", "check-actions");
+    var btn = document.createElement("button");
+    btn.className = "bx-btn";
+    btn.type = "button";
+    btn.disabled = true;
+    btn.textContent = "Replay chain";
+    btn.title = "Awaiting P2's audit-verify backend — once wired this deep-links into the Run Timeline below, filtered to this run.";
+    actions.appendChild(btn);
+    var jump = document.createElement("a");
+    jump.className = "bx-btn ghost";
+    jump.href = "#timelinePanel";
+    jump.textContent = "Jump to timeline ↓";
+    jump.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      var panel = document.getElementById("timelinePanel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    actions.appendChild(jump);
+    extra.appendChild(actions);
+  }
+
+  // ── combo picker shared by checks 3 + 4 ────────────────────────────────
+  function buildComboPicker(idPrefix, onChange) {
+    var wrap = BX.el("div", "combo-picker");
+    var label = BX.el("span", "", "combo:");
+    var select = document.createElement("select");
+    select.id = idPrefix + "ComboPicker";
+    select.setAttribute("aria-label", "Pick a combo");
+    wrap.appendChild(label);
+    wrap.appendChild(select);
+    select.addEventListener("change", function () { onChange(select.value); });
+    return { wrap: wrap, select: select };
+  }
+
+  function populateComboPicker(select) {
+    BX.clear(select);
+    if (!comboRows.length) {
+      var opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "no combos available for this run";
+      select.appendChild(opt);
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    comboRows.forEach(function (row) {
+      var opt = document.createElement("option");
+      opt.value = String(row.rank);
+      opt.textContent = "#" + row.rank + " " + (row.instrument || "—") + " " +
+        (row.tf || "—") + " " + (row.direction || "—");
+      select.appendChild(opt);
+    });
+  }
+
+  async function fetchTradesForRank(rank) {
+    var key = String(rank);
+    if (comboTradesCache[key]) return comboTradesCache[key];
+    var row = comboRows.filter(function (r) { return String(r.rank) === key; })[0];
+    var params = new URLSearchParams();
+    params.set("rank", key);
+    if (currentRunId) params.set("run_id", currentRunId);
+    if (row) {
+      if (row.mask_hex) params.set("mask_hex", row.mask_hex);
+      if (row.direction) params.set("direction", row.direction);
+      if (row.tf) params.set("tf", row.tf);
+    }
+    params.set("limit", "200");
+    var r = await BX.fetchJSON("/api/v1/sweep/trades?" + params.toString());
+    var body = r.ok ? r.body : { state: "artifact_error", reason: "HTTP " + r.status, rows: [], total: 0 };
+    comboTradesCache[key] = { row: row, body: body };
+    return comboTradesCache[key];
+  }
+
+  // ── check 3: trade_chart_match — the IDENTICAL chart renderer /strategy
+  //    mounts, over a rank picked from this run's top-100. ────────────────
+  var chart3 = null;
+  function renderTradeChartMatch(checkObj) {
+    var spec = CHECKS[2];
+    renderCheckHeader(spec, checkObj);
+    var extra = document.getElementById(spec.id + "Extra");
+    BX.clear(extra);
+
+    var picker = buildComboPicker("chart", function (rank) {
+      if (rank) loadChart3(Number(rank));
+    });
+    extra.appendChild(picker.wrap);
+    populateComboPicker(picker.select);
+
+    var sub = BX.el("div", "sub");
+    sub.id = "chart3Sub";
+    extra.appendChild(sub);
+
+    var chartWrap = BX.el("div", "chartwrap");
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 1000 320");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Candlestick chart with entry and exit markers");
+    svg.id = "chart3Svg";
+    chartWrap.appendChild(svg);
+    extra.appendChild(chartWrap);
+
+    var banner = BX.el("div", "banner");
+    banner.id = "chart3Banner";
+    banner.hidden = true;
+    extra.appendChild(banner);
+
+    chart3 = { svg: svg, sub: sub, banner: banner };
+
+    if (comboRows.length) {
+      picker.select.value = String(comboRows[0].rank);
+      loadChart3(comboRows[0].rank);
+    } else {
+      showBanner(banner, "No combos available yet for this run — top-100 artifact not written.", "");
+    }
+  }
+
+  async function loadChart3(rank) {
+    if (!chart3 || !BXChart) return;
+    BXChart.clearNode(chart3.svg);
+    hideBanner(chart3.banner);
+    chart3.sub.textContent = "loading trades for rank #" + rank + "…";
+    var loaded = await fetchTradesForRank(rank);
+    var body = loaded.body;
+    var row = loaded.row;
+    if (body.state !== "ok" || !body.rows || !body.rows.length) {
+      chart3.sub.textContent = "";
+      showBanner(
+        chart3.banner,
+        body.state === "awaiting_artifact"
+          ? "Awaiting real artifact — " + (body.reason || "no trade list for this combo yet")
+          : body.state === "artifact_error"
+            ? "Trade list present but unreadable: " + (body.reason || "unknown error")
+            : "No trades recorded for this combo yet.",
+        ""
+      );
+      return;
+    }
+    if (!row || !row.instrument || row.instrument === "—") {
+      chart3.sub.textContent = "";
+      showBanner(chart3.banner, "Chart unavailable — this combo's instrument is unknown (legacy top100 row).", "");
+      return;
+    }
+    var interval = BXChart.tfToInterval(row.tf);
+    if (!interval) {
+      chart3.sub.textContent = "";
+      showBanner(chart3.banner, "Chart unavailable — unrecognised timeframe " + String(row.tf) + ".", "");
+      return;
+    }
+    var trade = body.rows[body.rows.length - 1];
+    var sessionDate = BXChart.sessionDateOf(trade.entry_ts);
+    if (!sessionDate) {
+      chart3.sub.textContent = "";
+      showBanner(chart3.banner, "Chart unavailable — this trade's entry_ts could not be parsed.", "err");
+      return;
+    }
+    var params = new URLSearchParams();
+    params.set("exchange", BXChart.exchangeForInstrument(row.instrument));
+    params.set("segment", BXChart.segmentForInstrument());
+    params.set("symbol", row.instrument);
+    params.set("interval", interval);
+    params.set("start", sessionDate);
+    params.set("end", sessionDate);
+    params.set("limit", "500");
+    try {
+      var r = await BX.fetchJSON("/api/v1/db/candles?" + params.toString());
+      if (!r.ok) {
+        chart3.sub.textContent = "";
+        showBanner(chart3.banner, "error " + r.status + " loading candles for " + sessionDate, "err");
+        return;
+      }
+      if (!r.body.rows || !r.body.rows.length) {
+        chart3.sub.textContent = "";
+        showBanner(chart3.banner, "No candle data for " + row.instrument + " " + row.tf + " on " + sessionDate + " — a real data gap, not fabricated.", "");
+        return;
+      }
+      var sameDay = body.rows.filter(function (t) { return BXChart.sessionDateOf(t.entry_ts) === sessionDate; });
+      var stats = BXChart.renderCandleChart(chart3.svg, r.body, sameDay, { focusTrade: trade });
+      chart3.sub.textContent = fmtInt(stats.bars) + " bars · " + fmtInt(stats.entriesDrawn) + " entries · " +
+        fmtInt(stats.exitsDrawn) + " exits marked on " + sessionDate + " — eyeball-compare this against your own broker/TradingView chart.";
+    } catch (e) {
+      chart3.sub.textContent = "";
+      showBanner(chart3.banner, "offline — could not reach the candle API", "err");
+    }
+  }
+
+  // ── check 4: plain-English arithmetic — a REAL interactive line-by-line
+  //    sum over the ALREADY-VERIFIED trade numbers on screen (permitted: this
+  //    is arithmetic over verified numbers, not invented text, per R27). ───
+  var arith4 = null;
+  function renderArithmetic(checkObj) {
+    var spec = CHECKS[3];
+    renderCheckHeader(spec, checkObj);
+    var extra = document.getElementById(spec.id + "Extra");
+    BX.clear(extra);
+
+    var picker = buildComboPicker("arith", function (rank) {
+      if (rank) loadArithmetic4(Number(rank));
+    });
+    extra.appendChild(picker.wrap);
+    populateComboPicker(picker.select);
+
+    var claim = BX.el("div", "sub");
+    claim.id = "arith4Claim";
+    extra.appendChild(claim);
+
+    var lines = BX.el("div", "arith-lines");
+    lines.id = "arith4Lines";
+    extra.appendChild(lines);
+
+    var total = BX.el("div", "arith-total");
+    total.id = "arith4Total";
+    extra.appendChild(total);
+
+    var compare = BX.el("div", "arith-compare");
+    compare.id = "arith4Compare";
+    extra.appendChild(compare);
+
+    arith4 = { claim: claim, lines: lines, total: total, compare: compare };
+
+    if (comboRows.length) {
+      picker.select.value = String(comboRows[0].rank);
+      loadArithmetic4(comboRows[0].rank);
+    } else {
+      claim.textContent = "No combos available yet for this run — top-100 artifact not written.";
+    }
+  }
+
+  async function loadArithmetic4(rank) {
+    if (!arith4) return;
+    arith4.claim.textContent = "loading trade list for rank #" + rank + "…";
+    BX.clear(arith4.lines);
+    arith4.total.textContent = "";
+    arith4.compare.textContent = "";
+    arith4.compare.className = "arith-compare";
+    var loaded = await fetchTradesForRank(rank);
+    var body = loaded.body;
+    var row = loaded.row;
+    if (row) {
+      arith4.claim.textContent = (BX.mode.get() === "pro" ? row.pro_sentence : row.simple_sentence) || "";
+    } else {
+      arith4.claim.textContent = "";
+    }
+    if (body.state !== "ok" || !body.rows || !body.rows.length) {
+      var msg = document.createElement("div");
+      msg.className = "rc-empty";
+      msg.textContent = body.state === "awaiting_artifact"
+        ? "Awaiting real artifact — " + (body.reason || "no trade list for this combo yet")
+        : body.state === "artifact_error"
+          ? "Trade list present but unreadable: " + (body.reason || "unknown error")
+          : "No trades recorded for this combo yet.";
+      arith4.lines.appendChild(msg);
+      return;
+    }
+    var sum = 0;
+    var excluded = 0;
+    body.rows.forEach(function (t) {
+      var line = document.createElement("div");
+      var val = t.pnl_paisa;
+      if (val === null || val === undefined) {
+        line.className = "arith-line na";
+        line.appendChild(el2("span", null, String(t.entry_ts || "—")));
+        line.appendChild(el2("span", null, "— (P&L not available)"));
+        excluded += 1;
+      } else {
+        var n = Number(val);
+        sum += n;
+        line.className = "arith-line " + (n >= 0 ? "pos" : "neg");
+        line.appendChild(el2("span", null, String(t.entry_ts || "—")));
+        line.appendChild(el2("span", null, (n >= 0 ? "+ " : "− ") + fmtRupees(Math.abs(n))));
+      }
+      arith4.lines.appendChild(line);
+    });
+    var totalLabel = document.createElement("span");
+    totalLabel.textContent = "sum of " + fmtInt(body.rows.length - excluded) + " trades" +
+      (excluded ? " (" + fmtInt(excluded) + " excluded, P&L not available)" : "");
+    var totalValue = document.createElement("span");
+    totalValue.textContent = "= " + fmtRupees(sum);
+    BX.clear(arith4.total);
+    arith4.total.appendChild(totalLabel);
+    arith4.total.appendChild(totalValue);
+
+    var displayedNet = row && row.metrics ? row.metrics.net_pnl_paisa : null;
+    if (displayedNet === null || displayedNet === undefined) {
+      arith4.compare.textContent = "no displayed net P&L to compare against for this combo.";
+      arith4.compare.className = "arith-compare unknown";
+    } else if (excluded > 0) {
+      arith4.compare.textContent = "cannot fully reconcile — " + fmtInt(excluded) +
+        " trade(s) on this page have no P&L recorded yet.";
+      arith4.compare.className = "arith-compare unknown";
+    } else if (Math.round(sum) === Math.round(Number(displayedNet))) {
+      arith4.compare.textContent = "✓ matches the displayed net P&L (" + fmtRupees(displayedNet) + ") exactly.";
+      arith4.compare.className = "arith-compare match";
+    } else {
+      arith4.compare.textContent = "✗ mismatch vs the displayed net P&L (" + fmtRupees(displayedNet) +
+        ") by " + fmtRupees(sum - Number(displayedNet)) + ".";
+      arith4.compare.className = "arith-compare mismatch";
+    }
+  }
+
+  function el2(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // ── check 5: kill/resume — read-only, no action possible from a page ──
+  function renderKillResume(checkObj) {
+    renderCheckHeader(CHECKS[4], checkObj);
+  }
+
+  // ── check 6: dedup zero-recomputed — canned status + REAL manifest numbers ─
+  function renderDedup(checkObj, manifest) {
+    var spec = CHECKS[5];
+    renderCheckHeader(spec, checkObj);
+    var extra = document.getElementById(spec.id + "Extra");
+    BX.clear(extra);
+    if (!manifest || manifest.state !== "ok") {
+      var msg = document.createElement("div");
+      msg.className = "rc-empty";
+      msg.textContent = "manifest not available yet for this run.";
+      extra.appendChild(msg);
+      return;
+    }
+    var line1 = BX.el("div", "dedup-line", "dedup_skips (manifest, real): " + fmtInt(manifest.dedup_skips));
+    extra.appendChild(line1);
+    var detail = manifest.dedup_skips_detail;
+    if (detail && typeof detail === "object") {
+      var line2 = BX.el(
+        "div",
+        "dedup-line",
+        "breakdown — cache: " + fmtInt(detail.cache) + " · resume: " + fmtInt(detail.resume) +
+          " · sentinel: " + fmtInt(detail.sentinel)
+      );
+      extra.appendChild(line2);
+    }
+  }
+
+  // ── check 7: funnel reconcile — canned status + a REAL reconciliation row ─
+  function renderFunnel(checkObj, manifest) {
+    var spec = CHECKS[6];
+    renderCheckHeader(spec, checkObj);
+    var extra = document.getElementById(spec.id + "Extra");
+    BX.clear(extra);
+    var funnel = (manifest && manifest.state === "ok" && Array.isArray(manifest.actual && manifest.actual.funnel))
+      ? manifest.actual.funnel : [];
+    if (!funnel.length) {
+      var msg = document.createElement("div");
+      msg.className = "rc-empty";
+      msg.textContent = "funnel counts not available yet for this run.";
+      extra.appendChild(msg);
+      return;
+    }
+    var table = document.createElement("table");
+    table.className = "recon-table";
+    var head = document.createElement("tr");
+    [["Stage", null], ["Count", null]].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h[0];
+      head.appendChild(th);
+    });
+    table.appendChild(head);
+    var byStage = {};
+    funnel.forEach(function (row) {
+      var stage = String(row.stage || "");
+      byStage[stage] = row.count;
+      var tr = document.createElement("tr");
+      var tdStage = document.createElement("td");
+      tdStage.textContent = stage;
+      var tdCount = document.createElement("td");
+      tdCount.textContent = fmtInt(row.count);
+      tr.appendChild(tdStage);
+      tr.appendChild(tdCount);
+      table.appendChild(tr);
+    });
+
+    var reconRow = document.createElement("tr");
+    reconRow.className = "recon-row";
+    var tdLabel = document.createElement("td");
+    var tdValue = document.createElement("td");
+    var have = ["enumerated", "tested", "skipped", "in_flight"].every(function (k) {
+      return Object.prototype.hasOwnProperty.call(byStage, k) && typeof byStage[k] === "number";
+    });
+    if (!have) {
+      tdLabel.textContent = "enumerated == tested + skipped + in_flight";
+      tdValue.textContent = "cannot compute — not all 4 stage counts are present yet";
+      reconRow.className += " unknown";
+    } else {
+      var rhs = byStage.tested + byStage.skipped + byStage.in_flight;
+      var ok = byStage.enumerated === rhs;
+      tdLabel.textContent = "enumerated (" + fmtInt(byStage.enumerated) + ") == tested + skipped + in_flight (" + fmtInt(rhs) + ")";
+      tdValue.textContent = ok ? "✓ exact match" : "✗ off by " + fmtInt(Math.abs(byStage.enumerated - rhs));
+      reconRow.className += ok ? " match" : " mismatch";
+    }
+    reconRow.appendChild(tdLabel);
+    reconRow.appendChild(tdValue);
+    table.appendChild(reconRow);
+    extra.appendChild(table);
+  }
+
+  // ── overall verdict — computed CLIENT-SIDE purely from the 7 statuses ──
+  function renderOverallVerdict(checks) {
+    var pass = 0, fail = 0, awaiting = 0;
+    CHECKS.forEach(function (spec) {
+      var st = (checks[spec.key] && checks[spec.key].status) || "awaiting";
+      if (st === "pass") pass += 1;
+      else if (st === "fail") fail += 1;
+      else awaiting += 1;
+    });
+    overallVerdict.className = "verdict-banner";
+    if (fail > 0) {
+      overallVerdict.classList.add("notaccepted");
+      overallVerdict.textContent = pass + " / 7 — NOT ACCEPTED, see failing check(s) below";
+    } else if (pass === CHECKS.length) {
+      overallVerdict.classList.add("accepted");
+      overallVerdict.textContent = "7 / 7 PASS — ACCEPTED";
+    } else {
+      overallVerdict.classList.add("awaiting");
+      overallVerdict.textContent = "AWAITING — " + awaiting + " of 7 not yet runnable (P2 backend not merged)";
+    }
+  }
+
+  // ── run identity strip ──────────────────────────────────────────────
+  function renderIdentity(runStatus) {
+    var exitStatus = runStatus && runStatus.exit_status;
+    var chainMap = runStatus && runStatus.chain_map;
+    var manifest = runStatus && runStatus.manifest;
+    if (!runStatus || !runStatus.run_id) {
+      idLine.textContent = "no sweep run has ever launched";
+      hideBanner(suspectBanner);
+      return manifest;
+    }
+    var ok = exitStatus && exitStatus.state === "ok";
+    var runState = ok ? String(exitStatus.run_state || "unknown") : "awaiting real artifact";
+    var started = ok && exitStatus.wall_started_utc ? String(exitStatus.wall_started_utc) : "—";
+    var ended = ok && exitStatus.wall_ended_utc ? String(exitStatus.wall_ended_utc)
+      : (ok && runState === "running" ? "running…" : "—");
+    idLine.textContent = "RUN " + String(runStatus.run_id) + " · " + runState + " · started " + started + " · ended " + ended;
+
+    var suspect = !!((chainMap && chainMap.suspect) || (exitStatus && exitStatus.suspect) || (manifest && manifest.suspect));
+    if (!suspect) {
+      hideBanner(suspectBanner);
+    } else {
+      var reasons = (manifest && Array.isArray(manifest.suspect_reasons) && manifest.suspect_reasons.length)
+        ? manifest.suspect_reasons.map(String).join("; ")
+        : "a live tripwire fired during this run — review before trusting its results";
+      showBanner(suspectBanner, "SUSPECT: " + reasons, "err");
+    }
+    return manifest;
+  }
+
+  // ── main load ────────────────────────────────────────────────────────
+  async function resolveDefaultRunId() {
+    try {
+      var r = await BX.fetchJSON("/api/v1/sweep/runs?limit=50");
+      if (!r.ok || !r.body || !Array.isArray(r.body.runs)) return null;
+      var real = r.body.runs.filter(function (row) { return !row.is_demo; });
+      return real.length ? real[0].run_id : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function loadAll() {
+    comboTradesCache = {};
+    var params = currentRunId ? ("?run_id=" + encodeURIComponent(currentRunId)) : "";
+    hideBanner(hdrErrorBanner);
+    hideBanner(noRealRunBanner);
+    if (currentRunId === SENTINEL_NO_REAL_RUN) {
+      noRealRunBanner.hidden = false;
+    }
+    var vmR, rsR, topR;
+    try {
+      var results = await Promise.all([
+        BX.fetchJSON("/api/v1/sweep/verify-me" + params),
+        BX.fetchJSON("/api/v1/sweep/run-status" + params),
+        BX.fetchJSON("/api/v1/sweep/top100" + params),
+      ]);
+      vmR = results[0]; rsR = results[1]; topR = results[2];
+    } catch (e) {
+      showBanner(hdrErrorBanner, "offline — could not reach the sweep API", "err");
+      return;
+    }
+    if (!vmR.ok) {
+      showBanner(hdrErrorBanner, "error " + vmR.status + " loading the VERIFY-ME verdict", "err");
+      return;
+    }
+    var vm = vmR.body;
+    var runStatus = rsR.ok ? rsR.body : null;
+    var top100 = topR.ok ? topR.body : null;
+    comboRows = (top100 && top100.state === "ok" && Array.isArray(top100.rows)) ? top100.rows : [];
+
+    hdrTitle.textContent = vm.run_id ? ("VERIFY ME — " + String(vm.run_id)) : "VERIFY ME";
+    hdrMeta.textContent = vm.run_id ? "run " + String(vm.run_id) : "no run selected";
+    demoRibbon.hidden = !vm.is_demo;
+    viewRealFooterLink.hidden = !vm.is_demo || !Q.run_id;
+
+    var manifest = renderIdentity(runStatus);
+
+    buildCheckCards();
+    var checks = vm.checks || {};
+    renderDeterminism(checks.determinism);
+    renderAuditReplay(checks.audit_replay);
+    renderTradeChartMatch(checks.trade_chart_match);
+    renderArithmetic(checks.plain_english_arithmetic);
+    renderKillResume(checks.kill_resume);
+    renderDedup(checks.dedup_zero_recomputed, manifest);
+    renderFunnel(checks.funnel_reconcile, manifest);
+    renderOverallVerdict(checks);
+
+    resetTimeline();
+    loadTimelinePage(true);
+  }
+
+  async function switchToRun(runId) {
+    currentRunId = runId;
+    await loadAll();
+  }
+
+  viewDemoFooterLink.addEventListener("click", function (ev) {
+    ev.preventDefault();
+    switchToRun(DEMO_RUN_ID);
+  });
+  noRealRunDemoLink.addEventListener("click", function (ev) {
+    ev.preventDefault();
+    switchToRun(DEMO_RUN_ID);
+  });
+  viewRealFooterLink.addEventListener("click", function (ev) {
+    ev.preventDefault();
+    switchToRun(Q.run_id || SENTINEL_NO_REAL_RUN);
+  });
+
+  // ── footer timeline (R41) — self-contained cursor tail + bounded search ─
+  var tlCursor = 0;
+  var tlKindFilter = null;
+  var tlSearchMode = false;
+  var TL_KINDS = ["stage", "tuple_done", "milestone", "tripwire", "quarantine", "refusal", "checkpoint"];
+
+  function resetTimeline() {
+    tlCursor = 0;
+    tlKindFilter = null;
+    tlSearchMode = false;
+    var list = document.getElementById("tlList");
+    BX.clear(list);
+    var searchInput = document.getElementById("tlSearch");
+    if (searchInput) searchInput.value = "";
+    var kindsWrap = document.getElementById("tlKinds");
+    BX.clear(kindsWrap);
+    var allChip = BX.el("span", "tl-kind-chip active", "all");
+    allChip.addEventListener("click", function () { setKindFilter(null); });
+    kindsWrap.appendChild(allChip);
+    TL_KINDS.forEach(function (k) {
+      var chip = BX.el("span", "tl-kind-chip", k);
+      chip.addEventListener("click", function () { setKindFilter(k); });
+      kindsWrap.appendChild(chip);
+    });
+  }
+
+  function setKindFilter(kind) {
+    tlKindFilter = kind;
+    tlSearchMode = false;
+    var kindsWrap = document.getElementById("tlKinds");
+    Array.prototype.forEach.call(kindsWrap.children, function (chip, idx) {
+      chip.classList.toggle("active", (idx === 0 && kind === null) || chip.textContent === kind);
+    });
+    tlCursor = 0;
+    BX.clear(document.getElementById("tlList"));
+    loadTimelinePage(true);
+  }
+
+  function appendTimelineRow(list, rec) {
+    var row = BX.el("div", "tl-row");
+    row.appendChild(BX.el("span", "ts", rec.ts_utc ? String(rec.ts_utc) : "—"));
+    row.appendChild(BX.el("span", "kind", String(rec.kind || "?")));
+    row.appendChild(BX.el("span", "payload", BX.safeJson(rec.payload)));
+    list.appendChild(row);
+  }
+
+  async function loadTimelinePage(reset) {
+    if (tlSearchMode) return;
+    var list = document.getElementById("tlList");
+    if (!list) return;
+    if (reset) { tlCursor = 0; BX.clear(list); }
+    try {
+      var params = new URLSearchParams({ after_seq: String(tlCursor), limit: "100" });
+      if (currentRunId) params.set("run_id", currentRunId);
+      if (tlKindFilter) params.set("kind", tlKindFilter);
+      var r = await BX.fetchJSON("/api/v1/sweep/timeline?" + params.toString());
+      if (!r.ok) return;
+      var j = r.body;
+      if (j.state !== "ok") {
+        if (!list.firstChild) {
+          var empty = BX.el("div", "rc-empty", j.reason || "awaiting real artifact — no flight recorder for this run yet");
+          list.appendChild(empty);
+        }
+        return;
+      }
+      (j.records || []).forEach(function (rec) { appendTimelineRow(list, rec); });
+      if (j.next_after_seq !== null && j.next_after_seq !== undefined) tlCursor = j.next_after_seq;
+      if ((j.records || []).length) list.scrollTop = list.scrollHeight;
+    } catch (e) { /* network blip; next tick retries */ }
+  }
+
+  async function runTimelineSearch(q) {
+    var list = document.getElementById("tlList");
+    if (!list) return;
+    try {
+      var params = new URLSearchParams({ q: q, limit: "200" });
+      if (currentRunId) params.set("run_id", currentRunId);
+      if (tlKindFilter) params.set("kind", tlKindFilter);
+      var r = await BX.fetchJSON("/api/v1/sweep/timeline?" + params.toString());
+      if (!r.ok) return;
+      var j = r.body;
+      BX.clear(list);
+      if (j.state !== "ok" || !(j.records || []).length) {
+        list.appendChild(BX.el("div", "rc-empty", j.state === "ok" ? "no matching timeline records" : (j.reason || "search unavailable")));
+        return;
+      }
+      j.records.forEach(function (rec) { appendTimelineRow(list, rec); });
+    } catch (e) { /* network blip */ }
+  }
+
+  var tlSearchBtn = document.getElementById("tlSearchBtn");
+  var tlSearchInput = document.getElementById("tlSearch");
+  var tlLiveBtn = document.getElementById("tlLiveBtn");
+  tlSearchBtn.addEventListener("click", function () {
+    var q = tlSearchInput.value.trim();
+    if (!q) return;
+    tlSearchMode = true;
+    runTimelineSearch(q);
+  });
+  tlSearchInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") tlSearchBtn.click();
+  });
+  tlLiveBtn.addEventListener("click", function () {
+    tlSearchMode = false;
+    tlSearchInput.value = "";
+    tlCursor = 0;
+    BX.clear(document.getElementById("tlList"));
+    loadTimelinePage(true);
+  });
+
+  var TL_POLL_MS = 4000;
+  setInterval(function () {
+    if (!document.hidden) loadTimelinePage(false);
+  }, TL_POLL_MS);
+
+  // ── boot ────────────────────────────────────────────────────────────
+  async function init() {
+    if (!BX || !BXChart) {
+      showBanner(hdrErrorBanner, "A required script failed to load — reload the page.", "err");
+      return;
+    }
+    if (Q.run_id) {
+      currentRunId = Q.run_id;
+    } else {
+      currentRunId = (await resolveDefaultRunId()) || SENTINEL_NO_REAL_RUN;
+    }
+    await loadAll();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
