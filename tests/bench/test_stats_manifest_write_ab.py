@@ -35,7 +35,7 @@ no shard ever created; review round 2). Two layers:
   least once on the registered self-hosted M4-Pro tier: actions run
   28888100079 (2026-07-07, the first real M4-Pro run) ran this gate GREEN —
   the measured median overhead is printed in that run's log (see the
-  CALIBRATION bracket in MIGRATION.md #1543). An earlier revision of this
+  CALIBRATION bracket in MIGRATION.md #1595). An earlier revision of this
   docstring claimed the runner was "DORMANT ... no measured overhead figure
   is claimed anywhere" — stale-false after that run, reconciled here.
 """
@@ -217,7 +217,9 @@ class TestBenchWorkflowWiring:
     """Pin the A/B + O(page) gates INTO ``bench-m4pro.yml`` (review round 4).
 
     The wall-clock gate above skips unless ``BRUTEX_M4PRO_ABS=1`` and the
-    O(page) bench's strict 1.1× tier needs ``BRUTEX_M4PRO_STRICT=1`` — both
+    O(page) bench's strict tier (``metadata_sweep_ceiling`` —
+    ``METADATA_SWEEP_STRICT_CEILING`` = 3.0x, NOT the decreed 1.1x) needs
+    ``BRUTEX_M4PRO_STRICT=1`` — both
     set ONLY by ``.github/workflows/bench-m4pro.yml``, which previously
     neither listed these files in its ``paths`` triggers nor ran them: the
     gates executed in NO workflow. This deterministic pin (runs on shared CI)
@@ -225,7 +227,7 @@ class TestBenchWorkflowWiring:
     of execution lives outside the repo: actions run 28888100079 (2026-07-07,
     the first real M4-Pro run) executed both wired benches — this file's A/B
     merge-budget gate GREEN, the paging gate's strict ceiling recalibrated
-    1.1x -> 3.0x off its measured 1.53x (MIGRATION.md #1543 CALIBRATION
+    1.1x -> 3.0x off its measured 1.53x (MIGRATION.md #1595 CALIBRATION
     bracket). ENDGAME round 1 dropped this docstring's stale "runner is
     dormant / cannot prove an execution happened" wording.
     """
@@ -272,5 +274,33 @@ class TestBenchWorkflowWiring:
             assert stale not in text, (
                 f"bench-m4pro.yml resurrected the stale paging-gate claim {stale!r} — "
                 "the /db O(page) gate enforces METADATA_SWEEP_STRICT_CEILING (3.0x), "
-                "not the decreed 1.1x (MIGRATION.md #1543 CALIBRATION)"
+                "not the decreed 1.1x (MIGRATION.md #1595 CALIBRATION)"
+            )
+
+    def test_this_file_names_the_real_paging_ceiling(self) -> None:
+        """This file's OWN docstrings must not resurrect the stale tier claim.
+
+        ENDGAME FIX round 1 (refuter NIT): this class's docstring still
+        called the paging gate the O(page) bench's decreed-1.1x strict tier —
+        the exact claim :meth:`test_workflow_names_the_real_paging_ceiling`
+        forbids in ``bench-m4pro.yml`` comments — eight lines above its own
+        1.1x -> 3.0x recalibration record. Same rule, applied to ourselves:
+        the strict tier is ``metadata_sweep_ceiling`` /
+        ``METADATA_SWEEP_STRICT_CEILING`` (3.0x), never the decreed-1.1x
+        claim. (The forbidden phrases are assembled by concatenation so this
+        pin's own source can never satisfy its own scan.)
+        """
+        text = Path(__file__).resolve().read_text(encoding="utf-8")
+        assert "METADATA_SWEEP_STRICT_CEILING" in text, (
+            "this file no longer names METADATA_SWEEP_STRICT_CEILING — the paging-gate "
+            "tier disclosure drifted from tests/bench/test_db_paging_o_page.py"
+        )
+        for stale in (
+            "strict 1.1" + "× tier",
+            "strict 1.1" + "x tier",
+        ):
+            assert stale not in text, (
+                f"this file resurrected the stale paging-gate claim {stale!r} — the "
+                "/db O(page) gate enforces METADATA_SWEEP_STRICT_CEILING (3.0x), not "
+                "the decreed 1.1x (MIGRATION.md #1595 CALIBRATION)"
             )

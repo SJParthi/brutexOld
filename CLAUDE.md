@@ -2983,7 +2983,6 @@ hostile-review pass._
 - **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 — the write-time
   PER-FILE lake STATS manifest; matches §1's Active branch line)
-  Earlier: `claude/stoic-davinci-7c7xp0`
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
   retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel

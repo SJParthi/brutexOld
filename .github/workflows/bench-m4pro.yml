@@ -58,7 +58,7 @@ on:
       # write-path A/B wall-clock gate (BRUTEX_M4PRO_ABS-gated) and the
       # /db O(page) paging ratio gate (strict tier via metadata_sweep_ceiling
       # — _o1_tiers.py METADATA_SWEEP_STRICT_CEILING = 3.0x, recalibrated off
-      # run 28888100079's measured 1.53x per MIGRATION.md #1543 CALIBRATION;
+      # run 28888100079's measured 1.53x per MIGRATION.md #1595 CALIBRATION;
       # NOT the ratio_ceiling() 1.1x tier) previously executed in NO
       # workflow — the env vars are set only here, and this workflow neither
       # listed nor invoked the files.
@@ -339,7 +339,7 @@ jobs:
           # — its strict ceiling routes through metadata_sweep_ceiling(8.0),
           # i.e. _o1_tiers.py METADATA_SWEEP_STRICT_CEILING = 3.0x under
           # BRUTEX_M4PRO_STRICT=1, the endgame recalibration off run
-          # 28888100079's measured 1.53x [MIGRATION.md #1543 CALIBRATION]; it
+          # 28888100079's measured 1.53x [MIGRATION.md #1595 CALIBRATION]; it
           # never calls ratio_ceiling() and does NOT enforce the decreed 1.1x,
           # the feature's own documented O(D) statx sweep makes that
           # internally contradictory) previously executed in NO workflow: this
