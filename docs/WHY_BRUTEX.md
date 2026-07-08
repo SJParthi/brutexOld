@@ -48,7 +48,7 @@ still climbing to perfect is test coverage (next section).
 | Promise | Plain English | BruteX today |
 |---|---|---|
 | 100% coverage | "Every line of code is tested" | 🟡 **90% guaranteed floor**, ratcheting to 100% one locked module at a time (driver, catalog, instrument-store are already **100% + frozen there forever**) |
-| All kinds of tests | "Tested every way that matters" | 🟢 unit · integration · property (fuzz) · golden-master · benchmark · stress/soak (nightly) · mutation · red-team |
+| All kinds of tests | "Tested every way that matters" | 🟢 unit · integration · property (fuzz) · golden-master · benchmark · stress (nightly regression gate) + soak (weekly self-hosted multi-hour, DEC-SOAK-REAL-TIER-001) · mutation · red-team |
 | Bugs can't sneak back | "A fixed bug stays fixed" | 🟢 every fix ships with a test that *failed before the fix* |
 | Real, not fake, tests | "Tests prove behaviour, not just run" | 🟢 mutation testing + a 'red-team' suite that plants bugs to prove the gates catch them |
 
