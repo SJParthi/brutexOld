@@ -166,8 +166,8 @@
   <p class="theme">🌙 Theme 7 — "Runs itself overnight — even the login renews itself"</p>
   <table>
     <tr><th>What it does</th><th>Why you care</th><th>Proof</th></tr>
-    <tr><td class="feat">Self-renewing login (6 AM fix) — the broker's access token resets daily at 06:00; BruteX <b>re-mints it automatically</b> mid-download — thread-safe, exactly once even under a stampede</td><td class="why"><b>You sleep, it keeps working.</b> No manual token rotation at dawn, ever</td><td class="ref">#909</td></tr>
-    <tr><td class="feat">Visible self-heal in the log — each automatic renewal prints a <code>groww.token.reauth</code> line</td><td class="why">You can <i>see</i> it healed itself — proof, not a promise</td><td class="ref">#909</td></tr>
+    <tr><td class="feat">Self-renewing login (6 AM fix) — the broker's access token resets daily at 06:00; BruteX <b>RE-READS the Lambda-minted shared token</b> mid-download and adopts it — the Lambda mints, BruteX never does — thread-safe, exactly once even under a stampede</td><td class="why"><b>You sleep, it keeps working.</b> No manual token rotation at dawn, ever</td><td class="ref">#909/#1072</td></tr>
+    <tr><td class="feat">Visible self-heal in the log — each automatic renewal prints a <code>groww.token.reauth</code> then a <code>groww.token.reread</code> line</td><td class="why">You can <i>see</i> it healed itself — proof, not a promise</td><td class="ref">#909/#1072</td></tr>
     <tr><td class="feat">Can't freeze on a bad renewal — even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry</td><td class="why">A flaky network at 6 AM can never lock up your pull</td><td class="ref">#910</td></tr>
   </table>
 
