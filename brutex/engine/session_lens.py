@@ -5,12 +5,15 @@ tuple from the tuple's OWN daily bars and consumed by
 :mod:`brutex.engine.combo_aggregates` to attribute every captured trade to
 
 * a **trend regime** (R46 "trending-vs-sideways") — a fold of the existing
-  look-ahead-clean :class:`~brutex.indicators.market_structure.MarketStructureState`
-  (``k = 2``, the production 5-bar fractal) over the daily closes: after
-  feeding day ``D``'s bar the machine's :class:`~brutex.indicators.market_structure.Trend`
-  is the label for ``D``, and by the module's own confirmation law that state
-  used ONLY bars ``<= D`` — appending future sessions can never change an
-  already-labelled date (property-pinned);
+  look-ahead-clean shared Rust ``trading_core.MarketStructureState`` detector
+  (the SINGLE source per DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001;
+  ``k = 2``, the production 5-bar fractal) over the daily closes: after
+  feeding day ``D``'s bar, the prevailing trend — reconstructed bit-identically
+  from the detector's own returned per-bar BOS/CHoCH signal, mirroring the
+  core's ``resolve_break`` trend update — is the label for ``D``, and by the
+  detector's own confirmation law that state used ONLY bars ``<= D`` —
+  appending future sessions can never change an already-labelled date
+  (property-pinned);
 * **event-day flags** (R51) — ONLY what the repo's calendars verifiably know
   (Golden Rule #1): derivative **expiry** day for the tuple's instrument
   (:mod:`brutex.options.expiry_calendar` regimes + the holiday shift of
@@ -57,6 +60,7 @@ from math import inf, isfinite
 from typing import TYPE_CHECKING, Final
 
 import structlog
+import trading_core
 
 from brutex.calendars.nse import (
     IST,
@@ -66,7 +70,6 @@ from brutex.calendars.nse import (
     is_special_weekend_session,
 )
 from brutex.engine.exit_index import bars_strictly_increasing
-from brutex.indicators.market_structure import MarketStructureState, Trend
 from brutex.models import BruteXError
 from brutex.money import rupees_to_paisa
 from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
@@ -105,9 +108,10 @@ class SessionLensError(BruteXError):
 class TrendRegime(Enum):
     """The per-session trend label (R46's "trending-vs-sideways" axis).
 
-    Mapped 1:1 from the market-structure machine's
-    :class:`~brutex.indicators.market_structure.Trend`: ``UP``/``DOWN`` are its
-    confirmed trends; ``SIDEWAYS`` is its ``NONE`` (no confirmed structure yet
+    Mapped 1:1 from the shared Rust detector's prevailing trend
+    (``trading_core.MarketStructureState`` — the single source per
+    DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001): ``UP``/``DOWN`` are its
+    confirmed trends; ``SIDEWAYS`` is its ``None`` (no confirmed structure yet
     — warm-up sessions therefore read SIDEWAYS, honestly).
     """
 
@@ -149,13 +153,6 @@ VIX_BANDS: Final[tuple[tuple[str, float, float], ...]] = (
 #: The production fractal half-window for the daily trend fold — the same
 #: ``k = 2`` (5-bar fractal) the vocabulary's BOS/CHoCH bits use.
 _TREND_FRACTAL_K: Final[int] = 2
-
-#: Trend-enum → regime-label map (module-level so the fold is a pure lookup).
-_TREND_TO_REGIME: Final[dict[Trend, TrendRegime]] = {
-    Trend.NONE: TrendRegime.SIDEWAYS,
-    Trend.UP: TrendRegime.UP,
-    Trend.DOWN: TrendRegime.DOWN,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,7 +339,8 @@ def build_session_lens(daily_bars: Sequence[CandleBar], *, instrument: str) -> S
             instrument=instrument,
             note="no encoded expiry calendar — expiry flag abstains lens-wide",
         )
-    state = MarketStructureState(k=_TREND_FRACTAL_K)
+    state = trading_core.MarketStructureState(k=_TREND_FRACTAL_K)
+    regime = TrendRegime.SIDEWAYS
     trend_by_date: dict[date, TrendRegime] = {}
     event_flags_by_date: dict[date, tuple[str, ...]] = {}
     expiry_abstained = 0
@@ -354,10 +352,23 @@ def build_session_lens(daily_bars: Sequence[CandleBar], *, instrument: str) -> S
                 f"build_session_lens: two daily bars share IST session date {day.isoformat()} "
                 "(a daily series carries exactly one bar per session)"
             )
-        state.update(
+        bos_bullish, bos_bearish, choch_bullish, choch_bearish = state.update(
             rupees_to_paisa(bar.high), rupees_to_paisa(bar.low), rupees_to_paisa(bar.close)
         )
-        trend_by_date[day] = _TREND_TO_REGIME[state.trend]
+        # Reconstruct the detector's prevailing trend from its OWN returned
+        # per-bar signal, bit-identically mirroring the Rust core's
+        # ``resolve_break`` update order: a bullish break (BOS or CHoCH) sets
+        # UP first, a bearish break sets DOWN second — so a both-sides
+        # engulfing bar lands DOWN, exactly the core's final trend. The PyO3
+        # pyclass deliberately exposes no ``trend`` getter
+        # (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 added only the
+        # ``last_swing_high/low`` accessors), so the fold derives it from the
+        # signal instead of holding a second hand-synced state machine.
+        if bos_bullish or choch_bullish:
+            regime = TrendRegime.UP
+        if bos_bearish or choch_bearish:
+            regime = TrendRegime.DOWN
+        trend_by_date[day] = regime
         flags, abstained = _event_flags(day, underlying)
         if abstained:
             expiry_abstained += 1
