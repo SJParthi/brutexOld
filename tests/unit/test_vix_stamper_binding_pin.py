@@ -196,6 +196,26 @@ def _callee_name(node: ast.Call) -> str | None:
     return None
 
 
+def _is_none_literal(value: ast.expr) -> bool:
+    """A literal-``None`` seam binding — bare ``None`` OR ``lambda: None``.
+
+    The ``stamper_for`` provider seam takes a CALLABLE, so a lambda whose
+    body is the ``None`` constant is the provider-shaped literal-None: under
+    the pre-hardened classifier (``ast.Constant`` only) it registered as
+    ``bound=True`` and could silently unstamp a provider bind — e.g. the
+    recount's ``run_stage3_pass(stamper_for=lambda: recount_stamper)``
+    degraded to ``stamper_for=lambda: None`` would have PASSED every pin law
+    (review round-7). A lambda returning anything else stays ``bound``.
+    """
+    if isinstance(value, ast.Constant) and value.value is None:
+        return True
+    return (
+        isinstance(value, ast.Lambda)
+        and isinstance(value.body, ast.Constant)
+        and value.body.value is None
+    )
+
+
 def _iter_seam_calls() -> list[_SeamCall]:
     """Every seam call in every production module under ``brutex/``."""
     package_root = Path(brutex.__file__).resolve().parent
@@ -210,9 +230,7 @@ def _iter_seam_calls() -> list[_SeamCall]:
             if callee not in _SEAM_CALLEES:
                 continue
             seam_kwargs = [kw for kw in node.keywords if kw.arg in _SEAM_KWARGS]
-            literal_none = any(
-                isinstance(kw.value, ast.Constant) and kw.value.value is None for kw in seam_kwargs
-            )
+            literal_none = any(_is_none_literal(kw.value) for kw in seam_kwargs)
             has_splat = any(kw.arg is None for kw in node.keywords)
             calls.append(
                 _SeamCall(
@@ -335,3 +353,23 @@ class TestVixStamperBindingPin:
             f"seam calls must bind reference_stamper explicitly, never via a "
             f"**kwargs splat that could hide a None: {splatted}"
         )
+
+    def test_lambda_none_classifies_as_literal_none_never_bound(self) -> None:
+        """The provider-shaped smuggle: ``stamper_for=lambda: None`` is a
+        literal-None binding, NOT a bound one (review round-7) — under the
+        pre-hardened ``ast.Constant``-only classifier it counted as bound and
+        would have passed every pin law while silently unstamping the
+        recount's stage-3 cells."""
+
+        def kw_value(src: str) -> ast.expr:
+            call = ast.parse(src, mode="eval").body
+            assert isinstance(call, ast.Call)
+            return call.keywords[0].value
+
+        assert _is_none_literal(kw_value("run_stage3_pass(stamper_for=None)"))
+        assert _is_none_literal(kw_value("run_stage3_pass(stamper_for=lambda: None)"))
+        # A provider returning a real stamper stays a BOUND bind.
+        assert not _is_none_literal(kw_value("run_stage3_pass(stamper_for=lambda: stamper)"))
+        assert not _is_none_literal(kw_value("f(reference_stamper=stamper)"))
+        # A non-None constant body is degenerate but not the None literal.
+        assert not _is_none_literal(kw_value("f(stamper_for=lambda: 0)"))

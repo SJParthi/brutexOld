@@ -243,8 +243,31 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path, **extra:
     return cli.cmd_sweep_all(**kwargs)
 
 
+def _pin_code_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the run identity's ``code_commit_sha`` for MULTI-STEP tests.
+
+    ``cli._resolve_code_commit_sha`` reads the LIVE ``git rev-parse HEAD`` on
+    every launch, so a commit landing on the checkout BETWEEN this test's two
+    engine passes re-keys every BLAKE3 run identity (correct Golden-Rule-#4
+    behaviour) and turns the second pass into all-new rows — the exact
+    environmental flake the round-7 review root-caused (three reproducible
+    failures straddled by two mid-review merges). A fixed real-shaped sha
+    keeps the identity stable across the passes without touching what these
+    tests verify (VIX stamp/conflict semantics, never sha resolution); the
+    recount's context-match compares the recorded sha against the SAME
+    patched resolver, so the match law is preserved.
+    """
+    monkeypatch.setattr(cli, "_resolve_code_commit_sha", lambda: "f" * 40)
+
+
 def _sweep_verify_recount(
-    lake_root: Path, catalog_path: Path, results_root: Path, scratch_root: Path
+    lake_root: Path,
+    catalog_path: Path,
+    results_root: Path,
+    scratch_root: Path,
+    *,
+    start: str = _START,
+    end: str = _END,
 ) -> int:
     return cli.cmd_sweep_verify(
         lake_root=lake_root,
@@ -254,8 +277,8 @@ def _sweep_verify_recount(
         segment=_SEGMENT,
         symbols=_SYMBOL,
         intervals=_INTERVAL,
-        start=_START,
-        end=_END,
+        start=start,
+        end=end,
         directions="BUY",
         k="1",
         conditions="0,1,2",
@@ -322,6 +345,7 @@ def test_recount_over_a_stamped_tree_verifies_clean(
     lake_root, catalog_path = _persist(tmp_path)
     results_root = tmp_path / "sweeps"
     monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
     assert _sweep_all(lake_root, catalog_path, results_root) == 0
     assert _stamped_rows(results_root)[0].vix_mean is not None  # a stamped tree
 
@@ -342,6 +366,7 @@ def test_recount_after_a_vix_lake_move_warns_precisely_never_condemns(
     lake_root, catalog_path = _persist(tmp_path)
     results_root = tmp_path / "sweeps"
     monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)
     assert _sweep_all(lake_root, catalog_path, results_root) == 0
 
     # The sanctioned lake movement: the VIX series is re-pulled at new levels
@@ -406,6 +431,7 @@ def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(
     _plant_vix_months(lake_root, long_bars, base=14.0)
     results_root = tmp_path / "sweeps"
     monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    _pin_code_sha(monkeypatch)  # two launches + a recount — HEAD may move mid-test
     window = {"start": "2024-01-02", "end": "2024-08-01"}
     stage3_kwargs: dict[str, Any] = {
         "stage3_enable": True,
@@ -420,6 +446,25 @@ def test_cmd_sweep_all_relaunch_after_vix_move_warns_and_exits_nonzero(
     assert refined_1 is not None and int(refined_1.group(1)) > 0, (
         "launch 1 must genuinely refine stage-3 cells or the conflict pin is vacuous"
     )
+
+    # ROUND-7 coverage fold: the recount's stage-3 stamper bind
+    # (cmd_sweep_verify's ``run_stage3_pass(..., stamper_for=lambda:
+    # recount_stamper)`` inside the pragma-no-cover shim) had ZERO executing
+    # tests — the one VIX bind whose lambda shape the AST pin polices only
+    # statically. Drive a REAL ``--recount`` over the launch-1 stage-3 tree
+    # on the SAME lake (knobs auto-read from the audit): a clean verify
+    # proves the recount stamped its stage-3 cells exactly like the launcher
+    # — a ``lambda: None`` smuggle would byte-diverge every cell trio into
+    # ``cell_recount_vix_divergence`` and fail the assertions below.
+    rc_recount = _sweep_verify_recount(
+        lake_root, catalog_path, results_root, tmp_path / "recount-scratch", **window
+    )
+    recount_out = capsys.readouterr().out
+    assert rc_recount == cli.EXIT_OK
+    assert "recount_divergence" not in recount_out
+    assert "vix_divergence" not in recount_out  # same lake — nothing moved
+    assert "CORRUPT" not in recount_out
+    assert "stage3 cells degraded to INCONCLUSIVE" not in recount_out
 
     def _tree_hashes() -> dict[Path, str]:
         return {
