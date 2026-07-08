@@ -38,8 +38,9 @@ def test_widget_script_served_and_honest() -> None:
     assert "enabled === false" in js.text
     assert "textContent" in js.text
     assert "innerHTML" not in js.text
-    # The widget never re-runs the proof — it only polls the status route.
-    assert "fetch(ENDPOINT" in js.text
+    # The widget never re-runs the proof — it only polls the status route
+    # (via the bounded fetchJson helper — DEC-PULL-UI-STALENESS-001 port).
+    assert "fetchJson(ENDPOINT)" in js.text
     assert 'method: "POST"' not in js.text
     # m1: the pill dot renders the WORST of preflight+probes — a red probes
     # verdict can never hide behind a green preflight dot.
@@ -49,6 +50,42 @@ def test_widget_script_served_and_honest() -> None:
     assert "document.getElementById(WIDGET_ID)" in js.text
     assert uni.status_code == 200
     assert "/static/bx-liveproof.js" in uni.text
+
+
+def test_widget_serves_staleness_and_backoff() -> None:
+    """DEC-PULL-UI-STALENESS-001 (Defect 3b): the SERVED bx-liveproof.js carries
+    the client-clock staleness readout + the self-recovering capped backoff poll
+    ported from bx-rate-monitor.js, so a silent/unreachable backend can never keep
+    a green "pass" pill reading fresh forever. HONEST envelope (Golden Rule #10):
+    substring asserts pin PRESENCE of the JS, not its execution — this repo has no
+    headless JS runner (the same limit #1529/#1530 accepted).
+    """
+    with TestClient(build_app(DashboardState())) as client:
+        js = client.get("/static/bx-liveproof.js")
+    assert js.status_code == 200
+    body = js.text
+    # Staleness constants + the ~1 s age ticker.
+    assert "STALE_WARN_MS" in body
+    assert "STALE_RED_MS" in body
+    assert "AGE_TICK_MS" in body
+    # The client-clock stamp + the "updated Xs ago" / "STALE" age readout.
+    assert "lastPollOkMs" in body
+    assert "lastPollOkWallMs" in body  # suspend-guard wall-clock twin
+    assert "updated " in body
+    assert "STALE — " in body
+    assert "function renderAge" in body
+    # Self-recovering capped exponential backoff that NEVER gives up + the bounded
+    # fetch whose abort signal is actually WIRED (a non-ok/rejection/malformed body
+    # is a counted failure feeding the staleness clock).
+    assert "backoffDelayMs" in body
+    assert "schedulePoll(backoffDelayMs(pollFailures))" in body
+    assert "opts.signal = ctrl.signal" in body
+    assert "pollFailures" in body
+    # The hidden-tab guard is preserved AND textContent-only rendering is kept
+    # (CodeQL XSS gate — no markup sink introduced).
+    assert "document.hidden" in body
+    assert "visibilitychange" in body
+    assert "innerHTML" not in body
 
 
 def test_widget_referenced_on_every_dashboard_template() -> None:

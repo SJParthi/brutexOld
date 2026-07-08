@@ -38,8 +38,20 @@
  * contradictory PASS-then-FAIL toast sequence.
  * When the autorun is not wired (present:false) or disabled via the
  * BRUTEX_AUTORUN_LIVEPROOF=0 escape hatch, the widget renders NOTHING (no
- * invented state). A fetch error leaves the last render in place — the
- * widget is read-only + best-effort and never throws into the page.
+ * invented state). The widget is read-only + best-effort and never throws
+ * into the page.
+ *
+ * STALENESS HONESTY (DEC-PULL-UI-STALENESS-001 ported from bx-rate-monitor.js,
+ * Golden Rule #1): a non-ok status, a fetch rejection AND a malformed body are
+ * ALL counted failures that feed a client-clock staleness readout ("updated Xs
+ * ago" → amber past STALE_WARN_MS → LOUD "STALE" past STALE_RED_MS, which ALSO
+ * recolours the pill dot so a green "pass" can NEVER keep reading fresh when the
+ * backend has gone silent — even collapsed to the dot badge) and a
+ * self-recovering capped exponential backoff (3 s → 30 s) that NEVER gives up;
+ * the last real VERDICT is retained (it may still hold) — only the FRESHNESS
+ * marking escalates. The document.hidden guard is preserved (a background tab
+ * fires zero fetches, re-arms at normal cadence, and a visibilitychange
+ * catch-up poll clears the age on return).
  *
  * The ✕ on the red banner only COLLAPSES it to the pill (which stays red);
  * a NEW failing verdict (a different checked_at) re-opens it. No action
@@ -64,6 +76,15 @@
   // Auto-collapse the pill to the compact dot badge this long after a verdict
   // is first shown (DEC-UNIVERSE-UI-POLISH-002 — never occlude page content).
   var AUTO_MIN_MS = 8000;
+  // Client-side staleness + self-recovering backoff (DEC-PULL-UI-STALENESS-001,
+  // ported from bx-rate-monitor.js). STALE_RED_MS == BACKOFF_MAX_MS so the
+  // "retrying" tail reads true once the readout goes red.
+  var STALE_WARN_MS = 15000;   // amber: ~3 missed 5 s polls
+  var STALE_RED_MS = 30000;    // LOUD "STALE": 6x POLL_MS; == BACKOFF_MAX_MS
+  var BACKOFF_BASE_MS = 3000;  // failure backoff base, doubling per consecutive failure
+  var BACKOFF_MAX_MS = 30000;  // backoff cap: next attempt <= 30 s after the previous settle
+  var FETCH_TIMEOUT_MS = 10000; // abort bound (headers AND body) → a wedged fetch is a counted failure
+  var AGE_TICK_MS = 1000;      // the ~1 s client staleness ticker
   var WIDGET_ID = "bxLiveProof";
   var BANNER_ID = "bxLiveProofBanner";
   var DETAIL_ID = "bxLiveProofDetail";
@@ -194,9 +215,20 @@
       "#" + WIDGET_ID + " .bxlp-dot.bad{background:var(--red,#FF5C5C);" +
       "box-shadow:0 0 7px var(--red,#FF5C5C);}" +
       "#" + WIDGET_ID + " .bxlp-dot.na{background:var(--muted,#787B86);}" +
+      // Staleness override (DEC-PULL-UI-STALENESS-001): once the client-clock age
+      // crosses STALE_WARN_MS/STALE_RED_MS the DOT recolours amber/red REGARDLESS
+      // of the verdict kind, so a green "pass" dot can never keep reading fresh
+      // when the backend has gone silent — visible even collapsed to the dot badge.
+      "#" + WIDGET_ID + ".bxlp-stale-warn .bxlp-dot{background:var(--yellow,#FFB74D)!important;" +
+      "box-shadow:none!important;}" +
+      "#" + WIDGET_ID + ".bxlp-stale .bxlp-dot{background:var(--red,#FF5C5C)!important;" +
+      "box-shadow:0 0 7px var(--red,#FF5C5C)!important;}" +
+      "#" + WIDGET_ID + ".bxlp-stale .bxlp-age{color:var(--red,#FF5C5C);}" +
+      "#" + WIDGET_ID + ".bxlp-stale-warn .bxlp-age{color:var(--yellow,#FFB74D);}" +
       "#" + WIDGET_ID + " .bxlp-text{white-space:nowrap;overflow:hidden;" +
       "text-overflow:ellipsis;}" +
       "#" + WIDGET_ID + " .bxlp-sub{color:var(--muted,#787B86);}" +
+      "#" + WIDGET_ID + " .bxlp-age{color:var(--muted,#787B86);font-size:10px;}" +
       "#" + BANNER_ID + "{position:fixed;top:0;left:0;right:0;z-index:9200;display:none;" +
       "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;" +
       "background:#2A1215;color:#FFD7D7;border-bottom:2px solid var(--red,#FF5C5C);" +
@@ -257,8 +289,13 @@
     row1.appendChild(el("span", "bxlp-text", "live-proof: …")).id = "bxlpText";
     var row2 = el("div", "bxlp-row", null);
     row2.appendChild(el("span", "bxlp-sub", "")).id = "bxlpProbes";
+    // Client-clock freshness readout (DEC-PULL-UI-STALENESS-001): "updated Xs ago"
+    // → "STALE — …" — textContent only (CodeQL XSS gate).
+    var row3 = el("div", "bxlp-row", null);
+    row3.appendChild(el("span", "bxlp-age bxlp-sub", "")).id = "bxlpAge";
     pill.appendChild(row1);
     pill.appendChild(row2);
+    pill.appendChild(row3);
     pill.addEventListener("click", openDetail);
     document.body.appendChild(pill);
 
@@ -349,6 +386,14 @@
   var minTimer = null;
   var minimizedSignature = "";
   var pendingMinSignature = "";
+  // Staleness + self-recovering backoff state (DEC-PULL-UI-STALENESS-001).
+  var lastPollOkMs = null;      // monotonic client stamp of the last reachable poll
+  var lastPollOkWallMs = null;  // wall-clock twin (suspend guard — see renderAge)
+  var pollFailures = 0;         // consecutive failed polls → backoff exponent
+  var pollTimer = null;         // the self-scheduling poll chain handle
+  var pollSeq = 0;              // a superseded response never renders/schedules
+  var bootMs = null;            // fallback age reference until the first success
+  var bootWallMs = null;
 
   function verdictSignature(data) {
     // A stable id for the CURRENTLY SHOWN verdict set — a changed kind or
@@ -535,32 +580,116 @@
     scheduleMinimize(pill, verdictSignature(data));
   }
 
+  // Monotonic client clock: performance.now() is immune to NTP/wall-clock jumps
+  // (mirrors bx-rate-monitor.js; the Date.now() twin in renderAge covers the
+  // suspend caveat — a wall jump can only OVER-report staleness, the safe way).
+  function nowMs() {
+    return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+  }
+
+  // Exponential backoff, overflow-proof: exponent clamped BEFORE Math.pow
+  // (3000 * 2^4 = 48000 already exceeds the 30000 cap).
+  function backoffDelayMs(failures) {
+    var exp = Math.min(failures > 0 ? failures - 1 : 0, 4);
+    return Math.min(BACKOFF_BASE_MS * Math.pow(2, exp), BACKOFF_MAX_MS);
+  }
+
+  function schedulePoll(delayMs) {
+    if (pollTimer) { clearTimeout(pollTimer); }
+    pollTimer = setTimeout(poll, delayMs);
+  }
+
+  // Bounded JSON fetch (mirrors bx-rate-monitor.js): a non-ok status THROWS (a
+  // counted failure) and the abort timer stays ARMED through the BODY read —
+  // cleared only after r.json() settles — so a hung fetch OR a stalled body is
+  // aborted at FETCH_TIMEOUT_MS and lands in the counted-failure backoff path;
+  // the self-scheduling poll chain can never wedge on a dead connection.
+  function fetchJson(url) {
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var killer = ctrl ? setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS) : null;
+    var opts = { headers: { Accept: "application/json" } };
+    if (ctrl) { opts.signal = ctrl.signal; }
+    return fetch(url, opts).then(function (r) {
+      if (!r.ok) { throw new Error("HTTP " + r.status); }  // non-ok is a FAILED poll
+      return r.json();   // killer still armed: a stalled BODY (or malformed JSON) aborts/throws too
+    }).then(function (data) {
+      if (killer) { clearTimeout(killer); }
+      return data;
+    }).catch(function (err) { if (killer) { clearTimeout(killer); } throw err; });
+  }
+
+  // Client-clock freshness readout (DEC-PULL-UI-STALENESS-001): "updated Xs ago"
+  // → amber past STALE_WARN_MS → LOUD "STALE" past STALE_RED_MS, and the pill's
+  // stale classes recolour the DOT so a green "pass" can never keep reading fresh
+  // when the backend has gone silent. textContent only (CodeQL XSS gate).
+  function renderAge() {
+    var pill = document.getElementById(WIDGET_ID);
+    if (!pill) { return; }
+    var ageEl = document.getElementById("bxlpAge");
+    var ref = lastPollOkMs !== null ? lastPollOkMs : bootMs;
+    var wallRef = lastPollOkWallMs !== null ? lastPollOkWallMs : bootWallMs;
+    var text = "";
+    var cls = "";
+    if (ref !== null) {
+      var age = nowMs() - ref;
+      // Suspend guard: performance.now() may pause across a system suspend, so fold
+      // in the wall-clock age too — max() can only OVER-report (the safe direction).
+      if (wallRef !== null) { age = Math.max(age, Date.now() - wallRef); }
+      var ageS = Math.max(0, Math.round(age / 1000));
+      var base = lastPollOkMs !== null ? "updated " + ageS + "s ago" : "no data yet (" + ageS + "s)";
+      var tail = pollFailures > 0 ? " — retrying" : "";
+      if (age >= STALE_RED_MS) { text = "STALE — " + base + tail; cls = "bxlp-stale"; }
+      else if (age >= STALE_WARN_MS) { text = base + tail; cls = "bxlp-stale-warn"; }
+      else { text = base; }
+    }
+    if (ageEl) { ageEl.textContent = text; }
+    pill.classList.toggle("bxlp-stale", cls === "bxlp-stale");
+    pill.classList.toggle("bxlp-stale-warn", cls === "bxlp-stale-warn");
+  }
+
   function poll() {
     // Hidden-tab pause (DEC-LEDGER-DELTA-O-PAGE-001, the v29.html pattern): a
-    // background tab fires ZERO fetches; the visibilitychange listener below
-    // fires an immediate catch-up tick on return so the pill is never stale to
-    // a returning operator (Golden Rule #1). Pure scheduling — render
-    // semantics unchanged; the interval keeps ticking (hidden ticks are free).
-    if (document.hidden) return;
-    fetch(ENDPOINT, { headers: { Accept: "application/json" } })
-      .then(function (r) {
-        return r.ok ? r.json() : null;
-      })
+    // background tab fires ZERO fetches — the guard re-arms the self-scheduling
+    // chain at normal cadence (a hidden tick is free) and the visibilitychange
+    // listener below fires an immediate catch-up poll on return, so the pill is
+    // never stale to a returning operator (Golden Rule #1). The guard returns
+    // BEFORE pollSeq is bumped and BEFORE any fetch, so a hidden period counts
+    // ZERO pollFailures — no spurious backoff/staleness while hidden.
+    if (document.hidden) { schedulePoll(POLL_MS); return; }
+    var seq = ++pollSeq;   // a superseded response never renders or schedules
+    fetchJson(ENDPOINT)
       .then(function (data) {
-        if (data) {
-          render(data);
-        }
+        if (seq !== pollSeq) { return; }
+        // A reachable backend (ANY 2xx JSON, wired or not) resets the freshness
+        // clock; only a genuine PAYLOAD drives render() (present:false stays inert).
+        pollFailures = 0;
+        lastPollOkMs = nowMs();
+        lastPollOkWallMs = Date.now();
+        if (data && typeof data === "object") { render(data); }
+        renderAge();   // stale marking clears on the very next reachable poll
+        schedulePoll(POLL_MS);
       })
       .catch(function () {
-        /* best-effort — leave the last render in place on a transient error. */
+        // Operator-incident parity with bx-rate-monitor.js (#1529): a non-ok status,
+        // a fetch rejection AND a malformed body are ALL counted failures that feed
+        // the staleness clock + back off 3 s -> 30 s; NEVER a stale green pill reading
+        // fresh forever. The last real VERDICT is retained — only freshness escalates.
+        if (seq !== pollSeq) { return; }
+        pollFailures += 1;
+        renderAge();
+        schedulePoll(backoffDelayMs(pollFailures));
       });
   }
 
   function start() {
     injectStyles();
     buildWidget();
+    bootMs = nowMs();
+    bootWallMs = Date.now();
     poll();
-    setInterval(poll, POLL_MS);
+    // The ~1 s client staleness ticker keeps the age readout live between polls
+    // so a silent backend surfaces as STALE without waiting for the next attempt.
+    setInterval(renderAge, AGE_TICK_MS);
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) poll();
     });

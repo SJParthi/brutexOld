@@ -59,7 +59,7 @@ from brutex.adapters.groww.constants import (
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
-from brutex.calendars.nse import MUHURAT_SESSIONS
+from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
 # ``test_db_view_no_lake_revision_import``): lake_revision lazily imports
@@ -459,12 +459,19 @@ def _muhurat_exclusion_sql(muhurat_dates: Iterable[date]) -> str:
 #: see :func:`_muhurat_exclusion_sql` (DEC-DAILY-OPEN-PREDICATE-ALIGN-001).
 _MUHURAT_EXCLUSION_SQL: Final[str] = _muhurat_exclusion_sql(MUHURAT_SESSIONS)
 
-#: The two server-computed derived columns appended to every spot candle page
-#: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
-#: They are NOT real Parquet columns (never selectable in the column picker);
-#: the viewer computes them per bar from the symbol's prior-day last 1-minute
-#: close (DEC-SPOT-PREVCLOSE-1MIN-001).
-SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
+#: The server-computed derived columns appended to every spot candle page
+#: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap +
+#: the prev-close CONTIGUITY honesty flag (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001,
+#: the ``/db`` twin of the ``/movers`` " *" marker DEC-MOVERS-PREVCLOSE-CONTIGUITY-001
+#: #1539). ``prev_close_contiguous`` is ``False`` when the %-change baseline is NOT
+#: the NSE-calendar-adjacent prior session (a genuine lake hole was bridged — the
+#: served number is confidently wrong, so it is MARKED not silently changed),
+#: ``True`` when it IS adjacent, and ``None`` when there is no baseline / the
+#: calendar abstains past its coverage floor (never a fabricated verdict). They are
+#: NOT real Parquet columns (never selectable in the column picker); the viewer
+#: computes them per bar from the symbol's prior-day last 1-minute close
+#: (DEC-SPOT-PREVCLOSE-1MIN-001).
+SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct", "prev_close_contiguous")
 
 #: The two server-computed derived columns appended to every **F&O** candle page on
 #: TOP of :data:`SPOT_DERIVED_COLUMNS` (DEC-FNO-MONEYNESS-001): the ONE moneyness cell the
@@ -2255,12 +2262,15 @@ def query_candles(
     #   trading days of minute bars regardless of how many years are stored — the
     #   per-click cost stays flat as the lake grows. Byte-identical to the prior
     #   full-partition scan for every page date (proven in the db-query tests).
+    # Build the prev-close VALUE map AND its predecessor-DATE provenance map from
+    # ONE scan (the latter drives the contiguity marker,
+    # DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001).
     if interval == _DAILY_INTERVAL:
-        prev_close = _prev_trading_close(
-            _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        last_close_by_date = _daily_close_by_date(
+            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
         )
     else:
-        prev_close = _intraday_prev_close_by_page_date(
+        last_close_by_date = _intraday_last_close_with_predecessor(
             conn,
             lake_root,
             exchange=exchange,
@@ -2268,7 +2278,16 @@ def query_candles(
             symbol=symbol,
             page_dates=_page_ist_dates(raw_rows, out_columns),
         )
-    derived = _spot_derived_rows(raw_rows, out_columns, prev_close, interval=interval)
+    prev_close = _prev_trading_close(last_close_by_date)
+    prev_close_date = _prev_trading_close_date(last_close_by_date)
+    derived = _spot_derived_rows(
+        raw_rows,
+        out_columns,
+        prev_close,
+        prev_close_date,
+        exchange=exchange,
+        interval=interval,
+    )
     # F&O option pages also carry per-bar moneyness (ITM/ATM/OTM + ATM±N) classified
     # against the underlying spot at each bar (DEC-FNO-MONEYNESS-001); spot pages do not.
     extra_columns: list[str] = [*SPOT_DERIVED_COLUMNS, *_fno_derived_columns(segment)]
@@ -2551,11 +2570,14 @@ def _intraday_last_close_by_date(
     :func:`_validate_candle_coords` in the caller — no free user text) and
     aggregates with ``arg_max(close, timestamp)`` grouped by the bar DATE — ONE
     columnar pass returns ~one row per trading day, so the per-bar lookup
-    downstream is O(1) (CLAUDE.md §5). Session-filtered intraday bars (09:15–15:29
-    IST) never cross the IST/UTC date boundary, so ``CAST(timestamp AS DATE)`` IS
-    the IST trading date (matches :func:`_bar_ist_date` used on the viewed bars).
-    Returns ``{}`` when the symbol has no 1-minute partition yet, so the derived
-    columns degrade to blank rather than raising (DEC-DB-CANDLE-DERIVED-001).
+    downstream is O(1) (CLAUDE.md §5). Grouped by the bar's IST date via the COMMON
+    session-tz-independent :data:`_IST_DATE_EXPR` (NOT a bare ``CAST(timestamp AS
+    DATE)``, which resolves in the ambient DuckDB session ``TimeZone`` and splits
+    one NSE session across two dates on a negative-offset host —
+    DEC-SPOT-SESSION-DAYS-IST-TZ-001), so the key matches :func:`_bar_ist_date`
+    used on the viewed bars regardless of host tz. Returns ``{}`` when the symbol
+    has no 1-minute partition yet, so the derived columns degrade to blank rather
+    than raising (DEC-DB-CANDLE-DERIVED-001).
     """
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
@@ -2568,7 +2590,7 @@ def _intraday_last_close_by_date(
     rows = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
+        f'SELECT {_IST_DATE_EXPR} AS d, arg_max(close, "timestamp") AS last_close '  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path bound
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [],
         source=f"candle-prevclose:{exchange}/{segment}/{symbol}",
@@ -2593,6 +2615,27 @@ def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
     return out
 
 
+def _prev_trading_close_date(last_close: dict[date, Decimal]) -> dict[date, date]:
+    """Map each trading date to the PREVIOUS AVAILABLE trading date in the series.
+
+    The provenance twin of :func:`_prev_trading_close`: it exposes the exact
+    predecessor DATE whose close that map used as the baseline, so the
+    prev-close contiguity marker (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001) can
+    compare the baseline's actual source session against the NSE-calendar's
+    immediately-preceding session (:func:`previous_trading_session`) — a
+    MISMATCH means a real session was bridged (a lake hole), so the %-change is
+    marked non-contiguous. Same O(N) single sorted walk; the earliest date has
+    no predecessor and is absent (its bars carry no contiguity verdict).
+    """
+    out: dict[date, date] = {}
+    prev: date | None = None
+    for day in sorted(last_close):
+        if prev is not None:
+            out[day] = prev
+        prev = day
+    return out
+
+
 def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> set[date]:
     """The distinct IST trading dates present in a fetched page's ``timestamp`` column.
 
@@ -2608,7 +2651,7 @@ def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> 
     return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
 
 
-def _intraday_prev_close_by_page_date(
+def _intraday_last_close_with_predecessor(
     conn: Any,
     lake_root: Path,
     *,
@@ -2617,12 +2660,14 @@ def _intraday_prev_close_by_page_date(
     symbol: str,
     page_dates: set[date],
 ) -> dict[date, Decimal]:
-    """Prior-day last-1-minute close for EXACTLY a page's IST dates — page-bounded.
+    """Page-span last-1-minute-close map WITH the single predecessor bar prepended.
 
-    The flat-latency replacement for ``_prev_trading_close(
-    _intraday_last_close_by_date(...))`` on the ``/db`` intraday candle pager
-    (DEC-DB-UNIVERSE-O1-LATENCY-001). Instead of aggregating the WHOLE multi-year
-    1-minute partition on every paging click, it reads only:
+    The page-bounded read underneath :func:`_intraday_prev_close_by_page_date`
+    (DEC-DB-UNIVERSE-O1-LATENCY-001), exposed as its own helper so BOTH the
+    prev-close VALUE map (:func:`_prev_trading_close`) and the prev-close
+    predecessor-DATE provenance map (:func:`_prev_trading_close_date`, driving the
+    contiguity marker DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001) can be built from ONE
+    scan. Reads only:
 
     1. the last 1-minute close per day for the page's OWN ``[min, max]`` date span
        (an intraday page covers ~1–2 trading days), and
@@ -2632,14 +2677,13 @@ def _intraday_prev_close_by_page_date(
 
     Both reads are bounded by the bar ``timestamp`` (IST-midnight instants), which
     DuckDB row-group-prunes, so the per-click cost is O(page date-span) — flat as
-    the lake deepens, never O(all stored years). The result is **byte-identical**
-    to the prior full-partition scan for every page date: the page's dates are
-    contiguous trading days (a page is a ``LIMIT``/``OFFSET`` slice of
-    timestamp-sorted bars), and prepending their single shared predecessor makes
-    ``_prev_trading_close`` map each page date to the same prior-day close the full
-    scan would (proven in ``tests/unit/test_dashboard_db_query.py``). Returns
-    ``{}`` (every derived cell blank) when *page_dates* is empty or the symbol has
-    no 1-minute partition — matching :func:`_intraday_last_close_by_date`.
+    the lake deepens, never O(all stored years). The page's dates are contiguous
+    trading days (a page is a ``LIMIT``/``OFFSET`` slice of timestamp-sorted bars),
+    and prepending their single shared predecessor makes :func:`_prev_trading_close`
+    map each page date to the same prior-day close the full scan would (proven in
+    ``tests/unit/test_dashboard_db_query.py``). Returns ``{}`` when *page_dates* is
+    empty, the symbol has no 1-minute partition, or a corrupt file was skipped (the
+    adjacency guard — a bridged predecessor would baseline a NON-ADJACENT close).
 
     The baseline ALWAYS reads the ``1minute`` partition (DEC-SPOT-PREVCLOSE-1MIN-001),
     even when a coarser intraday timeframe is being VIEWED — *page_dates* come from
@@ -2652,9 +2696,13 @@ def _intraday_prev_close_by_page_date(
         return {}
     lo, hi = min(page_dates), max(page_dates)
     # IST-midnight instants bound the scan to the page's own span (+ predecessor);
-    # session bars (09:15–15:29 IST) never fall before 09:15, so CAST(ts AS DATE)
-    # for a bar in [lo 00:00 IST, (hi+1) 00:00 IST) is its IST trading date — the
-    # SAME keying as _intraday_last_close_by_date (session-tz-independent here).
+    # the GROUP-BY / projection key is the bar's IST date via the COMMON
+    # session-tz-independent :data:`_IST_DATE_EXPR` (the SAME keying as
+    # _intraday_last_close_by_date and the _bar_ist_date lookup keys in
+    # _spot_derived_rows). A bare CAST(ts AS DATE) resolves in the ambient DuckDB
+    # session TimeZone and would roll a 03:45-UTC (09:15 IST) session bar back one
+    # calendar day on a negative-offset host, mis-keying the baseline —
+    # DEC-SPOT-SESSION-DAYS-IST-TZ-001.
     lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
     hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
     skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
@@ -2672,7 +2720,7 @@ def _intraday_prev_close_by_page_date(
     span = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
+        f'SELECT {_IST_DATE_EXPR} AS d, arg_max(close, "timestamp") AS last_close '  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path + instants bound
         "FROM read_parquet(?, union_by_name=true) "
         'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d',
         [lo_instant, hi_instant],
@@ -2685,7 +2733,7 @@ def _intraday_prev_close_by_page_date(
     pred_rows = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT CAST("timestamp" AS DATE) AS d, close '
+        f"SELECT {_IST_DATE_EXPR} AS d, close "  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path + instant bound
         "FROM read_parquet(?, union_by_name=true) "
         'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1',
         [lo_instant],
@@ -2698,7 +2746,38 @@ def _intraday_prev_close_by_page_date(
     if pred_rows:
         pred = pred_rows[0]
         last_close[pred[0]] = _to_decimal(pred[1])
-    return _prev_trading_close(last_close)
+    return last_close
+
+
+def _intraday_prev_close_by_page_date(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    page_dates: set[date],
+) -> dict[date, Decimal]:
+    """Prior-day last-1-minute close for EXACTLY a page's IST dates — page-bounded.
+
+    The flat-latency replacement for ``_prev_trading_close(
+    _intraday_last_close_by_date(...))`` on the ``/db`` intraday candle pager
+    (DEC-DB-UNIVERSE-O1-LATENCY-001): a thin :func:`_prev_trading_close` over the
+    page-bounded :func:`_intraday_last_close_with_predecessor` scan. Byte-identical
+    to the prior full-partition scan for every page date; ``{}`` (every derived
+    cell blank) when the page is empty / the symbol has no 1-minute partition / a
+    corrupt file was skipped.
+    """
+    return _prev_trading_close(
+        _intraday_last_close_with_predecessor(
+            conn,
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            page_dates=page_dates,
+        )
+    )
 
 
 def _daily_close_by_date(
@@ -2779,9 +2858,12 @@ def _intraday_open_by_date(
     prior day's last 1-minute close, :func:`_intraday_last_close_by_date` +
     :func:`_prev_trading_close`). Mirrors :func:`_intraday_last_close_by_date`: a
     bound ``read_parquet`` glob over validated coordinates, ONE columnar pass
-    (~one row per trading day → O(1) per-day lookup, CLAUDE.md §5); session bars
-    never cross the IST/UTC date boundary so ``CAST(timestamp AS DATE)`` IS the IST
-    trading date. ``{}`` when the symbol has no 1-minute partition.
+    (~one row per trading day → O(1) per-day lookup, CLAUDE.md §5); grouped by the
+    bar's IST date via the COMMON session-tz-independent :data:`_IST_DATE_EXPR`
+    (NOT a bare ``CAST(timestamp AS DATE)``, which resolves in the ambient DuckDB
+    session ``TimeZone`` and would roll a session bar back one calendar day on a
+    negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001), matching
+    :func:`_bar_ist_date`. ``{}`` when the symbol has no 1-minute partition.
     """
     _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
@@ -2794,7 +2876,7 @@ def _intraday_open_by_date(
     rows = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_min(open, "timestamp") AS first_open '
+        f'SELECT {_IST_DATE_EXPR} AS d, arg_min(open, "timestamp") AS first_open '  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path bound
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [],
         source=f"candle-dayopen-min:{exchange}/{segment}/{symbol}",
@@ -2806,10 +2888,12 @@ def _spot_derived_rows(
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],
     prev_close_by_date: dict[date, Decimal],
+    prev_close_date_by_date: dict[date, date] | None = None,
     *,
+    exchange: str | None = None,
     interval: str = _INTRADAY_BASE_INTERVAL,
-) -> list[tuple[Any, Any]]:
-    """Compute the per-bar ``(change_pct, open_gap_pct)`` derived pair.
+) -> list[tuple[Any, Any, Any]]:
+    """Compute the per-bar ``(change_pct, open_gap_pct, prev_close_contiguous)`` triple.
 
     For each bar (DEC-DB-CANDLE-DERIVED-001), baselined on *prev_close_by_date* —
     the prior trading day's close **on the shown interval's own basis**
@@ -2823,25 +2907,50 @@ def _spot_derived_rows(
       view computed on EVERY bar (the open-vs-prior-close gap); for an intraday
       view computed ONLY for the day's 09:15:00 IST market-open bar (the overnight
       gap), ``None`` on every other intraday bar.
+    * ``prev_close_contiguous`` — the honesty verdict (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001,
+      the ``/db`` twin of the ``/movers`` #1539 " *" marker): ``True`` when the
+      baseline came from the NSE-calendar's IMMEDIATELY-preceding session,
+      ``False`` when a real session was BRIDGED (the baseline predecessor DATE in
+      *prev_close_date_by_date* is NOT :func:`previous_trading_session` for the
+      bar's date — a genuine lake hole, so the served %-change is confidently wrong
+      and is MARKED, never silently changed — the #1539 doctrine), and ``None`` when
+      there is no baseline, the caller passed no provenance map, or the calendar
+      ABSTAINS past its coverage floor (never a fabricated verdict, Golden Rule #1).
 
-    Both reuse the COMMON :func:`brutex.data.spot_features.pct_change` primitive
-    (CLAUDE.md §11) and stay full precision — statistical metrics, never
-    money-rounded (CLAUDE.md §4); the 2dp is a *display*-only concern in
-    ``db.html``. A bar whose IST date is absent from *prev_close_by_date* (the
-    first trading day, or a symbol with no baseline lake) gets ``(None, None)``;
-    a zero previous close yields ``None`` (no divide-by-zero, via ``pct_change``).
+    The ``change_pct`` / ``open_gap_pct`` reuse the COMMON
+    :func:`brutex.data.spot_features.pct_change` primitive (CLAUDE.md §11) and stay
+    full precision — statistical metrics, never money-rounded (CLAUDE.md §4); the
+    2dp is a *display*-only concern in ``db.html``. A bar whose IST date is absent
+    from *prev_close_by_date* (the first trading day, or a symbol with no baseline
+    lake) gets ``(None, None, None)``; a zero previous close yields ``None`` (no
+    divide-by-zero, via ``pct_change``). *prev_close_date_by_date* / *exchange* are
+    the provenance inputs for the contiguity verdict; omitted (the pre-marker
+    signature) → contiguity is uniformly ``None`` (byte-compatible with callers
+    that do not request the marker).
     """
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     open_idx = out_columns.index("open") if "open" in out_columns else -1
     close_idx = out_columns.index("close") if "close" in out_columns else -1
     is_daily = interval == _DAILY_INTERVAL
-    derived: list[tuple[Any, Any]] = []
+    # Per-page memo over the COMMON prev-session resolver (mirrors the /movers
+    # per-build memo, movers_snapshot.make_expected_session_resolver) so repeated
+    # bars on the same IST date resolve the calendar once.
+    session_memo: dict[date, date | None] = {}
+
+    def _expected_prev_session(ist_date: date) -> date | None:
+        if ist_date not in session_memo:
+            session_memo[ist_date] = previous_trading_session(ist_date, exchange=exchange)
+        return session_memo[ist_date]
+
+    derived: list[tuple[Any, Any, Any]] = []
     for row in raw_rows:
         change: Decimal | None = None
         gap: Decimal | None = None
+        contiguous: bool | None = None
         ts = row[ts_idx] if ts_idx >= 0 else None
         if isinstance(ts, datetime):
-            prev = prev_close_by_date.get(_bar_ist_date(ts))
+            ist_date = _bar_ist_date(ts)
+            prev = prev_close_by_date.get(ist_date)
             if prev is not None:
                 if close_idx >= 0:
                     change = pct_change(_to_decimal(row[close_idx]), prev)
@@ -2849,7 +2958,14 @@ def _spot_derived_rows(
                 # the 09:15 IST session-open bar (DEC-DB-CANDLE-PERINTERVAL-001).
                 if open_idx >= 0 and (is_daily or _bar_ist_time(ts) == _SESSION_OPEN_IST):
                     gap = pct_change(_to_decimal(row[open_idx]), prev)
-        derived.append((_json_safe(change), _json_safe(gap)))
+                # Contiguity verdict — only when the caller supplied the predecessor
+                # provenance map AND the calendar can name the true prior session
+                # (else honest abstain: None, never a guessed marker).
+                if prev_close_date_by_date is not None:
+                    expected = _expected_prev_session(ist_date)
+                    if expected is not None:
+                        contiguous = prev_close_date_by_date.get(ist_date) == expected
+        derived.append((_json_safe(change), _json_safe(gap), contiguous))
     return derived
 
 
