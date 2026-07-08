@@ -57,6 +57,33 @@ O(1): a never-seen id is added, an identical re-append is a silent no-op, and a
 — that conflict *is* the reproducibility guarantee (one identity can only ever
 map to one result; a clash means upstream non-determinism, never a silent
 overwrite).
+
+Schema back-compat law (gap-register ruling 5, DEC-SWEEP-RESULTS-DEPTH-001)
+---------------------------------------------------------------------------
+The LOAD boundary owns two guarantees so a stored history can never 500 a
+reader or silently rot:
+
+* **Damage is always typed (G14).** ANY failure to decode a store file —
+  corrupt/foreign bytes, an OLD-schema file missing a required column, a
+  wrong-dtype column, a null in a required cell, or row content that fails
+  :class:`ResultRow` validation — raises
+  :class:`ResultsStoreSchemaError` (a :class:`ResultsStoreError`) **naming
+  the store path**, never a raw ``polars`` / ``KeyError`` / ``TypeError``
+  that could 500 ``/results`` (every resilient reader — the dashboard scan,
+  the sweep-verify doctor — already skips-and-counts on
+  :class:`ResultsStoreError`, DEC-SWEEP-VERIFY-001).
+* **Presence-tolerant optional columns (the WindowLedgerRecord precedent).**
+  Every FUTURE :class:`ResultRow` extension MUST be an optional field
+  defaulting ``None``, appended after the required columns and read via
+  ``record.get(...)`` — so a store written BEFORE the extension loads with
+  the missing field as an honest ``None``, NEVER a fabricated value and
+  NEVER a "corrupt" verdict that would trigger a full quarantine-redo of
+  the pre-extension history. ``deflated_sharpe`` is the template (a
+  pre-DEC-RANKING-OVERFIT-001 store loads it as ``None``). The frozen
+  pre-extension golden fixture
+  (``tests/golden/fixtures/results_store_pre_extension_v1.parquet`` +
+  ``tests/golden/test_results_store_pre_extension_golden.py``) is the guard
+  every future extension must keep green.
 """
 
 from __future__ import annotations
@@ -170,6 +197,31 @@ class ResultsStoreError(BruteXError):
     different metrics — a reproducibility breach), a missing ``polars``
     dependency, an unknown leaderboard ranking field, or a read-back of a file
     that does not exist.
+    """
+
+
+class ResultsStoreSchemaError(ResultsStoreError):
+    """A store FILE could not be read/decoded — old-schema, foreign or damaged.
+
+    The G14 damage class (gap-register ruling 5 / DEC-SWEEP-RESULTS-DEPTH-001):
+    raised ONLY at the :meth:`ResultsStore.load` boundary, always **naming the
+    store path**, for
+
+    * corrupt / truncated / non-Parquet bytes,
+    * an OLD-schema file missing a required column (e.g. the pre-u128 single
+      ``mask_bits`` column instead of the ``mask_bits_lo``/``mask_bits_hi``
+      limbs),
+    * a wrong-dtype column or a null in a required cell, and
+    * row content that fails :class:`ResultRow` validation (including a
+      duplicate run-identity with differing metrics inside one file — a file
+      :meth:`ResultsStore.flush` can never produce).
+
+    Subclasses :class:`ResultsStoreError`, so every existing resilient reader
+    (the dashboard store scan, the sweep-verify doctor, the CLI) keeps its
+    skip-and-count behaviour unchanged while new callers can distinguish
+    file-level damage from API misuse. A store missing a NEWER **optional**
+    column is NOT damage — it loads presence-tolerantly with ``None`` (see the
+    module-level back-compat law).
     """
 
 
@@ -532,11 +584,16 @@ class ResultsStore:
         Raises
         ------
         ResultsStoreError
-            If *path* does not exist, ``polars`` is not installed, or the file
-            is not a readable results-store Parquet (corrupt/truncated/foreign
-            bytes are wrapped into the store's OWN typed error so every reader
-            — including the sweep-verify doctor — handles damage uniformly,
-            DEC-SWEEP-VERIFY-001).
+            If *path* does not exist or ``polars`` is not installed.
+        ResultsStoreSchemaError
+            If the file is not a readable, decodable results-store Parquet —
+            corrupt/truncated/foreign bytes, an old-schema file missing a
+            required column, a wrong-dtype column, or invalid row content are
+            ALL wrapped into the store's OWN typed error naming *path*, so
+            every reader — including the ``/results`` dashboard scan and the
+            sweep-verify doctor — handles damage uniformly and a raw
+            ``polars`` / ``KeyError`` error can never escape
+            (DEC-SWEEP-VERIFY-001; G14, gap-register ruling 5).
         """
         if not path.exists():
             raise ResultsStoreError(f"results store not found at {path}")
@@ -549,9 +606,21 @@ class ResultsStore:
         try:
             df = pl.read_parquet(path)
         except (pl.exceptions.PolarsError, OSError) as exc:
-            raise ResultsStoreError(f"unreadable results store at {path}: {exc}") from exc
-        for record in df.iter_rows(named=True):
-            store.append(_row_from_record(record))
+            raise ResultsStoreSchemaError(f"unreadable results store at {path}: {exc}") from exc
+        try:
+            for record in df.iter_rows(named=True):
+                store.append(_row_from_record(record))
+        except (ResultsStoreError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            # ANY schema/decode failure — a missing required column (KeyError),
+            # a null in a required cell (TypeError), a wrong-dtype value
+            # (ValueError / decimal.InvalidOperation ⊂ ArithmeticError), or row
+            # content failing ResultRow validation / the in-file duplicate
+            # conflict (ResultsStoreError) — surfaces as the typed damage
+            # class naming the store path, never a raw error (G14).
+            raise ResultsStoreSchemaError(
+                f"results store at {path} is not decodable as the current "
+                f"ResultRow schema (old-schema / foreign / damaged file): {exc!r}"
+            ) from exc
         _LOG.info("results_store.load", path=str(path), row_count=len(store))
         return store
 
@@ -684,10 +753,22 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
     ``condition_names`` is NOT read back — it is re-derived from ``mask_bits`` at
     construction (single source of truth), so the stored string can never desync.
     The u128 mask is reassembled from the two signed-Int64 limb columns
-    (``mask_bits_lo`` / ``mask_bits_hi``). ``deflated_sharpe`` is nullable: a
-    Parquet null reads back as ``None``.
+    (``mask_bits_lo`` / ``mask_bits_hi``).
+
+    Optional columns are read PRESENCE-TOLERANTLY via ``record.get`` (the
+    WindowLedgerRecord precedent — gap-register ruling 5): a store written
+    BEFORE the column existed loads the field as an honest ``None``, exactly
+    like a stored Parquet null — never a fabricated value, never a "corrupt"
+    verdict. ``deflated_sharpe`` is the template (a pre-DEC-RANKING-OVERFIT-001
+    store carries no such column). Every FUTURE :class:`ResultRow` extension
+    MUST follow it: optional field defaulting ``None`` + ``record.get`` here +
+    keep the pre-extension golden
+    (``tests/golden/test_results_store_pre_extension_golden.py``) green.
+    Required columns stay direct-indexed on purpose — their absence IS an
+    old-schema file, wrapped by :meth:`ResultsStore.load` into
+    :class:`ResultsStoreSchemaError`.
     """
-    deflated = record["deflated_sharpe"]
+    deflated = record.get("deflated_sharpe")
     return ResultRow(
         run_id=str(record["run_id"]),
         instrument=str(record["instrument"]),
@@ -738,4 +819,5 @@ __all__ = [
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
+    "ResultsStoreSchemaError",
 ]
