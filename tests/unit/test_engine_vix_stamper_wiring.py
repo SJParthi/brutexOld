@@ -2,15 +2,20 @@
 
 Stage B of the VIX-stamp wiring: the ``reference_stamper`` kwarg is threaded
 through EVERY production ``simulate_trades`` path and BOUND at every path whose
-trades are OBSERVABLE (persisted rows, the finalist projection, the WF/K-of-N
-oracle re-simulation, robustness/cascade reports, the CLI replay, the
-dashboard). Each test here proves ONE bind or thread is real — a monkeypatched
-capture on the exact seam the production call crosses, or a real end-to-end
-run whose trades carry the stamps — so no bind can silently regress.
+trades are OBSERVABLE — persisted finalist rows (grid + stage-3 refined cells,
+via the finalist projection's own re-simulation), the WF/K-of-N oracle
+re-simulation, and the sweep-verify recount. (The CLI options-sim replay and
+the whole cascade chain are since sanctioned-UNSTAMPED: round-2 removed the
+replay binds — stamps provably discarded at the SpotSignal conversion — and
+round-6 deleted the cascade stamper seam outright, its stamps discarded at the
+CandidateInput scalar conversion.) Each test here proves ONE bind or thread is
+real — a monkeypatched capture on the exact seam the production call crosses,
+or a real end-to-end run whose trades carry the stamps — so no bind can
+silently regress.
 
 Companion suite: ``tests/unit/test_vix_stamper_binding_pin.py`` (the AST pin
-enumerating the sanctioned literal-``None`` discarded-stream sites — FOUR
-after the round-2 review — plus the omission + positive-presence laws).
+enumerating the sanctioned literal-``None`` discarded-stream sites — FIVE
+after the round-6 review — plus the omission + positive-presence laws).
 Persisted-bytes honesty (updated for Stage C — the nullable
 ``vix_mean``/``vix_min``/``vix_max`` columns now land on the persisted rows):
 the stamped-vs-unstamped store regression in :class:`TestSweepRunSeam` pins
@@ -953,10 +958,14 @@ class TestParallelSeam:
         assert captured == [_STAMPER]
 
     def test_two_worker_stamped_tree_equals_stamped_sequential_tree(self, tmp_path: Path) -> None:
-        """THE spawn-parity pin (consciously updated for Stage C): a
-        2-spawn-worker STAMPED parallel run writes the byte-identical
-        per-tuple Parquet tree a STAMPED sequential run writes — the stamper
-        pickles into spawn workers and stamps deterministically on every one.
+        """THE spawn-parity pin (consciously updated for Stage C): a STAMPED
+        parallel run over TWO spawn eval workers (``workers=3`` —
+        ``ParallelGridDriver.run`` reserves one for the parent, so
+        ``pool_size = workers - 1 = 2``; the round-7 review caught the prior
+        ``workers=2`` claiming "2-spawn-worker" while spawning ONE) writes
+        the byte-identical per-tuple Parquet tree a STAMPED sequential run
+        writes — the stamper pickles into every spawn worker and stamps
+        deterministically across genuinely interleaved workers.
         (Stage B compared stamped-vs-UNstamped trees, valid only while the
         stamp touched zero persisted bytes; the ResultRow VIX columns now
         carry it, so the honest cross-arm baseline is stamped-vs-stamped.)
@@ -989,7 +998,7 @@ class TestParallelSeam:
                 root=par_tmp / "out",
                 ingest_audit=ingest,
                 guards=guards,
-                workers=2,
+                workers=3,  # pool_size = workers - 1 = TWO spawn eval workers
                 reference_stamper=_STAMPER,
             )
         seq_tree = _tree(seq_tmp / "out")
