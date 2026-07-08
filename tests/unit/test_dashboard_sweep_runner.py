@@ -563,6 +563,39 @@ def test_oneclick_preflight_for_plan_refuses_on_combined_sla_overrun(tmp_path: P
     assert any("projected wall-clock" in r["reason"] for r in result["refusals"])
 
 
+def test_oneclick_preflight_for_plan_single_group_sla_overrun_is_not_double_refused(
+    tmp_path: Path,
+) -> None:
+    """Round-3 mutation-testing finding: the combined-SLA re-check guards on
+    ``len(plan.requests) > 1`` specifically so a SINGLE group that already
+    breaches the envelope on its own (already refused once by the per-group
+    check inside the loop) does not ALSO get the summed re-check's refusal
+    appended — a mutation to ``>= 1`` slipped through every prior test
+    because they only asserted membership (``any(...)``), never an exact
+    count. This single-group plan's own tuple_count (12000) already exceeds
+    the 11520-tuple envelope alone."""
+    sl = ",".join(str(50 + i) for i in range(120))
+    tp = ",".join(str(100 + i) for i in range(100))
+    single_group = SweepRunRequest(
+        symbols="NIFTY",
+        intervals="1minute",
+        directions="BUY",
+        k="1",
+        sl=sl,
+        tp=tp,
+        exchange="NSE",
+        segment="FNO",
+        start=_TODAY.isoformat(),
+        end=_TODAY.isoformat(),
+        mode=DEFAULT_MODE,
+        top=10,
+    )
+    plan = OneClickSweepPlan(sweep_run_id="single-overrun-id", requests=(single_group,))
+    result = oneclick_preflight_for_plan(plan, lake_root=tmp_path, today=_TODAY, free_bytes=10**12)
+    sla_refusals = [r for r in result["refusals"] if "projected wall-clock" in r["reason"]]
+    assert len(sla_refusals) == 1
+
+
 def test_oneclick_preflight_for_plan_acknowledged_combined_sla_overrun_proceeds(
     tmp_path: Path,
 ) -> None:

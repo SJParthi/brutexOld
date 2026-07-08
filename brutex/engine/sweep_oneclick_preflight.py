@@ -111,6 +111,16 @@ __all__ = [
 #: reference-only, never a swept underlying (CLAUDE.md §2 Rule 3).
 INDIA_VIX_SYMBOL: Final[str] = "INDIAVIX"
 
+#: The ONLY exchange India VIX is ever published under (it is an NSE index —
+#: there is no BSE India-VIX partition, ever, by design). A round-3
+#: adversarial-refuter review found the VIX arm probed the CALLING group's
+#: own ``exchange`` unconditionally, so a SENSEX/BSE exchange-group call
+#: always reported a spurious "VIX coverage missing" clamp — a false,
+#: operator-facing claim about data the arm never actually checked (it
+#: checked a partition path that can never exist). The arm now runs ONLY
+#: for an NSE group.
+_INDIA_VIX_EXCHANGE: Final[str] = "NSE"
+
 #: The base 1-minute lake interval every derived timeframe re-derives from.
 SPOT_1M_INTERVAL: Final[str] = "1minute"
 
@@ -179,8 +189,13 @@ class OneClickPreflightVerdict:
     ok
         ``True`` iff every refusal-producing arm passed — the run may launch.
     refusals
-        Every named refusal (deterministic order: window/lock/disk arms
-        first, then per-symbol arms in request order).
+        Every named refusal, in the DETERMINISTIC arm-execution order:
+        window/zero-session, sweep-vs-pull lock, then per-symbol arms
+        (1-minute coverage, lake invariants, derived-TF freshness, futures
+        coverage) in request order, then free-disk-space, then the SLA
+        guard LAST (a round-3 adversarial-refuter review found this
+        docstring previously — wrongly — claimed disk ran first; corrected
+        to match the actual arm order in :func:`run_oneclick_preflight`).
     clamps
         Every applied edge-case clamp or honest flag-and-run annotation
         (never itself a refusal source).
@@ -445,6 +460,9 @@ def run_oneclick_preflight(
     check_vix_coverage
         Whether to run the India-VIX coverage arm (ruling #7) — the caller
         decides based on whether VIX stamping is in scope for this launch.
+        The arm additionally only ever runs for an NSE *exchange* group
+        (India VIX is an NSE-only index; a BSE/SENSEX group has no such
+        partition to check and would otherwise get a false "missing" clamp).
     free_bytes
         Injectable override for the free-disk-space check (tests); ``None``
         reads the real ``shutil.disk_usage`` via
@@ -612,7 +630,10 @@ def run_oneclick_preflight(
                 )
 
         # ── 7. India-VIX coverage arm (gap-hunt ruling #7) ────────────────
-        if check_vix_coverage:
+        # NSE-only (see _INDIA_VIX_EXCHANGE) — a BSE/SENSEX group has no VIX
+        # partition to ever find, so the arm is skipped there, not falsely
+        # reported as missing.
+        if check_vix_coverage and exchange == _INDIA_VIX_EXCHANGE:
             vix_gaps = missing_1m_partitions(
                 lake_root,
                 exchange=exchange,

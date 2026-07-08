@@ -147,10 +147,23 @@ def test_clamp_rejects_reversed_window() -> None:
 def test_clamp_ceiling_never_inverts_below_floor_for_an_unrealistic_today() -> None:
     """Adversarial-refuter finding: an unrealistic injected ``today`` before
     the coverage floor used to produce ``ceiling < floor`` (an inverted valid
-    span), collapsing the window to a date YEARS after the injected "now" —
-    contradicting the function's own future-to-date guarantee. The ceiling
-    must never fall below the floor."""
-    result = clamp_sweep_window(date(2010, 1, 1), date(2010, 6, 1), today=date(2005, 1, 1))
+    span), collapsing the window to a date YEARS before the injected "now"
+    (i.e. `today`'s OWN value, since the un-clamped ceiling degrades to
+    `today` itself) instead of the honest floor — contradicting the
+    function's own future-to-date guarantee. The ceiling must never fall
+    below the floor.
+
+    A round-3 mutation-testing audit found the ORIGINAL version of this test
+    (``start=2010-01-01, end=2010-06-01``) passed for the wrong reason: `end`
+    alone was already `< floor`, so the separate `end < floor` branch chose
+    `collapse_to = floor` regardless of whether the `max(floor, ...)` ceiling
+    fix was even present — reverting the fix left this test green. This
+    version uses a window that sits ENTIRELY ABOVE the floor (`>= floor`,
+    both endpoints), so only the ceiling computation decides the outcome:
+    without the fix, `ceiling` degrades to the unrealistic `today`
+    (2005-01-01, itself before the floor) and the window collapses there;
+    with the fix, `ceiling` is floored at 2020-01-01."""
+    result = clamp_sweep_window(date(2021, 6, 1), date(2021, 6, 1), today=date(2005, 1, 1))
     assert result.start == result.end == date(2020, 1, 1)
 
 
@@ -584,6 +597,36 @@ def test_vix_coverage_present_is_silent(tmp_path: Path) -> None:
     verdict = run_oneclick_preflight(
         **_base_kwargs(
             lake_root=tmp_path, results_root=tmp_path / "sweeps", check_vix_coverage=True
+        )
+    )
+    assert not any(c.field == "vix_coverage" for c in verdict.clamps)
+
+
+def test_vix_coverage_arm_skipped_for_bse_exchange_group(tmp_path: Path) -> None:
+    """Round-3 adversarial-refuter finding: India VIX is an NSE-only index —
+    there is no BSE India-VIX partition, ever, by design. The arm previously
+    probed the CALLING group's own ``exchange`` unconditionally, so a
+    SENSEX/BSE exchange-group call always reported a false "VIX coverage
+    missing" clamp regardless of true VIX data health. With no VIX partition
+    anywhere (not even under NSE), a BSE-exchange call must stay silent —
+    the arm is skipped entirely for a non-NSE group, never falsely
+    evaluated."""
+    _touch_partition(
+        tmp_path,
+        exchange="BSE",
+        segment="INDEX",
+        symbol="SENSEX",
+        interval="1minute",
+        year=2026,
+        month=1,
+    )
+    verdict = run_oneclick_preflight(
+        **_base_kwargs(
+            lake_root=tmp_path,
+            results_root=tmp_path / "sweeps",
+            exchange="BSE",
+            symbols=["SENSEX"],
+            check_vix_coverage=True,
         )
     )
     assert not any(c.field == "vix_coverage" for c in verdict.clamps)

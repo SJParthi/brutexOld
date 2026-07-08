@@ -85,6 +85,22 @@ _ZERO_VOLUME_SEGMENTS: Final[frozenset[str]] = frozenset({"INDEX"})
 #: here closes that gap regardless of which operand made it large.
 _MAX_EST_SECONDS: Final[float] = 1e18
 
+#: Sanity ceiling on ``est_bytes`` — a round-3 adversarial-refuter review
+#: found ``tuple_count * top * bytes_per_row`` (plain Python ints, so this
+#: never raises ``OverflowError``/produces ``inf`` INSIDE this function) can
+#: still grow an arbitrary-precision int past Python 3.11+'s
+#: ``sys.set_int_max_str_digits`` guard (default 4300 digits) — reproduced
+#: via a real, unauthenticated dashboard request: a large-but-otherwise-valid
+#: ``top`` query value (no upper bound existed on either one-click route)
+#: feeds through the UNCALIBRATED default (``bytes_per_row=512``) into an
+#: ``est_bytes`` whose decimal string blows that guard, raising
+#: ``ValueError: Exceeds the limit ... for integer string conversion`` from
+#: deep inside FastAPI's JSON encoder — an unhandled 500 on a single GET.
+#: Clamping the byte projection to an absurd-but-finite, JSON-and-string-safe
+#: ceiling (~1 yottabyte) closes this the same way :data:`_MAX_EST_SECONDS`
+#: closes the seconds-side gap.
+_MAX_EST_BYTES: Final[int] = 10**24
+
 
 @dataclass(frozen=True, slots=True)
 class EstimatorEstimate:
@@ -248,7 +264,7 @@ def estimate_sweep_cost(
         est_seconds = _MAX_EST_SECONDS
     if not isfinite(est_seconds) or est_seconds > _MAX_EST_SECONDS:
         est_seconds = _MAX_EST_SECONDS
-    est_bytes = tuple_count * top * calibration.bytes_per_row
+    est_bytes = min(tuple_count * top * calibration.bytes_per_row, _MAX_EST_BYTES)
     basis = CALIBRATED_BASIS if calibration.calibrated else PROVISIONAL_BASIS
     return EstimatorEstimate(
         trials=trials,

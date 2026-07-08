@@ -64,6 +64,18 @@ def test_malformed_json_resolves_to_uncalibrated(tmp_path: Path) -> None:
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED
 
 
+def test_deeply_nested_json_resolves_to_uncalibrated_not_recursion_error(tmp_path: Path) -> None:
+    """Round-3 adversarial-refuter finding: a deeply-nested JSON array, well
+    under the file-size cap, blows Python's ``json.loads`` parser recursion
+    limit and raises ``RecursionError`` — a DIFFERENT exception than
+    ``JSONDecodeError`` — which the reader must also catch to honor its
+    "never raises" contract."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    nested = "[" * 20_000 + "]" * 20_000
+    (tmp_path / CALIBRATION_FILENAME).write_text(nested, encoding="utf-8")
+    assert load_estimator_calibration(tmp_path) == UNCALIBRATED
+
+
 def test_non_object_json_resolves_to_uncalibrated(tmp_path: Path) -> None:
     _write(tmp_path, [1, 2, 3])
     assert load_estimator_calibration(tmp_path) == UNCALIBRATED

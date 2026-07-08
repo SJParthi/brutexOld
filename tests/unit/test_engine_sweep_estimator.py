@@ -214,6 +214,61 @@ def test_estimate_sweep_cost_clamps_overflow_error_to_inf() -> None:
     assert estimate.est_seconds_provisional == 1e18
 
 
+def test_estimate_sweep_cost_clamps_finite_but_over_ceiling_seconds() -> None:
+    """Round-3 mutation-testing finding: the overflow-clamp guard is
+    ``if not isfinite(est_seconds) or est_seconds > _MAX_EST_SECONDS`` — a
+    mutation that drops the second clause (leaving only the ``isfinite``
+    check) passed every existing test, because both prior tests only
+    produced ``inf``/``OverflowError``, never a merely-huge-but-FINITE
+    value. This constructs one directly (``4.19e18 trials * 3600s ≈
+    1.5e22``, comfortably finite, no exception) to pin that the ``>
+    _MAX_EST_SECONDS`` ceiling clause is independently required."""
+    calibration = EstimatorCalibration(
+        calibrated=True,
+        seconds_per_trial=3600.0,
+        bytes_per_row=100,
+        sample_trials=1,
+        measured_at_utc=None,
+        source="x",
+    )
+    estimate = estimate_sweep_cost(
+        k_values=[20],
+        other_axes_product=1000,
+        tuple_count=1,
+        top=1,
+        segment="FNO",
+        calibration=calibration,
+    )
+    assert estimate.est_seconds_provisional == 1e18
+
+
+def test_estimate_sweep_cost_clamps_est_bytes_ceiling() -> None:
+    """Round-3 adversarial-refuter finding: ``est_bytes`` (plain Python ints,
+    so never ``inf``/``OverflowError`` internally) had NO ceiling at all — a
+    large-but-otherwise-valid ``top`` fed through the UNCALIBRATED default
+    produces an int whose decimal string exceeds Python 3.11+'s
+    ``sys.set_int_max_str_digits`` guard, raising ``ValueError`` deep inside
+    the JSON encoder on a real, unauthenticated dashboard request. Pin the
+    same finite ceiling on the byte projection."""
+    calibration = EstimatorCalibration(
+        calibrated=True,
+        seconds_per_trial=1e-6,
+        bytes_per_row=10**20,
+        sample_trials=1,
+        measured_at_utc=None,
+        source="x",
+    )
+    estimate = estimate_sweep_cost(
+        k_values=[1],
+        other_axes_product=1,
+        tuple_count=10**10,
+        top=10**10,
+        segment="FNO",
+        calibration=calibration,
+    )
+    assert estimate.est_bytes == 10**24
+
+
 def test_estimate_sweep_cost_negative_tuple_count_raises() -> None:
     with pytest.raises(ValueError, match="tuple_count must be >= 0"):
         estimate_sweep_cost(
