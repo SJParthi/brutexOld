@@ -679,7 +679,9 @@ class SweepAlerter:
         ----------
         reason
             A short, non-secret cause token (e.g. ``"disk_full"``,
-            ``"out_of_memory"``, ``"DailyQuotaExceeded"``).
+            ``"out_of_memory"``, ``"DailyQuotaExceeded"`` — the quota example is
+            dormant under Groww, which has no daily quota;
+            DEC-QUOTA-VERDICT-MOOT-001).
         """
         message = escape_markdown_v2(
             f"🛑 Pull HALTED: {reason}. The pull stopped — no further bars will be "
