@@ -1114,8 +1114,10 @@ hostile-review pass._
   population floor). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
   ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact post-merge origin/main
-  d2cd283ad baseline (1 error/496 warnings, venv-resolved — measured identically on a pristine
-  origin/main worktree; supersedes the pre-merge 83baab8df 37/433 figure), 0 new).
+  d2cd283ad baseline (0 errors/496 warnings, venv-resolved pyright 1.1.411 — measured identically
+  on a pristine origin/main worktree; supersedes the pre-merge 83baab8df 37/433 figure; the
+  earlier-recorded "1 error" was a measurement artifact that does not reproduce venv-resolved),
+  0 new).
   Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
