@@ -29,6 +29,7 @@ from brutex.adapters.groww.pull_singleflight import (
     account_pull_singleflight_lock,
     account_singleflight_lock_path,
     default_account_lock_dir,
+    flock_singleflight,
     foreign_pull_lease,
     pull_lease_enabled,
     pull_lease_guard,
@@ -118,6 +119,33 @@ def test_contended_path_does_not_close_the_holders_lock(tmp_path: Path) -> None:
     # Holder released now → free.
     with pull_singleflight_lock(tmp_path):
         pass
+
+
+def test_flock_singleflight_public_wrapper_acquires_and_releases(tmp_path: Path) -> None:
+    # The public COMMON wrapper (reused by the engine sweep single-flight lock) enters the
+    # shared flock core over an EXPLICIT lock path, yields, and releases on exit — the two
+    # body lines the sibling engine reuse relies on. Release is proven by a clean
+    # re-acquire after the first block exits.
+    lock_path = tmp_path / ".locks" / "sibling.lock"
+    with flock_singleflight(lock_path):
+        assert lock_path.exists()
+        # Owner-only 0o600, inherited from the shared core (CodeQL file-permission guard).
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    # Released → a fresh acquire of the same path succeeds without raising.
+    with flock_singleflight(lock_path):
+        pass
+
+
+def test_flock_singleflight_public_wrapper_refuses_when_held(tmp_path: Path) -> None:
+    # A SECOND acquire of the same path while held is refused immediately by the
+    # non-blocking flock; the default contention error is PullAlreadyRunningError.
+    lock_path = tmp_path / ".locks" / "sibling.lock"
+    with (
+        flock_singleflight(lock_path),
+        pytest.raises(PullAlreadyRunningError),
+        flock_singleflight(lock_path),  # pragma: no cover — __enter__ raises first
+    ):
+        pass  # pragma: no cover — body never runs (the inner acquire raises)
 
 
 def test_lock_survives_when_lockfile_preexists(tmp_path: Path) -> None:
