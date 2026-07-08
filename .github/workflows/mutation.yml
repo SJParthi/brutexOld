@@ -284,7 +284,7 @@ jobs:
           #    focused-runner subset argument as the rest of the loop).
           #
           # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
-          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560) with a
+          # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) with a
           # per-pair hard pytest timeout: the module carries bounded fail-open spin
           # loops (_GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP) whose loop-counter mutants spin
           # forever; mutmut's internal timeout kills only the `sh` wrapper and the
@@ -295,7 +295,7 @@ jobs:
           # round 2's FIXED 30 s wrap) — kills the pytest subtree INSIDE the sh, the
           # pipe closes, and mutmut reads the `|| exit 1` as a kill (an infinite-loop
           # mutant IS a caught defect). HONEST classifier arithmetic (fixer rounds,
-          # MIGRATION.md #1560 — the round-1 "scores KILLED, never TIMEOUT, locally
+          # MIGRATION.md #1597 — the round-1 "scores KILLED, never TIMEOUT, locally
           # verified" claim was FALSE as written, and round 2's own "measured 5-7 s
           # CI baseline" was NOT measured either — it was local 2.5-3.4 s x an
           # ASSUMED 2x shared-GHA factor, see the budget comment; a plausible
@@ -380,7 +380,7 @@ jobs:
           # 243/243 8m48s run (re-validated 250/250 KILLED after fixer round 2's
           # pragma un-hiding, then 254/254 KILLED — 0 timeout/suspicious/survived
           # — post-round-3 on the F1-restructured audit.py, byte-identical to
-          # this tree; MIGRATION.md #1560) but silently defeatable by future test insertion or
+          # this tree; MIGRATION.md #1597) but silently defeatable by future test insertion or
           # a new spin loop without a fail-fast twin. Pre-decided dial: if a
           # rehearsal/scheduled run ever wedges on one of the 9 pairs again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
@@ -568,7 +568,7 @@ jobs:
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
-  # there + in MIGRATION.md #1560 (Golden Rule #10 — out openly, not
+  # there + in MIGRATION.md #1597 (Golden Rule #10 — out openly, not
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
@@ -626,19 +626,19 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
         run: |
-          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560):
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
           #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
           #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
           #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556).
-          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1560.
+          #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1560
+          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1597
           #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
           #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
           #   ceil(599/6)=100 mutants x 29-40 s/mutant serial (CI per-lane measured
@@ -716,7 +716,7 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
         run: |
-          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560):
+          # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
           #   evaluator.rs + spec.rs + python.rs = 627 mutants measured 2026-07-08
           #   (`cargo mutants --list | wc -l` on the post-merge HEAD — the race-6
@@ -873,7 +873,7 @@ jobs:
               }
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issue.number,
-                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1560 / STANDARDS row 3.`,
+                body: `Auto-closing: the full Mutation testing workflow ran GREEN on the SCHEDULED main run at \`${context.sha.substring(0, 7)}\` ([run](${runUrl})) and this issue's commit \`${m[1]}\` is an ancestor — the state it reported is superseded by a verified zero-survivor pass (DEC-MUTATION-RUNTIME-003, mutation-verdict job). This run is the completion proof for MIGRATION.md #1597 / STANDARDS row 3.`,
               });
               await github.rest.issues.update({
                 owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',

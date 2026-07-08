@@ -1,4 +1,4 @@
-# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560) — the ONE cargo-mutants scope for
+# DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) — the ONE cargo-mutants scope for
 # fno-math, resolved by BOTH the CI matrix jobs (.github/workflows/mutation.yml)
 # and any local `cargo mutants` run from this crate dir (CLAUDE.md §2 Rule 11
 # COMMON; cargo-mutants resolves config against the examined tree root, never
@@ -27,12 +27,12 @@
 # kill spot-checked 15/15 CAUGHT (`cargo mutants --in-place -F 'MaskWord for
 # u128'` 5/5 + `-F 'MaskWord for u64|below_parallel_threshold'` 10/10). The
 # mutation.yml shard-budget bands absorb future small drift; this growth was
-# NOT small (+7.7%), so the matrix took the #1560 pre-decided +1 shard (5→6).
+# NOT small (+7.7%), so the matrix took the #1597 pre-decided +1 shard (5→6).
 #
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10):
 #   compat/*    — 299 mutants; TickVault-compat surface (config defaults, NSE
 #                 calendar, domain types) NOT on the Track-1 engine execution
 #                 path; its known June/July survivors are enumerated in
-#                 MIGRATION.md #1560 and gating it is a NAMED follow-up.
+#                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
 examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]

@@ -60,7 +60,7 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: literal to mutate, and its one remaining ``= None`` mutant crashes the first
 #: emission (suite-killed). The prior pragma here hid that killable ``= None``
 #: mutant — removed by the DEC-MUTATION-RUNTIME-003 fixer round, MIGRATION.md
-#: #1560.)
+#: #1597.)
 _LOG = structlog.get_logger(__name__)
 
 # ── Deferred rate.* emission (DEC-RATE-LOG-OUTSIDE-LOCK-001) ────────────────
@@ -687,7 +687,7 @@ class RateController:
         # mutant flows straight into every caller's ``_flush_rate_logs`` on the
         # common no-gap path and is suite-killed, so NO pragma (the pragma-class
         # proof for the capture slots lives at :data:`_PendingLogSlot`;
-        # DEC-MUTATION-RUNTIME-003 fixer round, MIGRATION.md #1560).
+        # DEC-MUTATION-RUNTIME-003 fixer round, MIGRATION.md #1597).
         pending: _PendingLogSlot = None
         if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
             self._issues.clear()
@@ -767,7 +767,7 @@ class RateController:
         # ``max(wait, 0.0)`` — identical to ``wait if wait > 0.0 else 0.0`` (an
         # overdue/at-boundary wait clamps to exactly 0.0) but rephrased so the ONLY
         # generated mutant on this line is boundary-observable, never a silent
-        # tie-equivalent (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1560).
+        # tie-equivalent (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597).
         return max(wait, 0.0)
 
     def _advance_issue_ring_locked(self, sec: int) -> None:
@@ -788,7 +788,7 @@ class RateController:
         steps = sec - newest
         # ``steps < 1`` — int-identical to ``steps <= 0`` but rephrased so EVERY
         # generated mutant of this guard is boundary-observable (the ``<= 0 → < 0``
-        # tie-equivalent disappears; DEC-MUTATION-RUNTIME-003, MIGRATION.md #1560).
+        # tie-equivalent disappears; DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597).
         # NEVER pragma this line: it also carries the REAL off-by-one boundary mutant.
         if steps < 1:
             return  # same second (or a tiny backward skew already gap-handled): no advance
@@ -851,7 +851,7 @@ class RateController:
         # The raw bucket span for ``(now - window, now]``: the ``+ 1`` closes the
         # inclusive ``floor(now - window) .. floor(now)`` range (split onto its own
         # line so its off-by-one mutants stay observable; DEC-MUTATION-RUNTIME-003,
-        # MIGRATION.md #1560).
+        # MIGRATION.md #1597).
         raw_span = head_sec - oldest_sec + 1
         # Cap at the ring size only. The former defensive ``max(raw_span, 0)``
         # clamp was PROVABLY DEAD and is DELETED instead of pragma'd (the #624

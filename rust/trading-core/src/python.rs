@@ -2746,7 +2746,7 @@ mod tests {
         }
     }
 
-    // ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560): wrapper delegation-parity
+    // ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597): wrapper delegation-parity
     // kills — the LINKABLE subset. MEASURED boundary (rust-lld, 2026-07-07): a
     // `#[pyfunction]`/`#[pymethods]` wrapper whose body constructs a `PyErr`
     // (`.map_err(PyValueError::new_err)` / a `PyResult` reject arm) cannot be

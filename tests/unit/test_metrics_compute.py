@@ -1287,7 +1287,7 @@ def test_compute_metrics_from_scalars_rejects_nonpositive_total_bars() -> None:
 
 
 # ── DEC-MUTATION-RUNTIME-003: scalars-entry mutation-survivor kills ──
-# (MIGRATION.md #1560.) The 8 mutmut survivors 203, 205-207, 212-215 all
+# (MIGRATION.md #1597.) The 8 mutmut survivors 203, 205-207, 212-215 all
 # live in compute_metrics_from_scalars (the #1186 scalars entry): its
 # raise-tests used `pytest.raises(match=)` — which is re.search, so the
 # XX-wrapped message mutants still matched — and no scalars call ever
