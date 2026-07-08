@@ -109,6 +109,31 @@ def test_g5_running_schema_exact(tmp_path: Path) -> None:
     }
 
 
+def test_g5_running_write_preserves_prior_wall_started(tmp_path: Path) -> None:
+    """A mid-run RUNNING write preserves the prior launch start (round-3 fix, #1594).
+
+    ``mark_suspect``'s never-launder belt writes ``state=RUNNING, suspect=True``
+    mid-run; that write must NOT reset ``wall_started_utc`` to the suspect-latch
+    instant (which would truncate a SUSPECT run's reported forensic duration).
+    The enter write stamps launch; the later RUNNING write keeps it and only
+    flips ``suspect``.
+    """
+    _write(tmp_path, RunState.RUNNING, now=100.0)
+    _write(tmp_path, RunState.RUNNING, now=180.0, suspect=True)
+    doc = read_exit_status(tmp_path, _RUN_ID)
+    assert doc is not None
+    assert doc["state"] == "running"
+    assert doc["wall_started_utc"] == 100.0  # NOT reset to 180.0
+    assert doc["wall_ended_utc"] is None
+    assert doc["suspect"] is True
+    # A terminal write after the suspect latch still reports launch → duration.
+    _write(tmp_path, RunState.SUSPECT_COMPLETE, now=260.0, exit_code=0)
+    final = read_exit_status(tmp_path, _RUN_ID)
+    assert final is not None
+    assert final["wall_started_utc"] == 100.0
+    assert final["wall_ended_utc"] == 260.0
+
+
 def test_g5_terminal_preserves_wall_started(tmp_path: Path) -> None:
     """A terminal write preserves the prior artifact's wall_started_utc."""
     _write(tmp_path, RunState.RUNNING, now=100.0)

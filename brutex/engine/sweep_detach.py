@@ -34,10 +34,11 @@ reaps on its own. POSIX only (Linux + macOS — the Track-1 envelope).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -53,6 +54,7 @@ from brutex.engine.sweep_liveness import (
 )
 
 __all__ = [
+    "DETACHED_ENV_SENTINEL",
     "DETACH_LOG_FILENAME",
     "DETACH_PIDFILE_NAME",
     "DetachedSweepHandle",
@@ -61,6 +63,7 @@ __all__ = [
     "default_progress_path",
     "detach_pidfile_path",
     "probe_handle",
+    "running_as_detached_child",
     "spawn_detached_sweep",
 ]
 
@@ -73,6 +76,33 @@ DETACH_LOG_FILENAME: Final[str] = "detached-sweep.log"
 #: Durable pidfile (under ``runs/``) a restarted dashboard re-discovers the
 #: detached run from. Rewritten atomically per spawn.
 DETACH_PIDFILE_NAME: Final[str] = "detached-sweep.pid"
+
+#: Environment sentinel stamped into the detached child's environment. The
+#: child honours ``--detach`` ONLY when this sentinel is ABSENT, so an
+#: abbreviated flag (argparse's default ``allow_abbrev`` matches ``--det`` /
+#: ``--deta`` / ``--detac`` → ``detach=True``) that survives the parent's
+#: exact-string argv filter can NEVER re-trigger detach in the child. The
+#: sentinel is spelling-immune where a raw ``sys.argv`` string match is not —
+#: it closes the fork-bomb re-exec loop (hostile-review round 3, #1594).
+DETACHED_ENV_SENTINEL: Final[str] = "BRUTEX_SWEEP_DETACHED"
+
+
+def running_as_detached_child(env: Mapping[str, str] | None = None) -> bool:
+    """Return ``True`` iff this process is already a detached sweep child.
+
+    A detached child carries :data:`DETACHED_ENV_SENTINEL` == ``"1"`` in its
+    environment (stamped by :func:`spawn_detached_sweep`). The CLI's
+    ``sweep-all`` handler consults this BEFORE re-spawning, so ``--detach`` (or
+    any argparse abbreviation of it) is executed at most once — the child runs
+    the real sweep instead of forking another detached generation. O(1).
+
+    Parameters
+    ----------
+    env
+        Environment mapping to inspect; defaults to :data:`os.environ`.
+    """
+    source = os.environ if env is None else env
+    return source.get(DETACHED_ENV_SENTINEL) == "1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +168,7 @@ def spawn_detached_sweep(
     command: Sequence[str] | None = None,
     run_id_hint: str | None = None,
     clock: Callable[[], float] = time.time,
+    env: Mapping[str, str] | None = None,
 ) -> DetachedSweepHandle:
     """Spawn the sweep as a detached session leader (R7 detached survival).
 
@@ -164,6 +195,11 @@ def spawn_detached_sweep(
     clock
         Epoch-seconds source for the pidfile's ``started_utc`` stamp
         (observability only — never identity).
+    env
+        Base environment for the child; defaults to the current
+        :data:`os.environ`. :data:`DETACHED_ENV_SENTINEL` == ``"1"`` is ALWAYS
+        stamped on top (spelling-immune re-detach guard — see
+        :func:`running_as_detached_child`).
 
     Returns
     -------
@@ -180,6 +216,11 @@ def spawn_detached_sweep(
     cmdline = prefix + tuple(argv)
     log = log_path if log_path is not None else default_detach_log_path(results_root)
     log.parent.mkdir(parents=True, exist_ok=True)
+    # Stamp the spelling-immune re-detach sentinel on top of the child env so
+    # the child ignores any surviving ``--detach`` abbreviation (fork-bomb
+    # guard — hostile-review round 3, #1594).
+    base_env = os.environ if env is None else env
+    child_env = {**base_env, DETACHED_ENV_SENTINEL: "1"}
     with log.open("ab") as log_file:
         proc = subprocess.Popen(  # noqa: S603 — argv is caller-built, never shell-parsed
             cmdline,
@@ -188,6 +229,7 @@ def spawn_detached_sweep(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             close_fds=True,
+            env=child_env,
         )
     child_pid = proc.pid
     # DISOWN the Popen object: the child is detached BY DESIGN (nobody here

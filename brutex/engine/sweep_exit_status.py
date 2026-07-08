@@ -155,13 +155,17 @@ def write_exit_status(
         raise ValueError(f"exit_code must be an int or None, got {exit_code!r}")
     now = float(clock())
     prior = read_exit_status(results_root, run_id)
-    if resolved_state is RunState.RUNNING:
-        started = now
-        ended: float | None = None
-    else:
-        prior_started = _finite_float(prior.get("wall_started_utc")) if prior else None
-        started = prior_started if prior_started is not None else now
-        ended = now
+    # wall_started_utc is the run's LAUNCH instant (observability only, never
+    # identity): a prior readable artifact's start is ALWAYS preserved — only
+    # the very first (enter) write, with no prior, stamps ``now``. This holds
+    # for RUNNING too, so a mid-run RUNNING write (e.g. mark_suspect's
+    # never-launder belt) can no longer reset the start to the suspect-latch
+    # instant and truncate a SUSPECT run's reported duration (hostile-review
+    # round 3, #1594). ``ended`` alone distinguishes RUNNING (None) from a
+    # terminal state (now).
+    prior_started = _finite_float(prior.get("wall_started_utc")) if prior else None
+    started = prior_started if prior_started is not None else now
+    ended: float | None = None if resolved_state is RunState.RUNNING else now
     if resolved_state is RunState.SUSPECT_COMPLETE:
         resolved_suspect = True
     elif suspect is not None:

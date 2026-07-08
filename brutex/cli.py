@@ -5302,9 +5302,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # R7 detached survival (DEC-SWEEP-UNKILLABLE-CORE-001): re-exec this exact
     # invocation as its own session leader and return — the child owns the run
     # (progress + exit-status + Telegram) and survives this process's death.
-    if detach:
-        from brutex.engine.sweep_detach import spawn_detached_sweep
+    # The env sentinel (NOT a sys.argv string match) gates re-detach: the
+    # spawned child carries BRUTEX_SWEEP_DETACHED=1, so any surviving
+    # ``--detach`` abbreviation (argparse's default allow_abbrev matches
+    # ``--det`` → detach=True) is IGNORED in the child and the real sweep runs
+    # instead of forking another detached generation (fork-bomb guard,
+    # hostile-review round 3, #1594).
+    from brutex.engine.sweep_detach import running_as_detached_child, spawn_detached_sweep
 
+    if detach and not running_as_detached_child():
         handle = spawn_detached_sweep(
             [a for a in sys.argv[1:] if a != "--detach"], results_root=out_root
         )

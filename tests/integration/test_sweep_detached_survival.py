@@ -149,3 +149,61 @@ def test_r7_cli_detach_flag_reexecs_and_returns(
     doc = json.loads(pidfile.read_text(encoding="utf-8"))
     assert "--detach" not in doc["cmdline"]
     assert "--help" in doc["cmdline"]
+
+
+def test_r7_detached_child_does_not_respawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detached child (sentinel set) NEVER re-spawns — the fork-bomb is closed.
+
+    An abbreviated ``--det`` survives the parent's exact-string argv filter and
+    argparse re-parses it to ``detach=True`` in the child; without the env
+    sentinel the child would spawn ANOTHER detached generation forever. With
+    ``BRUTEX_SWEEP_DETACHED=1`` set the child skips the spawn and falls through
+    to the real sweep (proven here by a marker raised right after the detach
+    block, with ``spawn_detached_sweep`` asserted never called).
+    """
+    from brutex.cli import cmd_sweep_all
+    from brutex.engine import sweep_detach, sweep_scope
+
+    monkeypatch.setenv(sweep_detach.DETACHED_ENV_SENTINEL, "1")
+    spawn_calls: list[object] = []
+    monkeypatch.setattr(
+        sweep_detach,
+        "spawn_detached_sweep",
+        lambda *a, **k: spawn_calls.append((a, k)),  # pragma: no cover — must never run
+    )
+
+    class _Marker(Exception):
+        pass
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise _Marker
+
+    monkeypatch.setattr(sweep_scope, "check_sweep_scope", _boom)
+    # An abbreviated flag in argv — the string filter would leave it in.
+    monkeypatch.setattr(sys, "argv", ["brutex", "sweep-all", "--det"])
+    with pytest.raises(_Marker):
+        cmd_sweep_all(
+            lake_root=tmp_path / "lake",
+            catalog_path=None,
+            results_root=tmp_path / "sweeps",
+            exchange="NSE",
+            segment="INDEX",
+            symbols="NIFTY",
+            intervals="1minute",
+            start="2026-01-01",
+            end="2026-01-02",
+            directions="BUY",
+            k="1",
+            conditions=None,
+            sl="80",
+            tp="50",
+            top=5,
+            mode="A",
+            max_tuples=None,
+            max_combos=None,
+            data_snapshot_hash=None,
+            detach=True,
+        )
+    assert spawn_calls == []

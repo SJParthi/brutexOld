@@ -22,12 +22,14 @@ from brutex.dashboard.sweep_runner import sweep_progress_file
 from brutex.engine.sweep_detach import (
     DETACH_LOG_FILENAME,
     DETACH_PIDFILE_NAME,
+    DETACHED_ENV_SENTINEL,
     DetachedSweepHandle,
     default_detach_command,
     default_detach_log_path,
     default_progress_path,
     detach_pidfile_path,
     probe_handle,
+    running_as_detached_child,
     spawn_detached_sweep,
 )
 from brutex.engine.sweep_liveness import RunVerdict
@@ -53,7 +55,21 @@ TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_r7_probe_forwards_progress_verdicts": ("R7",),
     "test_r7_probe_explicit_progress_path_wins": ("R7",),
     "test_r7_probe_default_now_wall_is_wall_clock": ("R7",),
+    "test_r7_child_env_carries_detach_sentinel": ("R7",),
+    "test_r7_running_as_detached_child_true_from_mapping": ("R7",),
+    "test_r7_running_as_detached_child_false_absent": ("R7",),
+    "test_r7_running_as_detached_child_false_wrong_value": ("R7",),
+    "test_r7_running_as_detached_child_default_reads_os_environ": ("R7",),
+    "test_r7_spawn_env_override_base_still_stamps_sentinel": ("R7",),
 }
+
+#: Stub child that reports the value of the re-detach sentinel env var — proves
+#: the child's environment carries BRUTEX_SWEEP_DETACHED=1 (fork-bomb guard).
+_SENTINEL_STUB_CHILD: Final[str] = """
+import os, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write(os.environ.get(sys.argv[2], "<UNSET>"))
+"""
 
 #: Stub child: prove session leadership + argv passthrough, exercise both
 #: output streams, then exit — the R7 spawn contract without a real sweep.
@@ -208,6 +224,81 @@ def test_r7_handle_is_frozen(tmp_path: Path) -> None:
     handle = DetachedSweepHandle(pid=1, run_id_hint=None, results_root=tmp_path, cmdline=("x",))
     with pytest.raises(dataclasses.FrozenInstanceError):
         handle.pid = 2  # type: ignore[misc]
+
+
+def test_r7_child_env_carries_detach_sentinel(tmp_path: Path) -> None:
+    """The spawned child's environment carries BRUTEX_SWEEP_DETACHED=1.
+
+    This is the fork-bomb guard (hostile-review round 3, #1594): the child
+    consults the sentinel (NOT its raw argv) before re-detaching, so an
+    abbreviated ``--det`` that survives the argv filter can never fork another
+    detached generation.
+    """
+    out_file = tmp_path / "sentinel-report.txt"
+    handle = spawn_detached_sweep(
+        (str(out_file), DETACHED_ENV_SENTINEL),
+        results_root=tmp_path,
+        command=(sys.executable, "-c", _SENTINEL_STUB_CHILD),
+    )
+    _wait_for(out_file)
+    _reap(handle.pid)
+    assert out_file.read_text(encoding="utf-8") == "1"
+
+
+def test_r7_spawn_env_override_base_still_stamps_sentinel(tmp_path: Path) -> None:
+    """An explicit base env is honoured but the sentinel is ALWAYS stamped on top.
+
+    The child sees the injected marker AND the sentinel — the sentinel wins even
+    if the caller's base env omitted (or mis-set) it.
+    """
+    out_file = tmp_path / "sentinel-report.txt"
+    marker_file = tmp_path / "marker-report.txt"
+    base = {**os.environ, "BRUTEX_TEST_MARKER": "present", DETACHED_ENV_SENTINEL: "0"}
+    handle = spawn_detached_sweep(
+        (str(out_file), DETACHED_ENV_SENTINEL),
+        results_root=tmp_path,
+        command=(sys.executable, "-c", _SENTINEL_STUB_CHILD),
+        env=base,
+    )
+    _wait_for(out_file)
+    _reap(handle.pid)
+    # The base env's DETACHED_ENV_SENTINEL="0" is overridden to "1".
+    assert out_file.read_text(encoding="utf-8") == "1"
+    # And a distinct base-env marker survived (env override merged, not replaced).
+    handle2 = spawn_detached_sweep(
+        (str(marker_file), "BRUTEX_TEST_MARKER"),
+        results_root=tmp_path,
+        command=(sys.executable, "-c", _SENTINEL_STUB_CHILD),
+        env=base,
+    )
+    _wait_for(marker_file)
+    _reap(handle2.pid)
+    assert marker_file.read_text(encoding="utf-8") == "present"
+
+
+def test_r7_running_as_detached_child_true_from_mapping() -> None:
+    """The sentinel == "1" in the supplied mapping → True."""
+    assert running_as_detached_child({DETACHED_ENV_SENTINEL: "1"}) is True
+
+
+def test_r7_running_as_detached_child_false_absent() -> None:
+    """An absent sentinel → False (a normal, non-detached invocation)."""
+    assert running_as_detached_child({}) is False
+
+
+def test_r7_running_as_detached_child_false_wrong_value() -> None:
+    """A non-"1" sentinel value → False (only the exact "1" flips it)."""
+    assert running_as_detached_child({DETACHED_ENV_SENTINEL: "0"}) is False
+
+
+def test_r7_running_as_detached_child_default_reads_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no mapping the default reads os.environ."""
+    monkeypatch.delenv(DETACHED_ENV_SENTINEL, raising=False)
+    assert running_as_detached_child() is False
+    monkeypatch.setenv(DETACHED_ENV_SENTINEL, "1")
+    assert running_as_detached_child() is True
 
 
 def test_r7_progress_path_mirrors_dashboard_helper(tmp_path: Path) -> None:

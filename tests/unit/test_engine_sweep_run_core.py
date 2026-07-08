@@ -297,6 +297,44 @@ def test_runcore_writes_no_parquet_under_runs_dir(tmp_path: Path) -> None:
         pass
     run_dir = tmp_path / "runs" / run_id
     assert run_dir.is_dir()
+    # The CLEAN-run finalize wrote the full artifact set — manifest + chain-map +
+    # the diagnostic bundle — yet none is a .parquet.
+    assert (run_dir / "diagnostic-bundle.zip").exists()
+    assert list(run_dir.rglob("*.parquet")) == []
+
+
+def test_runcore_writes_no_parquet_under_runs_dir_on_failure(tmp_path: Path) -> None:
+    """Register Row 4 hazard pin — the FAILURE/diag-bundle finalize path (round 3).
+
+    The round-1 pin only exercised the clean ``with _core: pass`` finalize. The
+    hazard the ruling guards against is a run-core write reopening the
+    ``.parquet`` glob crash — and the diagnostic bundle + failure artifacts are
+    written on the EXCEPTION finalize (exactly when an operator forensically
+    reads the run). This drives a raising body so the full failure finalize
+    runs (exit-status ``failed`` + the diag bundle) and asserts STILL no
+    ``.parquet`` lands under ``runs/<run_id>/``.
+    """
+    grid = _grid()
+    run_id = grid_identity(grid)
+    spy = _spy()
+    with (
+        pytest.raises(ValueError, match="boom"),
+        sweep_run_core(
+            results_root=tmp_path,
+            grid=grid,
+            alerter=cast("SweepAlerter", spy),
+            entry_label="t",
+            tripwire_config=TripwireConfig(),
+            diffcheck_k=0,
+        ),
+    ):
+        raise ValueError("boom")
+    run_dir = tmp_path / "runs" / run_id
+    assert run_dir.is_dir()
+    status = read_exit_status(tmp_path, run_id)
+    assert status is not None
+    assert status["state"] == "failed"
+    assert (run_dir / "diagnostic-bundle.zip").exists()  # bundle written on failure
     assert list(run_dir.rglob("*.parquet")) == []
 
 
