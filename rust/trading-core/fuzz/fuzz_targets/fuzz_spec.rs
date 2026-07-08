@@ -121,7 +121,11 @@ fuzz_target!(|data: &[u8]| {
                 &SPEC_SCHEMA_VERSION.to_le_bytes(),
                 "the schema-version prefix must lead"
             );
-            assert_eq!(bytes, spec.canonical_bytes(), "canonical_bytes must be deterministic");
+            assert_eq!(
+                bytes,
+                spec.canonical_bytes(),
+                "canonical_bytes must be deterministic"
+            );
         }
         Err(msg) => {
             assert_ne!(
