@@ -737,6 +737,16 @@ def test_percentile_integer_rank_hits_exact_element() -> None:
     assert _percentile([0.0, 10.0, 20.0, 30.0, 40.0], 50.0) == 20.0
 
 
+def test_public_percentile_is_the_promoted_alias() -> None:
+    """The public ``percentile`` (DEC-SOAK-REAL-TIER-001) is the same object as
+    the back-compat ``_percentile`` alias — the ONE COMMON convention the soak
+    drift monitor shares (Golden Rule #11)."""
+    from brutex.metrics.compute import percentile
+
+    assert percentile is _percentile
+    assert percentile([2.0, 8.0], 50.0) == 5.0
+
+
 # ── _drawdown_stats: comparison boundaries ──────────────────────────
 
 

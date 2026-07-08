@@ -267,7 +267,16 @@ jobs:
     # 60 keeps an honest hang guard with ~45% headroom over the observed
     # ~40m wall time. Continues the 15->25->40 ratchet (60 = the higher of
     # the two concurrent 2026-07-04 raises, union-resolved at merge).
-    timeout-minutes: 60
+    # 60 -> 75 (2026-07-07, PR #1230 run 28854276463): a fully-GREEN run on
+    # 56f29620 measured exactly 60:00 wall — 33m05 pytest+coverage + 13m25
+    # strict per-module gate + 11m43 touched-module gate + setup, EVERY
+    # executed step green — and was cancelled AT the wall, failing the
+    # CI OK aggregate with zero real failures. The PR legitimately grew the
+    # job (new scoped per-module gates + the ampersand-probe/doctor suites).
+    # 75 gives evidenced ~25% headroom over the measured ~60m wall;
+    # wall-clock budget only — no gate is weakened. Continues the
+    # 15->25->40->60 ratchet.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1495,8 +1504,11 @@ jobs:
           # DEC-GROWW-DASHBOARD-CREDS-PROBE-001: strict gates on the live-probe
           # modules. Both are injectable (fake GrowwClient / fake sdk_factory), so
           # standalone-gateable with no growwapi/network. 100% line+branch.
+          # The &-family form-probe driver added to probe.py by
+          # DEC-FORM-WINNER-PERSIST-001 is covered by its own suite
+          # (test_groww_probe_ampersand.py), so BOTH files feed this gate.
           if compgen -G "tests/unit/test_groww_probe.py" > /dev/null; then
-            pytest --cov=brutex.adapters.groww.probe --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_probe.py
+            pytest --cov=brutex.adapters.groww.probe --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_probe.py tests/unit/test_groww_probe_ampersand.py
           else
             echo "(brutex.adapters.groww.probe test file not present yet — gate inactive)"
           fi
@@ -1513,6 +1525,21 @@ jobs:
             pytest --cov=brutex.adapters.groww.vendor_floor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_vendor_floor.py
           else
             echo "(brutex.adapters.groww.vendor_floor test file not present yet — gate inactive)"
+          fi
+          # DEC-FORM-WINNER-PERSIST-001: strict gates on the durable &-underlying
+          # form-winner map (symbol_form_preference — probe-evidence fold +
+          # schema_meta persist/load) and the ONE shared schema_meta key/value
+          # Protocol (data.meta_kv). Injectable store fakes, so standalone-gateable
+          # with no growwapi/network. 100% line+branch.
+          if compgen -G "tests/unit/test_groww_symbol_form_preference.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.symbol_form_preference --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_symbol_form_preference.py
+          else
+            echo "(brutex.adapters.groww.symbol_form_preference test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_data_meta_kv.py" > /dev/null; then
+            pytest --cov=brutex.data.meta_kv --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_meta_kv.py
+          else
+            echo "(brutex.data.meta_kv test file not present yet — gate inactive)"
           fi
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
@@ -2257,10 +2284,17 @@ jobs:
           fi
       - name: pytest stress tests (bounded)
         # DEC-GROWW-CATALOG-DRIVER-001: wire tests/stress into CI (bounded N;
-        # soak via BRUTEX_STRESS_YEARS / STRESS_EVENTS on workflow_dispatch).
+        # the real multi-hour soak runs on soak-selfhosted.yml — soak-scale
+        # STRESS_EVENTS dispatches are REFUSED by stress-nightly.yml's fence
+        # (> 200000), DEC-SOAK-REAL-TIER-001 #1580; BRUTEX_STRESS_YEARS stays
+        # the fetch-sustained scale knob).
         run: |
           if [ -d tests/stress ]; then
-            pytest tests/stress -q
+            # SOAK-1: honor the deliberately-isolated @soak marker — the
+            # full-budget soak runs ONLY on soak-selfhosted.yml, NEVER in the
+            # per-PR gate (pyproject.toml soak-marker contract + tests/stress/
+            # __init__.py). Matches stress-nightly.yml's exclusion.
+            pytest tests/stress -m 'not soak' -q
           else
             echo "⏸  tests/stress does not exist yet — skipping"
           fi
