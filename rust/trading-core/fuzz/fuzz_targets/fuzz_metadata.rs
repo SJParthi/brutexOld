@@ -56,7 +56,14 @@ fuzz_target!(|data: &[u8]| {
     let session_open = (read_u64(data, 40) % 86_401) as i64;
 
     // ── 1+2. derive never panics; tod is the exact civil arithmetic ──
-    let m = derive_bar_metadata(day_ordinal, hour, minute, second, session_open, expiry_ordinal);
+    let m = derive_bar_metadata(
+        day_ordinal,
+        hour,
+        minute,
+        second,
+        session_open,
+        expiry_ordinal,
+    );
     assert_eq!(
         m.tod_seconds,
         hour * 3600 + minute * 60 + second,
@@ -114,6 +121,9 @@ fuzz_target!(|data: &[u8]| {
     if candidate >= entry {
         assert_eq!(got, candidate, "an unexpired candidate is the near month");
     } else {
-        assert_eq!(got, next_month, "an expired candidate must roll to next month");
+        assert_eq!(
+            got, next_month,
+            "an expired candidate must roll to next month"
+        );
     }
 });

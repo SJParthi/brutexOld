@@ -78,6 +78,7 @@ import structlog
 
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contracts import resolve_contracts, resolve_expiries
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.dashboard.fno_underlying import (
     primary_fno_underlying,
     resolve_fno_index_aliases,
@@ -611,6 +612,7 @@ def pull_expiries_contracts(
     now: datetime | None = None,
     today: date | None = None,
     run_id: str = DEFAULT_METADATA_RUN_ID,
+    form_preference: SymbolFormPreference | None = None,
 ) -> MetadataPullReport:
     """Enumerate + PERSIST F&O expiries + contracts for *instruments* — NO candles.
 
@@ -674,6 +676,16 @@ def pull_expiries_contracts(
     run_id
         The reproducibility id stamped on every persisted row (defaults to
         :data:`DEFAULT_METADATA_RUN_ID`; the route injects a per-click id).
+    form_preference
+        Optional learned ``&``-form ordering (DEC-SYMBOL-FORM-PREFERENCE-001 /
+        DEC-FORM-WINNER-PERSIST-001) threaded into every ``resolve_expiries`` /
+        ``resolve_contracts`` call with ``preference_key=<the PRIMARY F&O
+        underlying>`` — the CELL key, NOT the queried spelling form — so one
+        durable winner row serves every phase (metadata + candles) instead of
+        fragmenting per spelling. Production passes the pipeline's shared
+        :class:`~brutex.adapters.groww.symbol_form_preference.\
+PersistentSymbolFormPreference`; ``None`` (the default — every existing
+        caller/test) is byte-identical to the fixed plain-first order.
 
     Returns
     -------
@@ -788,15 +800,22 @@ def pull_expiries_contracts(
         Tries the cell's PRIMARY F&O underlying form first and, only if it returns
         ZERO expiries, the resolver's fallback forms in order — first non-empty wins
         (DEC-FNO-UNDERLYING-RESOLVE-001). Each form composes the ``&`` → ``%26``
-        ampersand fallback inside :func:`resolve_expiries`. A canonical symbol carries
-        one form → exactly one call, byte-unchanged.
+        ampersand fallback inside :func:`resolve_expiries` — keyed by the PRIMARY
+        *underlying* (``preference_key``), never the queried spelling form, so the
+        learned winner is shared with the candle phase (DEC-FORM-WINNER-PERSIST-001).
+        A canonical symbol carries one form → exactly one call, byte-unchanged.
         """
         exchange, underlying, year = cell
         forms = forms_by_key.get((exchange, underlying), (underlying,))
         expiries = _first_nonempty_over_forms(
             forms,
             lambda form: resolve_expiries(
-                client, exchange=exchange, underlying_symbol=form, year=year
+                client,
+                exchange=exchange,
+                underlying_symbol=form,
+                year=year,
+                form_preference=form_preference,
+                preference_key=underlying,
             ),
             is_empty=lambda r: not r,
         )
@@ -911,7 +930,8 @@ def pull_expiries_contracts(
         the resolver's fallback forms only on a ZERO-contract reply — first non-empty
         wins (DEC-FNO-UNDERLYING-RESOLVE-001). The persisted registry ``underlying`` is
         always the PRIMARY (Phase-1) key, so the registry stays keyed consistently
-        regardless of which form answered the vendor.
+        regardless of which form answered the vendor — and the ``&``-form memory keys
+        on the SAME primary (``preference_key``; DEC-FORM-WINNER-PERSIST-001).
         """
         nonlocal contracts_persisted
         exchange, underlying, expiry = job
@@ -919,7 +939,12 @@ def pull_expiries_contracts(
         contracts = _first_nonempty_over_forms(
             forms,
             lambda form: resolve_contracts(
-                client, exchange=exchange, underlying_symbol=form, expiry=expiry
+                client,
+                exchange=exchange,
+                underlying_symbol=form,
+                expiry=expiry,
+                form_preference=form_preference,
+                preference_key=underlying,
             ),
             is_empty=lambda r: not r,
         )

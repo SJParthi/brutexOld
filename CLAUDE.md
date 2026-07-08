@@ -159,6 +159,64 @@ UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
 + `pull_jobs.py`/`lake_revision.py`/`progress_beat.py` ALL 100% line+branch;
 every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
+Earlier: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 —
+the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
+one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
+winning form STRING — the winner's ROLE applied to the key's own
+`underlying_symbol_forms` tuple (moved into `symbol_form_preference.py`,
+re-exported from `contracts.py`), so a candle-phase win and a metadata win
+share ONE value space — review-fixed from the raw phase-local string) written
+through the NEW `PersistentSymbolFormPreference`
+(write-on-change, read-once-per-preference-instance single-flight — one
+instance per pull run, MULTI-form keys only on
+BOTH paths — the ~750 plain underlyings pay ZERO store I/O on order AND record
+(review-fixed: the ungated persist wrote ~212 junk rows per pull process); the
+seed `get_meta` runs OUTSIDE the map lock, bounded by the COMMON
+`run_with_deadline` (2 s, `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged
+sidecar read can never stall the fan-out (review-fixed: it ran INSIDE the map
+lock), and the persist `set_meta` is bounded by the same guard (5 s,
+`BRUTEX_FORM_WINNER_WRITE_DEADLINE_S` — round-2 review fix: a non-raising
+wedged write would have hung the recording fetch worker forever and queued
+every later persist behind the persist lock); store errors WARN-only —
+a pull is never crashed; `BRUTEX_FORM_WINNER_PERSIST=off` is the write-side
+kill switch; SUPERSEDES the "cross-pull persistence is a NAMED follow-up"
+clause of DEC-SYMBOL-FORM-PREFERENCE-001), keyed by the PRIMARY F&O underlying
+in EVERY phase (`resolve_expiries`/`resolve_contracts` gain the
+`preference_key` normalization `candles.py` already had; the metadata pull
+passes the CELL key, never the queried spelling form) and wired at every
+production pull seam (ONE instance per `/pull-pipeline` run shared by the
+metadata + historical phases; the standalone metadata/composite routes AND the
+`/pull-historical` direct-selection grammar — the latter MISSED in round 1 and
+wired by the round-2 review fix; ALL FOUR seams route-pinned as of round 5
+(pipeline identity-sharing + dry-run store=None + metadata/composite
+real-store persist — previously only the direct-selection seam was);
+`run_groww_option_ingest`'s fresh-per-pass default stands down — also fixing
+the within-one-pull amnesia across market buckets/until-clean rounds; a
+dry-run threads store=None, byte-identical to the process-local base). The
+two structurally identical set_meta/get_meta Protocols consolidate into ONE
+`brutex/data/meta_kv.py` `MetaKV` (Golden Rule #11 COMMON;
+`VendorFloorMetaStore` is now a back-compat alias). PLUS the live `&`-family
+probe TOOLING: `brutex doctor --live --ampersand-probe` (stage 14, ≤64-call
+budget) probes BOTH symbol forms of every master-DERIVED `&`-underlying
+against BOTH F&O APIs through the kit's read-only client, writes the
+`ampersand_verdict.json` evidence sidecar + per-call transcript lines, SEEDS
+the durable map per-underlying through the ONE COMMON `record_winner` write
+path (the `seeded` count READ-BACK-VERIFIED — a kill-switched/failed write is
+never claimed, `amp.seed_shortfall` names the cause), and — iff DECISIVE —
+writes the machine-readable
+`groww.form_probe.verdict` stamp, whose ONLY writer in the repo is that stage
+(test-pinned; `form_probe_status()` reads it back — missing/corrupt =
+honestly UNVERIFIED, "verified" is DATA not prose; a data-beside-a-RAISED-
+sibling name reads `*_UNCONFIRMED` — it seeds its winner but NEVER counts
+CLEAR/decisive, so throttle-contaminated evidence cannot stamp). HONEST
+(Golden Rule
+#1/#10): the probe was NOT run for this change — no Groww credentials in the
+build environment — so ZERO transcript exists, ZERO stamp was written, and
+the #898 `%26`-encoding hypothesis stays vendor-UNVERIFIED byte-INTACT until
+a decisive operator-run probe lands its transcript; the map itself needs no
+probe (production pulls self-learn from ordinary fallback wins). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched
+modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-SOAK-REAL-TIER-001, MIGRATION.md #1580 —
 the REAL multi-hour soak tier + the honest reclassification of the ubuntu
 nightly: `stress-nightly.yml` is a **~5-min ubuntu-24.04 REGRESSION GATE**
@@ -722,8 +780,7 @@ UNVERIFIED — the lake_keys pledge stands); read-time recovery ONLY —
 NAMED follow-up DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 (until it lands a drifted
 stock lake shows recovered Greeks but `/db` moneyness UNKNOWN). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; `lake_keys.py`/`spot_drift.py`/
-`greeks_enrich.py` ALL 100% line+branch).
-Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+`greeks_enrich.py` ALL 100% line+branch).Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
 adversarial audit's confirmed defects fixed as ONE change set: (a) price
 POSITIVITY is enforced at the ENGINE READ BOUNDARY
@@ -1197,6 +1254,32 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
   `greeks_enrich_pass.py`/`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch;
   ruff/ruff-format/`mypy --strict`/pyright clean).
+  Earlier: `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
+  MIGRATION.md #1581** — the durable `&`-form winner map: `schema_meta` rows
+  (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
+  ROLE applied to the key's own `underlying_symbol_forms` tuple, so the metadata
+  and candle phases share ONE value space; `underlying_symbol_forms` moved into
+  `symbol_form_preference.py`, `contracts.py` re-exports byte-compatibly) via the
+  NEW `PersistentSymbolFormPreference` over the shared `brutex/data/meta_kv.py`
+  `MetaKV` Protocol (the `vendor_floor` durable-learned-value pattern;
+  `VendorFloorMetaStore` aliased); MULTI-form keys only on BOTH paths (the ~750
+  plain underlyings pay ZERO store I/O — order AND record); the seed `get_meta`
+  runs OUTSIDE the map lock under the COMMON `run_with_deadline` bound (2 s,
+  `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged sidecar read can never stall
+  the fan-out; the `preference_key` PRIMARY-underlying normalization on
+  `resolve_expiries`/`resolve_contracts`; ONE shared instance wired per pipeline run
+  across the metadata + historical phases (the spine's fresh-per-pass default stands
+  down); the `brutex doctor --live --ampersand-probe` stage-14 probe TOOLING whose
+  decisive run is the ONLY writer of the `groww.form_probe.verdict` stamp — the
+  stage's `seeded` count is READ-BACK-VERIFIED (a kill-switched or failed winner
+  write is never claimed; `amp.seed_shortfall` names the cause) and a
+  data-beside-a-RAISED-sibling name reads `*_UNCONFIRMED` (seeds its winner, never
+  counts CLEAR/decisive — a throttled side is not a refuted side). HONEST:
+  the live probe was NOT run here (no creds in the build environment) — the #898
+  `%26` UNVERIFIED wording stands byte-intact; the stamp flips it only with a real
+  transcript. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean,
+  pyright at the pre-change baseline).
   Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
   bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
   the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
@@ -1638,8 +1721,7 @@ hostile-review pass._
   DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — until it lands a drifted stock lake shows recovered Greeks but a `/db`
   moneyness UNKNOWN (honest split-brain). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no
   scope/vocab/rate change; `lake_keys.py` (75/44) + `spot_drift.py` (143/42, NEW) + `greeks_enrich.py` (539/130) ALL
-  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).
-  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
   DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
   the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
   constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
@@ -3057,6 +3139,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/peaceful-newton-fehcc3`
+  Earlier: `claude/sleepy-hawking-l87497`
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
   retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
