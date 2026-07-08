@@ -121,14 +121,17 @@ class TestR15ApplyFuturesFill:
             )
 
     def test_r15_short_does_not_inherit_check_sign_ambiguity(self) -> None:
-        # [R15] the calculator's short branch sells the ENTRY leg at
-        # entry + tick (the documented '# CHECK SIGN' favorable ambiguity,
-        # calculator.py MINOR-4); the futures short sells ADVERSE at
-        # entry − tick — proven different on the sell fill.
+        # [R15] the futures short sells the ENTRY leg ADVERSE at entry − tick,
+        # computed adverse-both-sides directly (never by delegating to the
+        # calculator's short branch — mechanism independence AST-pinned in the
+        # R45 test). After DEC-TRACK2-COSTS-SPEC-RECONCILE-001 (MIGRATION.md
+        # #1552) the calculator's own '# CHECK SIGN' short ambiguity was
+        # resolved to the §8 ADVERSE rule (entry + tick → entry − tick), so the
+        # calculator's short sell now AGREES with the futures adverse fill.
         _cal_buy, cal_sell, _ = _apply_slippage(2_200_000, 2_210_000, "short_call")
         fut_buy, fut_sell, _ = apply_futures_fill(2_200_000, 2_210_000, side="short")
-        assert cal_sell == 2_200_005  # favorable (the pinned legacy ambiguity)
-        assert fut_sell == 2_199_995  # adverse — NOT inherited
+        assert cal_sell == 2_199_995  # adverse (reconciled — DEC-TRACK2-COSTS-SPEC-RECONCILE-001)
+        assert fut_sell == 2_199_995  # adverse — computed independently
         assert fut_buy == 2_210_005
 
     def test_fill_floors_at_one_tick_long_exit(self) -> None:
