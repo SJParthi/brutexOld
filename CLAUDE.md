@@ -32,34 +32,47 @@ SCALED by the in-flight `mask·bar` work (`_effective_stall_seconds = max(base,
 work / STALL_MIN_MASK_BARS_PER_SEC)`; `work = C(n_unique, k) × N_bars` stored
 per in-flight `_Dispatched`), so a tuple that legitimately needs N minutes gets
 a proportional bound while a genuine hang STILL aborts (the bound is FINITE — a
-wedged worker makes zero progress). Env knobs `BRUTEX_SWEEP_STALL_SECONDS` +
-`BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC` (positive-float, invalid→default+LOUD);
-`stall_seconds`/`stall_min_mask_bars_per_sec` default `None`→env-resolved so
-`run_parallel_grid`/the CLI pick it up with no call-site change. HONEST (Golden
-Rule #10): `2.5e8 mask·bar/s` is a CONSERVATIVE hang-detection floor
-(kernel ~1e9, ~4× headroom), setting only the false-abort-margin ↔
-wedge-detection-latency trade-off, never results. (2) a worker OOM →
-`BrokenProcessPool` is now caught DISTINCTLY (`_drive`; `future.result()` runs
-BEFORE `pending.pop` so the broken future stays quarantinable): every in-flight
-tuple is QUARANTINED (`_quarantine_broken_pool` → a new `"pool_broken"`
-`_Outcome` per tuple → `_apply` `SweepCache.record`s it so a resume ALWAYS
-cache-skips it even under a prior-failure-frozen checkpoint, PLUS a
-contiguous-clean checkpoint advance) then the run fails LOUDLY with the NEW
-`SweepWorkerPoolBrokenError` naming the offending tuple(s) + remediation
-(reduce `BRUTEX_SWEEP_WORKERS` / k, or raise `BRUTEX_SWEEP_MEM_BUDGET_BYTES`).
-So a resume NEVER re-dispatches the same deterministically-OOMing tuple (the
-checkpoint froze at the clean prefix before, causing a silent no-progress
-livelock across resumes) and makes progress on the rest; a distinct
-`SUPERVISOR_TUPLE_POOL_BROKEN` audit action + ERROR log + `tuples_pool_broken`
-counter make the loss LOUD. Fail-loud is chosen over blind pool-rebuild on the
-merits + the memory-budget-division interaction: the per-tuple rank budget
-divides across workers (`memory_budget_bytes` = `total × fraction / workers`),
-so rebuilding into the next heavy tuple would just re-OOM — the honest fix
-tells the operator to reduce pressure while durably quarantining the poison
-tuple. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
-scope/vocab/rate/lake/audit-schema change (the new action appears only on a
-broken-pool run, never on a clean run); `sweep_parallel.py` 100% line+branch
-(109 tests); ruff/ruff-format/`mypy --strict`/`pyright` clean.
+wedged worker makes zero progress — HONEST: the detection latency SCALES with
+`C(n_unique,k) × N_bars`, ~4× a heavy tuple's legitimate runtime). Env knobs
+`BRUTEX_SWEEP_STALL_SECONDS` + `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC`
+(positive-float, invalid→default+LOUD; the constructor refuses non-positive/
+non-finite values); `stall_seconds`/`stall_min_mask_bars_per_sec` default
+`None`→env-resolved so `run_parallel_grid`/the CLI pick it up with no call-site
+change. HONEST (Golden Rule #10): `2.5e8 mask·bar/s` is a CONSERVATIVE
+hang-detection floor (kernel ~1e9, ~4× headroom), setting only the
+false-abort-margin ↔ wedge-detection-latency trade-off, never results. (2) a
+worker OOM is QUARANTINED durably + REVERSIBLY + VISIBLY: `_drive` catches
+`BrokenProcessPool` DISTINCTLY (`future.result()` runs BEFORE `pending.pop` so
+the broken future stays quarantinable) and `_await_next_result` catches a
+worker's surviving Python-level `MemoryError` (the cgroup/rlimit OOM shape —
+pool NOT broken) as the single-tuple twin; already-FINISHED sibling futures are
+DRAINED (real results applied, never discarded); the poison tuple(s) land in
+the DURABLE quarantine sidecar `<root>/.sweep_quarantine.json` (fsync'd BEFORE
+the raise) — deliberately NOT `SweepCache.record` (which would permanently +
+invisibly drop them from every identical resume — the adversarial-review MAJOR
+corrected pre-merge) and NO checkpoint advance (`had_failure` latch) — then the
+run fails LOUDLY with the NEW `SweepWorkerPoolBrokenError` naming tuple(s) +
+sidecar + remediation (reduce `BRUTEX_SWEEP_WORKERS` / k, or raise
+`BRUTEX_SWEEP_MEM_BUDGET_BYTES`; then DELETE the sidecar entries and resume —
+the tuples are then genuinely RECOMPUTED, the ONE reversible lever;
+regression-pinned). A resume gates the sidecar FIRST and reports the skips as
+the DISTINCT `tuples_quarantined_prior` counter (on `SupervisedGridSummary` +
+the COMPLETE audit payload — NEVER folded into `skipped_cache`), so the
+completeness hole is always visible; distinct
+`SUPERVISOR_TUPLE_POOL_BROKEN`/`SUPERVISOR_TUPLE_QUARANTINED_PRIOR` audit
+actions + ERROR/WARNING logs make the loss LOUD. Fail-loud is chosen over blind
+pool-rebuild on the merits + the memory-budget-division interaction: the
+per-tuple rank budget divides across workers (`memory_budget_bytes` = `total ×
+fraction / workers`), so rebuilding into the next heavy tuple would just
+re-OOM. HONEST residual (named follow-up, NOT claimed): a deterministically-
+WEDGED non-OOM tuple still aborts via `SweepStallError` with a frozen
+checkpoint, so an identical resume re-dispatches IT — the stall path has no
+quarantine (pre-existing). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+REFERENCE_ONLY; no scope/vocab/rate/lake/audit-schema change (the new actions
+appear only on broken-pool/resume-after-quarantine runs, never on a clean run);
+`sweep_parallel.py` 100% line+branch (128 tests) + the touched
+`sweep_supervisor.py` (additive defaulted summary field) 100% line+branch;
+ruff/ruff-format/`mypy --strict`/`pyright` clean.
 Earlier: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
@@ -1233,12 +1246,16 @@ hostile-review pass._
   parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a HEAVY-GRID-AWARE stall watchdog (the wait budget
   scales by the in-flight `mask·bar` work `C(n_unique, k) × N_bars` so a legitimately-slow k=5 tuple is not
   false-aborted near grid completion, while a genuine hang still aborts on the FINITE bound; env
-  `BRUTEX_SWEEP_STALL_SECONDS` + `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC`) + a distinct `BrokenProcessPool`
-  QUARANTINE (a worker OOM durably quarantines every in-flight tuple — cache-record so a resume always cache-skips
-  it + a contiguous-clean checkpoint advance — then fails LOUDLY with `SweepWorkerPoolBrokenError` naming the tuple
-  + remediation, so a resume never re-dispatches the same deterministically-OOMing tuple and no silent
-  no-progress livelock occurs). Additive resilience — a CLEAN run is byte-identical, frozen sweep goldens +
-  P-06/suffix-independence UNMODIFIED; `sweep_parallel.py` 100% line+branch. ENGINE UNCHANGED —
+  `BRUTEX_SWEEP_STALL_SECONDS` + `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC`) + a durable REVERSIBLE OOM QUARANTINE
+  (a broken pool — and a worker's surviving Python-level `MemoryError`, the cgroup/rlimit shape — records the
+  poison tuple(s) in the sidecar `<root>/.sweep_quarantine.json`, drains finished siblings' real results, then
+  fails LOUDLY with `SweepWorkerPoolBrokenError` naming tuple(s) + sidecar + remediation; a resume skips them
+  VISIBLY as the DISTINCT `tuples_quarantined_prior` summary counter — never `skipped_cache` — and deleting the
+  sidecar entries genuinely recomputes them; deliberately NO cache-record/checkpoint advance, so no permanent
+  invisible loss and no identical-resume livelock; HONEST residual: a WEDGED non-OOM tuple still resume-livelocks
+  via the `SweepStallError` path — pre-existing, named follow-up). Additive resilience — a CLEAN run is
+  byte-identical, frozen sweep goldens + P-06/suffix-independence UNMODIFIED; `sweep_parallel.py` +
+  touched `sweep_supervisor.py` 100% line+branch. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change).
   Earlier: `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·

@@ -66,6 +66,7 @@ from brutex.engine.sweep_supervisor import (
     SweepGuards,
     grid_identity,
     run_supervised_grid,
+    tuple_label,
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.orchestrator.audit import (
@@ -1713,11 +1714,124 @@ class _RecordingFakePool(_FakePool):
         return super().submit(fn, index, tuple_, bars)
 
 
+class TestQuarantineSidecar:
+    """The durable, reversible quarantine sidecar helpers (pure I/O)."""
+
+    def test_missing_sidecar_loads_empty(self, tmp_path: Path) -> None:
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == set()
+
+    def test_append_then_load_round_trips(self, tmp_path: Path) -> None:
+        path = mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0"), (3, "t3")], "OOM")
+        assert path == mod.quarantine_sidecar_path(tmp_path)
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0", "t3"}
+
+    def test_append_merges_with_existing_entries(self, tmp_path: Path) -> None:
+        mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0")], "OOM")
+        mod.append_quarantine_entries(tmp_path, "sid", [(1, "t1")], "OOM")
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0", "t1"}
+
+    def test_other_sweep_ids_are_filtered(self, tmp_path: Path) -> None:
+        mod.append_quarantine_entries(tmp_path, "other", [(0, "t0")], "OOM")
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == set()
+
+    def test_corrupt_sidecar_loads_empty_and_warns(self, tmp_path: Path) -> None:
+        mod.quarantine_sidecar_path(tmp_path).write_text("{not json", encoding="utf-8")
+        with capture_logs() as logs:
+            got = mod.load_quarantined_tuple_labels(tmp_path, "sid")
+        assert got == set()
+        assert any(e["event"] == "sweep.quarantine.sidecar_corrupt" for e in logs)
+
+    def test_wrong_shape_sidecar_loads_empty_and_warns(self, tmp_path: Path) -> None:
+        mod.quarantine_sidecar_path(tmp_path).write_text('{"nope": 1}', encoding="utf-8")
+        with capture_logs() as logs:
+            got = mod.load_quarantined_tuple_labels(tmp_path, "sid")
+        assert got == set()
+        assert any(e["event"] == "sweep.quarantine.sidecar_corrupt" for e in logs)
+
+    def test_append_replaces_a_corrupt_sidecar(self, tmp_path: Path) -> None:
+        mod.quarantine_sidecar_path(tmp_path).write_text("{not json", encoding="utf-8")
+        mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0")], "OOM")
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0"}
+
+    def test_append_replaces_a_non_list_entries_sidecar(self, tmp_path: Path) -> None:
+        mod.quarantine_sidecar_path(tmp_path).write_text('{"entries": 7}', encoding="utf-8")
+        mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0")], "OOM")
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0"}
+
+    def test_non_dict_entries_are_skipped_on_load(self, tmp_path: Path) -> None:
+        mod.quarantine_sidecar_path(tmp_path).write_text(
+            '{"entries": [7, {"sweep_id": "sid", "tuple": "t0"}]}', encoding="utf-8"
+        )
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0"}
+
+
+class TestDriverStallValidation:
+    """NIT: direct-constructor 0 / non-finite stall knobs are refused, never a ZeroDivision."""
+
+    @pytest.mark.parametrize("value", [0.0, -1.0, float("inf"), float("nan")])
+    def test_zero_or_nonfinite_mask_bars_refused(self, tmp_path: Path, value: float) -> None:
+        grid = _grid()
+        with (
+            AuditWriter.open(tmp_path / "i.jsonl") as ing,
+            _guards(tmp_path, grid) as guards,
+            pytest.raises(mod.SweepParallelUsageError, match="positive finite"),
+        ):
+            mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ing,
+                guards=guards,
+                workers=4,
+                stall_min_mask_bars_per_sec=value,
+            )
+
+    def test_zero_stall_seconds_refused(self, tmp_path: Path) -> None:
+        grid = _grid()
+        with (
+            AuditWriter.open(tmp_path / "i.jsonl") as ing,
+            _guards(tmp_path, grid) as guards,
+            pytest.raises(mod.SweepParallelUsageError, match="positive finite"),
+        ):
+            mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ing,
+                guards=guards,
+                workers=4,
+                stall_seconds=0.0,
+            )
+
+
+class _MemoryErrorPool(_FakePool):
+    """A fake pool whose designated index's future carries a worker MemoryError.
+
+    Models the cgroup/rlimit OOM shape: the worker SURVIVES (the pool does NOT
+    break), the tuple's future resolves with :exc:`MemoryError`.
+    """
+
+    def __init__(self, ctx: mod._WorkerContext, *, memory_error_index: int) -> None:
+        super().__init__(ctx)
+        self._memory_error_index = memory_error_index
+
+    def submit(
+        self, fn: object, index: int, tuple_: SweepTuple, bars: Sequence[CandleBar]
+    ) -> Future[mod.TupleWorkResult]:
+        if index == self._memory_error_index:
+            fut: Future[mod.TupleWorkResult] = Future()
+            fut.set_exception(MemoryError("worker allocation failed"))
+            return fut
+        return super().submit(fn, index, tuple_, bars)
+
+
 class TestBrokenProcessPoolQuarantine:
     def test_broken_pool_quarantines_inflight_and_fails_loud(self, tmp_path: Path) -> None:
-        """A broken pool → SweepWorkerPoolBrokenError naming the tuple(s) + remediation;
-        the in-flight tuples are cache-recorded + the checkpoint advances past them."""
+        """A broken pool → SweepWorkerPoolBrokenError naming tuple(s) + sidecar +
+        remediation; the in-flight tuples land in the DURABLE sidecar — deliberately
+        NOT cache-recorded, NOT checkpoint-advanced (the reversible-recovery law)."""
         grid = _grid()
+        sweep_id = grid_identity(grid)
         tuples = list(iter_sweep_tuples(grid))
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(tmp_path, grid, guards, ing)
@@ -1734,14 +1848,23 @@ class TestBrokenProcessPoolQuarantine:
         assert mod.SWEEP_WORKERS_ENV in msg  # remediation names the workers knob
         assert mod.MEM_BUDGET_ENV in msg  # …and the memory-budget knob
         assert "NIFTY" in msg  # names the offending tuple(s)
-        # max_inflight=2 → the two in-flight tuples were quarantined.
+        # HONESTY: the message states the resume-skip + names the reversible lever.
+        assert "tuples_quarantined_prior" in msg
+        assert mod.QUARANTINE_SIDECAR_NAME in msg
+        assert "DELETE" in msg
+        # max_inflight=2 → the two in-flight tuples were quarantined DURABLY.
         assert acc.tuples_pool_broken == 2
-        assert ckpt == 2  # checkpoint advanced PAST them (no prior failure)
-        assert seen0 is True and seen1 is True  # cache-recorded → a resume skips them
+        labels = mod.load_quarantined_tuple_labels(tmp_path / "out", sweep_id)
+        assert labels == {tuple_label(tuples[0]), tuple_label(tuples[1])}
+        # The reversible-recovery law: NO cache record, NO checkpoint advance —
+        # the sidecar is the ONE thing that makes a resume skip them.
+        assert ckpt == 0
+        assert seen0 is False and seen1 is False
 
-    def test_resume_does_not_redispatch_quarantined_tuples(self, tmp_path: Path) -> None:
+    def test_resume_skips_quarantined_visibly_and_makes_progress(self, tmp_path: Path) -> None:
         """After a broken-pool quarantine, a RESUME never re-dispatches the poison
-        tuples into the same OOM — it skips them and makes progress on the rest."""
+        tuples — they are counted as the DISTINCT tuples_quarantined_prior (never
+        folded into skipped_cache) and the rest of the grid makes progress."""
         grid = _grid()
         total = count_sweep_tuples(grid)
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
@@ -1752,19 +1875,172 @@ class TestBrokenProcessPoolQuarantine:
             with pytest.raises(mod.SweepWorkerPoolBrokenError):
                 driver1._drive(broken, 0, 2, 4, acc1)  # type: ignore[arg-type]
 
-            # RESUME: a fresh drive over the SAME durable guards.
+            # RESUME: a fresh driver over the SAME durable guards + sidecar. The
+            # driver loads the sidecar in run(); at the _drive level the test seeds
+            # it exactly as run() does (the loader is run()-covered below).
             resume_from = guards.checkpoint.next_index
-            assert resume_from == 2
+            assert resume_from == 0  # checkpoint FROZEN (reversible-recovery law)
             driver2 = _driver(tmp_path, grid, guards, ing)
+            driver2._quarantined = frozenset(
+                mod.load_quarantined_tuple_labels(tmp_path / "out", grid_identity(grid))
+            )
             acc2 = mod._Accumulator()
             recording = _RecordingFakePool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
             driver2._drive(recording, resume_from, 2, 4, acc2)  # type: ignore[arg-type]
 
-        # The quarantined indices 0 & 1 were NEVER re-submitted to a worker.
+        # The quarantined indices 0 & 1 were NEVER re-submitted to a worker…
         assert 0 not in recording.submitted and 1 not in recording.submitted
+        # …counted DISTINCTLY (the completeness hole is visible, never a cache blend)…
+        assert acc2.tuples_quarantined_prior == 2
+        assert acc2.skipped_cache == 0
         # …and the rest of the grid made progress.
         assert acc2.tuples_run == total - 2
-        assert guards.checkpoint.next_index == total
+
+    def test_deleting_the_sidecar_recovers_the_quarantined_tuples(self, tmp_path: Path) -> None:
+        """THE RECOVERY LEVER: delete the sidecar (after relieving memory pressure)
+        → the next resume genuinely RE-DISPATCHES + recomputes the tuples."""
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver1 = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc1 = mod._Accumulator()
+            broken = _BrokenPool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            with pytest.raises(mod.SweepWorkerPoolBrokenError):
+                driver1._drive(broken, 0, 2, 4, acc1)  # type: ignore[arg-type]
+
+            # The operator relieves memory pressure + deletes the sidecar.
+            mod.quarantine_sidecar_path(tmp_path / "out").unlink()
+
+            driver2 = _driver(tmp_path, grid, guards, ing)
+            driver2._quarantined = frozenset(
+                mod.load_quarantined_tuple_labels(tmp_path / "out", grid_identity(grid))
+            )
+            acc2 = mod._Accumulator()
+            recording = _RecordingFakePool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            driver2._drive(recording, guards.checkpoint.next_index, 2, 4, acc2)  # type: ignore[arg-type]
+
+        # The previously-quarantined tuples were genuinely RE-DISPATCHED…
+        assert 0 in recording.submitted and 1 in recording.submitted
+        # …and the WHOLE grid completed (no permanent loss — Golden Rule #1).
+        assert acc2.tuples_run == total
+        assert acc2.tuples_quarantined_prior == 0
+
+    def test_full_run_resume_reports_quarantined_prior_in_summary(self, tmp_path: Path) -> None:
+        """run() loads the sidecar + the returned SupervisedGridSummary carries the
+        DISTINCT tuples_quarantined_prior counter (a REAL pool resume run)."""
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+        # Quarantine indices 0+1 via a fake broken pool against the SAME root.
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver1 = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            broken = _BrokenPool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            with pytest.raises(mod.SweepWorkerPoolBrokenError):
+                driver1._drive(broken, 0, 2, 4, mod._Accumulator())  # type: ignore[arg-type]
+
+        # A REAL parallel resume over the same root: the summary surfaces the hole.
+        # (Fresh guards in a sibling dir — the sup.jsonl chain does not resume; the
+        # quarantine gate is sidecar-based, so the SAME root is what matters.)
+        resume_dir = tmp_path / "resume"
+        resume_dir.mkdir()
+        with (
+            AuditWriter.open(resume_dir / "ingest2.jsonl") as ingest,
+            _guards(resume_dir, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=3,
+            )
+        assert summary.tuples_quarantined_prior == 2
+        assert summary.tuples_run == total - 2
+        assert summary.skipped_cache == 0  # NOT folded into cache skips
+
+    def test_memory_error_quarantines_only_that_tuple(self, tmp_path: Path) -> None:
+        """A worker's Python-level MemoryError (pool NOT broken) quarantines ONLY the
+        offending tuple — innocent siblings are NOT sidecar'd — then fails loud."""
+        grid = _grid()
+        sweep_id = grid_identity(grid)
+        tuples = list(iter_sweep_tuples(grid))
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            fake = _MemoryErrorPool(
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), memory_error_index=0
+            )
+            with pytest.raises(mod.SweepWorkerPoolBrokenError) as exc_info:
+                driver._drive(fake, 0, 2, 4, acc)  # type: ignore[arg-type]
+        msg = str(exc_info.value)
+        assert "MemoryError" in msg
+        assert "tuples_quarantined_prior" in msg
+        assert acc.tuples_pool_broken == 1
+        labels = mod.load_quarantined_tuple_labels(tmp_path / "out", sweep_id)
+        assert labels == {tuple_label(tuples[0])}  # ONLY the poison tuple
+
+    def test_memory_error_resume_skips_only_the_poison_tuple(self, tmp_path: Path) -> None:
+        grid = _grid()
+        total = count_sweep_tuples(grid)
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver1 = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            fake = _MemoryErrorPool(
+                mod._WorkerContext(grid=grid, root=tmp_path / "out"), memory_error_index=0
+            )
+            with pytest.raises(mod.SweepWorkerPoolBrokenError):
+                driver1._drive(fake, 0, 2, 4, mod._Accumulator())  # type: ignore[arg-type]
+
+            driver2 = _driver(tmp_path, grid, guards, ing)
+            driver2._quarantined = frozenset(
+                mod.load_quarantined_tuple_labels(tmp_path / "out", grid_identity(grid))
+            )
+            acc2 = mod._Accumulator()
+            recording = _RecordingFakePool(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            driver2._drive(recording, guards.checkpoint.next_index, 2, 4, acc2)  # type: ignore[arg-type]
+        assert 0 not in recording.submitted  # the poison tuple stays out
+        assert acc2.tuples_quarantined_prior == 1
+        assert acc2.tuples_run == total - 1  # every innocent tuple recomputed
+
+    def test_quarantine_drains_completed_futures_before_quarantining(self, tmp_path: Path) -> None:
+        """A pool break with an already-FINISHED sibling future: the finished
+        result is DRAINED + applied as a real outcome (compute never discarded);
+        only the genuinely-broken future's tuple is quarantined."""
+        grid = _grid()
+        sweep_id = grid_identity(grid)
+        tuples = list(iter_sweep_tuples(grid))
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            guards.checkpoint.load()
+            acc = mod._Accumulator()
+            mod._worker_init(mod._WorkerContext(grid=grid, root=tmp_path / "out"))
+            done_fut: Future[mod.TupleWorkResult] = Future()
+            done_fut.set_result(mod._run_tuple_in_worker(0, tuples[0], _BARS))
+            broken_fut: Future[mod.TupleWorkResult] = Future()
+            broken_fut.set_exception(BrokenProcessPool("terminated abruptly"))
+            # A genuinely IN-FLIGHT (never-resolved) future — the pool broke under it.
+            inflight_fut: Future[mod.TupleWorkResult] = Future()
+            pending = {
+                done_fut: mod._Dispatched(index=0, tuple_=tuples[0], work=1.0),
+                broken_fut: mod._Dispatched(index=1, tuple_=tuples[1], work=1.0),
+                inflight_fut: mod._Dispatched(index=2, tuple_=tuples[2], work=1.0),
+            }
+            with pytest.raises(mod.SweepWorkerPoolBrokenError):
+                driver._quarantine_broken_pool(
+                    pending, acc, BrokenProcessPool("terminated abruptly")
+                )
+            seen0 = _cache_seen(guards, grid, tuples[0])
+        # The finished sibling's REAL result was applied (run + cache-recorded)…
+        assert acc.tuples_run == 1
+        assert seen0 is True
+        # …and ONLY the broken + still-in-flight futures' tuples were quarantined.
+        assert acc.tuples_pool_broken == 2
+        labels = mod.load_quarantined_tuple_labels(tmp_path / "out", sweep_id)
+        assert labels == {tuple_label(tuples[1]), tuple_label(tuples[2])}
+        assert pending == {}
 
     def test_submit_broken_before_any_task_fails_loud_with_zero_quarantined(
         self, tmp_path: Path
@@ -1785,8 +2061,9 @@ class TestBrokenProcessPoolQuarantine:
         assert acc.tuples_pool_broken == 0
         assert ckpt == 0
 
-    def test_apply_pool_broken_advances_checkpoint_when_clean(self, tmp_path: Path) -> None:
-        """The pool_broken apply branch: no prior failure → cache-record + checkpoint++."""
+    def test_apply_pool_broken_freezes_checkpoint_and_skips_cache(self, tmp_path: Path) -> None:
+        """The pool_broken apply branch: counter + had_failure latch; deliberately NO
+        checkpoint advance and NO cache record (the sidecar is the only skip lever)."""
         grid = _grid()
         tuples = list(iter_sweep_tuples(grid))
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
@@ -1805,35 +2082,37 @@ class TestBrokenProcessPoolQuarantine:
             ckpt = guards.checkpoint.next_index
             seen0 = _cache_seen(guards, grid, tuples[0])
         assert acc.tuples_pool_broken == 1
-        assert ckpt == 1  # advanced (contiguous-clean)
-        assert seen0 is True
+        assert acc.had_failure is True
+        assert ckpt == 0  # FROZEN — recovery stays possible after a sidecar delete
+        assert seen0 is False  # NEVER cache-recorded (would be irreversible)
 
-    def test_apply_pool_broken_after_failure_is_cache_recorded_not_checkpointed(
-        self, tmp_path: Path
-    ) -> None:
-        """A pool_broken quarantine AFTER a prior failure: the checkpoint stays FROZEN,
-        but the tuple is cache-recorded so a resume ALWAYS skips it (the cache belt)."""
+    def test_apply_quarantined_prior_counts_distinctly_and_freezes(self, tmp_path: Path) -> None:
+        """The quarantined_prior apply branch: DISTINCT counter + had_failure latch +
+        the distinct audit action naming the sidecar."""
         grid = _grid()
         tuples = list(iter_sweep_tuples(grid))
         with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
             driver = _driver(tmp_path, grid, guards, ing)
             guards.checkpoint.load()
             acc = mod._Accumulator()
-            acc.had_failure = True  # a prior genuine failure froze the checkpoint
             outcome = mod._Outcome(
-                index=1,
-                tuple_=tuples[1],
-                kind="pool_broken",
+                index=0,
+                tuple_=tuples[0],
+                kind="quarantined_prior",
                 summary=None,
-                failed_error="BrokenProcessPool: OOM",
+                failed_error=None,
                 audit_records=(),
             )
-            driver._apply(outcome, acc)
+            with capture_logs() as logs:
+                driver._apply(outcome, acc)
             ckpt = guards.checkpoint.next_index
-            seen1 = _cache_seen(guards, grid, tuples[1])
-        assert acc.tuples_pool_broken == 1
-        assert ckpt == 0  # FROZEN — the post-failure prefix is not advanced
-        assert seen1 is True  # …but cache-recorded → resume skips it anyway
+        assert acc.tuples_quarantined_prior == 1
+        assert acc.skipped_cache == 0
+        assert acc.had_failure is True
+        assert ckpt == 0
+        assert any(e["event"] == "sweep_parallel.tuple_quarantined_prior" for e in logs)
+        actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
+        assert mod.SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR in actions
 
     def test_pool_broken_emits_a_distinct_audit_action(self, tmp_path: Path) -> None:
         """The quarantine records the distinct SUPERVISOR_TUPLE_POOL_BROKEN audit line."""
