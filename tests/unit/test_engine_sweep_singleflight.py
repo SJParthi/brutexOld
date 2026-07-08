@@ -10,6 +10,7 @@ sweep lock is a thin translating wrapper over the SAME
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -41,9 +42,11 @@ def test_second_acquire_while_held_is_refused(tmp_path: Path) -> None:
     with (
         sweep_singleflight_lock(tmp_path),
         pytest.raises(SweepAlreadyRunningError) as excinfo,
-        sweep_singleflight_lock(tmp_path),  # pragma: no cover — __enter__ raises first
+        contextlib.ExitStack() as stack,
     ):
-        pass  # pragma: no cover — body never runs (the inner acquire raises)
+        # The contended acquire is the LAST statement in the block; its
+        # ``__enter__`` raises, so no statement is left unreachable after it.
+        stack.enter_context(sweep_singleflight_lock(tmp_path))
     # The error names the contended lock file for an actionable operator message.
     assert excinfo.value.lock_path == sweep_singleflight_lock_path(tmp_path)
     assert "another sweep is already running" in str(excinfo.value)
