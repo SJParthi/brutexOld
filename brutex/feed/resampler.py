@@ -41,12 +41,13 @@ does **not** re-sort. A non-increasing timestamp — an out-of-order bar
 *or* an exact duplicate — is a feed-integrity violation and is rejected
 with a :class:`~brutex.feed.errors.ResampleError` the moment it is seen
 (O(1) per bar — only the previous bar's timestamp is tracked, never a
-growing set). This mirrors the feed-integrity guard in
-:meth:`brutex.execution.driver.BacktestDriver.run`
-(``this_ts <= prev_ts`` ⇒ :class:`~brutex.execution.errors.NonMonotonicBarError`):
-silently mis-bucketing such a bar would double-count VWAP volume and
-corrupt the aggregated OHLC. All timestamps must be timezone-aware UTC —
-naive datetimes are rejected early rather than silently ambiguous.
+growing set). Raise-on-non-monotonic is the established feed-integrity
+convention (the typed
+:class:`~brutex.execution.errors.NonMonotonicBarError` exists for the
+same ``this_ts <= prev_ts`` violation): silently mis-bucketing such a
+bar would double-count VWAP volume and corrupt the aggregated OHLC.
+All timestamps must be timezone-aware UTC — naive datetimes are
+rejected early rather than silently ambiguous.
 """
 
 from __future__ import annotations
@@ -188,9 +189,10 @@ def resample_bars(
     current_bucket_start: datetime | None = None
     # O(1) feed-integrity guard: only the PREVIOUS bar's raw timestamp is
     # tracked (never a growing set), so the strictly-increasing check costs
-    # O(1) time + O(1) extra space per bar. Mirrors BacktestDriver.run's
-    # `this_ts <= prev_ts` rejection — a non-increasing bar would otherwise be
-    # silently mis-bucketed (double-counted VWAP volume / corrupted OHLC).
+    # O(1) time + O(1) extra space per bar. Raise-on-non-monotonic is the
+    # established feed convention (`this_ts <= prev_ts` rejection) — a
+    # non-increasing bar would otherwise be silently mis-bucketed
+    # (double-counted VWAP volume / corrupted OHLC).
     prev_ts: datetime | None = None
 
     for bar in bars:

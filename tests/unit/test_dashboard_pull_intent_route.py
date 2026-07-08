@@ -111,6 +111,25 @@ def _pin_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "groww_credentials_error", lambda: None)
 
 
+def _pin_creds_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the credential gate to a deterministic REFUSAL.
+
+    The refusal test previously left the gate UNpinned, relying on the ambient
+    machine having no reachable AWS Parameter Store — which silently inverted
+    the test on any host where the REAL Groww SSM parameters resolve (an
+    operator laptop / an agent sandbox with live AWS credentials): the launch
+    proceeded, no 503 fired, and ``banner is None`` failed. The module
+    docstring's own contract is "never a network call"; this pin restores it —
+    the 503 → transient-RuntimeError → keep-intent + banner path under test is
+    exercised identically, now hermetically.
+    """
+    monkeypatch.setattr(
+        app_module,
+        "groww_credentials_error",
+        lambda: "credentials unavailable (pinned absent for test)",
+    )
+
+
 def _fake_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
     return BulkSpotReport(
         dry_run=kwargs["dry_run"],
@@ -381,9 +400,11 @@ def test_resume_peer_held_flock_burns_no_token_and_fails_no_progress(
 def test_resume_credential_refusal_keeps_intent_for_next_boot(
     client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Creds NOT pinned: the launch's loud-refusal gate raises a 503, which the
-    # seam maps to a TRANSIENT failure — the intent survives (token burnt),
-    # bounded by the cap, and the banner says why.
+    # Creds pinned ABSENT (deterministic — never the ambient AWS reachability):
+    # the launch's loud-refusal gate raises a 503, which the seam maps to a
+    # TRANSIENT failure — the intent survives (token burnt), bounded by the
+    # cap, and the banner says why.
+    _pin_creds_absent(monkeypatch)
     _patch_spines(monkeypatch)
     intent_store.write(
         PullIntent(symbols="NIFTY", symbol=None, from_date=None, to_date=None, restarts=0)

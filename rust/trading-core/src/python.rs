@@ -1309,14 +1309,16 @@ impl PyVwapState {
     /// volume) sit orders of magnitude below the ceiling, so the golden
     /// VWAP output is byte-unchanged.
     ///
-    /// `typical_paisa` is additionally required NON-NEGATIVE: the documented
-    /// bit-for-bit twin identity with BruteX's Python `VwapState` holds only
-    /// for non-negative operands (the native i128 `/` truncates toward zero;
-    /// Python's `//` floors — a negative `cum_pv` would silently diverge by
-    /// one paisa). A negative typical is not a real price (HLC3 of positive
-    /// prices), so BOTH twins reject it with `ValueError` instead of silently
-    /// disagreeing — the domain hole is CLOSED at the boundary, mirrored by
-    /// the Python twin's identical guard (`brutex/indicators/vwap.py`).
+    /// `typical_paisa` is additionally required NON-NEGATIVE: the bit-for-bit
+    /// twin identity that was documented against the now-DELETED Python
+    /// `VwapState` (`brutex/indicators/vwap.py`, removed by
+    /// DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001) held only for non-negative
+    /// operands (the native i128 `/` truncates toward zero; Python's `//`
+    /// floors — a negative `cum_pv` would have silently diverged by one
+    /// paisa). A negative typical is not a real price (HLC3 of positive
+    /// prices), so the guard REMAINS at this now-single-source boundary: it
+    /// raises `ValueError` exactly as both twins did while the twin lived,
+    /// keeping the domain hole CLOSED.
     #[pyo3(signature = (typical_paisa, volume, is_pre_open, session_key, session_day, tod_seconds))]
     fn update(
         &mut self,
@@ -1393,6 +1395,31 @@ impl PyMarketStructureState {
             sig.choch_bullish,
             sig.choch_bearish,
         )
+    }
+
+    /// The most recent CONFIRMED swing high (int64 paisa), or `None` before any
+    /// swing high has been confirmed.
+    ///
+    /// Read-only introspection delegating to the EXISTING core accessor
+    /// [`CoreMarketStructureState::last_swing_high`] (the core is untouched —
+    /// TickVault-safe). Exposed so the Python side (the P-06 look-ahead property
+    /// suite + the frozen twin-state golden replay) can assert the confirmed
+    /// swing levels directly on the PRODUCTION state now that the hand-synced
+    /// Python twin is deleted (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001).
+    #[getter]
+    fn last_swing_high(&self) -> Option<i64> {
+        self.inner.last_swing_high()
+    }
+
+    /// The most recent CONFIRMED swing low (int64 paisa), or `None` before any
+    /// swing low has been confirmed.
+    ///
+    /// Read-only introspection delegating to the EXISTING core accessor
+    /// [`CoreMarketStructureState::last_swing_low`] — see
+    /// [`PyMarketStructureState::last_swing_high`] for the rationale.
+    #[getter]
+    fn last_swing_low(&self) -> Option<i64> {
+        self.inner.last_swing_low()
     }
 }
 
@@ -2528,6 +2555,51 @@ mod tests {
         assert!(vwap_update_guard(24_000_00, 100).is_ok());
     }
 
+    // ── PyMarketStructureState swing-level getters ─────────────────────
+    // (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — the additive read-only
+    // introspection the Python-side P-06 + golden-replay suites consume.)
+
+    #[test]
+    fn ms_getters_are_none_before_any_confirmed_swing() {
+        // The `None` arm of both getters: a fresh detector (and one fed fewer
+        // than 2k+1 bars) has confirmed nothing, so both levels read `None`.
+        let mut state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        assert_eq!(state.last_swing_high(), None);
+        assert_eq!(state.last_swing_low(), None);
+        for (h, l, c) in [(100, 90, 95), (110, 100, 105), (130, 80, 125)] {
+            state.update(h, l, c);
+        }
+        // 3 bars < 2k+1 = 5 — still nothing confirmable.
+        assert_eq!(state.last_swing_high(), None);
+        assert_eq!(state.last_swing_low(), None);
+    }
+
+    #[test]
+    fn ms_getters_expose_confirmed_swing_levels() {
+        // The `Some` arm: bar 2 is BOTH a strict local-max high (130) and a
+        // strict local-min low (80) over its 2k=4 neighbours, confirmed once
+        // the 5th bar lands. The getters must expose EXACTLY the core levels.
+        let mut state = PyMarketStructureState {
+            inner: CoreMarketStructureState::new(2),
+        };
+        for (h, l, c) in [
+            (100, 90, 95),
+            (110, 100, 105),
+            (130, 80, 125),
+            (115, 105, 110),
+            (112, 102, 108),
+        ] {
+            state.update(h, l, c);
+        }
+        assert_eq!(state.last_swing_high(), Some(130));
+        assert_eq!(state.last_swing_low(), Some(80));
+        // Delegation is verbatim: getter == the existing core accessor.
+        assert_eq!(state.last_swing_high(), state.inner.last_swing_high());
+        assert_eq!(state.last_swing_low(), state.inner.last_swing_low());
+    }
+
     // ── property layer ─────────────────────────────────────────────────────
     use proptest::prelude::*;
 
@@ -2624,7 +2696,7 @@ mod tests {
         }
     }
 
-    // ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1541): wrapper delegation-parity
+    // ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560): wrapper delegation-parity
     // kills — the LINKABLE subset. MEASURED boundary (rust-lld, 2026-07-07): a
     // `#[pyfunction]`/`#[pymethods]` wrapper whose body constructs a `PyErr`
     // (`.map_err(PyValueError::new_err)` / a `PyResult` reject arm) cannot be

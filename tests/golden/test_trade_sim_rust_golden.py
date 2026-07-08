@@ -222,3 +222,93 @@ class TestAbsoluteFrozenValues:
         )
         assert oracle == [expected]
         assert kernel == [[expected]]
+
+
+# ── wide-mask golden (DEC-TRADE-SIM-U128-KERNEL-001) ──────────────────────────
+#
+# The u64 corpus above is byte-UNTOUCHED (the frozen pre-u128 pin). This class
+# adds the >64-bit twin: parity across exit kinds through the u128 kernel plus
+# one hand-computed ABSOLUTE scenario (the anti-shared-drift teeth for the wide
+# path — a lock-step kernel+oracle drift cannot hide behind pure parity).
+
+
+class TestWideMaskGolden:
+    """>64-bit masks: Rust-served, byte-identical to the oracle, absolute-pinned."""
+
+    _WIDE_MASK = (1 << 64) | (1 << 100)
+
+    def _wide_feed_and_bits(self) -> tuple[list[CandleBar], list[int]]:
+        """The `long_end_of_data` morning shape with the signal moved to wide bits.
+
+        Bits 64+100 are set ONLY on bar0 (Stage-1A emits ≤60-bit words, so no
+        other bar can carry them) — the wide mask fires exactly where mask=0
+        fired in the frozen absolute scenario above, entry at open[1].
+        """
+        bars = [
+            _bar(9, 15, "100", "101", "99", "100"),
+            _bar(9, 16, "100", "110", "92", "100"),
+            _bar(9, 17, "100", "108", "95", "104"),
+        ]
+        bits = build_bar_bits(bars)
+        bits[0] |= self._WIDE_MASK
+        return bars, bits
+
+    def test_wide_mask_long_end_of_data_exact_trade(self) -> None:
+        # HAND-COMPUTED (paisa): entry at open[1] = 100.00 = 10000p; bar1
+        # (110, 92) folds fav = 1000 / adv = 800; bar2 (108, 95) folds 800/500
+        # (no new max); end of data → close[2] = 104.00 = 10400p → pnl 400,
+        # holding 2. Identical numbers to the frozen u64 `long_end_of_data`
+        # absolute pin — proving the WIDE path reproduces the exact walk.
+        bars, bits = self._wide_feed_and_bits()
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is True
+        trades = sim.simulate_masks([self._WIDE_MASK], direction=Side.BUY)[0]
+        assert trades == [
+            ClosedTrade(
+                pnl_paisa=400,
+                mfe_paisa=1000,
+                mae_paisa=800,
+                holding_bars=2,
+                entry_ts=bars[1].timestamp,
+                exit_ts=bars[2].timestamp,
+                direction=Side.BUY,
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ("label", "sl", "tp", "policy"),
+        [
+            ("wide_end_of_data", None, None, FillPolicy()),
+            ("wide_sl_at_level", 800, None, FillPolicy()),
+            ("wide_tp_at_level", None, 600, FillPolicy()),
+            ("wide_sl_next_open", 800, None, FillPolicy(stop_loss=LevelFill.NEXT_OPEN)),
+            ("wide_same_bar_tp_first", 800, 600, FillPolicy(same_bar=SameBarTie.TP_FIRST)),
+        ],
+        ids=lambda v: v if isinstance(v, str) else "",
+    )
+    def test_wide_mask_kernel_byte_identical_to_oracle(
+        self, label: str, sl: int | None, tp: int | None, policy: FillPolicy
+    ) -> None:
+        bars, bits = self._wide_feed_and_bits()
+        for direction in (Side.BUY, Side.SELL):
+            kernel = ResidentTradeSim(bars, bits, tf_minutes=1).simulate_masks(
+                [self._WIDE_MASK, 0],
+                direction=direction,
+                stop_loss_paisa=sl,
+                take_profit_paisa=tp,
+                policy=policy,
+            )
+            oracle = [
+                simulate_trades(
+                    bars,
+                    mask_to_entry_signals(bits, m),
+                    direction=direction,
+                    tf_minutes=1,
+                    stop_loss_paisa=sl,
+                    take_profit_paisa=tp,
+                    policy=policy,
+                )
+                for m in (self._WIDE_MASK, 0)
+            ]
+            assert kernel == oracle
+            assert len(kernel[0]) >= 1  # the wide mask genuinely traded
