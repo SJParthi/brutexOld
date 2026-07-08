@@ -18,6 +18,7 @@ import shutil
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from brutex.data.models import CandleBar
@@ -39,6 +40,7 @@ from brutex.engine.sweep_verify import (
     TreeVerifyReport,
     VerifyFinding,
     _is_pre_vix_schema_migration,
+    _non_hash_fields_equal,
     _sentinel_diff_is_the_vix_repair,
     _stores_differ_only_in_vix,
     compare_recount,
@@ -1023,6 +1025,103 @@ class TestRecountVixDivergence:
         report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
         assert _codes(report) == {"cell_recount_vix_divergence"}
         assert report.clean is True
+
+
+class TestVixFieldsSingleSource:
+    """The trio column names have ONE owner (CLAUDE.md §2 Rule 11 COMMON)."""
+
+    def test_sweep_verify_imports_results_store_vix_fields(self) -> None:
+        """A fourth field added to ``results_store.VIX_FIELDS`` can never
+        silently desync the recount attribution: ``sweep_verify`` binds the
+        SAME tuple object, never a mirrored literal (review finding — the old
+        ``_VIX_TRIO_COLUMNS`` mirror plus hardcoded ``replace()`` names had no
+        cross-module pin)."""
+        from brutex.engine import results_store, sweep_verify
+
+        assert sweep_verify.VIX_FIELDS is results_store.VIX_FIELDS
+        assert results_store.VIX_FIELDS == ("vix_mean", "vix_min", "vix_max")
+
+
+class TestNonHashFieldsEqual:
+    """The re-pair equality gates are :func:`dataclasses.fields`-driven.
+
+    Review finding: the old hand-enumerated field tuples were exhaustive at
+    the time but UNPINNED for later — a field added to either sidecar model
+    would silently escape the gate, and a divergence in it could then be
+    attributed into the non-corrupt "honest VIX re-pair" family. These tests
+    prove the gate is drift-proof by construction: a SUBCLASS field it has
+    never heard of is automatically part of the equality check.
+    """
+
+    _SENTINEL_KW: ClassVar[dict[str, object]] = {
+        "tuple_digest": "ab" * 8,
+        "store_content_hash": "cd" * 32,
+        "sidecar_written": True,
+        "n_marked": 3,
+    }
+    _STATS_KW: ClassVar[dict[str, object]] = {
+        "n_backtested": 5,
+        "n_finite": 4,
+        "sum_sharpe": 1.5,
+        "sum_sharpe_sq": 2.0,
+        "n_enumerated": 10,
+        "n_conflict_pruned": 3,
+        "n_minhits_dropped": 2,
+        "tuple_digest": "ab" * 8,
+        "store_content_hash": "cd" * 32,
+    }
+
+    def test_hash_only_divergence_passes_the_gate(self) -> None:
+        ours = TupleCompletionSentinel(**self._SENTINEL_KW)  # type: ignore[arg-type]
+        theirs = dataclasses.replace(ours, store_content_hash="ef" * 32)
+        assert _non_hash_fields_equal(ours, theirs) is True
+
+    def test_every_existing_non_hash_field_is_gated(self) -> None:
+        sentinel = TupleCompletionSentinel(**self._SENTINEL_KW)  # type: ignore[arg-type]
+        for change in ({"tuple_digest": "ba" * 8}, {"sidecar_written": False}, {"n_marked": 4}):
+            assert _non_hash_fields_equal(sentinel, dataclasses.replace(sentinel, **change)) is (
+                False
+            )
+        stats = tuple_trial_stats_from_sharpes(
+            [0.5, 1.0],
+            n_enumerated=4,
+            n_conflict_pruned=1,
+            n_minhits_dropped=1,
+            tuple_digest="ab" * 8,
+            store_content_hash="cd" * 32,
+        )
+        assert _non_hash_fields_equal(stats, stats) is True
+        assert (
+            _non_hash_fields_equal(stats, dataclasses.replace(stats, store_content_hash="ef" * 32))
+            is True
+        )
+        assert (
+            _non_hash_fields_equal(
+                stats, dataclasses.replace(stats, n_enumerated=stats.n_enumerated + 2)
+            )
+            is False
+        )
+
+    def test_a_future_sentinel_field_cannot_escape_the_gate(self) -> None:
+        @dataclasses.dataclass(frozen=True, slots=True)
+        class _Extended(TupleCompletionSentinel):
+            extra: int = 0
+
+        ours = _Extended(**self._SENTINEL_KW, extra=1)  # type: ignore[arg-type]
+        assert _non_hash_fields_equal(ours, _Extended(**self._SENTINEL_KW, extra=1)) is True  # type: ignore[arg-type]
+        # The gate sees the field it was never hand-taught about.
+        assert _non_hash_fields_equal(ours, _Extended(**self._SENTINEL_KW, extra=2)) is False  # type: ignore[arg-type]
+
+    def test_a_future_sidecar_field_cannot_escape_the_gate(self) -> None:
+        from brutex.engine.trial_stats import TupleTrialStats
+
+        @dataclasses.dataclass(frozen=True, slots=True)
+        class _Extended(TupleTrialStats):
+            extra: int = 0
+
+        ours = _Extended(**self._STATS_KW, extra=1)  # type: ignore[arg-type]
+        assert _non_hash_fields_equal(ours, _Extended(**self._STATS_KW, extra=1)) is True  # type: ignore[arg-type]
+        assert _non_hash_fields_equal(ours, _Extended(**self._STATS_KW, extra=2)) is False  # type: ignore[arg-type]
 
 
 def _drop_store_columns(path: Path, columns: list[str]) -> None:

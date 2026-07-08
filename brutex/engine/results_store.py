@@ -192,7 +192,11 @@ _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 #: the on-disk column order (the optional-column back-compat template). VIX stays
 #: REFERENCE ONLY (CLAUDE.md §2 Rule 3): these are deliberately excluded from
 #: :data:`_RANKABLE_FIELDS` and are never an input to the BLAKE3 run identity.
-_VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
+#: PUBLIC because it is the ONE cross-module source of truth for the trio's
+#: column names (CLAUDE.md §2 Rule 11 COMMON): ``sweep_verify``'s recount
+#: VIX-attribution imports it — never a mirrored literal — so adding a fourth
+#: field here can never silently desync the attribution's nulling/schema gates.
+VIX_FIELDS: Final[tuple[str, ...]] = ("vix_mean", "vix_min", "vix_max")
 
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
 #: The nullable ``deflated_sharpe`` and the REFERENCE-ONLY VIX trio are
@@ -219,7 +223,7 @@ class VixTrioConflictError(ResultsStoreError):
 
     Raised by :meth:`ResultsStore.append` when the incoming row carries the
     SAME ``run_id`` and byte-equal non-VIX fields, but one of
-    :data:`_VIX_FIELDS` holds two DIFFERENT known (non-``None``) values.
+    :data:`VIX_FIELDS` holds two DIFFERENT known (non-``None``) values.
     Because VIX is deliberately OUTSIDE the BLAKE3 run identity
     (CLAUDE.md §2 Rule 3), this is **NOT evidence of upstream
     non-determinism**: it means the India-VIX *lake* moved between the two
@@ -411,7 +415,7 @@ class ResultRow:
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
 
-        for name in (*_NULLABLE_METRIC_FIELDS, *_VIX_FIELDS):
+        for name in (*_NULLABLE_METRIC_FIELDS, *VIX_FIELDS):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -506,7 +510,7 @@ class ResultsStore:
 
         A re-append under an already-stored ``run_id`` follows the DIRECTIONAL
         three-branch rule (DEC-VIX-STAMP-WIRE-001) on the nullable
-        REFERENCE-ONLY VIX trio (:data:`_VIX_FIELDS`), per field:
+        REFERENCE-ONLY VIX trio (:data:`VIX_FIELDS`), per field:
 
         1. **Identical value** (including both-``None``) → OK, a silent no-op.
         2. **Backfill ``None`` → value** → OK, the stored row is UPGRADED to
@@ -555,7 +559,7 @@ class ResultsStore:
                 for f in fields(ResultRow)
                 if getattr(existing, f.name) != getattr(row, f.name)
             )
-            if any(name not in _VIX_FIELDS for name in differing):
+            if any(name not in VIX_FIELDS for name in differing):
                 _LOG.error("results_store.conflict", run_id=row.run_id, differing_fields=differing)
                 raise ResultsStoreError(
                     f"run-identity conflict for {row.run_id}: a different result is already "
@@ -573,7 +577,7 @@ class ResultsStore:
                 run_id=row.run_id,
                 backfilled_fields=tuple(
                     name
-                    for name in _VIX_FIELDS
+                    for name in VIX_FIELDS
                     if getattr(existing, name) is None and getattr(merged, name) is not None
                 ),
             )
@@ -727,7 +731,7 @@ class ResultsStore:
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
             columns[name] = [float(getattr(row, name)) for row in ordered]
-        for name in _VIX_FIELDS:
+        for name in VIX_FIELDS:
             # The nullable REFERENCE-ONLY VIX trio — appended LAST (the
             # optional-column back-compat template); None → Parquet null.
             columns[name] = [getattr(row, name) for row in ordered]
@@ -745,7 +749,7 @@ class ResultsStore:
                     (*_MASK_LIMB_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64
                 ),
                 **dict.fromkeys(
-                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *_VIX_FIELDS),
+                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS, *VIX_FIELDS),
                     pl.Float64,
                 ),
             },
@@ -795,7 +799,7 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
 
     The resolution is a per-field UNION under the directional law of
     :meth:`ResultsStore.append` (DEC-VIX-STAMP-WIRE-001): for each of
-    :data:`_VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
+    :data:`VIX_FIELDS` the known (non-``None``) value wins — ``None`` means
     *honestly unknown*, never a conflicting fact — so a stamped redo backfills
     an unstamped row and an unstamped redo never erases a stamp. The caller
     (:meth:`ResultsStore.append`) has ALREADY established that every non-VIX
@@ -815,7 +819,7 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
     """
     conflicting = tuple(
         name
-        for name in _VIX_FIELDS
+        for name in VIX_FIELDS
         if getattr(existing, name) is not None
         and getattr(incoming, name) is not None
         and getattr(existing, name) != getattr(incoming, name)
@@ -825,8 +829,8 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
             "results_store.vix_conflict",
             run_id=existing.run_id,
             conflicting_fields=conflicting,
-            stored={name: getattr(existing, name) for name in _VIX_FIELDS},
-            incoming={name: getattr(incoming, name) for name in _VIX_FIELDS},
+            stored={name: getattr(existing, name) for name in VIX_FIELDS},
+            incoming={name: getattr(incoming, name) for name in VIX_FIELDS},
         )
         raise VixTrioConflictError(
             f"REFERENCE-ONLY VIX trio conflict for {existing.run_id}: the stored row and "
@@ -847,7 +851,7 @@ def _merge_vix_backfill(existing: ResultRow, incoming: ResultRow) -> ResultRow:
             if getattr(existing, name) is not None
             else getattr(incoming, name)
         )
-        for name in _VIX_FIELDS
+        for name in VIX_FIELDS
     }
     # Explicit keywords (not a **splat) so mypy checks each against its field type.
     return replace(
@@ -971,6 +975,7 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 __all__ = [
     "CONDITION_NAME_SEP",
     "MASK_BITS_MAX",
+    "VIX_FIELDS",
     "FlushResult",
     "ResultRow",
     "ResultsStore",

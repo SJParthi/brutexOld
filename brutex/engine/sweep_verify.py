@@ -51,13 +51,13 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.engine.results_store import ResultsStore, ResultsStoreError
+from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -85,6 +85,8 @@ if TYPE_CHECKING:
     # of this module's runtime import graph (the sweep_run TYPE_CHECKING
     # discipline) so the engine coverage gates stay stable.
     from brutex.engine.cascade_wire import Stage3ManifestRecord
+    from brutex.engine.trial_stats import TupleTrialStats
+    from brutex.engine.tuple_complete import TupleCompletionSentinel
     from brutex.orchestrator.audit import AuditEntry
 
 _LOG = structlog.get_logger("brutex.engine.sweep_verify")
@@ -856,21 +858,23 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
         return None
     vix_differs = False
     recorded_value_differs = False
+    # Null the trio from the ONE public column source (results_store.VIX_FIELDS,
+    # CLAUDE.md §2 Rule 11 COMMON) — a fourth trio field added there is nulled
+    # here automatically, never a silently-desynced mirrored literal.
+    # dict[str, Any]: the trio fields are typed non-None on ResultRow's
+    # replace() signature, so a dict[str, None] splat fails strict mypy even
+    # though None is the valid null for every nullable trio column.
+    vix_nulled: dict[str, Any] = dict.fromkeys(VIX_FIELDS)
     for run_id, ours in original_rows.items():
         theirs = scratch_rows[run_id]
         if ours == theirs:
             continue
-        if replace(ours, vix_mean=None, vix_min=None, vix_max=None) != replace(
-            theirs, vix_mean=None, vix_min=None, vix_max=None
-        ):
+        if replace(ours, **vix_nulled) != replace(theirs, **vix_nulled):
             return None  # a non-VIX field differs — not VIX-attributable
         vix_differs = True
-        for mine, recount in (
-            (ours.vix_mean, theirs.vix_mean),
-            (ours.vix_min, theirs.vix_min),
-            (ours.vix_max, theirs.vix_max),
-        ):
-            if mine != recount and mine is not None:
+        for name in VIX_FIELDS:
+            mine = getattr(ours, name)
+            if mine != getattr(theirs, name) and mine is not None:
                 recorded_value_differs = True
     if not vix_differs:
         # Rows fully EQUAL yet the caller saw a byte diff: the ONE provable
@@ -879,11 +883,6 @@ def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
         # shape); anything else honestly abstains to the normal ladder.
         return "backfill" if _is_pre_vix_schema_migration(original, scratch) else None
     return "moved" if recorded_value_differs else "backfill"
-
-
-#: The persisted REFERENCE-ONLY trio columns (mirrors ``results_store._VIX_FIELDS``;
-#: the row-level attribution above hardcodes the same three names in ``replace``).
-_VIX_TRIO_COLUMNS: Final[tuple[str, str, str]] = ("vix_mean", "vix_min", "vix_max")
 
 
 def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
@@ -911,12 +910,12 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}
-    if any(name in original_names for name in _VIX_TRIO_COLUMNS):
+    if any(name in original_names for name in VIX_FIELDS):
         return False  # partial/total trio presence — not the pre-VIX generation
     scratch_names = {name for name, _ in scratch_schema}
-    if any(name not in scratch_names for name in _VIX_TRIO_COLUMNS):
+    if any(name not in scratch_names for name in VIX_FIELDS):
         return False  # the recount side lacks the trio — not this migration
-    stripped = [entry for entry in scratch_schema if entry[0] not in _VIX_TRIO_COLUMNS]
+    stripped = [entry for entry in scratch_schema if entry[0] not in VIX_FIELDS]
     return stripped == original_schema
 
 
@@ -927,6 +926,31 @@ def _hashes_pair_with_stores(
     return (
         ours_hash == hashlib.sha256(original_store.read_bytes()).hexdigest()
         and theirs_hash == hashlib.sha256(scratch_store.read_bytes()).hexdigest()
+    )
+
+
+#: The ONE store-pairing hash field the two re-pair checks below exempt from
+#: their non-hash equality gates (it NECESSARILY diverges with a VIX-moved
+#: store; each side is instead verified against its OWN store's actual bytes).
+_STORE_HASH_FIELD: Final[str] = "store_content_hash"
+
+
+def _non_hash_fields_equal(
+    ours: TupleCompletionSentinel | TupleTrialStats,
+    theirs: TupleCompletionSentinel | TupleTrialStats,
+) -> bool:
+    """``True`` iff every field EXCEPT :data:`_STORE_HASH_FIELD` compares equal.
+
+    Enumerated via :func:`dataclasses.fields` so the gate is drift-proof by
+    construction: a field added to either sidecar model LATER is automatically
+    part of the equality gate — a hand-enumerated field list would silently
+    exclude it, letting a divergence in the new field be attributed into the
+    non-corrupt "honest VIX re-pair" family (the unsafe drift direction).
+    """
+    return all(
+        getattr(ours, field.name) == getattr(theirs, field.name)
+        for field in fields(ours)
+        if field.name != _STORE_HASH_FIELD
     )
 
 
@@ -941,8 +965,8 @@ def _sentinel_diff_is_the_vix_repair(
     A completion sentinel embeds its store's ``store_content_hash``
     (DEC-MARK-MANY-SENTINEL-001), so a VIX-only store divergence NECESSARILY
     diverges the sentinel bytes too. The attribution is accepted only when
-    BOTH sentinels read valid, agree on every non-hash field
-    (``tuple_digest`` / ``sidecar_written`` / ``n_marked``), and each hash
+    BOTH sentinels read valid, agree on every non-hash field (enumerated via
+    :func:`_non_hash_fields_equal` — drift-proof, never a hand list), and each hash
     pairs with its OWN store's actual bytes — anything else (a tampered or
     stale sentinel) returns ``False`` and falls back to the caller's normal
     ladder. The caller consults this ONLY after
@@ -953,11 +977,7 @@ def _sentinel_diff_is_the_vix_repair(
         theirs = read_completion_sentinel(scratch_sentinel)
     except TupleCompletionError:
         return False  # an unreadable/invalid sentinel is never VIX-attributable
-    if (ours.tuple_digest, ours.sidecar_written, ours.n_marked) != (
-        theirs.tuple_digest,
-        theirs.sidecar_written,
-        theirs.n_marked,
-    ):
+    if not _non_hash_fields_equal(ours, theirs):
         return False  # a non-hash field differs — not the VIX re-pair
     return _hashes_pair_with_stores(
         ours.store_content_hash, theirs.store_content_hash, original_store, scratch_store
@@ -984,25 +1004,7 @@ def _sidecar_diff_is_the_vix_repair(
         theirs = read_tuple_trial_stats(scratch_sidecar)
     except TrialStatsError:
         return False  # an unreadable/invalid sidecar is never VIX-attributable
-    if (
-        ours.n_backtested,
-        ours.n_finite,
-        ours.sum_sharpe,
-        ours.sum_sharpe_sq,
-        ours.n_enumerated,
-        ours.n_conflict_pruned,
-        ours.n_minhits_dropped,
-        ours.tuple_digest,
-    ) != (
-        theirs.n_backtested,
-        theirs.n_finite,
-        theirs.sum_sharpe,
-        theirs.sum_sharpe_sq,
-        theirs.n_enumerated,
-        theirs.n_conflict_pruned,
-        theirs.n_minhits_dropped,
-        theirs.tuple_digest,
-    ):
+    if not _non_hash_fields_equal(ours, theirs):
         return False  # a statistic differs — not the VIX re-pair
     return _hashes_pair_with_stores(
         ours.store_content_hash, theirs.store_content_hash, original_store, scratch_store

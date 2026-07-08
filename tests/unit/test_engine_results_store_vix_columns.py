@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from brutex.engine.results_store import (
     _RANKABLE_FIELDS,
-    _VIX_FIELDS,
+    VIX_FIELDS,
     ResultRow,
     ResultsStore,
     ResultsStoreError,
@@ -127,7 +127,7 @@ class TestVixFieldValidation:
     )
     def test_part_null_trio_allowed(self, kwargs: dict[str, float]) -> None:
         row = _row(**kwargs)
-        for name in _VIX_FIELDS:
+        for name in VIX_FIELDS:
             assert getattr(row, name) == kwargs.get(name)
 
 
@@ -138,7 +138,7 @@ class TestVixFieldValidation:
 
 class TestVixReferenceOnlyScope:
     def test_vix_fields_are_not_rankable(self) -> None:
-        assert _RANKABLE_FIELDS.isdisjoint(_VIX_FIELDS)
+        assert _RANKABLE_FIELDS.isdisjoint(VIX_FIELDS)
 
     @pytest.mark.parametrize("name", ["vix_mean", "vix_min", "vix_max"])
     def test_top_k_refuses_a_vix_column(self, name: str, tmp_path: Path) -> None:
@@ -315,7 +315,7 @@ class TestVixFlushLoad:
         store.flush()
         schema = pl.read_parquet_schema(path)
         assert [*schema][-3:] == ["vix_mean", "vix_min", "vix_max"]
-        assert all(schema[name] == pl.Float64 for name in _VIX_FIELDS)
+        assert all(schema[name] == pl.Float64 for name in VIX_FIELDS)
 
     def test_store_without_the_columns_loads_none_trio(self, tmp_path: Path) -> None:
         """The optional-column law on a synthetic legacy file (unit-level twin
@@ -327,7 +327,7 @@ class TestVixFlushLoad:
         store.append(_row(deflated_sharpe=0.5, **_TRIO))
         store.flush()
         legacy = tmp_path / "legacy.parquet"
-        pl.read_parquet(modern).drop("deflated_sharpe", *_VIX_FIELDS).write_parquet(legacy)
+        pl.read_parquet(modern).drop("deflated_sharpe", *VIX_FIELDS).write_parquet(legacy)
         loaded = ResultsStore.load(legacy)
         row = loaded.get(_rid(1))
         assert row is not None
