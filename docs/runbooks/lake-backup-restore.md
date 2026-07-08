@@ -44,7 +44,7 @@ last-good cache, DEC-NTM-CACHE-FIRST-001 #892).
 ## 2. Backup (suggested shape)
 
 > **AUTOMATED by `brutex backup` — DEC-BACKUP-OFFBOX-001 (MIGRATION.md
-> #1527), see `docs/runbooks/backup-offbox.md`; the tar recipe below
+> #1596), see `docs/runbooks/backup-offbox.md`; the tar recipe below
 > remains the manual fallback.** The restore-ORDER law (§3) and the
 > consistency argument (§4) below stand verbatim and are what the
 > automated system's restore procedure follows.

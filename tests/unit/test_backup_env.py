@@ -316,6 +316,7 @@ class TestVerifySubset:
             "512M",
             "10k",
             "1b",
+            "8388607t",  # 2^63 − 2^40 bytes — the largest restic-valid t size (probed)
         ],
     )
     def test_verify_subset_valid_shapes_pass_through(self, tmp_path: Path, value: str) -> None:
@@ -339,6 +340,12 @@ class TestVerifySubset:
             "1000",  # a BARE integer is restic-INVALID (parses as a 1-element n/t)
             "1.5G",  # the size prefix is Go ParseInt — no float sizes
             "0G",  # size must be positive
+            # Round-9 MINOR: ui.ParseBytes overflows Go int64 with the SAME
+            # rc=1 flag-invalid as genuine corruption (probed on 0.16.4 —
+            # 8388608t is exactly 2^63 bytes):
+            "8388608t",
+            "9999999999t",
+            "99999999999999999999b",
             "10GB",  # ONE suffix char only
             "2 %",  # interior whitespace (only outer whitespace is stripped)
             # restic's Go ParseFloat would accept these exotic spellings; the

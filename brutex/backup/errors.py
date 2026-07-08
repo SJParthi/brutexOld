@@ -36,6 +36,11 @@ EXIT_RESTIC: Final[int] = 4
 #: benign overlap, no alert — the running backup is making progress. Drill
 #: arm: the busy skip emits ONE WARN ``backup_degraded(aspect="drill_skipped")``
 #: — a skipped drill is a month of LOST verification, not benign (round 6).
+#: Run-skipped-by-DRILL arm (round 9 — since round 5 the drill holds the SAME
+#: lock): NO backup is making progress; the skip stays deliberately no-alert
+#: (INFO ``backup.singleflight.busy`` only) because the dead-man OVERDUE at
+#: ``deadman_hours`` is the explicit backstop for the lost nightly snapshot
+#: (and a WEDGED drill eventually pages ``drill_restic`` on its own timeout).
 EXIT_BUSY: Final[int] = 5
 
 #: Corruption finding — ``restic check`` failure or a restore-drill byte

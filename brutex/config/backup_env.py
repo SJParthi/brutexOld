@@ -154,13 +154,29 @@ _SUBSET_PERCENT_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]+(?:\.[0-9]*)?|
 #: restic ``--read-data-subset`` size form — a positive integer + ONE suffix
 #: (``ui.ParseBytes``; a bare integer with NO suffix is restic-INVALID — it
 #: parses as a 1-element ``n/t`` slice and is refused, probed on 0.16.4).
-_SUBSET_SIZE_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]+)[bBkKmMgGtT]$")
+_SUBSET_SIZE_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]+)([bBkKmMgGtT])$")
 
 #: restic checkFlags bound: ``--read-data-subset=n/t`` requires ``t ≤ 256``.
 _SUBSET_MAX_BUCKETS: Final[int] = 256
 
 #: restic checkFlags bound: ``--read-data-subset=x%`` requires ``0 < x ≤ 100``.
 _SUBSET_MAX_PERCENT: Final[float] = 100.0
+
+#: ``ui.ParseBytes`` byte multipliers per size suffix (binary, per restic).
+_SUBSET_SIZE_MULTIPLIERS: Final[dict[str, int]] = {
+    "b": 1,
+    "k": 2**10,
+    "m": 2**20,
+    "g": 2**30,
+    "t": 2**40,
+}
+
+#: restic size-form overflow bound — Go ``int64`` max. ``ui.ParseBytes``
+#: rejects a byte total above it with the SAME rc=1 as genuine corruption
+#: (round-9 MINOR, empirically probed on 0.16.4: ``8388607t`` → rc=0 while
+#: ``8388608t`` — exactly 2^63 bytes — ``9999999999t`` and
+#: ``99999999999999999999b`` → rc=1 flag-invalid).
+_SUBSET_MAX_SIZE_BYTES: Final[int] = 2**63 - 1
 
 
 def _valid_verify_subset(value: str) -> bool:
@@ -169,11 +185,13 @@ def _valid_verify_subset(value: str) -> bool:
     Mirrors restic's own flag validation (``checkFlags``, empirically probed
     against the pinned restic 0.16.4): ``n/t`` with positive ints and
     ``n ≤ t ≤ 256``, ``x%`` with ``0 < x ≤ 100``, or a positive
-    ``<int><b|k|m|g|t>`` size. Restic rejects a malformed flag with rc=1
-    BEFORE reading any repo data — indistinguishable in rc from genuine
-    corruption — so an invalid passthrough must never reach the nightly
-    verify (round-7 MINOR; the F3-not-F11 honesty law of the
-    ``binary_missing`` arm, one arm over).
+    ``<int><b|k|m|g|t>`` size whose byte total fits Go ``int64``
+    (``ui.ParseBytes`` overflows above ``2^63 − 1`` with the SAME rc=1 —
+    round-9 MINOR completing the round-7 fix at the overflow boundary).
+    Restic rejects a malformed flag with rc=1 BEFORE reading any repo data —
+    indistinguishable in rc from genuine corruption — so an invalid
+    passthrough must never reach the nightly verify (round-7 MINOR; the
+    F3-not-F11 honesty law of the ``binary_missing`` arm, one arm over).
     """
     nt = _SUBSET_NT_RE.match(value)
     if nt is not None:
@@ -183,7 +201,8 @@ def _valid_verify_subset(value: str) -> bool:
         return 0.0 < float(pct.group(1)) <= _SUBSET_MAX_PERCENT
     size = _SUBSET_SIZE_RE.match(value)
     if size is not None:
-        return int(size.group(1)) > 0
+        total_bytes = int(size.group(1)) * _SUBSET_SIZE_MULTIPLIERS[size.group(2).lower()]
+        return 0 < total_bytes <= _SUBSET_MAX_SIZE_BYTES
     return False
 
 

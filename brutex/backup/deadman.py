@@ -548,8 +548,22 @@ def run_deadman_check(
             diverged, deep_completed, detail = _deep_divergence(cfg, state, factory(deep_cfg))
             deep_diverged = diverged
             if diverged:
-                _LOG.error("backup.deadman.remote_divergence", detail=detail)
-                reason = "state_remote_divergence"
+                # Cause honesty (round-9 MINOR — the same class as the round-2
+                # auth_or_repo, round-6 --no-lock, and round-8 check-rc=1
+                # splits): a COMPLETED comparison that disagrees IS divergence
+                # (the F21 forgery/poisoning framing); a FAILED metadata call
+                # (remote outage / DNS / timeout / missing binary) proved
+                # nothing about the stamp — asserting "divergence" would
+                # misdirect the operator at the runbook §3 forgery playbook
+                # during a transient S3 blip. Both arms keep the SAME alarm +
+                # no-stamp-retry semantics (fail-toward-alarm); only the
+                # reason token + log event tell the truth about the cause.
+                if deep_completed:
+                    _LOG.error("backup.deadman.remote_divergence", detail=detail)
+                    reason = "state_remote_divergence"
+                else:
+                    _LOG.error("backup.deadman.deep_failed", detail=detail)
+                    reason = "deep_check_unavailable"
                 report = DeadmanReport(
                     verdict=DeadmanVerdict.OVERDUE,
                     hours_since_success=report.hours_since_success,

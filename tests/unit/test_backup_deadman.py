@@ -623,6 +623,35 @@ class TestDeepTier:
         assert code == EXIT_DEADMAN_BREACH
         assert load_deadman(deadman_path(cfg)).last_deep_check_at is None
 
+    def test_deep_failed_call_pages_unavailable_not_divergence(self, tmp_path: Path) -> None:
+        """Round-9 MINOR pin (cause honesty): a FAILED metadata call (remote
+        outage / DNS / timeout / missing binary) never RAN a comparison, so it
+        must not assert stamp-vs-remote DIVERGENCE as fact — it pages the
+        distinct ``deep_check_unavailable`` reason via the distinct
+        ``backup.deadman.deep_failed`` event (alarm + no-stamp retry semantics
+        unchanged), never the runbook-§3 forgery token
+        ``state_remote_divergence``."""
+        cfg = _shell_cfg(tmp_path, **_repo_env(tmp_path))
+        save_state(state_path(cfg), _state())
+        fake = FakeNotifier()
+        with structlog.testing.capture_logs() as logs:
+            code = run_deadman_check(
+                cfg,
+                deep=True,
+                alerter=SweepAlerter(notifier=fake),
+                clock=_clock,
+                runner_factory=_factory(FakeDeepRunner(ok=False)),
+            )
+        assert code == EXIT_DEADMAN_BREACH
+        assert fake.published[0].dedupe_key == "backup-overdue:deep_check_unavailable"
+        assert "state_remote_divergence" not in fake.published[0].message
+        events = [entry["event"] for entry in logs]
+        assert "backup.deadman.deep_failed" in events
+        assert "backup.deadman.remote_divergence" not in events
+        # Delivered or not, a FAILED call never advances the daily deep gate —
+        # the next hourly tick retries the bounded metadata call.
+        assert load_deadman(deadman_path(cfg)).last_deep_check_at is None
+
     def test_deep_unparseable_output_diverges_no_stamp_when_undelivered(
         self, tmp_path: Path
     ) -> None:

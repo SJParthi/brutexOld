@@ -17,7 +17,7 @@ preflight mount gate + verify tiers; O(1) state-file dead-man with CRITICAL Tele
 durable re-alert throttle + daily remote cross-check; monthly canary+sample restore drill
 with byte verification and the audit byte-PREFIX law. rclone rejected: sync ≠ snapshots
 (no point-in-time restore, no dedup, no verify subset). Full design: DEC-BACKUP-OFFBOX-001,
-MIGRATION.md #1527.
+MIGRATION.md #1596.
 
 ## External-tool facts relied on (cited; PROBED against the installed binary — runbook step 2)
 - restic backup exit code 3 = snapshot CREATED, some source files unreadable (restic docs,

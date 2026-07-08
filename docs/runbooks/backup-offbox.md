@@ -1,6 +1,6 @@
 # Runbook — Automated Off-Box Backup (restic) · Install / Operate / Restore
 
-> **Decision:** DEC-BACKUP-OFFBOX-001 (MIGRATION.md #1527; ADR
+> **Decision:** DEC-BACKUP-OFFBOX-001 (MIGRATION.md #1596; ADR
 > `docs/adr/0017-offbox-backup-restic.md`). **Blueprint authority:**
 > `docs/REMOTE_CONTROL_AND_ZERO_TOUCH_COMPARISON.md:304` ("restic/rclone to
 > S3 Object-Lock (or B2 immutable) + local snapshots"), matrix rows 28
@@ -180,9 +180,14 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
   `--no-lock` is load-bearing (round 6) — the read-only metadata call must
   never collide with the nightly `forget`/Sunday `--prune` (or drill
   canary forget) EXCLUSIVE repo locks, which would read as a false
-  `state_remote_divergence` CRITICAL + `/fail` pings every tick until the
+  `deep_check_unavailable` CRITICAL + `/fail` pings every tick until the
   prune ended (verified on restic 0.16.4: `snapshots --no-lock` succeeds
-  under a held exclusive lock). THREE tiers: (1) a
+  under a held exclusive lock). A FAILED metadata call (remote outage /
+  DNS / timeout / missing binary) pages the distinct
+  `deep_check_unavailable` reason via `backup.deadman.deep_failed` —
+  never `state_remote_divergence`, which is reserved for a COMPLETED
+  comparison that disagrees (cause honesty, round 9); both arms keep the
+  same alarm + retry-next-tick semantics. THREE tiers: (1) a
   stamp-PLAUSIBILITY bound is screened FIRST — a `last_success_at` landing
   more than `BRUTEX_BACKUP_MAX_RUNTIME_HOURS` after the REMOTE latest
   snapshot's own time is CRITICAL divergence. The anchor is the remote time
@@ -207,7 +212,12 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
 - Exit codes (from `brutex/backup/errors.py`): 0 OK · 1 dead-man breach ·
   2 config · 3 preflight (unmounted/phantom/empty lake) · 4 restic/state
   failure · 5 busy (run-vs-run overlap benign, no alert; a busy-skipped
-  DRILL emits one WARN — round 6) · 6 corruption
+  DRILL emits one WARN — round 6; a nightly RUN busy-skipped because the
+  DRILL holds the lock is NOT "progress" — it stays no-alert (INFO
+  `backup.singleflight.busy` only) because the dead-man OVERDUE at
+  `deadman_hours` is the explicit backstop for the lost snapshot, and a
+  wedged drill eventually pages `drill_restic` on its own timeout —
+  round 9) · 6 corruption
   (verify/drill) · 7 maintenance failed (data-success stamp stands).
 - A DIVERGED deep check advances its daily gate ONLY when the CRITICAL was
   actually delivered — an undelivered divergence (Telegram outage/OFF)
@@ -230,7 +240,7 @@ first line's schedule (the RPO IS the schedule interval — honest envelope
 - Every failure maps to a deterministic triple (exit code + `backup.*`
   structlog event + alert-or-explicit-no-alert) — the full 23-row
   failure-mode matrix lives in the DEC-BACKUP-OFFBOX-001 PR body and
-  MIGRATION.md #1527.
+  MIGRATION.md #1596.
 - The nightly run REFUSES an unmounted `/Volumes/<name>` phantom dir and an
   empty backup set BEFORE any restic verb — critically before
   `forget --prune`, the one path by which a backup system could age real
@@ -324,7 +334,7 @@ the read-data tier is the knob:
 
 ## Decision trail
 
-- DEC-BACKUP-OFFBOX-001 (MIGRATION.md #1527) — this system.
+- DEC-BACKUP-OFFBOX-001 (MIGRATION.md #1596) — this system.
 - ADR-0017 (`docs/adr/0017-offbox-backup-restic.md`) — the
   manual-acceptance register M1-M8 + external-tool facts.
 - `docs/runbooks/lake-backup-restore.md` — the manual tar fallback + the

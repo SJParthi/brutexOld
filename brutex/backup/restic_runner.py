@@ -374,7 +374,9 @@ class ResticRunner:
         the repo's EXCLUSIVE lock through ``forget``/Sunday ``forget --prune``
         — hours on an 8 TB repo; the drill's canary forget is a second such
         window). Without ``--no-lock`` the lock conflict read rc=1 → a false
-        CRITICAL ``state_remote_divergence`` page + healthcheck ``/fail``
+        CRITICAL ``deep_check_unavailable`` page (the failed-call arm's own
+        honest token since round 9; before that it was mislabelled
+        ``state_remote_divergence``) + healthcheck ``/fail``
         pings EVERY subsequent tick until the prune ended (a failed call
         never advances ``last_deep_check_at``); conversely the call's own
         shared lock could fail the nightly's ``forget`` (false maintenance

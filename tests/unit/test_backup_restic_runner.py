@@ -162,8 +162,9 @@ class TestArgvGoldens:
             # Round-6 MAJOR pin: --no-lock is LOAD-BEARING — the hourly deep
             # tick lands in/near the nightly forget/--prune (and drill canary
             # forget) EXCLUSIVE repo-lock windows; a locking read there rc=1s
-            # into a false CRITICAL state_remote_divergence + /fail pings
-            # every tick until the prune ends.
+            # into a false CRITICAL deep_check_unavailable (round 9; formerly
+            # mislabelled state_remote_divergence) + /fail pings every tick
+            # until the prune ends.
             (
                 lambda r: r.snapshots_latest_json(),
                 "snapshots",
