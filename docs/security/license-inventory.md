@@ -313,4 +313,3 @@
 - Python: 0 strong-copyleft, 0 weak-copyleft (sole-license), 0 unknown/missing.
 - Rust: 0 strong-copyleft, 0 weak-copyleft (sole-license), 0 unknown/missing.
 - File-level weak-copyleft (MPL-2.0) and notice-only licenses present — see posture report §2 for the obligations.
-

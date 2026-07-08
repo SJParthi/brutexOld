@@ -897,8 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Run the Mac live-proof kit: walk the REAL Groww pull path stage by "
             "stage (env → creds → totp → token → master → spot-1m → depth → vix → "
-            "bhavcopy → resample → lake → integrity → resume → rate) and stop at "
-            "the first failure with an exact, register-cross-referenced diagnosis"
+            "bhavcopy → resample → lake → integrity → resume → rate → ampersand) "
+            "and stop at the first failure with an exact, register-cross-referenced "
+            "diagnosis"
         ),
     )
     doctor.add_argument(
@@ -917,7 +918,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage",
         type=str,
         default=None,
-        help="Comma-separated live-kit stage numbers to run (default: all, 0-13)",
+        help="Comma-separated live-kit stage numbers to run (default: all, 0-14)",
     )
     doctor.add_argument(
         "--keep-going",
@@ -933,6 +934,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--rate-probe",
         action="store_true",
         help="Stage 13 opt-in: ≤60 s / ≤480-call rate probe, aborts on a throttle burst",
+    )
+    doctor.add_argument(
+        "--ampersand-probe",
+        action="store_true",
+        help=(
+            "Stage 14 opt-in (DEC-FORM-WINNER-PERSIST-001): probe BOTH symbol forms "
+            "(plain & vs %%26) of every &-underlying against get_expiries/get_contracts "
+            "(≤64 calls), seed the durable form-winner map, and — iff DECISIVE — write "
+            "the machine-readable groww.form_probe.verdict stamp"
+        ),
     )
     doctor.add_argument(
         "--against-lake",
@@ -2068,9 +2079,9 @@ def parse_stage_selection(raw: str | None) -> frozenset[int] | None:
     stages: set[int] = set()
     for token in raw.split(","):
         text = token.strip()
-        if not text.isdigit() or not 0 <= int(text) <= 13:  # noqa: PLR2004 — stage ids are 0-13
+        if not text.isdigit() or not 0 <= int(text) <= 14:  # noqa: PLR2004 — stage ids are 0-14
             raise ValueError(
-                f"--stage takes comma-separated stage numbers 0-13, got {token.strip()!r}"
+                f"--stage takes comma-separated stage numbers 0-14, got {token.strip()!r}"
             )
         stages.add(int(text))
     return frozenset(stages)
@@ -2117,6 +2128,7 @@ def cmd_doctor_live(args: argparse.Namespace) -> int:  # pragma: no cover — re
         keep_going=args.keep_going,
         depth_bisect=args.depth_bisect,
         rate_probe=args.rate_probe,
+        ampersand_probe=args.ampersand_probe,
         against_lake=args.against_lake,
         json_output=args.json_output,
         mint_anyway=args.mint_anyway,
