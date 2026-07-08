@@ -1038,7 +1038,9 @@ class TestVixFieldsSingleSource:
         cross-module pin)."""
         from brutex.engine import results_store, sweep_verify
 
-        assert sweep_verify.VIX_FIELDS is results_store.VIX_FIELDS
+        # vars(): sweep_verify deliberately IMPORTS (not re-exports) the name,
+        # so attribute access would trip strict mypy's no_implicit_reexport.
+        assert vars(sweep_verify)["VIX_FIELDS"] is results_store.VIX_FIELDS
         assert results_store.VIX_FIELDS == ("vix_mean", "vix_min", "vix_max")
 
 
