@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1601 —
+_Last updated: 2026-07-08 (DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1617 —
 the dashboard read-path pool-wide wedge fix, closing the DEC-PULL-RATE-BRIDGE-
 NONBLOCK-CACHE-001 (#1522) named follow-up "pool-wide wedge protection". FORENSIC
 (operator's 2026-07-08 live log): during the write-heavy options phase the
@@ -1116,7 +1116,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dashboard-wedge-fix` (**DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1601** — the
+- **Active branch:** `claude/dashboard-wedge-fix` (**DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1617** — the
   dashboard read-path pool-wide wedge fix, closing the #1522 "pool-wide wedge protection" named follow-up. FORENSIC
   (operator's 2026-07-08 live log): during the write-heavy options phase the page-serving path HARD-WEDGED at
   05:02:52Z and stayed frozen ~37 min while the pull stayed healthy — the heavy full-lake read offloads (completeness
@@ -3079,7 +3079,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/dashboard-wedge-fix`
-  (DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1601 — the dashboard read-path
+  (DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1617 — the dashboard read-path
   pool-wide wedge fix: heavy full-lake read routes isolated onto a dedicated
   bounded `anyio.CapacityLimiter` (F1) + the `/universe` `setInterval` pollers
   abort-guarded (F2); see §1 Active branch for the full blurb)
