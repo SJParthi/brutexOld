@@ -106,10 +106,13 @@ class TestLaunchStateRoute:
         # coordinator delta: base command display carries NO ack flag
         assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
         assert payload["cards"]["spot"]["sla_ack_flag"] == lb.SLA_ACK_FLAG
-        # On main the futures alias layer (PR #1264) is absent — honest verdict.
-        assert payload["futures"]["available"] is False
-        assert payload["cards"]["futures"]["enabled"] is False
-        assert "PR #1264" in payload["cards"]["futures"]["reason"]
+        # On this branch the PR #1264 alias layer IS merged — the request-time
+        # probe (the REAL scope classifier; zero code change in launch_button,
+        # exactly as its docstring promises) honestly reads available and the
+        # futures card goes live.
+        assert payload["futures"]["available"] is True
+        assert payload["cards"]["futures"]["enabled"] is True
+        assert "PR #1264" not in payload["cards"]["futures"]["reason"]
 
     def test_state_without_store_is_honest(self, bare_client: TestClient) -> None:
         payload = bare_client.get("/api/v1/launch/state").json()
@@ -138,7 +141,16 @@ class TestLaunchSweepRoute:
         resp = bare_client.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 503
 
-    def test_futures_unavailable_400_on_main(self, client: TestClient) -> None:
+    def test_futures_unavailable_400_when_alias_absent(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The alias layer IS merged on this branch, so the honest-refusal arm
+        # (the pre-#1264 posture) is pinned via a monkeypatched probe.
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
         resp = client.post("/api/v1/launch/sweep?card=futures")
         assert resp.status_code == 400
         assert "PR #1264" in resp.json()["detail"]
