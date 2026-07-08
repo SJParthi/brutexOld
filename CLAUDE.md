@@ -70,6 +70,32 @@ quarantine + Row-15 forensics mirror + flight recorder ALL cover the button; onl
 (survival past process death) is CLI-only, which is the disclosed honest envelope (an in-process
 dashboard job cannot outlive the uvicorn worker). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+Earlier: 2026-07-08 (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 —
+two surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the
+one-click-sweep gap register): (1) a Muhurat-safe prev-day anchor at the
+Stage-1A roll seam — `_roll_to_new_day` rolled `_prev_day_ohlc = self._today_ohlc`
+on every IST-date change with NO calendar guard, so a Diwali Muhurat evening
+session's ~1-hour OHLC became the NEXT regular day's pivot / PDH-PDL / Fib /
+day-type anchor (bits 6-29 + 48-51), poisoning 6 days across 2020-2025 with zero
+warnings; the fix leaves BOTH `_prev_day_ohlc` AND `_daily_history` untouched
+when the completed day is a `has_muhurat_session` date (the prior REGULAR
+session's anchor carries through, mirroring `lookup_prev_day_ohlc` + the weekly
+anchors) + ONE `stage1a.muhurat_prev_day_anchor_skip` WARN, look-ahead-clean,
+parity-pinned across all 6 real Muhurat boundaries; and (2) a bounded bad-tick
+screen at the engine read boundary — NEW `brutex/data/bad_tick.py` (`is_bad_tick`
++ `BadTickScreen` + `bad_tick_screen_enabled`) wired into
+`feed/replay.py::arrow_table_to_bars` (the ONE sweep-feed choke point) SKIPS-and-
+COUNTS a self-consistent scaled bar (close `>= 4x` OR `<= 1/4x` the previous
+IN-SESSION kept close — the `x10` fat-finger class the positivity+ordering checks
+miss), first-bar-of-session exempt, one `feed.bad_tick_skipped` WARN per session,
+default-ON `BRUTEX_BAD_TICK_SCREEN` kill switch, O(1)/bar, never value-editing /
+never fabricating. Threshold 4.0 derived from NSE circuit-breaker physics
+(10/15/20% daily bands → single-minute moves << 0.25x; regular-day goldens
+byte-identical). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
+`bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
+--strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
+UNMODIFIED.)
 Earlier: 2026-07-08 (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 —
 the weekly deep mutation gate is made GREEN end-to-end: both cargo-mutants
 jobs restructured onto sharded matrices (6 fno-math + 7 trading-core shards;
@@ -1337,6 +1363,38 @@ hostile-review pass._
   stale RUNCORE-DASHBOARD-COVERAGE finding REJECTED — the dashboard button already routes
   `run_sweep_from_request` → `cmd_sweep_all` → `sweep_run_core`, so keep_awake + single-flight + G12 + forensics
   cover it; only `--detach` is CLI-only, the disclosed honest envelope).
+  Earlier: `claude/data-edge-guards` (**DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616** — two
+  surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the one-click-sweep gap register):
+  (1) a Muhurat-safe prev-day anchor at the Stage-1A roll seam (`brutex/engine/stage1a.py::_roll_to_new_day`
+  rolled `_prev_day_ohlc = self._today_ohlc` on every IST-date change with NO calendar guard, so a Diwali
+  Muhurat evening session's ~1-hour OHLC became the NEXT regular day's pivot / PDH-PDL / Fib / day-type anchor,
+  bits 6-29 + 48-51, poisoning 6 days across 2020-2025 — 2020-11-14 / 2021-11-04 / 2022-10-24 / 2023-11-12 /
+  2024-11-01 / 2025-10-21 — with zero warnings; the fix leaves BOTH `_prev_day_ohlc` AND `_daily_history`
+  untouched when the just-completed day is a `calendars/nse.has_muhurat_session` date, so the prior REGULAR
+  session's anchor carries through exactly as `indicators/prev_day_ohlc.lookup_prev_day_ohlc` + the weekly Fib
+  anchors already skip Muhurat sessions, plus ONE `stage1a.muhurat_prev_day_anchor_skip` WARN per skipped
+  session; look-ahead-clean, parity-pinned across all 6 real boundaries); and (2) a bounded bad-tick screen at
+  the engine read boundary — NEW `brutex/data/bad_tick.py` (`is_bad_tick` pure predicate + `BadTickScreen`
+  stateful single-pass screen + `bad_tick_screen_enabled` kill-switch reader) wired into
+  `brutex/feed/replay.py::arrow_table_to_bars` (the ONE sweep-feed choke point:
+  `ReplayFeed._load_bars` → `Catalog.get_bars` → `arrow_table_to_bars`) that SKIPS-and-COUNTS a self-consistent
+  SCALED bar (close `>= 4x` OR `<= 1/4x` the previous IN-SESSION kept close — the `x10` decimal-shift /
+  fat-finger class that passes `price_sanity`'s positivity + ordering checks), first bar of each session exempt
+  (no reopen-gap false trip), a skipped spike never advances the baseline (a lone spike cannot cascade-flag its
+  healthy successor), exactly one `feed.bad_tick_skipped` WARN per session (flushed at the session boundary /
+  stream end with the total skipped count + first offender), default-ON `BRUTEX_BAD_TICK_SCREEN` kill switch,
+  O(1)/bar, never value-editing / never fabricating. THRESHOLD 4.0 derived from NSE circuit-breaker physics
+  (index-wide 10/15/20% daily halt bands → single-MINUTE moves are a small fraction, well under a couple of
+  percent; the largest single-DAY COVID-2020 NIFTY moves were ≈ −13%/+9%; an order-of-magnitude ×10/÷10
+  corruption is ratio 10.0/0.1, so 4.0 sits ~2 orders above real single-minute returns yet below the ×10 class;
+  regular-day bars move `<< 0.25x`/minute so every golden is byte-identical). HONEST LIMITS: the Muhurat guard
+  fixes the prev-day ANCHOR roll — a ROLLING_WEEKLY/WEEKLY_STATIC sweep still hits the weekly resolver's
+  PRE-EXISTING non-trading-`today` refusal on a Muhurat bar-day (separate; PREV_DAY is the sweep default and is
+  fully fixed); the bad-tick screen is a heuristic bounded-ratio guard (a sub-4× ×2 scaling is deliberately not
+  caught; a corrupt FIRST bar of a session is not screened by this guard). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
+  change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
+  --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
   Earlier: `claude/jolly-tesla-miygwt` (**DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597** — the weekly deep
   mutation gate made GREEN end-to-end: both cargo-mutants jobs restructured onto sharded matrices (6 fno-math +
   7 trading-core shards; worst shard 65 min vs the 120 min job cap), trading-core WIDENED to evaluator+python+spec
@@ -3314,6 +3372,12 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/magical-pasteur-y6gmr8`
+  Earlier: `claude/data-edge-guards`
+  (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 — two surgical engine
+  data-edge guards for sweep-result correctness: (1) a Muhurat-safe prev-day
+  anchor at the Stage-1A roll seam + (2) a bounded bad-tick screen at the engine
+  read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  see §1 Active branch for the full blurb)
   Earlier: `claude/jolly-tesla-miygwt`
   (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 — the weekly deep mutation
   gate made green end-to-end: sharded cargo-mutants matrices + zero-survivor
@@ -3327,8 +3391,7 @@ hostile-review pass._
   for the full blurb)
   Earlier: `claude/upbeat-tesla-mfrovq`
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
-  CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
-  full blurb)
+  CallMeter lifecycle + rate-widget truth pack)
   Earlier: `claude/sleepy-hawking-l87497`
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
