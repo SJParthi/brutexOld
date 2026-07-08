@@ -1316,3 +1316,75 @@ class TestSetRate:
         clock.advance(1000.0)  # well past upshift_recovery
         b.acquire()
         assert b.current_rps() == 2.0  # did NOT auto-recover to the old initial 5.0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# `_last_429_at` sentinel — CI mutation-rehearsal survivor kills
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLast429SentinelInvariants:
+    """Kill the two CI mutation-rehearsal survivors on the ``_last_429_at``
+    no-429-yet sentinel (DEC-MUTATION-RUNTIME-003 rehearsal; both were
+    near-equivalent because ``__post_init__`` re-stamps the field and the
+    upshift recovery gate is normally unreachable before a downshift):
+
+    * mutant 43 — ``_last_429_at: float = field(init=False)`` → ``= None``
+      silently promotes internal runtime state to a constructor parameter
+      with a ``None`` default;
+    * mutant 70 — ``self._last_429_at = float("-inf")`` → ``= None`` in
+      ``__post_init__`` replaces the documented open-gate sentinel with a
+      value that would CRASH the recovery gate (``now - None``) on the
+      defended never-downshifted path.
+    """
+
+    def test_last_429_at_is_runtime_state_not_a_constructor_param(self) -> None:
+        """``_last_429_at`` is ``field(init=False)`` with NO default.
+
+        It is internal runtime state stamped only by ``__post_init__`` /
+        ``record_rate_limit_hit`` — never caller-settable: a
+        caller-preseeded 429 stamp could hold the upshift recovery gate
+        open (or shut) independently of real vendor 429s (Golden Rule #6:
+        never recover faster than specified).
+        """
+        by_name = {f.name: f for f in dataclasses.fields(AdaptiveTokenBucket)}
+        f = by_name["_last_429_at"]
+        assert f.init is False  # no constructor parameter exists
+        assert f.default is dataclasses.MISSING
+        assert f.default_factory is dataclasses.MISSING
+
+    def test_post_init_stamps_minus_inf_sentinel(self, clock: FakeClock) -> None:
+        """After ``__post_init__`` the sentinel is EXACTLY ``float("-inf")``.
+
+        ``-inf`` is the one value that keeps the recovery gate subtraction
+        ``now - _last_429_at`` well-defined AND trivially open
+        (``>= upshift_recovery``) for every finite monotonic clock — a
+        ``None`` sentinel would TypeError, a finite/``+inf`` sentinel
+        would wrongly hold the gate shut with no 429 ever seen.
+        """
+        b = AdaptiveTokenBucket(clock=clock.now, sleep=clock.sleep)
+        assert b._last_429_at == float("-inf")
+        assert clock.now() - b._last_429_at >= b.upshift_recovery  # gate open, no crash
+
+    def test_no_429_yet_recovery_gate_trivially_open(self, clock: FakeClock) -> None:
+        """SAFE direction pinned: below full rate with NO 429 ever recorded,
+        ``_maybe_upshift_locked`` must upshift back to ``initial_rps``
+        (there is nothing to recover from) — never crash, never wedge
+        sub-rate forever. The public API cannot reach this state (every
+        downshift stamps a real timestamp; ``set_rate`` moves
+        ``initial_rps`` with the rate), so the test forces the defended
+        desync directly — the exact scenario the ``-inf`` construction
+        sentinel exists for.
+        """
+        b = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        b.record_success()
+        b._current_rps = b.downshift_rps  # the "reached without a downshift" desync
+        clock.advance(1.0)
+        b.acquire()  # recovery gate: now - (-inf) = +inf >= upshift_recovery → open
+        assert b.current_rps() == b.initial_rps
