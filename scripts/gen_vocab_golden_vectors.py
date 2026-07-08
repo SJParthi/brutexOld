@@ -144,7 +144,8 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
     # (bits 56-59). Each fires independently with ~25% probability so across the
     # 400 cases EVERY one is set in >=1 case AND clear in >=1 case (the both-ways
     # coverage gate). The look-ahead-clean RESOLUTION of these flags is owned +
-    # proven by brutex.indicators.market_structure.MarketStructureState (its unit +
+    # proven by the shared Rust trading_core.MarketStructureState (the single
+    # source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001; its golden-replay +
     # property + P-06 tests); the golden oracle only carries the resolved flags so
     # both languages set the same bits from them.
     market_structure = MarketStructureSignal(
