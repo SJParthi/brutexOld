@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 
 from brutex.dashboard.pull_rate_view import (
+    BRIDGE_MAX_AGE_S,
     CEILING_PER_MIN_LIMIT,
     CEILING_RPS_LIMIT,
     FLOW_DONE,
@@ -1181,3 +1182,145 @@ def test_merged_bridge_failed_rps_threaded_and_none_defaults_zero() -> None:
     )
     assert legacy_bridge.flow_state == FLOW_STALLED  # no failure measurement → plain stalled
     assert legacy_bridge.req_per_sec_failed == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The bridge max-age TTL (DEC-RATE-METER-LIFECYCLE-001, audit C3): a DEAD CLI's
+# stuck pull_active=True file must never fabricate a PERMANENT red "stalled".
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeMaxAge:
+    """`build_pull_rate_view_merged`'s bridge TTL — dead evidence ≡ absent."""
+
+    def test_dead_bridge_beyond_ttl_reads_idle(self) -> None:
+        """The C3 repro pin (FAILS on pre-#1593 HEAD — it read FLOW_STALLED forever).
+
+        MUTANT KILLED: the ``<= bridge_max_age_s`` conjunct severed → the 2-day-old
+        SIGKILLed CLI file out-freshes the never-ticked panel and fabricates a
+        permanent site-wide red ``stalled``.
+        """
+        merged = build_pull_rate_view_merged(
+            panel_effective_rps=0.0,
+            panel_current_rps=0.0,
+            panel_recent_minute=0,
+            panel_recent_429_count=0,
+            panel_seconds_since_update=math.inf,  # freshly-restarted, never-pulled dashboard
+            bridge_effective_rps=4.8,
+            bridge_current_rps=5.0,
+            bridge_recent_minute=290,
+            bridge_recent_429_count=0,
+            bridge_seconds_since_update=172_800.0,  # a 2-day-old dead CLI file
+            bridge_pull_active=True,  # the stuck stamp (the finally never ran — SIGKILL)
+        )
+        assert merged.flow_state == FLOW_IDLE
+        assert merged.stalled is False
+        assert merged.active is False
+
+    def test_bridge_at_ttl_boundary_still_trusted(self) -> None:
+        """AT the bound the bridge stays trusted — the died-mid-run red alert is KEPT.
+
+        MUTANT KILLED: ``<=`` degraded to ``<`` (the boundary file would flip idle,
+        shaving the documented 15-minute alert window).
+        """
+        merged = build_pull_rate_view_merged(
+            panel_effective_rps=0.0,
+            panel_current_rps=0.0,
+            panel_recent_minute=0,
+            panel_recent_429_count=0,
+            panel_seconds_since_update=math.inf,
+            bridge_effective_rps=4.8,
+            bridge_current_rps=5.0,
+            bridge_recent_minute=290,
+            bridge_recent_429_count=0,
+            bridge_seconds_since_update=BRIDGE_MAX_AGE_S,  # exactly AT the bound
+            bridge_pull_active=True,
+        )
+        assert merged.flow_state == FLOW_STALLED
+        assert merged.stalled is True
+
+    def test_fresh_bridge_projection_byte_identical(self) -> None:
+        """A fresh bridge projects field-for-field IDENTICALLY to the pre-TTL pick.
+
+        MUTANTS KILLED: swapped operands / an inverted gate (the fresh CLI numbers
+        would vanish); a silently-changed constant (the 900.0 literal is pinned —
+        a policy revision must consciously retune the boundary tests too).
+        """
+        merged = build_pull_rate_view_merged(
+            panel_effective_rps=0.0,
+            panel_current_rps=0.0,
+            panel_recent_minute=0,
+            panel_recent_429_count=0,
+            panel_seconds_since_update=math.inf,
+            bridge_effective_rps=4.8,
+            bridge_current_rps=5.0,
+            bridge_recent_minute=290,
+            bridge_recent_429_count=3,
+            bridge_seconds_since_update=3.0,  # a live, flowing CLI
+            bridge_recent_1s=5,
+            bridge_recent_600s=2_800,
+            bridge_recent_3600s=16_500,
+            bridge_pull_active=True,
+        )
+        expected = build_pull_rate_view(
+            effective_rps=4.8,
+            current_rps=5.0,
+            recent_minute=290,
+            recent_429_count=3,
+            recent_1s=5,
+            recent_600s=2_800,
+            recent_3600s=16_500,
+            pull_active=True,
+            last_update_monotonic=0.0,
+            now_monotonic=3.0,
+        )
+        assert merged == expected
+        assert merged.flow_state == FLOW_FLOWING
+        assert BRIDGE_MAX_AGE_S == 900.0  # the pinned policy literal (Golden Rule #10)
+
+    def test_non_finite_bridge_age_ignored(self) -> None:
+        """A NaN/±inf bridge age takes the panel path — the isfinite CONTRACT pin.
+
+        MUTANT KILLED: the ``math.isfinite`` conjunct severed → the ``-inf`` case
+        is the killing input (``-inf <= 900`` AND ``-inf < panel_age`` are BOTH
+        True, so ONLY ``isfinite`` blocks the bridge path — the mutant would
+        project the bridge's FLOWING numbers where the contract reads IDLE).
+        The ``nan``/``+inf`` cases are independently blocked by the
+        ``<= bridge_max_age_s`` comparison and pin that behaviour as a CONTRACT,
+        not an accident of float-comparison ordering.
+        """
+        for bad_age in (float("nan"), math.inf, float("-inf")):
+            merged = build_pull_rate_view_merged(
+                panel_effective_rps=0.0,
+                panel_current_rps=0.0,
+                panel_recent_minute=0,
+                panel_recent_429_count=0,
+                panel_seconds_since_update=math.inf,
+                bridge_effective_rps=4.8,
+                bridge_current_rps=5.0,
+                bridge_recent_minute=290,
+                bridge_recent_429_count=0,
+                bridge_seconds_since_update=bad_age,
+                bridge_pull_active=True,
+            )
+            assert merged.flow_state == FLOW_IDLE
+            assert merged.stalled is False
+
+    def test_stale_but_within_ttl_bridge_still_reads_stalled(self) -> None:
+        """The 12 s < age ≤ 900 s alert window is PRESERVED end-to-end at the projection:
+        a CLI that died 60 s ago still reads honestly red (died mid-run)."""
+        merged = build_pull_rate_view_merged(
+            panel_effective_rps=0.0,
+            panel_current_rps=0.0,
+            panel_recent_minute=0,
+            panel_recent_429_count=0,
+            panel_seconds_since_update=math.inf,
+            bridge_effective_rps=4.8,
+            bridge_current_rps=5.0,
+            bridge_recent_minute=290,
+            bridge_recent_429_count=0,
+            bridge_seconds_since_update=60.0,
+            bridge_pull_active=True,
+        )
+        assert merged.flow_state == FLOW_STALLED
+        assert merged.stalled is True

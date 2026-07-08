@@ -1469,3 +1469,191 @@ class TestOnFinally:
         job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
         captured[0]()  # drain the stale worker → its finally hits the ->exit branch
         assert fired == [], "a superseded worker must not fire the newer run's clear"
+
+
+# ── the on_run_end per-JOB completion hook (DEC-RATE-METER-LIFECYCLE-001) ──────
+
+
+class TestOnRunEnd:
+    """`BackgroundPullJob(on_run_end=…)` — the per-JOB run-end hook (the production
+    wiring is ``SessionRateController.clear_meter``, the #1593 C0 cross-pull meter-leak
+    fix): fires ONCE per run — success AND failure — inside the identity-gated finally,
+    strictly AFTER ``on_finally`` and strictly BEFORE the single-flight release, in its
+    OWN try/except; never on a refused start; never from a superseded stale worker."""
+
+    def test_on_run_end_fires_on_success_and_on_failure(self) -> None:
+        # MUTANT KILLED: the `_run`-finally `self._on_run_end()` invocation severed →
+        # neither run fires the hook.
+        fired: list[str] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            on_run_end=lambda: fired.append("end"),
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.snapshot().state == STATE_DONE
+        assert fired == ["end"], "the hook fires exactly once on a successful run"
+        assert job.running is False
+
+        def failing(_on_progress: ProgressHook) -> None:
+            raise RuntimeError("boom")
+
+        assert job.start(failing, total=1) is True
+        assert job.snapshot().state == STATE_ERROR
+        assert fired == ["end", "end"], "the hook fires on a FAILED run too (worker exited)"
+        assert job.running is False
+
+    def test_on_run_end_raising_swallowed_and_singleflight_released(self, tmp_path: Path) -> None:
+        # MUTANT KILLED: the hook's OWN try/except removed → the raise would escape
+        # the locked finally and skip the single-flight release below it.
+        order: list[str] = []
+
+        def _boom_end() -> None:
+            order.append("run_end")
+            raise RuntimeError("clear exploded")
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+            on_run_end=_boom_end,
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        assert order == ["run_end", "released"], "the release still happens after a raising hook"
+        assert job.running is False
+        # The job is reusable — a fresh start succeeds after the raising hook.
+        assert job.start(lambda _h: None, total=1) is True
+
+    def test_on_run_end_fires_after_on_finally_and_before_release(self, tmp_path: Path) -> None:
+        # The documented ordering contract: on_finally → on_run_end → flock release
+        # (a peer acquiring the freed flock must never see the pre-clear state).
+        order: list[str] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+            on_run_end=lambda: order.append("run_end"),
+        )
+        started = job.start(lambda _h: None, total=1, on_finally=lambda: order.append("finally"))
+        assert started is True
+        assert order == ["finally", "run_end", "released"]
+
+    def test_on_finally_raising_does_not_skip_on_run_end(self, tmp_path: Path) -> None:
+        # MUTANT KILLED: the two hooks merged into ONE shared try/except → a raising
+        # on_finally would jump past the on_run_end call (the meter clear skipped).
+        order: list[str] = []
+
+        def _boom_finally() -> None:
+            order.append("finally")
+            raise RuntimeError("intent clear exploded")
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            lake_root_resolver=lambda: tmp_path,
+            singleflight_factory=lambda _root: _OrderGuard(order),
+            on_run_end=lambda: order.append("run_end"),
+        )
+        assert job.start(lambda _h: None, total=1, on_finally=_boom_finally) is True
+        assert order == ["finally", "run_end", "released"], (
+            "a raising on_finally must not skip the meter clear nor the release"
+        )
+
+    def test_on_run_end_not_fired_on_refused_start(self) -> None:
+        # A refused single-flight start spawns NO worker → no run ends → no fire.
+        fired: list[str] = []
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+            on_run_end=lambda: fired.append("end"),
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.start(lambda _h: None, total=1) is False  # single-flight refusal
+        assert fired == [], "a refused start must not fire the run-end hook"
+        captured[0]()  # drain the one real worker
+        assert fired == ["end"], "the real run's exit fires it exactly once"
+
+    def test_superseded_run_does_not_fire_on_run_end(self) -> None:
+        # MUTANT KILLED: the hook moved OUTSIDE the `self._watchdog is watchdog`
+        # identity gate → a stale worker would clear a NEWER run's meter.
+        captured: list[Callable[[], None]] = []
+        fired: list[str] = []
+        newer = PullWatchdog(
+            on_hung=lambda _e: None,
+            timeout_seconds=30.0,
+            spawn=_noop_spawn,
+            clock=_ticking_clock(),
+        )
+
+        def factory(_on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            return PullWatchdog(
+                on_hung=_on_hung,
+                timeout_seconds=30.0,
+                spawn=_noop_spawn,
+                clock=_ticking_clock(),
+            )
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+            watchdog_factory=factory,
+            on_run_end=lambda: fired.append("end"),
+        )
+        assert job.start(lambda _h: None, total=1) is True
+        job._running = True  # pyright: ignore[reportPrivateUsage]
+        job._watchdog = newer  # pyright: ignore[reportPrivateUsage]
+        captured[0]()  # drain the stale worker → its finally hits the ->exit branch
+        assert fired == [], "a superseded worker must not clear the newer run's meter"
+
+
+# ── the job-kind label + running_job_kind probe (DEC-RATE-METER-LIFECYCLE-001) ─
+
+
+class TestRunningJobKind:
+    """`start(job_kind=…)` + the atomic ``running_job_kind`` property — the C5 fix:
+    the rate route's probe distinguishes a vendor PULL from the zero-vendor-call
+    SWEEP sharing the single-flight job; idle reads ``None``; a refused start never
+    overwrites the running job's kind."""
+
+    def test_running_job_kind_lifecycle(self) -> None:
+        # MUTANTS KILLED: `self._job_kind = job_kind` severed in start (a sweep would
+        # read "pull"); the property ignoring `_running` (idle would read a kind);
+        # the property returning None while running.
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.running_job_kind is None, "a never-started job reads None (no AttributeError)"
+
+        assert job.start(lambda _h: None, total=1) is True
+        assert job.running_job_kind == pull_jobs.JOB_KIND_PULL, "the default start is pull-kind"
+        captured.pop()()  # drain → idle
+        assert job.running_job_kind is None, "an idle job reads None, never a stale kind"
+
+        assert job.start(lambda _h: None, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP) is True
+        assert job.running_job_kind == pull_jobs.JOB_KIND_SWEEP
+        captured.pop()()
+        assert job.running_job_kind is None
+
+    def test_refused_start_does_not_overwrite_running_kind(self) -> None:
+        # MUTANT KILLED: `self._job_kind = job_kind` moved BEFORE the `if
+        # self._running: return False` refusal → a refused sweep start would
+        # relabel the RUNNING pull as a sweep (the rate widget would go dark
+        # mid-pull — a fake "idle" during a live vendor pull).
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.start(lambda _h: None, total=1) is True  # a PULL is running
+        refused = job.start(lambda _h: None, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP)
+        assert refused is False
+        assert job.running_job_kind == pull_jobs.JOB_KIND_PULL, (
+            "the refused sweep start must not relabel the running pull"
+        )
+        captured[0]()
+        assert job.running_job_kind is None
