@@ -48,7 +48,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-import polars as pl
 import pytest
 from brutex.data.audit_capture import (
     DEDUP_ADD_ACTION,
@@ -71,6 +70,14 @@ from brutex.orchestrator.lake_replay import (
 from brutex.orchestrator.replay import assert_dedup_consistent
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
+# The lake round-trips below write real Parquet partitions (ParquetWriter's
+# lazy in-function polars import), so the whole module needs the [data]
+# extra — module-level importorskip, the exact idiom of the five sibling
+# polars-dependent property modules (e.g. test_derived_daily_properties),
+# so the lean polars-less "Property tests (hypothesis)" CI job SKIPS this
+# module instead of dying with a collection-time ImportError.
+pl = pytest.importorskip("polars")  # the frame read + writes need the [data] extra
 
 # ────────────────────────────────────────────────────────────────────────
 # Bounded generation domain
