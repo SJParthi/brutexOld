@@ -29,7 +29,7 @@ Counts are file-level, not test-level.
 | 3 | Golden (`tests/golden/`) | 1 working + 1 truth-table CSV (5 rows) + 1 fixtures README | 1 (truth table is skeleton ≥ 200 rows in Phase 2) | 1 (bloom golden) | 9 fixtures + 200-row truth table | 1 working test + 5-row CSV skeleton + 9-corpora README |
 | 4 | Integration (`tests/integration/`) | 13 | 2 (replay_audit_log + python_rust_parity) | 11 | 4 oracle + N drivers | 2 skeletons land Phase 1; 3rd oracle (vocabulary) lands Phase 2 |
 | 5 | Benchmark (`tests/bench/`) | 5 | 0 | 5 (3 ratio gates + 1 absolute stub + 1 extrapolation) | 6 hot-path ratios all ≤ 1.1 + 1 sweep extrapolation | M4 Pro absolute is 📋 ROADMAP until runner online (DEC-M4PRO-ABSOLUTE-001) |
-| 6 | Stress (`tests/stress/`) | 1 (audit chain sustained) | 0 | 1 | 24h-sustained on each hot path | nightly via `stress-nightly.yml` |
+| 6 | Stress (`tests/stress/`) | 1 (audit chain sustained) | 0 | 1 | ~~24h-sustained on each hot path~~ multi-hour sustained per hot path **(CORRECTED — DEC-SOAK-REAL-TIER-001 #1580: no tier delivers a 24h single run; ≤ 20 h per dispatch, SEC9-1)** | nightly ~5-min regression gate via `stress-nightly.yml` + weekly self-hosted multi-hour soak via `soak-selfhosted.yml` (#1580) |
 | 7 | Smoke (`tests/smoke/`) | 1 | 0 | 1 (pre-push, 12 tests, < 30 sec) | < 30s pre-push sanity | DEC-PHASE1-SMOKE-AND-SKELETONS-001 |
 | 8 | Fuzz (`rust/fno-math/fuzz/`) | 1 README directory marker | 1 (whole dir is README + ROADMAP for 7 targets) | 0 | 7 cargo-fuzz targets each running 10 min/night | activates per-target alongside each Phase 2 hot-path landing |
 | 9 | Mutation (`.cargo/mutants.toml` + `mutation.yml`) | 1 config + 1 workflow | 0 | 1 weekly workflow exists | ≥ 85% mutation score Python + Rust | mutation.yml runs weekly; Python state.py gated at 85% (DEC-P0-003) |
@@ -176,8 +176,12 @@ pytest tests/integration -q -rs
 # Layer 5 — bench (ratios pass; absolute skipped sans env)
 pytest tests/bench -q -rs
 
-# Layer 6 — stress (PR-event subset; full run is nightly)
-pytest tests/stress -q -m "not slow_24h"
+# Layer 6 — stress (per-PR regression subset; the multi-hour soak runs only
+# on soak-selfhosted.yml — CORRECTED, DEC-SOAK-REAL-TIER-001 #1580: the prior
+# command here deselected a `slow_24h` marker that was NEVER registered, so
+# the deselect was a no-op and "full run is nightly" repeated the retracted
+# #208 claim)
+pytest tests/stress -q -m "not soak"
 
 # Layer 7 — smoke
 pytest tests/smoke -q
@@ -274,9 +278,15 @@ every box below is closed by supersession per the banner above.)*
       regression classes (lint / format / import / conv-commit / docs)
       — ✅ landed and live in CI (MIGRATION.md #251).
 - [x] `tests/stress/test_audit_chain_sustained.py` lands as the stress
-      anchor; nightly workflow `stress-nightly.yml` runs the full
-      24h subset
-      — ✅ both present and running (DEC-STRESS-001, MIGRATION.md #208).
+      anchor; ~~nightly workflow `stress-nightly.yml` runs the full
+      24h subset~~ **CORRECTED (DEC-SOAK-REAL-TIER-001 #1580):**
+      `stress-nightly.yml` is a ~5-min regression gate (its fence refuses
+      `STRESS_EVENTS` > 200000); the real multi-hour soak runs weekly on
+      the self-hosted `soak-selfhosted.yml` tier
+      — ✅ the stress anchor is present and running nightly; the
+      superseded "24h subset" wording of #208 is retracted per the
+      correction above (the #208-cited sign-off of DEC-STRESS-001 stands
+      for the anchor itself).
 - [x] `rust/fno-math/fuzz/README.md` documents the 7 planned cargo-
       fuzz targets; per-target activation deferred to Phase 2
       — ✅ EXCEEDED: **5** of the README's 7-planned rows are LIVE

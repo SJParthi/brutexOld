@@ -12,8 +12,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import pytest
 from brutex.metrics.compute import ResultMetrics
 from brutex.ranking import OverfitGateConfig, rank_combos
+
+# Marker discipline (tests/stress/__init__.py): the nightly (`-m stress`) and
+# self-hosted soak (`-m 'stress or soak'`) tiers select BY MARKER — an unmarked
+# stress test silently drops out of both tiers (SOAK-R7-1).
+pytestmark = pytest.mark.stress
 
 _POOL_SIZE = 30_000
 

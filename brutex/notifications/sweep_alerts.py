@@ -589,6 +589,65 @@ class SweepAlerter:
             dedupe_key=f"pull-degraded:{rule}",
         )
 
+    def soak_drift(self, *, rule: str, observed: float, threshold: float, detail: str) -> bool:
+        """Alert that a long soak crossed a DETERMINISTIC drift rule (CRITICAL).
+
+        Fired by the soak driver on a rule OK→BREACH edge (DEC-SOAK-REAL-TIER-001)
+        for the two MONOTONE, deterministic rules ONLY — an RSS ceiling crossed or
+        an fd count that grew above its baseline. The noisy ``soak.p99_drift`` rule
+        is DELIBERATELY NOT routed here: its sub-second-window p99 oscillates, so
+        the detector fires a fresh OK→BREACH edge per up-crossing and pushing each
+        would storm the operator on non-regression noise (the driver excludes it —
+        see :mod:`tests.stress.test_soak_sustained`); p99 stays visible via the
+        monitor's structlog breach warning + the ``brutex_soak_p99_ratio`` gauge.
+
+        Mirrors :meth:`pull_degraded`: a best-effort, fire-and-forget push.
+        CRITICAL because a genuine multi-hour RSS/fd leak is the exact regression
+        the tier exists to catch — the operator must look. Silent no-op when
+        Telegram is disabled (the default), so a Telegram outage can never mask the
+        breach.
+
+        Coalescing is HONEST, not the dedupe_key: at the ``PHASE_BLOCKED`` kind the
+        notifier dedupe WINDOW is ``0.0``
+        (:data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`), so the
+        per-rule ``dedupe_key`` provides NO notifier-side suppression — it is set
+        for identification / defence-in-depth only. The real coalescing is upstream:
+        the :class:`~brutex.observability.sla.SLADetector` hysteresis fires exactly
+        ONE edge per OK→BREACH transition, and because the two rules routed here are
+        MONOTONE (a real leak climbs and stays), that edge fires once per
+        regression — one honest CRITICAL, never one per observe window.
+
+        Parameters
+        ----------
+        rule
+            The breached rule name (the raw dedupe key — e.g.
+            ``"soak.rss_ceiling"``).
+        observed
+            The measured value at the breach (RSS KiB / fd growth).
+        threshold
+            The rule's trigger level.
+        detail
+            Short free-form context naming what to check.
+        """
+        message = escape_markdown_v2(
+            f"⚠️ Soak drift ({rule}): observed {observed:.2f} vs threshold "
+            f"{threshold:.2f}. {detail}."
+        )
+        # PHASE_BLOCKED (0.0 notifier window) — the CRITICAL-severity precedent
+        # pull_halted / vendor_down / credential_dead use, so a real drift is
+        # never swallowed by a notifier coalescing window. HONESTY NOTE: at a
+        # 0.0-window kind the dedupe_key does NO notifier-side suppression (it is
+        # identification / defence-in-depth only). The genuine coalescing is the
+        # caller's SLADetector hysteresis firing ONE OK→BREACH edge, which for the
+        # MONOTONE rss/fd rules routed here is one push per genuine regression (the
+        # noisy oscillating p99 rule is excluded upstream — see the docstring).
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"soak-drift:{rule}",
+        )
+
     def vendor_conflict_drift(
         self, *, conflicts: int, max_close_delta_display: str, dup_rows: int
     ) -> bool:
