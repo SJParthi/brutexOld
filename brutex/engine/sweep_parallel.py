@@ -637,11 +637,16 @@ def quarantine_sidecar_path(root: Path) -> Path:
 def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
     """Load the quarantined tuple labels recorded for *sweep_id* under *root*.
 
-    Missing file → the empty set (the common case). A corrupt / non-JSON /
-    wrong-shape sidecar → the empty set + ONE LOUD ``sweep.quarantine.sidecar_corrupt``
-    WARNING (advisory sidecar: the worst outcome of ignoring a corrupt file is a
-    re-dispatch of a poison tuple, which re-quarantines and REWRITES the sidecar —
-    self-healing, never a wedge). Entries for OTHER sweep_ids are ignored. O(entries).
+    Missing file → the empty set (the common case). ANY other unreadable /
+    corrupt / non-JSON / wrong-shape state — including the OSError SHAPES a
+    hostile filesystem can present (a DIRECTORY at the sidecar path →
+    ``IsADirectoryError``, a symlink self-loop → ``ELOOP``, unreadable →
+    ``PermissionError``) — → the empty set + ONE LOUD
+    ``sweep.quarantine.sidecar_corrupt`` WARNING (advisory sidecar: the worst
+    outcome of ignoring a bad file is a re-dispatch of a poison tuple, which
+    re-quarantines and REWRITES the sidecar — self-healing, never a wedge, and
+    never a crash at the resume load). Entries for OTHER sweep_ids are ignored.
+    O(entries).
     """
     import json
 
@@ -649,6 +654,15 @@ def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        # IsADirectoryError / PermissionError / ELOOP / … — the advisory
+        # contract: never a wedge, never a crash; LOUD + empty.
+        _LOG.warning(
+            "sweep.quarantine.sidecar_corrupt",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return set()
     try:
         payload = json.loads(raw)
@@ -676,8 +690,16 @@ def append_quarantine_entries(
     Read-merge-write via a same-directory temp file + ``os.replace`` (atomic on
     POSIX), fsync'd BEFORE the rename — the quarantine record must be durable
     BEFORE the run raises, or a crash between the two could livelock the next
-    resume. A corrupt existing sidecar is REPLACED (its labels were already served
-    as empty by :func:`load_quarantined_tuple_labels` — same advisory contract).
+    resume. A corrupt/unreadable existing sidecar is REPLACED (its labels were
+    already served as empty by :func:`load_quarantined_tuple_labels` — same
+    advisory contract; a symlink self-loop is SELF-HEALED — ``os.replace``
+    replaces the link itself). A WRITE failure (an OSError shape — e.g. a
+    DIRECTORY squatting at the sidecar path, no permission) is caught: the
+    append is SKIPPED with ONE loud
+    ``sweep.quarantine.sidecar_corrupt`` WARNING instead of raising — the
+    informative :class:`SweepWorkerPoolBrokenError` the caller is about to
+    raise must never be MASKED by a filesystem defect (the durable record is
+    honestly lost + loud; a re-OOM on the resumed run re-attempts the append).
     Returns the sidecar path. O(existing entries + new entries).
     """
     import json
@@ -687,17 +709,27 @@ def append_quarantine_entries(
         existing = json.loads(path.read_text(encoding="utf-8"))["entries"]
         if not isinstance(existing, list):
             existing = []
-    except (FileNotFoundError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError):
+        # FileNotFoundError (the common first-quarantine case) plus any other
+        # OSError/corruption shape — start fresh; the write leg below either
+        # replaces the bad state or warns loudly.
         existing = []
     for index, label in entries:
         existing.append({"sweep_id": sweep_id, "index": index, "tuple": label, "reason": reason})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump({"entries": existing}, handle, indent=1)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump({"entries": existing}, handle, indent=1)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        _LOG.warning(
+            "sweep.quarantine.sidecar_corrupt",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
     return path
 
 

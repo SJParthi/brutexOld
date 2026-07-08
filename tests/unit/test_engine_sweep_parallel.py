@@ -1758,6 +1758,47 @@ class TestQuarantineSidecar:
         mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0")], "OOM")
         assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0"}
 
+    def test_directory_at_sidecar_path_loads_empty_and_warns(self, tmp_path: Path) -> None:
+        """R4 FINDING 1: a DIRECTORY squatting at the sidecar path (IsADirectoryError —
+        an OSError shape) must honour the advisory contract: LOUD + empty, never a
+        crash at run()'s resume load."""
+        mod.quarantine_sidecar_path(tmp_path).mkdir()
+        with capture_logs() as logs:
+            got = mod.load_quarantined_tuple_labels(tmp_path, "sid")
+        assert got == set()
+        assert any(e["event"] == "sweep.quarantine.sidecar_corrupt" for e in logs)
+
+    def test_symlink_self_loop_loads_empty_and_warns(self, tmp_path: Path) -> None:
+        """R4 FINDING 1: a symlink self-loop (ELOOP OSError) → LOUD + empty."""
+        path = mod.quarantine_sidecar_path(tmp_path)
+        path.symlink_to(path)
+        with capture_logs() as logs:
+            got = mod.load_quarantined_tuple_labels(tmp_path, "sid")
+        assert got == set()
+        assert any(e["event"] == "sweep.quarantine.sidecar_corrupt" for e in logs)
+
+    def test_directory_at_sidecar_path_append_skips_and_warns(self, tmp_path: Path) -> None:
+        """R4 FINDING 1: a DIRECTORY at the sidecar path must not let the append's
+        IsADirectoryError MASK the caller's SweepWorkerPoolBrokenError — the append
+        is skipped with ONE loud warning."""
+        mod.quarantine_sidecar_path(tmp_path).mkdir()
+        with capture_logs() as logs:
+            path = mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0")], "OOM")
+        assert path == mod.quarantine_sidecar_path(tmp_path)
+        assert any(e["event"] == "sweep.quarantine.sidecar_corrupt" for e in logs)
+
+    def test_symlink_self_loop_append_self_heals(self, tmp_path: Path) -> None:
+        """R4 FINDING 1: a symlink self-loop at the sidecar path never raises an
+        ELOOP masking the real error — the read leg treats it as empty (OSError
+        caught) and ``os.replace`` REPLACES the symlink itself (rename does not
+        follow links), so the append SELF-HEALS the loop into a real sidecar."""
+        path = mod.quarantine_sidecar_path(tmp_path)
+        path.symlink_to(path)
+        got = mod.append_quarantine_entries(tmp_path, "sid", [(0, "t0")], "OOM")
+        assert got == path
+        assert not path.is_symlink()  # the loop was healed into a regular file
+        assert mod.load_quarantined_tuple_labels(tmp_path, "sid") == {"t0"}
+
     def test_non_dict_entries_are_skipped_on_load(self, tmp_path: Path) -> None:
         mod.quarantine_sidecar_path(tmp_path).write_text(
             '{"entries": [7, {"sweep_id": "sid", "tuple": "t0"}]}', encoding="utf-8"
@@ -1925,6 +1966,23 @@ class TestBrokenProcessPoolQuarantine:
         # …and the WHOLE grid completed (no permanent loss — Golden Rule #1).
         assert acc2.tuples_run == total
         assert acc2.tuples_quarantined_prior == 0
+
+        # R4 FINDING 2 — "genuinely recomputes" pinned by BYTES, not counts: the
+        # recovered result tree is byte-identical to a CLEAN never-quarantined run
+        # (delete-to-recompute determinism, Golden Rule #4/#7).
+        clean_dir = tmp_path / "clean"
+        clean_dir.mkdir()
+        with (
+            AuditWriter.open(clean_dir / "i.jsonl") as clean_ing,
+            _guards(clean_dir, grid) as clean_guards,
+        ):
+            clean_driver = _driver(clean_dir, grid, clean_guards, clean_ing)
+            clean_guards.checkpoint.load()
+            clean_acc = mod._Accumulator()
+            clean_pool = _FakePool(mod._WorkerContext(grid=grid, root=clean_dir / "out"))
+            clean_driver._drive(clean_pool, 0, 2, 4, clean_acc)  # type: ignore[arg-type]
+        assert clean_acc.tuples_run == total
+        assert _tree(tmp_path / "out") == _tree(clean_dir / "out")
 
     def test_full_run_resume_reports_quarantined_prior_in_summary(self, tmp_path: Path) -> None:
         """run() loads the sidecar + the returned SupervisedGridSummary carries the
