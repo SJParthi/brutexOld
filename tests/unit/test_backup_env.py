@@ -218,11 +218,75 @@ class TestExtraExcludes:
 
 
 class TestVerifySubset:
-    @pytest.mark.parametrize("value", ["auto", "none", "3/7"])
-    def test_verify_subset_auto_none_passthrough(self, tmp_path: Path, value: str) -> None:
-        """auto | none | verbatim passthrough all resolve unchanged."""
-        cfg = resolve_backup_env({BACKUP_VERIFY_SUBSET_ENV: value}, home=tmp_path)
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "auto",
+            "none",
+            "3/7",
+            "1/56",
+            "01/56",  # Go ParseUint accepts a leading zero (probed, restic 0.16.4)
+            "56/56",
+            "1/256",  # the checkFlags t ≤ 256 boundary, inclusive
+            "2%",
+            "2.5%",
+            ".5%",
+            "2.%",
+            "100%",  # the 0 < x ≤ 100 boundary, inclusive
+            "10G",
+            "512M",
+            "10k",
+            "1b",
+        ],
+    )
+    def test_verify_subset_valid_shapes_pass_through(self, tmp_path: Path, value: str) -> None:
+        """auto | none | every restic-valid passthrough shape resolves unchanged, no WARN."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_VERIFY_SUBSET_ENV: value}, home=tmp_path)
         assert cfg.verify_subset == value
+        assert logs == []
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "garbage",  # the round-7 empirical repro: rc=1 flag error ≡ corruption rc
+            "0/56",  # the round-7 empirical repro: n must be positive
+            "00/56",  # ParseUint("00") == 0 → restic-refused (probed)
+            "5/3",  # n ≤ t violated
+            "1/257",  # t ≤ 256 violated
+            "1/2/3",
+            "0%",
+            "150%",  # x ≤ 100 violated
+            "1000",  # a BARE integer is restic-INVALID (parses as a 1-element n/t)
+            "1.5G",  # the size prefix is Go ParseInt — no float sizes
+            "0G",  # size must be positive
+            "10GB",  # ONE suffix char only
+            "2 %",  # interior whitespace (only outer whitespace is stripped)
+            # restic's Go ParseFloat would accept these exotic spellings; the
+            # validator is deliberately CONSERVATIVE (plain decimals only) —
+            # a false fallback costs one WARN + the safe auto default, a
+            # false pass costs a fake repo-corrupt CRITICAL:
+            "+2%",
+            "2e1%",
+        ],
+    )
+    def test_verify_subset_invalid_falls_back_auto_loud(self, tmp_path: Path, value: str) -> None:
+        """Round-7 MINOR pin: an invalid ``--read-data-subset`` shape must NEVER
+        reach restic — restic refuses it rc=1 on FLAG VALIDATION (reading zero
+        repo data), indistinguishable in rc from genuine corruption, so an
+        unvalidated typo paged repo-corrupt (exit 6 + the restore-from-older /
+        re-seed CRITICAL) every night with success never stamped (a dead-man
+        OVERDUE cascade). Same law as prune_weekday/drill_sample: fall back to
+        ``auto`` LOUDLY (empirical basis: restic 0.16.4 checkFlags probes)."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_VERIFY_SUBSET_ENV: value}, home=tmp_path)
+        assert cfg.verify_subset == "auto"
+        events = [
+            entry for entry in logs if entry["event"] == "backup.config.verify_subset_invalid"
+        ]
+        assert len(events) == 1
+        assert events[0]["value"] == value
+        assert events[0]["default"] == "auto"
 
 
 class TestPathExpansionTotality:

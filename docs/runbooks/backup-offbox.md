@@ -129,7 +129,11 @@ heals via the ledger-reconcile design of
     already-set var), then re-install the agent
     (`launchctl bootout gui/$(id -u)/com.brutex.backup-deadman` +
     `launchctl bootstrap …`); a `.env`-only URL takes effect only if the
-    plist key stays blank/deleted. Watch one
+    plist key is **DELETED** — a blank plist value still reaches the
+    checker as a present (empty) env var and blocks the `.env` route
+    (`bootstrap_env` never overrides a present var, blank included), so
+    blank leaves the ping lane silently OFF while a shell-run
+    `brutex backup status` (no launchd env) reads SET. Watch one
     hourly ping arrive. The checker pings EVERY tick — plain URL when
     FRESH/RUNNING, `<url>/fail` on any breach — so the EXTERNAL service
     alarms when pings STOP: the one lane that catches checker-dead,

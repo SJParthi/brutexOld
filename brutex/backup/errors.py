@@ -22,8 +22,9 @@ EXIT_DEADMAN_BREACH: Final[int] = 1
 #: recorded snapshot for a drill) — refused BEFORE touching restic (F6/F19).
 EXIT_CONFIG: Final[int] = 2
 
-#: Preflight refusal — unmounted /Volumes lake, missing lake root, or an empty
-#: backup set (F1/F2). Never snapshots, never stamps success.
+#: Preflight refusal — unmounted /Volumes lake, missing lake root, an empty
+#: backup set (F1/F2), or a preflight/plan-build I/O failure
+#: (``preflight_io``). Never snapshots, never stamps success.
 EXIT_PREFLIGHT: Final[int] = 3
 
 #: restic invocation failure — missing binary, remote unreachable, timeout,
@@ -36,7 +37,10 @@ EXIT_RESTIC: Final[int] = 4
 EXIT_BUSY: Final[int] = 5
 
 #: Verified corruption — ``restic check`` failure or a restore-drill byte
-#: mismatch (F11/F20). Success is NOT stamped; the dead-man escalates too.
+#: mismatch (F11/F20). Nightly-verify arm: success is NOT stamped, so the
+#: dead-man escalates too. Drill arm: nightly successes keep stamping — the
+#: dead-man stays QUIET; the CRITICAL page is the ONLY automated signal
+#: (the per-arm honesty of the round-5 alert-body split).
 EXIT_CORRUPTION: Final[int] = 6
 
 #: Backup + verify succeeded but maintenance (``forget``/``--prune``) failed

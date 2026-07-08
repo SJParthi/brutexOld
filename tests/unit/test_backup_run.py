@@ -484,24 +484,40 @@ class TestBusyAndLockErrors:
 
 
 class TestEscapedInRunOSError:
-    """Round-1 review pins: an OSError escaping ``_run_locked`` AFTER step 4
-    stamped ``running_since`` must clear the stale RUNNING marker (F17b —
-    "cleared at EVERY exit"), and an exec-time OSError from a present but
-    non-executable restic must map inside the runner seam."""
+    """Round-1 review pins (round-7 refit): an in-lock OSError must NEVER
+    leave a stale RUNNING marker (F17b — "cleared at EVERY exit"), an
+    exec-time OSError from a present but non-executable restic must map
+    inside the runner seam, and (round 7) a step-6 plan-build I/O failure
+    is the honest ``preflight_io`` triple — never ``state_write``."""
 
-    def test_plan_oserror_clears_running_marker(self, tmp_path: Path) -> None:
-        """A permissions hiccup in the step-6 plan build → exit 4 AND running_since=None."""
+    def test_plan_oserror_exit_3_preflight_io_counters_stamped(self, tmp_path: Path) -> None:
+        """Round-7 MINOR pin: a permissions hiccup in the step-6 plan build
+        (the audit-dir probe does real disk I/O) previously escaped to the
+        singleflight handler → exit 4 + reason ``state_write`` (misdirecting
+        the operator at the state dir/disk while the running-marker clear on
+        the SAME path succeeded) and the failure never stamped
+        last_failure/consecutive_failures. Now: the SAME honest triple as
+        the pre-lock/dry-run arm (round 2) — exit 3, ``backup.plan.io_failed``,
+        reason ``preflight_io`` — with counters stamped via shell.fail AND
+        running_since cleared (F17b)."""
         harness = Harness(tmp_path)
 
         def _raising_plan(cfg: BackupEnvConfig, lake: Path, **kwargs: Any) -> BackupPlan:
             raise PermissionError(13, "audit probe denied")
 
-        assert harness.run(plan_fn=_raising_plan) == EXIT_RESTIC
+        with structlog.testing.capture_logs() as logs:
+            assert harness.run(plan_fn=_raising_plan) == EXIT_PREFLIGHT
         state = harness.state()
         assert state is not None
         assert state.running_since is None  # the stale-RUNNING mute window is closed
         assert state.last_attempt_at == NOW
-        assert harness.dedupe_keys() == ["backup-failed:state_write"]
+        assert state.last_failure_at == NOW  # stamped — no longer bypasses shell.fail
+        assert state.last_failure_reason == "preflight_io"
+        assert state.consecutive_failures == 1
+        assert harness.dedupe_keys() == ["backup-failed:preflight_io"]
+        events = [entry["event"] for entry in logs]
+        assert "backup.plan.io_failed" in events
+        assert "backup.state.write_failed" not in events  # the misdirection is gone
 
     def test_nonexecutable_restic_reason_restic_missing_marker_cleared(
         self, tmp_path: Path

@@ -20,8 +20,11 @@
          leave the literal placeholder (any non-http(s) value is refused with a WARN
          every tick while `backup status` reads SET). The hourly checker reads THIS
          value: launchd env OVERRIDES ~/.brutex/.env, so set the URL here and
-         bootout+bootstrap the agent (a .env-only URL works only if this key stays
-         blank/deleted). -->
+         bootout+bootstrap the agent. A .env-only URL works only if this key is
+         DELETED — a blank value here still reaches the checker as a PRESENT (empty)
+         env var, and bootstrap_env never overrides a present var (blank included),
+         so blank keeps the ping lane OFF while a shell-run `backup status` (no
+         launchd env) reads SET. -->
     <key>BRUTEX_BACKUP_HEALTHCHECK_URL</key><string>{{BRUTEX_BACKUP_HEALTHCHECK_URL}}</string>
     <key>PATH</key><string>{{BRUTEX_VENV_BIN}}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

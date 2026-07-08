@@ -74,6 +74,16 @@ class TestTemplateLaw:
         assert "fill AFTER the healthchecks.io check exists (runbook step 10 / M6)" in note
         assert "blank reads as unset" in note
         assert "launchd env OVERRIDES ~/.brutex/.env" in note
+        # Round-7 MINOR pin: the old "a .env-only URL works only if this key
+        # stays blank/deleted" claim was FALSE for the blank half — launchd
+        # exports a blank <string></string> as a PRESENT empty env var, and
+        # bootstrap_env's apply_dotenv skips any PRESENT key regardless of
+        # blankness, so blank keeps the ping lane OFF while a shell-run
+        # `backup status` reads SET. The note must say DELETED-only.
+        assert "blank/deleted" not in note
+        assert "works only if this key is" in note
+        assert "DELETED" in note
+        assert "never overrides a present var (blank included)" in note
 
     def test_drill_plist_monthly(self) -> None:
         """Round-6 MAJOR pin: the drill fires Day-1 13:00 IST — OUTSIDE the

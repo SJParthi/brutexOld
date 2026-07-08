@@ -24,6 +24,7 @@ Resolution law (fail-safe, never fail-crash):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -92,8 +93,13 @@ BACKUP_PRUNE_WEEKDAY_ENV: Final[str] = "BRUTEX_BACKUP_PRUNE_WEEKDAY"
 #: Read-data verification tier: ``auto`` (default) → NIGHTLY rotating
 #: ``{cursor % 56 + 1}/56`` (the state cursor advances only after a SUCCESSFUL
 #: subset check — no bucket ever skipped; full repo read ≈ every 8 weeks);
-#: ``none`` → structure check only; anything else is passed to restic verbatim
-#: (``2%``, ``1/10``, …).
+#: ``none`` → structure check only; anything else is SHAPE-VALIDATED against
+#: the restic ``--read-data-subset`` forms (``n/t`` positive ints with
+#: ``n ≤ t ≤ 256``, a ``x%`` percentage in (0, 100], or a positive
+#: ``<int><k|m|g|t|b>`` size) then passed to restic verbatim (``2%``,
+#: ``1/10``, …). An invalid shape falls back to ``auto`` LOUDLY (round-7
+#: MINOR: restic rejects a malformed flag with the SAME rc=1 as genuine
+#: corruption, so an unvalidated typo would page repo-corrupt every night).
 BACKUP_VERIFY_SUBSET_ENV: Final[str] = "BRUTEX_BACKUP_VERIFY_SUBSET"
 
 #: External dead-man ping URL (healthchecks.io); default unset → ping lane OFF.
@@ -129,6 +135,52 @@ _DEFAULT_EXTRA_EXCLUDES: Final[str] = "logs:dedup-cache"
 
 #: Valid Python ``weekday()`` range for the prune gate (0=Mon .. 6=Sun).
 _MAX_WEEKDAY: Final[int] = 6
+
+#: restic ``--read-data-subset`` ``n/t`` form (checkFlags: positive ints,
+#: ``n ≤ t``, ``t ≤ 256`` — empirically probed against restic 0.16.4).
+_SUBSET_NT_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]+)/([0-9]+)$")
+
+#: restic ``--read-data-subset`` ``x%`` form — a plain decimal percentage
+#: (restic's Go ``ParseFloat`` also accepts exotic spellings like ``2e1%``;
+#: those fall back to ``auto`` LOUDLY — the conservative direction: a false
+#: fallback costs one WARN + the safe default, a false pass costs a fake
+#: repo-corrupt CRITICAL).
+_SUBSET_PERCENT_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]+(?:\.[0-9]*)?|\.[0-9]+)%$")
+
+#: restic ``--read-data-subset`` size form — a positive integer + ONE suffix
+#: (``ui.ParseBytes``; a bare integer with NO suffix is restic-INVALID — it
+#: parses as a 1-element ``n/t`` slice and is refused, probed on 0.16.4).
+_SUBSET_SIZE_RE: Final[re.Pattern[str]] = re.compile(r"^([0-9]+)[bBkKmMgGtT]$")
+
+#: restic checkFlags bound: ``--read-data-subset=n/t`` requires ``t ≤ 256``.
+_SUBSET_MAX_BUCKETS: Final[int] = 256
+
+#: restic checkFlags bound: ``--read-data-subset=x%`` requires ``0 < x ≤ 100``.
+_SUBSET_MAX_PERCENT: Final[float] = 100.0
+
+
+def _valid_verify_subset(value: str) -> bool:
+    """True iff *value* is a shape restic's ``--read-data-subset`` accepts.
+
+    Mirrors restic's own flag validation (``checkFlags``, empirically probed
+    against the pinned restic 0.16.4): ``n/t`` with positive ints and
+    ``n ≤ t ≤ 256``, ``x%`` with ``0 < x ≤ 100``, or a positive
+    ``<int><b|k|m|g|t>`` size. Restic rejects a malformed flag with rc=1
+    BEFORE reading any repo data — indistinguishable in rc from genuine
+    corruption — so an invalid passthrough must never reach the nightly
+    verify (round-7 MINOR; the F3-not-F11 honesty law of the
+    ``binary_missing`` arm, one arm over).
+    """
+    nt = _SUBSET_NT_RE.match(value)
+    if nt is not None:
+        return 1 <= int(nt.group(1)) <= int(nt.group(2)) <= _SUBSET_MAX_BUCKETS
+    pct = _SUBSET_PERCENT_RE.match(value)
+    if pct is not None:
+        return 0.0 < float(pct.group(1)) <= _SUBSET_MAX_PERCENT
+    size = _SUBSET_SIZE_RE.match(value)
+    if size is not None:
+        return int(size.group(1)) > 0
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +219,10 @@ class BackupEnvConfig:
         Python ``weekday()`` (0=Mon..6=Sun) on which ``forget`` prunes;
         an out-of-range env value falls back to the default 6 + WARN.
     verify_subset
-        ``"auto"`` | ``"none"`` | verbatim restic ``--read-data-subset`` value.
+        ``"auto"`` | ``"none"`` | a shape-validated restic
+        ``--read-data-subset`` value passed verbatim; an invalid shape falls
+        back to ``auto`` + WARN (a restic flag-validation failure is rc=1 —
+        the same rc as genuine corruption — so it must never reach verify).
     healthcheck_url
         External dead-man ping URL, or ``None`` (lane off).
     drill_sample
@@ -334,6 +389,22 @@ brutex_home`.
         )
         drill_sample = _DEFAULT_DRILL_SAMPLE
 
+    verify_subset = _optional(env, BACKUP_VERIFY_SUBSET_ENV) or _DEFAULT_VERIFY_SUBSET
+    if verify_subset not in ("auto", "none") and not _valid_verify_subset(verify_subset):
+        # Round-7 MINOR: restic refuses a malformed --read-data-subset with
+        # rc=1 on FLAG VALIDATION — reading ZERO repo data yet
+        # indistinguishable in rc from genuine corruption — so an
+        # unvalidated typo would page repo-corrupt (exit 6 + the
+        # restore-from-older / re-seed CRITICAL) every night, with success
+        # never stamped → a dead-man OVERDUE cascade. Same law as the
+        # prune_weekday / drill_sample guards above: fall back LOUDLY.
+        _LOG.warning(
+            "backup.config.verify_subset_invalid",
+            value=verify_subset,
+            default=_DEFAULT_VERIFY_SUBSET,
+        )
+        verify_subset = _DEFAULT_VERIFY_SUBSET
+
     extra_raw = env.get(BACKUP_EXTRA_EXCLUDES_ENV)
     extra_excludes = _split_excludes(
         extra_raw if extra_raw is not None else _DEFAULT_EXTRA_EXCLUDES
@@ -356,7 +427,7 @@ brutex_home`.
         keep_weekly=_int_env(env, BACKUP_KEEP_WEEKLY_ENV, _DEFAULT_KEEP_WEEKLY),
         keep_monthly=_int_env(env, BACKUP_KEEP_MONTHLY_ENV, _DEFAULT_KEEP_MONTHLY),
         prune_weekday=prune_weekday,
-        verify_subset=_optional(env, BACKUP_VERIFY_SUBSET_ENV) or _DEFAULT_VERIFY_SUBSET,
+        verify_subset=verify_subset,
         healthcheck_url=_optional(env, BACKUP_HEALTHCHECK_URL_ENV),
         drill_sample=drill_sample,
         extra_excludes=extra_excludes,

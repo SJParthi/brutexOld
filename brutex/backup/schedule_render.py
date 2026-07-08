@@ -59,8 +59,11 @@ _HEALTHCHECK_URL_NOTE: Final[str] = (
     "         leave the literal placeholder (any non-http(s) value is refused with a WARN\n"
     "         every tick while `backup status` reads SET). The hourly checker reads THIS\n"
     "         value: launchd env OVERRIDES ~/.brutex/.env, so set the URL here and\n"
-    "         bootout+bootstrap the agent (a .env-only URL works only if this key stays\n"
-    "         blank/deleted). -->"
+    "         bootout+bootstrap the agent. A .env-only URL works only if this key is\n"
+    "         DELETED — a blank value here still reaches the checker as a PRESENT (empty)\n"
+    "         env var, and bootstrap_env never overrides a present var (blank included),\n"
+    "         so blank keeps the ping lane OFF while a shell-run `backup status` (no\n"
+    "         launchd env) reads SET. -->"
 )
 
 

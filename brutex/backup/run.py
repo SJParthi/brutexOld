@@ -406,9 +406,10 @@ def run_backup(
         return EXIT_BUSY
     except OSError as exc:
         # Lock/state-dir creation failed (e.g. ENOSPC) — the F10 direction:
-        # alarm-over-silence, nothing was snapshotted or stamped. An OSError
-        # can ALSO escape _run_locked AFTER step 4 stamped running_since
-        # (e.g. a permissions hiccup in the step-6 plan build), so the stale
+        # alarm-over-silence, nothing was snapshotted or stamped. Every
+        # KNOWN in-lock OSError source now guards itself (step 4/9 saves,
+        # the step-6 plan build since round 7), but should a future in-lock
+        # OSError escape AFTER step 4 stamped running_since, the stale
         # RUNNING marker is cleared best-effort — F17b: cleared at EVERY exit.
         _LOG.error("backup.state.write_failed", context="singleflight", error=str(exc))
         _clear_running_marker_best_effort(cfg)
@@ -570,8 +571,20 @@ def _run_locked(
     if early_exit is not None:
         return early_exit
 
-    # Step 6 — plan + consistency tag (F16).
-    plan = plan_fn(cfg, lake)
+    # Step 6 — plan + consistency tag (F16). The plan build does real disk
+    # I/O (the pull-active audit-dir probe — pathlib re-raises EACCES/EIO),
+    # so an OSError HERE is a preflight/plan I/O failure, NEVER a state
+    # write: unguarded it escaped to run_backup's singleflight handler and
+    # paged reason="state_write" — misdirecting the operator at the state
+    # dir/disk — while last_failure/consecutive_failures never stamped
+    # (round-7 MINOR; the SAME exception on the pre-lock dry-run path was
+    # already honestly labelled preflight_io in round 2). shell.fail stamps
+    # the failure AND clears running_since (F17b).
+    try:
+        plan = plan_fn(cfg, lake)
+    except OSError as exc:
+        _LOG.error("backup.plan.io_failed", lake_root=str(lake), error=str(exc))
+        return shell.fail("preflight_io", exit_code=EXIT_PREFLIGHT, detail=str(exc))
     if plan.pull_active:
         _LOG.info("backup.run.pull_active")
 
