@@ -511,7 +511,21 @@ const sweepBtn = document.getElementById("run-sweep");
 const sweepMsg = document.getElementById("sweep-msg");
 const sweepBar = document.getElementById("sweep-bar");
 const sweepFill = document.getElementById("sweep-bar-fill");
-let sweepPoll = null;
+let sweepPoll = null;          // pending self-scheduled tick (was a fixed setInterval)
+let sweepFailures = 0;         // consecutive poll failures → capped backoff
+const SWEEP_POLL_MS = 1200;
+const SWEEP_BACKOFF_MAX_MS = 30000;
+
+/* 3 s → 30 s capped exponential backoff (DEC-DASHBOARD-POLL-HYGIENE-001): a
+   multi-day sweep polled every 1.2 s must not hammer a wedged endpoint; it never
+   gives up (mirrors the bx-rate-monitor backoff shape). */
+function sweepBackoffMs(n) {
+  return Math.min(SWEEP_BACKOFF_MAX_MS, 3000 * Math.pow(2, Math.max(0, n - 1)));
+}
+function scheduleSweepPoll(ms) {
+  clearTimeout(sweepPoll);
+  sweepPoll = setTimeout(pollSweep, ms);
+}
 
 function renderSweep(p) {
   const pct = Math.max(0, Math.min(100, p.percent || 0));
@@ -525,17 +539,27 @@ function renderSweep(p) {
 }
 
 async function pollSweep() {
+  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001): a background tab fires ZERO
+     fetches; a hidden tick re-arms at normal cadence WITHOUT fetching, and the
+     visibilitychange listener below re-polls immediately on return. */
+  if (document.hidden) { scheduleSweepPoll(SWEEP_POLL_MS); return; }
   try {
     const r = await fetch("/api/v1/sweep-progress");
     const p = await r.json();
     renderSweep(p);
+    sweepFailures = 0;
     if (!p.running && p.state !== "idle") {
-      clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
+      clearTimeout(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
       sweepMsg.textContent = "✅ Sweep " + p.state + " — " + (p.survivors || 0) +
         " survivor(s). Now press 🪜 Run cascade to filter them.";
+      return;
     }
+    scheduleSweepPoll(SWEEP_POLL_MS);
   } catch (e) {
+    /* Never give up, but back off 3 s → 30 s so a wedged endpoint is not hammered. */
+    sweepFailures += 1;
     sweepMsg.textContent = "Could not read sweep progress: " + e;
+    scheduleSweepPoll(sweepBackoffMs(sweepFailures));
   }
 }
 
@@ -564,14 +588,20 @@ sweepBtn.onclick = async () => {
     }
     sweepMsg.textContent = "Sweep started — " + j.symbols + " · " + j.intervals +
       " · " + j.start + " → " + j.end + ". Watching progress…";
-    if (sweepPoll) clearInterval(sweepPoll);
-    sweepPoll = setInterval(pollSweep, 1200);
-    pollSweep();
+    if (sweepPoll) clearTimeout(sweepPoll);
+    sweepFailures = 0;
+    pollSweep();   // fires now; self-schedules the next tick (cadence or backoff)
   } catch (e) {
     sweepMsg.textContent = "Sweep request failed: " + e;
     sweepBtn.disabled = false;
   }
 };
+/* Immediate catch-up on tab return while a sweep is being watched
+   (DEC-DASHBOARD-POLL-HYGIENE-001): pollSweep re-arms sweepPoll while hidden, so a
+   non-null handle means a watch is active; clear the pending tick and poll NOW. */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden && sweepPoll !== null) { clearTimeout(sweepPoll); pollSweep(); }
+});
 </script>
 </body>
 </html>
