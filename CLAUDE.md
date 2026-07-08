@@ -220,6 +220,61 @@ UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 is NOT touched by this branch — byte-identical to main's #1537 keyed design,
 dropped from this list at the round-9 honesty reconcile);
 every touched `cli.py`/`app.py`/`db_view.py` line+branch covered).
+Earlier: 2026-07-08 (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 —
+the parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a
+HEAVY-GRID-AWARE stall watchdog + a distinct `BrokenProcessPool` QUARANTINE,
+closing two round-3 meta-refuter run-killers, additive resilience (a CLEAN run
+is byte-identical; frozen sweep goldens + P-06/suffix-independence UNMODIFIED).
+(1) the stall watchdog no longer fires a flat 300 s: a legitimately-slow k=5
+1-minute tuple (`C(60,5) = 5.46M` masks × hundreds of thousands of bars) runs
+as one worker future FAR longer than 5 min with no sub-tuple progress, so at
+the grid tail — only slow heads in flight, none completing within 300 s — the
+old bound aborted a multi-hour grid near completion. The wait budget is now
+SCALED by the in-flight `mask·bar` work (`_effective_stall_seconds = max(base,
+work / STALL_MIN_MASK_BARS_PER_SEC)`; `work = C(n_unique, k) × N_bars` stored
+per in-flight `_Dispatched`), so a tuple that legitimately needs N minutes gets
+a proportional bound while a genuine hang STILL aborts (the bound is FINITE — a
+wedged worker makes zero progress — HONEST: the detection latency SCALES with
+`C(n_unique,k) × N_bars`, ~4× a heavy tuple's legitimate runtime). Env knobs
+`BRUTEX_SWEEP_STALL_SECONDS` + `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC`
+(positive-float, invalid→default+LOUD; the constructor refuses non-positive/
+non-finite values); `stall_seconds`/`stall_min_mask_bars_per_sec` default
+`None`→env-resolved so `run_parallel_grid`/the CLI pick it up with no call-site
+change. HONEST (Golden Rule #10): `2.5e8 mask·bar/s` is a CONSERVATIVE
+hang-detection floor (kernel ~1e9, ~4× headroom), setting only the
+false-abort-margin ↔ wedge-detection-latency trade-off, never results. (2) a
+worker OOM is QUARANTINED durably + REVERSIBLY + VISIBLY: `_drive` catches
+`BrokenProcessPool` DISTINCTLY (`future.result()` runs BEFORE `pending.pop` so
+the broken future stays quarantinable) and `_await_next_result` catches a
+worker's surviving Python-level `MemoryError` (the cgroup/rlimit OOM shape —
+pool NOT broken) as the single-tuple twin; already-FINISHED sibling futures are
+DRAINED (real results applied, never discarded); the poison tuple(s) land in
+the DURABLE quarantine sidecar `<root>/.sweep_quarantine.json` (fsync'd BEFORE
+the raise) — deliberately NOT `SweepCache.record` (which would permanently +
+invisibly drop them from every identical resume — the adversarial-review MAJOR
+corrected pre-merge) and NO checkpoint advance (`had_failure` latch) — then the
+run fails LOUDLY with the NEW `SweepWorkerPoolBrokenError` naming tuple(s) +
+sidecar + remediation (reduce `BRUTEX_SWEEP_WORKERS` / k, or raise
+`BRUTEX_SWEEP_MEM_BUDGET_BYTES`; then DELETE the sidecar entries and resume —
+the tuples are then genuinely RECOMPUTED, the ONE reversible lever;
+regression-pinned). A resume gates the sidecar FIRST and reports the skips as
+the DISTINCT `tuples_quarantined_prior` counter (on `SupervisedGridSummary` +
+the COMPLETE audit payload — NEVER folded into `skipped_cache`), so the
+completeness hole is always visible; distinct
+`SUPERVISOR_TUPLE_POOL_BROKEN`/`SUPERVISOR_TUPLE_QUARANTINED_PRIOR` audit
+actions + ERROR/WARNING logs make the loss LOUD. Fail-loud is chosen over blind
+pool-rebuild on the merits + the memory-budget-division interaction: the
+per-tuple rank budget divides across workers (`memory_budget_bytes` = `total ×
+fraction / workers`), so rebuilding into the next heavy tuple would just
+re-OOM. HONEST residual (named follow-up, NOT claimed): a deterministically-
+WEDGED non-OOM tuple still aborts via `SweepStallError` with a frozen
+checkpoint, so an identical resume re-dispatches IT — the stall path has no
+quarantine (pre-existing). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+REFERENCE_ONLY; no scope/vocab/rate/lake/audit-schema change (the new actions
+appear only on broken-pool/resume-after-quarantine runs, never on a clean run);
+`sweep_parallel.py` 100% line+branch (128 tests) + the touched
+`sweep_supervisor.py` (additive defaulted summary field) 100% line+branch;
+ruff/ruff-format/`mypy --strict`/`pyright` clean.
 Earlier: 2026-07-07 (DEC-SWEEP-NIGHTLY-AUTOMATION-001, MIGRATION.md #1612 —
 the R9 nightly zero-click chain: ONE `brutex nightly run` executes COLLISION →
 DISK → BACKUP → PULL → PREBUILD → SWEEP over EXISTING public entry points only
@@ -1580,6 +1635,21 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
   `greeks_enrich_pass.py`/`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch;
   ruff/ruff-format/`mypy --strict`/pyright clean).
+  Earlier: `claude/sweep-stall-oom-guards` (**DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608** — the
+  parallel grid-sweep (`brutex/engine/sweep_parallel.py`) gains a HEAVY-GRID-AWARE stall watchdog (the wait budget
+  scales by the in-flight `mask·bar` work `C(n_unique, k) × N_bars` so a legitimately-slow k=5 tuple is not
+  false-aborted near grid completion, while a genuine hang still aborts on the FINITE bound; env
+  `BRUTEX_SWEEP_STALL_SECONDS` + `BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC`) + a durable REVERSIBLE OOM QUARANTINE
+  (a broken pool — and a worker's surviving Python-level `MemoryError`, the cgroup/rlimit shape — records the
+  poison tuple(s) in the sidecar `<root>/.sweep_quarantine.json`, drains finished siblings' real results, then
+  fails LOUDLY with `SweepWorkerPoolBrokenError` naming tuple(s) + sidecar + remediation; a resume skips them
+  VISIBLY as the DISTINCT `tuples_quarantined_prior` summary counter — never `skipped_cache` — and deleting the
+  sidecar entries genuinely recomputes them; deliberately NO cache-record/checkpoint advance, so no permanent
+  invisible loss and no identical-resume livelock; HONEST residual: a WEDGED non-OOM tuple still resume-livelocks
+  via the `SweepStallError` path — pre-existing, named follow-up). Additive resilience — a CLEAN run is
+  byte-identical, frozen sweep goldens + P-06/suffix-independence UNMODIFIED; `sweep_parallel.py` +
+  touched `sweep_supervisor.py` 100% line+branch. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change).
   Earlier: `claude/intelligent-hamilton-qf3w38` (**DEC-SWEEP-NIGHTLY-AUTOMATION-001,
   MIGRATION.md #1612** — the R9 nightly zero-click chain + R50 backup/restore + launchd scheduling:
   NEW `brutex/nightly/` package (chain/probes/pipeline_binding/sweep_binding/backup/restore/report/
@@ -3667,6 +3737,10 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/peaceful-newton-fehcc3`
+  Earlier: `claude/sweep-stall-oom-guards`
+  (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
+  gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
+  quarantine; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/elegant-johnson-cgufi7`
   (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1617 — renumbered
   #1538→#1557→#1581→#1598→#1610→#1617; the final hop past main's #1616
