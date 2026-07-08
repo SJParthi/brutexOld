@@ -103,8 +103,10 @@ from brutex.adapters.groww.instruments import (
 )
 from brutex.dashboard.nse_constituents import fetch_constituent_csv, parse_constituents
 from brutex.dashboard.ntm_cache import (
+    CachedConstituents,
     default_cache_dir,
     load_cached_constituent_with_age,
+    revalidate_lock,
     save_constituent_csv,
 )
 from brutex.dashboard.universe_query import universe_summary
@@ -239,8 +241,24 @@ _LOAD_LOCK: threading.Lock = threading.Lock()
 #: niftyindices host is hit AT MOST once per revalidation cycle per process. The
 #: in-flight flag lives in a one-key mutable holder (mutated in place under the lock)
 #: rather than a rebindable module global — same semantics, no ``global`` statement.
+#: This layer is deliberately PROCESS-local (cheap, spawn-free); the CROSS-process
+#: arm is the worker-side non-blocking :func:`~brutex.dashboard.ntm_cache
+#: .revalidate_lock` flock (DEC-NTM-REVALIDATE-CROSSPROC-001), which closes the
+#: multi-uvicorn-worker double-refresh named follow-up of #1287.
 _NTM_REVALIDATE_LOCK: threading.Lock = threading.Lock()
 _NTM_REVALIDATE_STATE: Final[dict[str, bool]] = {"in_flight": False}
+
+
+def _ntm_cache_is_fresh(cached: CachedConstituents) -> bool:
+    """``True`` iff *cached* is younger than the NTM TTL — the ONE freshness predicate.
+
+    COMMON (§11): shared by the cache-first serve decision
+    (:func:`_resolve_constituent_csv` path 1) and the revalidation worker's
+    under-the-lock re-check (:func:`_spawn_ntm_revalidation`), so the two can never
+    drift. A non-positive TTL (the "disable the fast path" lever) makes every cache
+    read stale — both consumers inherit that pinned semantic. O(1).
+    """
+    return cached.age_seconds < _ntm_cache_ttl_seconds()
 
 
 def _default_revalidate_runner(job: Callable[[], None]) -> None:
@@ -284,6 +302,16 @@ def _spawn_ntm_revalidation(
     in-flight flag is cleared in the worker's ``finally`` (and on a failed SPAWN), so
     a later post-TTL load can always revalidate again. Returns ``False`` when a
     refresh is already in flight (single-flight — no second spawn).
+
+    CROSS-PROCESS single-flight (DEC-NTM-REVALIDATE-CROSSPROC-001): the worker takes
+    the NON-BLOCKING :func:`~brutex.dashboard.ntm_cache.revalidate_lock` flock before
+    fetching — a peer process already refreshing means SKIP (its atomic save lands
+    for everyone; ``ntm.revalidate_skipped_crossproc``), and a genuinely-acquired
+    lock RE-CHECKS freshness (double-checked: the peer may have JUST finished —
+    ``ntm.revalidate_skipped_fresh``) so the slow niftyindices host is hit at most
+    once per revalidation cycle ACROSS uvicorn workers too. An UNAVAILABLE lock
+    (read-only cache dir) fails OPEN to the pre-fix unguarded refresh
+    (``ntm.revalidate_lock_unavailable`` — idempotent-harmless, never worse).
     """
     with _NTM_REVALIDATE_LOCK:
         if _NTM_REVALIDATE_STATE["in_flight"]:
@@ -292,12 +320,30 @@ def _spawn_ntm_revalidation(
 
     def _job() -> None:
         try:
-            refreshed = _refresh_constituent_cache(opener, cache_dir=cache_dir)
-            _LOG.info(
-                "ntm.revalidate_done",
-                refreshed=bool(refreshed),
-                cache_dir=str(cache_dir),
-            )
+            with revalidate_lock(cache_dir=cache_dir) as lock_verdict:
+                if lock_verdict == "held_elsewhere":
+                    # A PEER process is refreshing right now — skip, never double
+                    # the fetch; the peer's atomic save is picked up by the next
+                    # load (cross-process single-flight).
+                    _LOG.info("ntm.revalidate_skipped_crossproc", cache_dir=str(cache_dir))
+                    return
+                if lock_verdict == "unavailable":
+                    # Fail OPEN: no cross-process guard, but the refresh itself
+                    # (the actual purpose) still runs — pre-fix behaviour.
+                    _LOG.warning("ntm.revalidate_lock_unavailable", cache_dir=str(cache_dir))
+                else:
+                    # Lock ACQUIRED — double-checked freshness: a peer may have
+                    # refreshed between our spawn decision and this acquire.
+                    cached = load_cached_constituent_with_age(cache_dir=cache_dir)
+                    if cached is not None and _ntm_cache_is_fresh(cached):
+                        _LOG.info("ntm.revalidate_skipped_fresh", cache_dir=str(cache_dir))
+                        return
+                refreshed = _refresh_constituent_cache(opener, cache_dir=cache_dir)
+                _LOG.info(
+                    "ntm.revalidate_done",
+                    refreshed=bool(refreshed),
+                    cache_dir=str(cache_dir),
+                )
         except Exception:  # pylint: disable=broad-exception-caught — best-effort background refresh
             _LOG.warning("ntm.revalidate_failed", cache_dir=str(cache_dir), exc_info=True)
         finally:
@@ -339,8 +385,12 @@ def _resolve_constituent_csv(
       no network — constant w.r.t. the slow niftyindices host, so every load after the
       first is instant; NOT a literal O(1) over the CSV, which is still parsed);
     * ``"cache_stale_revalidating"`` — a POST-TTL cache was served IMMEDIATELY and a
-      single-flight background refresh was kicked (or is already in flight). The data
-      is honestly one cycle stale (NTM rebalances semi-annually — CLAUDE.md §7);
+      single-flight background refresh was kicked (or is already in flight — the
+      process-local flag; the worker additionally holds the CROSS-process
+      :func:`~brutex.dashboard.ntm_cache.revalidate_lock` flock, so multiple uvicorn
+      workers cannot double the fetch either — DEC-NTM-REVALIDATE-CROSSPROC-001).
+      The data is honestly one cycle stale (NTM rebalances semi-annually —
+      CLAUDE.md §7);
     * ``"live"`` — NO cache at all, so the synchronous bounded live fetch ran and
       succeeded; the cache is seeded (the next load is a ``cache_fresh`` hit);
     * ``"none"`` — no cache AND the live fetch returned empty → ``("", "none")``.
@@ -355,7 +405,7 @@ def _resolve_constituent_csv(
     cached = load_cached_constituent_with_age(cache_dir=cache_dir)
     if cached is not None:
         # 1. FRESH cache → serve instantly, NO network (the ultra-fast hot path).
-        if cached.age_seconds < _ntm_cache_ttl_seconds():
+        if _ntm_cache_is_fresh(cached):
             return cached.csv_text, "cache_fresh"
         # 2. POST-TTL cache → serve IMMEDIATELY + kick ONE background refresh
         #    (stale-while-revalidate; single-flight — a refresh already in flight is

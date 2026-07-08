@@ -754,6 +754,54 @@ class TestReadOnlyQueries:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Shared-env registry — second open + ref-counted release
+# (DEC-QUOTA-ENV-SINGLE-OPEN-001: LMDB forbids a second open of the same
+# env in one process, so two live trackers on ONE store_path must share
+# the cached env; closing one drops a reference, closing the last closes
+# the env and evicts the registry entry.)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSharedEnvRefcount:
+    def test_two_live_trackers_share_one_env_and_release_ref_by_ref(self, tmp_path: Path) -> None:
+        from brutex.orchestrator import quota_tracker as qt
+
+        path = tmp_path / "quota.lmdb"
+        key = str(path.resolve())
+        clock = _make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST))
+
+        first = DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+        try:
+            # The SECOND concurrent tracker takes the registry fast path —
+            # same env object, refcount 2 (a raw second lmdb.open would raise).
+            second = DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+            try:
+                assert second._env is first._env
+                with qt._ENV_REGISTRY_LOCK:
+                    env, refs = qt._ENV_REGISTRY[key]
+                    assert env is first._env
+                    assert refs == 2
+                assert second.acquire_or_raise() == 1
+            finally:
+                second.close()
+
+            # Ref-counted release: the entry SURVIVES the first close (refs
+            # 2 → 1) and the shared env stays open — the surviving tracker
+            # still reads/writes through it.
+            with qt._ENV_REGISTRY_LOCK:
+                env, refs = qt._ENV_REGISTRY[key]
+                assert env is first._env
+                assert refs == 1
+            assert first.acquire_or_raise() == 2
+        finally:
+            first.close()
+
+        # Last release closes the env and evicts the entry.
+        with qt._ENV_REGISTRY_LOCK:
+            assert key not in qt._ENV_REGISTRY
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Default clock — production sanity
 # ────────────────────────────────────────────────────────────────────────
 
