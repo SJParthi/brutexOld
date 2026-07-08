@@ -88,6 +88,16 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     # IMMEDIATELY, exactly as the superseded doctor.py entry did.
     "brutex/data/tf_autoderive.py": "wired: read_lake_bars_frame dedups",
     "brutex/engine/results_store.py": "results-tree Parquet (run_id-keyed), not the bar lake",
+    "brutex/engine/trade_store.py": (
+        "results-depth engine sidecars (trades/aggs/equity, run_id-keyed, "
+        "byte-locked writer/reader pair under sweep_runs/) — not lake bars; "
+        "dedup identity does not apply (DEC-SWEEP-RESULTS-DEPTH-001)"
+    ),
+    "brutex/engine/results_depth_pass.py": (
+        "reads back the SAME stamp-validated engine sidecars trade_store "
+        "writes (aggs join + twin entry-ts sets) — engine artifacts, not "
+        "lake bars (DEC-SWEEP-RESULTS-DEPTH-001)"
+    ),
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"
