@@ -27,6 +27,7 @@ NEVER labelled ``"calibrated"``; only a real, schema-valid, on-disk
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -142,7 +143,7 @@ def _is_positive_finite(value: int | float) -> bool:
     kept separate so the type-narrowing ``isinstance`` guard lives once, at
     each call site, where mypy can actually narrow the argument type.
     """
-    return value > 0 and value not in (float("inf"), float("-inf")) and value == value  # noqa: PLR0124 — nan check
+    return value > 0 and value not in (float("inf"), float("-inf")) and not math.isnan(value)
 
 
 def load_estimator_calibration(results_root: Path) -> EstimatorCalibration:
