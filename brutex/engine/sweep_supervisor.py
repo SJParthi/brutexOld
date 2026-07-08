@@ -279,6 +279,46 @@ class SupervisedGridSummary:
     tuples_failed: int
 
 
+def _gate_config_fragment(grid: SweepGridConfig) -> dict[str, Any] | None:
+    """Return the canonical GATE-config identity fragment, or ``None`` at defaults.
+
+    Coordinator Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit gate +
+    the Stage-3 refinement knobs change what a persisted tuple's rows MEAN
+    (gated-institutional vs light-research), so they belong in BOTH the run
+    identity (:func:`grid_identity`) and the per-tuple cache key
+    (:func:`tuple_cache_key`) — otherwise a gated re-run over a light-run
+    results tree resumes the same checkpoint and cache-skips the ungated
+    tuples, serving ungated rows as institutional winners.
+
+    A SANCTIONED re-key that stays BYTE-STABLE at defaults (Golden Rule #4):
+    the fragment is emitted ONLY when a gate is actually active — overfit set
+    (``overfit is not None``) and/or the Stage-3 pass enabled
+    (``stage3_enable``). A disabled gate's knobs are INERT (no pass runs, no
+    row changes), so an ungated grid contributes NOTHING and hashes exactly as
+    it did before this axis existed (the frozen ``grid_identity`` /
+    ``tuple_cache_key`` goldens are unmoved — every golden grid is at gate
+    defaults). All legs flattened to JSON-native scalars.
+    """
+    fragment: dict[str, Any] = {}
+    overfit = grid.overfit
+    if overfit is not None:
+        fragment["overfit"] = [
+            overfit.dsr_min,
+            overfit.weight,
+            overfit.default_skew,
+            overfit.default_excess_kurtosis,
+        ]
+    if grid.stage3_enable:
+        # The Stage-3 knobs matter to the result ONLY when the pass runs; a
+        # disabled pass leaves them inert, so they never re-key a light grid.
+        fragment["stage3"] = [
+            grid.stage3_top_k,
+            grid.stage3_max_fevals,
+            grid.stage3_max_restarts,
+        ]
+    return fragment or None
+
+
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     """Return the canonical JSON-serialisable identity descriptor of *grid*.
 
@@ -286,8 +326,11 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     plus the shared context, the reproducibility hashes, and the honest guards —
     so two grids that differ in ANY knob produce different digests. ``None`` legs
     and proximity tolerances are flattened to JSON-native scalars (Golden Rule #4).
+    The GATE config (overfit + Stage-3) is folded in via
+    :func:`_gate_config_fragment` ONLY when active (Ruling 3, byte-stable at
+    defaults).
     """
-    return {
+    descriptor: dict[str, Any] = {
         "instruments": list(grid.instruments),
         "timeframes": [[tf.label, tf.minutes] for tf in grid.timeframes],
         "directions": [d.value for d in grid.directions],
@@ -315,6 +358,10 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
         "top_k": grid.top_k,
         "min_hits": grid.min_hits,
     }
+    gate_config = _gate_config_fragment(grid)
+    if gate_config is not None:
+        descriptor["gate_config"] = gate_config
+    return descriptor
 
 
 def grid_identity(grid: SweepGridConfig) -> str:
@@ -372,7 +419,7 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
             tuple_.proximity.fib_proximity_bps,
         ]
     )
-    return {
+    params: dict[str, Any] = {
         "k": tuple_.k,
         "condition_bits": sorted(set(grid.condition_bits)),
         "tf_minutes": tuple_.tf.minutes,
@@ -392,6 +439,14 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
         "min_hits": grid.min_hits,
         "max_combos": grid.max_combos,
     }
+    # Ruling 3: the GATE config (overfit + Stage-3) re-keys a gated tuple so a
+    # cache-skip can never serve an ungated row as a gated winner. Emitted only
+    # when active — byte-stable at defaults (the frozen tuple_cache_key golden
+    # is a default grid, unmoved).
+    gate_config = _gate_config_fragment(grid)
+    if gate_config is not None:
+        params["gate_config"] = gate_config
+    return params
 
 
 def tuple_cache_key(tuple_: SweepTuple, grid: SweepGridConfig) -> bytes:

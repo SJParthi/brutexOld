@@ -270,6 +270,38 @@ def test_g04_heal_refuses_live_run_the_old_expression_misjudged(tmp_path: Path) 
     assert _cmd_heal(lake, plan) == EXIT_HEAL_REFUSED
 
 
+def test_g04_heal_refuses_slow_but_live_stale_heartbeat_run(tmp_path: Path) -> None:
+    """MAJOR 5 (hostile-review round 1): a LIVE-but-slow run (pid alive, heartbeat
+    STALE) must be REFUSED — never quarantined.
+
+    A >600s lake preload, one very-large tuple, or the post-grid stage3/cascade
+    phase publishes no per-tuple beat, so the wall-clock heartbeat ages past the
+    freshness window while the writer pid is STILL ALIVE (a dead pid returns
+    NOT_RUNNING before the staleness arm). The verdict is STALE; the heal wiring
+    must fold STALE into the refuse set so a genuinely live run's
+    stores/checkpoint/dedup are never quarantined mid-flight ("a LIVE run is
+    never quarantinable").
+    """
+    from brutex.cli import EXIT_HEAL_REFUSED
+
+    lake = tmp_path / "lake"
+    out = lake / "sweeps"
+    plan = _empty_plan(out)
+    progress_path = out / "progress" / "sweep-progress.json"
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _live_progress_payload()
+    payload["running"] = True
+    payload["pid"] = os.getpid()  # ALIVE — this very test process
+    payload["wall_time_utc"] = time.time() - 3_600.0  # heartbeat 1h stale
+    progress_path.write_text(json.dumps(payload), encoding="utf-8")
+    # Sanity: the pure verdict is STALE for this pid-alive, stale-heartbeat file.
+    from brutex.engine.sweep_liveness import RunVerdict, progress_verdict
+
+    assert progress_verdict(payload, now_wall=time.time()) is RunVerdict.STALE
+    # The heal must REFUSE (C6) — STALE is only reachable with an alive pid.
+    assert _cmd_heal(lake, plan) == EXIT_HEAL_REFUSED
+
+
 def test_g04_heal_refuses_legacy_payload_fail_closed(tmp_path: Path) -> None:
     from brutex.cli import EXIT_HEAL_REFUSED
 

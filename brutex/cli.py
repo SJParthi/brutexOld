@@ -5672,6 +5672,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
                 f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
             )
+        else:
+            # No cascade specs (an all-no-bars grid or every combo below
+            # min_hits) — a legitimate degenerate-but-CLEAN run. Vacuously
+            # satisfy the R39 ``artifacts`` prerequisite so the clean run is
+            # never false-flagged SUSPECT (DEC-SWEEP-UNKILLABLE-CORE-001).
+            core.mark_cascade_absent()
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
         core.stage("artifacts")
@@ -6725,14 +6731,22 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
     # (sweep_progress.py stamps time.monotonic()), so "fresh" was ~always
     # False and a LIVE run's stores were quarantinable. FAIL-CLOSED: a legacy
     # payload without wall/pid evidence (UNKNOWN) REFUSES the heal — never
-    # quarantine on doubt; a MISSING progress file has no run to protect.
+    # quarantine on doubt; a MISSING progress file has no run to protect. STALE
+    # ALSO refuses (DEC-SWEEP-UNKILLABLE-CORE-001, hostile-review round 1): STALE
+    # is only ever reached when the writer PID is ALIVE (a dead pid returns
+    # NOT_RUNNING before the staleness arm), so a stale-heartbeat verdict means a
+    # genuinely LIVE-but-slow run — a >600s lake preload, one very-large tuple,
+    # or the post-grid stage3/cascade phase. Quarantining a live run's
+    # stores/checkpoint/dedup is the exact corruption the C6 guard exists to
+    # prevent ("a LIVE run is never quarantinable"), so STALE joins the refuse
+    # set — heal-able is reserved for NOT_RUNNING (dead pid / clean terminal).
     from brutex.engine.sweep_liveness import RunVerdict, progress_verdict
 
     progress_path = out_root / "progress" / "sweep-progress.json"
     progress = read_progress(progress_path)
     if progress_path.exists():
         verdict = progress_verdict(progress, now_wall=time.time())
-        sweep_running = verdict in (RunVerdict.RUNNING, RunVerdict.UNKNOWN)
+        sweep_running = verdict in (RunVerdict.RUNNING, RunVerdict.UNKNOWN, RunVerdict.STALE)
     else:
         sweep_running = False
 

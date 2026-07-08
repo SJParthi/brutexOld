@@ -280,6 +280,26 @@ def test_r7_clean_run_finalizes_complete(tmp_path: Path) -> None:
     assert manifest.recorder_degraded is False
 
 
+def test_runcore_writes_no_parquet_under_runs_dir(tmp_path: Path) -> None:
+    """Register Row 4 hazard pin (DEC-SWEEP-UNKILLABLE-CORE-001, hostile-review round 1).
+
+    The run-core artifacts live under ``<results_root>/runs/<run_id>/`` which
+    sits inside the ``.parquet``-globbed sweeps tree. The Ruling-4 relocation to
+    the ``sweep_runs/`` SIBLING root is a documented cross-phase follow-up; until
+    it lands the /results-500 hazard is kept structurally DEAD by writing ONLY
+    JSON/JSONL/extensionless artifacts here — NEVER a ``.parquet``. This pins
+    that invariant so a future run-core write can never silently reopen the
+    ``results_report`` / ``sweep_results_view`` / ``sweep_verify`` glob crash.
+    """
+    grid = _grid()
+    run_id = grid_identity(grid)
+    with _core(tmp_path, grid):
+        pass
+    run_dir = tmp_path / "runs" / run_id
+    assert run_dir.is_dir()
+    assert list(run_dir.rglob("*.parquet")) == []
+
+
 def test_attempt_increments_from_prior_and_junk_resets(tmp_path: Path) -> None:
     grid = _grid()
     run_id = grid_identity(grid)
@@ -294,6 +314,43 @@ def test_attempt_increments_from_prior_and_junk_resets(tmp_path: Path) -> None:
     path.write_text(json.dumps(doc), encoding="utf-8")
     with _core(tmp_path, grid) as (core, _s):
         assert core.attempt == 1
+
+
+def test_resume_after_suspect_never_launders_to_complete(tmp_path: Path) -> None:
+    """MAJOR 3 (hostile-review round 1): a prior SUSPECT latch is sticky across resume.
+
+    ``run_id = grid_identity`` is timestamp-free, so a re-run resumes into the
+    SAME ``runs/<run_id>/`` and resume-SKIPS the already-complete offending
+    tuple — the diffcheck/tripwire that latched SUSPECT never re-fires. The run
+    core must carry the prior SUSPECT forward so it can never overwrite
+    SUSPECT_COMPLETE with a clean COMPLETE.
+    """
+    grid = _grid()
+    run_id = grid_identity(grid)
+    # First attempt latches SUSPECT (a diffcheck-mismatch class defect) and
+    # finalizes SUSPECT_COMPLETE.
+    with _core(tmp_path, grid) as (core, _s):
+        core.mark_suspect("diffcheck_mismatch", "mask abcd: net_pnl_paisa")
+    first = read_exit_status(tmp_path, run_id)
+    assert first is not None
+    assert first["state"] == "suspect_complete"
+    assert first["suspect"] is True
+    # A resume (fresh handles, NO new tripwire) must stay SUSPECT.
+    with _core(tmp_path, grid) as (core, _s):
+        assert core.suspect is True  # seeded from the prior attempt's latch
+        assert core.attempt == 2
+    second = read_exit_status(tmp_path, run_id)
+    assert second is not None
+    assert second["state"] == "suspect_complete"  # never laundered to "complete"
+    assert second["suspect"] is True
+    # The manifest + recorder agree the resumed run is still SUSPECT.
+    manifest = load_manifest(tmp_path, run_id)
+    assert manifest.suspect is True
+    resume_records = [r for r in _records(tmp_path, run_id) if r["kind"] == "SUSPECT"]
+    assert any(
+        cast("dict[str, object]", r["payload"]).get("reason") == "resumed_suspect"
+        for r in resume_records
+    )
 
 
 def test_g06_second_core_enter_refused_before_any_writer(tmp_path: Path) -> None:
@@ -577,6 +634,39 @@ def test_grid_done_stage2_aggregate_reads_real_sentinel(tmp_path: Path) -> None:
     assert json.loads(stage2.read_text()) == {"pairs": [["ab" * 8, "cd" * 32]]}
 
 
+def test_grid_done_stage2_write_failure_still_satisfies_prerequisite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR 4 (hostile-review round 1): a stage-2 aggregate write ENOSPC must NOT flip SUSPECT.
+
+    The forensic aggregate stamp is fail-soft; its failure must never withhold
+    the ``stage2`` tripwire prerequisite (a subsequent ``stage("stage3")`` would
+    else false-trip STAGE_INVARIANT → SUSPECT). The prerequisite is the grid's
+    CORRECTNESS milestone, recorded independently of the guarded write.
+    """
+    result = SimpleNamespace(
+        evaluated=1,
+        enumerated=1,
+        tuples_run=1,
+        tuples_failed=0,
+        skipped_cache=0,
+        skipped_resume=0,
+        tuples_skipped_no_bars=0,
+    )
+
+    def _boom(self: object) -> None:
+        raise OSError("simulated ENOSPC on the stage-2 aggregate write")
+
+    monkeypatch.setattr(mod.RunCoreHandles, "_write_stage2_aggregate", _boom)
+    with _core(tmp_path) as (core, _s):
+        core.grid_done(result)
+        assert "stage2" in core._stamps_present  # prerequisite met despite write failure
+        assert "sweep" not in core._link_stamps  # durable link evidence withheld
+        # The next stage entry must NOT trip the stage invariant → no SUSPECT.
+        core.stage("stage3")
+        assert core.suspect is False
+
+
 # ────── stage-3 D-4 loop ──────
 
 
@@ -669,6 +759,93 @@ def test_run_stage3_rerun_without_cells_skips_revalidation(
         assert "stage3" in core._stamps_present
 
 
+def test_run_stage3_stamp_write_failure_is_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR 1 (hostile-review round 1): a stamp WRITE OSError must NOT kill the run.
+
+    A transient sidecar ENOSPC/permission failure at ``stamp_stage3_cells`` is
+    WARNed and the cells are left UNSTAMPED (the cascade replays them on the
+    MISSING_STAMP back-compat path) — the run continues, the ``stage3``
+    prerequisite still stands, and the hard ``Stage3CellStampError`` is NEVER
+    raised for a write failure (reserved for a genuine post-rerun MISMATCH).
+    """
+    from brutex.observability.stage_stamp import StageStampError
+
+    cell = tmp_path / "cell.parquet"
+    cell.write_bytes(b"cell-bytes")
+
+    def _boom(*_a: object, **_kw: object) -> int:
+        raise StageStampError("simulated ENOSPC writing stamp sidecar")
+
+    monkeypatch.setattr(mod, "stamp_stage3_cells", _boom)
+    with _core(tmp_path) as (core, _s):
+        report = _cell_report([cell], "ab" * 32)
+        # No raise — the run survives the observability write failure.
+        assert core.run_stage3(lambda: report) is report
+        assert "stage3" in core._stamps_present  # correctness prerequisite met
+        assert "stage3" not in core._link_stamps  # no durable OK link evidence
+        assert core.suspect is False  # a write hiccup NEVER latches SUSPECT
+
+
+def test_run_stage3_discard_write_failure_is_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR 1: a forensic DISCARD rename failure is fail-soft — WARN, never raise."""
+    from brutex.observability.stage_stamp import StageStampError
+
+    cell = tmp_path / "cell.parquet"
+    cell.write_bytes(b"cell-bytes")
+    monkeypatch.setattr(
+        mod, "validate_stage3_cells", lambda cells, *, run_id, snapshot_hash: (cell,)
+    )
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise StageStampError("simulated rename failure discarding a cell")
+
+    monkeypatch.setattr(mod, "discard_and_flag", _boom)
+    with _core(tmp_path) as (core, _s):
+        report = _cell_report([cell], "ab" * 32)
+        assert core.run_stage3(lambda: report) is report  # no raise
+        assert "stage3" in core._stamps_present
+        assert "stage3" not in core._link_stamps
+        assert core.suspect is False
+
+
+def test_run_stage3_restamp_write_failure_is_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR 1: a RE-STAMP write failure on the second (post-discard) pass is fail-soft."""
+    from brutex.observability.stage_stamp import StageStampError
+
+    cell = tmp_path / "cell.parquet"
+    cell.write_bytes(b"cell-bytes")
+    # First validate → invalid (drives the discard + re-run); the re-stamp fails.
+    monkeypatch.setattr(
+        mod, "validate_stage3_cells", lambda cells, *, run_id, snapshot_hash: (cell,)
+    )
+    stamp_calls = {"n": 0}
+
+    def _stamp(*_a: object, **_kw: object) -> int:
+        stamp_calls["n"] += 1
+        if stamp_calls["n"] >= 2:
+            raise StageStampError("simulated ENOSPC on the post-discard re-stamp")
+        return 1
+
+    monkeypatch.setattr(mod, "stamp_stage3_cells", _stamp)
+
+    def _factory() -> Any:
+        cell.write_bytes(b"cell-bytes")
+        return _cell_report([cell], "ab" * 32)
+
+    with _core(tmp_path) as (core, _s):
+        assert core.run_stage3(_factory) is not None  # no raise
+        assert stamp_calls["n"] == 2  # first OK, second failed
+        assert "stage3" in core._stamps_present
+        assert "stage3" not in core._link_stamps
+        assert core.suspect is False
+
+
 # ────── cascade fold ──────
 
 
@@ -708,18 +885,43 @@ def test_cascade_done_missing_stamps_report_worst_verdict(tmp_path: Path) -> Non
     from brutex.engine.cascade_wire import manifest_path as cmp
 
     with _core(tmp_path) as (core, _s):
-        # Manifest stamped OK, report missing → the worst verdict wins.
+        # Manifest stamped OK, report missing → the worst LINK verdict wins.
         cmp(tmp_path).parent.mkdir(parents=True, exist_ok=True)
         cmp(tmp_path).write_bytes(b"{}")
         write_stage_stamp(cmp(tmp_path), stage="cascade_manifest", run_id=core.run_id)
         core.cascade_done(_fake_cascade_report(None))
         assert core._link_stamps["cascade"] is StampVerdict.MISSING_ARTIFACT
+        # Decoupled (DEC-SWEEP-UNKILLABLE-CORE-001, hostile-review round 1): the
+        # tripwire prerequisites track the CASCADE CORRECTNESS pass having run,
+        # NOT the durable stamp — so BOTH are present even when a forensic stamp
+        # is missing; only the chain-map LINK verdict reflects the miss.
         assert "cascade_manifest" in core._stamps_present
-        assert "cascade_report" not in core._stamps_present
+        assert "cascade_report" in core._stamps_present
     with _core(tmp_path / "b") as (core, _s):
         # Neither artifact exists → the manifest's own verdict reports first.
         core.cascade_done(_fake_cascade_report(None))
         assert core._link_stamps["cascade"] is StampVerdict.MISSING_ARTIFACT
+
+
+def test_mark_cascade_absent_vacuously_satisfies_artifacts_prereq(tmp_path: Path) -> None:
+    """MAJOR 2 (hostile-review round 1): an empty-cascade CLEAN run never trips SUSPECT.
+
+    A degenerate-but-clean grid (all-no-bars / all below min_hits) produces zero
+    cascade specs, so the CLI calls ``mark_cascade_absent`` instead of
+    ``cascade_done``. The ``artifacts`` stage invariant must then be vacuously
+    satisfied — the clean run stays NOT-suspect.
+    """
+    with _core(tmp_path) as (core, _s):
+        core._stamps_present.add("stage2")  # grid_done satisfied it
+        core.stage("stage3")
+        core._stamps_present.add("stage3")  # run_stage3 satisfied it
+        core.stage("cascade")
+        core.mark_cascade_absent()
+        assert "cascade_manifest" in core._stamps_present
+        assert "cascade_report" in core._stamps_present
+        assert "cascade" not in core._link_stamps  # no artifact to evidence
+        core.stage("artifacts")
+        assert core.suspect is False
 
 
 # ────── G1 quarantine composition ──────

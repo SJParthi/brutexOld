@@ -474,10 +474,23 @@ class RunCoreHandles:
             self.manifest.add_door_kills("min_hits", self._minhits_dropped)
 
         self._guarded("manifest.doors", _fold_doors)
+        # I-3 fail-soft: the R39 stage-invariant prerequisite is the CORRECTNESS
+        # milestone (the grid ran + its per-tuple completion sentinels exist),
+        # NOT the durability of the forensic ``stage2`` aggregate sidecar. A
+        # transient ENOSPC/EIO on that observability write must never flip the
+        # next ``stage("stage3")`` to a false STAGE_INVARIANT → SUSPECT, so the
+        # prerequisite is recorded HERE, decoupled from the guarded write below.
+        self._stamps_present.add("stage2")
         self._guarded("stage2.aggregate_stamp", self._write_stage2_aggregate)
 
     def _write_stage2_aggregate(self) -> None:
-        """Write ``runs/<run_id>/stage2`` (sorted sentinel pairs) + its stamp (§3)."""
+        """Write ``runs/<run_id>/stage2`` (sorted sentinel pairs) + its stamp (§3).
+
+        Fail-soft (I-3): a failure here is WARNed by the ``_guarded`` caller and
+        never changes the run outcome — the ``stage2`` correctness prerequisite
+        was already recorded in :meth:`grid_done`; only the ``sweep`` chain-map
+        LINK evidence (a durable-stamp signal) is withheld when the write fails.
+        """
         pairs: list[list[str]] = []
         for tuple_ in iter_sweep_tuples(self._grid):
             sentinel = completion_sentinel_path(
@@ -494,7 +507,9 @@ class RunCoreHandles:
         content = json.dumps({"pairs": pairs}, sort_keys=True).encode("utf-8")
         atomic_write_simple(dest, lambda tmp: tmp.write_bytes(content))
         write_stage_stamp(dest, stage="stage2", run_id=self.run_id)
-        self._stamps_present.add("stage2")
+        # Durable stamp landed → the chain-map SWEEP link is OK. The tripwire
+        # prerequisite ``stage2`` was already recorded in grid_done (correctness
+        # path), so it stands even when this forensic write fails.
         self._link_stamps["sweep"] = StampVerdict.OK
 
     def run_stage3(self, factory: Callable[[], Any]) -> Any:
@@ -530,25 +545,53 @@ class RunCoreHandles:
             self._stamps_present.add("stage3")  # vacuous prerequisite (disabled pass)
             self._link_stamps.pop("stage3", None)
             return report
-        stamp_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
+        # The stage-3 CORRECTNESS pass ran → the R39 prerequisite is met
+        # regardless of whether the forensic cell stamps durably write. A stamp
+        # WRITE failure (I-3: a transient ENOSPC/permission hiccup on the
+        # ``.stamp.json`` sidecar) must NEVER kill an otherwise-successful
+        # sweep — it is WARNed and the cells are left UNSTAMPED so the cascade
+        # replays them on the documented validate→MISSING_STAMP legacy
+        # back-compat rebuild path. The hard :class:`Stage3CellStampError` is
+        # reserved STRICTLY for a genuine post-rerun content-hash MISMATCH.
+        self._stamps_present.add("stage3")
+        if self._guarded("stage3.stamp_cells", lambda: self._stamp_cells(cells, snapshot)) is None:
+            self._link_stamps.pop("stage3", None)  # write failed → fail-soft, unstamped
+            return report
         invalid = validate_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
         if invalid:
-            for cell in invalid:
-                discard_and_flag(cell, reason="stage3_cell_stamp_invalid", recorder=self.recorder)
+            if self._guarded("stage3.discard", lambda: self._discard_cells(invalid)) is None:
+                self._link_stamps.pop("stage3", None)  # discard write failed → fail-soft
+                return report
             report = factory()
             cells = [cell.path for cell in report.cells]
             snapshot = report.train_snapshot_hash
             if cells and snapshot is not None:
-                stamp_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
+                if (
+                    self._guarded(
+                        "stage3.restamp_cells", lambda: self._stamp_cells(cells, snapshot)
+                    )
+                    is None
+                ):
+                    self._link_stamps.pop("stage3", None)  # re-stamp write failed → fail-soft
+                    return report
                 invalid = validate_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
                 if invalid:
                     raise Stage3CellStampError(
                         f"stage-3 cell stamps still invalid after one discard + re-run: "
                         f"{[str(p) for p in invalid]}"
                     )
-        self._stamps_present.add("stage3")
         self._link_stamps["stage3"] = StampVerdict.OK
         return report
+
+    def _stamp_cells(self, cells: Sequence[Path], snapshot: str) -> int:
+        """Stamp the stage-3 cells (raises ``StageStampError`` on any write failure)."""
+        return stamp_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
+
+    def _discard_cells(self, invalid: Sequence[Path]) -> int:
+        """Discard+flag each invalid stage-3 cell (raises on a rename failure)."""
+        for cell in invalid:
+            discard_and_flag(cell, reason="stage3_cell_stamp_invalid", recorder=self.recorder)
+        return len(invalid)
 
     def cascade_done(self, report: Any) -> None:
         """Fold the cascade report's sourceable door kills + stamp verdicts (D-8/G7).
@@ -573,12 +616,43 @@ class RunCoreHandles:
             for door, count in sorted(kills.items()):
                 self.manifest.add_door_kills(door, count)
 
+        # I-3 fail-soft: the CASCADE correctness pass ran, so the ``artifacts``
+        # stage's prerequisites are satisfied HERE (decoupled from whether the
+        # forensic cascade stamps durably wrote/validated — that only feeds the
+        # chain-map LINK evidence in ``_fold_cascade_stamps``). Without this a
+        # transient stamp-write hiccup would false-trip STAGE_INVARIANT →
+        # SUSPECT on ``stage("artifacts")``.
+        self._stamps_present.add("cascade_manifest")
+        self._stamps_present.add("cascade_report")
         self._guarded("manifest.cascade_doors", _fold)
         self._guarded("cascade.stamp_verdicts", self._fold_cascade_stamps)
         self._write_chain_map()
 
+    def mark_cascade_absent(self) -> None:
+        """Vacuously satisfy the ``artifacts`` prerequisite when NO cascade ran.
+
+        A legitimate degenerate-but-clean run (an all-no-bars grid, or every
+        combo below ``min_hits``) yields ZERO cascade specs, so the CLI never
+        calls :meth:`cascade_done` and no cascade stamp is ever written. The
+        R39 stage invariant would then false-trip on ``stage("artifacts")`` and
+        flag the whole clean run SUSPECT. Mirroring :meth:`run_stage3`'s
+        disabled-pass treatment, mark the two cascade prerequisites vacuously
+        present (no LINK stamp is asserted — there is genuinely no cascade
+        artifact to evidence).
+        """
+        self._stamps_present.add("cascade_manifest")
+        self._stamps_present.add("cascade_report")
+        self._link_stamps.pop("cascade", None)
+
     def _fold_cascade_stamps(self) -> None:
-        """Validate the just-written cascade stamps into the chain-map evidence."""
+        """Validate the just-written cascade stamps into the chain-map LINK evidence.
+
+        Durable-write evidence ONLY (I-3): the ``cascade_manifest`` /
+        ``cascade_report`` tripwire prerequisites were already recorded on the
+        correctness path in :meth:`cascade_done`; this method records solely the
+        chain-map ``cascade`` LINK verdict, so a failed/absent stamp withholds
+        the LINK evidence without changing the run outcome.
+        """
         from brutex.engine.cascade_wire import manifest_path as cascade_manifest_path
         from brutex.engine.cascade_wire import report_path as cascade_report_path
 
@@ -592,10 +666,6 @@ class RunCoreHandles:
             expected_stage="cascade_report",
             expected_run_id=self.run_id,
         )
-        if manifest_verdict is StampVerdict.OK:
-            self._stamps_present.add("cascade_manifest")
-        if report_verdict is StampVerdict.OK:
-            self._stamps_present.add("cascade_report")
         worst = manifest_verdict if manifest_verdict is not StampVerdict.OK else report_verdict
         self._link_stamps["cascade"] = worst
 
@@ -944,6 +1014,14 @@ def sweep_run_core(
     prior = read_exit_status(results_root, run_id)
     prior_attempt = prior.get("attempt") if prior else None
     attempt = (prior_attempt + 1) if isinstance(prior_attempt, int) and prior_attempt >= 1 else 1
+    # D-12 SUSPECT stickiness (never-adopt guarantee, I-4): a prior attempt that
+    # latched SUSPECT (a diffcheck mismatch / tripwire on already-persisted
+    # stores) is the ONLY durable "these result bytes may be wrong" signal.
+    # ``run_id = grid_identity`` is timestamp-free, so a re-run resumes into the
+    # SAME ``runs/<run_id>/`` and resume-SKIPS the offending (already-complete)
+    # tuple — the SUSPECT would never re-fire. Carry it forward so the run can
+    # never launder SUSPECT_COMPLETE back to a clean COMPLETE on resume.
+    prior_suspect = bool(prior.get("suspect")) if prior else False
 
     with ExitStack() as stack:
         stack.enter_context(sweep_run_lock(results_root))  # G6 — BEFORE any writer
@@ -954,7 +1032,7 @@ def sweep_run_core(
             state=RunState.RUNNING,
             attempt=attempt,
             pid=os.getpid(),
-            suspect=False,
+            suspect=prior_suspect,  # sticky across resume (D-12 never-adopt)
         )
         stack.enter_context(keep_awake(entry_label))  # G9 — best-effort, never raises
         recorder = FlightRecorder.open(
@@ -993,6 +1071,7 @@ def sweep_run_core(
             _progress_path=progress_path,
             _wall=wall,
             _monotonic=monotonic,
+            _suspect=prior_suspect,  # D-12: SUSPECT carries forward across attempts
         )
         # Rebind the callbacks that need the finished handles object (the
         # dataclass cannot reference itself mid-construction).
@@ -1021,6 +1100,22 @@ def sweep_run_core(
                 },
             ),
         )
+        if prior_suspect:
+            # Record the carried-forward SUSPECT in the recorder + manifest so
+            # every G5/D-18 surface (exit-status already stamped above) agrees the
+            # run stays SUSPECT. Not the full mark_suspect fan-out — no fresh
+            # CRITICAL page for a state the prior attempt already alerted; a NEW
+            # tripwire this attempt still fans out normally.
+            core._guarded(
+                "recorder.resume_suspect",
+                lambda: recorder.record(
+                    "SUSPECT",
+                    {"reason": "resumed_suspect", "detail": "prior attempt latched SUSPECT"},
+                ),
+            )
+            core._guarded(
+                "manifest.resume_suspect", lambda: core.manifest.mark_suspect("resumed_suspect")
+            )
         if checkpoint_store is not None:  # G12 — quarantine-start-fresh pre-load
             checkpoint: SweepCheckpoint | None = cast(
                 "SweepCheckpoint | None",
