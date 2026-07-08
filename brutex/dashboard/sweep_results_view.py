@@ -91,6 +91,7 @@ __all__ = [
     "RANKABLE_COLUMNS",
     "SNAPSHOT_ERA_AMBIGUOUS",
     "SNAPSHOT_ERA_UNKNOWN",
+    "STORE_ERROR_PUBLIC_DETAIL",
     "SWEEPS_DIRNAME",
     "SweepLeaderboard",
     "SweepScan",
@@ -443,6 +444,16 @@ def _preset_rank_record(row: ResultRow) -> RankRecord:
     )
 
 
+#: The externally-served ``error`` marker of :func:`store_error_payload` — a
+#: STABLE generic token, deliberately NOT ``str(exc)``: the raised message can
+#: carry internals (store paths, decode tracebacks' text), and the route is an
+#: externally-served response (CodeQL py/stack-trace-exposure). The full
+#: exception detail is logged server-side under ``sweep_results.store_error``.
+STORE_ERROR_PUBLIC_DETAIL: Final[str] = (
+    "results store unavailable — see the server log (sweep_results.store_error)"
+)
+
+
 def store_error_payload(exc: ResultsStoreError) -> dict[str, Any]:
     """The honest ``/api/v1/sweep/leaderboard`` degrade payload for a store fault.
 
@@ -454,13 +465,20 @@ def store_error_payload(exc: ResultsStoreError) -> dict[str, Any]:
     leaderboard shape (so the page's renderer keeps working) PLUS the explicit
     ``error`` / ``error_type`` markers — never the bare ``available: false``
     blank that would be indistinguishable from "no sweep run yet" (no blank
-    illusion, Golden Rule #1). Logged here (``sweep_results.store_error``) so
-    the degrade is visible wherever it fires.
+    illusion, Golden Rule #1).
+
+    SANITIZED (CodeQL py/stack-trace-exposure): the served ``error`` marker is
+    the STABLE :data:`STORE_ERROR_PUBLIC_DETAIL` token + ``error_type`` is the
+    stable ``results_store`` reason token — ``str(exc)`` (which can leak store
+    paths / decode internals) NEVER reaches the wire. The FULL exception detail
+    (message + concrete class) is logged server-side here
+    (``sweep_results.store_error``) so the degrade stays diagnosable wherever
+    it fires.
     """
     _LOG.warning("sweep_results.store_error", error=str(exc), error_type=type(exc).__name__)
     return {
         "available": False,
-        "error": str(exc),
+        "error": STORE_ERROR_PUBLIC_DETAIL,
         "error_type": "results_store",
         "total_rows": 0,
         "store_count": 0,

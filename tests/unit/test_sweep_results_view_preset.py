@@ -23,6 +23,7 @@ pytest.importorskip("polars", reason="the reader loads per-tuple Parquet stores 
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_RANK_BY,
     PRESET_INERT_AXES,
+    STORE_ERROR_PUBLIC_DETAIL,
     build_sweep_leaderboard,
     load_sweep_scan,
     resolve_preset_param,
@@ -279,7 +280,7 @@ class TestStoreErrorPayload:
     def test_shape_carries_error_markers_plus_full_empty_board(self) -> None:
         payload = store_error_payload(ResultsStoreError("synthetic store fault"))
         assert payload["available"] is False
-        assert payload["error"] == "synthetic store fault"
+        assert payload["error"] == STORE_ERROR_PUBLIC_DETAIL
         assert payload["error_type"] == "results_store"
         assert payload["rows"] == []
         assert payload["total_rows"] == 0
@@ -293,9 +294,28 @@ class TestStoreErrorPayload:
         blank = build_sweep_leaderboard(tmp_path).to_dict()
         errored = store_error_payload(ResultsStoreError("boom"))
         assert "error" not in blank
-        assert errored["error"] == "boom"
+        assert errored["error"] == STORE_ERROR_PUBLIC_DETAIL
 
-    def test_logs_the_degrade(self) -> None:
+    def test_exception_internals_never_reach_the_wire(self) -> None:
+        """CodeQL py/stack-trace-exposure pin: the served payload is SANITIZED.
+
+        The raised message routinely carries internals (a store path, a decode
+        traceback's text) — none of it may appear ANYWHERE in the externally
+        served payload; the wire carries only the stable generic marker + the
+        stable ``results_store`` reason token.
+        """
+        import json
+
+        secret = "/secret/lake/sweeps/NIFTY/5m/long_k3_deadbeef.parquet: boom-internals"
+        payload = store_error_payload(ResultsStoreError(f"decode failed: {secret}"))
+        wire = json.dumps(payload)
+        assert "boom-internals" not in wire
+        assert secret not in wire
+        assert payload["error"] == STORE_ERROR_PUBLIC_DETAIL
+        assert payload["error_type"] == "results_store"
+
+    def test_logs_the_degrade_with_full_detail(self) -> None:
+        """The FULL exception detail lands server-side (log), never wire-side."""
         from structlog.testing import capture_logs
 
         with capture_logs() as logs:

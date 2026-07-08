@@ -26,6 +26,7 @@ pytest.importorskip("polars", reason="the leaderboard reads per-tuple Parquet st
 from brutex.dashboard import app as app_module
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.summary_cache import SummaryCache
+from brutex.dashboard.sweep_results_view import STORE_ERROR_PUBLIC_DETAIL
 from brutex.data.instrument_store import InstrumentStore
 from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -170,7 +171,10 @@ class TestStoreErrorDegrade:
         assert resp.status_code == 200  # never a 500
         payload = resp.json()
         assert payload["available"] is False
-        assert payload["error"] == "synthetic store fault outside the skip net"
+        # SANITIZED wire marker (CodeQL py/stack-trace-exposure): the raised
+        # message's internals never reach the externally-served response.
+        assert payload["error"] == STORE_ERROR_PUBLIC_DETAIL
+        assert "synthetic store fault outside the skip net" not in resp.text
         assert payload["error_type"] == "results_store"
         assert payload["rows"] == []
 
@@ -186,7 +190,8 @@ class TestStoreErrorDegrade:
                 raise ResultsStoreError("transient fault")
 
             outage.setattr(app_module, "load_sweep_scan", _raise)
-            assert client.get("/api/v1/sweep/leaderboard").json()["error"] == "transient fault"
+            errored = client.get("/api/v1/sweep/leaderboard").json()
+            assert errored["error"] == STORE_ERROR_PUBLIC_DETAIL
         healthy = client.get("/api/v1/sweep/leaderboard").json()
         assert "error" not in healthy
         assert healthy["available"] is True

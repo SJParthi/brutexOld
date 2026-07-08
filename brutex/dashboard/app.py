@@ -5962,7 +5962,10 @@ def build_app(
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with
-            # explicit error markers, never a 500, never a blank illusion.
+            # explicit error markers, never a 500, never a blank illusion. The
+            # payload is SANITIZED (CodeQL py/stack-trace-exposure): str(exc)
+            # never reaches the wire — store_error_payload logs the full detail
+            # server-side and serves only the stable generic markers.
             return JSONResponse(store_error_payload(exc))
 
     @app.get("/api/v1/logs")
