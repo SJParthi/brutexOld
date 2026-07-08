@@ -1655,7 +1655,7 @@ def test_g01_run_one_tuple_quarantine_retries_once_and_succeeds(tmp_path: Path) 
     summary = _run_one(tmp_path, grid, tuple_, store_quarantine=_quarantine)
     assert summary is not None
     assert summary.persisted >= 0
-    assert quarantined == ["ResultsStoreError"]
+    assert quarantined == ["ResultsStoreSchemaError"]
     assert store.exists()  # regenerated fresh after the trio moved
     assert (tmp_path / ".quarantine" / "runtime").is_dir()
 

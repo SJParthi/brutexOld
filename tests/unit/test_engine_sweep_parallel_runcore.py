@@ -85,7 +85,8 @@ def test_g1_corrupt_store_quarantined_in_worker_grid_continues(tmp_path: Path) -
     """G1 (round 2): a corrupt tuple store is quarantined IN-WORKER, grid CONTINUES.
 
     Pre-corrupt one tuple's on-disk store so the worker's persist raises
-    ResultsStoreError. Without the worker-side quarantine that non-SweepComboError
+    ResultsStoreSchemaError (a ResultsStoreError). Without the worker-side
+    quarantine that non-SweepComboError
     would break the future and ABORT the whole grid. With it, the worker
     quarantines + retries the trio in-process (byte-identical regeneration), the
     grid finishes, and the QUARANTINE event replays into the ``on_quarantine``
@@ -116,5 +117,5 @@ def test_g1_corrupt_store_quarantined_in_worker_grid_continues(tmp_path: Path) -
     assert len(quarantined) == 1
     dest_rel, reason = quarantined[0]
     assert dest_rel.startswith(".quarantine/runtime/")
-    assert "ResultsStoreError" in reason
+    assert "ResultsStoreSchemaError" in reason
     assert (out / ".quarantine" / "runtime").is_dir()

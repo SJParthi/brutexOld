@@ -616,7 +616,8 @@ class TestRunTupleInWorker:
     def test_corrupt_store_quarantined_in_worker(self, tmp_path: Path) -> None:
         """G1 (round 2): a corrupt store is quarantined + retried IN-WORKER.
 
-        A pre-corrupt tuple store raises ResultsStoreError from the worker's
+        A pre-corrupt tuple store raises ResultsStoreSchemaError (a
+        ResultsStoreError) from the worker's
         persist. The worker-side quarantine moves the trio + retries once
         (byte-identical regeneration), so the worker returns a SUCCESS summary +
         the quarantine event as data — never a non-SweepComboError propagating
@@ -635,7 +636,7 @@ class TestRunTupleInWorker:
         assert len(result.quarantine_events) == 1
         dest_rel, reason = result.quarantine_events[0]
         assert dest_rel.startswith(".quarantine/runtime/")
-        assert "ResultsStoreError" in reason
+        assert "ResultsStoreSchemaError" in reason
 
 
 class TestOutcomeAndResultMapping:
