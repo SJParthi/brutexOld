@@ -99,7 +99,47 @@ the flag, not a real production limitation.
   sequential opt-out. See :func:`resolve_sweep_workers`.
 * **The stall watchdog RAISES rather than warns** — a wedged worker's future never
   completes, so unlike ``fetch_pipeline`` (which only WARNs) this driver surfaces
-  a :class:`SweepStallError` so a sweep can never hang forever.
+  a :class:`SweepStallError` so a sweep can never hang forever. The wait budget is
+  HEAVY-GRID-AWARE (DEC-SWEEP-STALL-OOM-GUARDS-001): a single legitimately-slow
+  ``k=5`` 1-minute tuple (``C(60,5) = 5.46M`` masks × hundreds of thousands of
+  bars) runs FAR longer than a flat 300 s with no sub-tuple progress reported, so
+  the parent scales the stall deadline by the MAX per-tuple ``mask·bar`` work of
+  the in-flight set (a tuple that legitimately needs *N* minutes gets a
+  proportional bound), floored at :func:`resolve_stall_seconds` — a genuine hang
+  is STILL caught in bounded time (the bound is finite; a wedged worker makes zero
+  progress so its work-scaled deadline eventually elapses), a slow-but-progressing
+  heavy tuple is not spuriously aborted. See :meth:`ParallelGridDriver._effective_stall_seconds`.
+* **A worker OOM is QUARANTINED durably + reversibly, not a resume-livelock**
+  (DEC-SWEEP-STALL-OOM-GUARDS-001). A ``k=5`` worker OOM-killed while building
+  ``bar_bits``/finalists breaks the whole pool (:class:`BrokenProcessPool`); a
+  worker's Python-level :exc:`MemoryError` (cgroup/rlimit — the worker survives)
+  arrives through ``future.result()``. Either way the generic ``except Exception``
+  would ABORT + re-raise, and — because the checkpoint freezes at the last clean
+  prefix — an identically-configured resume would re-dispatch the SAME
+  deterministically-OOMing tuple forever (a silent no-progress loop). This driver
+  catches BOTH shapes DISTINCTLY: already-FINISHED sibling futures are DRAINED
+  (their real results applied, never discarded), the poison tuple(s) are recorded
+  in the DURABLE quarantine sidecar (``<root>/.sweep_quarantine.json`` — fsync'd
+  BEFORE the raise; deliberately NOT a ``SweepCache.record``, which would
+  permanently + invisibly drop them from every identical resume), and the run
+  fails LOUDLY with :class:`SweepWorkerPoolBrokenError` naming the tuple(s), the
+  sidecar, and the remediation (reduce ``BRUTEX_SWEEP_WORKERS`` / ``k`` / raise
+  ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``, then delete the sidecar entries and resume).
+  A resume SKIPS quarantined tuples VISIBLY — the DISTINCT
+  ``tuples_quarantined_prior`` summary counter, never folded into
+  ``skipped_cache`` — and makes progress on the rest; deleting a sidecar entry
+  genuinely recomputes that tuple (the ONE reversible recovery lever).
+  Fail-loud is chosen over blind pool-rebuild-and-continue on the merits: a broken
+  pool from OOM means the machine is under memory pressure, and the per-tuple rank
+  budget DIVIDES across workers
+  (:func:`brutex.config.hardware_envelope.memory_budget_bytes` sizes
+  ``total × fraction / workers`` — the DEC-SWEEP-STREAMING-RANK-001 rank-region
+  interaction) — so rebuilding and re-running the next heavy tuple would just
+  re-OOM. HONEST limit (named follow-up, NOT claimed): a deterministically-WEDGED
+  non-OOM tuple (an infinite loop, not an allocation failure) still aborts via
+  :class:`SweepStallError` with a frozen checkpoint, so an identical resume
+  re-dispatches IT — the stall path has no quarantine (pre-existing behaviour,
+  out of this change's scope).
 """
 
 from __future__ import annotations
@@ -114,11 +154,14 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED as _FIRST_COMPLETED
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 
 import structlog
 
+from brutex.engine.combo_mask import count_combos
+from brutex.engine.sweep_mem_budget import MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -304,11 +347,101 @@ _INFLIGHT_MULTIPLIER: Final[int] = 2
 #: independent of T.
 _HEAP_CAP_MULTIPLIER: Final[int] = 2
 
-#: How long (seconds) the parent will wait for the NEXT result before firing the
-#: stall watchdog, when work is in flight. A wedged worker's future never resolves,
-#: so — unlike ``fetch_pipeline`` (which only WARNs) — this RAISES so a sweep can
-#: never hang forever.
+#: The BASE (minimum / floor) stall interval in seconds — how long the parent will
+#: wait for the NEXT result before firing the stall watchdog on a LIGHT grid (one
+#: whose in-flight tuples are cheap). A wedged worker's future never resolves, so —
+#: unlike ``fetch_pipeline`` (which only WARNs) — this RAISES so a sweep can never
+#: hang forever. On a HEAVY grid the effective bound is SCALED UP from this floor by
+#: the in-flight ``mask·bar`` work (:meth:`ParallelGridDriver._effective_stall_seconds`)
+#: so a legitimately-slow tuple is never spuriously aborted
+#: (DEC-SWEEP-STALL-OOM-GUARDS-001); env-tunable via :data:`STALL_SECONDS_ENV`.
 DEFAULT_STALL_SECONDS: Final[float] = 300.0
+
+#: Environment variable overriding the BASE stall floor :data:`DEFAULT_STALL_SECONDS`
+#: (a positive float, seconds). Unset/blank keeps the default; an invalid value
+#: (non-float / ``<= 0``) falls back to the default and is logged LOUDLY at WARNING
+#: (mirrors the :func:`resolve_sweep_workers` invalid-env loudness).
+STALL_SECONDS_ENV: Final[str] = "BRUTEX_SWEEP_STALL_SECONDS"
+
+#: The CONSERVATIVE hang-detection floor: the MINIMUM ``mask·bar`` evaluations per
+#: second the resident kernel is ASSUMED to sustain. The heavy-grid stall bound is
+#: ``work / this`` (seconds), floored at the base stall — so a tuple whose
+#: ``C(n_unique, k) × N_bars`` work legitimately needs *N* minutes gets a
+#: proportional wait budget instead of the flat 300 s that would abort it near
+#: grid completion. HONEST (Golden Rule #10): this is a HEURISTIC floor, NOT a
+#: measured throughput — the resident Rust trade-walk is order-of-magnitude
+#: ~1e9 ``mask·bar``/s, so ``2.5e8`` gives ~4× headroom (a legit tuple never
+#: false-aborts) while keeping the bound FINITE (a genuine hang is still caught in
+#: bounded time — a wedged worker makes ZERO progress, so its work-scaled deadline
+#: eventually elapses). It sets ONLY the false-abort margin vs the wedge-detection
+#: latency; it never changes results. Env-tunable via
+#: :data:`STALL_MASK_BARS_PER_SEC_ENV`.
+STALL_MIN_MASK_BARS_PER_SEC: Final[float] = 250_000_000.0
+
+#: Environment variable overriding :data:`STALL_MIN_MASK_BARS_PER_SEC` (a positive
+#: float). Unset/blank keeps the default; an invalid value (non-float / ``<= 0``)
+#: falls back to the default and is logged LOUDLY at WARNING.
+STALL_MASK_BARS_PER_SEC_ENV: Final[str] = "BRUTEX_SWEEP_STALL_MASK_BARS_PER_SEC"
+
+
+def _resolve_positive_float_env(
+    env: dict[str, str] | None,
+    name: str,
+    default: float,
+    event: str,
+) -> float:
+    """Resolve a positive-float env knob — unset/blank → *default*, invalid → LOUD.
+
+    Reads *name* from *env* (default :data:`os.environ`): unset/blank →
+    *default*; a valid ``float`` strictly ``> 0`` → that value; an INVALID value
+    (non-float / non-finite / ``<= 0``) → *default*, logged at WARNING on *event*
+    naming the value via ``repr`` (the :func:`resolve_sweep_workers` invalid-env
+    loudness). O(1). Shared by :func:`resolve_stall_seconds` and
+    :func:`resolve_stall_min_mask_bars_per_sec` (Golden Rule #11 COMMON).
+    """
+    import math
+
+    source = os.environ if env is None else env
+    raw = source.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        parsed = float("nan")
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        _LOG.warning(event, requested_env=repr(raw), fallback=default)
+        return default
+    return parsed
+
+
+def resolve_stall_seconds(env: dict[str, str] | None = None) -> float:
+    """Resolve the BASE stall floor — env-tunable (DEC-SWEEP-STALL-OOM-GUARDS-001).
+
+    Reads :data:`STALL_SECONDS_ENV`; unset/blank → :data:`DEFAULT_STALL_SECONDS`,
+    a valid positive float → that value, an invalid value → the default + a LOUD
+    ``sweep.stall_seconds.invalid`` WARNING. O(1).
+    """
+    return _resolve_positive_float_env(
+        env, STALL_SECONDS_ENV, DEFAULT_STALL_SECONDS, "sweep.stall_seconds.invalid"
+    )
+
+
+def resolve_stall_min_mask_bars_per_sec(env: dict[str, str] | None = None) -> float:
+    """Resolve the hang-detection throughput floor — env-tunable.
+
+    Reads :data:`STALL_MASK_BARS_PER_SEC_ENV`; unset/blank →
+    :data:`STALL_MIN_MASK_BARS_PER_SEC`, a valid positive float → that value, an
+    invalid value → the default + a LOUD ``sweep.stall_mask_bars_per_sec.invalid``
+    WARNING. O(1).
+    """
+    return _resolve_positive_float_env(
+        env,
+        STALL_MASK_BARS_PER_SEC_ENV,
+        STALL_MIN_MASK_BARS_PER_SEC,
+        "sweep.stall_mask_bars_per_sec.invalid",
+    )
+
 
 #: The minimum worker count the parallel driver accepts (one core is the
 #: writer-actor, so a pool needs at least one EVAL worker). ``1`` means "run the
@@ -451,6 +584,156 @@ class SweepParallelUsageError(BruteXError):
     """
 
 
+class SweepWorkerPoolBrokenError(BruteXError):
+    """Raised when a worker OOM (or crash) poisons the sweep's worker pool mid-grid.
+
+    Two triggers: an OS-OOM-killed worker breaks the whole pool
+    (:class:`BrokenProcessPool` on the next ``future.result()`` / ``pool.submit``),
+    or a worker's Python-level :exc:`MemoryError` (allocation failure under a
+    cgroup/rlimit — the worker SURVIVES, the pool does not break) arrives through
+    ``future.result()``. Because the checkpoint freezes at the last clean prefix,
+    an identically-configured resume would re-dispatch the SAME deterministically-
+    OOMing tuple forever — a silent no-progress livelock. This driver instead
+    records the poison tuple(s) in the DURABLE, REVERSIBLE quarantine sidecar
+    (:func:`quarantine_sidecar_path` — deliberately NOT a ``SweepCache.record``,
+    which would permanently and invisibly drop the tuples from every identical
+    resume) so a resume SKIPS them VISIBLY (the distinct ``tuples_quarantined_prior``
+    counter, never folded into ``skipped_cache``), then raises THIS — distinct from
+    a generic abort — naming the offending tuple(s), the sidecar path, and the
+    remediation: relieve the memory pressure (reduce ``BRUTEX_SWEEP_WORKERS`` — the
+    per-tuple rank budget divides across workers — / the grid's ``k``, or raise
+    ``BRUTEX_SWEEP_MEM_BUDGET_BYTES``), then DELETE the tuples' sidecar entries and
+    resume — the tuples are then genuinely recomputed
+    (DEC-SWEEP-STALL-OOM-GUARDS-001).
+    """
+
+
+#: The supervisor-audit action recording a pool-broken tuple QUARANTINE. A plain
+#: local string (not a :mod:`brutex.engine.sweep_supervisor` constant) so the
+#: quarantine surface stays contained to this module; the ``AuditWriter.append``
+#: contract accepts any action string, so a new vocabulary line needs no schema
+#: change (DEC-SWEEP-STALL-OOM-GUARDS-001).
+SUPERVISOR_ACTION_TUPLE_POOL_BROKEN: Final[str] = "SUPERVISOR_TUPLE_POOL_BROKEN"
+
+#: The supervisor-audit action recording that a RESUMED run SKIPPED a tuple a PRIOR
+#: run's broken pool quarantined (the durable sidecar hit) — counted DISTINCTLY as
+#: ``tuples_quarantined_prior``, never folded into ``skipped_cache``, so the
+#: completeness hole is always visible (DEC-SWEEP-STALL-OOM-GUARDS-001).
+SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR: Final[str] = "SUPERVISOR_TUPLE_QUARANTINED_PRIOR"
+
+#: The durable quarantine sidecar's file name, created under the results ``root``.
+#: JSON: ``{"entries": [{"sweep_id":…, "index":…, "tuple":…, "reason":…}, …]}``.
+#: The sidecar — NOT the SweepCache, NOT the checkpoint — is the ONLY thing that
+#: makes a resume skip a quarantined tuple, so recovery is ONE reversible lever:
+#: delete the tuple's entry (or the whole file) after relieving memory pressure and
+#: resume — the tuple is then genuinely recomputed (DEC-SWEEP-STALL-OOM-GUARDS-001).
+QUARANTINE_SIDECAR_NAME: Final[str] = ".sweep_quarantine.json"
+
+
+def quarantine_sidecar_path(root: Path) -> Path:
+    """The durable quarantine sidecar path for the results *root*. O(1)."""
+    return root / QUARANTINE_SIDECAR_NAME
+
+
+def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
+    """Load the quarantined tuple labels recorded for *sweep_id* under *root*.
+
+    Missing file → the empty set (the common case). ANY other unreadable /
+    corrupt / non-JSON / wrong-shape state — including the OSError SHAPES a
+    hostile filesystem can present (a DIRECTORY at the sidecar path →
+    ``IsADirectoryError``, a symlink self-loop → ``ELOOP``, unreadable →
+    ``PermissionError``) — → the empty set + ONE LOUD
+    ``sweep.quarantine.sidecar_corrupt`` WARNING (advisory sidecar: the worst
+    outcome of ignoring a bad file is a re-dispatch of a poison tuple, which
+    re-quarantines and REWRITES the sidecar — self-healing, never a wedge, and
+    never a crash at the resume load). Entries for OTHER sweep_ids are ignored.
+    O(entries).
+    """
+    import json
+
+    path = quarantine_sidecar_path(root)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        # IsADirectoryError / PermissionError / ELOOP / … — the advisory
+        # contract: never a wedge, never a crash; LOUD + empty.
+        _LOG.warning(
+            "sweep.quarantine.sidecar_corrupt",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return set()
+    try:
+        payload = json.loads(raw)
+        entries = payload["entries"]
+        labels = {
+            str(entry["tuple"])
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("sweep_id") == sweep_id
+        }
+    except (ValueError, TypeError, KeyError) as exc:
+        _LOG.warning(
+            "sweep.quarantine.sidecar_corrupt",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return set()
+    return labels
+
+
+def append_quarantine_entries(
+    root: Path, sweep_id: str, entries: Sequence[tuple[int, str]], reason: str
+) -> Path:
+    """DURABLY append quarantined ``(index, tuple_label)`` *entries* to the sidecar.
+
+    Read-merge-write via a same-directory temp file + ``os.replace`` (atomic on
+    POSIX), fsync'd BEFORE the rename — the quarantine record must be durable
+    BEFORE the run raises, or a crash between the two could livelock the next
+    resume. A corrupt/unreadable existing sidecar is REPLACED (its labels were
+    already served as empty by :func:`load_quarantined_tuple_labels` — same
+    advisory contract; a symlink self-loop is SELF-HEALED — ``os.replace``
+    replaces the link itself). A WRITE failure (an OSError shape — e.g. a
+    DIRECTORY squatting at the sidecar path, no permission) is caught: the
+    append is SKIPPED with ONE loud
+    ``sweep.quarantine.sidecar_corrupt`` WARNING instead of raising — the
+    informative :class:`SweepWorkerPoolBrokenError` the caller is about to
+    raise must never be MASKED by a filesystem defect (the durable record is
+    honestly lost + loud; a re-OOM on the resumed run re-attempts the append).
+    Returns the sidecar path. O(existing entries + new entries).
+    """
+    import json
+
+    path = quarantine_sidecar_path(root)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if not isinstance(existing, list):
+            existing = []
+    except (OSError, ValueError, TypeError, KeyError):
+        # FileNotFoundError (the common first-quarantine case) plus any other
+        # OSError/corruption shape — start fresh; the write leg below either
+        # replaces the bad state or warns loudly.
+        existing = []
+    for index, label in entries:
+        existing.append({"sweep_id": sweep_id, "index": index, "tuple": label, "reason": reason})
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump({"entries": existing}, handle, indent=1)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        _LOG.warning(
+            "sweep.quarantine.sidecar_corrupt",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return path
+
+
 def refuse_parallel_on_legacy_path(workers: int, *, digest_path: bool) -> None:
     """Hard-refuse ``workers > 1`` on the legacy no-digest sweep path.
 
@@ -584,8 +867,11 @@ def _run_tuple_in_worker(
     digest path never consults dedup, and the ``bars`` are passed IN (already in
     parent memory) via a trivial ``bars_for`` so no un-picklable loader crosses
     the boundary. A ``SweepComboError`` is caught → returned as a failed marker
-    ("Resilient: skip + continue"); a ``MemoryError`` (OOM = global stop) and any
-    OTHER exception propagate → the future breaks → the parent tears the pool down.
+    ("Resilient: skip + continue"); a ``MemoryError`` (OOM) or any OTHER exception
+    propagates. A worker OOM typically KILLS the worker process, so the pool breaks
+    and the parent sees :class:`BrokenProcessPool` on the next ``result()`` — which
+    the parent QUARANTINES (DEC-SWEEP-STALL-OOM-GUARDS-001,
+    :meth:`ParallelGridDriver._quarantine_broken_pool`) rather than looping on it.
     """
     ctx = _WORKER_CTX
     if ctx is None:  # pragma: no cover — the initializer always runs before a task
@@ -665,9 +951,10 @@ class _Outcome:
     contiguous ``next_apply`` prefix and applies each in canonical enumeration
     order. ``kind`` is one of ``"resume"`` / ``"cache"`` / ``"no_bars"`` /
     ``"failed"`` / ``"done"`` — mirroring the five branches of the sequential
-    ``run_supervised_grid`` loop. The parent computes ``resume`` / ``cache`` slots
-    synchronously at dispatch time; ``no_bars`` / ``failed`` / ``done`` arrive from
-    a worker via :class:`TupleWorkResult`.
+    ``run_supervised_grid`` loop — or the parallel-only ``"pool_broken"`` quarantine
+    (DEC-SWEEP-STALL-OOM-GUARDS-001). The parent computes ``resume`` / ``cache`` /
+    ``pool_broken`` slots synchronously; ``no_bars`` / ``failed`` / ``done`` arrive
+    from a worker via :class:`TupleWorkResult`.
 
     Ordering is by enumeration :attr:`index` ONLY (the canonical apply order); the
     :func:`functools.total_ordering` decorator derives ``__le__`` / ``__gt__`` /
@@ -686,6 +973,23 @@ class _Outcome:
     def __lt__(self, other: _Outcome) -> bool:
         """Order two outcomes by enumeration ``index`` (the canonical apply order)."""
         return self.index < other.index
+
+
+@dataclass(frozen=True, slots=True)
+class _Dispatched:
+    """A dispatched-but-not-yet-completed tuple's parent-side record.
+
+    Stored per in-flight future in the driver's ``pending`` map: the enumeration
+    ``index`` (paired back on completion instead of re-marshalling the tuple across
+    the process boundary), the ``SweepTuple`` itself, and its ``mask·bar`` work
+    estimate (``C(n_unique, k) × N_bars``) — the heavy-grid stall bound is scaled by
+    the MAX ``work`` across the in-flight set (DEC-SWEEP-STALL-OOM-GUARDS-001), and
+    the whole set is quarantined by index on a broken pool.
+    """
+
+    index: int
+    tuple_: SweepTuple
+    work: float
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -722,8 +1026,11 @@ class ParallelGridDriver:
         "_heap",
         "_ingest_audit",
         "_monotonic",
+        "_n_unique",
         "_next_apply",
+        "_quarantined",
         "_root",
+        "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
         "_subject",
         "_workers",
@@ -738,7 +1045,8 @@ class ParallelGridDriver:
         ingest_audit: AuditWriterLike,
         guards: SweepGuards,
         workers: int,
-        stall_seconds: float = DEFAULT_STALL_SECONDS,
+        stall_seconds: float | None = None,
+        stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a driver for one grid run.
@@ -763,16 +1071,29 @@ class ParallelGridDriver:
             (one core is the writer-actor). MUST be ``>= 2`` (else the caller runs
             the sequential path).
         stall_seconds
-            Raise :class:`SweepStallError` if no result arrives for this long
-            while work is in flight.
+            The BASE stall floor — raise :class:`SweepStallError` if no result
+            arrives for this long (or the heavier work-scaled bound) while work is
+            in flight. ``None`` (the default) resolves it from the environment via
+            :func:`resolve_stall_seconds` (:data:`STALL_SECONDS_ENV`); a test passes
+            an explicit value to drive the watchdog deterministically.
+        stall_min_mask_bars_per_sec
+            The conservative hang-detection throughput floor used to SCALE the stall
+            bound by the in-flight ``mask·bar`` work (heavy-grid awareness,
+            DEC-SWEEP-STALL-OOM-GUARDS-001). ``None`` resolves it from the
+            environment via :func:`resolve_stall_min_mask_bars_per_sec`.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
 
         Raises
         ------
         SweepParallelUsageError
-            If ``workers < 2``.
+            If ``workers < 2``, or an explicit ``stall_seconds`` /
+            ``stall_min_mask_bars_per_sec`` is not a positive finite float (a
+            direct-constructor ``0`` would divide-by-zero the work-scaled bound;
+            the env resolvers already guarantee positive-finite).
         """
+        import math
+
         if workers < _MIN_PARALLEL_WORKERS:
             raise SweepParallelUsageError(
                 f"ParallelGridDriver requires workers >= {_MIN_PARALLEL_WORKERS} "
@@ -785,11 +1106,32 @@ class ParallelGridDriver:
         self._ingest_audit = ingest_audit
         self._guards = guards
         self._workers = workers
-        self._stall_seconds = stall_seconds
+        self._stall_seconds = resolve_stall_seconds() if stall_seconds is None else stall_seconds
+        self._stall_min_mask_bars_per_sec = (
+            resolve_stall_min_mask_bars_per_sec()
+            if stall_min_mask_bars_per_sec is None
+            else stall_min_mask_bars_per_sec
+        )
+        for name, value in (
+            ("stall_seconds", self._stall_seconds),
+            ("stall_min_mask_bars_per_sec", self._stall_min_mask_bars_per_sec),
+        ):
+            if not math.isfinite(value) or value <= 0.0:
+                raise SweepParallelUsageError(
+                    f"ParallelGridDriver requires a positive finite {name} (got {value!r})"
+                )
+        #: ``C(n_unique, k)`` over these unique condition bits sizes each tuple's
+        #: mask count — the heavy-grid work estimate (DEC-SWEEP-STALL-OOM-GUARDS-001).
+        self._n_unique = len(set(grid.condition_bits))
         self._monotonic = monotonic
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
+        #: Labels a PRIOR run's broken pool quarantined (loaded from the durable
+        #: sidecar in :meth:`run`) — gated FIRST in :meth:`_gate_or_dispatch` so a
+        #: resume classifies them VISIBLY as ``quarantined_prior``, regardless of
+        #: the checkpoint/cache state (DEC-SWEEP-STALL-OOM-GUARDS-001).
+        self._quarantined: frozenset[str] = frozenset()
 
     def run(self) -> SupervisedGridSummary:
         """Execute the whole grid in parallel; return the aggregate tally.
@@ -827,6 +1169,11 @@ class ParallelGridDriver:
                 "code_commit_sha": self._grid.code_commit_sha,
             },
         )
+
+        # Load the durable quarantine sidecar BEFORE dispatch: a tuple a PRIOR
+        # run's broken pool quarantined is skipped VISIBLY (quarantined_prior),
+        # never re-dispatched into the same OOM (DEC-SWEEP-STALL-OOM-GUARDS-001).
+        self._quarantined = frozenset(load_quarantined_tuple_labels(self._root, sweep_id))
 
         acc = _Accumulator()
         pool_size = self._workers - 1
@@ -872,6 +1219,7 @@ class ParallelGridDriver:
             "skipped_cache": acc.skipped_cache,
             "skipped_resume": acc.skipped_resume,
             "tuples_failed": acc.tuples_failed,
+            "tuples_quarantined_prior": acc.tuples_quarantined_prior,
             "enumerated": acc.enumerated,
             "conflict_pruned": acc.conflict_pruned,
             "skipped_dedup": acc.skipped_dedup,
@@ -879,10 +1227,17 @@ class ParallelGridDriver:
             "ranked": acc.ranked,
             "persisted": acc.persisted,
         }
+        quarantine_note = (
+            f" · {acc.tuples_quarantined_prior} QUARANTINED-prior "
+            f"(see {quarantine_sidecar_path(self._root)})"
+            if acc.tuples_quarantined_prior
+            else ""
+        )
         self._guards.progress.finish(
             detail=(
                 f"{acc.tuples_run} run · {acc.skipped_cache} cached · "
                 f"{acc.skipped_resume} resumed · {acc.tuples_failed} failed"
+                f"{quarantine_note}"
             )
         )
         self._guards.audit.append(
@@ -904,6 +1259,7 @@ class ParallelGridDriver:
             ranked=acc.ranked,
             persisted=acc.persisted,
             tuples_failed=acc.tuples_failed,
+            tuples_quarantined_prior=acc.tuples_quarantined_prior,
         )
 
     def _drive(
@@ -932,42 +1288,59 @@ class ParallelGridDriver:
           blocks the apply prefix while siblings complete), so a slow-but-
           progressing head with completing siblings never spuriously raises
           ``SweepStallError`` — only a genuine no-completion, no-apply hang does.
+          The wait budget is HEAVY-GRID-AWARE (:meth:`_await_next_result` scales it
+          by the in-flight ``mask·bar`` work), so a legitimately-slow k=5 tuple is
+          not aborted while a genuine hang still is (DEC-SWEEP-STALL-OOM-GUARDS-001).
+
+        A worker OOM (or crash) breaks the pool; :class:`BrokenProcessPool` from
+        either ``pool.submit`` or a ``future.result()`` is caught here and routed to
+        :meth:`_quarantine_broken_pool`, which drains the already-finished futures'
+        REAL results, durably sidecar-quarantines the genuinely-broken in-flight
+        tuples, then raises :class:`SweepWorkerPoolBrokenError` — so a resume never
+        re-dispatches the same OOMing tuple (no livelock). A worker's surviving
+        Python-level :exc:`MemoryError` takes the single-tuple twin path inside
+        :meth:`_await_next_result` (:meth:`_quarantine_memory_error`).
         """
-        pending: dict[Future[TupleWorkResult], SweepTuple] = {}
+        pending: dict[Future[TupleWorkResult], _Dispatched] = {}
         last_progress = self._monotonic()
         enumerator = enumerate(iter_sweep_tuples(self._grid))
         exhausted = False
 
-        while not exhausted or pending or self._heap:
-            # 1. Dispatch until the in-flight window OR the heap cap is full (or the
-            #    grid is done). Coupling dispatch to the heap cap is the memory bound
-            #    under head-of-line blocking (Golden Rule #5).
-            while not exhausted and len(pending) < max_inflight and len(self._heap) < heap_cap:
-                try:
-                    index, tuple_ = next(enumerator)
-                except StopIteration:
-                    exhausted = True
-                    break
-                self._guards.watchdog.beat(self._guards.worker_name)
-                slot = self._gate_or_dispatch(index, tuple_, resume_from, pool, pending)
-                if slot is not None:
-                    heapq.heappush(self._heap, slot)
+        try:
+            while not exhausted or pending or self._heap:
+                # 1. Dispatch until the in-flight window OR the heap cap is full (or
+                #    the grid is done). Coupling dispatch to the heap cap is the
+                #    memory bound under head-of-line blocking (Golden Rule #5).
+                while not exhausted and len(pending) < max_inflight and len(self._heap) < heap_cap:
+                    try:
+                        index, tuple_ = next(enumerator)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    self._guards.watchdog.beat(self._guards.worker_name)
+                    slot = self._gate_or_dispatch(index, tuple_, resume_from, pool, pending)
+                    if slot is not None:
+                        heapq.heappush(self._heap, slot)
 
-            # 2. Apply every contiguous outcome the heap now permits (in order) —
-            #    an APPLY is forward progress and resets the stall clock.
-            if self._apply_ready_prefix(acc):
-                last_progress = self._monotonic()
-
-            # 3. If nothing is applyable yet, wait for the NEXT worker result. A
-            #    future COMPLETING is itself forward progress (even when the slow
-            #    head keeps the apply prefix blocked), so it resets the stall clock
-            #    BEFORE any apply — this is the head-of-line liveness fix.
-            if pending and (not self._heap or self._heap[0].index != self._next_apply):
-                slot = self._await_next_result(pending, last_progress)
-                last_progress = self._monotonic()
-                heapq.heappush(self._heap, slot)
+                # 2. Apply every contiguous outcome the heap now permits (in order) —
+                #    an APPLY is forward progress and resets the stall clock.
                 if self._apply_ready_prefix(acc):
                     last_progress = self._monotonic()
+
+                # 3. If nothing is applyable yet, wait for the NEXT worker result. A
+                #    future COMPLETING is itself forward progress (even when the slow
+                #    head keeps the apply prefix blocked), so it resets the stall
+                #    clock BEFORE any apply — this is the head-of-line liveness fix.
+                if pending and (not self._heap or self._heap[0].index != self._next_apply):
+                    slot = self._await_next_result(pending, acc, last_progress)
+                    last_progress = self._monotonic()
+                    heapq.heappush(self._heap, slot)
+                    if self._apply_ready_prefix(acc):
+                        last_progress = self._monotonic()
+        except BrokenProcessPool as exc:
+            # A worker OOM/crash broke the pool: quarantine the in-flight tuples so a
+            # resume skips them (no re-OOM livelock), then re-raise a distinct error.
+            self._quarantine_broken_pool(pending, acc, exc)
 
     def _gate_or_dispatch(
         self,
@@ -975,15 +1348,22 @@ class ParallelGridDriver:
         tuple_: SweepTuple,
         resume_from: int,
         pool: ProcessPoolExecutor,
-        pending: dict[Future[TupleWorkResult], SweepTuple],
+        pending: dict[Future[TupleWorkResult], _Dispatched],
     ) -> _Outcome | None:
         """Resume/cache-gate a tuple in the PARENT, or dispatch it to a worker.
 
-        Returns a synchronous ``_Outcome`` for a resume/cache skip (applied in
-        order via the heap), or ``None`` after submitting a worker future (its
-        result becomes an outcome when it completes). Mirrors the two parent-only
-        gates of the sequential loop.
+        Returns a synchronous ``_Outcome`` for a quarantined-prior/resume/cache skip
+        (applied in order via the heap), or ``None`` after submitting a worker
+        future (its result becomes an outcome when it completes). Mirrors the two
+        parent-only gates of the sequential loop, PLUS the quarantine gate FIRST —
+        a tuple a prior run's broken pool quarantined must classify VISIBLY as
+        ``quarantined_prior`` (never blend into resume/cache skips), whatever the
+        checkpoint/cache state. A dispatched tuple's ``_Dispatched`` record carries
+        its ``mask·bar`` work estimate so :meth:`_await_next_result` can size the
+        heavy-grid stall bound (DEC-SWEEP-STALL-OOM-GUARDS-001).
         """
+        if self._quarantined and tuple_label(tuple_) in self._quarantined:
+            return _skip_outcome(index, tuple_, "quarantined_prior")
         if index < resume_from:
             return _skip_outcome(index, tuple_, "resume")
         if self._guards.cache.seen(
@@ -999,37 +1379,88 @@ class ParallelGridDriver:
             return _skip_outcome(index, tuple_, "cache")
         bars = self._bars_for(tuple_.instrument, tuple_.tf.label)
         future = pool.submit(_run_tuple_in_worker, index, tuple_, bars)
-        pending[future] = tuple_
+        pending[future] = _Dispatched(
+            index=index, tuple_=tuple_, work=self._tuple_work(tuple_, len(bars))
+        )
         return None
+
+    def _tuple_work(self, tuple_: SweepTuple, n_bars: int) -> float:
+        """The tuple's ``mask·bar`` work estimate = ``C(n_unique, k) × N_bars``.
+
+        The exact per-tuple work the trade sim performs (each of the ``C(n_unique,
+        k)`` enumerated masks walks the ``N_bars`` bars). Used ONLY to size the
+        heavy-grid stall bound (:meth:`_effective_stall_seconds`); never in results.
+        O(1) — ``count_combos`` is a single ``math.comb``.
+        """
+        return float(count_combos(tuple_.k, self._n_unique)) * float(n_bars)
+
+    def _effective_stall_seconds(self, max_inflight_work: float) -> float:
+        """The heavy-grid-aware stall bound for the current in-flight set.
+
+        ``max(base_stall, max_inflight_work / min_mask_bars_per_sec)`` — a light
+        grid keeps the base floor (byte-identical to the pre-fix flat bound), a
+        heavy k=5 tuple gets a bound proportional to its legitimate compute time so
+        it is never spuriously aborted near grid completion. The bound is FINITE, so
+        a genuine no-progress hang is still caught in bounded time — HONEST caveat
+        (Golden Rule #10): the bound SCALES with ``C(n_unique, k) × N_bars``, so a
+        wedged VERY heavy tuple is caught ~(1 / throughput-floor-headroom) × its
+        legitimate runtime, which can be long (hours for a k=5 1-minute tuple) —
+        the deliberate correctness > fast-detection trade
+        (DEC-SWEEP-STALL-OOM-GUARDS-001). O(1).
+        """
+        work_bound = max_inflight_work / self._stall_min_mask_bars_per_sec
+        return max(self._stall_seconds, work_bound)
 
     def _await_next_result(
         self,
-        pending: dict[Future[TupleWorkResult], SweepTuple],
+        pending: dict[Future[TupleWorkResult], _Dispatched],
+        acc: _Accumulator,
         last_progress: float,
     ) -> _Outcome:
         """Block for the next completed worker future; STALL-guard the wait.
 
-        Raises :class:`SweepStallError` if NO future completes within
-        ``stall_seconds`` of the last progress (``last_progress`` — reset by the
-        caller on any completion or apply) while work is in flight. A wedged
-        worker's future never resolves, so this is the guarantee the sweep cannot
-        hang forever; because the clock measures time-since-last-COMPLETION, a
-        slow-but-progressing head with completing siblings never trips it (only a
-        genuine no-completion hang does).
+        Raises :class:`SweepStallError` if NO future completes within the effective
+        stall bound of the last progress (``last_progress`` — reset by the caller on
+        any completion or apply) while work is in flight. The bound is
+        HEAVY-GRID-AWARE: :meth:`_effective_stall_seconds` scales the base floor by
+        the MAX ``mask·bar`` work of the in-flight tuples, so a legitimately-slow
+        heavy head is not aborted (its trade walk simply needs longer than the flat
+        300 s), while a wedged worker's never-resolving future still trips the
+        (finite) bound. Because the clock measures time-since-last-COMPLETION, a
+        slow-but-progressing head with completing siblings never trips it.
+
+        A worker's Python-level :exc:`MemoryError` (allocation failure with the
+        worker SURVIVING — the pool does NOT break, so the ``BrokenProcessPool``
+        path never fires) is caught HERE and routed through the SAME durable
+        quarantine as a broken pool, but for THIS tuple ONLY (the siblings are
+        innocent and will be re-run on resume) — closing the identical-resume
+        re-dispatch livelock for the cgroup/rlimit OOM shape too
+        (DEC-SWEEP-STALL-OOM-GUARDS-001).
         """
-        deadline = last_progress + self._stall_seconds
+        max_work = max(item.work for item in pending.values())
+        effective_stall = self._effective_stall_seconds(max_work)
+        deadline = last_progress + effective_stall
         timeout = max(0.0, deadline - self._monotonic())
         done, _ = _futures_wait(pending, timeout=timeout, return_when=_FIRST_COMPLETED)
         if not done:
             # No completion within the stall window while work is in flight → stall.
             raise SweepStallError(
-                f"parallel sweep made no progress for {self._stall_seconds:.0f}s "
-                f"with {len(pending)} tuple(s) in flight (next_apply={self._next_apply})"
+                f"parallel sweep made no progress for {effective_stall:.0f}s "
+                f"(base {self._stall_seconds:.0f}s, heaviest in-flight work "
+                f"{max_work:.3g} mask·bar) with {len(pending)} tuple(s) in flight "
+                f"(next_apply={self._next_apply})"
             )
         future = done.pop()
-        tuple_ = pending.pop(future)
-        result = future.result()  # re-raises a worker's non-combo exception
-        return _result_to_outcome(result, tuple_)
+        # ``result()`` FIRST (before removing from ``pending``): a broken pool raises
+        # :class:`BrokenProcessPool` here, and the future must still be in ``pending``
+        # so :meth:`_quarantine_broken_pool` quarantines it (DEC-SWEEP-STALL-OOM-GUARDS-001).
+        try:
+            result = future.result()  # re-raises a worker's non-combo exception
+        except MemoryError as exc:
+            dispatched = pending.pop(future)
+            self._quarantine_memory_error(dispatched, acc, exc)
+        dispatched = pending.pop(future)
+        return _result_to_outcome(result, dispatched.tuple_)
 
     def _apply_ready_prefix(self, acc: _Accumulator) -> bool:
         """Apply every heap outcome whose index == ``next_apply``, contiguously.
@@ -1080,6 +1511,68 @@ class ParallelGridDriver:
                 action=SUPERVISOR_ACTION_TUPLE_CACHE,
                 subject=self._subject,
                 payload={"index": index, "tuple": label},
+            )
+            return
+
+        if outcome.kind == "quarantined_prior":
+            # A tuple a PRIOR run's broken pool quarantined (the durable sidecar).
+            # Skip it VISIBLY: a DISTINCT counter (never folded into skipped_cache)
+            # + a distinct audit action + one WARNING per tuple — the completeness
+            # hole can never blend into a "successful" run. Treated as a STANDING
+            # failure for the checkpoint (had_failure latch — data is permanently
+            # missing until the operator deletes the sidecar entry), so the frozen
+            # checkpoint keeps the recovery path live: delete the entry → the very
+            # next resume re-dispatches the tuple (nothing else marks it done).
+            acc.tuples_quarantined_prior += 1
+            acc.had_failure = True
+            self._advance(current=label, survived=False, skipped=True)
+            self._guards.audit.append(
+                action=SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR,
+                subject=self._subject,
+                payload={
+                    "index": index,
+                    "tuple": label,
+                    "sidecar": str(quarantine_sidecar_path(self._root)),
+                },
+            )
+            _LOG.warning(
+                "sweep_parallel.tuple_quarantined_prior",
+                subject=self._subject,
+                index=index,
+                tuple=label,
+                sidecar=str(quarantine_sidecar_path(self._root)),
+            )
+            return
+
+        if outcome.kind == "pool_broken":
+            # A worker OOM/crash poisoned the pool while this tuple was in flight.
+            # QUARANTINE — durable sidecar ONLY (written by the caller BEFORE these
+            # outcomes are applied): deliberately NO SweepCache.record (that would
+            # permanently + invisibly drop the tuple from every identical resume)
+            # and NO checkpoint advance (had_failure latch, the sequential
+            # failed-tuple semantics) — so the ONE reversible recovery lever is
+            # "delete the sidecar entry and resume". The loss is LOUD: a distinct
+            # audit action + ERROR log + counter, and the run itself fails loudly
+            # via SweepWorkerPoolBrokenError naming tuple(s) + sidecar + remediation.
+            acc.tuples_pool_broken += 1
+            acc.had_failure = True
+            self._advance(current=label, survived=False, skipped=False)
+            self._guards.audit.append(
+                action=SUPERVISOR_ACTION_TUPLE_POOL_BROKEN,
+                subject=self._subject,
+                payload={
+                    "index": index,
+                    "tuple": label,
+                    "reason": outcome.failed_error,
+                    "sidecar": str(quarantine_sidecar_path(self._root)),
+                },
+            )
+            _LOG.error(
+                "sweep_parallel.tuple_pool_broken",
+                subject=self._subject,
+                index=index,
+                tuple=label,
+                reason=outcome.failed_error,
             )
             return
 
@@ -1160,6 +1653,141 @@ class ParallelGridDriver:
             },
         )
 
+    def _quarantine_broken_pool(
+        self,
+        pending: dict[Future[TupleWorkResult], _Dispatched],
+        acc: _Accumulator,
+        exc: BrokenProcessPool,
+    ) -> NoReturn:
+        """DURABLY quarantine the in-flight tuples on a broken pool, then fail loud.
+
+        A worker OOM/crash breaks the pool. Already-FINISHED futures still carry
+        REAL results — those are DRAINED and applied as genuine outcomes first
+        (their compute is never discarded); every genuinely-broken future's tuple
+        (the executor sets :class:`BrokenProcessPool` on unfinished futures; the
+        parent cannot know WHICH caused the OOM) is quarantined: its identity is
+        appended to the DURABLE sidecar (:func:`append_quarantine_entries` —
+        fsync'd BEFORE anything else, so even a crash right here cannot lose the
+        record) and it becomes a ``"pool_broken"`` outcome. All outcomes are
+        pushed into the reorder heap at their enumeration indices and the
+        contiguous prefix is applied — the union of ``self._heap`` and ``pending``
+        covers every index in ``[next_apply, dispatched_so_far)`` (dispatch is
+        strictly in enumeration order and never skips), so the prefix applies with
+        no gaps. :meth:`_apply` deliberately does NOT ``SweepCache.record`` a
+        quarantined tuple and does NOT advance the checkpoint past it — the
+        SIDECAR alone makes a resume skip it (VISIBLY, as
+        ``tuples_quarantined_prior``), so deleting the sidecar entry genuinely
+        recomputes the tuple (the ONE reversible recovery lever).
+
+        Then raises :class:`SweepWorkerPoolBrokenError` naming the offending
+        tuple(s) + the sidecar + the remediation. This runs INSIDE ``run()``'s
+        try-block, so the durable writes land BEFORE the abort line is recorded
+        and the error re-raised (DEC-SWEEP-STALL-OOM-GUARDS-001).
+        """
+        reason = f"{type(exc).__name__}: {exc}"
+        drained: list[_Outcome] = []
+        broken: list[_Dispatched] = []
+        for future, item in pending.items():
+            outcome: _Outcome | None = None
+            if future.done():
+                try:
+                    result = future.result(timeout=0)
+                except Exception:  # a broken/raising done future → quarantine
+                    outcome = None
+                else:
+                    outcome = _result_to_outcome(result, item.tuple_)
+            if outcome is None:
+                broken.append(item)
+            else:
+                drained.append(outcome)
+        pending.clear()
+        broken.sort(key=lambda item: item.index)
+
+        # DURABLE FIRST: the sidecar write must land before any other state moves.
+        sidecar = append_quarantine_entries(
+            self._root,
+            grid_identity(self._grid),
+            [(item.index, tuple_label(item.tuple_)) for item in broken],
+            reason,
+        )
+        for done_outcome in drained:
+            heapq.heappush(self._heap, done_outcome)
+        for item in broken:
+            heapq.heappush(
+                self._heap,
+                _Outcome(
+                    index=item.index,
+                    tuple_=item.tuple_,
+                    kind="pool_broken",
+                    summary=None,
+                    failed_error=reason,
+                    audit_records=(),
+                ),
+            )
+        self._apply_ready_prefix(acc)
+        labels = ", ".join(tuple_label(item.tuple_) for item in broken)
+        raise SweepWorkerPoolBrokenError(
+            f"parallel sweep worker pool BROKE ({reason}) — a worker was likely "
+            f"OOM-killed. Quarantined {len(broken)} in-flight tuple(s) in the durable "
+            f"sidecar {sidecar}: [{labels}]. An identical-config resume SKIPS them "
+            f"(reported as tuples_quarantined_prior — they are NOT silently "
+            f"recomputed). Remediation: relieve the memory pressure — reduce "
+            f"{SWEEP_WORKERS_ENV} (fewer workers raises each worker's per-tuple "
+            f"memory budget AND cuts total pressure), reduce the grid's k, or raise "
+            f"{MEM_BUDGET_ENV} — then DELETE the tuples' entries from the sidecar "
+            f"(or the whole file) and resume: the tuples are then genuinely "
+            f"recomputed."
+        )
+
+    def _quarantine_memory_error(
+        self, dispatched: _Dispatched, acc: _Accumulator, exc: MemoryError
+    ) -> NoReturn:
+        """DURABLY quarantine ONE tuple whose worker raised :exc:`MemoryError`.
+
+        The Python-level OOM shape (cgroup/rlimit allocation failure — the worker
+        SURVIVES, the pool does NOT break): only THIS tuple is poisoned, so only it
+        is quarantined — its innocent in-flight siblings are left un-recorded and
+        will be re-run on resume. Sidecar write FIRST (durable before the raise),
+        then the loud state (counter + had_failure latch + distinct audit action +
+        ERROR log — mirroring the :meth:`_apply` ``pool_broken`` branch without the
+        heap, because the run raises immediately and a blocked apply prefix must
+        not be able to swallow the record), then
+        :class:`SweepWorkerPoolBrokenError` (DEC-SWEEP-STALL-OOM-GUARDS-001).
+        """
+        reason = f"MemoryError: {exc}"
+        label = tuple_label(dispatched.tuple_)
+        sidecar = append_quarantine_entries(
+            self._root, grid_identity(self._grid), [(dispatched.index, label)], reason
+        )
+        acc.tuples_pool_broken += 1
+        acc.had_failure = True
+        self._guards.audit.append(
+            action=SUPERVISOR_ACTION_TUPLE_POOL_BROKEN,
+            subject=self._subject,
+            payload={
+                "index": dispatched.index,
+                "tuple": label,
+                "reason": reason,
+                "sidecar": str(sidecar),
+            },
+        )
+        _LOG.error(
+            "sweep_parallel.tuple_pool_broken",
+            subject=self._subject,
+            index=dispatched.index,
+            tuple=label,
+            reason=reason,
+        )
+        raise SweepWorkerPoolBrokenError(
+            f"parallel sweep worker raised {reason} on tuple [{label}] (the worker "
+            f"survived — a cgroup/rlimit allocation failure, not an OS OOM-kill). "
+            f"Quarantined it in the durable sidecar {sidecar}; an identical-config "
+            f"resume SKIPS it (reported as tuples_quarantined_prior). Remediation: "
+            f"relieve the memory pressure — reduce {SWEEP_WORKERS_ENV}, reduce the "
+            f"grid's k, or raise {MEM_BUDGET_ENV} — then DELETE the tuple's entry "
+            f"from the sidecar and resume: the tuple is then genuinely recomputed."
+        ) from exc
+
     def _replay_ingest_audit(self, records: tuple[BufferedAuditRecord, ...]) -> None:
         """Append a worker's buffered ``SWEEP_*`` records into the real chain, in order."""
         for record in records:
@@ -1192,6 +1820,16 @@ class _Accumulator:
     skipped_cache: int = 0
     skipped_resume: int = 0
     tuples_failed: int = 0
+    #: Tuples THIS run quarantined because the worker pool broke / a worker raised
+    #: MemoryError while they were in flight — recorded in the DURABLE sidecar
+    #: (:func:`quarantine_sidecar_path`), deliberately NOT cache-recorded and NOT
+    #: checkpoint-advanced, so the sidecar is the ONE reversible skip lever
+    #: (DEC-SWEEP-STALL-OOM-GUARDS-001).
+    tuples_pool_broken: int = 0
+    #: Tuples a PRIOR run quarantined that THIS run therefore skipped (the sidecar
+    #: gate) — a DISTINCT counter, never folded into ``skipped_cache``, surfaced in
+    #: the summary so the completeness hole is always visible.
+    tuples_quarantined_prior: int = 0
     enumerated: int = 0
     conflict_pruned: int = 0
     skipped_dedup: int = 0
@@ -1267,7 +1905,8 @@ def run_parallel_grid(
     ingest_audit: AuditWriterLike,
     guards: SweepGuards,
     workers: int,
-    stall_seconds: float = DEFAULT_STALL_SECONDS,
+    stall_seconds: float | None = None,
+    stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
@@ -1283,12 +1922,17 @@ def run_parallel_grid(
     Parameters mirror :class:`ParallelGridDriver` (``root`` replaces the
     sequential ``store_for``: workers rebuild ``store_for`` from ``(root, grid)``,
     so no un-picklable parent closure crosses the process boundary — the ONE
-    signature difference from ``run_supervised_grid``).
+    signature difference from ``run_supervised_grid``). ``stall_seconds`` /
+    ``stall_min_mask_bars_per_sec`` default to ``None`` → resolved from the
+    environment (the heavy-grid-aware stall bound, DEC-SWEEP-STALL-OOM-GUARDS-001).
 
     Raises
     ------
     SweepParallelUsageError
         If ``workers < 2``.
+    SweepWorkerPoolBrokenError
+        If a worker OOM/crash breaks the pool (the in-flight tuples are durably
+        quarantined first so a resume never re-dispatches them).
     """
     driver = ParallelGridDriver(
         grid,
@@ -1298,6 +1942,7 @@ def run_parallel_grid(
         guards=guards,
         workers=workers,
         stall_seconds=stall_seconds,
+        stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,
     )
     return driver.run()
@@ -1307,16 +1952,28 @@ __all__ = [
     "AUTO_SWEEP_WORKERS_CAP",
     "AUTO_SWEEP_WORKERS_RESERVED_CPUS",
     "DEFAULT_STALL_SECONDS",
+    "QUARANTINE_SIDECAR_NAME",
     "SEQUENTIAL_SWEEP_WORKERS",
     "SMALL_GRID_FACTOR",
+    "STALL_MASK_BARS_PER_SEC_ENV",
+    "STALL_MIN_MASK_BARS_PER_SEC",
+    "STALL_SECONDS_ENV",
+    "SUPERVISOR_ACTION_TUPLE_POOL_BROKEN",
+    "SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR",
     "SWEEP_WORKERS_ENV",
     "AuditWriterLike",
     "ParallelGridDriver",
     "SweepParallelUsageError",
     "SweepStallError",
+    "SweepWorkerPoolBrokenError",
     "TupleWorkResult",
+    "append_quarantine_entries",
     "auto_sweep_workers",
+    "load_quarantined_tuple_labels",
+    "quarantine_sidecar_path",
     "refuse_parallel_on_legacy_path",
+    "resolve_stall_min_mask_bars_per_sec",
+    "resolve_stall_seconds",
     "resolve_sweep_workers",
     "run_parallel_grid",
 ]
