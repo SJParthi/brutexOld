@@ -27,6 +27,7 @@ file get the catalog's existing missing-file error, unchanged.
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +37,7 @@ import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog
-from brutex.data.errors import PartitionError, parquet_read_skip_errors
+from brutex.data.errors import CatalogError, PartitionError, parquet_read_skip_errors
 from brutex.data.lake_invariants import (
     LakeFinding,
     PartitionCoords,
@@ -80,12 +81,20 @@ class ReconcileResult:
         parsed. Reconcile itself NEVER heals — healing is the caller's
         one-liner (``lake_heal.heal_after_reconcile``). Defaulted ``()`` so
         the pre-existing three-counter construction stays compatible.
+    stat_cache_hits
+        DEC-SWEEP-RECONCILE-STATCACHE-001: number of partitions SKIPPED via the
+        opt-in ``stat_cache`` fast path — a byte-unchanged file (exact
+        ``(st_mtime_ns, st_size, st_ino)`` token match against its stored catalog
+        row) whose ``sha256`` + timestamp read + upsert were all avoided. Always
+        ``0`` when ``stat_cache=False`` (every caller except the sweep-all
+        launcher), so the pre-existing counter constructions stay compatible.
     """
 
     partitions_reconciled: int
     bars_total: int
     skipped: int
     findings: tuple[LakeFinding, ...] = ()
+    stat_cache_hits: int = 0
 
 
 def _partition_files(
@@ -119,6 +128,7 @@ def reconcile_catalog_from_lake(
     symbol: str | None = None,
     interval: str | None = None,
     check_invariants: bool = True,
+    stat_cache: bool = False,
 ) -> ReconcileResult:
     """Upsert one catalog row per on-disk Parquet partition under *lake_root*.
 
@@ -158,12 +168,32 @@ def reconcile_catalog_from_lake(
         by mid-pull HOT call sites that never heal (the F&O window
         derivation), where the findings would only re-log what the L2
         post-pull heal handles moments later.
+    stat_cache
+        DEC-SWEEP-RECONCILE-STATCACHE-001 durable reconcile stat-cache
+        (default ``False`` = OFF). When ``True``, each partition file is
+        ``os.stat``-ed FIRST and, if its ``(st_mtime_ns, st_size, st_ino)``
+        token EXACTLY matches the stored catalog row's token, the full-bytes
+        ``sha256`` + timestamp read + upsert (and the L1 ``check_invariants``
+        classification) are ALL skipped — the stored row is already
+        byte-correct. A changed / new / legacy-``NULL``-token file recomputes as
+        today and backfills its token (best-effort — a token-write failure is
+        logged, never fails the launch). This is **opt-in and set ``True`` ONLY
+        at the ``brutex sweep-all`` launcher**, whose reconcile findings are
+        discarded: the SHARED callers that drive the cascade-wire L1 auto-heal
+        and the ``lake audit-unique`` census keep the default ``stat_cache=False``
+        so their findings are still emitted for a byte-unchanged-but-poisoned
+        partition (a skip would silently suppress heal/census detection). The
+        skip never changes which bars load (``get_bars`` re-reads the actual file
+        content) nor their values — run identity is byte-identical (Golden Rule
+        #4). ``st_ino`` is part of the token because every lake writer publishes
+        via ``os.replace`` (a fresh inode), so an inode change defeats a same-size
+        in-place rewrite and a coarse-mtime external-SSD collision.
 
     Returns
     -------
     ReconcileResult
         Counts of reconciled partitions, total bars, and skipped files, plus
-        the L1 invariant ``findings``.
+        the L1 invariant ``findings`` and the ``stat_cache`` hit count.
     """
     files = _partition_files(
         lake_root,
@@ -175,14 +205,59 @@ def reconcile_catalog_from_lake(
     reconciled = 0
     bars_total = 0
     skipped = 0
+    stat_cache_hits = 0
     findings: list[LakeFinding] = []
     symbol_dirs: dict[tuple[str, str], set[str]] = {}
+    # DEC-SWEEP-RECONCILE-STATCACHE-001: per-(symbol, interval) stored stat-token
+    # maps, loaded lazily in ONE indexed query each, so a warm hit is an os.stat +
+    # O(1) dict lookup with zero Parquet reads. Populated only when stat_cache=True.
+    stat_token_maps: dict[
+        tuple[str, str, str, str], dict[tuple[int, int], tuple[int, int, int] | None]
+    ] = {}
     for path in files:
         try:
             coords = parse_partition_path(path, lake_root=lake_root)
         except PartitionError:
             skipped += 1
             continue
+        file_stat: os.stat_result | None = None
+        if stat_cache:
+            try:
+                file_stat = path.stat()
+            except OSError as exc:
+                # TOCTOU: the partition vanished / became unreadable between the
+                # glob and the stat. Mirror the corrupt/zero-row skip — counted,
+                # never a crash (get_bars would raise on the missing file later).
+                _LOG.warning("catalog.reconcile.stat_skip", path=str(path), error=str(exc))
+                skipped += 1
+                continue
+            coord_key = (
+                cast(str, coords["exchange"]),
+                cast(str, coords["segment"]),
+                cast(str, coords["symbol"]),
+                cast(str, coords["interval"]),
+            )
+            if coord_key not in stat_token_maps:
+                stat_token_maps[coord_key] = catalog.get_partition_stat_tokens(
+                    exchange=coord_key[0],
+                    segment=coord_key[1],
+                    symbol=coord_key[2],
+                    interval=coord_key[3],
+                )
+            cached_token = stat_token_maps[coord_key].get(
+                (cast(int, coords["year"]), cast(int, coords["month"]))
+            )
+            if cached_token is not None and cached_token == (
+                file_stat.st_mtime_ns,
+                file_stat.st_size,
+                file_stat.st_ino,
+            ):
+                # WARM HIT: the stored catalog row is already byte-correct for this
+                # unchanged file — skip the sha256 + timestamp read + upsert (and
+                # the L1 classification). The launcher discards findings; the
+                # shared heal/census callers pass stat_cache=False (never skip).
+                stat_cache_hits += 1
+                continue
         if check_invariants:
             symbol_dirs.setdefault(
                 (cast(str, coords["exchange"]), cast(str, coords["segment"])), set()
@@ -239,6 +314,27 @@ def reconcile_catalog_from_lake(
         catalog.upsert(entry)
         reconciled += 1
         bars_total += row_count
+        if file_stat is not None:
+            # DEC-SWEEP-RECONCILE-STATCACHE-001 best-effort stat-cache backfill:
+            # stamp the (mtime_ns, size, ino) token so the NEXT launch skips this
+            # unchanged file on a stat-only match. A write failure (e.g. ENOSPC)
+            # must NOT fail the launch — the token stays NULL and this file is
+            # simply recomputed next launch. Reachable only when stat_cache=True
+            # (file_stat is None on every other caller).
+            try:
+                catalog.set_partition_stat(
+                    exchange=cast(str, coords["exchange"]),
+                    segment=cast(str, coords["segment"]),
+                    symbol=cast(str, coords["symbol"]),
+                    interval=cast(str, coords["interval"]),
+                    year=cast(int, coords["year"]),
+                    month=cast(int, coords["month"]),
+                    file_mtime_ns=file_stat.st_mtime_ns,
+                    file_size=file_stat.st_size,
+                    file_ino=file_stat.st_ino,
+                )
+            except CatalogError as exc:
+                _LOG.warning("catalog.reconcile.stat_write_failed", path=str(path), error=str(exc))
     if check_invariants:
         # DEC-LAKE-HEAL-001 L1 drift pass: derived from the coords already parsed
         # (no Parquet reads; a drifted dir pays one directory listing for its
@@ -254,6 +350,7 @@ def reconcile_catalog_from_lake(
         bars_total=bars_total,
         skipped=skipped,
         findings=tuple(findings),
+        stat_cache_hits=stat_cache_hits,
     )
 
 
