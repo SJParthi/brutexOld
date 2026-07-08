@@ -207,7 +207,12 @@ from brutex.dashboard.pull_intent import (
     persist_intent_for_launch,
     run_auto_resume,
 )
-from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.pull_jobs import (
+    JOB_KIND_PULL,
+    JOB_KIND_SWEEP,
+    BackgroundPullJob,
+    ProgressHook,
+)
 from brutex.dashboard.rate_bridge_cache import (
     BRIDGE_SOURCE_UNWIRED,
     BridgeReadResult,
@@ -394,12 +399,16 @@ class RateLimitPanel:
     #: Golden Rule #1). Monotonic (not wall-clock) so it is immune to clock adjustments.
     last_update_monotonic: float = float("-inf")
     #: Whether the panel's :attr:`effective_rps` is a REAL measured completed-rate from the
-    #: transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001).
-    #: ``True`` for a spot-phase tick (the meter is wired); ``False`` for a metadata/F&O-phase
-    #: tick from the admission-only :class:`~brutex.dashboard.rate_sampler.RatePanelSampler`,
-    #: whose meter is unreachable — so the live-rate view keeps "achieved" an honest 0 that phase
-    #: and bases the stall verdict on the controller's admission signal. Defaults ``True`` (the
-    #: pre-decision meter-fed contract; an idle panel never reports a fabricated completed-rate).
+    #: transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001,
+    #: reachable across the metadata + F&O phases since DEC-RATE-WIDGET-FNO-MEASURED-001's
+    #: registered-meter lifecycle). ``True`` for any tick fed by the REGISTERED pool meter's
+    #: real snapshot — the spot per-window observe AND the sampler's metadata/F&O ticks once
+    #: the build site registered the meter; ``False`` means exactly "no meter registered" —
+    #: the pre-registration window at pull start, a dry-run (which explicitly DEREGISTERS,
+    #: DEC-RATE-METER-LIFECYCLE-001), or after the job-finish clear — so the live-rate view
+    #: keeps "achieved" an honest 0 and bases the stall verdict on the controller's admission
+    #: signal. Defaults ``True`` (the meter-fed contract; an idle panel never reports a
+    #: fabricated completed-rate).
     meter_present: bool = True
     #: The transport meter's MEASURED rolling failed-calls rate (the ``CallMeter`` snapshot's
     #: ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001): failed attempts per second over the
@@ -697,12 +706,15 @@ class DashboardState:
         is the real-time proof the 5 r/s cap held (``<= 5`` ⇒ no breach, ever).
 
         ``meter_present`` (DEC-RATE-WIDGET-FNO-HONEST-001) records whether ``effective_rps``
-        is a REAL measured completed-rate (``True`` — a spot-phase tick whose
-        :class:`~brutex.adapters.call_meter.CallMeter` is wired) or honestly absent (``False``
-        — a metadata/F&O-phase tick from the admission-only sampler, which pushes no measured
-        completed-rate). The ``/api/v1/pull/rate`` view reads it to keep "achieved" an honest 0
+        is a REAL measured completed-rate (``True`` — a tick fed by the REGISTERED pool
+        meter's real :class:`~brutex.adapters.call_meter.CallMeter` snapshot: the spot
+        per-window observe AND, since DEC-RATE-WIDGET-FNO-MEASURED-001, the sampler's
+        metadata/F&O ticks) or honestly absent (``False`` — no meter registered: the
+        pre-registration window at pull start, a dry-run — which explicitly DEREGISTERS,
+        DEC-RATE-METER-LIFECYCLE-001 — or after the job-finish clear). The
+        ``/api/v1/pull/rate`` view reads it to keep "achieved" an honest 0
         + use the controller's admission signal for the stall verdict during the meter-less
-        phases, instead of fabricating a completed-rate.
+        window, instead of fabricating a completed-rate.
 
         ``failed_rps`` (DEC-PULL-TELEMETRY-TRIAD-001) is the meter snapshot's MEASURED
         rolling failed-calls rate — the evidence the ``/api/v1/pull/rate`` view needs to
@@ -900,9 +912,12 @@ def make_rate_observer(
             latency_ms_p95=float(meter.get("latency_ms_p95", 0.0)),
             rps_1s=int(meter.get("rps_1s", 0)),
             rps_1s_max=int(meter.get("rps_1s_max", 0)),
-            # DEC-RATE-WIDGET-FNO-HONEST-001: the admission-only sampler (metadata + F&O phases)
-            # pushes ``meter_present=False`` (no measured completed-rate this phase); a REAL spot
-            # CallMeter snapshot carries no such key → defaults ``True`` (the meter-fed contract).
+            # DEC-RATE-WIDGET-FNO-HONEST-001 / DEC-RATE-METER-LIFECYCLE-001: the sampler
+            # pushes ``meter_present=False`` ONLY when no meter is registered (the
+            # pre-registration window, a dry-run — which deregisters — or after the
+            # job-finish clear); a REAL CallMeter snapshot (the spot observe or the
+            # sampler's registered-meter metadata/F&O ticks) carries no such key →
+            # defaults ``True`` (the meter-fed contract).
             meter_present=bool(meter.get("meter_present", True)),
             # The meter's MEASURED rolling failed-calls rate (DEC-PULL-TELEMETRY-TRIAD-001);
             # absent on an older snapshot / the admission-only sampler sentinel → an honest 0.0.
@@ -1105,6 +1120,7 @@ def build_app(
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
+    session_rate: SessionRateController | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1225,6 +1241,16 @@ def build_app(
         ``None`` (the default — unit tests / bare apps) disables all of it;
         ``build_app`` itself never fires a resume (the launcher seam does), so
         constructing an app stays side-effect-free.
+    session_rate
+        Optional :class:`~brutex.dashboard.pull_controller.SessionRateController`
+        — the ONE per-session rate holder every pull shares
+        (DEC-DHAN-PERSIST-RATE-001) and the registered-CallMeter home of
+        DEC-RATE-WIDGET-FNO-MEASURED-001 / DEC-RATE-METER-LIFECYCLE-001.
+        Injected so tests drive the meter register/clear lifecycle
+        deterministically (pre-warm a controller, pre-register a meter, then
+        assert the dry-run / job-end eviction through the REAL routes); ``None``
+        (the default) builds a fresh production holder — byte-identical to the
+        pre-seam construction (mirrors the ``summary_cache`` injection pattern).
 
     Returns
     -------
@@ -1613,8 +1639,9 @@ def build_app(
     _sweep_leaderboard_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
-    # pull restarting at the 5 r/s ceiling and re-storming the vendor.
-    _session_rate = SessionRateController()
+    # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
+    # (DEC-RATE-METER-LIFECYCLE-001 test seam); ``None`` builds the production holder.
+    _session_rate = session_rate if session_rate is not None else SessionRateController()
     # The Greeks-enrichment consecutive-failure health counter
     # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
     # NEVER fail a pull, so a persistently broken enrichment used to be one
@@ -1781,7 +1808,10 @@ def build_app(
             # reads "done"/"idle", never a red "stalled". The CLI bridge carries its
             # OWN flag since schema v3 (DEC-CLI-BRIDGE-PULL-ACTIVE-001) — a pre-v3 /
             # flagless file reads None (the honest tick-freshness fallback).
-            panel_pull_active=_pull_active_probe(),
+            # KIND-AWARE since DEC-RATE-METER-LIFECYCLE-001: a running SWEEP on the
+            # shared job reads False here (honest "idle" — zero vendor calls by
+            # design), while _pull_live's duty-degrade probe stays sweep-inclusive.
+            panel_pull_active=_rate_pull_active_probe(),
             # DEC-PIPELINE-PHASE-UI-HONESTY-001: the pipeline's current phase label —
             # the PANEL side only (the CLI bridge is a separate process with no
             # pipeline phase). During the zero-vendor-call LOCAL stages
@@ -2251,7 +2281,26 @@ def build_app(
                 intervals=resolve_fetch_intervals(spot_interval),
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
-                session_rate=_session_rate,
+                # Meter lifecycle on this DIRECT (off-job) route — DEC-RATE-METER-
+                # LIFECYCLE-001 round 2: a dry-run passes NO holder, so an operator's
+                # ``?dry_run=true`` fired WHILE a live job pull runs (this route
+                # bypasses the single-flight ``_pull_job``) can never evict that
+                # pull's registered meter through ``register_pull_meter``'s dry-run
+                # gate. The synthetic dry-run needs no session controller either
+                # (``_live_rate_runtime`` ignores it when ``use_live_rate`` is
+                # False), so the ``None`` arm is byte-identical apart from the
+                # eviction it avoids. The REAL arm's register/clear pairing lives
+                # INSIDE ``pull_candles`` (round 4 — ``_pull_meter_scope``): the
+                # spine compare-and-clears the EXACT handle it registered, success
+                # AND failure, so this route needs NO clear of its own. The prior
+                # route-level unconditional ``finally: clear_meter()`` is REMOVED —
+                # it evicted a concurrent JOB pull's LIVE meter whenever this route
+                # 400'd BEFORE ``pull_candles`` ever registered (a malformed date),
+                # leaving the job's F&O phase meterless for its remainder (the
+                # round-4 MAJOR; its "a concurrent job pull re-registers at its own
+                # build sites" claim was false — registration is once per phase
+                # START, never periodic).
+                session_rate=None if dry_run else _session_rate,
                 floor_store=instrument_store,
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
@@ -2315,8 +2364,20 @@ def build_app(
     # with the app's SummaryCache so each window write invalidates the coverage
     # summary (the next eligible poll refreshes), and owns the incremental
     # CoverageCounters that back the O(1) coverage headline
-    # (DEC-DASHBOARD-FASTREAD-001).
-    _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
+    # (DEC-DASHBOARD-FASTREAD-001). ``on_run_end`` clears the session's registered
+    # CallMeter in the worker's identity-gated finally (DEC-RATE-METER-LIFECYCLE-001 —
+    # the C0 cross-pull leak fix; the clear is UNCONDITIONAL, so a job finish CAN
+    # evict a concurrent off-job direct pull's live meter — the widget degrades to
+    # meter_present=False, never fabricates; blast radius disclosed at the
+    # ``on_run_end`` param doc); together with ``pull_candles``' own paired
+    # identity-gated clear (the direct ``/universe/pull`` route runs OFF-job — the
+    # spine compare-and-clears the exact handle it registered, rounds 2/4),
+    # "no in-process
+    # pull running ⇒ no meter registered" is a process invariant, so a dead pull's
+    # meter can never feed a later sampler tick.
+    _pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache, on_run_end=_session_rate.clear_meter
+    )
 
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
     # the production default reads THIS app's own single-flight job (`running` is an O(1)
@@ -2324,6 +2385,20 @@ def build_app(
     # tests inject a deterministic probe. Resolved at request time via the route closure.
     _pull_active_probe: Callable[[], bool | None] = (
         pull_active_probe if pull_active_probe is not None else (lambda: _pull_job.running)
+    )
+
+    # RATE-ROUTE-ONLY pull signal (DEC-RATE-METER-LIFECYCLE-001): kind-aware so a
+    # brute-force SWEEP on the shared single-flight job reads honest "idle" on the
+    # PULL RATE widget instead of a red "stalled" for its 2-4-day run (audit C5).
+    # _pull_active_probe / _pull_live DELIBERATELY stay sweep-INCLUSIVE — a sweep IS
+    # a heavy in-process job and the cache duty-degrade floors (#920) must still
+    # engage; "unifying" the two probes would resurrect either C5 or the #920
+    # starvation. An injected pull_active_probe is used verbatim (bool | None
+    # pass-through — the test seam bypasses the kind gate by design).
+    _rate_pull_active_probe: Callable[[], bool | None] = (
+        pull_active_probe
+        if pull_active_probe is not None
+        else (lambda: _pull_job.running_job_kind == JOB_KIND_PULL)
     )
 
     # The pipeline-phase probe (DEC-PIPELINE-PHASE-UI-HONESTY-001): the production
@@ -5815,11 +5890,17 @@ def build_app(
         # generation-keyed cache still rides `_summary_cache.generation` (zero
         # drift). Fires only on success, never on a failed sweep (see
         # BackgroundPullJob._run).
+        # job_kind=SWEEP (DEC-RATE-METER-LIFECYCLE-001): the kind-aware rate probe
+        # reads a running sweep as "no PULL active" so the site-wide PULL RATE widget
+        # stays honest dark "idle" for the sweep's 2-4-day wall time — never a red
+        # "stalled" off the (correctly) zero vendor rate. Single-flight, progress and
+        # the duty-degrade probes are unchanged (they stay sweep-inclusive).
         started = _pull_job.start(
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
             on_success=_summary_cache.mark_dirty,
+            job_kind=JOB_KIND_SWEEP,
         )
         payload = request.to_dict()
         payload["started"] = started

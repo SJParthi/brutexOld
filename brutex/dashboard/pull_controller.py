@@ -53,7 +53,8 @@ expansion.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1007,10 +1008,17 @@ class SessionRateController:
         self._factory = factory if factory is not None else _build_live_controller
         self._controller: RateController | None = None
         #: The live pull's shared transport :class:`~brutex.adapters.call_meter.CallMeter`
-        #: — the MEASURED completed-rate source (``effective_rps``) — REGISTERED by the pull
-        #: build sites once they build the client pool (DEC-RATE-WIDGET-FNO-MEASURED-001).
-        #: ``None`` until a real live pull registers one; a dry-run / metadata-before-client
-        #: tick reads ``None`` and the sampler falls back to its honest ``meter_present=False``.
+        #: — the MEASURED completed-rate source (``effective_rps``) — with an explicit
+        #: LIFECYCLE (DEC-RATE-METER-LIFECYCLE-001): REGISTERED by the pull build sites once
+        #: they build the client pool (DEC-RATE-WIDGET-FNO-MEASURED-001) and CLEARED (a) by a
+        #: dry-run's :func:`register_pull_meter` gate, (b) by the ``BackgroundPullJob``'s
+        #: job-end hook (:meth:`clear_meter`), and (c) by :func:`pull_candles`' own paired,
+        #: identity-gated ``finally`` (the direct off-job ``POST /api/v1/universe/pull``
+        #: spine compare-and-clears the EXACT handle it registered — round 4) — so ``None``
+        #: means exactly "no meter registered: the pre-registration window at pull start,
+        #: a dry-run, or after a finished pull's clear", and the sampler falls back to its
+        #: honest ``meter_present=False``. A dead pull's meter can never linger into a
+        #: later pull / dry-run (the #1593 C0 fix + its round-2 direct-route residual).
         self._meter: CallMeter | None = None
         self._lock = threading.Lock()
 
@@ -1050,7 +1058,9 @@ class SessionRateController:
         push the REAL measured rate during the metadata + F&O phases (not the admission
         average). A ``None`` *meter* (a client with no meter attribute — a defensive
         best-effort guard) is silently ignored, leaving any prior registration intact so a
-        transient factory oddity never blanks a live meter. Idempotent — re-registering the
+        transient factory oddity MID-PULL never blanks a live meter (an explicit eviction
+        goes through :meth:`clear_meter` instead — DEC-RATE-METER-LIFECYCLE-001). Idempotent
+        — re-registering the
         SAME session's pool meter is a harmless overwrite (the pool holds ONE aggregate
         meter for the whole pull). Observe-only: this stores a READ handle; it changes NO
         pacing decision.
@@ -1067,22 +1077,72 @@ class SessionRateController:
         :class:`~brutex.dashboard.rate_sampler.RatePanelSampler`: when a real live pull has
         :meth:`register_meter`\\ ed the pool's shared meter, the sampler reads its
         :meth:`~brutex.adapters.call_meter.CallMeter.snapshot` MEASURED ``effective_rps`` and
-        pushes ``meter_present=True`` with the true completed-rate; when no meter has been
-        registered (a dry-run / a phase before the client pool is built), it reads ``None``
-        and the sampler falls back to the honest ``meter_present=False`` sentinel (no
-        fabricated rate — DEC-RATE-WIDGET-FNO-HONEST-001). Thread-safe + O(1) (one lock,
-        one read).
+        pushes ``meter_present=True`` with the true completed-rate; when no meter is
+        registered — the pre-registration window at pull start, a dry-run (which explicitly
+        DEREGISTERS via :func:`register_pull_meter`), or after the job-finish
+        :meth:`clear_meter` (DEC-RATE-METER-LIFECYCLE-001) — it reads ``None`` and the
+        sampler falls back to the honest ``meter_present=False`` sentinel (no fabricated
+        rate — DEC-RATE-WIDGET-FNO-HONEST-001). Thread-safe + O(1) (one lock, one read).
         """
         with self._lock:
             return self._meter
 
+    def clear_meter(self, *, expected: CallMeter | None = None) -> None:
+        """Evict the registered :class:`CallMeter` handle — thread-safe, idempotent, O(1).
 
-def register_pull_meter(session_rate: SessionRateController | None, source: object) -> None:
+        DEC-RATE-METER-LIFECYCLE-001 — the paired DEATH of the meter handle whose BIRTH is
+        the build sites' :func:`register_pull_meter`. The LIFECYCLE LAW: the meter is
+        registered by the pull build sites at pull start and cleared (a) by
+        :func:`register_pull_meter`'s dry-run gate, (b) by the
+        ``BackgroundPullJob(on_run_end=...)`` hook in the job's identity-gated ``finally``,
+        and (c) by :func:`pull_candles`' own paired ``finally``
+        (``POST /api/v1/universe/pull`` — the spine's ONLY production caller — bypasses
+        the single-flight job, so the SPINE compare-and-clears the exact handle it
+        registered, success AND failure — round 4) — so "no in-process pull
+        running ⇒ no meter registered" is a process invariant and a dead pull's
+        never-evicted meter can never be sampled by a later dry-run / idle poll (the
+        #1593 C0 cross-pull leak fix + its round-2/round-4 direct-route residuals).
+
+        *expected* (round 4) makes the clear an identity-gated COMPARE-AND-CLEAR: with a
+        non-``None`` handle the stored handle is evicted ONLY when it ``is`` that exact
+        object, so a finished pull clears ITS OWN registration and can never evict a
+        concurrent pull's registration — neither a LIVE one it never replaced (the
+        round-4 MAJOR: the prior route-level unconditional clear evicted a live job
+        pull's meter when the direct pull 400'd BEFORE it ever registered) nor a LATER
+        one that overwrote its own. ``expected=None`` (the default) keeps the
+        unconditional clear for the two callers that hold no handle — the job-end hook
+        and the dry-run gate — each of which CAN evict a concurrent OFF-job direct live
+        pull's registered meter (the widget then degrades to the honest
+        ``meter_present=False`` admission fallback, never a fabricated rate); that wider
+        blast radius is disclosed at their own sites: :func:`register_pull_meter`'s
+        HONEST-BLAST-RADIUS paragraph (the dry-run gate) and the ``on_run_end`` param
+        doc on :class:`~brutex.dashboard.pull_jobs.BackgroundPullJob` (the job-end
+        hook).
+
+        This method is a LEAF and must stay so: one lock, one compare, one write, NO
+        callbacks. It takes ONLY the controller ``_lock`` itself; of its three callers,
+        ONLY the ``on_run_end`` job-finish hook invokes it while
+        ``BackgroundPullJob._lock`` is HELD (lock order: job ``_lock`` → controller
+        ``_lock``, never the reverse — the LEAF rule keeps that nesting safe), while the
+        :func:`register_pull_meter` dry-run gate and :func:`_pull_meter_scope`'s exit
+        hold no job lock at all. Distinct from ``register_meter(None)``,
+        whose ignore-guard stays byte-identical so a transient meterless factory MID-pull
+        never blanks a live meter. Idempotent (clearing an empty holder is a no-op).
+        Observe-only: it clears a READ handle; it changes NO pacing decision.
+        """
+        with self._lock:
+            if expected is None or self._meter is expected:
+                self._meter = None
+
+
+def register_pull_meter(
+    session_rate: SessionRateController | None, source: object, *, dry_run: bool = False
+) -> CallMeter | None:
     """Register *source*'s transport :class:`CallMeter` into *session_rate* (best-effort).
 
-    DEC-RATE-WIDGET-FNO-MEASURED-001. The ONE COMMON seam the live pull build sites call
-    right after building their client pool (CLAUDE.md §11 COMMON — no copy of the
-    meter-extraction logic). *source* is either a live
+    DEC-RATE-WIDGET-FNO-MEASURED-001 + DEC-RATE-METER-LIFECYCLE-001. The ONE COMMON seam
+    the pull build sites call right after building their client pool (CLAUDE.md §11 COMMON
+    — no copy of the meter-extraction logic). *source* is either a live
     :class:`~brutex.adapters.groww.pool.ClientPool` / :class:`~brutex.adapters.groww.client.\
 GrowwClient` (its own ``.meter``) OR a :class:`~brutex.adapters.protocol.MarketAdapter`
     whose ``.client`` carries the ``.meter`` — so the shared aggregate meter reaches the
@@ -1091,19 +1151,96 @@ GrowwClient` (its own ``.meter``) OR a :class:`~brutex.adapters.protocol.MarketA
     measured completed-rate instead of the admission average
     (DEC-RATE-WIDGET-FNO-HONEST-001 follow-up).
 
+    ``dry_run=True`` with a live *session_rate* now actively **DEREGISTERS**
+    (:meth:`SessionRateController.clear_meter`) and never registers — NOT a no-op
+    (DEC-RATE-METER-LIFECYCLE-001, correcting the false pre-#1593 "silently a NO-OP"
+    claim): the metadata / F&O dry-run ``GrowwClient``\\ s carry a REAL unpaced
+    ``CallMeter`` (``client.py`` ``default_factory=CallMeter``), so registering it would
+    fabricate a MEASURED "flowing" rate during a synthetic pull, and the clear also evicts
+    a DEAD prior pull's handle so a warm-process dry-run reads the same honest
+    ``meter_present=False`` as a cold one. HONEST BLAST RADIUS (round 4, Golden Rule #1 —
+    the prior "no live pull can be concurrent with it in-process" premise was FALSE): the
+    gate's clear is UNCONDITIONAL because it holds no handle to compare, and a live
+    OFF-job pull CAN be concurrent with a job run's ``dry_run=True`` build sites — the
+    direct ``POST /api/v1/universe/pull`` route bypasses the single-flight
+    ``BackgroundPullJob``, so a job dry-run started while such a direct REAL pull is in
+    flight EVICTS that pull's registered meter for the remainder of its run. The widget
+    then honestly DEGRADES to the ``meter_present=False`` admission fallback (never
+    fabricates a rate) — the same disclosed materiality as the job-end ``on_run_end``
+    mirror eviction — and the direct pull's own paired identity-gated clear no-ops on
+    the already-evicted handle. The REVERSE direction is closed: the direct route passes
+    ``session_rate=None`` on ITS dry-run (round 2), so an operator's off-job
+    ``?dry_run=true`` can never evict a LIVE job pull's registered meter through this
+    gate. A NEW call site should pass no holder on a dry-run unless it deliberately
+    wants this stale-handle eviction AND accepts the disclosed concurrent-live-pull
+    blast radius.
+
     Mirrors :func:`_observe_rate`'s ``getattr`` probe: it looks for a ``meter`` directly on
-    *source* (a client/pool) and, failing that, on ``source.client`` (an adapter). A
-    ``None`` *session_rate* (a dry-run / an injected-factory pull with no live holder) OR a
-    *source* carrying no meter is silently a NO-OP — the sampler then keeps its honest
-    ``meter_present=False`` fallback (never a fabricated rate). Observe-only + O(1): it reads
-    a handle and stores it; it changes NO pacing decision and can never block/crash the pull.
+    *source* (a client/pool) and, failing that, on ``source.client`` (an adapter). Only a
+    ``None`` *session_rate* (an injected-factory pull with no live holder) or a LIVE
+    *source* carrying no meter remains a silent NO-OP — the ``None``-meter arm rides
+    :meth:`SessionRateController.register_meter`'s ignore-guard, keeping any prior
+    registration intact so a transient meterless factory mid-pull never blanks a live
+    meter. Observe-only + O(1): it reads a handle and stores/clears it; it changes NO
+    pacing decision and can never block/crash the pull.
+
+    Returns
+    -------
+    CallMeter | None
+        The EXACT handle it registered, or ``None`` when nothing was registered (a
+        ``None`` holder, a dry-run, or a meterless live source) — so the one OFF-job
+        spine (:func:`pull_candles`, via :func:`_pull_meter_scope`) can pair the
+        registration with an identity-gated
+        :meth:`SessionRateController.clear_meter` ``expected=`` in its ``finally``
+        (round 4): a raise BEFORE registration clears nothing, and a concurrent pull's
+        LATER registration is never evicted by the finished pull's clear.
     """
     if session_rate is None:
-        return
-    meter = getattr(source, "meter", None)
+        return None
+    if dry_run:
+        session_rate.clear_meter()
+        return None
+    meter: CallMeter | None = getattr(source, "meter", None)
     if meter is None:
         meter = getattr(getattr(source, "client", None), "meter", None)
     session_rate.register_meter(meter)
+    return meter
+
+
+@contextmanager
+def _pull_meter_scope(
+    session_rate: SessionRateController | None, source: object, *, dry_run: bool
+) -> Generator[None, None, None]:
+    """Pair a build-site meter registration with its identity-gated clear (round 4).
+
+    The OFF-job single-symbol spine (:func:`pull_candles` — its ONLY production caller
+    is the direct ``POST /api/v1/universe/pull`` route, which bypasses the single-flight
+    ``BackgroundPullJob`` so no ``on_run_end`` ever fires for it) pairs its OWN
+    registration with its OWN clear. Enter registers via :func:`register_pull_meter` (a
+    dry-run still DEREGISTERS and registers nothing); exit — success AND raise —
+    compare-and-clears (:meth:`SessionRateController.clear_meter` ``expected=``) ONLY the
+    exact handle registered on enter, so:
+
+    * a raise BEFORE this scope (e.g. ``resolve_candle_range`` on a malformed date, which
+      never reaches the registration) clears NOTHING — a concurrent job pull's live
+      registered meter survives the direct route's 400 (the round-4 MAJOR: the prior
+      route-level unconditional ``finally`` clear evicted it, leaving the job's F&O phase
+      meterless — its measured stall verdict blinded — for the phase's remainder);
+    * a concurrent pull's LATER registration is never evicted by this pull's exit (the
+      identity compare fails and the newer handle stays);
+    * nothing registered (a dry-run / no holder / a meterless source) ⇒ nothing cleared.
+
+    Observe-only + O(1) on enter and exit; supersedes the route-level unconditional
+    ``finally: clear_meter()`` of round 2, whose "a concurrent job pull re-registers at
+    its own build sites" comment was FALSE as a mid-phase statement (registration is
+    once per phase START, never periodic).
+    """
+    registered = register_pull_meter(session_rate, source, dry_run=dry_run)
+    try:
+        yield
+    finally:
+        if session_rate is not None and registered is not None:
+            session_rate.clear_meter(expected=registered)
 
 
 #: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
@@ -1609,8 +1746,11 @@ def pull_all_spot(
     # RatePanelSampler (which holds only the session controller); registering the meter lets
     # that sampler read the REAL completed-rate too. The spot per-window observe (which reads
     # ``adapter.client.meter`` directly) is UNCHANGED — this only widens the sampler's reach.
-    # A dry-run / injected-factory pull (no live ``session_rate``) is a silent no-op.
-    register_pull_meter(session_rate, adapter)
+    # A dry-run DEREGISTERS (DEC-RATE-METER-LIFECYCLE-001): the synthetic spot adapter is
+    # genuinely meterless, but the explicit ``dry_run`` gate is the uniform COMMON contract
+    # AND the stale-meter evictor — without it a meterless dry-run would ride the
+    # ``register_meter(None)`` ignore-guard and keep a DEAD prior pull's meter readable.
+    register_pull_meter(session_rate, adapter, dry_run=dry_run)
     # Open the pull's correlation scope: ``pid`` is bound into the structlog
     # contextvars for the whole pass, so every event — this start/done summary,
     # the ingest spine's ``ingest.*`` events, AND the already-lit transport
@@ -2748,8 +2888,18 @@ def pull_candles(
     # Register the pool's shared MEASURED-rate meter for the observe-only sampler
     # (DEC-RATE-WIDGET-FNO-MEASURED-001) — see :func:`pull_all_spot`. No-op offline /
     # when no live ``session_rate`` is wired; the spot per-window observe is unchanged.
-    register_pull_meter(session_rate, adapter)
-
+    # A dry-run DEREGISTERS instead of registering (DEC-RATE-METER-LIFECYCLE-001) — the
+    # uniform COMMON contract + the stale-meter evictor (see the pull_all_spot twin).
+    # PAIRED lifecycle (round 4): this spine is the meter lifecycle's OFF-job arm — its
+    # only production caller is the direct ``POST /api/v1/universe/pull`` route, which
+    # bypasses the single-flight job (no ``on_run_end`` ever fires for it) — so the
+    # scope below clears on exit (success AND raise) EXACTLY the handle it registered
+    # (compare-and-clear): a raise BEFORE the registration (e.g. resolve_candle_range
+    # above on a malformed date) clears nothing — a concurrent job pull's live meter
+    # survives this pull's 400 — and a concurrent pull's LATER registration is never
+    # evicted (the round-4 MAJOR fix; the route-level unconditional ``finally`` clear
+    # is REMOVED).
+    #
     # Open the pull's correlation scope (DEC-DHAN-INGEST-LOGGING-001): ``pid`` is
     # bound into the structlog contextvars for the whole pass, so this start/done
     # summary, the ingest spine's ``ingest.*`` events, and the already-lit
@@ -2765,6 +2915,7 @@ def pull_candles(
     # real data, no audit). The spine appends RUN_START → per-pair → RUN_COMPLETE
     # on its controller drain thread, O(1) per event, never on a fetch worker.
     with (
+        _pull_meter_scope(session_rate, adapter, dry_run=dry_run),
         inherited_pull_id_scope(pull_id) as pid,
         open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
