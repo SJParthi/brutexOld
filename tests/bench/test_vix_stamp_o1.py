@@ -189,6 +189,17 @@ def test_converter_stamp_overhead_is_bounded_ab() -> None:
     )
     plain = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
     stamped = ResidentTradeSim(bars, bar_bits, tf_minutes=1, reference_stamper=stamper)
+    # Self-honesty (review NIT): this bench gates the RUST-batch hoisted
+    # converter's post-stamp seam. On a wheel-degraded env ResidentTradeSim
+    # WARN-falls-back to the Python walker arm — a real A/B, but not the seam
+    # this test names — so fail loudly instead of silently measuring the
+    # wrong arm (the unit wiring suite hard-asserts rust_active the same way).
+    assert plain.rust_active and stamped.rust_active, (
+        "trading_core wheel absent/degraded — ResidentTradeSim fell back to the "
+        "Python walker, so this bench would gate the fallback seam, not the "
+        "hoisted Rust-batch converter it claims; rebuild the wheel "
+        "(maturin develop --release) before judging."
+    )
 
     t_plain, n_trades = _batch_seconds(plain)
     t_stamped, n_trades_stamped = _batch_seconds(stamped)
