@@ -49,6 +49,45 @@ registered" wording swept across every remaining claim site and locked by a
 grep doc-pin test. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
 ruff/ruff-format/mypy --strict/pyright clean).
+Earlier: 2026-07-07 (DEC-SOAK-REAL-TIER-001, MIGRATION.md #1580 —
+the REAL multi-hour soak tier + the honest reclassification of the ubuntu
+nightly: `stress-nightly.yml` is a **~5-min ubuntu-24.04 REGRESSION GATE**
+whose guard step now REFUSES a soak-scale dispatch (`STRESS_EVENTS >
+200000`) — the retracted "24h soak via workflow_dispatch
+`STRESS_EVENTS=10_000_000`" #208 claim was FALSE per Golden Rule #10 (the
+60-min job timeout hard-kills a 10M run at ~1/17th done; #208 corrected in
+place, strikethrough + CORRECTED notes). The real multi-hour soak is a
+SEPARATE tier — NEW `.github/workflows/soak-selfhosted.yml` on the
+self-hosted M4-Pro (§8): weekly cron (default 6 h) + `workflow_dispatch
+(soak_minutes)` fenced 1..1200 (20 h — the self-hosted `GITHUB_TOKEN`
+expires at 24 h, so a longer run's failure watchdog could never authenticate
+to file its issue, SEC9-1), with a duration-DERIVED `timeout-minutes`
+(`soak_minutes + 30 + soak_minutes/6` — fixed install slack +
+duration-linear teardown, SOAK-R7-4) so the job can never outrun its own
+clock, driving NEW `tests/stress/test_soak_sustained.py` (the NEW `soak`
+pytest marker — excluded from the per-PR ci.yml stress step AND
+stress-nightly via `-m 'not soak'`; the previously-dead `STRESS_DURATION_S`
+knob is now actually honored) under TWO NEW pure observability modules:
+`brutex/observability/process_probe.py` (the ONE COMMON cross-platform
+RSS+fd source of truth — Linux `/proc/self/status` VmRSS primary,
+`ru_maxrss` PEAK fallback documented as an absolute-CEILING backstop for the
+macOS tier, `/dev/fd` fd fallback; `None` = honest abstain, never a
+fabricated 0; `test_memory_growth._read_rss_kib` delegates to it) +
+`brutex/observability/soak_drift.py` (`SoakDriftMonitor` — RSS-ceiling /
+fd-growth / p99-latency-drift rules modelled on the in-repo
+`pull_health.py`, routed to a NEW real-time `SweepAlerter.soak_drift`
+Telegram alert). Ledger provenance: renumbered
+#1512→#1534→#1535→#1536→#1537→#1540→#1541→#1552→#1566→#1580 across
+eight-plus main collisions (#1580 chosen clear of live-main max #1560 AND the
+in-flight PR #1264/#1244 wave holding #1558–#1567, the PR #1236 high-jump
+precedent — the validator allows gaps); ships via the replacement-PR remedy
+(the PR #1095→#1097 / #1220→#1235 precedent) on
+`claude/soak-real-tier-rebuild` after commit 2757d005's `fix(test+docs):`
+scope (`+` illegal in a conventional-commit scope, no override, history
+rewrite forbidden) made the original `claude/serene-maxwell-0irkzn` (PR
+#1231) permanently unmergeable. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no Groww scope/vocab/rate change; CI + observability + tests + docs only;
+touched modules 100% line+branch.
 Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
 the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
 fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
@@ -3095,7 +3134,7 @@ bruteX/
 │   ├── property/                   ← hypothesis + proptest (24 invariants)
 │   ├── golden/                     ← byte-equality fixtures
 │   ├── bench/                      ← O(1) ratio tests
-│   ├── stress/                     ← 24h sustained
+│   ├── stress/                     ← nightly ~5-min gate + weekly soak (#1580)
 │   ├── smoke/                      ← <30s pre-push
 │   └── fakes/                      ← test doubles
 └── .github/workflows/
