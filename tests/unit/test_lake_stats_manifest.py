@@ -686,7 +686,7 @@ class TestShardRoundtrip:
 class TestMutationWorkflowWiring:
     """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
 
-    Review round 8: MIGRATION #1543 claimed the module's mutation score
+    Review round 8: MIGRATION #1561 claimed the module's mutation score
     "rides the standard weekly Mutation workflow" while NO
     ``--paths-to-mutate`` in ``.github/workflows/mutation.yml`` named it —
     an unwired gate presented as a deferred one (Golden Rule #10). The

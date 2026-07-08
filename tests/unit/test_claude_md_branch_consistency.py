@@ -88,7 +88,7 @@ class TestStrictTierClaimFreshness:
     The rule's parenthetical claimed the ``BRUTEX_M4PRO_STRICT=1`` tier is
     "DORMANT until the operator registers the runner" — refuted by the very
     workflow it cites (``bench-m4pro.yml`` header: RUNNER IS LIVE,
-    2026-07-07) and by MIGRATION.md #1543's CALIBRATION record of a
+    2026-07-07) and by MIGRATION.md #1561's CALIBRATION record of a
     strict-tier execution (actions run 28888100079). It also enumerated only
     the cache-tier 3× allowance, omitting the calibrated metadata-sweep 3×
     allowance (``METADATA_SWEEP_STRICT_CEILING``) the same run produced.
@@ -119,7 +119,7 @@ class TestHeaderRoundNarrationRetired:
     """The compressed ``_Last updated:`` header must not narrate per-round history.
 
     Endgame round 2: the header's "review round 1 (...) then round 2 (...)"
-    narration froze while the §1 blurb + MIGRATION.md #1543 moved on to
+    narration froze while the §1 blurb + MIGRATION.md #1561 moved on to
     rounds 3-8 — a within-file freshness drift baked into the header's shape.
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.

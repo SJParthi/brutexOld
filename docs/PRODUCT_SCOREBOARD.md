@@ -131,8 +131,8 @@ Each row reads left-to-right: **What it does** (plain English) → **Why you car
 
 | What it does | Why you care | Proof |
 |---|---|---|
-| Self-renewing login (6 AM fix) — the broker's access token resets daily at 06:00; BruteX **re-mints it automatically** mid-download — thread-safe, exactly once even under a stampede | **You sleep, it keeps working.** No manual token rotation at dawn, ever | #909 |
-| Visible self-heal in the log — each automatic renewal prints a `groww.token.reauth` line | You can *see* it healed itself — proof, not a promise | #909 |
+| Self-renewing login (6 AM fix) — the broker's access token resets daily at 06:00; BruteX **RE-READS the Lambda-minted shared token** mid-download and adopts it — the Lambda mints, BruteX never does — thread-safe, exactly once even under a stampede | **You sleep, it keeps working.** No manual token rotation at dawn, ever | #909/#1072 |
+| Visible self-heal in the log — each automatic renewal prints a `groww.token.reauth` then a `groww.token.reread` line | You can *see* it healed itself — proof, not a promise | #909/#1072 |
 | Can't freeze on a bad renewal — even if the renewal call hangs on a half-dead network socket, a wall-clock deadline turns it into a normal retry | A flaky network at 6 AM can never lock up your pull | #910 |
 
 > Why this matters most: this is the difference between *"start a download and babysit it"* and
