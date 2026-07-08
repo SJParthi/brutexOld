@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1543 —
+_Last updated: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1557 —
 the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
 one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
 winning form STRING — the winner's ROLE applied to the key's own
@@ -76,6 +76,111 @@ a decisive operator-run probe lands its transcript; the map itself needs no
 probe (production pulls self-learn from ordinary fallback wins). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched
 modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
+the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
+trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
+executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
+order lot_size → cost_regime → no_contract → no_data → stale_bar[opt-in] and
+the two pure date gates BEFORE any I/O; registry-calendar front-month
+resolution via the SHARED `select_near_month` — never a last-Thursday formula,
+lake-discovery fallback; exact-minute lake source with keep-FIRST dedup +
+corrupt-partition quarantine-skip; R4 disk-verified preflight naming missing
+months, no Phase-1 file edited; R45 independent Decimal-pipeline reference sim
++ per-run differential; R13 annotation-never-reranks projection + R42
+content-hash-stamped atomic sidecar) + `brutex/costs/futures_costs.py`
+(VERIFIED-rates-only: Groww min(₹20, 0.03%) futures brokerage + futures STT
+0.02%@2024-10-01/0.05%@2026-04-01 encoded; futures ETC/NSE-IPFT/stamp + the
+pre-2024-10-01 futures STT are explicit REFUSAL windows — the
+DEC-ETC-REGIME-HISTORY-001 precedent, no runtime escape hatch; INDEX futures
+COST-FREE per DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001, net == gross). R15
+OPTIMISTIC=PRECISE fill only (open ± one tick adverse; volume-0 printed bars
+FILL by default; gap-opens fill at the REAL open; the worst leg is DEFERRED,
+structurally absent); STOCK winners gracefully DEFERRED naming the future
+scope decree; a missing minute bar is a counted NO_DATA — never a nearest-bar
+substitute. HONEST: not yet wired into cmd_sweep_all/the dashboard (the seams
+are exposed; binding is the orchestrator's later step); R47 margin-ROI not
+built (no in-repo SPAN history). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+options path untouched (R12); 197 tests, all 8 new modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
+MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
+(1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
+ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
+production-unreachable `calculator.py::_apply_slippage` short SELL leg re-pinned
+`entry_open + tick` → `entry_open − tick` (byte-exact test 10_005 → 9_995; BUY-only
+DEC-EXEC-008 + intraday DEC-RISK-011 locks UNTOUCHED, `executor.py` not edited), the
+§4.2 expiry state machine honestly labelled a fail-loud STUB in-spec, and the two
+§4.2 pseudo-code drifts REGISTERED as §16 items 18/19 — never silently decided;
+(2) the broker (Groww) token/credential docs refreshed to the AWS-only / fail-fast /
+mid-run-re-read truth (#1065/#1072/#1092) — the stale `BRUTEX_TOKEN_BROKER_READONLY`
+instructions + REMOVED local-mint-fallback prose replaced across the two runbooks, the
+deploy guide, the minter runbook, `TOKEN_BROKER_CONTRACT.md` (TickVault claims left
+"per its own repo"), ADR-0013/0014 Status-line superseded-in-part notes, and the
+scoreboard's re-mint cell → re-read (`groww.token.reread`); DOCS-only, auth code CITED
+never edited, rate caps untouched; (3) ADR-0004 GPU gate reconciled — Status PROPOSED
+→ ACCEPTED (CPU-first arm EXECUTED + MEASURED #411/#413/#417), the never-run §6
+tri-platform benchmark RETIRED as scheduled work + RETAINED as a dormant FAIL-CLOSED
+precondition, mechanically pinned by NEW `tests/unit/test_gpu_gate_drift_pin.py`
+(no MLX/CuPy/`BRUTEX_GPU_OFFLOAD` in `brutex/`+`rust/`; #1492-G3 pattern);
+(4) the dormant cloud auto-fix snippet (claude_automation.md §3) RETIRED outright —
+DELETE, never wired, a #1180-class privileged-trigger hazard — and the fork-PR redteam
+sweep EXTENDED to comment-family triggers (`test_no_issue_comment_privileged_workflows`,
+GITHUB_TOKEN carve-out; revival needs a fresh DEC + the ledgered precondition checklist);
+(5) the Phase-1 sign-off checklist closed by SUPERSESSION — all 11 boxes ticked with
+per-item citations, the "10 boxes" count defect fixed, the env-var trailer superseded by
+#1065; NO operator ack pre-claimed (requested on the PR). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the ONE code delta lives inside the
+DEC-EXEC-008-stubbed short branch, `calculator.py` stays 100% line+branch.)
+Earlier: 2026-07-07 (DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001,
+MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541) — the 5-item engine cleanup pack (reapplied onto
+current main after the original 2026-07-06 lineage was wiped), ONE change set:
+(1) the combo `\x1f` reject-only guard is MIRRORED into both previously-
+unguarded run-identity joins (`refinement_run_id` + `_walk_forward_run_hash`)
+via ONE COMMON `strategies.combo.reject_unit_separator`, plus `allow_nan=False`
+at both engine canonical-JSON sites (+ the stage1a schedule-hash third mirror)
+— byte-frozen run-identity goldens (with an independent pip-blake3
+payload-byte oracle proving `fno_math.blake3_hash ≡ blake3`) landed FIRST and
+pass unchanged; LOW/defence-in-depth, NOT a live bug. (2) the option-dedup
+bloom-before-exact-confirm ordering VERIFIED already correct — ZERO executable
+change (AST-proven); no-phantom + bloom-negative-short-circuit pins added at
+both public probe entries (`add_if_new`/`unique_option_bars`) — the PRODUCTION
+consumer of the verified ordering is the engine sweep's
+`ComboDedup(OptionDedupIndex)` dedup tier (`sweep_launch.py`/`cli.py`); the
+original sink-path pin covered the since-deleted `OptionBarSink` orchestration
+(removed on main by DEC-INGEST-AUDIT-WIRING-001 #1500 — dropped in the rebase),
+with the mark-after-durable-write LAW recorded as history in #1547. (3) the
+hand-synced Python `VwapState` +
+`MarketStructureState`/`Trend` twins DELETED — the `rust/trading-core`
+pyclasses are the SINGLE SOURCE (additive `last_swing_high/low` getters
+delegating to the EXISTING core accessors, core untouched — TickVault-safe;
+crate 0.3.0→0.3.1, so the LIVE `_indicator_version()` string moves with the
+bump — NO math change, new runs re-key via `indicator_version` exactly as the
+§2-Rule-4 formula intends; the frozen twin fixture + SHA never regenerated,
+replayed Rust-only; P-06 preserved at strength; `MarketStructureSignal`
+stays). (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic
+`MaskWord` core (the existing Rust suite passed UNMODIFIED — the
+frozen-behaviour gate; native `Vec<u128>` FFI per the recorded pyo3-0.29-abi3
+probe transcript) — >64-bit masks/bar_bits are now Rust-served, parity-pinned
+vs the `simulate_trades` oracle, with lazy wide-kernel promotion (reasons
+re-scoped `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+`wide_kernel_promoted`); HONEST: future-proofing, production-UNREACHABLE at
+today's 60-bit vocabulary — every currently-legal u64 input byte-identical,
+the frozen u64 golden corpus untouched, u64 bench non-regression measured.
+(5) the deprecated `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver`
+trio DELETED with its 8 test surfaces + golden fixture + dead ci.yml gates
+(grep-proven zero production consumers; `types.py` kept whole —
+`InstrumentMeta` live — and `errors.py` semantics untouched, its five
+subclasses honestly ledgered as orphaned; landed as ONE atomic commit — the
+wiped first lineage's two-commit accident is recorded as history in #1550) —
+the pack's ONLY behaviour-visible item (import surface). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; run identity bit-identical for all currently-legal
+inputs (golden-proven); no scope/vocab/rate change; touched modules 100%
+line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+pre-change baseline; cargo suites green (fno-math 565, trading-core 162);
+cargo-mutants evidence partial under the ledgered #1511 Rust timeout —
+stated, not papered over).
 Earlier: 2026-07-07 (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 —
 the test-apparatus debt pack: nine long-ledgered apparatus gaps closed as ONE
 change set, each landed fix-the-violation or measured-green: (a) a repo-wide
@@ -881,7 +986,7 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
-  MIGRATION.md #1543** — the durable `&`-form winner map: `schema_meta` rows
+  MIGRATION.md #1557** — the durable `&`-form winner map: `schema_meta` rows
   (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
   ROLE applied to the key's own `underlying_symbol_forms` tuple, so the metadata
   and candle phases share ONE value space; `underlying_symbol_forms` moved into
@@ -906,6 +1011,94 @@ hostile-review pass._
   transcript. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
   touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean,
   pyright at the pre-change baseline).
+  Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
+  the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
+  twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
+  futures contract (nearest UNEXPIRED monthly as of each trade's ENTRY date, resolved from the REAL `registry.duckdb`
+  calendar via the SHARED `movers_futures.select_near_month` — NEVER a computed last-Thursday formula; graceful
+  lake-partition-discovery fallback; expiry-day trades stay on the EXPIRING contract, post-expiry tail → M+1, M/M+1
+  co-trading = deterministic earliest-expiry-≥-entry, never liquidity-picked). NEW `brutex/futures/` (executor ·
+  contract_resolver · lake_source · preflight · reference_sim · leaderboard) + `brutex/costs/futures_costs.py`. R15
+  fills are OPTIMISTIC = PRECISE ONLY — minute-bar OPEN ± one tick ADVERSE per side (the LONG arm golden-pinned
+  byte-equal to `calculator._apply_slippage(...,"long")`; the SHORT arm computed adverse-both-sides, NOT inheriting
+  the documented `# CHECK SIGN` ambiguity), gap-opens fill at the REAL open (never an SL/TP fantasy), volume-0
+  PRINTED bars are REAL + TRADABLE (STALE_BAR strictly opt-in), a missing entry/exit minute is a counted NO_DATA
+  (never a nearest-bar substitute), the pessimistic/worst leg is DEFERRED — structurally absent. PINNED reject order
+  lot_size → cost_regime → no_contract → no_data → stale_bar with both pure DATE gates before any registry/lake I/O
+  (never-called-seam pinned); count-dict tally projected 1:1 onto `n_rejected_*` (no catch-all). COSTS are
+  VERIFIED-rates-only (the DEC-ETC-REGIME-HISTORY-001 refusal precedent, NO runtime escape hatch): Groww futures
+  brokerage min(₹20, 0.03%×turnover) (PLAN_FINALIZATION §8.1 row 2) + futures STT 0.02% eff. 2024-10-01 / 0.05% eff.
+  2026-04-01 (TAX_HANDLING §8.1 + DEC-COST-003) are encoded; EVERY futures-ETC window + NSE futures IPFT + futures
+  stamp + pre-2024-10-01 futures STT ship as rate-less REFUSAL rows (figures live in source TEXT only — the §14
+  proposal block is not a verification) ⇒ a cost-bearing stock future counts COST_REGIME_UNVERIFIED (exercised via
+  the SYNTHETIC cited-regime/lot test fixture — no NATURAL input reaches the gate today: index futures are cost-free
+  and skip it, a natural stock future trips LOT_SIZE_UNKNOWN first; the designed forward path, naturally reachable
+  only once a cost-bearing stock-futures scope decree + cited RegimeRows land); INDEX futures
+  are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 — net == gross; the ±tick is R15 fill realism, not a statutory
+  cost). Lots via the ONE date-keyed derivative-lot history (2020-dated / stock signals ⇒ counted LOT_SIZE_UNKNOWN,
+  never invented). STOCK winners → ExecutionKind.STOCK_SPOT_DEFERRED with an honest note NAMING the future scope
+  decree (R11); routing lives ABOVE the instrument-agnostic executor. R22 MAE/MFE from the contract's OWN minute
+  path; R31 VIX passthrough (missing = honest None, counted); R45 differential vs an independent naive
+  Decimal-pipeline reference (AST-pinned to share only the primitive readers; run_id-seeded deterministic sample;
+  mismatch ⇒ SUSPECT + loud); R42 content-hash-stamped atomic sidecar (an UNKEYED sha256 integrity checksum —
+  corrupted/torn fails its stamp, rebuilt byte-identical; NOT tamper-evidence: no secret key, a rewriter could
+  restamp); R4 preflight disk-verifies each trade month's front-month partition(s) across the roll seam and
+  refuses naming exact months — no Phase-1 file edited (the pure helper is exposed for the shim). ROLL-9
+  suffix-independence property-gated (fills+MAE/MFE bit-identical under absent/mutated/extreme post-exit suffixes);
+  R13/R30 rank-independence property-gated (annotation additive-only under ONE `futures_exec` key). O(1) honest
+  (R29): per-trade resolve+fill flat vs signal AND contract count (bench-pinned at the `_o1_tiers` ceiling); first
+  loads O(contracts)/O(bars-in-contract) + MAE/MFE O(bars-in-trade) STATED, never hidden. HONEST: NOT yet wired into
+  `cmd_sweep_all`/the dashboard (deliberate no-existing-file-edit boundary — the orchestrator binds later); R47
+  margin-ROI not built (no in-repo date-keyed SPAN history — nothing rendered, nothing invented). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; options path untouched (R12); F&O lake REFERENCE_ONLY; no scope/vocab/rate change; 197
+  tests (unit/integration/property/golden/bench/chaos), all 8 new modules 100.00% line+branch (760/194);
+  ruff/ruff-format clean; `mypy --strict` clean; pyright at the 38-error pre-change baseline, 0 new).
+  Earlier: `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
+  DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
+  pack, DOCS-first: the Track-2 short-side slippage contradiction resolved to the §8 ADVERSE rule
+  (spec + the production-unreachable `_apply_slippage` short SELL sign + byte-exact test re-pinned;
+  "# CHECK SIGN" deleted; §4.2 expiry machine labelled a fail-loud STUB in-spec, its two pseudo-code
+  drifts registered as §16 items 18/19; BUY-only DEC-EXEC-008 + DEC-RISK-011 locks untouched); the
+  broker token/credential docs (runbooks + deploy guide + minter + `TOKEN_BROKER_CONTRACT.md` +
+  ADR-0013/0014 status notes + scoreboard cell) refreshed to the AWS-only / fail-fast /
+  mid-run-re-read truth (#1065/#1072/#1092 — docs-only, rate caps untouched); ADR-0004 GPU gate
+  reconciled (PROPOSED→ACCEPTED, §6 benchmark retired-as-scheduled + retained as a dormant
+  fail-closed precondition, NEW drift pin `tests/unit/test_gpu_gate_drift_pin.py`); the dormant
+  cloud auto-fix snippet RETIRED (DELETE) + the redteam sweep extended to comment-family triggers;
+  the Phase-1 sign-off checklist closed by supersession (11 boxes, honest no-backdate clause).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched costs module
+  stays 100% line+branch).
+  Earlier: `claude/zen-meitner-8780fo` (**DEC-RUN-IDENTITY-GUARD-PARITY-001 +
+  DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 + DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 +
+  DEC-TRADE-SIM-U128-KERNEL-001 + DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550 (renumbered from #1541–#1545 after PR #1234 took #1541)** — the
+  5-item engine cleanup pack (reapplied onto current main after the original lineage was wiped):
+  (1) the combo `\x1f` reject-only guard mirrored into BOTH
+  previously-unguarded run-identity joins via ONE COMMON `strategies.combo.reject_unit_separator`
+  (+ `allow_nan=False` at the engine canonical-JSON sites incl. the stage1a third mirror) —
+  byte-frozen run-identity goldens landed FIRST and pass unchanged (LOW hardening, no live bug);
+  (2) the option-dedup bloom-before-exact-confirm ordering VERIFIED already correct — pins +
+  docs only, ZERO executable change (AST-proven); the PRODUCTION consumer is the engine sweep's
+  `ComboDedup(OptionDedupIndex)` dedup tier (the `OptionBarSink` pin was dropped in the rebase —
+  main's #1500 deleted that dead orchestration; the mark-after-durable-write LAW recorded as
+  history in #1547);
+  (3) the hand-synced Python `VwapState` + `MarketStructureState`/`Trend` twins DELETED — the
+  `rust/trading-core` pyclasses are the single source (additive `last_swing_high/low` getters,
+  core untouched — TickVault-safe; crate 0.3.0→0.3.1 moves the live `_indicator_version()`
+  string with NO math change; twin fixture + SHA never regenerated; P-06 preserved);
+  (4) NEW `ResidentSweepSimU128` fno-math kernel via a width-generic `MaskWord` core (existing
+  Rust suite passed UNMODIFIED; native `Vec<u128>` FFI per the recorded pyo3 probe; lazy
+  wide-kernel promotion; `bar_bits_beyond_u128`/`mask_beyond_u128`/`wheel_missing_u128` +
+  `wide_kernel_promoted` observability) — HONEST: future-proofing, production-unreachable at the
+  60-bit vocabulary, u64 golden corpus byte-untouched; (5) the deprecated
+  `IndianCostModel`/`ExecutionSimulator`/`BacktestDriver` trio DELETED in full (8 test surfaces +
+  golden fixture + dead ci.yml gates; `types.py` whole + `errors.py` semantics untouched, five
+  subclasses honestly orphaned; ONE atomic commit — the wiped lineage's two-commit shape recorded
+  as history in #1550) — the
+  pack's ONLY behaviour-visible item. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity
+  bit-identical for all currently-legal inputs (golden-proven); no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean, pyright at the
+  pre-change baseline; cargo-mutants partial under the ledgered #1511 timeout).
   Earlier: `claude/ecstatic-cannon-o3zbbe` (**DEC-TEST-APPARATUS-DEBTS-001,
   MIGRATION.md #1541** — the test-apparatus debt pack: repo-wide doctest gate (measured
   55-example floor; the 3 broken tf_resampler examples fixed — docstring-only, the sole
@@ -1357,8 +1550,10 @@ hostile-review pass._
   non-member → trusted=false, allowlist/OWNER/MEMBER/COLLABORATOR → trusted=true). HONEST
   (Golden Rule #10): server-side branch protection (require PR + `CI OK (aggregate gate)`
   + up-to-date branch + restricted merge; Actions → "Require approval for all outside
-  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1176,
-  NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
+  collaborators") is an OWNER GitHub-settings task — exact click-path in ledger #1180's
+  own honest-limits follow-up (the prior "#1176" citation here was DRIFTED — #1176 is
+  DEC-OPTIONS-EXEC-COST-AUDIT-R2-001, unrelated; reconciled 2026-07-06 under
+  DEC-CLOUD-AUTOFIX-RETIRE-001, MIGRATION.md #1555), NOT claimed done. ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), no scope/vocab/rate change.
   Prior merged: **DEC-LAKE-HEAL-001, MIGRATION.md #1175** — the
   lake gains ONE bounded invariant scanner (`brutex/data/lake_invariants.py`: intra-file dup ·
   UTC-month/foreign-row · #911 legacy-key drift via the COMMON `brutex/data/lake_keys.py` move)
@@ -2686,14 +2881,17 @@ hostile-review pass._
 - **No look-ahead** — at bar N, the engine may only access bars 0..N.
   Enforced TODAY by TWO complementary runtime guards: (1) the
   feed-boundary guard (`ReplayFeed.ensure_no_lookahead`, raises
-  `LookAheadError`; wired into the strategy runner + execution driver,
-  integration-tested) — a *timestamp*-based check on emitted signals; and
+  `LookAheadError`; wired into the strategy runner — the deprecated
+  execution driver, the historical second wiring site, was DELETED with
+  the simulator/driver trio per DEC-EXECUTION-TRIO-DELETE-001
+  (MIGRATION.md #1550) — integration-tested) — a *timestamp*-based check
+  on emitted signals; and
   (2) the named **Property P-06 (instrumented bar accessor)** — now LIVE
   per **DEC-LOOKAHEAD-BARRIER-001** (`brutex/feed/lookahead.py`
   `LookAheadBarrier`): an *index*-based accessor that raises `LookAheadError`
   the moment an `access(i)` reaches index `i > N`. Guard (1) is the real
   strategy-look-ahead defence — it catches a future *signal*. Guard (2), as
-  wired into the runner/driver event loop (a default `record=False`
+  wired into the runner event loop (a default `record=False`
   O(1)-memory barrier on every sweep eval), asserts the **advance/access
   cursor invariant**: both sites `advance_to(step)` then `guard(step, …)` at
   the SAME `step`, so it fires on a feed/barrier desync or a wiring regression
@@ -2709,7 +2907,7 @@ hostile-review pass._
   an O(1)-total claim). Promoted from the prior `pytest.skip` ROADMAP stub (was
   corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
   DEC-DOC-DRIFT-RECONCILE-001). The brute-force **SWEEP path** (which the two
-  runner/driver guards above never covered) now has its own three-layer
+  runner-wired guards above never covered) now has its own three-layer
   defence (DEC-SWEEP-LOOKAHEAD-GUARD-001, MIGRATION.md #1181): structural
   causality (audit-verified — Stage-1A updates prior-bar history AFTER
   evaluation; the trade sim enters at the next bar's open) + PERMANENT
@@ -2772,7 +2970,10 @@ bruteX/
 │   ├── dashboard/                  ← FastAPI UI
 │   ├── data/                       ← Parquet + DuckDB lake (generic)
 │   ├── engine/                     ← brute-force combo/mask sweep engine
-│   ├── execution/                  ← signal-only simulator (Track 1)
+│   ├── execution/                  ← shared execution types + typed errors
+│   │                                 for the lean instrument store (the
+│   │                                 deprecated costs/simulator/driver trio
+│   │                                 was DELETED — DEC-EXECUTION-TRIO-DELETE-001)
 │   ├── feed/                       ← replay + resampler
 │   ├── indicators/                 ← evaluate-time indicators (pivots/fib/EMA)
 │   ├── math/                       ← thin facade to Rust hot kernel

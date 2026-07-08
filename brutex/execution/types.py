@@ -1,4 +1,4 @@
-"""Pure dataclasses for the execution simulator.
+"""Pure dataclasses for the execution surface.
 
 Intentionally heavy-dep-free \u2014 no ``polars`` / ``pyarrow`` /
 ``lmdb`` imports \u2014 so this module participates in the unit-test
@@ -7,13 +7,19 @@ extras. Every non-trivial validation on construction uses plain
 Python, and ``decimal.Decimal`` carries all prices + money amounts
 so byte-for-byte reproducibility (``NFR-DET-001``) is preserved.
 
+The consuming ``IndianCostModel`` / ``ExecutionSimulator`` /
+``BacktestDriver`` trio was deleted (DEC-EXECUTION-TRIO-DELETE-001);
+these dataclasses stay as the shared, dependency-light execution
+vocabulary \u2014 the live production consumer is the lean instrument
+store (:mod:`brutex.data.instrument_store`), which hands out
+``{symbol: InstrumentMeta}`` maps on the hot path.
+
 ## Key types
 
-* :class:`InstrumentMeta` \u2014 per-symbol trading metadata the
-  simulator needs at order time: segment, instrument type, lot
-  size, freeze quantity.
+* :class:`InstrumentMeta` \u2014 per-symbol trading metadata needed at
+  order time: segment, instrument type, lot size, freeze quantity.
 * :class:`FillCosts` \u2014 itemised Indian transaction costs applied
-  to one fill (see :class:`~brutex.execution.costs.IndianCostModel`).
+  to one fill.
 * :class:`Fill` \u2014 one completed order: side, quantity,
   requested/fill price, timestamp, and the :class:`FillCosts`
   charged on it.
@@ -21,8 +27,8 @@ so byte-for-byte reproducibility (``NFR-DET-001``) is preserved.
   symbol, with realized + unrealized P&L tracking.
 * :class:`EquityPoint` \u2014 one sample of the account's equity curve
   at a given timestamp.
-* :class:`BacktestResult` \u2014 the frozen summary returned by the
-  :class:`~brutex.execution.driver.BacktestDriver`.
+* :class:`BacktestResult` \u2014 the frozen summary of one complete
+  backtest run.
 """
 
 from __future__ import annotations
@@ -49,7 +55,7 @@ _ZERO: Final[Decimal] = Decimal("0")
 
 @dataclass(frozen=True, slots=True)
 class InstrumentMeta:
-    """Per-symbol trading metadata used by the execution simulator.
+    """Per-symbol trading metadata for order sizing and validation.
 
     Attributes
     ----------
@@ -77,9 +83,9 @@ class InstrumentMeta:
     def __post_init__(self) -> None:
         # Indices (IDX) are reference instruments — never directly tradable
         # (brutex/universe.py) — so the vendor master legitimately carries no
-        # lot_size for them (parsed as 0; see DEC-INDEX-PARSE-FIX-001). The
-        # execution simulator never sizes an order against an index, so a
-        # zero lot is tolerated for IDX only; every tradable type stays strict.
+        # lot_size for them (parsed as 0; see DEC-INDEX-PARSE-FIX-001). No
+        # order is ever sized against an index, so a zero lot is tolerated
+        # for IDX only; every tradable type stays strict.
         if self.instrument_type == InstrumentType.IDX:
             if self.lot_size < 0:
                 raise ValueError(
@@ -104,9 +110,10 @@ class FillCosts:
     """Itemised Indian transaction costs on a single fill.
 
     Every field is a :class:`~decimal.Decimal` so round-trip
-    equality holds bit-for-bit (``NFR-DET-001``). Rates and
-    derivations are documented on
-    :class:`~brutex.execution.costs.IndianCostModel`.
+    equality holds bit-for-bit (``NFR-DET-001``). The authoritative
+    rate derivations live in :func:`brutex.costs.calculator.compute_trade_cost`
+    (DEC-COST-001; the stale in-package ``IndianCostModel`` was
+    deleted per DEC-EXECUTION-TRIO-DELETE-001).
 
     Attributes
     ----------
@@ -203,9 +210,8 @@ class Fill:
         """Return the signed change to cash this fill induces.
 
         A BUY deducts ``notional + costs`` from cash; a SELL adds
-        ``notional`` and deducts ``costs``. Used by
-        :class:`~brutex.execution.simulator.ExecutionSimulator` to
-        update its running cash balance.
+        ``notional`` and deducts ``costs``. Consumers apply it to a
+        running cash balance.
         """
         if self.side == Side.BUY:
             return -(self.notional + self.costs.total)
@@ -222,7 +228,7 @@ class Position:
     """Aggregated exposure for one symbol, with P&L tracking.
 
     ``qty > 0`` means long, ``qty < 0`` means short, ``qty == 0``
-    means flat. The simulator updates :attr:`avg_price` on entry
+    means flat. Consumers update :attr:`avg_price` on entry
     and additions; :attr:`realized_pnl` on closes and reversals;
     :attr:`unrealized_pnl` on every mark-to-market against the
     latest bar close.
@@ -240,8 +246,8 @@ class Position:
         Cumulative realized P&L across every close / reversal of
         this position.
     unrealized_pnl
-        Most recent mark-to-market value. Updated by
-        :meth:`ExecutionSimulator.mark_to_market` on every bar.
+        Most recent mark-to-market value. Updated on every
+        mark-to-market pass.
     last_mark_price
         Most recent price used to compute :attr:`unrealized_pnl`.
         Stored so ``BacktestResult`` can reconstruct the final
@@ -309,12 +315,12 @@ class EquityPoint:
 
 @dataclass(frozen=True, slots=True)
 class BacktestResult:
-    """Frozen summary of a :class:`~brutex.execution.driver.BacktestDriver` run.
+    """Frozen summary of one complete backtest run.
 
     Attributes
     ----------
     fills
-        Every :class:`Fill` the simulator recorded, in emission
+        Every :class:`Fill` recorded by the run, in emission
         order. Ties at the same timestamp break deterministically
         by signal-emission order from the strategy.
     equity_curve
