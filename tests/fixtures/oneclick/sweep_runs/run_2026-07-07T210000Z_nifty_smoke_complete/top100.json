@@ -51,9 +51,7 @@
     },
     "family_id": "fam-0001",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0001",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "b669d4844ed1db5832870df8e2d857f7605f174842de44dd1d55531eeb86dbc4"
   },
   {
     "rank": 2,
@@ -104,9 +102,7 @@
     },
     "family_id": "fam-0002",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0002",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "af1a5c246c72e6f4fcfe82ff4a349bf9d579b586b3568994ceeaa85f94a69abd"
   },
   {
     "rank": 3,
@@ -156,9 +152,7 @@
     },
     "family_id": "fam-0003",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0003",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "0dc0de836792d7abfe277f0188973f00aabb469e31d9469616c1dd9aa1bfe1e0"
   },
   {
     "rank": 4,
@@ -208,9 +202,7 @@
     },
     "family_id": "fam-0004",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0004",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "f4e11a83908fcbc101af0c401cb85b7f428ab10d0c43bdd1434570d5e2a39027"
   },
   {
     "rank": 5,
@@ -262,9 +254,7 @@
     },
     "family_id": "fam-0005",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0005",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "e21cc08f2c04d5801e9282d25ee5644911a92d3af4914cf95c6d8fe9a4c5f94d"
   },
   {
     "rank": 6,
@@ -314,9 +304,7 @@
     },
     "family_id": "fam-0006",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0006",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "2ae5195fa1a2c05c0c6255ceb830dbc03e973ebc5b2093e33dab976f5147c3ef"
   },
   {
     "rank": 7,
@@ -370,9 +358,7 @@
     },
     "family_id": "fam-0007",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0007",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "16cb0c2cbae827df13896983fc15ed59fc0856c5b239ef4c5b30cc7479ef98b3"
   },
   {
     "rank": 8,
@@ -424,9 +410,7 @@
     },
     "family_id": "fam-0008",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0008",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "c080e015c0c6145f494ef887ed5a48f24792f094766be4f54e5a6d14d0fc9a8b"
   },
   {
     "rank": 9,
@@ -476,9 +460,7 @@
     },
     "family_id": "fam-0009",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0009",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "e82b648d1ff05295c15554c5966f052e738a5055f75de7f215d4f25bf4bde8cb"
   },
   {
     "rank": 10,
@@ -532,9 +514,7 @@
     },
     "family_id": "fam-0010",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0010",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "6ce9a9375c665c7f4c6e2e320a7951cb617575b177074f061401f642e9e00108"
   },
   {
     "rank": 11,
@@ -585,9 +565,7 @@
     },
     "family_id": "fam-0011",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0011",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "efa4ea3faf18f358cdbec12243837655f572db038959dcdff43057076f645434"
   },
   {
     "rank": 12,
@@ -638,9 +616,7 @@
     },
     "family_id": "fam-0012",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0012",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "632688677a98d786f765ebb027480f2fb7751a80274ad818e2f709bb08f05650"
   },
   {
     "rank": 13,
@@ -692,9 +668,7 @@
     },
     "family_id": "fam-0013",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0013",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "f73d5b361a00845632a60a0c67e838debe57df99a4ca270eb5217686c32e91e5"
   },
   {
     "rank": 14,
@@ -748,9 +722,7 @@
     },
     "family_id": "fam-0014",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0014",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "cc07d83d1adca7e09ed325a101caadf0009760f191166ebf1485c37a8b1ee08a"
   },
   {
     "rank": 15,
@@ -800,9 +772,7 @@
     },
     "family_id": "fam-0015",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0015",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "0da39cfbf1285247165cabb6ab697db9da35f61fc7f46ed5404c0492fdca54c6"
   },
   {
     "rank": 16,
@@ -855,9 +825,7 @@
     },
     "family_id": "fam-0016",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0016",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "db417ca7052f8f8cfd714087aac223257b69637f94ab7494a054722c07e547d8"
   },
   {
     "rank": 17,
@@ -907,9 +875,7 @@
     },
     "family_id": "fam-0017",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0017",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "2e186abbda3000c13171b7e9b34fcec553450a4cb3dda127a28043ba83de6b4e"
   },
   {
     "rank": 18,
@@ -959,9 +925,7 @@
     },
     "family_id": "fam-0018",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0018",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "367d3b8afe3b76e09ed1a1d58cd34ec3e7ccd6e9105298f81c6cbf88c1872110"
   },
   {
     "rank": 19,
@@ -1013,9 +977,7 @@
     },
     "family_id": "fam-0019",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0019",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "069d24208b8b5db2f10441a8ed782098d082aa9b0b3dc91d40a94291038a8ecf"
   },
   {
     "rank": 20,
@@ -1068,9 +1030,7 @@
     },
     "family_id": "fam-0020",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0020",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "0c0f539b20d6c0f53f5300a0780b14ffd373a652228d7d3318ab4784b9d698ea"
   },
   {
     "rank": 21,
@@ -1124,9 +1084,7 @@
     },
     "family_id": "fam-0021",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0021",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "8094898520356f69d0587def3ab63bc1110314f27f3e61696a020dcc758a4a99"
   },
   {
     "rank": 22,
@@ -1176,9 +1134,7 @@
     },
     "family_id": "fam-0022",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0022",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "797d2981dae360601d787412e8f4760531304415380181482c6f9abe2321f6f6"
   },
   {
     "rank": 23,
@@ -1233,9 +1189,7 @@
     },
     "family_id": "fam-0007",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0023",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "4fe05134a5ad11da02cddd7751e645f3c3c4c32e96db52b4d3e2cee8225adae4"
   },
   {
     "rank": 24,
@@ -1289,9 +1243,7 @@
     },
     "family_id": "fam-0024",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0024",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "e47c4546ef84d88414d1d42311b950104b00ce87631969e7ffa7c880c962290e"
   },
   {
     "rank": 25,
@@ -1345,9 +1297,7 @@
     },
     "family_id": "fam-0025",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0025",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "82ff170b31499016271425814448d4fbb438f9e336da09b72e5a798f65f12091"
   },
   {
     "rank": 26,
@@ -1398,9 +1348,7 @@
     },
     "family_id": "fam-0026",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0026",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "53e830fbe63fa5e125e182798cf1f8021c89d91c565a5d0325923566cb199d6e"
   },
   {
     "rank": 27,
@@ -1450,9 +1398,7 @@
     },
     "family_id": "fam-0027",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0027",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "b7827bb24c5f7c28acfe2825bc230848daf403d0bba68e02c0aedac141b6095a"
   },
   {
     "rank": 28,
@@ -1504,9 +1450,7 @@
     },
     "family_id": "fam-0028",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0028",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "7fa22fb11a2f9fb73d76fedf1aab09db87c73f0264a36f27b5c280f74fda0699"
   },
   {
     "rank": 29,
@@ -1560,9 +1504,7 @@
     },
     "family_id": "fam-0029",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0029",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "330aa6ecfb28d5b6959ea4efdbf16b2741059bff42a0ca982673e4a81f58671f"
   },
   {
     "rank": 30,
@@ -1614,9 +1556,7 @@
     },
     "family_id": "fam-0030",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0030",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "6d97ef6f953e488c32b5e2e1dee11a26ab82c7c2192468cc90e31c5b897abd4f"
   },
   {
     "rank": 31,
@@ -1667,9 +1607,7 @@
     },
     "family_id": "fam-0031",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0031",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "57e3b6b6b6f0c07323a7cf46a5d41fdbebf14324f0e4d7a31b99e79914012a95"
   },
   {
     "rank": 32,
@@ -1720,9 +1658,7 @@
     },
     "family_id": "fam-0032",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0032",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "8639de74599aef8ae29e2e469a249d49ea0c7314029420eca9d8119a2828cbe8"
   },
   {
     "rank": 33,
@@ -1775,9 +1711,7 @@
     },
     "family_id": "fam-0033",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0033",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "066dfd6e2c0e438241eeca269971b6135d4af709444337f5a5135ec7ebac56a3"
   },
   {
     "rank": 34,
@@ -1828,9 +1762,7 @@
     },
     "family_id": "fam-0034",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0034",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "87f7466465b76f37be9726a380b176fd58ad6de1764c39266ca4fbc1e9032249"
   },
   {
     "rank": 35,
@@ -1882,9 +1814,7 @@
     },
     "family_id": "fam-0035",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0035",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "02cf4ccb8991f280f6d5fc74581ab1f813d34f143646bf7d0b5520d7d1bbfa84"
   },
   {
     "rank": 36,
@@ -1937,9 +1867,7 @@
     },
     "family_id": "fam-0036",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0036",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "fc129d2e2cea909acb974c5770bf82fe1b9a0a1201701eb5c2da19aa6fabc41a"
   },
   {
     "rank": 37,
@@ -1989,9 +1917,7 @@
     },
     "family_id": "fam-0037",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0037",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "a354eb652257ea7637d7e35920147e71e66bbd0f2caef62271b54639d6c0a308"
   },
   {
     "rank": 38,
@@ -2042,9 +1968,7 @@
     },
     "family_id": "fam-0038",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0038",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "fa43e188b30ffdb03998747f5dd4780c6fcde947a22e2d73bff71f895a247f42"
   },
   {
     "rank": 39,
@@ -2095,9 +2019,7 @@
     },
     "family_id": "fam-0039",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0039",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "9977435f3ba4281a34994cfcca46170e2fa3ab1a80ea0d4a3dbd706f42911d89"
   },
   {
     "rank": 40,
@@ -2147,9 +2069,7 @@
     },
     "family_id": "fam-0040",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0040",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "cec0d2f33f9cd5a9e1efea494fac46111264d58f0da6ed92d862761f60f07af1"
   },
   {
     "rank": 41,
@@ -2201,9 +2121,7 @@
     },
     "family_id": "fam-0041",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0041",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "228f1d4fe7da6989bf6c705148697464c03b2b0859e98ad2b410b6a9f047e560"
   },
   {
     "rank": 42,
@@ -2253,9 +2171,7 @@
     },
     "family_id": "fam-0042",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0042",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "63fd337bbc40658abcfaf3b9cc300e2fdfd1bc4a34c85e122574b73df22b0e44"
   },
   {
     "rank": 43,
@@ -2305,9 +2221,7 @@
     },
     "family_id": "fam-0043",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0043",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "acc2ce60072f258e6285099030cc1d1e231b93807e11924c2e6cdcc6dfbe49ba"
   },
   {
     "rank": 44,
@@ -2357,9 +2271,7 @@
     },
     "family_id": "fam-0044",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0044",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "6120b98f09c1302f42821f275d6fd5b4ad505fa9a1b6f66fe92c8f6a875266ee"
   },
   {
     "rank": 45,
@@ -2410,9 +2322,7 @@
     },
     "family_id": "fam-0045",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0045",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "911b4b503579672834c95364b3b22a5c5f222bde8b51ea5dc0e64d38f189cb06"
   },
   {
     "rank": 46,
@@ -2462,9 +2372,7 @@
     },
     "family_id": "fam-0046",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0046",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "e34b39e1ed477eb275786c98938573320d35b95660110a87b47a8d636fb48437"
   },
   {
     "rank": 47,
@@ -2516,9 +2424,7 @@
     },
     "family_id": "fam-0047",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0047",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "6a396f0a0ee5fd723305fe8861dfe9226416fbda67ab45c53d221f7eb565d9dd"
   },
   {
     "rank": 48,
@@ -2570,9 +2476,7 @@
     },
     "family_id": "fam-0048",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0048",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "549e4a22fe45d3f2feae796deae39819f51b846e18b3ff86f8867321ac56b507"
   },
   {
     "rank": 49,
@@ -2622,9 +2526,7 @@
     },
     "family_id": "fam-0049",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0049",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "e6cf591b56df123580c6705b303f58e0c937c2766fbf640f299bcb421a3b86d9"
   },
   {
     "rank": 50,
@@ -2675,9 +2577,7 @@
     },
     "family_id": "fam-0050",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0050",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "870c0d5f9096d2bee1f5e303ba2e604235573598f9df6f835d9f7f6c29dd1cbf"
   },
   {
     "rank": 51,
@@ -2730,9 +2630,7 @@
     },
     "family_id": "fam-0051",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0051",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "7d0d453f45eec839cb99bf903c19929c0bb2d14d52f729d1958d54b152f2f936"
   },
   {
     "rank": 52,
@@ -2786,9 +2684,7 @@
     },
     "family_id": "fam-0052",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0052",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "9e0ffb1252857538cef586e4f9bed8f894571a09be30a4ddc36822040250e0c2"
   },
   {
     "rank": 53,
@@ -2841,9 +2737,7 @@
     },
     "family_id": "fam-0053",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0053",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "0dfd0ce977e0832a5dffe3303c190ca44d0d0eb08dc9f211f5bc02a48b80e46b"
   },
   {
     "rank": 54,
@@ -2894,9 +2788,7 @@
     },
     "family_id": "fam-0054",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0054",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "19c5f1523828f03463a3ef59f869a07cbf7c31a64ca06ce1df6f4d9fd50b5bdd"
   },
   {
     "rank": 55,
@@ -2948,9 +2840,7 @@
     },
     "family_id": "fam-0055",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0055",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "77329820e8aa6f2802685d42a84803e5e6e2bd8664e093ccb7db4d18e3c176c6"
   },
   {
     "rank": 56,
@@ -3000,9 +2890,7 @@
     },
     "family_id": "fam-0056",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0056",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "dbee02dfe65e3531f9e8bdfbdde6f53fb42019fc90bffecae114c583e5c02669"
   },
   {
     "rank": 57,
@@ -3055,9 +2943,7 @@
     },
     "family_id": "fam-0057",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0057",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "a29fb62a10c1117809f7747fb663e77e3cf7872ab4c9309bf3836d6ac33dbb6a"
   },
   {
     "rank": 58,
@@ -3110,9 +2996,7 @@
     },
     "family_id": "fam-0058",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0058",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "7c8e373ca61f44437a9dadab3c3106671711adb8e75caac898f0c73cbb08d0ed"
   },
   {
     "rank": 59,
@@ -3165,9 +3049,7 @@
     },
     "family_id": "fam-0059",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0059",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "b7dc13317d7072b84769177f890cdbc87d7c6e25ebcc20cba1f6256e7c146a8f"
   },
   {
     "rank": 60,
@@ -3221,9 +3103,7 @@
     },
     "family_id": "fam-0060",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0060",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "38e00e70a6541fdc1f6a2351746d025823af65f2c62b513362b4cdb948b76940"
   },
   {
     "rank": 61,
@@ -3274,9 +3154,7 @@
     },
     "family_id": "fam-0061",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0061",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "149b9c9e4210c695c509b6d2e70f06da08f69ad5481e81794f1e604e39a49d62"
   },
   {
     "rank": 62,
@@ -3328,9 +3206,7 @@
     },
     "family_id": "fam-0062",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0062",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "72bf01157dbbf54e08b35d5ff3bc93f9bdfb3e6360b41cdb006e0bf7e9a30c2f"
   },
   {
     "rank": 63,
@@ -3381,9 +3257,7 @@
     },
     "family_id": "fam-0063",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0063",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "ac51324481f84611ef56bdee575d80f0cf6b7c4c439e35c34414306ea1115e05"
   },
   {
     "rank": 64,
@@ -3437,9 +3311,7 @@
     },
     "family_id": "fam-0064",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0064",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "d4381ddba20601cd525e05e64a6269c8f65bba628a2a59b6f5243d1bf15ec057"
   },
   {
     "rank": 65,
@@ -3491,9 +3363,7 @@
     },
     "family_id": "fam-0065",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0065",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "2408e9899dda8792aba8150fe1b5df277651833e417f32ebab76b4b3075038f0"
   },
   {
     "rank": 66,
@@ -3544,9 +3414,7 @@
     },
     "family_id": "fam-0066",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0066",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "ce08a729e0d278c1d46603a9a969f9781e4c919815e16861beae119304efaed6"
   },
   {
     "rank": 67,
@@ -3596,9 +3464,7 @@
     },
     "family_id": "fam-0067",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0067",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "0218215571497dd8652804c1319d7589902e3ad16e35ca8573118c5cf5128934"
   },
   {
     "rank": 68,
@@ -3648,9 +3514,7 @@
     },
     "family_id": "fam-0068",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0068",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "760d88deac024b32cd05b33498bb9b8be3b5747cd3b8f2795dc40653317b288d"
   },
   {
     "rank": 69,
@@ -3700,9 +3564,7 @@
     },
     "family_id": "fam-0069",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0069",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "bc45e23bd52ff415b2de793dcd27637e4c4ff4aa39bd8dab47e93e0ab5762c2e"
   },
   {
     "rank": 70,
@@ -3755,9 +3617,7 @@
     },
     "family_id": "fam-0070",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0070",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "59f2eb9ec7263d490945fc268f2dc85b5a7e51bd306547e6b77ae46af6108e64"
   },
   {
     "rank": 71,
@@ -3810,9 +3670,7 @@
     },
     "family_id": "fam-0071",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0071",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "7adb6f7279c22991d9ba2dd1bca3e3ccb2cf7b9bf1178a42c9a052ee4e59018a"
   },
   {
     "rank": 72,
@@ -3862,9 +3720,7 @@
     },
     "family_id": "fam-0072",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0072",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "21bd4cbe2235044b79d36d2035e5346dff8dd7f92b9e29cabd65a4b5b624fa4a"
   },
   {
     "rank": 73,
@@ -3915,9 +3771,7 @@
     },
     "family_id": "fam-0073",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0073",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "b3e933d6463746e6b12675a681fd108cd484e9ab26ca9689beb337012a8013f2"
   },
   {
     "rank": 74,
@@ -3970,9 +3824,7 @@
     },
     "family_id": "fam-0074",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0074",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "223af55172b8c683541f4658d6e771252715d706b32702f6feabb0558ab2b00b"
   },
   {
     "rank": 75,
@@ -4023,9 +3875,7 @@
     },
     "family_id": "fam-0075",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0075",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "ed4d8ff74c3301c4efeb3e1d42e1b54e3da15eb02e7e58ef899012e3919c194d"
   },
   {
     "rank": 76,
@@ -4079,9 +3929,7 @@
     },
     "family_id": "fam-0076",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0076",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "1643b3982463d3dd4fedee223e18b644f35d9645bbe7bc9478ee5638ca6758ac"
   },
   {
     "rank": 77,
@@ -4131,9 +3979,7 @@
     },
     "family_id": "fam-0077",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0077",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "f08cc3b0108e124478f61c7ccecade9c3bca9f274002aeec9474536db95d80a6"
   },
   {
     "rank": 78,
@@ -4183,9 +4029,7 @@
     },
     "family_id": "fam-0078",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0078",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "b925903bf5e226f3cb6c67229650337926e604f42a60573a10eb63b4a99c253f"
   },
   {
     "rank": 79,
@@ -4236,9 +4080,7 @@
     },
     "family_id": "fam-0079",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0079",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "6535156b071afe056b2c2e0a01ef7a5c8d2ad573cbb44d67fb97d899e85b7d9d"
   },
   {
     "rank": 80,
@@ -4288,9 +4130,7 @@
     },
     "family_id": "fam-0080",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0080",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "b81853e01002afe56c9d1c3544b91266b27af42631ab524204bd5c1768e768f8"
   },
   {
     "rank": 81,
@@ -4343,9 +4183,7 @@
     },
     "family_id": "fam-0081",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0081",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "766973a27bc2e4412d680c260766a581ef49cec45fa28bbae70d9e28b71f4d2e"
   },
   {
     "rank": 82,
@@ -4395,9 +4233,7 @@
     },
     "family_id": "fam-0082",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0082",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "94e46826d4ffe966ea38c9903b2c9ee360d2ef7fe39d1d60ecaeeb59a0f5bf60"
   },
   {
     "rank": 83,
@@ -4448,9 +4284,7 @@
     },
     "family_id": "fam-0083",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0083",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "7401cc7a73068e05d066536a90d665107667b3100d71ec8458dd807f8b22ac82"
   },
   {
     "rank": 84,
@@ -4501,9 +4335,7 @@
     },
     "family_id": "fam-0084",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0084",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "5b546d39087a75d8104d83a2f24dafa69142efb824b28b2eb132bfcd82c0e96b"
   },
   {
     "rank": 85,
@@ -4557,9 +4389,7 @@
     },
     "family_id": "fam-0085",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0085",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "688aedae9463d7ab3483b099792cc73afd71aa44f05ec51e1ccae84a622b39f9"
   },
   {
     "rank": 86,
@@ -4613,9 +4443,7 @@
     },
     "family_id": "fam-0086",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0086",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "780515f34e46ae4f1b1a01b3842fc9f909335d03d899e7a0965f3ef141427cfc"
   },
   {
     "rank": 87,
@@ -4666,9 +4494,7 @@
     },
     "family_id": "fam-0087",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0087",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "56cfa82728cf58dfd734bd3599e8289ada184e0fecb22045cbfc6de445dd0753"
   },
   {
     "rank": 88,
@@ -4719,9 +4545,7 @@
     },
     "family_id": "fam-0088",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0088",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "019a7fd2a1fc94862d79a5d2b404fdea85005cd67f60a5e79960c35f1cf61c6a"
   },
   {
     "rank": 89,
@@ -4772,9 +4596,7 @@
     },
     "family_id": "fam-0089",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0089",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "c2b5da787f877840ef3f07c8f6e7283a89a019c98abe5c737f52d026d092dc93"
   },
   {
     "rank": 90,
@@ -4828,9 +4650,7 @@
     },
     "family_id": "fam-0090",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0090",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "492062c6c495dd37798ad18fcbdcfa8958a34d10839e295f0af690fd7a378643"
   },
   {
     "rank": 91,
@@ -4882,9 +4702,7 @@
     },
     "family_id": "fam-0091",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0091",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "bdef23aeb50f6440c3f392835a2a8c06581f7ff79db715935b8b0b01b4be3fa1"
   },
   {
     "rank": 92,
@@ -4937,9 +4755,7 @@
     },
     "family_id": "fam-0092",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0092",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "5d8d8ec5c3127e0ef2ad65625f10f798fd8636c4816155b2640abe7a8728e0fa"
   },
   {
     "rank": 93,
@@ -4993,9 +4809,7 @@
     },
     "family_id": "fam-0093",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0093",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "134faf53712b6270c8283f6917543d44dbe563329c68ca21279aa970bb60e949"
   },
   {
     "rank": 94,
@@ -5046,9 +4860,7 @@
     },
     "family_id": "fam-0094",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0094",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "3f484ed57d8899de26bfef1d5d6da4a8f4f176b97a4ab3a99bba231b959df7a0"
   },
   {
     "rank": 95,
@@ -5101,9 +4913,7 @@
     },
     "family_id": "fam-0095",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0095",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "7d422099fa2cdacc0e2154bf08f038a527ff9db418c65feb9e153e3933a76451"
   },
   {
     "rank": 96,
@@ -5153,9 +4963,7 @@
     },
     "family_id": "fam-0096",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0096",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "a4605484f5d46edefe39b648b2bfc33eee59cd05d887ad21f9f8abe93ff2618a"
   },
   {
     "rank": 97,
@@ -5206,9 +5014,7 @@
     },
     "family_id": "fam-0097",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0097",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "475168d1128ad90f591ec62a04300dbad47f61e7dd69d19a024e06418bff2e2e"
   },
   {
     "rank": 98,
@@ -5259,9 +5065,7 @@
     },
     "family_id": "fam-0098",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0098",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "4b8e6f405741826c0b3a50d0b0297a7576f11b0d79c2bfbf6f0c6a3b5228c140"
   },
   {
     "rank": 99,
@@ -5312,9 +5116,7 @@
     },
     "family_id": "fam-0099",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0099",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "105f8bee5ab0d44ede0f54bf38e7cb9b5dea6eb9039cf3c84e3d7586f83826e1"
   },
   {
     "rank": 100,
@@ -5364,8 +5166,6 @@
     },
     "family_id": "fam-0100",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-complete-0100",
-    "sweep_run_id": "run_2026-07-07T210000Z_nifty_smoke_complete"
+    "run_id": "8a8a2bd287ef18d4072f34fa4be694f62c8906573f2ea85488382efd0acb8f83"
   }
 ]

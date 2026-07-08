@@ -330,7 +330,6 @@ def test_top100_ok_decorated_rows_against_completed_run(fixture_client: TestClie
         "rank",
         "mask_hex",
         "instrument",
-        "mode",
         "combo_id",
         "sweep_run_id",
         "join_key_inferred",
@@ -338,6 +337,9 @@ def test_top100_ok_decorated_rows_against_completed_run(fixture_client: TestClie
         "pro_sentence",
     ):
         assert key in row
+    # `mode` was the superseded gap-register #17 sketch's per-entry key —
+    # the real P3 shipped shape does not have it (Ruling 17 status).
+    assert "mode" not in row
 
 
 @pytest.mark.parametrize("run_id", _TRAVERSAL_RUN_IDS)

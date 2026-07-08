@@ -63,8 +63,24 @@ def test_bx_oneclick_exposes_the_shared_api() -> None:
         "EXIT_REASON_LABELS",
         "virtualList",
         "safeJson",
+        "maeGranularityMarker",
     ):
         assert f"{name}:" in js, f"BXOneclick.{name} missing from the exported API"
+
+
+def test_bx_oneclick_mae_granularity_marker_flags_non_1m_and_unknown_rows() -> None:
+    """TradeRowWire additive keys (sweep-parallel-integration-contracts.md
+    §1): `mae`/`mfe` are the verified 1-minute-path values ONLY when
+    `mae_granularity === "1m"` AND `path_1m_status === "ok"`; every other
+    case (explicit "tf" fallback, an unrecognized/partial status, or a row
+    predating these keys entirely) must render the SAME warning marker —
+    never silently presented as a verified 1-minute value (R22)."""
+    client = TestClient(build_app(DashboardState(), instrument_store=None))
+    js = client.get("/static/bx-oneclick.js").text
+    assert "function maeGranularityMarker(" in js
+    assert 'granularity === "1m" && status === "ok"' in js
+    assert "warn: true" in js
+    assert "warn: false" in js
 
 
 def test_bx_oneclick_mode_defaults_to_beginner_and_persists() -> None:

@@ -999,6 +999,12 @@ class TestReadTop100:
         assert row["join_key_inferred"] is False
         assert row["instrument"] == "NIFTY"
         assert row["sweep_run_id"] == RUN_SMOKE
+        # the real per-combo join key (shipped entry-level `run_id`,
+        # sweep-parallel-integration-contracts.md §3 Ruling 17 status) must
+        # be read verbatim into `combo_id` — never a synthesized "legacy-"
+        # placeholder when the real key is present on disk.
+        assert not row["combo_id"].startswith("legacy-")
+        assert len(row["combo_id"]) == 64  # blake3-hex-shaped store key
 
     def test_legacy_rows_backfilled_with_join_key_inferred(self, fixture_env: Path) -> None:
         result = oa.read_top100(fixture_env, RUN_LEGACY)
@@ -1006,7 +1012,7 @@ class TestReadTop100:
         for row in result["rows"]:
             assert row["join_key_inferred"] is True
             assert row["instrument"] == "—"
-            assert row["mode"] == "—"
+            assert "mode" not in row  # not a real per-entry key (Ruling 17 status)
             assert row["combo_id"].startswith("legacy-")
             assert row["sweep_run_id"] == RUN_LEGACY
 
@@ -1041,7 +1047,10 @@ class TestReadTop100:
 
         The reader must transparently unwrap ``entries`` rather than
         rejecting the whole artifact as ``artifact_error`` just because the
-        JSON root is an object instead of a bare array.
+        JSON root is an object instead of a bare array. Entry fields use the
+        REAL shipped shape (Ruling 17 status): the additive ``instrument``
+        key, and the entry-level ``run_id`` field as the per-combo join key
+        — NOT the superseded ``mode``/``combo_id``/``sweep_run_id`` sketch.
         """
         monkeypatch.setenv(oa.FIXTURE_ROOT_ENV, str(tmp_path))
         run_dir = tmp_path / "run_top100_object_root"
@@ -1067,9 +1076,7 @@ class TestReadTop100:
                             "vix_band": {},
                             "family_id": None,
                             "instrument": "NIFTY",
-                            "mode": "options",
-                            "combo_id": "combo-1",
-                            "sweep_run_id": "run_top100_object_root",
+                            "run_id": "combo-1-blake3-hex",
                         }
                     ],
                 }
@@ -1081,6 +1088,11 @@ class TestReadTop100:
         assert len(result["rows"]) == 1
         assert result["rows"][0]["rank"] == 1
         assert result["rows"][0]["join_key_inferred"] is False
+        # the real per-combo join key (entry-level `run_id`) must be read
+        # and surfaced, never discarded in favor of a synthesized guess.
+        assert result["rows"][0]["combo_id"] == "combo-1-blake3-hex"
+        # the run-LEVEL id is the resolved run_id (how the file was found).
+        assert result["rows"][0]["sweep_run_id"] == "run_top100_object_root"
 
     def test_object_root_missing_entries_key_is_artifact_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

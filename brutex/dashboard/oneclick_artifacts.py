@@ -808,16 +808,24 @@ def _family_members_map(raw_rows: list[dict[str, Any]]) -> dict[Any, list[dict[s
 
 
 def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
-    """Decorate one raw top100.json row with join-key back-fill + decode_combo()."""
+    """Decorate one raw top100.json row with join-key back-fill + decode_combo().
+
+    Join-key law (sweep-parallel-integration-contracts.md §3, "Ruling 17
+    status" — the correction over the earlier gap-register #17 sketch this
+    function was originally written against): the real per-combo join key
+    the P3 SHIPPED ``top100.json`` entries carry is the entry-level
+    ``run_id`` field — "the per-combo blake3 store key ... serving as the
+    combo join id into ResultsStore + trade_spans". ``mode`` is explicitly
+    NOT a per-entry key in the shipped shape, and the run-LEVEL id was never
+    renamed ``sweep_run_id`` (the object root's key is plain ``run_id``,
+    passed in here as *run_id* — always genuinely known, since it is how the
+    caller located this file, so it is never treated as inferred).
+    """
     join_key_inferred = False
 
     instrument = raw.get("instrument")
     if instrument is None:
         instrument = "—"
-        join_key_inferred = True
-    mode = raw.get("mode")
-    if mode is None:
-        mode = "—"
         join_key_inferred = True
 
     mask_hex = raw.get("mask_hex")
@@ -829,8 +837,8 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         # Honest-absence discipline (module docstring): "long" is a
         # concrete, potentially opposite-of-real trading direction, so a
         # fabricated default here MUST flip the same inferred signal the
-        # instrument/mode/combo_id/sweep_run_id back-fill uses below —
-        # never render a guess as though it were the real value.
+        # instrument/combo_id back-fill uses below — never render a guess
+        # as though it were the real value.
         direction = "long"
         join_key_inferred = True
     tf = raw.get("tf")
@@ -838,14 +846,18 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         tf = ""
         join_key_inferred = True
 
-    combo_id = raw.get("combo_id")
+    # The real per-combo join key (see docstring): the shipped entry's own
+    # `run_id`, surfaced under the `combo_id` key P4's templates/JS already
+    # consume (results.html / v29.html / strategy.html) — only synthesize
+    # the legacy placeholder when the real key is genuinely absent (a row
+    # written before P3 shipped, or a hand-built legacy fixture).
+    combo_id = raw.get("run_id")
     if combo_id is None:
         combo_id = f"legacy-{mask_hex}-{direction}-{tf}"
         join_key_inferred = True
-    sweep_run_id = raw.get("sweep_run_id")
-    if sweep_run_id is None:
-        sweep_run_id = run_id
-        join_key_inferred = True
+    # The run-LEVEL id is how the caller resolved this top100.json in the
+    # first place (see read_top100) — always known, never inferred.
+    sweep_run_id = run_id
 
     try:
         mask_int = int(str(mask_hex), 16)
@@ -865,7 +877,6 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         "vix_band": raw.get("vix_band", {}),
         "family_id": raw.get("family_id"),
         "instrument": instrument,
-        "mode": mode,
         "combo_id": combo_id,
         "sweep_run_id": sweep_run_id,
         "join_key_inferred": join_key_inferred,
@@ -883,8 +894,10 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
     :func:`dedupe_family_representatives` first, then each surviving row is
     decorated by calling :func:`~brutex.dashboard.combo_decoder.decode_combo`
     (reused verbatim) plus honest join-key back-fill for legacy rows lacking
-    ``instrument``/``mode``/``combo_id``/``sweep_run_id`` (gap-register
-    finding #17) — such rows carry ``join_key_inferred=True``.
+    ``instrument`` or the real per-combo join key (the shipped entry-level
+    ``run_id`` field, surfaced as ``combo_id`` — sweep-parallel-integration-
+    contracts.md §3, "Ruling 17 status") — such rows carry
+    ``join_key_inferred=True``.
 
     The on-disk root accepts EITHER a bare JSON array of rows (legacy/fixture
     shape) OR the P3 SHIPPED object root (sweep-parallel-integration-
@@ -976,7 +989,16 @@ def read_trades_page(
     honestly returns ``state="awaiting_artifact"`` rather than guessing a
     path P3 has not shipped. ``lots``/``costs_paisa`` pass through as-is
     (``None`` stays ``None`` — gap-register finding #18, NULL-by-design until
-    P5). ``combo_explanation`` is populated by calling
+    P5). Every row also passes through the three P3 SHIPPED additive
+    ``TradeRowWire`` keys verbatim — ``trade_seq``, ``path_1m_status``,
+    ``mae_granularity`` (``"1m"``/``"tf"`` — sweep-parallel-integration-
+    contracts.md §1 — says which granularity ``mae``/``mfe`` actually carry
+    so a consumer never guesses); this function does not need to interpret
+    them itself, but MUST NOT drop them — :mod:`strategy.html`/
+    :mod:`results.html` read ``row.mae_granularity``/``row.path_1m_status``
+    to mark a TF-level (R22 non-compliant) MAE/MFE value in the UI instead of
+    rendering it identically to a verified 1-minute value.
+    ``combo_explanation`` is populated by calling
     :func:`~brutex.dashboard.combo_decoder.decode_combo` once when
     *mask_hex*/*direction*/*tf* are all supplied. *limit* is capped
     server-side at 500.

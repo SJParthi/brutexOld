@@ -206,6 +206,10 @@
   .trades-table td { padding:7px 10px; border-top:1px solid var(--border); white-space:nowrap; }
   .trades-table td.num { text-align:right; font-variant-numeric:tabular-nums; }
   .trades-table td.pos { color:var(--green); } .trades-table td.neg { color:var(--red); }
+  /* R22: mae/mfe not backed by the verified 1-minute path (TF fallback or
+     an older row predating the mae_granularity/path_1m_status keys) —
+     never look identical to a genuine 1-minute value. */
+  .trades-table td.mae-tf-fallback { color:var(--yellow); }
   .trades-foot { display:flex; align-items:center; gap:10px; margin-top:8px; font-size:12px; color:var(--muted); }
   .trades-foot button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-sm);
     background:var(--surface-2); color:var(--text); padding:4px 10px; font:inherit; font-size:12px; }
@@ -356,8 +360,10 @@
         <div class="trades-scroll"><table class="trades-table" id="scTradesTable">
           <thead><tr>
             <th>Entry</th><th>Exit</th><th>Why exited</th><th class="num">P&amp;L</th>
-            <th class="num">Costs</th><th class="num">Lots</th><th class="num">MAE</th>
-            <th class="num">MFE</th><th class="num">VIX in</th><th class="num">VIX out</th>
+            <th class="num">Costs</th><th class="num">Lots</th>
+            <th class="num" title="Measured from the 1-minute price path when available; ⚠ marks a coarser timeframe-level fallback (R22).">MAE</th>
+            <th class="num" title="Measured from the 1-minute price path when available; ⚠ marks a coarser timeframe-level fallback (R22).">MFE</th>
+            <th class="num">VIX in</th><th class="num">VIX out</th>
           </tr></thead>
           <tbody id="scTradesBody"></tbody>
         </table></div>
@@ -1042,7 +1048,19 @@ if (document.readyState === "loading") {
     lotsTd.textContent = t.lots === null || t.lots === undefined ? "—" : fmtInt(t.lots);
     tr.appendChild(lotsTd);
 
-    [t.mae, t.mfe, t.vix_entry, t.vix_exit].forEach(function (v) {
+    // mae/mfe carry the additive `mae_granularity`/`path_1m_status` keys
+    // (sweep-parallel-integration-contracts.md §1) — surface a visible
+    // warning + tooltip whenever they are NOT a verified 1-minute value
+    // instead of rendering a TF-level fallback identically (R22).
+    var maeMarker = BX.maeGranularityMarker(t);
+    [t.mae, t.mfe].forEach(function (v) {
+      var td = document.createElement("td");
+      td.className = "num" + (maeMarker.warn ? " mae-tf-fallback" : "");
+      td.textContent = fmtNumVal(v, 2) + maeMarker.suffix;
+      td.title = maeMarker.title;
+      tr.appendChild(td);
+    });
+    [t.vix_entry, t.vix_exit].forEach(function (v) {
       var td = document.createElement("td");
       td.className = "num";
       td.textContent = fmtNumVal(v, 2);

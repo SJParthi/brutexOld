@@ -47,9 +47,7 @@
     },
     "family_id": "fam-0001",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0001",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "72ce29b8342d19d99cfc35a92c2c627fd1968ff2b0710e6eee30e5d6abf38683"
   },
   {
     "rank": 2,
@@ -100,9 +98,7 @@
     },
     "family_id": "fam-0002",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0002",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "50bd86efa8ac010ed253d2fae29566f17fd72e910cd879416dad83c6d06b942e"
   },
   {
     "rank": 3,
@@ -156,9 +152,7 @@
     },
     "family_id": "fam-0003",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0003",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "b436022278c2f36f86fb8fcf2dc943802f9916d8b6d2c34cf8aabf73f0df1588"
   },
   {
     "rank": 4,
@@ -208,9 +202,7 @@
     },
     "family_id": "fam-0004",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0004",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "e4327f7c146246beab057b1e82501eadf2dd364f09209385110a934565115122"
   },
   {
     "rank": 5,
@@ -263,9 +255,7 @@
     },
     "family_id": "fam-0005",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0005",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "ba4deb577f7a1886325f9afeeed6ad950b8b1a66553cc2571520406bd81eccde"
   },
   {
     "rank": 6,
@@ -319,9 +309,7 @@
     },
     "family_id": "fam-0006",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0006",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "df85c49378e22d7be1cc17bbaa4d84c5aacca1cbdcf5ad1e41af31cafe415023"
   },
   {
     "rank": 7,
@@ -372,9 +360,7 @@
     },
     "family_id": "fam-0007",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0007",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "22b9a83c1393037ab0b4fb5792b096d799508a60fe2c6117d656fc239cd4ba67"
   },
   {
     "rank": 8,
@@ -428,9 +414,7 @@
     },
     "family_id": "fam-0008",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0008",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "09e94e6d6c4fb59e27f768bd6d3ec45efcb2f27d71fd3e4b0ed2cbdf23737036"
   },
   {
     "rank": 9,
@@ -481,9 +465,7 @@
     },
     "family_id": "fam-0009",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0009",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "fb5040932013778a3a9bebcb9feb77b893ce05658df28082156991ca3bf824d1"
   },
   {
     "rank": 10,
@@ -533,9 +515,7 @@
     },
     "family_id": "fam-0010",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0010",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "567125ad4e0cc36e155ce43138e9cc691f48876adcc84e24b8a1120b255210cc"
   },
   {
     "rank": 11,
@@ -585,9 +565,7 @@
     },
     "family_id": "fam-0011",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0011",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "eb91350ee77fe30945dd42e81dd82d5f28bccd783552360041c74150c4e59975"
   },
   {
     "rank": 12,
@@ -641,9 +619,7 @@
     },
     "family_id": "fam-0012",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0012",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "0bc5c23cd35132ba7abfe542bd86af1b0d671efd60ee28c0e725aa2378acf89d"
   },
   {
     "rank": 13,
@@ -697,9 +673,7 @@
     },
     "family_id": "fam-0013",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0013",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "ee39e5ade8a8c999753fb7ff6b972ec93d3b49a3ab0eefd0b1dff4f9b94fad46"
   },
   {
     "rank": 14,
@@ -750,9 +724,7 @@
     },
     "family_id": "fam-0014",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0014",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "93a0d543a4792459026cdf85087a8f9e2d6194db508f5fd4d5cd57f03af2d1de"
   },
   {
     "rank": 15,
@@ -805,9 +777,7 @@
     },
     "family_id": "fam-0015",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0015",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "b7b9634489208654044ea461e3249cf5ab0e418302c865e36dbf938c227e5a7a"
   },
   {
     "rank": 16,
@@ -858,9 +828,7 @@
     },
     "family_id": "fam-0016",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0016",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "69373c91cf8827ae9e847a176a1c677679ab55a4c4dfca788133869ace793ddd"
   },
   {
     "rank": 17,
@@ -914,9 +882,7 @@
     },
     "family_id": "fam-0017",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0017",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "1204d9ce421cbb393cf72bb622e062c785a9ea698c4cb109e1efbe2388596216"
   },
   {
     "rank": 18,
@@ -969,9 +935,7 @@
     },
     "family_id": "fam-0018",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0018",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "7e0a88d2ab4177a096fd219dd1a599e514233d7cf4ae02f57c32f9befb7de0c8"
   },
   {
     "rank": 19,
@@ -1025,9 +989,7 @@
     },
     "family_id": "fam-0019",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0019",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "7e9a4a34a77f527b43d5aaf097acc1afba1c833de952af4e0ec97d1a076166df"
   },
   {
     "rank": 20,
@@ -1081,9 +1043,7 @@
     },
     "family_id": "fam-0020",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0020",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "f6bb9746efef145e4d4b43d9d2e583e2ab562a4483230de177cc165adae32dec"
   },
   {
     "rank": 21,
@@ -1134,9 +1094,7 @@
     },
     "family_id": "fam-0021",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0021",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "a3a4726a13ca0f321ff7e3cfb483c6578be54a99533c70bf3fdfa5c2109a4822"
   },
   {
     "rank": 22,
@@ -1187,9 +1145,7 @@
     },
     "family_id": "fam-0022",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0022",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "1166076b5c271f897649a7dac5135da44dce1a5330c4a16355135372546c3e7d"
   },
   {
     "rank": 23,
@@ -1241,9 +1197,7 @@
     },
     "family_id": "fam-0023",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0023",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "aa459efd351d729259760ddd37f96d52b3072dbd186597396d191cd0a512a1d7"
   },
   {
     "rank": 24,
@@ -1296,9 +1250,7 @@
     },
     "family_id": "fam-0024",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0024",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "0ba1f9a1c3cef475df2a49fd01978cb3269ac5872c6897175857704463f673ca"
   },
   {
     "rank": 25,
@@ -1352,9 +1304,7 @@
     },
     "family_id": "fam-0025",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0025",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "ad6fee7d5bd7106f0224a899d6edd383e66c541696b8f63ce1818c6f7a34d5af"
   },
   {
     "rank": 26,
@@ -1405,9 +1355,7 @@
     },
     "family_id": "fam-0026",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0026",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "c381c7804235fbade3d6783ecc77dbb07ee6c4609cba622afa20510724593fe7"
   },
   {
     "rank": 27,
@@ -1458,9 +1406,7 @@
     },
     "family_id": "fam-0027",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0027",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "1920e2cacf6cd2149bd46c289efcdd01ee5140f5a9054f98579cb38351185dd6"
   },
   {
     "rank": 28,
@@ -1514,9 +1460,7 @@
     },
     "family_id": "fam-0028",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0028",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "98accc663b451ca2f3279bee7c1c364be1608560bd730647d4850a03a3d2da48"
   },
   {
     "rank": 29,
@@ -1570,9 +1514,7 @@
     },
     "family_id": "fam-0029",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0029",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "887b769ebc0a1e430fa3f9d78d6e52a1397946394da8bda144d1f99850f06abc"
   },
   {
     "rank": 30,
@@ -1625,9 +1567,7 @@
     },
     "family_id": "fam-0030",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0030",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "c9dcd78ea0816e9f1c98de158748b13b309946895f39a34f63c84d2168131466"
   },
   {
     "rank": 31,
@@ -1679,9 +1619,7 @@
     },
     "family_id": "fam-0031",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0031",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "38d82f944ce41752425c5b03f1bf32ba3d1045e1709f70817bb71d499326f39d"
   },
   {
     "rank": 32,
@@ -1733,9 +1671,7 @@
     },
     "family_id": "fam-0032",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0032",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "e727d19d0c72adf506bc31f6b0cceedc5158d90a52fb8d8fc38d1f59b7ef7cda"
   },
   {
     "rank": 33,
@@ -1785,9 +1721,7 @@
     },
     "family_id": "fam-0033",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0033",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "dae82d3d52910a2c4b5a4a206bdebb44aeb3797a999868f0a5ef6b2a5396d6c7"
   },
   {
     "rank": 34,
@@ -1839,9 +1773,7 @@
     },
     "family_id": "fam-0034",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0034",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "3703cb625fc9a4d254e68db40dd2fae2dd50297c9b887d579b7860d097436057"
   },
   {
     "rank": 35,
@@ -1895,9 +1827,7 @@
     },
     "family_id": "fam-0035",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0035",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "25a9819d1455289d50aca926150025ec28ab615cff81a1fc52bfab475c76249a"
   },
   {
     "rank": 36,
@@ -1947,9 +1877,7 @@
     },
     "family_id": "fam-0036",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0036",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "113a7ea837840fcaf019d0969092269dd08e25998ad9b282f911d3ad2c2f62d8"
   },
   {
     "rank": 37,
@@ -2000,9 +1928,7 @@
     },
     "family_id": "fam-0037",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0037",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "9ad105b4386f18d73fd010478e796062f9c3efa344ae901112a81d105217aca2"
   },
   {
     "rank": 38,
@@ -2056,9 +1982,7 @@
     },
     "family_id": "fam-0038",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0038",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "2136b514524aa38a32e7d500816ddea12ce22eece4c55b37d5c25c08bd97186b"
   },
   {
     "rank": 39,
@@ -2111,9 +2035,7 @@
     },
     "family_id": "fam-0039",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0039",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "aca73c8291a88b77774629ed3ce1fa18832038c33473d41a498a05e27e7c8021"
   },
   {
     "rank": 40,
@@ -2167,9 +2089,7 @@
     },
     "family_id": "fam-0040",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0040",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "627176ce86671fac4a57ed5942218acf14793f00855e44029786b701bceb878d"
   },
   {
     "rank": 41,
@@ -2224,9 +2144,7 @@
     },
     "family_id": "fam-0003",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0041",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "0ac9ec4eeff8703c8f392cae3b158c4a2e8e37ea290730819cce5103577af79b"
   },
   {
     "rank": 42,
@@ -2280,9 +2198,7 @@
     },
     "family_id": "fam-0042",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0042",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "42a0151d767409e3d808bb4f8b88a96ec9d967b6be8a8e7fcc88ed7642105db6"
   },
   {
     "rank": 43,
@@ -2335,9 +2251,7 @@
     },
     "family_id": "fam-0043",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0043",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "cf88e57773398f9aeeb22983d6d01c30ab5c0eed7d940f4ad29d427751f0a5d7"
   },
   {
     "rank": 44,
@@ -2391,9 +2305,7 @@
     },
     "family_id": "fam-0044",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0044",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "9b64e3e086173ce0493bb8a1e3d1ec9a128b61381b5e9c4be4515c19d9b7608d"
   },
   {
     "rank": 45,
@@ -2443,9 +2355,7 @@
     },
     "family_id": "fam-0045",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0045",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "807793b01e139a9a960bd4d906e5332a586b8f84d08c81d8c47fc0d3cf9f3152"
   },
   {
     "rank": 46,
@@ -2498,9 +2408,7 @@
     },
     "family_id": "fam-0046",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0046",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "27c20bbb3bc7f0470adc0a3b75a6c5d0c061c02d56b52d6ef9fbb1d43404dfcd"
   },
   {
     "rank": 47,
@@ -2550,9 +2458,7 @@
     },
     "family_id": "fam-0047",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0047",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "9503fde1984248fd92879be96a3f948944b31b947977f2a50eb7331efe4ea9d7"
   },
   {
     "rank": 48,
@@ -2604,9 +2510,7 @@
     },
     "family_id": "fam-0048",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0048",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "57c3ee464abf35979c00f42027450bd70e1c031f204c907a8a7c4f0f8b5326a6"
   },
   {
     "rank": 49,
@@ -2660,9 +2564,7 @@
     },
     "family_id": "fam-0049",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0049",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "0abb29e261d3058869fe789646b33d3b30e4c1f82c81d4a6753038b48d945eb9"
   },
   {
     "rank": 50,
@@ -2713,9 +2615,7 @@
     },
     "family_id": "fam-0050",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0050",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "d7ec7b1a768fb3b572ab430130f4d19ed361ed8291b93bdff3cada69104aebfe"
   },
   {
     "rank": 51,
@@ -2767,9 +2667,7 @@
     },
     "family_id": "fam-0051",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0051",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "c5ce7220f0d4191309db32798dc540178d146468de8e3e37788a63b22e4e1995"
   },
   {
     "rank": 52,
@@ -2821,9 +2719,7 @@
     },
     "family_id": "fam-0052",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0052",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "25dbc69da810a61f7ea7aad17c779281127297c6fa5bb99e270b3f723ab9455f"
   },
   {
     "rank": 53,
@@ -2874,9 +2770,7 @@
     },
     "family_id": "fam-0053",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0053",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "f23cc67dacbc9ac2a11928559ed813367fdb0204a6a0596b40bf587fd2a7b0e1"
   },
   {
     "rank": 54,
@@ -2929,9 +2823,7 @@
     },
     "family_id": "fam-0054",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0054",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "7c1a41672271b86668645fb6c917724ddf742b66a9738f1f3359d15d4b4728aa"
   },
   {
     "rank": 55,
@@ -2985,9 +2877,7 @@
     },
     "family_id": "fam-0055",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0055",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "f5ad2fb3c7877e7857e48d363caaedf6c76020e0914bf0d725a0b229e954a7b8"
   },
   {
     "rank": 56,
@@ -3039,9 +2929,7 @@
     },
     "family_id": "fam-0056",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0056",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "126e4b6ab5e41404e580a4d66680016f21c45a0418b8d49bed8aab3565a358dd"
   },
   {
     "rank": 57,
@@ -3092,9 +2980,7 @@
     },
     "family_id": "fam-0057",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0057",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "c70288f4c78a1c19097ea10642c3c5801ca496b512a4abed4130e271bb5ba5ad"
   },
   {
     "rank": 58,
@@ -3147,9 +3033,7 @@
     },
     "family_id": "fam-0058",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0058",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "cad6a13760f1c0e10602255cce786d4f815066558744931b51d3c2b140385057"
   },
   {
     "rank": 59,
@@ -3203,9 +3087,7 @@
     },
     "family_id": "fam-0059",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0059",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "176a13bd9f7e3075d0333b3711a2b57852feda5c507f034a1c1d754c0ee1aa70"
   },
   {
     "rank": 60,
@@ -3258,9 +3140,7 @@
     },
     "family_id": "fam-0060",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0060",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "92f4653b7e8e52ddf7205a2b76c121714e24157a6c717a9da47863b5627403ca"
   },
   {
     "rank": 61,
@@ -3311,9 +3191,7 @@
     },
     "family_id": "fam-0061",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0061",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "39b65cca7ac347e4c113529266e996ba7fd3fbe55f6ef7b0e53d39981cee0fcf"
   },
   {
     "rank": 62,
@@ -3367,9 +3245,7 @@
     },
     "family_id": "fam-0062",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0062",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "3b3173c79217a7ad4ec77437e55f02bb35b696141777e62e9d80dc8046b62848"
   },
   {
     "rank": 63,
@@ -3422,9 +3298,7 @@
     },
     "family_id": "fam-0063",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0063",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "cd15d54f7a3cf822923c509346d8cff4e0dbd5b4a801f72b1a7e5d5b50cd6c7f"
   },
   {
     "rank": 64,
@@ -3474,9 +3348,7 @@
     },
     "family_id": "fam-0064",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0064",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "37d89ddf9442de613e699f6826fae706932f87eebf764659b65a3388d8820699"
   },
   {
     "rank": 65,
@@ -3527,9 +3399,7 @@
     },
     "family_id": "fam-0065",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0065",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "864b87dcda2e70413591e2094ca6bee4ad8bac494033ea24aedde73e7f646b99"
   },
   {
     "rank": 66,
@@ -3581,9 +3451,7 @@
     },
     "family_id": "fam-0066",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0066",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "3a57652f2a4f7486c012c7933803c1fcebfe8876a88d9dc717ce287613ff0136"
   },
   {
     "rank": 67,
@@ -3633,9 +3501,7 @@
     },
     "family_id": "fam-0067",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0067",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "3495c882fb90e9d99c9fa102d925889ecce62fdce7d4cd14c2878a26aa8b3489"
   },
   {
     "rank": 68,
@@ -3688,9 +3554,7 @@
     },
     "family_id": "fam-0068",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0068",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "7550f654c9f0b038c32c9ab19a6ecdea925a8ea9cc96fe216af98950d38eda6a"
   },
   {
     "rank": 69,
@@ -3740,9 +3604,7 @@
     },
     "family_id": "fam-0069",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0069",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "247a67112aed76994afc9998479baa63302c6ecf6f665f2c158208e8839014ef"
   },
   {
     "rank": 70,
@@ -3793,9 +3655,7 @@
     },
     "family_id": "fam-0070",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0070",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "5bc79f4194cc42245b19a78623dd84340c73e460c1cc304037103c2ce47a97b6"
   },
   {
     "rank": 71,
@@ -3845,9 +3705,7 @@
     },
     "family_id": "fam-0071",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0071",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "1a163573b45c5dd6dafb2a0e61ab3f06942cda8e2c995873bc5f0dd1ec8be09d"
   },
   {
     "rank": 72,
@@ -3899,9 +3757,7 @@
     },
     "family_id": "fam-0072",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0072",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "d2ad2bc6f69a5277d4e665adb3b0e187700d4d38d03f889d7414deef310e08ec"
   },
   {
     "rank": 73,
@@ -3955,9 +3811,7 @@
     },
     "family_id": "fam-0073",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0073",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "bf6bc045a7ee728403a4069eef923b457c35729521f21e31926bff4784a34937"
   },
   {
     "rank": 74,
@@ -4008,9 +3862,7 @@
     },
     "family_id": "fam-0074",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0074",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "26abc3e49a8d77b619c585d63286b078633da4ab25925eedd7f3e81bad335854"
   },
   {
     "rank": 75,
@@ -4063,9 +3915,7 @@
     },
     "family_id": "fam-0075",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0075",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "c4a49c30de056539046a49f3d5309bda4ecaa7dcb0ba33d16dadf8b6074e46fb"
   },
   {
     "rank": 76,
@@ -4117,9 +3967,7 @@
     },
     "family_id": "fam-0076",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0076",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "3c7947799fcd89b4ad814f9c87e53078fe8da56c6dfed4b5c97f281bd4f9eb01"
   },
   {
     "rank": 77,
@@ -4171,9 +4019,7 @@
     },
     "family_id": "fam-0077",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0077",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "fe7a7be4ef4d41d5694e2b0484a9c78372942eba856d4d56ca6b8b5eb1eff135"
   },
   {
     "rank": 78,
@@ -4224,9 +4070,7 @@
     },
     "family_id": "fam-0078",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0078",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "ff135c1f84a1d8ed19abc645235c89d9c29c832be514a16cf70d697b90ebcbc3"
   },
   {
     "rank": 79,
@@ -4278,9 +4122,7 @@
     },
     "family_id": "fam-0079",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0079",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "6738324638a4d05e4ac1570cf8a56fce7c1511557a7a1dd0fa5f0da267612165"
   },
   {
     "rank": 80,
@@ -4332,9 +4174,7 @@
     },
     "family_id": "fam-0080",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0080",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "ec66c19d27906cf08846c7117eeb2e5f3fd0a2ac700db431c5e871d40c468dfe"
   },
   {
     "rank": 81,
@@ -4385,9 +4225,7 @@
     },
     "family_id": "fam-0081",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0081",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "cee738b06157a20948fdc19bd5b76936146f5cfd73c8eacae5790e507fd9e0dd"
   },
   {
     "rank": 82,
@@ -4441,9 +4279,7 @@
     },
     "family_id": "fam-0082",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0082",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "889b658973f54afbf54b9ef5e7bd7316ae9c5b79596c847b6a276f2e48537c9f"
   },
   {
     "rank": 83,
@@ -4494,9 +4330,7 @@
     },
     "family_id": "fam-0083",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0083",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "7fe205ea29db06438772eff7d79f72bf72a62093e718e18ed5b612d60845bd99"
   },
   {
     "rank": 84,
@@ -4549,9 +4383,7 @@
     },
     "family_id": "fam-0084",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0084",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "deafe3be4e9453db4939ed7828df6f92cda2c61ecc95bb678cc0a0d97f9024f6"
   },
   {
     "rank": 85,
@@ -4601,9 +4433,7 @@
     },
     "family_id": "fam-0085",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0085",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "ab2c7cc5562c2707f412a219be1e09d1816e2d223de6f13f3ad9ebac8c388468"
   },
   {
     "rank": 86,
@@ -4655,9 +4485,7 @@
     },
     "family_id": "fam-0086",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0086",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "c17f5bab9dcb492f4f1544c89b43f0e40b10769992ccac0534d7f9b090588753"
   },
   {
     "rank": 87,
@@ -4708,9 +4536,7 @@
     },
     "family_id": "fam-0087",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0087",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "62d68def7666d9bd8aafab4865efc7a2343ff58ccc0bcbfe18c1fe475e25ac59"
   },
   {
     "rank": 88,
@@ -4763,9 +4589,7 @@
     },
     "family_id": "fam-0088",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0088",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "3e64b92fb8a8d46a7e83a827cce5d2db147439ecc637d305140c2b05e38f3b73"
   },
   {
     "rank": 89,
@@ -4817,9 +4641,7 @@
     },
     "family_id": "fam-0089",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0089",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "e1c8892004e6196c98e6ac4bc045ce0a358cc89fd57de27ed1a0d1535d2046a1"
   },
   {
     "rank": 90,
@@ -4869,9 +4691,7 @@
     },
     "family_id": "fam-0090",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0090",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "0015422ca76f9f73d2c5f7ce9710527d5893cbfb2dd55b4ef4532335b7089e74"
   },
   {
     "rank": 91,
@@ -4921,9 +4741,7 @@
     },
     "family_id": "fam-0091",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0091",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "92d325c937b224680bbe2458c1e4a37851b32575fd610e28bb488c4916e54865"
   },
   {
     "rank": 92,
@@ -4973,9 +4791,7 @@
     },
     "family_id": "fam-0092",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0092",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "b9db5ac09a5a357f9ff07e813ccc3f988bfb1a0ae9763032805d0e925c1b19fc"
   },
   {
     "rank": 93,
@@ -5026,9 +4842,7 @@
     },
     "family_id": "fam-0093",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0093",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "cfcc4b4ec09ff589e12ced709c721ab631c8e8501f3c8e7456716bd5f3fabdc3"
   },
   {
     "rank": 94,
@@ -5081,9 +4895,7 @@
     },
     "family_id": "fam-0094",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0094",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "70ba773324ef1eb2b72c1827bac051d2cd711c0ec3f81f4365b370f20b923b80"
   },
   {
     "rank": 95,
@@ -5134,9 +4946,7 @@
     },
     "family_id": "fam-0095",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0095",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "076aa2bab80325c00d330635a7a1128e4ad0a19ff7b163f7750ae0bf83813899"
   },
   {
     "rank": 96,
@@ -5187,9 +4997,7 @@
     },
     "family_id": "fam-0096",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0096",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "af2e4c5a8d1dd8f71ba3d45e2b52e7ed29407df9bc49216d2d782f903eba2f6a"
   },
   {
     "rank": 97,
@@ -5239,9 +5047,7 @@
     },
     "family_id": "fam-0097",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0097",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "99f29e3aa85191cb3cc8482a566c1e60d3d413268d59106c0870a5e7d64be3bc"
   },
   {
     "rank": 98,
@@ -5293,9 +5099,7 @@
     },
     "family_id": "fam-0098",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0098",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "6e91ebb4022091dd0c94cce9314a7353b982c25f6f10d9b7a1a7f855ce633793"
   },
   {
     "rank": 99,
@@ -5347,9 +5151,7 @@
     },
     "family_id": "fam-0099",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0099",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "d0ad0764fd6726de57f08bf5be14772e93c0c72b09464cb23470973493b88d44"
   },
   {
     "rank": 100,
@@ -5403,8 +5205,6 @@
     },
     "family_id": "fam-0100",
     "instrument": "NIFTY",
-    "mode": "institutional",
-    "combo_id": "combo-26-07-08-0100",
-    "sweep_run_id": "demo-allpass-2026-07-08"
+    "run_id": "e5c7edd3b27ef21ec0f7d8c3a54787baab817eb09c47bce9c28e1ad2fe7056f5"
   }
 ]

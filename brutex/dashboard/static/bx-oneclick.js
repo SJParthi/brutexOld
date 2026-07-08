@@ -180,6 +180,33 @@
     return node;
   }
 
+  // ── MAE/MFE granularity marker (TradeRowWire additive keys, R22) ────────
+  // sweep-parallel-integration-contracts.md §1: a trade row's `mae`/`mfe`
+  // are the 1-MINUTE-path values ONLY when `path_1m_status === "ok"`
+  // (equivalently `mae_granularity === "1m"`); otherwise they are the
+  // coarser sweep-TF values ("mae_granularity": "tf" — R22 requires the
+  // 1-minute path because TF-level/close-only drawdown understates real
+  // pain). A row from a fixture/build that predates these additive keys
+  // carries neither field — that is treated IDENTICALLY to a known TF
+  // fallback (honest-absence: never silently presented as a verified
+  // 1-minute value just because the marker is missing).
+  function maeGranularityMarker(row) {
+    var granularity = row && row.mae_granularity;
+    var status = row && row.path_1m_status;
+    if (granularity === "1m" && status === "ok") {
+      return { suffix: "", title: "MAE/MFE measured from the 1-minute price path.", warn: false };
+    }
+    var detail = status ? " (path_1m_status=" + String(status) + ")" : "";
+    return {
+      suffix: " ⚠",
+      title:
+        "MAE/MFE are TF-level values, NOT the 1-minute path" +
+        detail +
+        " — R22 requires the 1-minute path; TF-level drawdown understates real pain.",
+      warn: true,
+    };
+  }
+
   // ── Exit-reason dual-language phrase table (R33) ─────────────────────────
   // A FIXED hand-written lookup (mirrors combo_decoder.py's condition
   // phrase table discipline) — never generated text, so no per-trade
@@ -280,6 +307,7 @@
     METRIC_EXPLANATIONS: METRIC_EXPLANATIONS,
     exitReasonLabel: exitReasonLabel,
     EXIT_REASON_LABELS: EXIT_REASON_LABELS,
+    maeGranularityMarker: maeGranularityMarker,
     virtualList: virtualList,
     safeJson: safeJson,
   };
