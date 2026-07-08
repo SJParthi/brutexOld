@@ -516,18 +516,31 @@ def test_r38_adversarial_poisoned_lake_refuses_with_nothing_touched(
 
 
 def test_g14_old_schema_store_degrades_typed_never_raw(tmp_path: Path) -> None:
-    """The committed OLD-SCHEMA results Parquet degrades through the shipped
-    P2-side guard as a TYPED ``ArtifactLoadError`` (the exact contract P3
-    wires at /results), never a raw ``KeyError`` into a 500."""
+    """The committed OLD-SCHEMA results Parquet degrades TYPED, never raw.
+
+    ``ResultsStore.load`` now types a missing required column itself as a
+    :class:`ResultsStoreSchemaError` (a :class:`ResultsStoreError`) naming the
+    store path (DEC-SWEEP-RESULTS-DEPTH-001 ruling 5, the main fold), preserving
+    the raw ``KeyError`` as ``__cause__`` — so the /results skip set (which
+    catches the ``ResultsStoreError`` family) degrades honestly instead of a raw
+    ``KeyError`` escaping into a 500. ``guarded_load`` passes that already-typed
+    store error through UNWRAPPED (never double-wrapping into an
+    ``ArtifactLoadError``), so the end-to-end degrade stays a single typed
+    ``ResultsStoreError``."""
     import shutil
 
-    from brutex.engine.results_store import ResultsStore
-    from brutex.engine.sweep_artifact_guard import ArtifactLoadError, guarded_load
+    from brutex.engine.results_store import (
+        ResultsStore,
+        ResultsStoreError,
+        ResultsStoreSchemaError,
+    )
+    from brutex.engine.sweep_artifact_guard import guarded_load
 
     fixture = Path("tests/fixtures/results_store_old_schema.parquet")
     assert fixture.exists(), "the committed old-schema fixture is required (WP-4 note #1)"
     legacy = tmp_path / "legacy.parquet"
     shutil.copy(fixture, legacy)
-    with pytest.raises(ArtifactLoadError) as excinfo:
+    with pytest.raises(ResultsStoreSchemaError) as excinfo:
         guarded_load(ResultsStore.load, legacy)
-    assert excinfo.value.degrade_payload["verdict"] == "unreadable"
+    assert isinstance(excinfo.value, ResultsStoreError)  # the resilient-reader skip family
+    assert isinstance(excinfo.value.__cause__, KeyError)  # typed wrap of the raw escape

@@ -21,7 +21,11 @@ import polars as pl
 import pyarrow.lib
 import pytest
 from brutex.engine import sweep_artifact_guard
-from brutex.engine.results_store import ResultsStore, ResultsStoreError
+from brutex.engine.results_store import (
+    ResultsStore,
+    ResultsStoreError,
+    ResultsStoreSchemaError,
+)
 from brutex.engine.sweep_artifact_guard import (
     STORE_COLUMN_NAMES,
     ArtifactLoadError,
@@ -31,8 +35,9 @@ from structlog.testing import capture_logs
 
 #: D-6 traceability — test name → requirement/gap tokens.
 TRACEABILITY: dict[str, tuple[str, ...]] = {
-    "test_g14_old_schema_fixture_raises_real_keyerror_unguarded": ("G14",),
-    "test_g14_old_schema_fixture_maps_to_artifact_load_error": ("G14",),
+    "test_g14_old_schema_fixture_raises_typed_schema_error_unguarded": ("G14",),
+    "test_g14_raw_legacy_keyerror_maps_to_artifact_load_error": ("G14",),
+    "test_g14_old_schema_fixture_through_guarded_load_passes_store_typed_error": ("G14",),
     "test_g14_degrade_payload_is_honest_unreadable_verdict": ("G14",),
     "test_g14_foreign_keyerror_not_swallowed": ("G14",),
     "test_g14_multi_arg_keyerror_not_swallowed": ("G14",),
@@ -63,29 +68,63 @@ if not FIXTURE.is_file():
     )
 
 
-def test_g14_old_schema_fixture_raises_real_keyerror_unguarded() -> None:
-    """The UNguarded production loader dies on the fixture with the RAW KeyError.
+def test_g14_old_schema_fixture_raises_typed_schema_error_unguarded() -> None:
+    """The UNguarded production loader degrades the fixture as a TYPED error.
 
-    This is the G14 bug itself, pinned so the fixture can never silently rot
-    into something the modern loader accepts (which would hollow out every
-    other test here).
+    ``ResultsStore.load`` now wraps the first missing REQUIRED column
+    (``mask_bits_lo``) into a :class:`ResultsStoreSchemaError` naming the store
+    path (DEC-SWEEP-RESULTS-DEPTH-001 ruling 5, the main fold), preserving the
+    raw ``KeyError`` as ``__cause__``. This pins the fixture is genuinely
+    old-schema (missing a required limb column, so it can never silently rot
+    into something the modern loader accepts — which would hollow out every
+    other test here) AND that its degrade is typed, never a raw escape.
     """
-    with pytest.raises(KeyError) as excinfo:
+    with pytest.raises(ResultsStoreSchemaError) as excinfo:
         ResultsStore.load(FIXTURE)
-    assert excinfo.value.args == ("deflated_sharpe",)
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, KeyError)
+    assert cause.args == ("mask_bits_lo",)
+    assert cause.args[0] in STORE_COLUMN_NAMES
 
 
-def test_g14_old_schema_fixture_maps_to_artifact_load_error() -> None:
-    """guarded_load maps the empirical old-schema KeyError to ArtifactLoadError."""
+def test_g14_raw_legacy_keyerror_maps_to_artifact_load_error(tmp_path: Path) -> None:
+    """guarded_load maps a RAW legacy-schema KeyError (a store column) to ArtifactLoadError.
+
+    A loader that lets a bare missing-column ``KeyError`` escape — an older or
+    foreign loader that does NOT pre-wrap it the way ``ResultsStore.load`` now
+    does — is degraded to the typed :class:`ArtifactLoadError` with the honest
+    ``missing column`` message. This is the KeyError arm of :func:`guarded_load`
+    exercised directly (the real fixture now degrades typed at the store
+    boundary, so the raw-KeyError path is pinned via a synthetic loader).
+    """
+    artifact = tmp_path / "legacy.parquet"
+
+    def raw_legacy_loader(_: Path) -> None:
+        raise KeyError("mask_bits_lo")
+
     with pytest.raises(ArtifactLoadError) as excinfo:
-        guarded_load(ResultsStore.load, FIXTURE)
+        guarded_load(raw_legacy_loader, artifact)
     err = excinfo.value
     assert isinstance(err.__cause__, KeyError)
-    assert err.__cause__.args == ("deflated_sharpe",)
+    assert err.__cause__.args == ("mask_bits_lo",)
     assert str(err) == (
-        f"legacy or corrupt results artifact: {FIXTURE}: missing column 'deflated_sharpe'"
+        f"legacy or corrupt results artifact: {artifact}: missing column 'mask_bits_lo'"
     )
-    assert err.path == FIXTURE
+    assert err.path == artifact
+
+
+def test_g14_old_schema_fixture_through_guarded_load_passes_store_typed_error() -> None:
+    """guarded_load passes the store's OWN typed schema error through unwrapped.
+
+    ``ResultsStore.load`` now types the old-schema failure itself
+    (DEC-SWEEP-RESULTS-DEPTH-001 ruling 5), so wrapping it through
+    :func:`guarded_load` yields the SAME :class:`ResultsStoreSchemaError` — a
+    :class:`ResultsStoreError`, already handled by every resilient reader —
+    never double-wrapped into an :class:`ArtifactLoadError` (module docstring:
+    a typed ``ResultsStoreError`` is never swallowed).
+    """
+    with pytest.raises(ResultsStoreSchemaError):
+        guarded_load(ResultsStore.load, FIXTURE)
 
 
 def test_g14_degrade_payload_is_honest_unreadable_verdict() -> None:
@@ -234,10 +273,15 @@ def test_g14_optional_error_set_wheel_free(monkeypatch: pytest.MonkeyPatch) -> N
     assert sweep_artifact_guard._optional_parquet_errors() == ()  # pyright: ignore[reportPrivateUsage]
 
 
-def test_g14_load_failed_warn_logged_once() -> None:
+def test_g14_load_failed_warn_logged_once(tmp_path: Path) -> None:
     """Exactly ONE sweep_artifact_guard.load_failed WARN per mapped failure."""
+    artifact = tmp_path / "legacy.parquet"
+
+    def raw_legacy_loader(_: Path) -> None:
+        raise KeyError("mask_bits_lo")
+
     with capture_logs() as logs, pytest.raises(ArtifactLoadError):
-        guarded_load(ResultsStore.load, FIXTURE)
+        guarded_load(raw_legacy_loader, artifact)
     warns = [e for e in logs if e["event"] == "sweep_artifact_guard.load_failed"]
     assert len(warns) == 1
-    assert warns[0]["path"] == str(FIXTURE)
+    assert warns[0]["path"] == str(artifact)

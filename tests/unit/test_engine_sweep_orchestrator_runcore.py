@@ -117,7 +117,11 @@ def test_g1_quarantine_then_one_retry_regenerates_the_tuple(tmp_path: Path) -> N
         store_path.unlink()  # the trio move — the retry starts FRESH
 
     summary = _run(out, tmp_path / "a.jsonl", store_quarantine=_quarantine)
-    assert seen == [("NIFTY", "ResultsStoreError")]
+    # ResultsStore.load now types a corrupt/undecodable store as the
+    # ResultsStoreSchemaError subclass of ResultsStoreError (main fold,
+    # DEC-SWEEP-RESULTS-DEPTH-001 ruling 5) — the quarantine still catches the
+    # ResultsStoreError family, so the trio move + fresh retry are unchanged.
+    assert seen == [("NIFTY", "ResultsStoreSchemaError")]
     assert summary is not None
     assert summary.persisted >= 0  # the retry genuinely re-ran the tuple
     assert store_path.exists()  # regenerated as a REAL store
