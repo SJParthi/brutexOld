@@ -135,6 +135,7 @@ from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
+from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
@@ -7464,6 +7465,11 @@ def build_app(
     # the `from __future__ import annotations` closure-annotation
     # resolution problem. We register it dynamically.
     app.add_api_websocket_route("/ws", _make_ws_handler(state))
+
+    # INTERIM Run-Sweep launch page (DEC-SWEEP-LAUNCH-BUTTON-INTERIM-001):
+    # strictly additive registration — /launch + /api/v1/launch/* live in
+    # brutex/dashboard/launch_button.py (single-flight detached CLI launch).
+    register_launch_routes(app, lake_root_resolver=store_lake_root_resolver(instrument_store))
 
     return app
 
