@@ -10,9 +10,16 @@
 # run-identity stamping surfaces: spec.rs (StrategySpec::canonical_bytes, LE
 # field encoding) and python.rs (spec_canonical_bytes_impl + the *_impl/check_*
 # boundary logic).
-# 619 mutants measured 2026-07-07 (`cargo mutants --list | wc -l`, run from this
+# 627 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
 # dir with this config in place — the count also proves the `features` key parses
-# under cargo-mutants 27.1.0).
+# under cargo-mutants 27.1.0): evaluator.rs 238 + python.rs 376 + spec.rs 13.
+# The 2026-07-07 measurement read 619 (python.rs 368); the race-6 merge
+# (1bb34cc8) then folded main's python.rs swing-getter additions
+# (DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 — `last_swing_high`/
+# `last_swing_low`, 2 getters × 4 replacements = the exact +8), each killed by
+# the merge-added in-file getter tests; re-measured post-merge, not projected.
+# The getters return `Option<i64>`, NOT `PyResult`, so the 229 PyErr-wrapper
+# UNVIABLE figure below is unaffected by the growth.
 #
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10; the fno-math twin
 # toml sets the disclosure standard; counts measured 2026-07-07 via

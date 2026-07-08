@@ -10,7 +10,7 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
-# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 5-shard matrix,
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 6-shard matrix,
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -562,7 +562,7 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────
-  # Rust mutation — cargo-mutants over rust/fno-math/ (5-shard matrix)
+  # Rust mutation — cargo-mutants over rust/fno-math/ (6-shard matrix)
   #
   # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
@@ -572,7 +572,7 @@ jobs:
   # silently).
   # ─────────────────────────────────────────────────────────────────
   rust-mutation:
-    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/5)"
+    name: "Rust mutation (cargo-mutants, fno-math, shard ${{ matrix.shard }}/6)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003):
@@ -586,7 +586,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2, 3, 4, 5]
     defaults:
       run:
         working-directory: rust/fno-math
@@ -624,26 +624,30 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
-      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/5)
+      - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
-          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 556 mutants measured
-          #   2026-07-07 (`cargo mutants --list | wc -l`, post-reshape final tree).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
+          #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
+          #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
+          #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1560.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-          #   wall-clock parallelism = this 5-way shard matrix:
-          #   ceil(556/5)=112 mutants x 29-40 s/mutant serial (CI per-lane measured
-          #   4-9 s build + 25-31 s test) ~= 54-75 min + ~5.5 min baseline/setup
-          #   ~= 60-81 min nominal, ~95 at +20% on the worst end -> >= 25 min
+          #   wall-clock parallelism = this 6-way shard matrix (5->6 = the #1560
+          #   pre-decided +1-shard dial, taken when the 599 re-measure pushed the
+          #   5-shard +20%-band worst end to ~102 min — a ~18 min margin):
+          #   ceil(599/6)=100 mutants x 29-40 s/mutant serial (CI per-lane measured
+          #   4-9 s build + 25-31 s test) ~= 48-67 min + ~5.5 min baseline/setup
+          #   ~= 54-72 min nominal, ~86 at +20% on the worst end -> >= 34 min
           #   margin per shard.
           cargo mutants \
             --in-place \
-            --shard ${{ matrix.shard }}/5 \
+            --shard ${{ matrix.shard }}/6 \
             --test-tool cargo \
             --no-shuffle \
             --timeout 300 \
@@ -714,27 +718,31 @@ jobs:
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1560):
           # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
-          #   evaluator.rs + spec.rs + python.rs = 619 mutants measured 2026-07-07
-          #   (`cargo mutants --list | wc -l`); features python,serde (python.rs is
-          #   feature-gated at lib.rs:66 — all 368 of its mutants — and spec.rs's
-          #   mask_hex module is serde-gated — 3 of its 13; without the features
-          #   those 368 + 3 = 371 mutants build a byte-identical crate and
-          #   trivially "survive": 3 mask_hex MISSED measured under default
-          #   features, the other 10 spec.rs mutants compile there and were
-          #   killed/unviable — 8 caught + 2 unviable measured. Fixer round 4,
-          #   R4-1: the earlier "381" wrongly summed ALL 13 spec.rs mutants
-          #   into the feature-dead count; per-file counts re-verified on HEAD
-          #   via `cargo mutants --list`).
+          #   evaluator.rs + spec.rs + python.rs = 627 mutants measured 2026-07-08
+          #   (`cargo mutants --list | wc -l` on the post-merge HEAD — the race-6
+          #   merge folded main's python.rs swing getters, python.rs 368->376, the
+          #   exact +8, each killed by the merge-added in-file tests; the
+          #   pre-merge 2026-07-07 measurement was 619); features python,serde
+          #   (python.rs is feature-gated at lib.rs:66 — all 376 of its mutants —
+          #   and spec.rs's mask_hex module is serde-gated — 3 of its 13; without
+          #   the features those 376 + 3 = 379 mutants build a byte-identical
+          #   crate and trivially "survive": 3 mask_hex MISSED measured under
+          #   default features, the other 10 spec.rs mutants compile there and
+          #   were killed/unviable — 8 caught + 2 unviable measured. Fixer round
+          #   4, R4-1: the earlier "381" wrongly summed ALL 13 spec.rs mutants
+          #   into the feature-dead count; per-file counts re-verified via
+          #   `cargo mutants --list`, re-measured post-merge in convergence
+          #   round 1).
           #   spec.rs + python.rs are the Golden-Rule-#4 run-identity stamping
           #   surfaces, previously UNGATED.
           # - --in-place: the golden test reads ../../tests/golden/fixtures/... and
           #   main's build.rs include!s ../source_digest_core.rs — both outside the
           #   crate dir, so copy-mode baselines break (#1258, measured).
           # - --in-place precludes --jobs (hard CLI error, measured) => the 120-min
-          #   budget is met by SHARDING: ceil(619/7)=89 mutants x 39-48 s/mutant
+          #   budget is met by SHARDING: ceil(627/7)=90 mutants x 39-48 s/mutant
           #   (measured serial: CI 34 s default features, +15% python feature,
-          #   ±20%) ~= 58-71 min + ~6 min baseline/setup ~= 64-77 min nominal,
-          #   ~91 at +20% -> >= 29 min margin per shard.
+          #   ±20%) ~= 59-72 min + ~6 min baseline/setup ~= 65-78 min nominal,
+          #   ~92 at +20% -> >= 28 min margin per shard.
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/7 \

@@ -15,11 +15,19 @@
 #                      below_parallel_threshold dispatch predicate extracted by
 #                      DEC-MUTATION-RUNTIME-003 (kept IN scope so the dispatch
 #                      boundary itself stays mutation-gated)
-# 556 mutants measured 2026-07-07 (`cargo mutants --list | wc -l`, run from this
-# dir; re-measured AFTER the below_parallel_threshold extraction + the .max()
-# reshapes landed — down from the pre-extraction 576 because the reshapes remove
-# tie-equivalent operator mutants by construction; the mutation.yml shard-budget
-# bands absorb any future small drift).
+# 599 mutants measured 2026-07-08 (`cargo mutants --list | wc -l`, run from this
+# dir on the post-merge HEAD: metrics 358 + trade_sim 167 + python 65 + lib 9).
+# Measurement history, kept honest (convergence round 1 — the counts here must
+# describe the SHIPPED tree, Golden Rule #1): the below_parallel_threshold
+# extraction + .max() reshapes brought the pre-extraction 576 down to 556
+# (measured 2026-07-07), then the race-6 merge (1bb34cc8) folded main's
+# width-generic u128 trade_sim kernel (DEC-TRADE-SIM-U128-KERNEL-001 #1549,
+# trade_sim 124→167) and grew the total to 599 — re-measured, not projected;
+# the merge-added MaskWord u128/u64 + below_parallel_threshold mutants were
+# kill spot-checked 15/15 CAUGHT (`cargo mutants --in-place -F 'MaskWord for
+# u128'` 5/5 + `-F 'MaskWord for u64|below_parallel_threshold'` 10/10). The
+# mutation.yml shard-budget bands absorb future small drift; this growth was
+# NOT small (+7.7%), so the matrix took the #1560 pre-decided +1 shard (5→6).
 #
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10):
 #   compat/*    — 299 mutants; TickVault-compat surface (config defaults, NSE
