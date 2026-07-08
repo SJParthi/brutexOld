@@ -105,7 +105,11 @@ fuzz_target!(|data: &[u8]| {
         // ── 4. trend coherence ──
         if down {
             // The down-side resolves last, so any bearish break ends Down.
-            assert_eq!(machine.trend(), Trend::Down, "a bearish break must leave Down");
+            assert_eq!(
+                machine.trend(),
+                Trend::Down,
+                "a bearish break must leave Down"
+            );
         } else if up {
             assert_eq!(machine.trend(), Trend::Up, "an up-only break must leave Up");
         } else {

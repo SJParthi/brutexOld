@@ -2056,8 +2056,11 @@ def run_groww_option_ingest(
     # ONE shared symbol-form preference per PASS (DEC-SYMBOL-FORM-PREFERENCE-001):
     # every contract of this run shares the learned `&`-form winners (keyed by
     # underlying inside the candle fetch), so ONE `%26` recovery reorders the whole
-    # chain's subsequent fetches. Process-local + per-run — cross-pull persistence is
-    # a named follow-up. Thread-safe (the pool fan-out records from worker threads).
+    # chain's subsequent fetches. Thread-safe (the pool fan-out records from worker
+    # threads). The production spine threads ONE PersistentSymbolFormPreference over
+    # the instrument master through `form_preference` (DEC-FORM-WINNER-PERSIST-001 —
+    # durable across market buckets, until-clean rounds AND pulls); the fresh
+    # process-local default below serves only the direct/unwired callers.
     preference = form_preference if form_preference is not None else SymbolFormPreference()
     # Lever 1 (DEC-FETCH-WRITE-OVERLAP-LEVER1-001): route every contract write through
     # the background pool when wired, freeing the fetch connection from the serial

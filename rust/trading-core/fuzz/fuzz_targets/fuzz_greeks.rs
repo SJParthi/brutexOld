@@ -20,7 +20,9 @@
 //!    must reproduce the input price within the verified round-trip band.
 
 use libfuzzer_sys::fuzz_target;
-use trading_core::greeks::{ERR_INVALID, ERR_NO_SOLUTION, IV_CLAMP_MAX, IV_CLAMP_MIN, T_FLOOR_YEARS};
+use trading_core::greeks::{
+    ERR_INVALID, ERR_NO_SOLUTION, IV_CLAMP_MAX, IV_CLAMP_MIN, T_FLOOR_YEARS,
+};
 use trading_core::{GreeksOut, greeks};
 
 fn read_u64(data: &[u8], off: usize) -> u64 {
@@ -76,7 +78,11 @@ fn assert_sane(out: &GreeksOut, is_call: bool, rate: f64, t_years: f64, scale: f
     }
     assert!(out.gamma >= 0.0, "gamma {} must be >= 0", out.gamma);
     assert!(out.vega >= 0.0, "vega {} must be >= 0", out.vega);
-    assert!(out.theta.is_finite(), "theta must be finite, got {}", out.theta);
+    assert!(
+        out.theta.is_finite(),
+        "theta must be finite, got {}",
+        out.theta
+    );
     assert!(out.rho.is_finite(), "rho must be finite, got {}", out.rho);
     // Analytically price ≥ 0, but the deep-OTM subtraction
     // df·(F·N(d1) − K·N(d2)) can round to a TINY negative (this fuzzer
