@@ -77,9 +77,9 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import fno_math
 
@@ -88,10 +88,59 @@ from brutex.strategies.errors import StrategyError
 #: Maximum nesting depth accepted by :func:`_canonicalise_value`. Far above any
 #: realistic param (production params are flat dicts of scalars, occasionally a
 #: one-level list). A deeper structure raises :class:`StrategyError` rather than
-#: crashing with ``RecursionError``. The engine canonicaliser mirrors
-#: (``brutex/engine/{stage1a,sweep_driver,stage3_refine}.py``) must adopt the
-#: same cap to stay bit-identical — tracked as a separate follow-up.
+#: crashing with ``RecursionError``. The engine run-identity mirrors
+#: (``brutex/engine/{stage1a,sweep_driver,stage3_refine}.py``) adopted guard
+#: parity via :func:`reject_unit_separator` + ``allow_nan=False``
+#: (DEC-RUN-IDENTITY-GUARD-PARITY-001); this depth cap itself is structurally
+#: vacuous at those sites — their payloads are flat scalars, no recursion
+#: exists to cap.
 _MAX_CANONICALISE_DEPTH: int = 64
+
+#: The identity-payload field-join delimiter. Every run-identity join
+#: (:func:`combo_hash` + the engine mirrors above) separates raw string fields
+#: with this byte, so a field CARRYING it could smuggle a field boundary and
+#: forge another identity's payload — :func:`reject_unit_separator` is the ONE
+#: COMMON reject-only guard (CLAUDE.md §11 COMMON).
+UNIT_SEPARATOR: Final[str] = "\x1f"
+
+
+def reject_unit_separator(
+    context: str,
+    fields: Iterable[tuple[str, str]],
+    *,
+    error: type[Exception],
+) -> None:
+    """Reject any ``(name, value)`` field whose value contains ``\\x1f``.
+
+    The ONE COMMON guard for every ``\\x1f``-joined run-identity payload
+    (DEC-RUN-IDENTITY-GUARD-PARITY-001): a raw field carrying the join
+    delimiter could shift a field boundary and forge a different identity, so
+    it is rejected BEFORE any digest byte is produced. REJECT-ONLY — no
+    currently-legal input's digest changes.
+
+    Parameters
+    ----------
+    context
+        The calling identity function's name, prefixed onto the error message
+        (``"combo_hash"`` reproduces the historical message byte-for-byte).
+    fields
+        ``(field_name, field_value)`` pairs to screen, in order.
+    error
+        The caller's domain error class to raise (:class:`StrategyError` for
+        :func:`combo_hash`, ``Stage3RefineError`` / ``ValueError`` at the
+        engine mirrors — each site keeps its own error contract).
+
+    Raises
+    ------
+    Exception
+        The injected *error* class, naming the offending field.
+    """
+    for field_name, field_value in fields:
+        if UNIT_SEPARATOR in field_value:
+            raise error(
+                f"{context}: {field_name} must not contain the \\x1f "
+                "unit-separator byte (it is the field join delimiter)"
+            )
 
 
 def canonicalise_params(params: Mapping[str, Any]) -> str:
@@ -205,24 +254,23 @@ def combo_hash(
     if not code_commit_sha:
         raise StrategyError("combo_hash: code_commit_sha must be non-empty")
 
-    for _field_name, _field_value in (
-        ("strategy_id", strategy_id),
-        ("direction", direction),
-        ("instrument", instrument),
-        ("tf", tf),
-        ("mode", mode),
-        ("data_snapshot_hash", data_snapshot_hash),
-        ("indicator_version", indicator_version),
-        ("code_commit_sha", code_commit_sha),
-    ):
-        if "\x1f" in _field_value:
-            raise StrategyError(
-                f"combo_hash: {_field_name} must not contain the \\x1f "
-                "unit-separator byte (it is the field join delimiter)"
-            )
+    reject_unit_separator(
+        "combo_hash",
+        (
+            ("strategy_id", strategy_id),
+            ("direction", direction),
+            ("instrument", instrument),
+            ("tf", tf),
+            ("mode", mode),
+            ("data_snapshot_hash", data_snapshot_hash),
+            ("indicator_version", indicator_version),
+            ("code_commit_sha", code_commit_sha),
+        ),
+        error=StrategyError,
+    )
 
     canonical = canonicalise_params(params)
-    payload = "\x1f".join(
+    payload = UNIT_SEPARATOR.join(
         [
             strategy_id,
             direction,

@@ -33,18 +33,21 @@ incremental skip-sets from the registry + coverage ledger
 :func:`~brutex.orchestrator.universe_phases.run_two_phase`:
 
 * **Phase 1** — ``fetch_expiries(cell)`` calls
-  :func:`~brutex.adapters.groww.contracts.resolve_expiries` (metadata only); the
-  ``on_expiry_cell`` callback PERSISTS each discovered date via
-  :meth:`~brutex.data.registry_store.RegistryStore.upsert_expiry` and writes the
-  per-``(underlying, year)`` coverage rollup
-  (:data:`~brutex.data.coverage_ledger.STATUS_EXPIRIES_ONLY` on success — the
-  expiries are captured but contracts are a separate sub-phase here).
+  :func:`~brutex.adapters.groww.contracts.resolve_expiries` (metadata only) and
+  PERSISTS the discovered dates as ONE deadline-guarded batch via
+  :meth:`~brutex.data.registry_store.RegistryStore.upsert_expiries`
+  (DEC-STORE-WRITE-DEADLINE-001 — the fetcher persists, the Phase-2 shape, so a
+  wedged registry write defers the CELL, never the pull); the ``on_expiry_cell``
+  callback records the outcome and writes the per-``(underlying, year)`` coverage
+  rollup (:data:`~brutex.data.coverage_ledger.STATUS_EXPIRIES_ONLY` on success —
+  the expiries are captured but contracts are a separate sub-phase here).
 * **Phase 2** — ``fetch_contracts(job)`` calls
   :func:`~brutex.adapters.groww.contracts.resolve_contracts` (metadata only) and
-  the ``on_contract`` callback PERSISTS each contract via
-  :meth:`~brutex.data.registry_store.RegistryStore.upsert_contract`, parsing the
-  ``strike`` / ``side`` from the already-parsed
-  :class:`~brutex.adapters.protocol.DerivativeContract` (never re-invented).
+  PERSISTS the job's contracts as ONE deadline-guarded batch via
+  :meth:`~brutex.data.registry_store.RegistryStore.upsert_contracts`
+  (DEC-STORE-WRITE-DEADLINE-001), taking the ``strike`` / ``side`` from the
+  already-parsed :class:`~brutex.adapters.protocol.DerivativeContract` (never
+  re-invented); the ``on_contract`` callback records the outcome.
 
 ## Honest envelope (Golden Rule #1 + #10)
 
@@ -86,6 +89,7 @@ from brutex.data.coverage_ledger import (
     CoverageRecord,
     classify_cell,
 )
+from brutex.data.errors import StoreWriteDeadlineExceeded
 from brutex.data.registry_store import RegistryStore
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import (
@@ -114,6 +118,28 @@ _LOG = structlog.get_logger(__name__)
 #: F&O-eligible stock can never silently vanish — DETECT-only, no return/ledger
 #: change, no auto-recovery.
 METADATA_UNDERLYING_NO_EXPIRIES_EVENT: Final[str] = "metadata.underlying_no_expiries"
+
+#: WARN — a Phase-1 cell's registry expiry-batch write blew the store-write deadline
+#: (DEC-STORE-WRITE-DEADLINE-001): the cell records ``failed`` (never settled) and is
+#: re-attempted on the NEXT pull. Fields: ``run_id`` / ``exchange`` / ``underlying`` /
+#: ``year`` / ``error_type`` / ``defer_seconds`` / ``latched``.
+METADATA_EXPIRY_WRITE_DEFERRED_EVENT: Final[str] = "metadata.expiry_cell.write_deferred"
+
+#: WARN — a Phase-1 cell's coverage rollup write blew the store-write deadline. Safe
+#: swallow: every cell in the loop came through ``cells_to_pull``, so its persisted
+#: status is already non-settled and the cell re-attempts next pull regardless.
+METADATA_COVERAGE_WRITE_DEFERRED_EVENT: Final[str] = "metadata.coverage_cell.write_deferred"
+
+#: WARN — a Phase-2 job's registry contract-batch write blew the store-write deadline:
+#: the job counts into ``contract_failures``, persisted no contracts, and is rebuilt +
+#: re-pulled on the NEXT pull (DEC-PHASE2-REGISTRY-REBUILD-001).
+METADATA_CONTRACT_WRITE_DEFERRED_EVENT: Final[str] = "metadata.contract_job.write_deferred"
+
+#: WARN — the post-Phase-2 contract-count rewrite hit the store-write deadline; the
+#: rewrite loop BREAKS (the remaining cells would only fail fast on the wedge latch).
+#: Fail-safe: an unsettled cell re-pulls + rewrites next run; a previously-``complete``
+#: cell keeps a stale display count until recovery (honest envelope).
+METADATA_COUNTS_WRITE_DEFERRED_EVENT: Final[str] = "metadata.contract_counts.write_deferred"
 
 #: Max underlyings inlined in the zero-expiry WARNING's sample list — the full count
 #: is always logged via ``count``; only the inlined ``sample`` is capped so a
@@ -200,6 +226,11 @@ class MetadataPullReport:
         Total contract legs upserted into the registry.
     note
         An honest one-line outcome note (dry-run / persisted counts).
+    store_write_deferrals
+        Registry/coverage write batches deferred by the store-write wall-clock
+        deadline (DEC-STORE-WRITE-DEADLINE-001) — each deferred unit re-attempts
+        on the next pull; a non-zero count fails the pipeline's
+        :func:`~brutex.dashboard.pipeline_pull.metadata_phase_ok` gate.
     """
 
     dry_run: bool
@@ -213,6 +244,7 @@ class MetadataPullReport:
     contract_failures: int
     contracts_persisted: int
     note: str
+    store_write_deferrals: int = 0
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the metadata-pull route + the live panel."""
@@ -228,6 +260,7 @@ class MetadataPullReport:
             "contract_failures": self.contract_failures,
             "contracts_persisted": self.contracts_persisted,
             "note": self.note,
+            "store_write_deferrals": self.store_write_deferrals,
         }
 
 
@@ -479,7 +512,7 @@ def _rewrite_contract_counts(
     contract_counts: dict[ContractJob, int],
     run_id: str,
     now: datetime,
-) -> None:
+) -> int:
     """Re-upsert each Phase-1 coverage cell with its REAL enumerated contract count.
 
     DEC-METADATA-CONTRACTS-COUNT-001 (year-key correctness fix, DEC-METADATA-CONTRACTS
@@ -511,8 +544,18 @@ def _rewrite_contract_counts(
     Idempotent on the PK (rerun-safe, CLAUDE.md §7); lean-universe compliant — only the
     COUNT is persisted, the legs themselves are never stored
     (DEC-INSTRUMENT-UNIVERSE-FAST-001). O(total discovered expiries).
+
+    Returns the number of DEFERRED rewrite batches (``0`` healthy, ``1`` on a
+    store-write-deadline breach — DEC-STORE-WRITE-DEADLINE-001): on the FIRST
+    :class:`~brutex.data.errors.StoreWriteDeadlineExceeded` the loop WARNs
+    (:data:`METADATA_COUNTS_WRITE_DEFERRED_EVENT`, naming the remaining cells) and
+    BREAKS — the remaining cells would only fail fast on the wedge latch. Fail-safe:
+    an unsettled cell re-pulls + rewrites next run; a previously-``complete`` cell
+    keeps a stale display count until the next successful pull (honest envelope,
+    Golden Rule #10).
     """
-    for (exchange, underlying, year), expiries in cells.items():
+    items = list(cells.items())
+    for index, ((exchange, underlying, year), expiries) in enumerate(items):
         if not expiries:
             # A 0-expiry cell ran but discovered nothing — it has NO contract jobs and
             # Phase 1 already recorded it as ``pending`` (classify_cell). Leave that intact;
@@ -524,19 +567,34 @@ def _rewrite_contract_counts(
         # legitimately surface a 2026-Jan expiry).
         count = sum(contract_counts.get((exchange, underlying, expiry), 0) for expiry in expiries)
         status = STATUS_COMPLETE if count > 0 else STATUS_EXPIRIES_ONLY
-        coverage_store.upsert_coverage(
-            CoverageRecord(
-                exch_id=exchange,
-                underlying_symbol=underlying,
-                year=year,
-                expiries_pulled=len(expiries),
-                contracts_pulled=count,
-                status=status,
-                last_run_id=run_id,
-                last_fetched_at=now,
-                error_message=None,
+        try:
+            coverage_store.upsert_coverage(
+                CoverageRecord(
+                    exch_id=exchange,
+                    underlying_symbol=underlying,
+                    year=year,
+                    expiries_pulled=len(expiries),
+                    contracts_pulled=count,
+                    status=status,
+                    last_run_id=run_id,
+                    last_fetched_at=now,
+                    error_message=None,
+                )
             )
-        )
+        except StoreWriteDeadlineExceeded as exc:
+            _LOG.warning(
+                METADATA_COUNTS_WRITE_DEFERRED_EVENT,
+                run_id=run_id,
+                exchange=exchange,
+                underlying=underlying,
+                year=year,
+                cells_remaining=len(items) - index,
+                error_type=type(exc).__name__,
+                defer_seconds=exc.deadline_seconds,
+                latched=exc.latched,
+            )
+            return 1
+    return 0
 
 
 def pull_expiries_contracts(
@@ -668,6 +726,10 @@ def pull_expiries_contracts(
     # (the classify_cell rule keys completeness off expiries_pulled).
     expiries_persisted = 0
     contracts_persisted = 0
+    # Registry/coverage write batches deferred by the store-write wall-clock deadline
+    # (DEC-STORE-WRITE-DEADLINE-001) — surfaced on the report so the pipeline's
+    # metadata gate goes honestly red on a wedged store volume.
+    store_write_deferrals = 0
     # Per-EXPIRY enumerated CONTRACT count (DEC-METADATA-CONTRACTS-COUNT-001, keyed by the
     # FULL ``(exchange, underlying, expiry)`` job — NOT ``expiry.year``; the year-key
     # correctness fix). Phase 2 enumerates the contracts per expiry; ``_rewrite_contract_
@@ -731,23 +793,59 @@ def pull_expiries_contracts(
         """
         exchange, underlying, year = cell
         forms = forms_by_key.get((exchange, underlying), (underlying,))
-        return _first_nonempty_over_forms(
+        expiries = _first_nonempty_over_forms(
             forms,
             lambda form: resolve_expiries(
                 client, exchange=exchange, underlying_symbol=form, year=year
             ),
             is_empty=lambda r: not r,
         )
+        # Persist HERE, in the fetcher — the exact Phase-2 shape (its fetcher
+        # persists too) — as ONE deadline-guarded registry batch
+        # (DEC-STORE-WRITE-DEADLINE-001). A wedged registry raises the TRANSIENT
+        # :class:`~brutex.data.errors.StoreWriteDeadlineExceeded` out of the
+        # FETCHER, which the engine captures per cell (record-and-resume): the
+        # cell is recorded FAILED (never settled), derives NO Phase-2 jobs (no
+        # vendor calls against unpersisted expiries), and re-attempts next pull.
+        registry.upsert_expiries(
+            exchange, underlying, list(expiries), run_id=run_id, fetched_at=now
+        )
+        return expiries
 
     def _on_expiry_cell(
         cell: ExpiryCell, expiries: Sequence[date], exc: BaseException | None
     ) -> None:
-        """Persist each discovered expiry + write the per-cell coverage rollup."""
-        nonlocal expiries_persisted, progress_completed, cells_observed
+        """Record each cell's outcome + write the per-cell coverage rollup.
+
+        The registry expiry persistence happens in the FETCHER
+        (:func:`_fetch_expiries` — the Phase-2 shape), so a store-write-deadline
+        breach arrives HERE as the cell's ``exc`` (DEC-STORE-WRITE-DEADLINE-001):
+        the cell records ``failed`` (never settled — the settle-correctness rule:
+        a registry-deferred cell settling would skip it next pull while the
+        registry lacks its expiries, a permanent loss), contributes NO Phase-2
+        jobs, and re-attempts next pull. This callback runs on the DRAINING
+        thread, so its OWN coverage write is also caught below — a raise here
+        would fail the WHOLE pull.
+        """
+        nonlocal expiries_persisted, progress_completed, cells_observed, store_write_deferrals
         exchange, underlying, year = cell
-        for expiry in expiries:
-            registry.upsert_expiry(exchange, underlying, expiry, run_id=run_id, fetched_at=now)
-        expiries_persisted += len(expiries)
+        if isinstance(exc, StoreWriteDeadlineExceeded):
+            # The cell's expiry BATCH write blew the store-write deadline (or hit
+            # the wedge latch): a per-cell DEFERRAL, loudly counted — never a
+            # pull-wide crash/freeze.
+            store_write_deferrals += 1
+            _LOG.warning(
+                METADATA_EXPIRY_WRITE_DEFERRED_EVENT,
+                run_id=run_id,
+                exchange=exchange,
+                underlying=underlying,
+                year=year,
+                error_type=type(exc).__name__,
+                defer_seconds=exc.deadline_seconds,
+                latched=exc.latched,
+            )
+        if exc is None:
+            expiries_persisted += len(expiries)
         # Roll this cell's outcome into the per-underlying zero-expiry audit accumulator
         # (DEC-FNO-UNDERLYING-RESOLVE-001).
         prior = cell_outcomes.get((exchange, underlying), _CellOutcome())
@@ -768,24 +866,43 @@ def pull_expiries_contracts(
         # A failed cell ⇒ classify_cell → "failed"; a success with ≥1 expiry ⇒
         # "expiries_only" (captured but contracts are the separate Phase 2 here);
         # a success with 0 expiries ⇒ classify_cell → "pending" (ran, found none).
+        # A write-DEFERRED cell arrives with ``exc`` set + ``expiries == []`` ⇒
+        # classify_cell(0, 0, error) → "failed" (NEVER settled; an honest 0 —
+        # nothing durably persisted).
         status = (
             STATUS_EXPIRIES_ONLY
             if (exc is None and expiries)
             else classify_cell(len(expiries), 0, error_message)
         )
-        coverage_store.upsert_coverage(
-            CoverageRecord(
-                exch_id=exchange,
-                underlying_symbol=underlying,
-                year=year,
-                expiries_pulled=len(expiries),
-                contracts_pulled=0,
-                status=status,
-                last_run_id=run_id,
-                last_fetched_at=now,
-                error_message=error_message,
+        try:
+            coverage_store.upsert_coverage(
+                CoverageRecord(
+                    exch_id=exchange,
+                    underlying_symbol=underlying,
+                    year=year,
+                    expiries_pulled=len(expiries),
+                    contracts_pulled=0,
+                    status=status,
+                    last_run_id=run_id,
+                    last_fetched_at=now,
+                    error_message=error_message,
+                )
             )
-        )
+        except StoreWriteDeadlineExceeded as deferred:
+            store_write_deferrals += 1
+            _LOG.warning(
+                METADATA_COVERAGE_WRITE_DEFERRED_EVENT,
+                run_id=run_id,
+                exchange=exchange,
+                underlying=underlying,
+                year=year,
+                error_type=type(deferred).__name__,
+                defer_seconds=deferred.deadline_seconds,
+                latched=deferred.latched,
+            )
+            # Safe swallow: every cell in this loop came through ``cells_to_pull``,
+            # so its PERSISTED status is already non-settled — the cell re-attempts
+            # next pull regardless of this missing rollup row.
 
     def _fetch_contracts(job: ContractJob) -> int:
         """Phase-2 fetcher: resolve + persist one expiry's contracts (metadata only).
@@ -806,19 +923,26 @@ def pull_expiries_contracts(
             ),
             is_empty=lambda r: not r,
         )
-        for contract in contracts:
-            registry.upsert_contract(
-                exchange,
-                underlying,
-                expiry,
-                contract.symbol,
-                side=contract.contract_type,
-                strike=contract.strike,
-                run_id=run_id,
-                fetched_at=now,
-            )
-        contracts_persisted += len(contracts)
-        return len(contracts)
+        # ONE deadline-guarded write BATCH for the whole leg list (O(1) guard cost
+        # per job, not per contract — DEC-STORE-WRITE-DEADLINE-001). NO catch here:
+        # the raise IS the defer — PoolRunParallel captures it per job, the job
+        # counts into ``contract_failures``, persisted no contracts, and is rebuilt
+        # + re-pulled on the NEXT pull (DEC-PHASE2-REGISTRY-REBUILD-001).
+        # "Persisted no contracts" is GUARANTEED by ``upsert_contracts``' atomic
+        # transaction (fix round 3): a mid-batch breach whose zombie dies with the
+        # process commits ZERO legs, so ``settled_contract_jobs`` can never infer
+        # this expired job settled from a durable prefix (which would have skipped
+        # the remaining legs forever — a silent permanent partial chain).
+        contracts_stored = registry.upsert_contracts(
+            exchange,
+            underlying,
+            expiry,
+            [(contract.symbol, contract.contract_type, contract.strike) for contract in contracts],
+            run_id=run_id,
+            fetched_at=now,
+        )
+        contracts_persisted += contracts_stored
+        return contracts_stored
 
     def _on_contract(job: ContractJob, count: int, exc: BaseException | None) -> None:
         """Per-job hook — the persistence already happened in the fetcher.
@@ -834,10 +958,26 @@ def pull_expiries_contracts(
         + settled its expiry cell, so ``total`` is always already re-scaled to
         ``cells + jobs`` by the time the first job lands here.
         """
-        nonlocal progress_completed
+        nonlocal progress_completed, store_write_deferrals
         progress_completed += 1
         exchange, underlying, expiry = job
         _emit_progress(f"{exchange}-{underlying} {expiry} contracts")
+        if isinstance(exc, StoreWriteDeadlineExceeded):
+            # The job's contract-batch write blew the store-write deadline
+            # (DEC-STORE-WRITE-DEADLINE-001): already counted into
+            # ``contract_failures`` by the engine; surface the DEFERRAL loudly +
+            # on the report (the pipeline gate goes red; the job re-pulls next run).
+            store_write_deferrals += 1
+            _LOG.warning(
+                METADATA_CONTRACT_WRITE_DEFERRED_EVENT,
+                run_id=run_id,
+                exchange=exchange,
+                underlying=underlying,
+                expiry=expiry.isoformat(),
+                error_type=type(exc).__name__,
+                defer_seconds=exc.deadline_seconds,
+                latched=exc.latched,
+            )
         if exc is None:
             # Key by the FULL expiry, NOT ``expiry.year``: ``get_expiries(year=Y)`` is not
             # year-filtered by the vendor, so a year=Y cell can surface an expiry dated in
@@ -873,7 +1013,7 @@ def pull_expiries_contracts(
     # cell carries the real integer count and — once ≥1 contract is in — graduates from
     # ``expiries_only`` to ``complete`` (a chain with no enumerated contracts stays
     # ``expiries_only``, so the "metadata-only by design" note still reads honestly).
-    _rewrite_contract_counts(
+    store_write_deferrals += _rewrite_contract_counts(
         coverage_store,
         cells=expiries_seen,
         contract_counts=contract_counts,
@@ -903,4 +1043,5 @@ def pull_expiries_contracts(
         contract_failures=report.contract_failures,
         contracts_persisted=contracts_persisted,
         note=note,
+        store_write_deferrals=store_write_deferrals,
     )

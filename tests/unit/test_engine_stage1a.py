@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 import pytest
 import trading_core
@@ -29,8 +30,10 @@ from brutex.engine.stage1a import (
     _DEFAULT_SESSION_KEY,  # pyright: ignore[reportPrivateUsage]
     ANCHOR_DEPENDENT_MASK,
     Stage1AMatrixBuilder,
+    WalkForwardFold,
     _ema_to_paisa,
     _price_to_paisa,
+    _walk_forward_schedule_hash,
     apply_1day_mask_for,
     build_bar_bits,
 )
@@ -668,3 +671,24 @@ def test_apply_1day_mask_for_is_the_one_d12_predicate() -> None:
     assert apply_1day_mask_for("NIFTY", "1day") is False  # named follow-up
     assert apply_1day_mask_for("BANKNIFTY", "1day") is False
     assert apply_1day_mask_for("NSE-NIFTY-30Jul26-FUT", "1day") is False
+
+
+def test_walk_forward_schedule_hash_rejects_nan_param() -> None:
+    """``allow_nan=False`` (DEC-RUN-IDENTITY-GUARD-PARITY-001): a smuggled
+    non-finite float raises instead of silently emitting non-canonical
+    ``NaN`` JSON — unreachable for the typed all-int schedule fields, so
+    every currently-legal digest is byte-unchanged (golden-pinned in
+    ``tests/golden/test_engine_run_identity_golden.py``)."""
+    fold = WalkForwardFold(
+        fold_index=0,
+        train_start_day=0,
+        train_end_day=3,
+        test_start_day=3,
+        test_end_day=4,
+        train_start_bar=0,
+        train_end_bar=6,
+        test_start_bar=6,
+        test_end_bar=8,
+    )
+    with pytest.raises(ValueError, match="[Oo]ut of range float"):
+        _walk_forward_schedule_hash((fold,), cast(int, float("nan")), 1, 1, 4, 8)

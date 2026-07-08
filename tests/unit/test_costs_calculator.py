@@ -32,10 +32,12 @@ from brutex.costs import (
     TradeOutcome,
     TradeSide,
     UnsupportedTradeOutcomeError,
+    UnverifiedCostRegimeError,
     compute_trade_cost,
     constants,
 )
 from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -312,21 +314,35 @@ def test_fixture_f13_zero_gross_pnl_negative_net() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
-# §12.2 F11 — Pre-Jul-2021 lot history (75 shares)
+# §12.2 F11 — Pre-Jul-2021 lot history (75 shares) — SPLIT per
+# DEC-ETC-REGIME-HISTORY-001: a 2021 entry date now REFUSES the whole
+# compute (pre-2024-10-01 ETC refusal window), so the lot-75 pin moves
+# to the lot-size lookup directly and the compute path pins the refusal.
 # ─────────────────────────────────────────────────────────────────
 
 
 def test_fixture_f11_pre_jul_2021_lot_75() -> None:
-    """NIFTY 2021-06-15 has lot size 75 (pre-Jul-2021 default)."""
-    r = compute_trade_cost(
-        _make_trade(
-            entry_dt=datetime(2021, 6, 15, 10, 0),
-            exit_dt=datetime(2021, 6, 15, 11, 0),
-            expiry_date=date(2021, 6, 24),
-        )
-    )
+    """NIFTY 2021-06-15 has lot size 75 (pre-Jul-2021 default) — pinned at
+    ``get_lot_size`` directly (compute_trade_cost now refuses the date on
+    the ETC regime, so the lot value is no longer observable through it)."""
+    assert get_lot_size(OptionsUnderlying.NIFTY, date(2021, 6, 15)) == 75
 
-    assert r.n_shares_per_lot == 75
+
+def test_pre_boundary_compute_raises_unverified() -> None:
+    """DEC-ETC-REGIME-HISTORY-001 end-to-end: a pre-2024-10-01 entry date
+    refuses the WHOLE trade cost — no component is fabricated."""
+    with pytest.raises(UnverifiedCostRegimeError) as exc_info:
+        compute_trade_cost(
+            _make_trade(
+                entry_dt=datetime(2021, 6, 15, 10, 0),
+                exit_dt=datetime(2021, 6, 15, 11, 0),
+                expiry_date=date(2021, 6, 24),
+            )
+        )
+    err = exc_info.value
+    assert err.exchange == "NSE"
+    assert err.on_date == date(2021, 6, 15)
+    assert err.verified_from == constants.ETC_REGIME_OCT_2024_START
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -620,6 +636,144 @@ def test_brokerage_zerodha() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+# UnverifiedCostRegimeError — direct construction (DEC-ETC-REGIME-
+# HISTORY-001). These live HERE because ci.yml gate 19d covers
+# brutex.costs.types through test_costs_calculator.py ONLY.
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_unverified_error_attrs_and_message() -> None:
+    """Bounded-window construction: every structured attr stored verbatim
+    and the message carries window + source + remediation."""
+    err = UnverifiedCostRegimeError(
+        charge="exchange transaction charge (options premium)",
+        exchange="NSE",
+        on_date=date(2024, 5, 2),
+        window_start=date.min,
+        verified_from=date(2024, 10, 1),
+        source="the citation-gap stamp",
+    )
+    assert err.charge == "exchange transaction charge (options premium)"
+    assert err.exchange == "NSE"
+    assert err.on_date == date(2024, 5, 2)
+    assert err.window_start == date.min
+    assert err.verified_from == date(2024, 10, 1)
+    assert err.source == "the citation-gap stamp"
+    # The remediation DEFAULT text: how the window closes (data-only).
+    assert "add ONE dated" in err.remediation
+    assert "RegimeRow" in err.remediation
+    assert "MIGRATION.md" in err.remediation
+    msg = str(err)
+    assert "(NSE)" in msg
+    assert "UNVERIFIED for 2024-05-02" in msg
+    assert "→ 2024-10-01)" in msg
+    assert "the citation-gap stamp" in msg
+    assert "Golden Rule #1" in msg
+
+
+def test_unverified_error_open_window() -> None:
+    """``verified_from=None`` == an open-ended trailing refusal window —
+    the message's window end reads 'open'."""
+    err = UnverifiedCostRegimeError(
+        charge="synthetic charge",
+        exchange="BSE",
+        on_date=date(2025, 1, 1),
+        window_start=date(2024, 10, 1),
+        verified_from=None,
+        source="trailing refusal",
+        remediation="custom remediation text",
+    )
+    assert err.verified_from is None
+    assert err.remediation == "custom remediation text"
+    assert "→ open)" in str(err)
+    assert "custom remediation text" in str(err)
+
+
+def test_unverified_error_no_exchange_label() -> None:
+    """``exchange=""`` (a non-exchange-scoped table) omits the parenthesised
+    exchange label from the message."""
+    err = UnverifiedCostRegimeError(
+        charge="synthetic charge",
+        exchange="",
+        on_date=date(2024, 5, 2),
+        window_start=date.min,
+        verified_from=date(2024, 10, 1),
+        source="no exchange scope",
+    )
+    assert err.exchange == ""
+    assert "(" not in str(err).split(" is UNVERIFIED")[0]
+    assert str(err).startswith("synthetic charge is UNVERIFIED")
+
+
+def test_unverified_error_is_value_error_subclass() -> None:
+    """Catch-ValueError callers keep working (the UnsupportedTradeOutcome
+    precedent); a caller can pin the exact type."""
+    assert issubclass(UnverifiedCostRegimeError, ValueError)
+
+
+# ─────────────────────────────────────────────────────────────────
+# ETC regime boundary through the FULL calculator stack
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_boundary_exact_oct_2024_computes() -> None:
+    """Entry EXACTLY on 2024-10-01 computes successfully at the verified
+    rates (full-stack bisect-boundary mutant killer: bisect_right→
+    bisect_left would refuse this date)."""
+    r = compute_trade_cost(
+        _make_trade(
+            entry_dt=datetime(2024, 10, 1, 10, 0),
+            exit_dt=datetime(2024, 10, 1, 11, 0),
+            expiry_date=date(2024, 10, 31),
+        )
+    )
+    assert r.total_charges_paisa > 0
+    assert r.exch_paisa > 0
+
+
+def test_day_before_boundary_refuses() -> None:
+    """2024-09-30 (the day before the verified window opens) refuses."""
+    with pytest.raises(UnverifiedCostRegimeError):
+        compute_trade_cost(
+            _make_trade(
+                entry_dt=datetime(2024, 9, 30, 10, 0),
+                exit_dt=datetime(2024, 9, 30, 11, 0),
+                expiry_date=date(2024, 10, 31),
+            )
+        )
+
+
+@pytest.mark.property
+@settings(max_examples=200, deadline=None)
+@given(
+    entry_dt=st.datetimes(
+        min_value=datetime(2020, 1, 1, 9, 15),
+        max_value=datetime(2024, 9, 30, 15, 20),
+    ),
+    instrument=st.sampled_from(["NIFTY", "BANKNIFTY", "SENSEX"]),
+)
+def test_property_pre_boundary_always_refuses(entry_dt: datetime, instrument: Instrument) -> None:
+    """Any pre-2024-10-01 entry refuses — NEVER a wrong number.
+
+    2021-01-01 → 2024-09-30 raises ``UnverifiedCostRegimeError`` (the ETC
+    refusal window); 2020 dates raise the lot-size-history ``ValueError``
+    FIRST (Step 2 precedes Step 6; the lot floor is 2021-01-01 —
+    COSTS_VERIFIED §20 row 4). Either way no cost is fabricated.
+    """
+    with pytest.raises(ValueError) as exc_info:  # subtype asserted below
+        compute_trade_cost(
+            _make_trade(
+                entry_dt=entry_dt,
+                exit_dt=entry_dt,
+                expiry_date=entry_dt.date(),
+                instrument=instrument,
+            )
+        )
+    if entry_dt.date() >= date(2021, 1, 1):
+        assert isinstance(exc_info.value, UnverifiedCostRegimeError)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Return-type sanity
 # ─────────────────────────────────────────────────────────────────
 
@@ -843,23 +997,48 @@ def test_slippage_long_fills_byte_exact() -> None:
     assert r.sell_fill_paisa == 11_995  # exit 12000 - 5 tick (adverse, lower)
 
 
-def test_slippage_short_fills_pinned_current_behavior() -> None:
-    """MINOR-4: the short-side fills are PINNED to current behaviour.
+def test_slippage_short_fills_byte_exact_adverse() -> None:
+    """Short fills match the resolved §4/§8 adverse rule, byte-exact.
 
-    The short SELL (entry) leg sign is a documented spec ambiguity:
-    CALCULATOR_SPEC §8 table says short entry fill = ``entry_bar_open − 1
-    tick``, but the §4 pseudocode says "SELL at entry+1tick" and is flagged
-    "CHECK SIGN". Track 2 is BUY-only (DEC-EXEC-008), so this path is never
-    used in production; we PIN the current implementation (cover at
-    exit+tick, sell at entry+tick) rather than guess-change an unused path.
-    Resolve the spec contradiction before any short-side track relies on it.
+    DEC-TRACK2-COSTS-SPEC-RECONCILE-001 resolved the #963 MINOR-4 spec
+    contradiction: CALCULATOR_SPEC §8's ADVERSE table is authoritative and §4's
+    pseudocode was rewritten to agree — short entry SELL = ``entry_bar_open − 1
+    tick`` (adverse, LOWER; the old pin was the favorable ``+ 1 tick``) and
+    cover BUY = ``exit_bar_open + 1 tick`` (adverse, HIGHER — unchanged). Track
+    2 stays BUY-only (DEC-EXEC-008): this branch is production-unreachable
+    forward-compat. The long side cannot move under this flip — the standing
+    witness is ``test_slippage_long_fills_byte_exact`` above (10_005 / 11_995).
     """
     r = compute_trade_cost(
         _make_trade(entry_open_paisa=10_000, exit_open_paisa=12_000, side="short_call")
     )
     assert r.buy_fill_paisa == 12_005  # cover: exit 12000 + 5 tick (adverse, higher)
-    # Current behaviour (matches §4 pseudocode, NOT the §8 table — see docstring):
-    assert r.sell_fill_paisa == 10_005  # entry 10000 + 5 tick
+    # Resolved §4/§8 adverse rule (DEC-TRACK2-COSTS-SPEC-RECONCILE-001):
+    assert r.sell_fill_paisa == 9_995  # entry 10000 - 5 tick (adverse, lower)
+
+
+def test_short_entry_fill_floored_at_one_tick() -> None:
+    """The adverse re-pin's NEW floor case: a short ENTRY on a 1-tick bar.
+
+    Before DEC-TRACK2-COSTS-SPEC-RECONCILE-001 the short entry SELL filled
+    at ``entry_open + tick`` (favorable) and could never reach ₹0.00; the
+    adverse re-pin (``entry_open − tick``) makes ``5 − 5 = 0`` reachable on
+    the short ENTRY leg — the exact scenario the ``_apply_slippage``
+    docstring now claims the MINOR-3 one-tick floor covers. Pin it: the
+    sell fill floors at ``TICK_PAISA`` (5 paise, never a "free" ₹0.00
+    sale), the cover buy is untouched, and the realized slippage is
+    ``1 × tick × shares`` (only the buy leg truly moved — the floored sell
+    leg moved 0), mirroring ``test_realized_slippage_floored_exit_one_tick``
+    on the long side. Production-unreachable under DEC-EXEC-008 (BUY-only);
+    forward-compat teeth only.
+    """
+    r = compute_trade_cost(
+        _make_trade(entry_open_paisa=5, exit_open_paisa=12_000, side="short_call")
+    )
+    assert r.sell_fill_paisa == constants.TICK_PAISA  # floored from 5 - 5 = 0
+    assert r.buy_fill_paisa == 12_005  # cover: exit 12000 + 5 tick (adverse, higher)
+    # Realized: only the cover buy moved (1 tick); the floored sell leg moved 0.
+    assert r.slippage_paisa == 1 * constants.TICK_PAISA * r.n_shares
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -989,7 +1168,10 @@ def test_stt_regime_boundary_apr_2026_flip() -> None:
     side=st.sampled_from(["long_call", "long_put"]),
     broker=st.sampled_from(["groww", "zerodha"]),
     entry_dt=st.datetimes(
-        min_value=datetime(2021, 1, 1, 9, 15),
+        # Floor at the verified ETC window start (DEC-ETC-REGIME-HISTORY-001):
+        # a pre-2024-10-01 entry now REFUSES pricing — pinned by
+        # test_property_pre_boundary_always_refuses below.
+        min_value=datetime(2024, 10, 1, 9, 15),
         max_value=datetime(2026, 12, 31, 15, 20),
     ),
 )

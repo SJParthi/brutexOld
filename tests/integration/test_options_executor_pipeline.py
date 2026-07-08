@@ -43,7 +43,7 @@ class _Source:
         def _bar(open_rupees: str) -> OptionBar:
             px = Decimal(open_rupees)
             return OptionBar(
-                timestamp=datetime(2024, 5, 2, 9, 16, tzinfo=_IST),
+                timestamp=datetime(2024, 10, 3, 9, 16, tzinfo=_IST),
                 open=px,
                 high=px,
                 low=px,
@@ -60,15 +60,17 @@ class _Source:
 
 
 def test_full_options_sim_pipeline_with_real_audit(tmp_path: Path) -> None:
-    # Two replayed spot round-trips (entry/exit in UTC, as the lake stores them).
+    # Two replayed spot round-trips (entry/exit in UTC, as the lake stores
+    # them). Post-2024-10-01 dates: the verified ETC window
+    # (DEC-ETC-REGIME-HISTORY-001 made pre-boundary dates reject).
     trades = [
         _Trade(
-            entry_ts=datetime(2024, 5, 2, 3, 46, tzinfo=UTC),
-            exit_ts=datetime(2024, 5, 2, 9, 50, tzinfo=UTC),
+            entry_ts=datetime(2024, 10, 3, 3, 46, tzinfo=UTC),
+            exit_ts=datetime(2024, 10, 3, 9, 50, tzinfo=UTC),
         ),
         _Trade(
-            entry_ts=datetime(2024, 5, 3, 3, 46, tzinfo=UTC),
-            exit_ts=datetime(2024, 5, 3, 9, 50, tzinfo=UTC),
+            entry_ts=datetime(2024, 10, 4, 3, 46, tzinfo=UTC),
+            exit_ts=datetime(2024, 10, 4, 9, 50, tzinfo=UTC),
         ),
     ]
     spot_by_ts = {

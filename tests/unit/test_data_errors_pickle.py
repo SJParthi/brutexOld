@@ -34,6 +34,7 @@ from brutex.data.errors import (
     PartitionError,
     PartitionLockTimeout,
     ResampleInputError,
+    StoreWriteDeadlineExceeded,
     WriteDeadlineExceeded,
     WriterError,
     parquet_read_skip_errors,
@@ -102,6 +103,34 @@ class TestConstructorArgReduce:
         copy = _roundtrip(LakeWriteHalt("worker_pool_broken"))
         assert isinstance(copy, LakeWriteHalt)
         assert copy.reason == "worker_pool_broken"
+
+    def test_store_write_deadline_exceeded_roundtrips(self) -> None:
+        """DEC-STORE-WRITE-DEADLINE-001: the registry/coverage store-write twin —
+        the SAME ``:g``-re-format latent bug class, so all four positional ctor
+        args (incl. the ``latched`` fail-fast flag) must round-trip exactly."""
+        exc = StoreWriteDeadlineExceeded(90.0, "registry", "upsert_contracts")
+        copy = _roundtrip(exc)
+        assert type(copy) is StoreWriteDeadlineExceeded
+        assert str(copy) == str(exc)
+        assert copy.args == exc.args
+        assert copy.deadline_seconds == 90.0
+        assert copy.store == "registry"
+        assert copy.op == "upsert_contracts"
+        assert copy.latched is False
+
+    def test_store_write_deadline_latched_roundtrips(self) -> None:
+        exc = StoreWriteDeadlineExceeded(0.2, "coverage", "upsert_coverage", latched=True)
+        copy = _roundtrip(exc)
+        assert type(copy) is StoreWriteDeadlineExceeded
+        assert copy.latched is True
+        assert str(copy).endswith("[latched fail-fast]")
+        assert str(copy) == str(exc)
+
+    def test_store_write_deadline_is_transient_never_a_halt(self) -> None:
+        """The catch-site contract: a DataLakeError, deliberately NOT LakeWriteHalt."""
+        exc = StoreWriteDeadlineExceeded(90.0, "registry", "op")
+        assert isinstance(exc, DataLakeError)
+        assert not isinstance(exc, LakeWriteHalt)
 
     def test_double_roundtrip_is_stable(self) -> None:
         """A second hop (paranoia: nested pools / re-pickled results) is a fixpoint."""

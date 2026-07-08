@@ -57,6 +57,50 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
 _LOG = structlog.get_logger("brutex.adapters.rate_common")
 
+# ── Deferred rate.* emission (DEC-RATE-LOG-OUTSIDE-LOCK-001) ────────────────
+# structlog routes through stdlib handlers (a stderr StreamHandler + a rotating
+# JSON file handler, ``brutex/observability/logging.py``) — real blocking
+# ``write()`` I/O behind handler locks. An emission under
+# ``RateController._lock`` lets ONE wedged/slow log sink freeze every worker's
+# ``pace()`` and the dashboard sampler's ``snapshot()`` read path, stalling the
+# whole pull's pacing. Every rate.* event is therefore CAPTURED under the lock
+# as a :data:`_PendingLog` — ``(level, event, fields)`` with every field VALUE
+# resolved at the original emission program point, so later same-critical-
+# section mutation (``_rps -= STEP_RPS``, ``_hits.clear()``,
+# ``_timeouts.clear()``, ``_last_seen = now``) can never drift the emitted
+# line — and EMITTED strictly AFTER the lock is released, on the SAME thread
+# (contextvars like ``pull_id`` merge at emit time; handing events to another
+# thread would silently drop them — deliberately not done). Fields hold only
+# immutables or freshly-built containers never referenced by controller state
+# afterward (``bucket_counts`` is a fresh list per call). Levels are plain
+# strings so NO structlog machinery (lazy proxy binding, logging-manager lock,
+# handlers, processors) is touched while ``_lock`` is held. Generalizes the
+# file's own ``rate.snapshot`` emit-outside-the-lock precedent
+# (:meth:`RateController._maybe_log_snapshot`).
+_PendingLog = tuple[str, str, dict[str, object]]  # (level, event, fields)
+
+
+def _flush_rate_logs(*events: _PendingLog | None) -> None:
+    """Emit captured rate.* events in positional (= capture) order.
+
+    THE single deferred-emission choke point (CLAUDE.md §11 COMMON — one
+    capture-then-emit mechanism for every rate.* event in this module). MUST
+    only be called with ``RateController._lock`` NOT held — every call site is
+    the ``finally`` of a ``try`` whose body is the ``with self._lock:`` block,
+    so the lock is provably released first, on success AND on an in-lock
+    exception. ``None`` slots (events that did not fire) are skipped. A wedged
+    sink now stalls ONLY the emitting thread's own call — never the lock.
+    """
+    for item in events:
+        if item is None:
+            continue
+        level, event, fields = item
+        if level == "info":
+            _LOG.info(event, **fields)
+        else:
+            _LOG.warning(event, **fields)
+
+
 #: The verified data-API ceiling (5 r/s), kept here as the DEFAULT ceiling so this
 #: vendor-neutral controller needs NO vendor import — the width policy is owned
 #: locally and mirrors the verified 5 r/s cap. A different vendor injects its own
@@ -298,7 +342,10 @@ class RateController:
     :meth:`~brutex.orchestrator.rate_limiter.AdaptiveTokenBucket.set_rate` (never
     a swap) — is atomic and never races a concurrent ``pace``. Each critical
     section is **O(1)** (a few comparisons + a bounded deque) and the lock is
-    NEVER held across network I/O or a sleep. In particular :meth:`pace` copies
+    NEVER held across network I/O, a sleep, or a structlog emission — every
+    rate.* event is captured under the lock and emitted after release via
+    :func:`_flush_rate_logs` (DEC-RATE-LOG-OUTSIDE-LOCK-001), so a wedged/slow
+    log sink can never freeze the pacing lock. In particular :meth:`pace` copies
     the bucket reference under the lock then calls ``.acquire()`` (which sleeps)
     OUTSIDE it — holding the lock across the bucket sleep would re-serialise every
     worker to ~1 r/s and defeat the whole parallelisation. Because the bucket
@@ -473,7 +520,9 @@ class RateController:
         self._bucket: AdaptiveTokenBucket = self._make_bucket()
         #: Guards the step-ladder state under concurrent worker access
         #: (DEC-DHAN-PARALLEL-INGEST-001). Held only for O(1) state reads/writes,
-        #: NEVER across the bucket ``.acquire()`` sleep in :meth:`pace`.
+        #: NEVER across the bucket ``.acquire()`` sleep in :meth:`pace`, and NEVER
+        #: across a structlog emission — rate.* events are captured under it and
+        #: emitted after release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         self._lock = threading.Lock()
 
     def _make_bucket(self) -> AdaptiveTokenBucket:
@@ -527,8 +576,13 @@ class RateController:
         with self._lock:
             return self._smooth_pacing
 
-    def _handle_clock_gap_locked(self, now: float) -> None:
+    def _handle_clock_gap_locked(self, now: float) -> _PendingLog | None:
         """Detect a laptop sleep/wake clock jump; reset rolling state if one occurred — O(1).
+
+        Returns the captured ``rate.clock_gap`` event (or ``None`` when no gap
+        tripped); the caller MUST hand it to :func:`_flush_rate_logs` AFTER
+        releasing ``self._lock`` — this helper never emits
+        (DEC-RATE-LOG-OUTSIDE-LOCK-001).
 
         DEC-RATE-CLOCK-SLEEPWAKE-001. The caller MUST hold ``self._lock`` and pass the
         ``now`` it just read from the injected clock. Compares ``now`` against the last
@@ -551,6 +605,7 @@ class RateController:
         accumulates into a false trip. O(1): one subtraction + (rarely) a few deque
         clears.
         """
+        pending: _PendingLog | None = None
         if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
             self._issues.clear()
             # Clear the observe-only trailing-hour issue counter ring too
@@ -572,12 +627,15 @@ class RateController:
                 # against a pre-sleep instant); the per-second spacing re-binds from
                 # that issue onward, exactly as on a fresh controller.
                 self._last_issue_ts = float("-inf")
-            _LOG.warning(
+            # Captured BEFORE ``self._last_seen = now`` below overwrites the gap
+            # baseline — the emitted ``gap_s`` is the real observed jump.
+            pending = (
+                "warning",
                 "rate.clock_gap",
-                gap_s=now - self._last_seen,
-                current_rps=self._rps,
+                {"gap_s": now - self._last_seen, "current_rps": self._rps},
             )
         self._last_seen = now
+        return pending
 
     def _governor_wait_locked(self, now: float) -> float:
         """Evict the rolling window; return seconds to wait before an issue may proceed.
@@ -722,8 +780,13 @@ class RateController:
             for offset in range(span - 1, -1, -1)
         ]
 
-    def _maybe_latch_smooth_locked(self, now: float) -> None:
+    def _maybe_latch_smooth_locked(self, now: float) -> _PendingLog | None:
         """ONE-WAY latch smooth pacing ON when a 429 carries burst evidence (caller holds lock).
+
+        Returns the captured ``rate.smooth_pacing_latched`` event (or ``None``
+        when the latch did not fire); the caller MUST hand it to
+        :func:`_flush_rate_logs` AFTER releasing ``self._lock`` — this helper
+        never emits (DEC-RATE-LOG-OUTSIDE-LOCK-001).
 
         DEC-SMOOTH-PACING-AUTOLATCH-001. Runs ONLY in :data:`SMOOTH_PACING_ADAPTIVE`
         mode while not yet latched (ON is latched from construction; OFF disables the
@@ -736,27 +799,34 @@ class RateController:
         step-down mutates ``_rps``, so the comparison reads the rate that was allowed
         when the burst was issued (an APPROXIMATION when the rate stepped between the
         burst and the 429 — honest envelope: the ladder steps at most 1 r/s per
-        :data:`STEP_DOWN_WINDOW`, so the drift is bounded at 1 r/s). Emits ONE
+        :data:`STEP_DOWN_WINDOW`, so the drift is bounded at 1 r/s). Captures ONE
         ``rate.smooth_pacing_latched`` WARNING carrying the evidence (the scanned
-        bucket counts + the current rate); latched state never clears. O(1) — a
-        bounded 3-bucket scan per 429, only until the latch fires.
+        bucket counts + the PRE-stepdown current rate — the value at this program
+        point, deliberately resolved before the caller's ladder mutates ``_rps``);
+        latched state never clears. O(1) — a bounded 3-bucket scan per 429, only
+        until the latch fires.
         """
         if self._smooth_mode != SMOOTH_PACING_ADAPTIVE or self._smooth_pacing:
-            return
+            return None
         counts = self._recent_bucket_counts_locked(now, SMOOTH_LATCH_SCAN_SECONDS)
         if not any(count > self._rps for count in counts):
-            return
+            return None
         self._smooth_pacing = True
         # Re-base the spacing baseline to the construction sentinel so the FIRST
         # smoothed issue admits immediately (no spurious wait against a pre-latch
         # instant); per-issue spacing binds from that issue onward, exactly as on a
         # construction-latched (ON-mode) controller.
         self._last_issue_ts = float("-inf")
-        _LOG.warning(
+        # ``counts`` is a fresh list built above and never referenced by controller
+        # state afterward — safe to carry by reference into the deferred emission.
+        return (
+            "warning",
             "rate.smooth_pacing_latched",
-            bucket_counts=counts,
-            current_rps=self._rps,
-            scan_seconds=SMOOTH_LATCH_SCAN_SECONDS,
+            {
+                "bucket_counts": counts,
+                "current_rps": self._rps,
+                "scan_seconds": SMOOTH_LATCH_SCAN_SECONDS,
+            },
         )
 
     def pace(self) -> None:
@@ -783,9 +853,12 @@ class RateController:
 
         CRITICAL (DEC-DHAN-PARALLEL-INGEST-001): the controller lock is taken ONLY
         for O(1) state work and is RELEASED before EVERY sleep (the governor sleep
-        AND ``bucket.acquire()``). Holding ``self._lock`` across a sleep would
-        serialise every worker through one mutex and collapse the achieved rate to
-        ~1 r/s. The two gates SEQUENCE (never nest), so there is no lock-ordering
+        AND ``bucket.acquire()``) AND before every structlog emission (a captured
+        ``rate.clock_gap`` is flushed via :func:`_flush_rate_logs` after each lock
+        release — DEC-RATE-LOG-OUTSIDE-LOCK-001). Holding ``self._lock`` across a
+        sleep would serialise every worker through one mutex and collapse the
+        achieved rate to ~1 r/s; holding it across an emission would let one
+        wedged log sink freeze every worker's pacing. The two gates SEQUENCE (never nest), so there is no lock-ordering
         cycle: the governor never holds ``self._lock`` when the bucket acquires its
         own lock. The issue instant is RESERVED at governor admission (gate 1), under
         the lock, ATOMICALLY with the free-slot check — so the deque counts true
@@ -811,13 +884,32 @@ class RateController:
         if self._smooth_pacing:
             iterations = 0
             while True:
-                with self._lock:
-                    now = self._clock()
-                    self._handle_clock_gap_locked(now)
-                    wait = self._smooth_wait_locked(now)
-                    if wait <= 0.0:
-                        self._last_issue_ts = now  # stamp the issue atomically
-                        break  # spaced — fall through to the governor + bucket
+                # ``gap_evt`` NEEDS the None initializer (the finally reads it on an
+                # in-lock exception path); ``wait`` deliberately has NO initializer —
+                # every path that reads it is dominated by the in-lock assignment
+                # below (an in-lock exception propagates past all reads), and a dead
+                # ``wait = 0.0`` here was flagged by CodeQL (py/multiple-definition).
+                gap_evt: _PendingLog | None = None
+                try:
+                    with self._lock:
+                        now = self._clock()
+                        gap_evt = self._handle_clock_gap_locked(now)
+                        wait = self._smooth_wait_locked(now)
+                        if wait <= 0.0:
+                            self._last_issue_ts = now  # stamp the issue atomically
+                finally:
+                    # Emit the captured clock-gap AFTER releasing the lock
+                    # (DEC-RATE-LOG-OUTSIDE-LOCK-001) — EVERY iteration (break
+                    # path AND sleep path), so a loop-local capture is never
+                    # overwritten unemitted. None-guard: the common (no-gap)
+                    # path allocates NOTHING and skips the flush call entirely.
+                    if gap_evt is not None:
+                        _flush_rate_logs(gap_evt)
+                if wait <= 0.0:
+                    # Same local ``wait`` the atomic (check, stamp) above keyed
+                    # on — the decision is byte-identical; only the ``break``
+                    # keyword moved outside the with-block.
+                    break  # spaced — fall through to the governor + bucket
                 iterations += 1
                 if iterations > _SMOOTH_LOOP_CAP:
                     # fail-OPEN after the cap (mirrors the governor's loop cap): still
@@ -840,13 +932,30 @@ class RateController:
         if self._ceiling_per_min is not None:
             iterations = 0
             while True:
-                with self._lock:
-                    now = self._clock()
-                    self._handle_clock_gap_locked(now)
-                    wait = self._governor_wait_locked(now)
-                    if wait <= 0.0:
-                        self._issues.append(now)  # reserve the slot atomically
-                        break  # slot reserved — fall through to the token bucket
+                # Mirrors gate 0: ``gov_gap_evt`` keeps its None initializer (read in
+                # the finally on an in-lock exception); ``gov_wait`` has NO initializer
+                # — the in-lock assignment dominates every read (CodeQL
+                # py/multiple-definition on the dead ``gov_wait = 0.0``).
+                gov_gap_evt: _PendingLog | None = None
+                try:
+                    with self._lock:
+                        now = self._clock()
+                        gov_gap_evt = self._handle_clock_gap_locked(now)
+                        gov_wait = self._governor_wait_locked(now)
+                        if gov_wait <= 0.0:
+                            # Reserve the slot atomically, in the SAME lock
+                            # acquisition that observed it free
+                            # (DEC-GROWW-GOVERNOR-ATOMIC-001 — untouched).
+                            self._issues.append(now)
+                finally:
+                    # Emit AFTER releasing the lock (DEC-RATE-LOG-OUTSIDE-LOCK-001);
+                    # mirrors gate 0 — every iteration flushes, None-guarded.
+                    if gov_gap_evt is not None:
+                        _flush_rate_logs(gov_gap_evt)
+                if gov_wait <= 0.0:
+                    # Same local the atomic (check, reserve) above keyed on —
+                    # only the ``break`` keyword moved outside the with-block.
+                    break  # slot reserved — fall through to the token bucket
                 iterations += 1
                 if iterations > _GOVERNOR_LOOP_CAP:
                     # fail-OPEN after the cap (mirrors the bucket's acquire cap): still
@@ -856,7 +965,7 @@ class RateController:
                         self._issues.append(self._clock())
                     break
                 # lock RELEASED before sleeping; re-evict + re-test on the next pass.
-                self._sleep(wait)
+                self._sleep(gov_wait)
         # ── Gate 2: per-second token bucket (two-phase: copy ref under lock, sleep
         #    outside it). ──
         with self._lock:
@@ -896,16 +1005,29 @@ class RateController:
         Observability only — it changes no pacing decision.
         """
         now = self._clock()
-        with self._lock:
-            # Re-base on a sleep/wake gap FIRST (DEC-RATE-CLOCK-SLEEPWAKE-001) so even a
-            # default controller — no governor, no smooth pacing, whose ``pace`` reads
-            # the clock under lock only here — forgets stale AIMD anchors on wake. The
-            # gap reset sets ``_last_snapshot_log = now``, so the throttle check below
-            # then correctly suppresses an immediate post-wake snapshot.
-            self._handle_clock_gap_locked(now)
-            if now - self._last_snapshot_log < SNAPSHOT_LOG_INTERVAL_S:
-                return
-            self._last_snapshot_log = now
+        gap_evt: _PendingLog | None = None
+        due = False
+        try:
+            with self._lock:
+                # Re-base on a sleep/wake gap FIRST (DEC-RATE-CLOCK-SLEEPWAKE-001) so even a
+                # default controller — no governor, no smooth pacing, whose ``pace`` reads
+                # the clock under lock only here — forgets stale AIMD anchors on wake. The
+                # gap reset sets ``_last_snapshot_log = now``, so the throttle check below
+                # then correctly suppresses an immediate post-wake snapshot.
+                gap_evt = self._handle_clock_gap_locked(now)
+                if now - self._last_snapshot_log >= SNAPSHOT_LOG_INTERVAL_S:
+                    self._last_snapshot_log = now
+                    due = True
+        finally:
+            # Emit AFTER releasing the lock (DEC-RATE-LOG-OUTSIDE-LOCK-001). Per-thread
+            # order kept: clock_gap → snapshot. The gap event now survives the
+            # throttled early-return path too (it previously emitted under the lock
+            # before the throttle ``return``).
+            if gap_evt is not None:
+                _flush_rate_logs(gap_evt)
+        if not due:
+            return
+        # Already outside the lock — snapshot() re-acquires it SEQUENCED, never nested.
         _LOG.info("rate.snapshot", **self.snapshot())
 
     def on_rate_limit(self) -> None:
@@ -915,57 +1037,82 @@ class RateController:
         atomic O(1) critical section, so two workers reporting a 429 at once can
         never double-step or corrupt the deque. The ``set_rate`` mutation happens
         under the lock but only re-stamps the bucket's in-memory rate/token state
-        (no I/O / sleep), keeping the single shared token stream intact.
+        (no I/O / sleep), keeping the single shared token stream intact. Field
+        values are captured at the decision point; telemetry is emitted
+        post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        with self._lock:
-            now = self._clock()
-            self._handle_clock_gap_locked(now)
-            self._hits.append(now)
-            cutoff = now - STEP_DOWN_WINDOW
-            while self._hits and self._hits[0] < cutoff:
-                self._hits.popleft()
-            _LOG.warning("rate.429", current_rps=self._rps, recent_hits=len(self._hits))
-            # ADAPTIVE smooth-pacing auto-latch (DEC-SMOOTH-PACING-AUTOLATCH-001):
-            # BEFORE the ladder below mutates ``_rps``, check the trailing per-1s
-            # issue buckets for a burst above the then-current allowed rate — the
-            # evidence that OUR sub-second micro-burst (not a plain vendor quota
-            # squeeze) provoked this 429 — and one-way latch the smooth gate ON.
-            # A no-op in ON (already latched) / OFF (latch disabled) modes and once
-            # latched. The latch's STATE mutation runs under the controller lock
-            # (no torn state with the token math), but ``pace()``'s gate-0 check
-            # (``if self._smooth_pacing:``) reads the flag OUTSIDE the lock —
-            # honest envelope: a worker already past (or concurrently reading)
-            # that check may issue ONE more unsmoothed request after the flip.
-            # Benign: the flag is a one-way GIL-atomic bool transition, bounded
-            # at one unsmoothed issue per in-flight worker, and every later
-            # ``pace()`` observes the latched state.
-            self._maybe_latch_smooth_locked(now)
-            # Two-tier 429 ladder (DEC-DHAN-RATE-STORM-FLOOR-001): reach the soft
-            # FLOOR_RPS (3) quickly on a brief burst (STEP_DOWN_HITS=3), but ease BELOW
-            # it toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1) ONLY on SUSTAINED
-            # evidence (STORM_HITS). So a transient quota nudge rests at 3 (a quota
-            # breach is no reason to crawl), while a relentless cascade — every call
-            # rejected even at 3 r/s — can finally back off instead of spinning pinned
-            # at the floor getting 100%-rejected for minutes. The floor for the 429
-            # ladder is now the deep RATE_LIMIT_STORM_FLOOR_RPS, gated by the higher
-            # STORM_HITS threshold below 3 so it is reached only under a true storm.
-            above_soft_floor = self._rps > FLOOR_RPS
-            threshold = STEP_DOWN_HITS if above_soft_floor else STORM_HITS
-            if len(self._hits) >= threshold and self._rps > RATE_LIMIT_STORM_FLOOR_RPS:
-                old_rps = self._rps
-                self._rps -= STEP_RPS
-                self._bucket.set_rate(self._rps)
-                self._hits.clear()
-                self._last_step = now
-                # Log the EFFECTIVE floor for THIS rung: a soft-floor step (still
-                # above 3) heads toward FLOOR_RPS (3); a sustained-storm step below
-                # the soft floor heads toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1).
-                _LOG.warning(
-                    "rate.stepdown",
-                    from_rps=old_rps,
-                    to_rps=self._rps,
-                    floor_rps=FLOOR_RPS if above_soft_floor else RATE_LIMIT_STORM_FLOOR_RPS,
+        gap_evt: _PendingLog | None = None
+        hit_evt: _PendingLog | None = None
+        latch_evt: _PendingLog | None = None
+        step_evt: _PendingLog | None = None
+        try:
+            with self._lock:
+                now = self._clock()
+                gap_evt = self._handle_clock_gap_locked(now)
+                self._hits.append(now)
+                cutoff = now - STEP_DOWN_WINDOW
+                while self._hits and self._hits[0] < cutoff:
+                    self._hits.popleft()
+                # Captured at the pre-change emission point — post-append/evict,
+                # PRE-latch, PRE-stepdown, PRE-``_hits.clear()``: at the step
+                # threshold this still reads e.g. current_rps=5.0, recent_hits=3
+                # even though the method returns with _rps == 4.0 and _hits empty.
+                hit_evt = (
+                    "warning",
+                    "rate.429",
+                    {"current_rps": self._rps, "recent_hits": len(self._hits)},
                 )
+                # ADAPTIVE smooth-pacing auto-latch (DEC-SMOOTH-PACING-AUTOLATCH-001):
+                # BEFORE the ladder below mutates ``_rps``, check the trailing per-1s
+                # issue buckets for a burst above the then-current allowed rate — the
+                # evidence that OUR sub-second micro-burst (not a plain vendor quota
+                # squeeze) provoked this 429 — and one-way latch the smooth gate ON.
+                # A no-op in ON (already latched) / OFF (latch disabled) modes and once
+                # latched. The latch's STATE mutation runs under the controller lock
+                # (no torn state with the token math), but ``pace()``'s gate-0 check
+                # (``if self._smooth_pacing:``) reads the flag OUTSIDE the lock —
+                # honest envelope: a worker already past (or concurrently reading)
+                # that check may issue ONE more unsmoothed request after the flip.
+                # Benign: the flag is a one-way GIL-atomic bool transition, bounded
+                # at one unsmoothed issue per in-flight worker, and every later
+                # ``pace()`` observes the latched state.
+                latch_evt = self._maybe_latch_smooth_locked(now)
+                # Two-tier 429 ladder (DEC-DHAN-RATE-STORM-FLOOR-001): reach the soft
+                # FLOOR_RPS (3) quickly on a brief burst (STEP_DOWN_HITS=3), but ease BELOW
+                # it toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1) ONLY on SUSTAINED
+                # evidence (STORM_HITS). So a transient quota nudge rests at 3 (a quota
+                # breach is no reason to crawl), while a relentless cascade — every call
+                # rejected even at 3 r/s — can finally back off instead of spinning pinned
+                # at the floor getting 100%-rejected for minutes. The floor for the 429
+                # ladder is now the deep RATE_LIMIT_STORM_FLOOR_RPS, gated by the higher
+                # STORM_HITS threshold below 3 so it is reached only under a true storm.
+                above_soft_floor = self._rps > FLOOR_RPS
+                threshold = STEP_DOWN_HITS if above_soft_floor else STORM_HITS
+                if len(self._hits) >= threshold and self._rps > RATE_LIMIT_STORM_FLOOR_RPS:
+                    old_rps = self._rps
+                    self._rps -= STEP_RPS
+                    self._bucket.set_rate(self._rps)
+                    self._hits.clear()
+                    self._last_step = now
+                    # Capture the EFFECTIVE floor for THIS rung: a soft-floor step
+                    # (still above 3) heads toward FLOOR_RPS (3); a sustained-storm
+                    # step below the soft floor heads toward the deep
+                    # RATE_LIMIT_STORM_FLOOR_RPS (1).
+                    step_evt = (
+                        "warning",
+                        "rate.stepdown",
+                        {
+                            "from_rps": old_rps,
+                            "to_rps": self._rps,
+                            "floor_rps": FLOOR_RPS
+                            if above_soft_floor
+                            else RATE_LIMIT_STORM_FLOOR_RPS,
+                        },
+                    )
+        finally:
+            # Positional order == the pre-change in-lock emission order:
+            # gap → 429 → latch → stepdown (DEC-RATE-LOG-OUTSIDE-LOCK-001).
+            _flush_rate_logs(gap_evt, hit_evt, latch_evt, step_evt)
 
     def on_timeout(self) -> None:
         """Record a server-stress stall; step **down** 1 r/s on a sustained storm — O(1).
@@ -987,29 +1134,48 @@ class RateController:
         Thread-safe: the record → window-evict → maybe-step-down is one atomic
         O(1) critical section, so concurrent workers reporting a stall can never
         double-step. The ``set_rate`` mutation only re-stamps the one bucket's
-        in-memory rate/token state (no I/O / sleep under the lock).
+        in-memory rate/token state (no I/O / sleep under the lock). Field values
+        are captured at the decision point; telemetry is emitted post-release
+        (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        with self._lock:
-            now = self._clock()
-            self._handle_clock_gap_locked(now)
-            self._timeouts.append(now)
-            cutoff = now - STEP_DOWN_WINDOW
-            while self._timeouts and self._timeouts[0] < cutoff:
-                self._timeouts.popleft()
-            _LOG.warning("rate.timeout", current_rps=self._rps, recent_timeouts=len(self._timeouts))
-            if len(self._timeouts) >= STEP_DOWN_TIMEOUT_HITS and self._rps > TIMEOUT_FLOOR_RPS:
-                old_rps = self._rps
-                self._rps -= STEP_RPS
-                self._bucket.set_rate(self._rps)
-                self._timeouts.clear()
-                self._last_step = now
-                _LOG.warning(
-                    "rate.stepdown",
-                    from_rps=old_rps,
-                    to_rps=self._rps,
-                    floor_rps=TIMEOUT_FLOOR_RPS,
-                    cause="timeout",
+        gap_evt: _PendingLog | None = None
+        to_evt: _PendingLog | None = None
+        step_evt: _PendingLog | None = None
+        try:
+            with self._lock:
+                now = self._clock()
+                gap_evt = self._handle_clock_gap_locked(now)
+                self._timeouts.append(now)
+                cutoff = now - STEP_DOWN_WINDOW
+                while self._timeouts and self._timeouts[0] < cutoff:
+                    self._timeouts.popleft()
+                # Captured at the pre-change emission point — post-append/evict,
+                # PRE-stepdown, PRE-``_timeouts.clear()``.
+                to_evt = (
+                    "warning",
+                    "rate.timeout",
+                    {"current_rps": self._rps, "recent_timeouts": len(self._timeouts)},
                 )
+                if len(self._timeouts) >= STEP_DOWN_TIMEOUT_HITS and self._rps > TIMEOUT_FLOOR_RPS:
+                    old_rps = self._rps
+                    self._rps -= STEP_RPS
+                    self._bucket.set_rate(self._rps)
+                    self._timeouts.clear()
+                    self._last_step = now
+                    step_evt = (
+                        "warning",
+                        "rate.stepdown",
+                        {
+                            "from_rps": old_rps,
+                            "to_rps": self._rps,
+                            "floor_rps": TIMEOUT_FLOOR_RPS,
+                            "cause": "timeout",
+                        },
+                    )
+        finally:
+            # Positional order == the pre-change in-lock emission order:
+            # gap → timeout → stepdown (DEC-RATE-LOG-OUTSIDE-LOCK-001).
+            _flush_rate_logs(gap_evt, to_evt, step_evt)
 
     def on_success(self) -> None:
         """Record a clean call; step **up** 1 r/s after a sustained clean window — O(1).
@@ -1024,57 +1190,73 @@ class RateController:
 
         Recovery is gated on the **step-down trigger**, NOT on a strictly-empty
         window (DEC-DHAN-RATE-RECOVERY-TRICKLE-001) — see the inline note for the
-        trickle-trap this closes.
+        trickle-trap this closes. Field values are captured at the decision
+        point; telemetry is emitted post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        with self._lock:
-            now = self._clock()
-            self._handle_clock_gap_locked(now)
-            cutoff = now - STEP_DOWN_WINDOW
-            # Evict aged-out 429 hits AND timeouts (DEC-DHAN-RATE-STORM-FLOOR-001).
-            # on_success previously evicted ONLY _timeouts. But on_rate_limit clears
-            # _hits exclusively inside its step-DOWN branch, which cannot fire once the
-            # rate is pinned at the floor (`rps > RATE_LIMIT_STORM_FLOOR_RPS` False) — so
-            # after a storm reached the floor, _hits stayed pinned at its rolling-window
-            # count and `not self._hits` was NEVER True, leaving the rate STUCK at the
-            # floor for the rest of the pull, never recovering to 5 (the operator's
-            # 90-min log: 3 r/s the whole run after one storm). Aging stale hits out here
-            # lets recovery proceed once the storm has truly cleared (no new 429s).
-            while self._hits and self._hits[0] < cutoff:
-                self._hits.popleft()
-            while self._timeouts and self._timeouts[0] < cutoff:
-                self._timeouts.popleft()
-            # Recover when NEITHER ladder currently shows step-down-level pressure.
-            # This was previously gated on a STRICTLY-empty window (`not self._hits
-            # and not self._timeouts`), which created the "trickle-trap"
-            # (DEC-DHAN-RATE-RECOVERY-TRICKLE-001): under a CHRONIC mild 429 (or
-            # timeout) drip — a few rejections per minute, far BELOW the step-down
-            # trigger — the rolling window never fully empties, so `not self._hits`
-            # was never True and the rate stayed pinned at the floor FOREVER, never
-            # probing back toward the ceiling. (#539's age-out fix only closed the
-            # case where a storm FULLY clears to zero; a persistent drip still pinned
-            # it — the residual of the operator's "never recovered above 3" log.)
-            # Gating on the step-down trigger instead lets a mild drip recover: probe
-            # up one rung, and if the higher rate genuinely storms the ladder steps
-            # straight back down (self-correcting AIMD) — while genuine
-            # step-down-level pressure still HOLDS the rate down. Note the threshold
-            # bites only at/below the floor: above it on_rate_limit/on_timeout clear
-            # their deque on every step, so at most STEP_DOWN_HITS-1 hits ever sit in
-            # the window there and recovery is purely STEP_UP_WINDOW-timer gated; at/
-            # below the floor (where no further step clears the deque) a real
-            # >= STEP_DOWN_HITS drip is what holds recovery. O(1): len() on a deque.
-            if (
-                self._rps < self._ceiling
-                and len(self._hits) < STEP_DOWN_HITS
-                and len(self._timeouts) < STEP_DOWN_TIMEOUT_HITS
-                and now - self._last_step >= STEP_UP_WINDOW
-            ):
-                old_rps = self._rps
-                self._rps += STEP_RPS
-                self._bucket.set_rate(self._rps)
-                self._last_step = now
-                _LOG.info(
-                    "rate.stepup", from_rps=old_rps, to_rps=self._rps, ceiling_rps=self._ceiling
-                )
+        gap_evt: _PendingLog | None = None
+        step_evt: _PendingLog | None = None
+        try:
+            with self._lock:
+                now = self._clock()
+                gap_evt = self._handle_clock_gap_locked(now)
+                cutoff = now - STEP_DOWN_WINDOW
+                # Evict aged-out 429 hits AND timeouts (DEC-DHAN-RATE-STORM-FLOOR-001).
+                # on_success previously evicted ONLY _timeouts. But on_rate_limit clears
+                # _hits exclusively inside its step-DOWN branch, which cannot fire once the
+                # rate is pinned at the floor (`rps > RATE_LIMIT_STORM_FLOOR_RPS` False) — so
+                # after a storm reached the floor, _hits stayed pinned at its rolling-window
+                # count and `not self._hits` was NEVER True, leaving the rate STUCK at the
+                # floor for the rest of the pull, never recovering to 5 (the operator's
+                # 90-min log: 3 r/s the whole run after one storm). Aging stale hits out here
+                # lets recovery proceed once the storm has truly cleared (no new 429s).
+                while self._hits and self._hits[0] < cutoff:
+                    self._hits.popleft()
+                while self._timeouts and self._timeouts[0] < cutoff:
+                    self._timeouts.popleft()
+                # Recover when NEITHER ladder currently shows step-down-level pressure.
+                # This was previously gated on a STRICTLY-empty window (`not self._hits
+                # and not self._timeouts`), which created the "trickle-trap"
+                # (DEC-DHAN-RATE-RECOVERY-TRICKLE-001): under a CHRONIC mild 429 (or
+                # timeout) drip — a few rejections per minute, far BELOW the step-down
+                # trigger — the rolling window never fully empties, so `not self._hits`
+                # was never True and the rate stayed pinned at the floor FOREVER, never
+                # probing back toward the ceiling. (#539's age-out fix only closed the
+                # case where a storm FULLY clears to zero; a persistent drip still pinned
+                # it — the residual of the operator's "never recovered above 3" log.)
+                # Gating on the step-down trigger instead lets a mild drip recover: probe
+                # up one rung, and if the higher rate genuinely storms the ladder steps
+                # straight back down (self-correcting AIMD) — while genuine
+                # step-down-level pressure still HOLDS the rate down. Note the threshold
+                # bites only at/below the floor: above it on_rate_limit/on_timeout clear
+                # their deque on every step, so at most STEP_DOWN_HITS-1 hits ever sit in
+                # the window there and recovery is purely STEP_UP_WINDOW-timer gated; at/
+                # below the floor (where no further step clears the deque) a real
+                # >= STEP_DOWN_HITS drip is what holds recovery. O(1): len() on a deque.
+                if (
+                    self._rps < self._ceiling
+                    and len(self._hits) < STEP_DOWN_HITS
+                    and len(self._timeouts) < STEP_DOWN_TIMEOUT_HITS
+                    and now - self._last_step >= STEP_UP_WINDOW
+                ):
+                    old_rps = self._rps
+                    self._rps += STEP_RPS
+                    self._bucket.set_rate(self._rps)
+                    self._last_step = now
+                    step_evt = (
+                        "info",
+                        "rate.stepup",
+                        {
+                            "from_rps": old_rps,
+                            "to_rps": self._rps,
+                            "ceiling_rps": self._ceiling,
+                        },
+                    )
+        finally:
+            # Positional order == the pre-change in-lock emission order:
+            # gap → stepup (DEC-RATE-LOG-OUTSIDE-LOCK-001). The common (hot,
+            # per-clean-call) path has both slots None — one varargs tuple + two
+            # pointer checks, transient (the stress memory-flat gate pins this).
+            _flush_rate_logs(gap_evt, step_evt)
 
     def snapshot(self) -> dict[str, object]:
         """A JSON-friendly state snapshot for the dashboard rate panel (thread-safe, O(1)).

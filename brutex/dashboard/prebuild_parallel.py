@@ -15,10 +15,12 @@ and the Parquet writer releases the GIL during the write
 (``parquet_writer.py``). So a :class:`~concurrent.futures.ThreadPoolExecutor`
 genuinely scales here — and it avoids every process-pool hazard: no pickling of
 the materialise closure / the raised exceptions, and
-:func:`~brutex.observability.progress_beat.emit_progress_beat` (a process-global
-singleton keyed for thread fan-out) keeps feeding the pull stall watchdog for
-free (a ProcessPool child's beat is a no-op → a false 600 s "hung" kill). The
-pool is sized by :func:`~brutex.config.hardware_envelope.cpu_pool_workers`.
+:func:`~brutex.observability.progress_beat.emit_progress_beat` (the pull-id-keyed
+in-process seam, DEC-PULL-BEAT-PERRUN-001 — each pool TASK re-binds the driver's
+captured ``pull_id`` so its beats route to the run's channel) keeps feeding the
+pull stall watchdog for free (a ProcessPool child's beat is a no-op → a false
+600 s "hung" kill). The pool is sized by
+:func:`~brutex.config.hardware_envelope.cpu_pool_workers`.
 
 ## Safe per symbol (Golden Rule #7)
 
@@ -61,6 +63,7 @@ from typing import TYPE_CHECKING, cast
 import structlog
 
 from brutex.config.hardware_envelope import cpu_pool_workers
+from brutex.observability.correlation import current_pull_id, pull_id_scope
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -297,10 +300,23 @@ def run_work_items(
     if workers <= SEQUENTIAL_WORKERS or len(items) <= 1:
         return [do_one(item) for item in items]
 
+    # Run correlation for the pool workers (DEC-PULL-BEAT-PERRUN-001): capture the
+    # DRIVER thread's ambient pull_id BEFORE the pool, and re-bind it PER TASK (never
+    # per thread — pool threads are REUSED across runs; ``bound_contextvars`` restores
+    # on task exit so no id can leak into a later run's task). The workers' seam beats
+    # (timeframe_materialize / the derive partition lock-wait) then attribute to the
+    # run's keyed channel; a captured "" (no ambient scope) binds "" → the legacy
+    # channel → byte-identical behaviour.
+    pull_id = current_pull_id()
+
+    def _bound_do_one(item: PrebuildWorkItem) -> PrebuildWorkResult:
+        with pull_id_scope(pull_id):
+            return do_one(item)
+
     _LOG.info("prebuild.parallel.start", items=len(items), workers=workers)
     results: list[PrebuildWorkResult | None] = [None] * len(items)
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="prebuild") as pool:
-        futures = {pool.submit(do_one, item): idx for idx, item in enumerate(items)}
+        futures = {pool.submit(_bound_do_one, item): idx for idx, item in enumerate(items)}
         for future in as_completed(futures):
             idx = futures[future]
             # A per-symbol fault is already a PrebuildWorkResult(error=...); a

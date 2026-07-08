@@ -1,7 +1,10 @@
 //! Session-anchored intraday futures VWAP — the stateful indicator the Group-10
 //! `close_above_vwap` / `close_below_vwap` conditions consume (ADR-0012 D12).
 //!
-//! A bit-for-bit twin of `brutex/indicators/vwap.py::VwapState`. Running
+//! THE single VWAP source: the hand-synced bit-for-bit Python twin that used
+//! to live at `brutex/indicators/vwap.py::VwapState` was DELETED by
+//! DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (`docs/MIGRATION.md` #1548) —
+//! BruteX drives this state via the PyO3 pyclass. Running
 //! `cum(price·vol) / cum(vol)`, anchored per trading session:
 //!
 //! * **reset at 09:15 IST** each trading day (the session open — a new IST date
@@ -21,8 +24,10 @@
 //! volume). The accumulators are therefore **`i128`**; the VWAP is snapped back to
 //! `i64` paisa at read with truncating integer division (`cum_pv / cum_vol`,
 //! matching Python's `//` on non-negative operands — volume and price are both
-//! non-negative for a real futures bar). The Python twin uses unbounded ints and
-//! the same floor division, so the two are bit-identical.
+//! non-negative for a real futures bar). The deleted Python twin used unbounded
+//! ints and the same floor division, so the two were bit-identical for
+//! non-negative operands — the identity the frozen twin-state golden fixture
+//! still replays (Rust-only) against this single source.
 //!
 //! O(1) per bar: two `i128` adds (one multiply) + one divide. No growing history.
 
@@ -78,7 +83,7 @@ impl VwapState {
     /// session has no usable (post-09:15, non-zero) volume yet.
     ///
     /// `typical_paisa` is the bar's typical price (HLC3 — the caller computes it,
-    /// matching the movers turnover proxy and the Python twin). `volume` is the
+    /// matching the movers turnover proxy). `volume` is the
     /// bar's traded volume. `is_pre_open` excludes the 09:00-09:15 auction.
     /// `session_key` is the engine-injected contract key (changes on roll).
     /// `session_day` is the bar's IST date ordinal. `tod_seconds` is the bar's IST

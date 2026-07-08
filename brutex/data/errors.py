@@ -39,9 +39,11 @@ class ResampleInputError(DataLakeError):
     (``maintain_order=True`` + ``first()``/``last()`` trust input order). This
     typed error makes the violation LOUD at the resampler boundary — the same
     raise-on-non-monotonic convention the feed resampler
-    (``brutex.feed.errors.ResampleError``) and the execution driver already
-    enforce — so corrupted input can never masquerade as a clean aggregate
-    (Golden Rule #1).
+    (``brutex.feed.errors.ResampleError``) enforces (the typed
+    ``brutex.execution.errors.NonMonotonicBarError`` exists for the same
+    violation; its ``BacktestDriver`` raiser was deleted per
+    DEC-EXECUTION-TRIO-DELETE-001) — so corrupted input can never masquerade
+    as a clean aggregate (Golden Rule #1).
     """
 
 
@@ -185,6 +187,56 @@ class WriteDeadlineExceeded(DataLakeError):
         deadline wrapper is Groww-adapter-only), fixed as cheap latent-bug
         hardening while in this file (DEC-GREEKS-PARALLEL-001)."""
         return (type(self), (self.deadline_seconds,))
+
+
+class StoreWriteDeadlineExceeded(DataLakeError):
+    """A registry/coverage DuckDB write blew its wall-clock deadline (wedged volume).
+
+    The metadata twin of :class:`WriteDeadlineExceeded`
+    (DEC-STORE-WRITE-DEADLINE-001 over DEC-FETCH-HUNG-WRITE-DEADLINE-001 #999). The
+    registry (``registry.duckdb``) + coverage (``coverage_ledger``) DuckDB writes carry
+    NO inherent wall-clock bound, so a WEDGED write on a stalled external SSD / NFS
+    mount that NEVER raises would hold the store's Python lock forever and freeze
+    EVERY metadata worker behind it.
+    :class:`~brutex.data.store_write_deadline.StoreWriteDeadlineGuard` bounds each
+    write batch and raises this on expiry.
+
+    TRANSIENT / RETRYABLE — it subclasses :class:`DataLakeError`, deliberately NOT
+    :class:`LakeWriteHalt` (never a pull-wide stop) and NOT
+    ``RegistryError`` / :class:`CatalogError` (those are terminal). Catch sites defer
+    the underlying's cell/job to the NEXT pull, exactly like a
+    :class:`PartitionLockTimeout` / :class:`WriteDeadlineExceeded` window defer.
+    Retryability is a catch-site contract (the #999 shape), never an
+    ``is_retryable()`` membership — that predicate covers only the Groww error family.
+
+    **Honest envelope (Golden Rule #10):** the abandoned daemon write cannot be
+    killed; the store's Python lock is caller-held and always released — the zombie
+    holds only the DuckDB connection's internal mutex until the volume recovers,
+    during which the store fail-fasts (``latched=True`` — the guard's wedge latch
+    raises this instantly with NO new thread and NO deadline wait).
+
+    ``deadline_seconds`` / ``store`` / ``op`` / ``latched`` are non-secret context for
+    the log; all four are positional constructor args so :meth:`__reduce__` needs no
+    rebuild helper (the same ``:g``-re-format pickle fix as
+    :class:`PartitionLockTimeout` / :class:`WriteDeadlineExceeded`).
+    """
+
+    def __init__(self, deadline_seconds: float, store: str, op: str, latched: bool = False) -> None:
+        suffix = " [latched fail-fast]" if latched else ""
+        super().__init__(
+            f"{store} DuckDB write '{op}' not completed within {deadline_seconds:g}s "
+            f"(wedged store volume); deferred to the next pull{suffix}"
+        )
+        self.deadline_seconds = deadline_seconds
+        self.store = store
+        self.op = op
+        self.latched = latched
+
+    def __reduce__(self) -> tuple[type[StoreWriteDeadlineExceeded], tuple[float, str, str, bool]]:
+        """Pickle as constructor args — the same ``:g``-re-format latent-bug
+        discipline as :class:`PartitionLockTimeout` / :class:`WriteDeadlineExceeded`
+        (the default reduce would re-feed the FORMATTED message to ``__init__``)."""
+        return (type(self), (self.deadline_seconds, self.store, self.op, self.latched))
 
 
 class GreeksEnrichPoolBroken(DataLakeError):

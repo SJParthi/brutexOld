@@ -12,7 +12,8 @@ params)"* into a **reproducible, idempotent, audited** leaderboard on disk. It
          --mask_run_id (combo_hash)--> run-identity          (Golden Rule #4)
          --ComboDedup.seen--> skip already-evaluated         (Bloom→exact, O(1))
          --count_supermasks--> Stage-1B min-hits prefilter   (combo_mask)
-         --ResidentTradeSim.simulate_masks--> trades         (rust_trade_sim, CHUNKED)
+         --ResidentTradeSim.simulate_masks_with_exit_indices--> (trades, exit_idx)
+                                                             (rust_trade_sim, CHUNKED)
          --metrics_from_trades--> (mask, ResultMetrics)      (sweep_driver tail)
          --rank_combos--> RankedCombo leaderboard            (ranking)
          --ranked_combo_to_result_row--> ResultRow           (the projector)
@@ -1077,13 +1078,19 @@ def _iter_mask_metrics(
     """Yield ``(mask, metrics)`` for *masks* in order — THE one chunked eval spine.
 
     The factored Phase-C body (DEC-SWEEP-STREAMING-RANK-001, CLAUDE.md §11
-    COMMON): chunked :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks`
-    batches + the per-mask :func:`~brutex.engine.sweep_driver.metrics_from_trades`
-    tail, shared VERBATIM by the batch rank accumulation, the bounded columnar
-    accumulation, AND the bounded finalists' O(top_k) metrics recompute — one
-    spine, so the three consumers can never drift (the recomputed finalist
-    metrics are bit-identical to the streamed pass because ``simulate_masks``
-    is per-mask independent and deterministic).
+    COMMON): chunked
+    :meth:`~brutex.engine.rust_trade_sim.ResidentTradeSim.simulate_masks_with_exit_indices`
+    batches — each mask's ``(trades, exit_indices)`` pair, the certified exit
+    indices threaded into the per-mask
+    :func:`~brutex.engine.sweep_driver.metrics_from_trades` tail so its
+    kernel arm skips the per-mask ``exit_ts``→index dict build
+    (DEC-SWEEP-EXIT-INDEX-FASTPATH-001; a ``None`` stream demotes to the
+    dict, results byte-identical) — shared VERBATIM by the batch rank
+    accumulation, the bounded columnar accumulation, AND the bounded
+    finalists' O(top_k) metrics recompute — one spine, so the three
+    consumers can never drift (the recomputed finalist metrics are
+    bit-identical to the streamed pass because the batch simulation is
+    per-mask independent and deterministic).
 
     Error contract UNCHANGED from the pre-factor inline loop: a batch failure
     goes through :func:`_reattribute_chunk_failure` (per-mask oracle replay →
@@ -1095,38 +1102,40 @@ def _iter_mask_metrics(
     for chunk_start in range(0, len(masks), chunk_size):
         chunk = masks[chunk_start : chunk_start + chunk_size]
         try:
-            chunk_trades = sim.simulate_masks(
+            chunk_pairs = sim.simulate_masks_with_exit_indices(
                 chunk,
                 direction=cfg.direction,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
             )
-            # Batch-contract guard: `simulate_masks` must RETURN exactly one
-            # trade list per mask (both arms do, by construction). A
-            # wrong-length return (a PyO3 marshalling bug, a kernel bug)
-            # raises HERE — inside the chunk try — so it rides the SAME
-            # re-attribution → SweepComboError tuple-skip ladder as a chunk
-            # that RAISES (the oracle passes every mask, so it fails LOUD
-            # naming the chunk), instead of escaping run_persisted_sweep as
-            # a bare error the grid drivers (#904) would turn into a
+            # Batch-contract guard: the batch call must RETURN exactly one
+            # (trades, exit_indices) pair per mask (both arms do, by
+            # construction). A wrong-length return (a PyO3 marshalling bug,
+            # a kernel bug) raises HERE — inside the chunk try — so it rides
+            # the SAME re-attribution → SweepComboError tuple-skip ladder as
+            # a chunk that RAISES (the oracle passes every mask, so it fails
+            # LOUD naming the chunk), instead of escaping run_persisted_sweep
+            # as a bare error the grid drivers (#904) would turn into a
             # grid-wide abort. The `strict=True` zip below is then a
             # structurally-unreachable second belt.
-            if len(chunk_trades) != len(chunk):
+            if len(chunk_pairs) != len(chunk):
                 raise ValueError(
-                    f"simulate_masks returned {len(chunk_trades)} trade lists "
-                    f"for a chunk of {len(chunk)} masks — batch-contract violation"
+                    f"simulate_masks_with_exit_indices returned {len(chunk_pairs)} "
+                    f"trade/exit-index pairs for a chunk of {len(chunk)} masks — "
+                    f"batch-contract violation"
                 )
         except MemoryError:
             raise
         except Exception as exc:
             _reattribute_chunk_failure(bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of)
-        for mask, trades in zip(chunk, chunk_trades, strict=True):
+        for mask, (trades, exit_indices) in zip(chunk, chunk_pairs, strict=True):
             try:
                 metrics = metrics_from_trades(
                     bars,
                     trades,
                     start_equity_paisa=cfg.start_equity_paisa,
                     tf_minutes=cfg.tf_minutes,
+                    exit_indices=exit_indices,
                 )
             except MemoryError:
                 raise

@@ -34,7 +34,7 @@ import pytest
 from brutex import cli
 from brutex.adapters.error_storm_breaker import ErrorStormBreaker
 from brutex.adapters.groww.option_ingest import GrowwOptionIngestReport
-from brutex.adapters.ingest_common import SyntheticSpotAdapter
+from brutex.adapters.ingest_common import StepOrderMonitor, SyntheticSpotAdapter
 from brutex.adapters.protocol import DerivativeContract, MarketAdapter
 from brutex.dashboard import historical_pull, pull_controller
 from brutex.dashboard.pull_controller import pull_all_spot, pull_candles
@@ -188,7 +188,7 @@ class TestPullCandlesArming:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _fno_bucket() -> dict[str, list[tuple[ContractRow, DerivativeContract]]]:
+def _fno_bucket() -> dict[tuple[str, bool], list[tuple[ContractRow, DerivativeContract]]]:
     row = ContractRow(
         exch="NSE",
         underlying="NIFTY",
@@ -207,14 +207,16 @@ def _fno_bucket() -> dict[str, list[tuple[ContractRow, DerivativeContract]]]:
         contract_type="CE",
         strike=20000.0,
     )
-    return {"groww-option": [(row, contract)]}
+    # DEC-PULL-SIX-STEP-ORDER-001: the phase now takes (market, is_index) buckets.
+    return {("groww-option", False): [(row, contract)]}
 
 
 def _run_fno_phase(*, lake_root: Path, dry_run: bool) -> None:
     historical_pull._run_phase(
         interval="1minute",
-        by_market=_fno_bucket(),
+        by_bucket=_fno_bucket(),
         selected_symbols=frozenset({"NSE-NIFTY-02Jan25-20000-CE"}),
+        step_monitor=StepOrderMonitor(),
         client=object(),  # type: ignore[arg-type] — never touched, the ingest spine is a spy
         sink=NullBarSink(),
         lake_root=lake_root,
