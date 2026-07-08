@@ -600,6 +600,35 @@ class TestReadRunStatus:
         with pytest.raises(ValueError):
             oa.read_run_status(fixture_env, "../../etc/passwd")
 
+    def test_list_runs_artifact_error_on_default_poll_is_loud_not_awaiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real infra failure resolving the default run must never look idle.
+
+        ``_resolve_run_id`` composes with ``list_runs``' OWN
+        ``artifact_error`` branch (root unreadable — permissions, a disk
+        error, an external-mount hiccup mid-poll): every ``run_id=None``
+        caller must surface the loud ``artifact_error`` banner, never the
+        honest-looking-but-wrong ``awaiting_artifact`` "no run has ever
+        launched" state (module docstring's Honest-absence discipline).
+        """
+        root = tmp_path / "sweep_runs"
+        root.mkdir()
+        real_iterdir = Path.iterdir
+
+        def _fake_iterdir(self: Path) -> object:
+            if self == root:
+                raise PermissionError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _fake_iterdir)
+        result = oa.read_run_status(tmp_path)
+        assert result["run_id"] is None
+        assert result["chain_map"]["state"] == "artifact_error"
+        assert result["exit_status"]["state"] == "artifact_error"
+        assert result["manifest"]["state"] == "artifact_error"
+        assert "denied" in result["chain_map"]["reason"]
+
 
 # ─────────────────────────── preflight_estimate ───────────────────────────
 
@@ -922,6 +951,25 @@ class TestIterTimeline:
         assert result["bounded_scan"] is True
         assert result["records"] == []  # the needle was scanned past the bound
 
+    def test_list_runs_artifact_error_on_default_poll_is_loud_not_awaiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sweep_runs"
+        root.mkdir()
+        real_iterdir = Path.iterdir
+
+        def _fake_iterdir(self: Path) -> object:
+            if self == root:
+                raise PermissionError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _fake_iterdir)
+        result = oa.iter_timeline(tmp_path, None)
+        assert result["state"] == "artifact_error"
+        assert result["run_id"] is None
+        assert result["records"] == []
+        assert "denied" in result["reason"]
+
 
 # ─────────────────────────── dedupe_family_representatives ───────────────────────────
 
@@ -983,6 +1031,39 @@ class TestDedupeFamilyRepresentatives:
         assert result[0]["rank"] in (1, 2)  # tie broken by lower rank between the two 0-bit rows
 
 
+# ─────────────────────────── _arm_label ───────────────────────────
+
+
+class TestArmLabel:
+    """The P3 SHIPPED ``arm`` shape (contracts §3) is the OBJECT
+    ``{"sl_paisa": int|null, "tp_paisa": int|null}`` — never a bare scalar.
+    ``_arm_label`` is the ONE place that reshapes it into the stable display
+    token every template consumes via ``String(row.arm)``."""
+
+    def test_sl_only(self) -> None:
+        assert oa._arm_label({"sl_paisa": 8000, "tp_paisa": None}) == "sl_only"
+
+    def test_tp_only(self) -> None:
+        assert oa._arm_label({"sl_paisa": None, "tp_paisa": 5000}) == "tp_only"
+
+    def test_sl_tp(self) -> None:
+        assert oa._arm_label({"sl_paisa": 8000, "tp_paisa": 5000}) == "sl_tp"
+
+    def test_none_both_null(self) -> None:
+        assert oa._arm_label({"sl_paisa": None, "tp_paisa": None}) == "none"
+
+    def test_legacy_bare_string_passes_through_unchanged(self) -> None:
+        assert oa._arm_label("sl_only") == "sl_only"
+        assert oa._arm_label("anything") == "anything"
+
+    def test_none_passes_through(self) -> None:
+        assert oa._arm_label(None) is None
+
+    def test_unrecognised_shape_is_honestly_none(self) -> None:
+        assert oa._arm_label(42) is None
+        assert oa._arm_label([1, 2]) is None
+
+
 # ─────────────────────────── read_top100 ───────────────────────────
 
 
@@ -1005,6 +1086,79 @@ class TestReadTop100:
         # placeholder when the real key is present on disk.
         assert not row["combo_id"].startswith("legacy-")
         assert len(row["combo_id"]) == 64  # blake3-hex-shaped store key
+        # arm reshaping (contracts §3): the on-disk shape is now the real
+        # object {sl_paisa, tp_paisa}; it must reach the row as a stable
+        # display token, never the raw object (which templates would render
+        # as the literal text "[object Object]").
+        assert row["arm"] in ("sl_only", "tp_only", "sl_tp", "none")
+        assert row["equity_ref"] is not None
+        assert isinstance(row["reasons_wired"], bool)
+
+    def test_object_root_honesty_header_surfaced(self, fixture_env: Path) -> None:
+        """The P3 SHIPPED honesty header must reach the caller verbatim.
+
+        R38's "funnel counts reconcile to the digit" self-audit promise has
+        no data source at the top100 layer unless ``preset``/``source``/
+        ``baselines`` are actually surfaced, not silently discarded after
+        unwrapping ``entries``.
+        """
+        result = oa.read_top100(fixture_env, RUN_SMOKE)
+        assert result["preset"] == "min_dd_first"
+        assert result["source"]["gate_passers"] == 100
+        assert result["source"]["families_collapsed"] == 1
+        assert result["source"]["reasons_wired"] is True
+        assert result["source"]["margin_roi_wired"] is True
+        assert result["baselines"] == {"NIFTY": "baseline-NIFTY.json"}
+
+    def test_object_root_header_absent_for_legacy_bare_array(self, fixture_env: Path) -> None:
+        result = oa.read_top100(fixture_env, RUN_LEGACY)
+        assert result["preset"] is None
+        assert result["source"] is None
+        assert result["baselines"] is None
+
+    def test_reasons_margin_roi_equity_ref_pass_through_honestly(
+        self, fixture_env: Path
+    ) -> None:
+        """P3's additive per-entry keys must be forwarded, never dropped —
+        and never conflated with P4's own locally re-derived narrative."""
+        result = oa.read_top100(fixture_env, RUN_SMOKE)
+        by_rank = {r["rank"]: r for r in result["rows"]}
+        wired = by_rank[1]
+        assert wired["reasons_wired"] is True
+        assert wired["reasons"] == {
+            "technical": "DSR 0.9131 / SPA p=0.0081 / CPCV 95.0% — passes all cascade gates.",
+            "plain": "This rule cleared every honesty check we run — it is not a fluke.",
+        }
+        assert wired["margin_roi"] == {"roi_pct": 18.42, "basis": "margin_true"}
+        # P4's own decode_combo narrative is present regardless of wiring —
+        # and is NOT overwritten by / merged with the P3-wired reasons.
+        assert wired["simple_sentence"]
+        assert wired["pro_sentence"]
+
+        unwired = by_rank[2]
+        assert unwired["reasons_wired"] is False
+        assert unwired["reasons"] is None
+        assert unwired["margin_roi"] is None
+        assert unwired["simple_sentence"]  # still present — never gated on wiring
+
+    def test_list_runs_artifact_error_on_default_poll_is_loud_not_awaiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sweep_runs"
+        root.mkdir()
+        real_iterdir = Path.iterdir
+
+        def _fake_iterdir(self: Path) -> object:
+            if self == root:
+                raise PermissionError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _fake_iterdir)
+        result = oa.read_top100(tmp_path)
+        assert result["state"] == "artifact_error"
+        assert result["run_id"] is None
+        assert result["rows"] == []
+        assert "denied" in result["reason"]
 
     def test_legacy_rows_backfilled_with_join_key_inferred(self, fixture_env: Path) -> None:
         result = oa.read_top100(fixture_env, RUN_LEGACY)
@@ -1389,6 +1543,24 @@ class TestReadTradesPage:
         assert result["state"] == "ok"
         assert result["combo_explanation"]["conditions"] == []
 
+    def test_list_runs_artifact_error_on_default_poll_is_loud_not_awaiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sweep_runs"
+        root.mkdir()
+        real_iterdir = Path.iterdir
+
+        def _fake_iterdir(self: Path) -> object:
+            if self == root:
+                raise PermissionError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _fake_iterdir)
+        result = oa.read_trades_page(tmp_path, None, 1)
+        assert result["state"] == "artifact_error"
+        assert result["run_id"] is None
+        assert "denied" in result["reason"]
+
 
 # ─────────────────────────── read_verify_me ───────────────────────────
 
@@ -1470,6 +1642,25 @@ class TestReadVerifyMe:
         with pytest.raises(ValueError):
             oa.read_verify_me(fixture_env, "../../etc/passwd")
 
+    def test_list_runs_artifact_error_on_default_poll_is_loud_not_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sweep_runs"
+        root.mkdir()
+        real_iterdir = Path.iterdir
+
+        def _fake_iterdir(self: Path) -> object:
+            if self == root:
+                raise PermissionError("denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", _fake_iterdir)
+        result = oa.read_verify_me(tmp_path)
+        assert result["state"] == "artifact_error"
+        assert result["run_id"] is None
+        assert "denied" in result["reason"]
+        assert all(c["status"] == "awaiting" for c in result["checks"].values())
+
 
 # ─────────────────────────── fixture-tree self-consistency ───────────────────────────
 
@@ -1511,7 +1702,9 @@ class TestFixtureTreeIsHonest:
                 prev = rec["entry_hash"]
 
     def test_smoke_top100_has_exactly_one_family_collision(self) -> None:
-        data = json.loads((FIXTURE_SWEEP_RUNS / RUN_SMOKE / "top100.json").read_text())
+        root = json.loads((FIXTURE_SWEEP_RUNS / RUN_SMOKE / "top100.json").read_text())
+        # P3 SHIPPED object-root shape (contracts §3) — unwrap `entries`.
+        data = root["entries"]
         assert len(data) == 100
         family_ids = [row["family_id"] for row in data]
         assert len(family_ids) != len(set(family_ids))  # at least one collision by construction

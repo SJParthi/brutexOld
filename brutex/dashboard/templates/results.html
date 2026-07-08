@@ -136,6 +136,7 @@
   .modebtn:hover { border-color:var(--blue); }
   .modebtn .cur { color:var(--green); }
   .t100meta { color:var(--muted); font-size:12px; padding:0 24px; }
+  .t100honesty { color:var(--muted); font-size:11px; padding:2px 24px 0; opacity:.85; }
   .t100banner { margin:10px 24px 0; padding:10px 14px; border:1px solid var(--border-strong);
     border-radius:var(--r-md); background:var(--surface-2); color:var(--muted); font-size:13px; }
   .t100banner.err { border-color:var(--red); color:var(--red); background:rgba(255,92,92,.08); }
@@ -182,6 +183,10 @@
     color:var(--blue); text-decoration:none; }
   .story-card .scviewchart:hover { color:var(--text-bright); }
   .story-card .sctoggle { margin-top:10px; }
+  .sc-p3-reasons { margin-top:10px; padding:10px 12px; border:1px solid var(--border-strong);
+    border-radius:var(--r-md); background:var(--surface-2); }
+  .sc-p3-reasons-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+    color:var(--muted); margin-bottom:4px; }
   .story-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px;
     margin-top:16px; }
   .story-tile { background:var(--surface-3); border:1px solid var(--border-strong); border-radius:12px;
@@ -325,6 +330,13 @@
     </button>
   </div>
   <div class="t100meta" id="t100Meta"></div>
+  <!-- R38 self-audit: the P3 SHIPPED top100.json object-root "honesty header"
+       (preset + source{gate_passers, excluded_no_aggs, zero_trade_excluded,
+       families_collapsed, ...} — sweep-parallel-integration-contracts.md §3)
+       surfaced verbatim so the operator can audit "nothing was silently
+       dropped" without a second artifact. Hidden entirely for a legacy
+       bare-array top100.json (no header to show — never fabricated). -->
+  <div class="t100honesty" id="t100Honesty" hidden></div>
   <div class="t100banner" id="t100Banner" hidden></div>
   <div class="t100scroll" id="t100Scroll"></div>
 
@@ -354,7 +366,17 @@
         <div class="story-tab" data-pane="scTradesPane" id="scTabTrades">List of trades</div>
       </div>
       <div class="story-pane active" id="scStoryPane">
+        <!-- R27/R33 provenance: P4's own decode_combo() narrative below is
+             ALWAYS shown (it never depends on P3 wiring), but it is
+             explicitly labelled so it is never mistaken for P3's own
+             authoritative reasons{technical, plain} — which render
+             separately, ONLY when the raw top100 entry's own `reasons` key
+             is wired (sweep-parallel-integration-contracts.md §3). -->
         <p id="scSentence" style="font-size:14px; line-height:1.7; color:var(--text);"></p>
+        <div class="sc-p3-reasons" id="scP3Reasons" hidden>
+          <div class="sc-p3-reasons-label">P3-computed reasons (wired for this run)</div>
+          <p id="scP3ReasonsText" style="font-size:14px; line-height:1.7; color:var(--text);"></p>
+        </div>
       </div>
       <div class="story-pane" id="scTradesPane">
         <div class="trades-scroll"><table class="trades-table" id="scTradesTable">
@@ -737,6 +759,7 @@ if (document.readyState === "loading") {
   if (!BX) return; // bx-oneclick.js failed to load — the rest of the page still works
 
   var t100Meta = document.getElementById("t100Meta");
+  var t100Honesty = document.getElementById("t100Honesty");
   var t100Banner = document.getElementById("t100Banner");
   var t100Scroll = document.getElementById("t100Scroll");
   var modeBtn = document.getElementById("modeToggleBtn");
@@ -750,6 +773,8 @@ if (document.readyState === "loading") {
   var scTwinsSummary = document.getElementById("scTwinsSummary");
   var scTwinsList = document.getElementById("scTwinsList");
   var scSentence = document.getElementById("scSentence");
+  var scP3Reasons = document.getElementById("scP3Reasons");
+  var scP3ReasonsText = document.getElementById("scP3ReasonsText");
   var scTabStory = document.getElementById("scTabStory");
   var scTabTrades = document.getElementById("scTabTrades");
   var scStoryPane = document.getElementById("scStoryPane");
@@ -862,6 +887,34 @@ if (document.readyState === "loading") {
     return line;
   }
 
+  // R38 self-audit line: renders the P3 SHIPPED honesty header (preset +
+  // source funnel counts) verbatim — hidden entirely when the artifact is a
+  // legacy bare-array root (no header present) rather than fabricating
+  // zeros. Never claims counts it was not given.
+  function renderHonestyHeader(body) {
+    var source = body.source;
+    if (!source && !body.preset) { t100Honesty.hidden = true; t100Honesty.textContent = ""; return; }
+    var bits = [];
+    if (body.preset) bits.push("preset " + String(body.preset));
+    if (source) {
+      var counters = [
+        ["gate_passers", "gate passers"],
+        ["excluded_no_aggs", "excluded (no aggs)"],
+        ["zero_trade_excluded", "zero-trade excluded"],
+        ["parity_excluded", "parity excluded"],
+        ["families_collapsed", "families collapsed"],
+      ];
+      counters.forEach(function (pair) {
+        var v = source[pair[0]];
+        if (v !== undefined && v !== null) bits.push(String(v) + " " + pair[1]);
+      });
+      if (source.reasons_wired === false) bits.push("reasons not yet wired by P3");
+      if (source.margin_roi_wired === false) bits.push("margin ROI not yet wired by P3");
+    }
+    t100Honesty.textContent = bits.join(" · ");
+    t100Honesty.hidden = bits.length === 0;
+  }
+
   async function loadTop100() {
     t100Meta.textContent = "loading…";
     hideBanner();
@@ -879,17 +932,20 @@ if (document.readyState === "loading") {
         t100Meta.textContent = fmtInt(TOP100_ROWS.length) + " behaviorally-distinct combos" +
           (body.run_id ? " · run " + body.run_id : "") +
           " · click a row for the full story + trade list";
+        renderHonestyHeader(body);
         hideBanner();
       } else if (body.state === "awaiting_artifact") {
         TOP100_ROWS = [];
         if (vlist) vlist.setItems([]);
         t100Meta.textContent = "";
+        t100Honesty.hidden = true;
         showBanner("Awaiting real artifact — " +
           (body.reason || "no Top-100 leaderboard written for this run yet (P1/P2/P3 backend not yet merged)"), false);
       } else if (body.state === "artifact_error") {
         TOP100_ROWS = [];
         if (vlist) vlist.setItems([]);
         t100Meta.textContent = "";
+        t100Honesty.hidden = true;
         showBanner("Top-100 artifact present but unreadable: " + (body.reason || "unknown error"), true);
       }
     } catch (e) {
@@ -930,6 +986,28 @@ if (document.readyState === "loading") {
     return tile;
   }
 
+  // R47 margin-true ROI — the raw `margin_roi` payload shape is P3-owned
+  // and not otherwise pinned by the contracts file beyond "payload or
+  // null"; this renders a recognised percent-ish field when present and
+  // otherwise falls back to the raw JSON text — evidence that P3 wired
+  // *something* — rather than fabricating a specific number out of an
+  // unrecognised shape (R27 no-hallucination rule applied to the UI).
+  function fmtMarginRoi(v) {
+    if (v === null || v === undefined) return "not wired by P3 yet";
+    if (typeof v === "number") return fmtPctVal(v, 2);
+    if (typeof v === "object") {
+      var candidateKeys = ["roi_pct", "margin_roi_pct", "pct", "value"];
+      for (var i = 0; i < candidateKeys.length; i++) {
+        var k = candidateKeys[i];
+        if (v[k] !== undefined && v[k] !== null && isFinite(Number(v[k]))) {
+          return fmtPctVal(Number(v[k]), 2);
+        }
+      }
+      try { return JSON.stringify(v); } catch (e) { return "wired (unrecognized shape)"; }
+    }
+    return String(v);
+  }
+
   function renderStoryTiles(row) {
     clearChildren(scTiles);
     var metrics = row.metrics || {};
@@ -952,6 +1030,7 @@ if (document.readyState === "loading") {
     ));
     scTiles.appendChild(metricTile("Trades", fmtInt(metrics.total_trades), "", "total_trades"));
     scTiles.appendChild(metricTile("Profit factor", fmtNumVal(metrics.profit_factor), "", "profit_factor"));
+    scTiles.appendChild(metricTile("Margin-true ROI (R47)", fmtMarginRoi(row.margin_roi), "", null));
   }
 
   function renderStoryTwins(row) {
@@ -986,6 +1065,20 @@ if (document.readyState === "loading") {
     clearChildren(scSentence);
     scSentence.appendChild(pro);
     scSentence.appendChild(plain);
+    // R27/R33: only ever show P3's own reasons{technical, plain} when the
+    // raw entry actually wired them (row.reasons_wired) — never synthesize
+    // this block from row.pro_sentence/simple_sentence, which are P4's OWN
+    // locally re-derived narrative and are shown above regardless.
+    var p3Reasons = row.reasons_wired ? row.reasons : null;
+    if (p3Reasons && (p3Reasons.technical || p3Reasons.plain)) {
+      scP3Reasons.hidden = false;
+      scP3ReasonsText.textContent = [p3Reasons.technical, p3Reasons.plain]
+        .filter(function (s) { return !!s; })
+        .join(" — ");
+    } else {
+      scP3Reasons.hidden = true;
+      scP3ReasonsText.textContent = "";
+    }
     switchTab("scStoryPane");
     storyOverlay.hidden = false;
     loadTrades();

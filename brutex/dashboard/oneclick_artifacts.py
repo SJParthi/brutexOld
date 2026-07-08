@@ -184,16 +184,34 @@ def read_json_artifact(path: Path) -> tuple[ReadState, Any, str | None]:
     return ("corrupt", None, "unreachable read state")  # pragma: no cover
 
 
-def _resolve_run_id(lake_root: Path, run_id: str | None) -> str | None:
-    """Resolve *run_id*, defaulting to the most-recent known run when ``None``."""
+def _resolve_run_id(lake_root: Path, run_id: str | None) -> tuple[str | None, str | None]:
+    """Resolve *run_id*, defaulting to the most-recent known run when ``None``.
+
+    Returns ``(resolved_run_id, artifact_error_reason)``. *artifact_error_reason*
+    is ``None`` on every clean resolution — including the honest "no run has
+    ever launched" case, which resolves to ``(None, None)``. It is non-``None``
+    ONLY when the underlying :func:`list_runs` call itself reports
+    ``state="artifact_error"`` (e.g. the sweep_runs root became unreadable —
+    permission change, a disk error, an external-mount hiccup mid-poll):
+    that reason is carried through UNCHANGED so every caller (``read_run_status``,
+    ``read_top100``, ``iter_timeline``, ``read_trades_page``, ``read_verify_me``)
+    can render the loud ``artifact_error`` banner instead of silently
+    conflating a real infrastructure failure with the honest
+    ``awaiting_artifact`` "no sweep run has ever launched" state (module
+    docstring's Honest-absence discipline — a louder state must never be
+    downgraded to a quieter one).
+    """
     if run_id is not None:
-        return run_id
+        return run_id, None
     listing = list_runs(lake_root, limit=1)
+    if listing.get("state") == "artifact_error":
+        reason = listing.get("reason")
+        return None, reason if isinstance(reason, str) else "sweep run root unreadable"
     runs = listing.get("runs") or []
     if not runs:
-        return None
+        return None, None
     resolved = runs[0].get("run_id")
-    return resolved if isinstance(resolved, str) else None
+    return (resolved if isinstance(resolved, str) else None), None
 
 
 def _awaiting(run_id: str | None, reason: str, **extra: Any) -> dict[str, Any]:
@@ -432,8 +450,11 @@ def read_run_status(lake_root: Path, run_id: str | None = None) -> dict[str, Any
     :func:`list_runs`); the resolved id is echoed back in the response so the
     UI's run picker stays in sync.
     """
-    resolved = _resolve_run_id(lake_root, run_id)
+    resolved, resolve_err = _resolve_run_id(lake_root, run_id)
     if resolved is None:
+        if resolve_err is not None:
+            err = _artifact_error(None, resolve_err)
+            return {"run_id": None, "chain_map": err, "exit_status": err, "manifest": err}
         reason = "no sweep run has ever launched"
         return {
             "run_id": None,
@@ -605,15 +626,15 @@ def iter_timeline(
     ``brutex.audit_verify.auto_verify`` — out of scope for this read-only
     tailer).
     """
-    resolved = _resolve_run_id(lake_root, run_id)
+    resolved, resolve_err = _resolve_run_id(lake_root, run_id)
     if resolved is None:
         return {
-            "state": "awaiting_artifact",
+            "state": "artifact_error" if resolve_err is not None else "awaiting_artifact",
             "run_id": None,
             "records": [],
             "next_after_seq": None,
             "bounded_scan": False,
-            "reason": "no sweep run has ever launched",
+            "reason": resolve_err if resolve_err is not None else "no sweep run has ever launched",
         }
     resolved = validate_run_id(resolved)
     path = sweep_runs_root(lake_root) / resolved / "flight-recorder.jsonl"
@@ -808,6 +829,44 @@ def _family_members_map(raw_rows: list[dict[str, Any]]) -> dict[Any, list[dict[s
     return {family_id: members for family_id, members in groups.items() if len(members) > 1}
 
 
+def _arm_label(arm: Any) -> Any:
+    """Reshape the P3 SHIPPED ``arm`` object into the display token P4 renders.
+
+    sweep-parallel-integration-contracts.md §3 defines the binding on-disk
+    ``arm`` shape as an OBJECT — ``{"sl_paisa": int|null, "tp_paisa":
+    int|null}`` — never a bare string. Rendering that object directly (the
+    previous behaviour: ``raw.get("arm")`` passed through unexamined) is
+    exactly the sort of opaque-scalar forwarding this module's docstring
+    forbids: every consumer does ``String(row.arm)``/splices it into a URL
+    query string (results.html, v29.html), and ``String({...})`` in
+    JavaScript renders the literal text ``"[object Object]"`` — a silent,
+    non-loud corruption of both the on-page label and every arm-filtered
+    deep link.
+
+    This derives the same stable ``sl_only`` / ``tp_only`` / ``sl_tp`` /
+    ``none`` vocabulary the pre-P3 fixtures used as their bare-string
+    convention, so existing consumers/tests keep working unchanged once P3's
+    real object-shaped artifact lands. A bare string (a legacy/hand-built
+    fixture written before this fix, or written directly in that
+    vocabulary) passes through UNCHANGED — never re-wrapped or rejected.
+    Anything else honestly falls back to ``None`` rather than fabricating a
+    label from a shape nothing here recognises.
+    """
+    if isinstance(arm, str) or arm is None:
+        return arm
+    if isinstance(arm, Mapping):
+        has_sl = arm.get("sl_paisa") is not None
+        has_tp = arm.get("tp_paisa") is not None
+        if has_sl and has_tp:
+            return "sl_tp"
+        if has_sl:
+            return "sl_only"
+        if has_tp:
+            return "tp_only"
+        return "none"
+    return None
+
+
 def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
     """Decorate one raw top100.json row with join-key back-fill + decode_combo().
 
@@ -821,6 +880,22 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
     renamed ``sweep_run_id`` (the object root's key is plain ``run_id``,
     passed in here as *run_id* — always genuinely known, since it is how the
     caller located this file, so it is never treated as inferred).
+
+    ``arm`` is reshaped by :func:`_arm_label` (contracts §3: the shipped
+    on-disk shape is the OBJECT ``{sl_paisa, tp_paisa}``, never a bare
+    scalar). ``reasons``/``margin_roi``/``equity_ref`` are the three
+    additive P3 SHIPPED per-entry keys (contracts §3) and pass through
+    UNCHANGED — including ``None`` — as their own named fields; they are
+    never merged into or allowed to overwrite ``simple_sentence``/
+    ``pro_sentence`` below, which stay P4's OWN locally re-derived
+    :func:`~brutex.dashboard.combo_decoder.decode_combo` narrative computed
+    from the mask alone. Conflating the two would erase the operator's
+    ability to tell "P3 actually wired this reason" from "P4 guessed it
+    from the bitmask" (R27's no-hallucination rule applied to the UI) — so
+    ``reasons_wired`` is surfaced explicitly (``True`` only when the raw
+    entry's own ``reasons`` key is a non-``None`` value) instead of being
+    inferred from whether the sentence fields happen to be non-empty (they
+    are ALWAYS non-empty, wired or not).
     """
     join_key_inferred = False
 
@@ -866,13 +941,15 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         mask_int = 0
     explanation = decode_combo(mask_int, direction, tf)
 
+    raw_reasons = raw.get("reasons")
+
     return {
         "rank": raw.get("rank"),
         "mask_hex": mask_hex,
         "conditions": raw.get("conditions", []),
         "tf": tf,
         "direction": direction,
-        "arm": raw.get("arm"),
+        "arm": _arm_label(raw.get("arm")),
         "metrics": raw.get("metrics", {}),
         "regime": raw.get("regime", {}),
         "vix_band": raw.get("vix_band", {}),
@@ -884,6 +961,12 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         "simple_sentence": explanation.simple_sentence,
         "pro_sentence": explanation.pro_sentence,
         "regime_label": explanation.regime_label,
+        # Additive P3 SHIPPED per-entry keys (contracts §3) — honest
+        # pass-through, never fabricated (see docstring above).
+        "reasons": raw_reasons,
+        "reasons_wired": raw_reasons is not None,
+        "margin_roi": raw.get("margin_roi"),
+        "equity_ref": raw.get("equity_ref"),
     }
 
 
@@ -905,10 +988,22 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
     contracts.md §3, DEC-SWEEP-RESULTS-DEPTH-001 / PR #1275) —
     ``{schema_version, run_id, preset, source{...}, baselines{...}, entries:
     [...]}`` — in which case ``entries`` is unwrapped transparently before
-    dedupe/decoration.
+    dedupe/decoration. When the object-root shape is present, the "honesty
+    header" — ``preset`` (the applied ranking preset token) and ``source``
+    (the ``{data_snapshot_hashes, gate_passers, excluded_no_aggs,
+    zero_trade_excluded, parity_excluded, families_collapsed, reasons_wired,
+    margin_roi_wired}`` funnel-audit block) plus ``baselines`` (the
+    per-instrument baseline filename map) — is surfaced UNCHANGED at the top
+    level of the returned dict, never silently discarded: this is the ONLY
+    data source for R38's "funnel counts reconcile to the digit"
+    self-audit promise at the top100 layer. A bare-array root (legacy
+    fixture, no header) leaves all three ``None`` — honestly absent, not
+    fabricated as empty containers.
     """
-    resolved = _resolve_run_id(lake_root, run_id)
+    resolved, resolve_err = _resolve_run_id(lake_root, run_id)
     if resolved is None:
+        if resolve_err is not None:
+            return _artifact_error(None, resolve_err, rows=[])
         return {
             "state": "awaiting_artifact",
             "run_id": None,
@@ -926,6 +1021,9 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
         )
     if state == "corrupt":
         return _artifact_error(resolved, f"top100.json present but unreadable: {err}", rows=[])
+    preset: str | None = None
+    source: dict[str, Any] | None = None
+    baselines: dict[str, Any] | None = None
     if isinstance(data, list):
         entries = data
     elif isinstance(data, dict) and isinstance(data.get("entries"), list):
@@ -934,6 +1032,13 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
         # OBJECT wrapping {schema_version, run_id, preset, source{...},
         # baselines{...}, entries: [...]}, not a bare list — unwrap it here.
         entries = data["entries"]
+        # Honesty header — surfaced verbatim, never discarded (see docstring).
+        raw_preset = data.get("preset")
+        preset = raw_preset if isinstance(raw_preset, str) else None
+        raw_source = data.get("source")
+        source = raw_source if isinstance(raw_source, dict) else None
+        raw_baselines = data.get("baselines")
+        baselines = raw_baselines if isinstance(raw_baselines, dict) else None
     else:
         return _artifact_error(
             resolved,
@@ -965,7 +1070,14 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
             for twin in twins
         ]
         rows.append(decorated)
-    return {"state": "ok", "run_id": resolved, "rows": rows}
+    return {
+        "state": "ok",
+        "run_id": resolved,
+        "rows": rows,
+        "preset": preset,
+        "source": source,
+        "baselines": baselines,
+    }
 
 
 # ─────────────────────────── trade list ───────────────────────────
@@ -1004,10 +1116,10 @@ def read_trades_page(
     *mask_hex*/*direction*/*tf* are all supplied. *limit* is capped
     server-side at 500.
     """
-    resolved = _resolve_run_id(lake_root, run_id)
+    resolved, resolve_err = _resolve_run_id(lake_root, run_id)
     if resolved is None:
         return {
-            "state": "awaiting_artifact",
+            "state": "artifact_error" if resolve_err is not None else "awaiting_artifact",
             "run_id": None,
             "rank": rank,
             "rows": [],
@@ -1015,7 +1127,7 @@ def read_trades_page(
             "offset": offset,
             "limit": limit,
             "combo_explanation": None,
-            "reason": "no sweep run has ever launched",
+            "reason": resolve_err if resolve_err is not None else "no sweep run has ever launched",
         }
     resolved = validate_run_id(resolved)
     limit = max(1, min(int(limit), _TRADES_LIMIT_MAX))
@@ -1133,8 +1245,16 @@ def read_verify_me(lake_root: Path, run_id: str | None = None) -> dict[str, Any]
     checks forced back to ``"awaiting"`` plus a loud top-level unreadable
     message. NEVER computes or triggers a check itself.
     """
-    resolved = _resolve_run_id(lake_root, run_id)
+    resolved, resolve_err = _resolve_run_id(lake_root, run_id)
     if resolved is None:
+        if resolve_err is not None:
+            return {
+                "state": "artifact_error",
+                "run_id": None,
+                "is_demo": False,
+                "reason": resolve_err,
+                "checks": _awaiting_verify_checks(resolve_err),
+            }
         return {
             "state": "ok",
             "run_id": None,
