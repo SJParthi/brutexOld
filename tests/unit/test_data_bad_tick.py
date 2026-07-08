@@ -19,6 +19,7 @@ import pytest
 from brutex.data.bad_tick import (
     BAD_TICK_HEAD_UNCONFIRMED_EVENT,
     BAD_TICK_MAX_RATIO,
+    BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
     BAD_TICK_SKIP_EVENT,
     HEAD_CONFIRM_BARS,
     BadTickScreen,
@@ -303,16 +304,98 @@ def test_two_bar_session_flushed_by_next_session_boundary() -> None:
 
 
 def test_two_of_three_corrupt_head_beats_the_median() -> None:
-    # DOCUMENTED LIMIT: two same-scaled corrupt head bars out-vote the healthy
-    # one — the median IS the corruption, so the healthy bar is dropped and the
-    # corrupt pair survives. Majority evidence is the best a bounded in-session
-    # screen can do; the per-session WARN still fires.
-    rows = [(_D1, 279400.0), (_D1, 27940.0), (_D1, 279410.0)]
+    # DOCUMENTED LIMIT (full blast radius pinned — round-1 review): when 2 of
+    # the first 3 bars are corrupt, the median IS the corruption — the healthy
+    # head bar is dropped, the corrupt pair SEEDS the post-head baseline, and
+    # EVERY healthy successor in the session is cascade-dropped: the session
+    # collapses to the corrupt pair (the bug-1 session-destroying shape at a
+    # 2-corrupt-head-bars threshold; Stage-1A would absorb the corrupt pair as
+    # _today_ohlc and poison the NEXT day's anchors). Majority evidence is the
+    # best a bounded in-session screen can do; the skip WARN fires AND — since
+    # skipped > kept — the majority-dropped collapse WARN fires too.
+    rows = [(_D1, 279400.0), (_D1, 27940.0), (_D1, 279410.0)] + [
+        (_D1, 27941.0 + i) for i in range(19)
+    ]
     with capture_logs() as logs:
-        assert _mask(rows) == [True, False, True]
+        assert _mask(rows) == [True, False, True] + [False] * 19
     warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
     assert len(warns) == 1
-    assert warns[0]["skipped"] == 1
+    assert warns[0]["skipped"] == 20  # 1 healthy head bar + all 19 successors
+    collapse = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(collapse) == 1
+    assert collapse[0]["skipped"] == 20
+    assert collapse[0]["kept"] == 2  # ONLY the corrupt pair survives
+    assert collapse[0]["session"] == "2024-01-02"
+
+
+def test_two_of_three_differently_scaled_corrupt_head_also_beats_the_median() -> None:
+    # DOCUMENTED LIMIT (round-1 review — the "SAME scaling" qualifier was
+    # WRONG): two DIFFERENTLY-scaled corrupt head bars (×10 and ×100) also put
+    # the median ON a corrupt bar. Here the session collapses to exactly ONE
+    # poison bar (the ×10 median; the ×100 bar is itself ≥4x from the median so
+    # it drops too) — the precise bug-1 catastrophic shape surviving behind a
+    # 2-corrupt-head-bars precondition. Loudly disclosed via BOTH WARNs.
+    rows = [(_D1, 279400.0), (_D1, 27940.0), (_D1, 2794000.0)] + [
+        (_D1, 27941.0 + i) for i in range(10)
+    ]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True, False, False] + [False] * 10
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 12
+    collapse = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(collapse) == 1
+    assert collapse[0]["kept"] == 1  # the session collapsed to ONE poison bar
+
+
+def test_corrupt_run_from_head_position_two_is_the_disclosed_regression_envelope() -> None:
+    # DOCUMENTED LIMIT (round-1 review): a corrupt run of length >= 2 STARTING
+    # at head position 2 is a strict REGRESSION versus the #1616 screen —
+    # pre-fix, healthy bar 1 was the baseline and the whole corrupt run was
+    # dropped; post-fix, the corrupt pair wins the median vote and the healthy
+    # bars (head bar 1 + every successor) are ALL dropped. The vendor-scaling
+    # threat model makes a contiguous corrupt run of opening minutes realistic,
+    # so this envelope is pinned + disclosed (module docstring, honest limits)
+    # rather than silently accepted; the collapse WARN makes it loud.
+    rows = [(_D1, 27940.0), (_D1, 279410.0), (_D1, 279420.0)] + [
+        (_D1, 27941.0 + i) for i in range(10)
+    ]
+    with capture_logs() as logs:
+        assert _mask(rows) == [False, True, True] + [False] * 10
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 11
+    collapse = [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+    assert len(collapse) == 1
+    assert collapse[0]["kept"] == 2
+
+
+def test_majority_dropped_warn_not_fired_at_or_below_equal_split() -> None:
+    # The collapse WARN is strictly majority (skipped > kept): a 4-bar session
+    # with 2 skipped / 2 kept fires the skip WARN only.
+    rows = [(_D1, 100.0), (_D1, 101.0), (_D1, 1000.0), (_D1, 10000.0)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True, True, False, False]
+    assert len([e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]) == 1
+    assert not [e for e in logs if e.get("event") == BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT]
+
+
+def test_head_verdict_is_bounded_forward_looking_truncation_pin() -> None:
+    # DOCUMENTED LIMIT (round-1 review): the head vote reads up to 2 FOLLOWING
+    # same-session bars, so the SAME leading bar's verdict legitimately differs
+    # across loads truncated inside the session's first 3 bars — a 1- or 2-bar
+    # truncated load keeps the poison head (unconfirmable — never destroy real
+    # data on no/50-50 evidence) that the 3-bar load drops. The pre-#1625
+    # screen was strictly prefix-causal; this forward dependence is the
+    # recorded price of the evidence-confirmed head seed, disclosed in the
+    # module docstring (and the sweep suffix-independence gates deliberately
+    # do NOT route through arrow_table_to_bars, so they do not certify this).
+    screen = BadTickScreen()
+    assert screen.screen_mask([_D1], [279400.0]) == [True]
+    with capture_logs() as logs:
+        assert screen.screen_mask([_D1] * 2, [279400.0, 27940.0]) == [True, True]
+    assert len([e for e in logs if e.get("event") == BAD_TICK_HEAD_UNCONFIRMED_EVENT]) == 1
+    assert screen.screen_mask([_D1] * 3, [279400.0, 27940.0, 27941.0]) == [False, True, True]
 
 
 def test_all_three_head_bars_mutually_inconsistent_median_survives() -> None:
@@ -358,7 +441,7 @@ def test_screen_instance_reusable_across_tables() -> None:
     assert _mask(rows, screen=screen) == [True, True, True, False]
 
 
-def test_injected_logger_is_used_for_both_events() -> None:
+def test_injected_logger_is_used_for_all_three_events() -> None:
     events: list[tuple[str, dict[str, object]]] = []
 
     class _FakeLog:
@@ -366,10 +449,13 @@ def test_injected_logger_is_used_for_both_events() -> None:
             events.append((event, kw))
 
     screen = BadTickScreen(source="src", log=_FakeLog())  # type: ignore[arg-type]
-    # Table 1: a post-head ÷10 spike (skip warn).
+    # Table 1: a post-head ÷10 spike (skip warn only — 1 skipped vs 3 kept).
     screen.screen_mask([_D1] * 4, [100.0, 101.0, 102.0, 10.0])
     # Table 2: an inconsistent 2-bar session (unconfirmed warn).
     screen.screen_mask([_D2] * 2, [100.0, 1000.0])
+    # Table 3: a mutually-inconsistent head (2 skipped vs 1 kept) — the skip
+    # warn AND the majority-dropped collapse warn.
+    screen.screen_mask([_D1] * 3, [10.0, 100.0, 1000.0])
     assert events == [
         (
             BAD_TICK_SKIP_EVENT,
@@ -389,6 +475,27 @@ def test_injected_logger_is_used_for_both_events() -> None:
                 "session": "2024-01-03",
                 "first_close": 100.0,
                 "second_close": 1000.0,
+                "max_ratio": BAD_TICK_MAX_RATIO,
+            },
+        ),
+        (
+            BAD_TICK_SKIP_EVENT,
+            {
+                "source": "src",
+                "session": "2024-01-02",
+                "skipped": 2,
+                "max_ratio": BAD_TICK_MAX_RATIO,
+                "first_ref_close": 100.0,
+                "first_close": 10.0,
+            },
+        ),
+        (
+            BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
+            {
+                "source": "src",
+                "session": "2024-01-02",
+                "skipped": 2,
+                "kept": 1,
                 "max_ratio": BAD_TICK_MAX_RATIO,
             },
         ),

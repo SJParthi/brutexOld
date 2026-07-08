@@ -72,10 +72,39 @@ Honest limits (disclosed, not papered over):
   real data on 50/50 evidence) and the inconsistency is disclosed loudly via
   one :data:`BAD_TICK_HEAD_UNCONFIRMED_EVENT` WARN (real NSE sessions carry
   60-375 one-minute bars, so this is a synthetic-data corner);
-* a **2-of-3 corrupt head beats the median** — if two of the first three bars
-  carry the SAME scaling corruption, the median IS the corruption and the
-  healthy head bar is dropped instead (majority evidence is the best a bounded
-  in-session screen can do; the per-session WARN still fires).
+* a **corrupt-majority head (2 of the first 3 bars corrupt) collapses the
+  WHOLE session onto the corruption** — whenever ≥ 2 of the first 3 bars are
+  corrupt (the SAME scaling, or two DIFFERENT scalings), the median IS a
+  corrupt bar: the healthy head bar is dropped, the corrupt survivor(s) SEED
+  the post-head baseline, and — because a skipped bar never advances the
+  baseline — EVERY healthy successor in the session is cascade-dropped. The
+  session collapses to the corrupt bar(s) (a differently-scaled corrupt pair
+  collapses it to the ONE median poison bar), which Stage-1A absorbs as
+  ``_today_ohlc`` and rolls into the NEXT day's pivot / PDH-PDL / Fib
+  anchors — the same session-destroying shape as the poison-head bug this
+  module fixes, re-armed at a 2-corrupt-head-bars threshold. For a corrupt
+  run of length ≥ 2 STARTING at head position 2 this is a strict REGRESSION
+  versus the #1616 screen (which baselined the healthy bar 1 and dropped the
+  whole corrupt run); the recorded trade-off: the median vote moved the
+  poison-baseline threshold from 1 corrupt head bar to 2, and the
+  vendor-scaling threat model makes a corrupt RUN of opening minutes a
+  realistic shape — majority evidence is the best a bounded in-session
+  screen can do. The per-session skip WARN fires, and a session whose
+  skipped count exceeds its kept count ADDITIONALLY fires one
+  :data:`BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` WARN (the
+  corrupt-head-out-vote signature: the surviving bars are then more likely
+  the corruption than the data — mask unchanged, disclosure only);
+* the **head verdict is bounded-forward-looking** — a session-head bar's KEEP
+  verdict reads up to 2 FOLLOWING same-session bars (the median vote), so a
+  load truncated INSIDE a session's first 3 bars can keep a poison head bar
+  that the full load would drop (the pre-head-seed #1616 screen was strictly
+  prefix-causal; this one is prefix-causal only at whole-session-head
+  granularity). Clean-lake verdicts never flip (clean head bars agree with
+  their median), production sweep windows are whole days, and any ONE fixed
+  window stays fully deterministic; the sweep suffix-independence property
+  gates consume bar lists / resamplers directly and do NOT route through
+  ``arrow_table_to_bars``, so they deliberately do not certify this screen
+  (disclosed + test-pinned, never claimed).
 
 Contract (deliberately narrow, to never destroy real data):
 
@@ -128,6 +157,13 @@ BAD_TICK_SKIP_EVENT: Final[str] = "feed.bad_tick_skipped"
 #: (ratio ≥ the bound) yet ALL KEPT — the honest unconfirmable-head disclosure
 #: (no third witness → no offender identified → never destroy real data).
 BAD_TICK_HEAD_UNCONFIRMED_EVENT: Final[str] = "feed.bad_tick_head_unconfirmed"
+
+#: One structlog event per session whose SKIPPED count exceeds its KEPT count —
+#: the corrupt-majority-head out-vote signature (module docstring, honest
+#: limits): when the screen destroys MOST of a session, the surviving bars are
+#: more likely the corruption than the data. Disclosure only — the keep mask is
+#: unchanged; remediation is a re-pull / lake-heal of the named partition.
+BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT: Final[str] = "feed.bad_tick_session_majority_dropped"
 
 #: Falsy literals that DISABLE the (default-ON) screen — the mirror of the
 #: ``volume_keepalive`` kill-switch vocabulary (CLAUDE.md §11 COMMON pattern).
@@ -196,9 +232,12 @@ class BadTickScreen:
     against their median close (the evidence-confirmed head seed,
     ``DEC-BADTICK-HEAD-SEED-001``), then judges every later bar against the
     last KEPT close. Emits exactly one :data:`BAD_TICK_SKIP_EVENT` WARN per
-    session that skipped ≥ 1 bar, plus one
+    session that skipped ≥ 1 bar, one
     :data:`BAD_TICK_HEAD_UNCONFIRMED_EVENT` WARN per inconsistent-but-kept
-    2-bar session (the disclosed unconfirmable-head limit).
+    2-bar session (the disclosed unconfirmable-head limit), and one
+    :data:`BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT` WARN per session whose
+    skipped count exceeds its kept count (the corrupt-majority-head collapse
+    signature — module docstring, honest limits).
 
     The instance carries only CONFIGURATION (``source`` / ``max_ratio`` /
     ``log``); all per-session state is local to :meth:`screen_mask`, so one
@@ -262,6 +301,7 @@ class BadTickScreen:
         session: date | None = None
         head: list[int] = []  # pending (unjudged) head-bar row indices, ≤ 3
         baseline: float | None = None  # last KEPT close once the head resolved
+        session_rows = 0  # total rows seen in the current session
         skipped = 0
         first_offender: tuple[float, float] | None = None
 
@@ -294,7 +334,7 @@ class BadTickScreen:
 
         def _flush() -> None:
             """Close the current session: unconfirmable-head + WARN bookkeeping."""
-            nonlocal skipped, first_offender
+            nonlocal session_rows, skipped, first_offender
             if (
                 # A 2-bar pending head (a 1-bar head has no witness at all →
                 # silent keep; a 3-bar head already resolved via the median).
@@ -324,6 +364,23 @@ class BadTickScreen:
                     first_ref_close=reference,
                     first_close=close,
                 )
+                kept_in_session = session_rows - skipped
+                if skipped > kept_in_session:
+                    # Corrupt-majority signature (module docstring, honest
+                    # limits): the screen destroyed MOST of the session — a
+                    # corrupt 2-of-3 head has out-voted the median and
+                    # cascade-dropped the healthy remainder, so the SURVIVING
+                    # bars are more likely the corruption than the data. Mask
+                    # unchanged; this louder second WARN names the collapse.
+                    self._log.warning(
+                        BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
+                        source=self._source,
+                        session=session.isoformat() if session is not None else None,
+                        skipped=skipped,
+                        kept=kept_in_session,
+                        max_ratio=self._max_ratio,
+                    )
+            session_rows = 0
             skipped = 0
             first_offender = None
 
@@ -336,6 +393,7 @@ class BadTickScreen:
                 _flush()
                 session = day
                 baseline = None
+            session_rows += 1
             if baseline is None:
                 head.append(i)
                 if len(head) == HEAD_CONFIRM_BARS:
@@ -350,6 +408,7 @@ __all__ = [
     "BAD_TICK_ENABLED_ENV",
     "BAD_TICK_HEAD_UNCONFIRMED_EVENT",
     "BAD_TICK_MAX_RATIO",
+    "BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT",
     "BAD_TICK_SKIP_EVENT",
     "HEAD_CONFIRM_BARS",
     "BadTickScreen",

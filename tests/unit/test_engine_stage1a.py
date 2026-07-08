@@ -674,3 +674,29 @@ def test_weekly_anchor_grid_completes_across_muhurat_day(tmp_path: Path) -> None
             audit=audit,
         )
     assert summary.tuples_failed == 0
+
+
+@pytest.mark.parametrize("anchor", _WEEKLY_ANCHORS)
+def test_leaked_non_trading_date_bar_still_raises_weekly_resolver_refusal(
+    anchor: FibAnchorKind,
+) -> None:
+    # RESIDUAL HONEST LIMIT pin (disclosed in #1625/#1626 + the
+    # _compute_anchors comment — round-1 review): the Muhurat abstain keys
+    # ONLY on has_muhurat_session(today). A leaked stored bar on any OTHER
+    # non-trading date — e.g. a weekend/holiday bar written by the pre-#1294
+    # date-blind ingest filter and never retro-cleaned (arrow_table_to_bars
+    # performs no session-date validation) — still drives the non-PREV_DAY
+    # branch into the weekly resolvers' plain ValueError, OUTSIDE the grid
+    # drivers' SweepComboError quarantine (the same whole-grid abort mechanism
+    # the Muhurat abstain closes for Muhurat dates). Pinned as the DOCUMENTED
+    # residual behavior, not fixed: remediation is a re-pull / lake census of
+    # the leaked partition; a typed quarantinable error is a NAMED follow-up.
+    bars = [
+        _day_bar(_date(2024, 11, 7), "100.00", "110.00", "90.00", "105.00"),
+        _day_bar(_date(2024, 11, 8), "104.00", "105.00", "103.00", "104.50"),
+        # A leaked SATURDAY bar (2024-11-09 is not an NSE trading day and not
+        # a Muhurat session date).
+        _day_bar(_date(2024, 11, 9), "104.00", "104.50", "103.50", "104.20"),
+    ]
+    with pytest.raises(ValueError, match="not a trading day"):
+        build_bar_bits(bars, fib_anchor=anchor)

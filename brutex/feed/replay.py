@@ -330,7 +330,10 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     # then every later bar is judged against the last IN-SESSION kept close.
     # The whole-table mask is computed in ONE O(n) pre-pass (the head vote
     # needs the ≤ 2 following head bars, so the verdict is per-table, not
-    # per-row-streaming); genuine reopen gaps never false-trip and
+    # per-row-streaming — a head bar's verdict is bounded-FORWARD-looking, and
+    # a load truncated inside a session's first 3 bars can keep a poison head
+    # the full load would drop: the bad_tick module docstring's honest-limits
+    # disclosure); genuine reopen gaps never false-trip and
     # cross-session comparison stays forbidden. Default ON,
     # ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar. IST session dates
     # drive the per-session grouping (``ts`` is timezone-aware — the
@@ -361,8 +364,14 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
         # DROPPED (not built, not appended) and counted per the pre-computed
         # keep mask. The positivity raise above deliberately stays FIRST — a
         # corrupt NON-POSITIVE stored bar is a different, always-loud class
-        # that never rides the skip path (byte-identical to the pre-mask
-        # ordering, where ``screen.keep`` also ran after the positivity check).
+        # that never rides the skip path. SCOPE of the "byte-identical to the
+        # pre-mask #1616 ordering" claim: it holds for this per-row
+        # raise-before-skip law and for every table that is SERVED; on a table
+        # the positivity guard REFUSES, the whole-table pre-pass above has
+        # already emitted the table's bad-tick WARNs before the raise (the
+        # pre-#1625 streaming screen emitted none past the raising row) —
+        # strictly MORE disclosure on a refused table, never less, and no bars
+        # are served either way (test-pinned).
         if keep_mask is not None and not keep_mask[row]:
             continue
         try:

@@ -174,3 +174,25 @@ def test_non_positive_price_still_raises_before_the_screen_drop() -> None:
     ]
     with pytest.raises(ValueError, match="non-positive price"):
         arrow_table_to_bars(_table(rows))
+
+
+def test_refused_table_emits_bad_tick_warns_before_the_positivity_raise() -> None:
+    # SCOPE PIN for the "byte-identical to #1616's ordering" claim (round-1
+    # review): the whole-table mask pre-pass runs BEFORE the row loop, so on a
+    # table the positivity guard REFUSES the pre-pass has already emitted the
+    # table's bad-tick WARNs — the pre-#1625 streaming screen emitted none past
+    # the raising row. Strictly MORE disclosure on a refused table, never less;
+    # the table still raises identically and no bars are served either way.
+    rows = [
+        (_BASE, 100.0, 101.0, 99.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.5, 101.5, 99.5, 100.5),
+        (_BASE + timedelta(minutes=2), 101.0, 102.0, 100.0, 101.0),
+        (_BASE + timedelta(minutes=3), 10.0, 10.1, 9.9, 10.0),  # ÷10 spike (masked)
+        (_BASE + timedelta(days=1), -5.0, -4.0, -6.0, -5.0),  # next session, refused
+    ]
+    with capture_logs() as logs, pytest.raises(ValueError, match="non-positive price"):
+        arrow_table_to_bars(_table(rows), source="src")
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1  # the D1 spike's WARN landed before the raise
+    assert warns[0]["skipped"] == 1
+    assert warns[0]["session"] == "2024-01-02"

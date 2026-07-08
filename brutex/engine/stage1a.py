@@ -757,6 +757,19 @@ class Stage1AMatrixBuilder:
             # bounded rolling history. Returns None on a cold week (< 5 sessions
             # for rolling-weekly / no completed prior week for weekly-static) — the
             # caller then clears ONLY the Group-4 Fib bits, keeping the warm pivots.
+            # RESIDUAL HONEST LIMIT (disclosed, #1625/#1626 round-1 review): the
+            # abstain above keys ONLY on `has_muhurat_session(today)`. Any OTHER
+            # stored bar whose IST date is not a trading day — e.g. a
+            # weekend/holiday leak written by the pre-#1294 date-blind ingest
+            # filter and never retro-cleaned (`arrow_table_to_bars` performs no
+            # session-date validation) — still drives this dispatch into the
+            # weekly resolvers' plain ValueError, which the grid drivers'
+            # SweepComboError quarantine does NOT catch → whole-grid abort
+            # (test-pinned as the documented behavior). Remediation: re-pull /
+            # `brutex lake audit-unique` census the named partition and remove
+            # the leaked rows; a typed quarantinable error is a NAMED follow-up
+            # (deliberately not widened here — the fix stays Muhurat-narrow per
+            # the #1625 prescription).
             fib = resolve_fib_anchor_levels(self._fib_anchor, today, self._daily_history)
         return _DayAnchors(pivots=pivots, fib=fib)
 

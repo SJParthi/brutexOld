@@ -41,9 +41,21 @@ byte-unchanged; the skip WARN's `first_prev_close` field renamed
 `first_ref_close` (a head skip's reference is the MEDIAN, not a prev close).
 HONEST LIMITS: a 1-bar session head is unconfirmable (kept, silent); a 2-bar
 session is unconfirmable (symmetric ratio — no offender identifiable) → BOTH
-kept + one `feed.bad_tick_head_unconfirmed` WARN; a 2-of-3 same-scaled corrupt
-head out-votes the median. Clean lakes byte-identical (all goldens pass
-unmodified). (2) DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — the weekly resolvers'
+kept + one `feed.bad_tick_head_unconfirmed` WARN; a corrupt-MAJORITY head (≥2
+corrupt of the first 3 bars — SAME or DIFFERENT scalings, round-1 review: the
+original "same-scaled" qualifier was WRONG) out-votes the median and COLLAPSES
+the WHOLE session onto the corruption (the corrupt survivors seed the
+baseline, every healthy successor cascade-drops, and Stage-1A absorbs the
+corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug-1
+shape re-armed at a 2-corrupt-head-bars threshold; for a corrupt run starting
+at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
+blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
+`feed.bad_tick_session_majority_dropped` WARN when skipped > kept); the head
+verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
+a load truncated inside a session's first 3 bars can keep a poison head the
+full load would drop; pinned; the suffix-independence gates do not route
+through `arrow_table_to_bars`, so they do not certify the screen). Clean lakes
+byte-identical (all goldens pass unmodified). (2) DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — the weekly resolvers'
 deliberate non-trading-`today` `ValueError` (true for EVERY Muhurat date, all
 6, 2020-2025) escaped `stage1a._compute_anchors` OUTSIDE the grid drivers'
 SweepComboError tuple-skip quarantine, so ANY full-scope
@@ -56,7 +68,12 @@ kept) with ONE `stage1a.muhurat_weekly_anchor_ineligible` WARN per Muhurat
 session; the weekly resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
 refusal for direct callers); PREV_DAY + non-Muhurat behavior byte-identical;
 all 6 real boundaries × both anchors test-pinned + a REAL `run_sweep_grid`
-whole-grid completion regression. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+whole-grid completion regression; RESIDUAL (round-1 disclosure): the abstain
+keys ONLY on `has_muhurat_session` — a leaked NON-Muhurat non-trading-date
+stored bar (a pre-#1294 ingest leak, never retro-cleaned) still hits the
+resolvers' ValueError whole-grid abort (pinned; remediation = re-pull / lake
+census; a typed quarantinable error is a NAMED follow-up); the second DEC id
+carries its own validator stub header, MIGRATION.md #1626. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
 `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
 suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
@@ -1610,9 +1627,21 @@ hostile-review pass._
   `first_ref_close` (a head skip's reference is the MEDIAN, not a prev close).
   HONEST LIMITS: a 1-bar session head is unconfirmable (kept, silent); a 2-bar
   session is unconfirmable (symmetric ratio — no offender identifiable) → BOTH
-  kept + one `feed.bad_tick_head_unconfirmed` WARN; a 2-of-3 same-scaled corrupt
-  head out-votes the median. Clean lakes byte-identical (all goldens pass
-  unmodified). (2) DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — the weekly resolvers'
+  kept + one `feed.bad_tick_head_unconfirmed` WARN; a corrupt-MAJORITY head (≥2
+  corrupt of the first 3 bars — SAME or DIFFERENT scalings, round-1 review: the
+  original "same-scaled" qualifier was WRONG) out-votes the median and COLLAPSES
+  the WHOLE session onto the corruption (the corrupt survivors seed the
+  baseline, every healthy successor cascade-drops, and Stage-1A absorbs the
+  corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug-1
+  shape re-armed at a 2-corrupt-head-bars threshold; for a corrupt run starting
+  at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
+  blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
+  `feed.bad_tick_session_majority_dropped` WARN when skipped > kept); the head
+  verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
+  a load truncated inside a session's first 3 bars can keep a poison head the
+  full load would drop; pinned; the suffix-independence gates do not route
+  through `arrow_table_to_bars`, so they do not certify the screen). Clean lakes
+  byte-identical (all goldens pass unmodified). (2) DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001 — the weekly resolvers'
   deliberate non-trading-`today` `ValueError` (true for EVERY Muhurat date, all
   6, 2020-2025) escaped `stage1a._compute_anchors` OUTSIDE the grid drivers'
   SweepComboError tuple-skip quarantine, so ANY full-scope
@@ -1625,7 +1654,12 @@ hostile-review pass._
   session; the weekly resolvers' raise stays BYTE-UNTOUCHED (test-pinned honest
   refusal for direct callers); PREV_DAY + non-Muhurat behavior byte-identical;
   all 6 real boundaries × both anchors test-pinned + a REAL `run_sweep_grid`
-  whole-grid completion regression. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  whole-grid completion regression; RESIDUAL (round-1 disclosure): the abstain
+  keys ONLY on `has_muhurat_session` — a leaked NON-Muhurat non-trading-date
+  stored bar (a pre-#1294 ingest leak, never retro-cleaned) still hits the
+  resolvers' ValueError whole-grid abort (pinned; remediation = re-pull / lake
+  census; a typed quarantinable error is a NAMED follow-up); the second DEC id
+  carries its own validator stub header, MIGRATION.md #1626. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
   `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
   suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
@@ -1856,7 +1890,9 @@ hostile-review pass._
   DEC-BADTICK-HEAD-SEED-001 #1625 — this UNDERSTATED the defect: the corrupt first bar was not merely
   unscreened, it was KEPT AS THE BASELINE and destroyed the rest of its session; a corrupt head bar at any of
   positions 1-3 is NOW caught by the median-of-first-3 head vote — the remaining honest limits are the
-  unconfirmable 1-2-bar session head + a 2-of-3 same-scaled corrupt head out-voting the median, see #1625]).
+  unconfirmable 1-2-bar session head + the corrupt-MAJORITY head (≥2 corrupt of the first 3 bars — SAME or
+  DIFFERENT scalings — out-vote the median, seed the baseline, and collapse the WHOLE session onto the
+  corruption), both disclosed in full in #1625 with the round-1 collapse WARN + cascade pins]).
   ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
