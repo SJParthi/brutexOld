@@ -693,10 +693,17 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
     still in flight when phase (b) starts — must yield an honest report with
     ``historical=None`` (candle phase skipped, deferral surfaced), NEVER an
     uncaught terminal ``RegistryError`` that kills the whole composite job."""
-    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
     sdk = _nifty_sdk()
     sink = _RecordingSink()
+    # De-flake: open the store BEFORE arming the 0.2 s wedge deadline —
+    # RegistryStore.open runs its own connect+DDL under the env-resolved
+    # deadline, and a COLD DuckDB open on a loaded CI runner can legitimately
+    # exceed 0.2 s (a spurious terminal RegistryError, not the wedge under
+    # test). The wedge teeth are untouched: StoreWriteDeadlineGuard.run
+    # re-resolves the env PER WRITE BATCH, so the phase-(a) upsert still
+    # runs under the 0.2 s bound.
     registry = _registry(tmp_path)
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
     coverage = _CoverageSink()
     proxy = _RegistryGateConn(registry._conn, hang_on="INSERT OR REPLACE INTO expiries")
     registry._conn = proxy

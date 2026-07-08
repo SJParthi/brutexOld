@@ -1054,7 +1054,6 @@ class TestCoverageWriteDeadline:
         transient raise unwinds the ``_synchronized`` wrapper on the OWNING
         thread, so a second thread acquires the lock within a small bound.
         """
-        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_coverage(_coverage_cell("NIFTY"))  # healthy prior row
             # A whitebox view that already HOLDS the read lock from a healthy
@@ -1062,6 +1061,12 @@ class TestCoverageWriteDeadline:
             # next execute drops the stale hold BEFORE the wedge raise.
             stale_view = s.connection
             stale_view.execute("SELECT 1")
+            # De-flake: arm the 0.2 s wedge deadline only AT wedge-install time —
+            # the store open + the healthy prior write above must run under the
+            # generous default (a real ms-scale write on a loaded CI runner could
+            # otherwise spuriously breach 0.2 s). guard.run re-resolves the env
+            # per write batch, so the wedged write below still sees 0.2 s.
+            monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
             proxy = _CoverageGateConn(s._conn)
             s._conn = proxy
             start = _time.monotonic()
@@ -1165,8 +1170,11 @@ class TestCoverageWriteDeadline:
     def test_wedged_close_skips_both_raw_closes_and_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
+        # De-flake: open the store BEFORE arming the 0.2 s wedge deadline
+        # (uniform with the sibling wedge sites; guard.run re-resolves the env
+        # per write batch, so the wedged write below still sees 0.2 s).
         s = InstrumentStore.open(tmp_path / "db")
+        monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "0.2")
         proxy = _CoverageGateConn(s._conn)
         s._conn = proxy
         read_conn: Any = s._read_conn
