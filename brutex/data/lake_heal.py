@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 import structlog
 
+from brutex.calendars.nse import daily_derive_cutoff
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -1331,7 +1332,14 @@ def heal_findings(
             skipped += 1
     recall_report: RecallReport | None = None
     if recall and state.touched_minute:
-        recall_report = _run_recall(state, before=now_fn().astimezone(_IST).date())
+        # Session-close-aware forming-session cutoff (DEC-DAILY-CUTOFF-
+        # GROUNDED-001 Move 1 — the third divergent pin repointed at the ONE
+        # law): a post-close heal recall re-derives the run day's own
+        # completed session instead of deferring it (the prior plain
+        # today-IST date pin regressed DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001
+        # here too). CLOCK arm only, honestly: recall is historical heal —
+        # data-grounding it is a named non-goal.
+        recall_report = _run_recall(state, before=daily_derive_cutoff(now_fn().astimezone(_IST)))
     report = HealReport(
         mode=resolved,
         findings=len(ordered),

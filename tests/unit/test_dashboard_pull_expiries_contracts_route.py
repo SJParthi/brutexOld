@@ -27,6 +27,10 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
+from brutex.adapters.groww.symbol_form_preference import (
+    PersistentSymbolFormPreference,
+    form_winner_key,
+)
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.metadata_pull import MetadataPullReport
@@ -464,3 +468,37 @@ def test_metadata_progress_sync_maps_onto_sync_from_ledger() -> None:
     assert calls == [
         {"completed": 3, "total": 7, "bars": None, "failed": 0, "current": "NIFTY/2024"}
     ]
+
+
+# ── durable &-form winner wiring (DEC-FORM-WINNER-PERSIST-001, round-5 pin) ──
+
+
+def test_metadata_route_threads_durable_form_preference(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The standalone metadata route wires the DURABLE form-winner map.
+
+    The round-5 regression pin (the direct-selection route's round-2
+    discipline, mirrored): this route's ``form_preference=...`` kwarg was
+    asserted by ZERO tests, so deleting the wiring — silently degrading the
+    route back to the fresh-per-pass amnesiac default — passed every suite.
+    Fail-loud key access + the FUNCTIONAL pin: a winner recorded through the
+    ROUTED preference lands in the wired ``InstrumentStore``'s ``schema_meta``
+    (never a fresh store-less map) on a non-dry-run.
+    """
+    _pin_creds_present(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def _capturing(instruments: list[Instrument], **kwargs: Any) -> MetadataPullReport:
+        captured["form_preference"] = kwargs["form_preference"]
+        return _fake_report(instruments, years=kwargs["years"], dry_run=kwargs["dry_run"])
+
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _capturing)
+    resp = client.post("/api/v1/universe/pull-expiries-contracts", params={"symbol": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    pref = captured["form_preference"]
+    assert isinstance(pref, PersistentSymbolFormPreference)
+    forms = ("M&M", "M%26M")
+    assert pref.record_winner("M&M", forms, "M%26M") is True
+    assert store.get_meta(form_winner_key("M&M")) == "M%26M"  # the REAL wired store

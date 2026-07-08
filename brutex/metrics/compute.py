@@ -53,6 +53,7 @@ __all__ = [
     "ResultMetrics",
     "compute_metrics",
     "compute_metrics_from_scalars",
+    "percentile",
     "with_stage4_statistics",
 ]
 
@@ -245,8 +246,16 @@ class ResultMetrics:
     pbo_probability: float | None = None  # pragma: no mutate
 
 
-def _percentile(sorted_values: Sequence[float], pct: float) -> float:
+def percentile(sorted_values: Sequence[float], pct: float) -> float:
     """Return the linear-interpolation percentile of a pre-sorted series.
+
+    The ONE COMMON percentile convention (Golden Rule #11): the NumPy
+    ``"linear"`` interpolation over a PRE-SORTED sequence. Promoted from the
+    module-private ``_percentile`` so downstream observers
+    (:mod:`brutex.observability.soak_drift`) share the exact convention instead
+    of adding a fourth copy — a p99-drift RATIO built on a mismatched
+    nearest-rank vs linear pair would compare apples to oranges
+    (DEC-SOAK-REAL-TIER-001). ``_percentile`` remains a back-compat alias.
 
     Parameters
     ----------
@@ -269,6 +278,11 @@ def _percentile(sorted_values: Sequence[float], pct: float) -> float:
         return sorted_values[lower]
     frac = rank - lower
     return sorted_values[lower] * (1.0 - frac) + sorted_values[upper] * frac
+
+
+#: Back-compat alias — the pre-DEC-SOAK-REAL-TIER-001 module-private name kept
+#: byte-stable for its two internal callers + the existing unit tests.
+_percentile = percentile
 
 
 def _drawdown_stats(equity: EquityCurve) -> tuple[int, float, int, float]:

@@ -104,6 +104,7 @@ from brutex.adapters.groww.option_ingest import (
     run_groww_option_ingest,
 )
 from brutex.adapters.groww.strike_chain_bound import build_empty_retry_budget
+from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
@@ -1140,6 +1141,7 @@ def _run_phase(
     audit: AuditWriter | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    form_preference: SymbolFormPreference | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
 
@@ -1359,6 +1361,12 @@ def _run_phase(
                 breaker_health_probe=breaker_canary,
                 storm_breaker=storm_breaker,
                 audit=audit,
+                # ONE shared &-form preference across every step bucket AND
+                # every until-clean round (DEC-FORM-WINNER-PERSIST-001; the
+                # spine's fresh-per-pass default stands down when threaded) —
+                # in production the PersistentSymbolFormPreference over the
+                # instrument master, so the winner survives across pulls too.
+                form_preference=form_preference,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1933,6 +1941,7 @@ def pull_contract_candles(
     scope_end: date | None = None,
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
+    form_preference: SymbolFormPreference | None = None,
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
@@ -2060,6 +2069,15 @@ def pull_contract_candles(
         planned per market bucket), so the dashboard marks the phase *open_ended* —
         this feeds real moving counts, it does NOT claim a final total. ``None``
         (default — CLI / tests) is byte-identical.
+    form_preference
+        Optional learned ``&``-form ordering shared across the WHOLE phase — every
+        market bucket and every until-clean round reuse the SAME instance
+        (DEC-FORM-WINNER-PERSIST-001; supersedes the spine's fresh-per-pass default,
+        which made the learning amnesiac across buckets/rounds). Production threads
+        the pipeline's :class:`~brutex.adapters.groww.symbol_form_preference.\
+PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pull
+        issues the learned winner FIRST); ``None`` (the default — CLI / tests) keeps
+        the spine's per-pass process-local preference byte-identical.
     underlying_kinds
         Optional ``{registry-underlying-key: is_index}`` classification map
         (DEC-PULL-SIX-STEP-ORDER-001) — keyed by the SAME
@@ -2112,13 +2130,17 @@ def pull_contract_candles(
     # (DEC-RATE-WIDGET-FNO-MEASURED-001) so the observe-only RatePanelSampler — which holds
     # only the session controller, NOT this deep-in-the-spine pool — can read the transport
     # CallMeter's real ``effective_rps`` during the long F&O phase and push the TRUE completed
-    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). Best-effort +
-    # observe-only: a dry-run / no-``session_rate`` pull, or a client with no ``.meter``
-    # (the empty-candle dry-run client), is a silent no-op. The lazy import avoids any
-    # module-load ordering coupling with pull_controller.
+    # rate (instead of the admission average of DEC-RATE-WIDGET-FNO-HONEST-001). The
+    # empty-candle dry-run GrowwClient DOES carry a real CallMeter (``client.py``
+    # ``default_factory=CallMeter``), so honesty comes from the explicit ``dry_run=True``
+    # gate, which DEREGISTERS (clears any stale prior-pull meter, never registers the
+    # synthetic one) — never from a meterless client (the pre-#1593 "no ``.meter`` silent
+    # no-op" claim here was factually FALSE; DEC-RATE-METER-LIFECYCLE-001). Best-effort +
+    # observe-only. The lazy import avoids any module-load ordering coupling with
+    # pull_controller.
     from brutex.dashboard.pull_controller import register_pull_meter
 
-    register_pull_meter(session_rate, client)
+    register_pull_meter(session_rate, client, dry_run=dry_run)
     # FULL async fetch/process separation (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) for the F&O
     # (futures + options) pull — the F&O TWIN of the spot spine's wiring
     # (DEC-FNO-ASYNC-PIPELINE-WIRE-001). When built (DEFAULT ON; ``None`` for a dry-run / the
@@ -2266,6 +2288,7 @@ def pull_contract_candles(
                 audit=ingest_audit,
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
+                form_preference=form_preference,
             )
         finally:
             # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute
