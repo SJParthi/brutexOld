@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
@@ -255,7 +255,7 @@ def test_is_halt_arms() -> None:
 def test_r7_clean_run_finalizes_complete(tmp_path: Path) -> None:
     grid = _grid()
     run_id = grid_identity(grid)
-    with _core(tmp_path, grid) as (core, _spy_):
+    with _core(tmp_path, grid) as (core, _unused_spy):
         assert core.run_id == run_id
         assert core.attempt == 1
         assert core.suspect is False
@@ -298,9 +298,8 @@ def test_attempt_increments_from_prior_and_junk_resets(tmp_path: Path) -> None:
 
 def test_g06_second_core_enter_refused_before_any_writer(tmp_path: Path) -> None:
     grid = _grid()
-    with _core(tmp_path, grid), pytest.raises(SweepAlreadyRunningError):
-        with _core(tmp_path, grid):
-            pytest.fail("the second core must never enter")  # pragma: no cover
+    with _core(tmp_path, grid), pytest.raises(SweepAlreadyRunningError), _core(tmp_path, grid):
+        pytest.fail("the second core must never enter")  # pragma: no cover
 
 
 def test_g09_keep_awake_entered_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,16 +320,18 @@ def test_exception_finalizes_failed_and_alerts(tmp_path: Path) -> None:
     grid = _grid()
     run_id = grid_identity(grid)
     spy = _spy()
-    with pytest.raises(ValueError, match="boom"):
-        with sweep_run_core(
+    with (
+        pytest.raises(ValueError, match="boom"),
+        sweep_run_core(
             results_root=tmp_path,
             grid=grid,
             alerter=cast("SweepAlerter", spy),
             entry_label="t",
             tripwire_config=TripwireConfig(),
             diffcheck_k=0,
-        ):
-            raise ValueError("boom")
+        ),
+    ):
+        raise ValueError("boom")
     status = read_exit_status(tmp_path, run_id)
     assert status is not None
     assert status["state"] == "failed"
@@ -344,16 +345,18 @@ def test_keyboard_interrupt_halts_without_alert(tmp_path: Path) -> None:
     grid = _grid()
     run_id = grid_identity(grid)
     spy = _spy()
-    with pytest.raises(KeyboardInterrupt):
-        with sweep_run_core(
+    with (
+        pytest.raises(KeyboardInterrupt),
+        sweep_run_core(
             results_root=tmp_path,
             grid=grid,
             alerter=cast("SweepAlerter", spy),
             entry_label="t",
             tripwire_config=TripwireConfig(),
             diffcheck_k=0,
-        ):
-            raise KeyboardInterrupt
+        ),
+    ):
+        raise KeyboardInterrupt
     status = read_exit_status(tmp_path, run_id)
     assert status is not None
     assert status["state"] == "halted"
@@ -364,16 +367,18 @@ def test_lake_write_halt_maps_to_halted_and_alerts(tmp_path: Path) -> None:
     grid = _grid()
     run_id = grid_identity(grid)
     spy = _spy()
-    with pytest.raises(LakeWriteHalt):
-        with sweep_run_core(
+    with (
+        pytest.raises(LakeWriteHalt),
+        sweep_run_core(
             results_root=tmp_path,
             grid=grid,
             alerter=cast("SweepAlerter", spy),
             entry_label="t",
             tripwire_config=TripwireConfig(),
             diffcheck_k=0,
-        ):
-            raise LakeWriteHalt("disk_full")
+        ),
+    ):
+        raise LakeWriteHalt("disk_full")
     status = read_exit_status(tmp_path, run_id)
     assert status is not None
     assert status["state"] == "halted"
@@ -390,17 +395,21 @@ def test_exit_code_honoured_on_clean_and_failed_exit(tmp_path: Path) -> None:
     assert status is not None and status["exit_code"] == 3
     # The failure arm keeps a caller-set code too.
     spy = _spy()
-    with pytest.raises(RuntimeError):
-        with sweep_run_core(
+    # PT012 suppressed: the exception MUST propagate through the run-core CM
+    # AFTER set_exit_code ran — the two statements ARE the scenario.
+    with (  # noqa: PT012
+        pytest.raises(RuntimeError),
+        sweep_run_core(
             results_root=tmp_path,
             grid=grid,
             alerter=cast("SweepAlerter", spy),
             entry_label="t",
             tripwire_config=TripwireConfig(),
             diffcheck_k=0,
-        ) as core:
-            core.set_exit_code(7)
-            raise RuntimeError("late")
+        ) as core,
+    ):
+        core.set_exit_code(7)
+        raise RuntimeError("late")
     status = read_exit_status(tmp_path, run_id)
     assert status is not None and status["exit_code"] == 7
 
@@ -437,7 +446,11 @@ def test_mark_suspect_fans_out_once(tmp_path: Path) -> None:
 
 def test_r39_on_trip_records_and_latches_suspect(tmp_path: Path) -> None:
     event = TripwireEvent(
-        ts_utc=123.0, name="count_reconciliation", severity="critical", detail="d", values={"x": 1.0}
+        ts_utc=123.0,
+        name="count_reconciliation",
+        severity="critical",
+        detail="d",
+        values={"x": 1.0},
     )
     with _core(tmp_path) as (core, spy):
         core._on_trip(event)
@@ -631,9 +644,14 @@ def test_run_stage3_still_invalid_raises_hard(
         cell.write_bytes(b"cell-bytes")
         return _cell_report([cell], "ab" * 32)
 
-    with pytest.raises(Stage3CellStampError, match="still invalid"):
-        with _core(tmp_path) as (core, _s):
-            core.run_stage3(_factory)
+    with (
+        pytest.raises(Stage3CellStampError, match="still invalid"),
+        _core(tmp_path) as (
+            core,
+            _s,
+        ),
+    ):
+        core.run_stage3(_factory)
 
 
 def test_run_stage3_rerun_without_cells_skips_revalidation(
@@ -688,7 +706,6 @@ def test_cascade_done_folds_sourceable_doors_only(tmp_path: Path) -> None:
 
 def test_cascade_done_missing_stamps_report_worst_verdict(tmp_path: Path) -> None:
     from brutex.engine.cascade_wire import manifest_path as cmp
-    from brutex.engine.cascade_wire import report_path as crp
 
     with _core(tmp_path) as (core, _s):
         # Manifest stamped OK, report missing → the worst verdict wins.
@@ -825,9 +842,10 @@ def test_on_tuple_composes_inner_then_records(tmp_path: Path) -> None:
     grid = _grid()
     tuple_ = next(iter_sweep_tuples(grid))
     inner: list[str] = []
-    with _core(
-        tmp_path, grid, inner_on_tuple=lambda t, s: inner.append(t.instrument)
-    ) as (core, _s):
+    with _core(tmp_path, grid, inner_on_tuple=lambda t, s: inner.append(t.instrument)) as (
+        core,
+        _s,
+    ):
         core.on_progress(_snapshot(enumerated=1, evaluated=1))
         core.on_tuple(tuple_, _summary(resumed_complete=True, minhits_dropped=2))
         assert core._sentinel_skips == 1
@@ -855,8 +873,10 @@ def test_on_tuple_inner_raise_propagates_raw(tmp_path: Path) -> None:
 
     with _core(tmp_path, grid, inner_on_tuple=_boom) as (core, _s):
         # The caller's own hook keeps its RAW pre-existing contract (a raising
-        # print aborted the sweep before this change too).
-        with pytest.raises(RuntimeError, match="inner hook broke"):
+        # print aborted the sweep before this change too). PT012-shaped: only
+        # the hook call sits inside the raises block.
+        raises_ctx = pytest.raises(RuntimeError, match="inner hook broke")
+        with raises_ctx:
             core.on_tuple(tuple_, _summary())
 
 
@@ -930,13 +950,13 @@ def test_clean_run_appends_run_manifest_chain_line(tmp_path: Path) -> None:
 
 def test_terminal_patch_tolerates_missing_garbage_and_nondict(tmp_path: Path) -> None:
     progress_path = tmp_path / "progress" / "p.json"
-    with _core(tmp_path, progress_path=progress_path) as (core, _s):
+    with _core(tmp_path, progress_path=progress_path) as (_core0, _s):
         progress_path.unlink()  # vanished mid-run → terminal patch no-ops
     assert not progress_path.exists()
-    with _core(tmp_path, progress_path=progress_path) as (core, _s):
+    with _core(tmp_path, progress_path=progress_path) as (_core1, _s):
         progress_path.write_text("{torn", encoding="utf-8")
     assert progress_path.read_text() == "{torn"
-    with _core(tmp_path, progress_path=progress_path) as (core, _s):
+    with _core(tmp_path, progress_path=progress_path) as (_core2, _s):
         progress_path.write_text("[]", encoding="utf-8")
     assert progress_path.read_text() == "[]"
 
@@ -1099,9 +1119,7 @@ def test_g05_read_progress_enriches_with_exit_status(tmp_path: Path) -> None:
     root = tmp_path
     progress_path = root / "progress" / "sweep-progress.json"
     progress_path.parent.mkdir(parents=True)
-    write_exit_status(
-        root, run_id="r" * 64, state=RunState.COMPLETE, exit_code=0, attempt=1, pid=1
-    )
+    write_exit_status(root, run_id="r" * 64, state=RunState.COMPLETE, exit_code=0, attempt=1, pid=1)
     progress_path.write_text(json.dumps({"running": False, "run_id": "r" * 64}))
     out = read_progress(progress_path)
     status = out["exit_status"]
@@ -1327,7 +1345,7 @@ def test_g03_parallel_driver_streams_progress(tmp_path: Path) -> None:
 def test_g06_cli_main_maps_refusals_to_clean_user_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import brutex.cli as cli
+    from brutex import cli
 
     monkeypatch.setattr(
         cli,
@@ -1348,6 +1366,7 @@ def test_g06_cli_main_maps_refusals_to_clean_user_error(
 def _cascade_setup(tmp_path: Path) -> tuple[Any, Any, Any]:
     """One stamped AUTOMATIC cascade run over the sibling harness's fixture."""
     import brutex.engine.cascade_wire as cw
+
     from tests.unit.test_engine_cascade_wire import _bars_for, _session_bars, _spec
 
     bars_for = _bars_for(_session_bars())
@@ -1430,9 +1449,7 @@ def test_g07_unstamped_legacy_replay_warns_and_proceeds(tmp_path: Path) -> None:
 def test_g07_stamp_without_snapshot_extra_is_not_asserted(tmp_path: Path) -> None:
     cw, bars_for, _report = _cascade_setup(tmp_path)
     # Re-stamp WITHOUT the extra: the snapshot compare is honestly skipped.
-    write_stage_stamp(
-        cw.manifest_path(tmp_path), stage="cascade_manifest", run_id="a" * 64
-    )
+    write_stage_stamp(cw.manifest_path(tmp_path), stage="cascade_manifest", run_id="a" * 64)
     replayed = cw.run_and_write_from_manifest(tmp_path, bars_for=bars_for)
     assert replayed.n_input >= 0  # replay proceeded
 
@@ -1447,7 +1464,7 @@ def test_g07_stamp_failure_is_fail_soft_on_both_paths(
 
     monkeypatch.setattr(stage_stamp_mod, "write_stage_stamp", _boom)
     with capture_logs() as logs:
-        cw, bars_for, report = _cascade_setup(tmp_path)
+        _cw, _bars_for, report = _cascade_setup(tmp_path)
     assert report.n_input >= 0  # the AUTOMATIC run completed
     assert [e for e in logs if e["event"] == "cascade_wire.stamp_failed"]
     # The replay side: stamp valid, but the RE-stamp after the rewrite fails.

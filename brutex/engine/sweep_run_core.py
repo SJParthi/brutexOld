@@ -49,7 +49,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -113,8 +113,8 @@ from brutex.observability.stage_stamp import (
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from pathlib import Path
 
-    from brutex.engine.sweep_checkpoint import SweepCheckpointStore
-    from brutex.engine.sweep_orchestrator import SweepTuple
+    from brutex.engine.sweep_checkpoint import SweepCheckpoint, SweepCheckpointStore
+    from brutex.engine.sweep_orchestrator import StoreQuarantine, SweepTuple
     from brutex.engine.sweep_progress import SweepProgressSnapshot
     from brutex.engine.sweep_run import SweepRunSummary
     from brutex.notifications.sweep_alerts import SweepAlerter
@@ -259,7 +259,7 @@ class RunCoreHandles:
     on_progress: Callable[[SweepProgressSnapshot], None]
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None]
     diffcheck: Callable[..., None] | None
-    store_quarantine: Callable[[SweepTuple, BaseException], None]
+    store_quarantine: StoreQuarantine
     _results_root: Path
     _grid: SweepGridConfig
     _alerter: SweepAlerter
@@ -459,23 +459,21 @@ class RunCoreHandles:
                 }
             ),
         )
-        self._guarded(
-            "manifest.dedup",
-            lambda: (
-                self.manifest.add_dedup_skip("cache", int(result.skipped_cache)),
-                self.manifest.add_dedup_skip("resume", int(result.skipped_resume)),
-                self.manifest.add_dedup_skip("sentinel", self._sentinel_skips),
-            ),
-        )
-        self._guarded(
-            "manifest.doors",
-            lambda: (
-                self.manifest.add_door_kills("no_bars", int(result.tuples_skipped_no_bars)),
-                self.manifest.add_door_kills("cache_skip", int(result.skipped_cache)),
-                self.manifest.add_door_kills("resume_skip", int(result.skipped_resume)),
-                self.manifest.add_door_kills("min_hits", self._minhits_dropped),
-            ),
-        )
+
+        def _fold_dedup() -> None:
+            self.manifest.add_dedup_skip("cache", int(result.skipped_cache))
+            self.manifest.add_dedup_skip("resume", int(result.skipped_resume))
+            self.manifest.add_dedup_skip("sentinel", self._sentinel_skips)
+
+        self._guarded("manifest.dedup", _fold_dedup)
+
+        def _fold_doors() -> None:
+            self.manifest.add_door_kills("no_bars", int(result.tuples_skipped_no_bars))
+            self.manifest.add_door_kills("cache_skip", int(result.skipped_cache))
+            self.manifest.add_door_kills("resume_skip", int(result.skipped_resume))
+            self.manifest.add_door_kills("min_hits", self._minhits_dropped)
+
+        self._guarded("manifest.doors", _fold_doors)
         self._guarded("stage2.aggregate_stamp", self._write_stage2_aggregate)
 
     def _write_stage2_aggregate(self) -> None:
@@ -542,9 +540,7 @@ class RunCoreHandles:
             snapshot = report.train_snapshot_hash
             if cells and snapshot is not None:
                 stamp_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
-                invalid = validate_stage3_cells(
-                    cells, run_id=self.run_id, snapshot_hash=snapshot
-                )
+                invalid = validate_stage3_cells(cells, run_id=self.run_id, snapshot_hash=snapshot)
                 if invalid:
                     raise Stage3CellStampError(
                         f"stage-3 cell stamps still invalid after one discard + re-run: "
@@ -600,11 +596,7 @@ class RunCoreHandles:
             self._stamps_present.add("cascade_manifest")
         if report_verdict is StampVerdict.OK:
             self._stamps_present.add("cascade_report")
-        worst = (
-            manifest_verdict
-            if manifest_verdict is not StampVerdict.OK
-            else report_verdict
-        )
+        worst = manifest_verdict if manifest_verdict is not StampVerdict.OK else report_verdict
         self._link_stamps["cascade"] = worst
 
     # ── composed callbacks ────────────────────────────────────────────────
@@ -875,7 +867,7 @@ def sweep_run_core(
     log_file: Path | None = None,
     wall: Callable[[], float] = time.time,
     monotonic: Callable[[], float] = time.monotonic,
-) -> Iterator[RunCoreHandles]:
+) -> Generator[RunCoreHandles, None, None]:
     """Compose the unkillable run core around ONE grid run (design §2, the CLI seam).
 
     ENTER order (G13 alerter-first — *alerter* exists BEFORE this CM):
@@ -1030,29 +1022,28 @@ def sweep_run_core(
             ),
         )
         if checkpoint_store is not None:  # G12 — quarantine-start-fresh pre-load
-            checkpoint = core._guarded(
-                "checkpoint.preload",
-                lambda: load_checkpoint_resilient(
-                    checkpoint_store,
-                    results_root=results_root,
-                    recorder=recorder,
-                    tracker=CheckpointCorruptionTracker(),
-                    on_crash_loop=lambda detail: alerter.run_suspect(
-                        run_id=run_id, tripwire="checkpoint_crash_loop", detail=detail
+            checkpoint: SweepCheckpoint | None = cast(
+                "SweepCheckpoint | None",
+                core._guarded(
+                    "checkpoint.preload",
+                    lambda: load_checkpoint_resilient(
+                        checkpoint_store,
+                        results_root=results_root,
+                        recorder=recorder,
+                        tracker=CheckpointCorruptionTracker(),
+                        on_crash_loop=lambda detail: alerter.run_suspect(
+                            run_id=run_id, tripwire="checkpoint_crash_loop", detail=detail
+                        ),
                     ),
                 ),
             )
             if checkpoint is not None and checkpoint.next_index > 0:
                 core._guarded(
                     "recorder.resume",
-                    lambda: recorder.record(
-                        "RESUME", {"resume_from": checkpoint.next_index}
-                    ),
+                    lambda: recorder.record("RESUME", {"resume_from": checkpoint.next_index}),
                 )
         core._guarded("progress.reset", core._reset_progress_at_launch)
-        core._guarded(
-            "manifest.stage_started", lambda: core.manifest.stage_started(core._stage)
-        )
+        core._guarded("manifest.stage_started", lambda: core.manifest.stage_started(core._stage))
         core._write_chain_map()
 
         try:
@@ -1069,9 +1060,10 @@ def sweep_run_core(
                 checkpoint_store=checkpoint_store,
             )
             if isinstance(exc, Exception):
+                reason = type(exc).__name__
                 core._guarded(
                     "alerter.sweep_halted",
-                    lambda: alerter.sweep_halted(run_id=run_id, reason=type(exc).__name__),
+                    lambda: alerter.sweep_halted(run_id=run_id, reason=reason),
                 )
             raise
         else:
@@ -1157,9 +1149,7 @@ def _finalize(
     else:
         core._guarded(
             "recorder.halt",
-            lambda: core.recorder.record(
-                "HALT", {"reason": state.value, "error_type": error_type}
-            ),
+            lambda: core.recorder.record("HALT", {"reason": state.value, "error_type": error_type}),
         )
     core._write_chain_map()
     extra_files: list[Path] = []

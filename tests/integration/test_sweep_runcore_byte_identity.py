@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from brutex.audit_verify import auto_verify
 from brutex.data.models import CandleBar
@@ -202,24 +202,27 @@ def _run_on(tmp: Path, grid: SweepGridConfig) -> tuple[Path, Path, int, RunCoreH
     ) as core:
         handles = core
         core.stage("sweep")
-        with AuditWriter.open(ingest_path, resume=ingest_path.exists()) as ingest:
-            with _guards(tmp, grid) as guards:
-                result = run_supervised_grid(
-                    grid,
-                    bars_for=_bars_for,
-                    store_for=make_store_for(out, grid),
-                    dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
-                    ingest_audit=ingest,
-                    guards=guards,
-                    on_tuple=core.on_tuple,
-                    on_progress=core.on_progress,
-                    diffcheck=core.diffcheck,
-                    store_quarantine=core.store_quarantine,
-                )
-                ckpt = guards.checkpoint.next_index
+        with (
+            AuditWriter.open(ingest_path, resume=ingest_path.exists()) as ingest,
+            _guards(tmp, grid) as guards,
+        ):
+            result = run_supervised_grid(
+                grid,
+                bars_for=_bars_for,
+                store_for=make_store_for(out, grid),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                ingest_audit=ingest,
+                guards=guards,
+                on_tuple=core.on_tuple,
+                on_progress=core.on_progress,
+                diffcheck=core.diffcheck,
+                store_quarantine=core.store_quarantine,
+            )
+            ckpt = guards.checkpoint.next_index
         core.grid_done(result)
         core.set_exit_code(0)
-    return out, ingest_path, ckpt, cast("RunCoreHandles", handles)
+    assert handles is not None
+    return out, ingest_path, ckpt, handles
 
 
 def test_runcore_on_vs_off_result_trees_are_byte_identical(tmp_path: Path) -> None:

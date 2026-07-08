@@ -26,7 +26,6 @@ from pathlib import Path
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.sweep_audit import SweepAuditWriter
 from brutex.engine.sweep_cache import SweepCache
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -158,9 +157,7 @@ def _write_run(tmp_path: Path) -> tuple[Path, str]:
     run_id = "e" * 64
     progress_path = root / "progress" / "sweep-progress.json"
     progress_path.parent.mkdir(parents=True)
-    write_exit_status(
-        root, run_id=run_id, state=RunState.RUNNING, attempt=1, pid=os.getpid()
-    )
+    write_exit_status(root, run_id=run_id, state=RunState.RUNNING, attempt=1, pid=os.getpid())
     write_exit_status(
         root, run_id=run_id, state=RunState.COMPLETE, exit_code=0, attempt=1, pid=os.getpid()
     )
