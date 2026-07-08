@@ -89,6 +89,7 @@ from brutex.engine.results_store import (
     ResultsStoreError,
 )
 from brutex.money import format_inr, paisa_to_rupees
+from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_preset
 
 _LOG = structlog.get_logger("brutex.dashboard.sweep_results_view")
 
@@ -96,14 +97,18 @@ __all__ = [
     "DEFAULT_RANK_BY",
     "DEFAULT_TOP_N",
     "MAX_TOP_N",
+    "PRESET_INERT_AXES",
     "RANKABLE_COLUMNS",
     "SNAPSHOT_ERA_AMBIGUOUS",
     "SNAPSHOT_ERA_UNKNOWN",
+    "STORE_ERROR_PUBLIC_DETAIL",
     "SWEEPS_DIRNAME",
     "SweepLeaderboard",
     "SweepScan",
     "build_sweep_leaderboard",
     "load_sweep_scan",
+    "resolve_preset_param",
+    "store_error_payload",
 ]
 
 #: The sub-directory of the lake root that holds the per-tuple sweep stores —
@@ -218,6 +223,14 @@ class SweepLeaderboard:
         How many duplicate ``run_id`` rows with DIFFERENT metrics were dropped
         (deterministic first-wins) across stores — counted + logged, never
         silently masked.
+    preset
+        The APPLIED ranking-preset token (one of
+        :data:`brutex.ranking.presets.PRESET_NAMES`) when the leaderboard was
+        ordered by a named R30 preset instead of the ``rank_by`` column, else
+        ``None`` (the byte-identical legacy ordering —
+        DEC-SWEEP-RESULTS-DEPTH-001, gap-register ruling 10). When set, the
+        ordering came ENTIRELY from the preset; ``rank_by`` is echoed unchanged
+        for the page's dropdown state but did NOT order the rows.
     """
 
     rows: tuple[dict[str, Any], ...]
@@ -232,10 +245,20 @@ class SweepLeaderboard:
     snapshot_hashes: tuple[str, ...]
     mixed_snapshot_eras: bool
     run_id_conflicts: int
+    preset: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route."""
-        return {
+        """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route.
+
+        With no preset applied the payload is BYTE-IDENTICAL to the pre-preset
+        shape (no new keys — the absent/blank arm of gap-register ruling 10 is
+        pinned by test). A preset-ranked payload gains exactly TWO additive
+        keys: ``preset`` (the applied token) and ``preset_inert_axes`` (the
+        honest names of the :class:`~brutex.ranking.presets.RankRecord` axes
+        that are NOT persisted on :class:`~brutex.engine.results_store.ResultRow`
+        and were therefore constant-filled — see :func:`_preset_rank_record`).
+        """
+        payload: dict[str, Any] = {
             "available": self.available,
             "total_rows": self.total_rows,
             "store_count": self.store_count,
@@ -249,6 +272,10 @@ class SweepLeaderboard:
             "run_id_conflicts": self.run_id_conflicts,
             "rows": list(self.rows),
         }
+        if self.preset is not None:
+            payload["preset"] = self.preset
+            payload["preset_inert_axes"] = list(PRESET_INERT_AXES)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +389,119 @@ def _clamp_top_n(top_n: int) -> int:
     if top_n > MAX_TOP_N:
         return MAX_TOP_N
     return top_n
+
+
+# ── R30 ranking-preset adapter (DEC-SWEEP-RESULTS-DEPTH-001 · ruling 10) ──
+# THIN by design: every ordering law lives in brutex.ranking.presets (the ONE
+# preset home, CLAUDE.md §11 COMMON); this surface only VALIDATES the query
+# token and PROJECTS a persisted ResultRow onto the preset's RankRecord.
+
+#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
+#: :class:`~brutex.engine.results_store.ResultRow` — constant-filled by
+#: :func:`_preset_rank_record` so they are INERT for every row (ordering falls
+#: through to the next preset key, ultimately ``run_id`` ASC). Surfaced on the
+#: payload (``preset_inert_axes``) so a preset-ranked view never pretends those
+#: axes discriminated (Golden Rule #10): notably the ``composite`` preset
+#: currently orders by ``run_id`` alone — the recomputed composite lives in the
+#: (row ⋈ aggregate) top-100 artifact build, and joining the aggregate sidecars
+#: here is merge-integration work, NOT silently faked per-row values.
+PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+
+
+def resolve_preset_param(preset: str | None) -> str | None:
+    """Validate the optional ``?preset=`` query token against the R30 registry.
+
+    ``None`` / blank (empty or whitespace-only) means "no preset" → ``None``:
+    the caller keeps the legacy ``rank_by`` ordering byte-identical (the
+    absent/blank arm of gap-register ruling 10). A KNOWN token (exact,
+    case-sensitive — the registry keys are the wire vocabulary) is returned
+    stripped. An UNKNOWN token raises ``ValueError`` naming every valid value,
+    which the route maps to a clean 400 — deliberately NOT the
+    :func:`brutex.ranking.presets.resolve_preset` silent-default degrade: a
+    typo on an explicit operator choice must refuse loudly, never quietly rank
+    by something else (Golden Rule #1).
+    """
+    if preset is None:
+        return None
+    token = preset.strip()
+    if not token:
+        return None
+    if token in PRESETS:
+        return token
+    raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
+
+
+def _preset_rank_record(row: ResultRow) -> RankRecord:
+    """Project one persisted :class:`ResultRow` onto the preset rank inputs.
+
+    The persisted full-precision metrics map 1:1 (NEVER rounded — CLAUDE.md §4;
+    raw floats, no coercion). The two :data:`PRESET_INERT_AXES` fields are NOT
+    persisted on ``ResultRow``: they are filled with the CONSTANT no-signal
+    values (``None`` composite — the presets module's honest "unscored" state —
+    and ``0`` consecutive losses), IDENTICAL for every row, so they can never
+    reorder anything; ties fall through to the store's ``run_id``-ASC law
+    inside :func:`~brutex.ranking.presets.sort_by_preset`. Constants are not
+    fabricated per-row data — they are never displayed, only ordering-inert.
+    """
+    return RankRecord(
+        run_id=row.run_id,
+        max_drawdown_pct=row.max_drawdown_pct,
+        composite_score=None,
+        max_consecutive_losses=0,
+        profit_factor=row.profit_factor,
+        win_rate=row.win_rate,
+        calmar_ratio=row.calmar_ratio,
+    )
+
+
+#: The externally-served ``error`` marker of :func:`store_error_payload` — a
+#: STABLE generic token, deliberately NOT ``str(exc)``: the raised message can
+#: carry internals (store paths, decode tracebacks' text), and the route is an
+#: externally-served response (CodeQL py/stack-trace-exposure). The full
+#: exception detail is logged server-side under ``sweep_results.store_error``.
+STORE_ERROR_PUBLIC_DETAIL: Final[str] = (
+    "results store unavailable — see the server log (sweep_results.store_error)"
+)
+
+
+def store_error_payload(exc: ResultsStoreError) -> dict[str, Any]:
+    """The honest ``/api/v1/sweep/leaderboard`` degrade payload for a store fault.
+
+    DEC-SWEEP-RESULTS-DEPTH-001 (package C3): when a typed
+    :class:`~brutex.engine.results_store.ResultsStoreError` escapes the
+    per-store skip net (``_load_rows_resilient`` already skips + counts a
+    single bad store — this is the belt for a fault raised OUTSIDE that loop),
+    the route returns THIS payload instead of a 500. It carries the full empty
+    leaderboard shape (so the page's renderer keeps working) PLUS the explicit
+    ``error`` / ``error_type`` markers — never the bare ``available: false``
+    blank that would be indistinguishable from "no sweep run yet" (no blank
+    illusion, Golden Rule #1).
+
+    SANITIZED (CodeQL py/stack-trace-exposure): the served ``error`` marker is
+    the STABLE :data:`STORE_ERROR_PUBLIC_DETAIL` token + ``error_type`` is the
+    stable ``results_store`` reason token — ``str(exc)`` (which can leak store
+    paths / decode internals) NEVER reaches the wire. The FULL exception detail
+    (message + concrete class) is logged server-side here
+    (``sweep_results.store_error``) so the degrade stays diagnosable wherever
+    it fires.
+    """
+    _LOG.warning("sweep_results.store_error", error=str(exc), error_type=type(exc).__name__)
+    return {
+        "available": False,
+        "error": STORE_ERROR_PUBLIC_DETAIL,
+        "error_type": "results_store",
+        "total_rows": 0,
+        "store_count": 0,
+        "skipped": 0,
+        "rank_by": DEFAULT_RANK_BY,
+        "instruments": [],
+        "timeframes": [],
+        "directions": [],
+        "snapshot_hashes": [],
+        "mixed_snapshot_eras": False,
+        "run_id_conflicts": 0,
+        "rows": [],
+    }
 
 
 def _iter_store_paths(sweeps_root: Path) -> list[Path]:
@@ -631,6 +771,19 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
     }
 
 
+# ═══ P2 VERDICT-JOIN SEAM (gap-register ruling 10 — documented, NOT built) ═══
+# P2 (run-core) delivers gap G8 as a PURE verdict-marker function in a
+# P2-owned module: it marks stage3-ungated / cascade-rejected rows so /results
+# can never co-rank them silently as institutional winners. At
+# merge-integration, P3 IMPORTS that function HERE and folds its marker into
+# `_project_row` as an additive per-row key — exactly the `snapshot_era`
+# pattern (marker, never exclusion). Until that lands, rows carry NO verdict
+# field: absence means "not yet joined", never a fabricated verdict (Golden
+# Rule #1). P4 consumes the JSON only. DO NOT implement the verdict logic in
+# this module — it is P2's zone; only the import + per-row fold belong here.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
 def build_sweep_leaderboard(
     lake_root: Path,
     *,
@@ -640,11 +793,13 @@ def build_sweep_leaderboard(
     rank_by: str | None = None,
     top_n: int = DEFAULT_TOP_N,
     scan: SweepScan | None = None,
+    preset: str | None = None,
 ) -> SweepLeaderboard:
     """Build the ranked sweep leaderboard for the ``/results`` page.
 
     Applies the optional filters over the :class:`SweepScan`'s rows, ranks the
-    survivors by *rank_by* (descending — best first), and projects the
+    survivors by *rank_by* (descending — best first) or, when *preset* names an
+    R30 ranking preset, by that preset's total order, and projects the
     top-*top_n* into display dicts. Pure + framework-free (no FastAPI), so it is
     unit-tested directly. With ``scan=None`` (the default) the scan is performed
     inline via :func:`load_sweep_scan` — byte-identical to the pre-split
@@ -663,17 +818,35 @@ def build_sweep_leaderboard(
     rank_by
         The column to rank by — one of :data:`RANKABLE_COLUMNS`. ``None`` / an
         unknown value falls back to :data:`DEFAULT_RANK_BY` (never an error).
+        IGNORED for ordering when *preset* is given (echoed unchanged).
     top_n
         Leaderboard depth, clamped into ``[1, MAX_TOP_N]``.
     scan
         An already-performed :func:`load_sweep_scan` result to rank, or ``None``
         to scan now.
+    preset
+        Optional R30 ranking-preset token (DEC-SWEEP-RESULTS-DEPTH-001,
+        gap-register ruling 10) — one of
+        :data:`brutex.ranking.presets.PRESET_NAMES`. ``None``/blank keeps the
+        legacy *rank_by* ordering BYTE-IDENTICAL (pinned by test); a known
+        token orders the filtered rows via the ONE preset law
+        (:func:`brutex.ranking.presets.sort_by_preset` — full precision,
+        ``run_id``-ASC deterministic ties, the exact ``ResultsStore.top_k``
+        two-pass idiom); an unknown token raises ``ValueError`` naming the
+        valid values (the route maps it to a clean 400).
 
     Returns
     -------
     SweepLeaderboard
         The ranked rows + the honest availability / counts / filter option sets.
+
+    Raises
+    ------
+    ValueError
+        If *preset* names an unknown ranking preset (see
+        :func:`resolve_preset_param`).
     """
+    resolved_preset = resolve_preset_param(preset)
     resolved_rank = _resolve_rank_by(rank_by)
     depth = _clamp_top_n(top_n)
     if scan is None:
@@ -682,11 +855,20 @@ def build_sweep_leaderboard(
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
     ]
-    # Deterministic rank: by the chosen column descending, ties broken by run_id
-    # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
-    # the leaderboard is identical for any discovery order.
-    ordered = sorted(filtered, key=lambda r: r.run_id)
-    ordered.sort(key=lambda r: _rank_value(r, resolved_rank), reverse=True)
+    if resolved_preset is None:
+        # Deterministic rank: by the chosen column descending, ties broken by run_id
+        # ascending (the SAME total order ResultsStore.top_k uses — Golden Rule #4), so
+        # the leaderboard is identical for any discovery order.
+        ordered = sorted(filtered, key=lambda r: r.run_id)
+        ordered.sort(key=lambda r: _rank_value(r, resolved_rank), reverse=True)
+    else:
+        # THIN preset adapter (ruling 10): the ENTIRE ordering law — key,
+        # direction, run_id-ASC tie pre-sort — lives in brutex.ranking.presets;
+        # this call site only projects the persisted rows (raw full-precision
+        # values, see _preset_rank_record) and never re-derives a ranking rule.
+        ordered = list(
+            sort_by_preset(filtered, preset=PRESETS[resolved_preset], record_of=_preset_rank_record)
+        )
     rows = tuple(
         _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
         for rank, r in enumerate(ordered[:depth], start=1)
@@ -705,4 +887,5 @@ def build_sweep_leaderboard(
         snapshot_hashes=scan.snapshot_hashes,
         mixed_snapshot_eras=len(scan.snapshot_hashes) > 1,
         run_id_conflicts=scan.run_id_conflicts,
+        preset=resolved_preset,
     )

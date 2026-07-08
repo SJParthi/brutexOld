@@ -150,6 +150,10 @@ scratchpad/
 # working dir; committed baselines live ONLY under tests/bench/baselines/.
 abs-bench/
 
+# DEC-SWEEP-RESULTS-DEPTH-001 (gap-register ruling 5, B2): the pre-extension
+# results-store GOLDEN is a committed, frozen REAL store file — exempt it
+# (exact path only) from the runtime-lake *.parquet ignore above.
+!tests/golden/fixtures/results_store_pre_extension_v1.parquet
 # Headless-browser truth-suite failure artifacts (DEC-DASHBOARD-BROWSER-TRUTH-001):
 # Playwright traces/screenshots/ledgers saved on test FAILURE only — never committed.
 test-artifacts/

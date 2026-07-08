@@ -238,6 +238,8 @@ from brutex.dashboard.sweep_results_view import (
     SweepScan,
     build_sweep_leaderboard,
     load_sweep_scan,
+    resolve_preset_param,
+    store_error_payload,
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
@@ -272,6 +274,7 @@ from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.doctor_autorun import LiveProofAutorun
+from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
 from brutex.observability.power_keepawake import keep_awake
@@ -5917,6 +5920,7 @@ def build_app(
         tf: str | None = Query(default=None),
         direction: str | None = Query(default=None),
         rank_by: str | None = Query(default=None),
+        preset: str | None = Query(default=None),
         top: int = Query(
             default=SWEEP_LEADERBOARD_DEFAULT_TOP_N, ge=1, le=SWEEP_LEADERBOARD_MAX_TOP_N
         ),
@@ -5944,9 +5948,30 @@ def build_app(
             The ranking column — one of
             :data:`brutex.dashboard.sweep_results_view.RANKABLE_COLUMNS`; an unknown
             value falls back to the default headline metric (``sharpe_ratio``),
-            never a 500.
+            never a 500. IGNORED for ordering when ``preset`` is given.
+        preset
+            OPTIONAL R30 ranking-preset token (DEC-SWEEP-RESULTS-DEPTH-001,
+            gap-register ruling 10) — one of
+            :data:`brutex.ranking.presets.PRESET_NAMES`. Absent/blank keeps the
+            legacy ``rank_by`` ordering BYTE-IDENTICAL (payload shape included);
+            a known token orders via the ONE preset law in
+            :mod:`brutex.ranking.presets` (full precision, ``run_id``-ASC
+            deterministic ties — the store's total-order idiom) and the payload
+            gains the additive ``preset`` + ``preset_inert_axes`` keys; an
+            UNKNOWN token is a clean 400 naming the valid values (an explicit
+            operator choice must refuse loudly, never silently rank by
+            something else). THIN adapter — the ranking logic lives entirely in
+            ``brutex.ranking`` (this route only validates + threads the token).
         top
             Leaderboard depth (1..500; default 50).
+
+        **Store-fault degrade (DEC-SWEEP-RESULTS-DEPTH-001, C3):** a typed
+        :class:`~brutex.engine.results_store.ResultsStoreError` escaping the
+        per-store skip net returns the honest
+        :func:`~brutex.dashboard.sweep_results_view.store_error_payload` (200
+        with explicit ``error`` / ``error_type`` markers + the full empty
+        leaderboard shape) — never a 500, and never the bare ``available:
+        false`` blank that would masquerade as "no sweep run yet".
 
         **Latency (DEC-DASHBOARD-RESULTS-PAGE-001, re-keyed by
         DEC-LEDGER-DELTA-O-PAGE-001):** the ``<lake>/sweeps`` read is a pure
@@ -5973,6 +5998,15 @@ def build_app(
         fabricated winner; a corrupt per-tuple Parquet is SKIPPED + counted, never a
         500. When no lake root is wired the payload is the same honest empty shape.
         """
+        # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001, ruling 10) ──
+        # Validate the preset token EAGERLY (before any threadpool hop / cache
+        # key build): an unknown token is a deterministic 400 naming the valid
+        # values; None/blank resolves to None = the byte-identical legacy path.
+        try:
+            resolved_preset = resolve_preset_param(preset)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         store = _require_store()
         store_path = getattr(store, "path", None)
         if not isinstance(store_path, Path):
@@ -5985,6 +6019,7 @@ def build_app(
                 direction=direction,
                 rank_by=rank_by,
                 top_n=top,
+                preset=resolved_preset,
             )
             return JSONResponse(empty.to_dict())
         lake_root = store_path.parent
@@ -6007,6 +6042,7 @@ def build_app(
                     direction=direction,
                     rank_by=rank_by,
                     top_n=top,
+                    preset=resolved_preset,
                 ).to_dict()
 
             if rev is None:
@@ -6026,13 +6062,16 @@ def build_app(
             # axes: build_sweep_leaderboard's _matches filters them
             # case-insensitively, so ``NIFTY`` and ``nifty`` yield the SAME
             # leaderboard and must share ONE cache slot (rank_by stays raw — it
-            # is matched exactly against RANKABLE_COLUMNS, not casefolded). The
-            # revision rides in the KEY at a fixed generation=0 (the
-            # `_nav_latency_key` precedent); the LRU ages out old revisions.
+            # is matched exactly against RANKABLE_COLUMNS, not casefolded; the
+            # RESOLVED preset token rides too — a preset-ranked payload must
+            # never share a slot with the default ordering, and blank/absent
+            # share ONE slot because both resolve to None). The revision rides
+            # in the KEY at a fixed generation=0 (the `_nav_latency_key`
+            # precedent); the LRU ages out old revisions.
             key = (
                 f"sweep_leaderboard|rev={rev}|i={(instrument or '').casefold()}"
                 f"|tf={(tf or '').casefold()}|d={(direction or '').casefold()}"
-                f"|r={rank_by or ''}|n={top}"
+                f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
             )
             return _sweep_leaderboard_cache.get_or_compute(
                 key,
@@ -6045,10 +6084,20 @@ def build_app(
                     rank_by=rank_by,
                     top_n=top,
                     scan=scan,
+                    preset=resolved_preset,
                 ).to_dict(),
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        try:
+            return JSONResponse(await run_in_threadpool(_resolve))
+        except ResultsStoreError as exc:
+            # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
+            # per-store skip net degrades to the honest error payload — 200 with
+            # explicit error markers, never a 500, never a blank illusion. The
+            # payload is SANITIZED (CodeQL py/stack-trace-exposure): str(exc)
+            # never reaches the wire — store_error_payload logs the full detail
+            # server-side and serves only the stable generic markers.
+            return JSONResponse(store_error_payload(exc))
 
     @app.get("/api/v1/logs")
     async def api_logs(

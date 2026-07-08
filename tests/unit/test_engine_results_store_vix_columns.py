@@ -336,6 +336,33 @@ class TestVixFlushLoad:
         # Every non-optional field survived unchanged.
         assert row == _row(deflated_sharpe=None)
 
+    def test_load_time_vix_only_duplicate_re_raises_distinct_not_schema_error(
+        self, tmp_path: Path
+    ) -> None:
+        """The G14-wrap carve-out (DEC-VIX-STAMP-WIRE-001 ∩
+        DEC-SWEEP-RESULTS-DEPTH-001 reconciliation): an in-file duplicate
+        run_id differing ONLY in a non-None VIX value re-raises the DISTINCT
+        :class:`VixTrioConflictError` from :meth:`ResultsStore.load` — never
+        wrapped into ``ResultsStoreSchemaError`` — so the stage-3 pass keeps
+        its typed cell-skip contract instead of condemning the file as
+        verdict-grade damage."""
+        pl = pytest.importorskip("polars")
+        from brutex.engine.results_store import ResultsStoreSchemaError
+
+        path = tmp_path / "s.parquet"
+        store = ResultsStore(path=path)
+        store.append(_row(**_TRIO))
+        store.flush()
+        df = pl.read_parquet(path)
+        # Stay inside the trio's [min, max] order law so the clone row itself
+        # CONSTRUCTS cleanly — the only difference is the conflicting mean.
+        clone = df.head(1).with_columns(pl.lit(14.5, dtype=pl.Float64).alias("vix_mean"))
+        tampered = tmp_path / "tampered.parquet"
+        pl.concat([df, clone]).write_parquet(tampered)
+        with pytest.raises(VixTrioConflictError) as excinfo:
+            ResultsStore.load(tampered)
+        assert not isinstance(excinfo.value, ResultsStoreSchemaError)
+
     def test_stamped_and_unstamped_rows_differ_only_in_the_trio(self) -> None:
         plain = _row()
         stamped = _row(**_TRIO)
