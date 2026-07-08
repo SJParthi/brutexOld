@@ -81,9 +81,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 import structlog
 
@@ -97,13 +98,10 @@ from brutex.ranking.presets import (
     RankRecord,
     sort_by_preset,
 )
-from brutex.ranking.presets import (
-    PRESET_MIN_DD_FIRST as _PRESET_MIN_DD_FIRST,
-)
 from brutex.vocabulary.describe import matched_condition_names
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from brutex.engine.combo_aggregates import ComboAggregate
@@ -160,7 +158,9 @@ TOP100_LIMIT: Final[int] = 100
 #: The R30 default preset + the one-click alternates, in display order —
 #: re-exported VERBATIM from the ONE preset home (``brutex.ranking.presets``,
 #: WP3) so the artifact vocabulary can never fork from the ranking law's.
-PRESET_MIN_DD_FIRST: Final[str] = _PRESET_MIN_DD_FIRST
+#: (The ``min_dd_first`` token itself lives ONLY at that home —
+#: ``brutex.ranking.presets.PRESET_MIN_DD_FIRST`` — no duplicate constant
+#: here per the COMMON rule; it arrives via ``DEFAULT_PRESET``.)
 DEFAULT_TOP100_PRESET: Final[str] = DEFAULT_PRESET
 TOP100_PRESETS: Final[tuple[str, ...]] = PRESET_NAMES
 
@@ -235,13 +235,18 @@ class Top100Error(BruteXError):
 #: R33 dual-language reasons provider: ``mask_bits`` → ``{"technical": …,
 #: "plain": …}`` or ``None`` (entry then carries an honest ``None`` — never
 #: generated text). WP3's ``brutex.ranking.phrases.reason_for_mask`` plugs in
-#: here at merge time.
-type ReasonProvider = Callable[[int], Mapping[str, str] | None]
+#: here at merge time. Classic ``TypeAlias`` (not a PEP 695 ``type``
+#: statement) because both provider aliases are ``__all__``-exported public
+#: API — a plain runtime binding keeps the export introspectable (the
+#: ``ingest_common.SpotStepGroup`` precedent).
+ReasonProvider: TypeAlias = Callable[[int], Mapping[str, str] | None]  # noqa: UP040
 
 #: R47 margin-true-ROI provider: candidate → the ``margin_roi`` payload
 #: (e.g. ``{"status": "unverified", "roi_pct": None, "detail": …}``) or
 #: ``None``. WP3's ``brutex.engine.margin_history`` plugs in here.
-type MarginRoiProvider = Callable[["Top100Candidate"], Mapping[str, object] | None]
+MarginRoiProvider: TypeAlias = Callable[  # noqa: UP040
+    ["Top100Candidate"], Mapping[str, object] | None
+]
 
 
 @dataclass(frozen=True, slots=True)
