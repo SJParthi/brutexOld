@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1559–#1569 —
+_Last updated: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
 DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
 DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
@@ -99,7 +99,7 @@ AST-pinned) and the doubly-dead informational quota surface is DELETED
 (`GET /api/v1/quota` + panel fields + `/universe` gauge — all only ever
 served the constant sentinel), the vendor-neutral enforcement seam kept
 dormant logic-byte-identical; (11) the TWO daily-open-substitution surfaces
-now share ONE per-session predicate (MIGRATION.md #1569,
+now share ONE per-session predicate (MIGRATION.md #1592,
 DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up the #1267/#1232
 drift pin deferred to): NEW pure `spot_daily_resample.classify_daily_open`
 (substituted iff a NON-Muhurat session's first present 1-minute bar is NOT
@@ -113,17 +113,43 @@ same-lake same-verdict equivalence proven + pinned, the old divergence pin
 consciously rewritten to an alignment pin; the ONE remaining deliberate
 divergence is POPULATION not predicate (census = ALL stored sessions,
 detector = the forming-session cutoff), documented + pinned; also corrects
-#1559's earlier misattribution (this item was never closed-wontfix — it is
+#1582's earlier misattribution (this item was never closed-wontfix — it is
 closed by IMPLEMENTATION). ALL ELEVEN: ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch
 PACING/RATE byte-identical everywhere, with exactly THREE SANCTIONED
 behavior changes (each honestly scoped in its own ledger entry): the
-same-run post-close 1day derive (#1560 — previously deferred to the
-next run), the learned-floor-clamped CLI planning (#1564 — a persisted
+same-run post-close 1day derive (#1583 — previously deferred to the
+next run), the learned-floor-clamped CLI planning (#1587 — a persisted
 learned floor plans FEWER 1-minute windows by design; dry-run
-byte-identical), and the fresh-foreign-lease pull REFUSAL (#1565);
+byte-identical), and the fresh-foreign-lease pull REFUSAL (#1588);
 every other item's fetch behaviour is byte-identical (the counter
-split #1562 explicitly so); touched modules 100% line+branch).
+split #1585 explicitly so); touched modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
 Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
@@ -1034,7 +1060,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1559–#1569** —
+- **Active branch:** `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
   DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
   DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
@@ -1049,14 +1075,38 @@ hostile-review pass._
   banner auto-clears on the next real pull launch that actually STARTS — started-gated
   `clear_banner_after_start`, a refused start clears nothing) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
   follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant) ·
-  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1569 — the two daily-open-substitution surfaces share the ONE
+  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1592 — the two daily-open-substitution surfaces share the ONE
   per-session predicate `spot_daily_resample.classify_daily_open`: Muhurat abstains on BOTH, `!=` 09:15 on
   BOTH — the /completeness census's strict-`>` flips to `<>` + a `MUHURAT_SESSIONS` NOT-IN exclusion, its SQL
   CTE mirror-pinned equivalent to the classifier; the remaining divergence is POPULATION (forming-session
   cutoff) not predicate, documented + pinned; closes the #1267/#1232 named follow-up BY IMPLEMENTATION and
-  corrects #1559's wontfix misattribution).
+  corrects #1582's wontfix misattribution).
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch;
   ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
   Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
   the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
   twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
@@ -2893,11 +2943,16 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/blissful-curie-gp94rk`
+  Earlier: `claude/peaceful-wright-r7l8l9`
+  (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
+  retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
+  fields replace the wrong bearish alias; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/stoic-davinci-7c7xp0`
   (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
   DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
   DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556 — the doc/spec/ops
-  debt reconciliation pack, DOCS-first; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  debt reconciliation pack; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +

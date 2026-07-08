@@ -95,7 +95,7 @@ def _row(
 
     The trailing ``empty_retries``/``transient_retries`` pair is ``None`` — the
     honest-unknown optional-column default (DEC-RETRY-COUNTER-SPLIT-001,
-    MIGRATION.md #1562), exactly what a pre-split ledger row loads as.
+    MIGRATION.md #1585), exactly what a pre-split ledger row loads as.
     """
     return (
         "groww",
