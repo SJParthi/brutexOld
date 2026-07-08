@@ -73,7 +73,7 @@ from brutex.data.timeframe_materialize import PrebuildKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
 
     from brutex.dashboard.fno_cascade import FnoCascadeIndex, FnoContract
@@ -529,6 +529,7 @@ def run_pipeline_prebuild_parallel(
     workers: int,
     include_daily: bool = True,
     daily_before: date | None = None,
+    daily_cutoff_now: datetime | None = None,
     incremental: bool | None = None,
     fno_segment: str = FNO_CANDLE_LAKE_SEGMENT,
     source: str = "pipeline",
@@ -555,10 +556,20 @@ def run_pipeline_prebuild_parallel(
     the work unit declarative + auditable (and process-pool-portable, though the
     shipped pool is threads). The route binds ``include_daily=True`` (matching
     the sequential ``_materialize``), so the two paths are equivalent.
-    ``daily_before`` is resolved ONCE here when ``None`` so the forming-session
-    cutoff is identical across every worker (byte-identity across a midnight-IST
-    boundary; never a per-worker clock skew). Cost: O(symbols × bars) work
-    spread over *workers* cores — NOT an O(1) claim (Golden Rule #10).
+    An EXPLICIT ``daily_before`` date is threaded verbatim (no grounding — it
+    is LAW at the materialise layer). With ``daily_before=None`` the run's
+    ``daily_cutoff_now`` IST INSTANT is pinned ONCE here (when the caller did
+    not already pin it) so the forming-session cutoff is identical across
+    every worker (M1 byte-identity across a midnight-IST boundary; never a
+    per-worker clock skew) — since DEC-DAILY-CUTOFF-GROUNDED-001 the pinned
+    value is the INSTANT, not a plain today-IST date, so each worker resolves
+    the session-close-aware :func:`~brutex.calendars.nse.daily_derive_cutoff`
+    from it (a post-close run derives the run day's own ``1day`` bar —
+    restoring DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 on the production path)
+    and a DENSE symbol's data-grounded verdict stays a pure function of
+    ``(instant, own frame)`` — order/concurrency-independent. Cost:
+    O(symbols × bars) work spread over *workers* cores — NOT an O(1) claim
+    (Golden Rule #10).
 
     Parameters mirror :func:`run_pipeline_prebuild` except for the explicit
     materialise arguments above and *workers* (``>= 2``; the caller resolves it
@@ -579,19 +590,24 @@ def run_pipeline_prebuild_parallel(
         _LOG.warning("pipeline.prebuild.all_excluded", excluded_symbols=excluded_count)
     instruments = _unique_spot_instruments(kept)
 
-    # M1 (byte-identity): resolve the forming-session daily cutoff ONCE per RUN.
-    # ``materialize_lake_timeframes`` resolves ``daily_before=None`` to now-IST
-    # PER CALL, so a run straddling midnight IST would write an extra trailing
-    # ``1day`` bar for whichever symbols materialise after midnight →
-    # order/concurrency-dependent bytes (a byte-identity break the golden would
-    # flag). Resolving it HERE pins EVERY worker to the SAME cutoff so the
-    # parallel lake is byte-identical to a sequential run (Golden Rule #7).
-    if include_daily and daily_before is None:
-        from datetime import UTC, datetime
+    # M1 (byte-identity): pin the forming-session cutoff's IST INSTANT ONCE per
+    # RUN. Without a pin, ``materialize_lake_timeframes`` would resolve
+    # ``daily_before=None`` via ``daily_derive_cutoff(_now_ist())`` PER CALL
+    # (the session-close-aware default of DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001
+    # — the prior comment here mis-described it as a plain "now-IST" date), so
+    # a run straddling midnight IST or the session close would write a
+    # different ``1day`` set for whichever symbols materialise after the
+    # boundary → order/concurrency-dependent bytes (a byte-identity break the
+    # golden would flag). Pinning the INSTANT here (DEC-DAILY-CUTOFF-
+    # GROUNDED-001; corrects the #1401 M1 fix, whose plain today-IST DATE pin
+    # bypassed the session-close-aware default and regressed the post-close
+    # run-day derive) gives EVERY worker the SAME clock verdict while keeping
+    # the dense symbols' data-grounded arm reachable (an explicit
+    # ``daily_before`` DATE would be LAW and suppress it).
+    if include_daily and daily_before is None and daily_cutoff_now is None:
+        from brutex.calendars.nse import now_ist
 
-        from brutex.calendars.nse import IST
-
-        daily_before = datetime.now(UTC).astimezone(IST).date()
+        daily_cutoff_now = now_ist()
 
     def _item(
         exchange: str, segment: str, symbol: str, kind: PrebuildKind, *, dense: bool
@@ -606,6 +622,7 @@ def run_pipeline_prebuild_parallel(
             daily_before=daily_before,
             incremental=incremental,
             dense_symbol=dense,
+            daily_cutoff_now=daily_cutoff_now,
         )
 
     # Ordered per-phase work items — EAGER, in-parent cascade discovery (pure
@@ -769,6 +786,7 @@ def run_pipeline_prebuild_guarded(
     workers: int | None = None,
     include_daily: bool = True,
     daily_before: date | None = None,
+    daily_cutoff_now: datetime | None = None,
     incremental: bool | None = None,
     disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
 ) -> PrebuildOutcome:
@@ -784,6 +802,10 @@ def run_pipeline_prebuild_guarded(
     DEC-PREBUILD-CLEANSET-001 (see :func:`run_pipeline_prebuild`). ``disk_guard``
     is forwarded to WHICHEVER path runs (sequential or parallel) — the pre-run
     disk preflight of DEC-LAKE-FOOTPRINT-MEASURED-001 gates both.
+    ``daily_cutoff_now`` (the run's pinned IST instant,
+    DEC-DAILY-CUTOFF-GROUNDED-001) reaches the PARALLEL path explicitly; on
+    the sequential path the caller bakes the SAME instant into the injected
+    *materialize* closure (the route does — one instant, both paths).
 
     The fetch already succeeded when the prebuild runs, so no ORDINARY error
     here may kill the job — an unexpected NON-halt error (a cascade-build
@@ -812,6 +834,7 @@ def run_pipeline_prebuild_guarded(
                 workers=workers,
                 include_daily=include_daily,
                 daily_before=daily_before,
+                daily_cutoff_now=daily_cutoff_now,
                 incremental=incremental,
                 fno_segment=fno_segment,
                 source=source,

@@ -59,7 +59,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
-from brutex.calendars.nse import IST
+from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
@@ -203,6 +203,7 @@ from brutex.dashboard.pull_controller import (
 from brutex.dashboard.pull_intent import (
     PullIntent,
     PullIntentStore,
+    clear_banner_after_start,
     persist_intent_for_launch,
     run_auto_resume,
 )
@@ -248,6 +249,7 @@ from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revisi
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
+from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
 from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
@@ -373,14 +375,6 @@ class RateLimitPanel:
     latency_ms_p95: float = 0.0
     rps_1s: int = 0
     rps_1s_max: int = 0
-    #: The mandatory daily vendor quota gauge (DEC-AUTO-RESUME-QUOTA-001): calls spent
-    #: today, calls remaining, and the 100,000/day ceiling — straight from the
-    #: shared persisted ``DailyQuotaTracker`` via the controller snapshot. ``-1``
-    #: ``quota_limit`` means "no tracker wired" (dry-run / no live pull) so the panel
-    #: hides the gauge rather than showing a false 0.
-    quota_used: int = 0
-    quota_remaining: int = 0
-    quota_limit: int = -1
     #: The controller's MEASURED rolling-60s ISSUE count (``recent_minute``) and the HARD
     #: per-minute governor cap (``ceiling_per_min``) — straight from the controller
     #: snapshot (DEC-GROWW-RATE-PERMIN-001). Feed the live-pull-rate monitor's req/min
@@ -645,9 +639,6 @@ class DashboardState:
         current_rps: float,
         available_tokens: float,
         recent_429_count: int,
-        quota_used: int = 0,
-        quota_remaining: int = 0,
-        quota_limit: int = -1,
         recent_minute: int = 0,
         ceiling_per_min: int = -1,
         recent_1s: int = 0,
@@ -656,10 +647,11 @@ class DashboardState:
     ) -> None:
         """Update the rate-limit panel from a fresh controller snapshot.
 
-        ``quota_used`` / ``quota_remaining`` / ``quota_limit`` are the daily vendor
-        quota gauge (DEC-AUTO-RESUME-QUOTA-001), defaulting to the "no tracker
-        wired" sentinel (``quota_limit=-1``) so a caller that has no quota snapshot
-        leaves the gauge hidden rather than showing a false 0.
+        The daily-quota gauge fields the panel once carried are GONE
+        (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no daily quota
+        (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6) and no
+        production controller wires a ``DailyQuotaTracker``, so the snapshot never
+        carried ``quota_*`` keys — the fields were a constant ``(0, 0, -1)``.
 
         ``recent_minute`` / ``ceiling_per_min`` are the controller's rolling-60s issue
         count + the HARD per-minute governor cap (DEC-GROWW-RATE-PERMIN-001), feeding the
@@ -677,9 +669,6 @@ class DashboardState:
             self.rate_limit.current_rps = current_rps
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
-            self.rate_limit.quota_used = quota_used
-            self.rate_limit.quota_remaining = quota_remaining
-            self.rate_limit.quota_limit = quota_limit
             self.rate_limit.recent_minute = recent_minute
             self.rate_limit.ceiling_per_min = ceiling_per_min
             self.rate_limit.recent_1s = recent_1s
@@ -897,9 +886,10 @@ def make_rate_observer(
 
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
         """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
-        # Quota gauge (DEC-AUTO-RESUME-QUOTA-001): the controller snapshot carries
-        # ``quota_*`` only when a DailyQuotaTracker is wired (the live path); absent
-        # → ``quota_limit=-1`` sentinel so the panel hides the gauge, not a false 0.
+        # The controller snapshot's conditional ``quota_*`` keys (a wired
+        # DailyQuotaTracker only) are deliberately NOT mapped: no production
+        # controller wires one (DEC-QUOTA-VERDICT-MOOT-001 — Groww has no daily
+        # quota) and the panel's gauge fields are deleted with the /universe gauge.
         # ``ceiling_per_min`` is ``None`` in the snapshot when no governor is wired
         # (DEC-GROWW-RATE-PERMIN-001) — map that to the ``-1`` "no cap" panel sentinel so
         # the live-rate monitor shows no per-minute limit rather than a false 0.
@@ -908,9 +898,6 @@ def make_rate_observer(
             current_rps=float(rate.get("current_rps", 0.0)),
             available_tokens=float(rate.get("available_tokens", 0.0)),
             recent_429_count=int(rate.get("recent_hits", 0)),
-            quota_used=int(rate.get("quota_used", 0)),
-            quota_remaining=int(rate.get("quota_remaining", 0)),
-            quota_limit=int(rate.get("quota_limit", -1)),
             recent_minute=int(rate.get("recent_minute", 0)),
             ceiling_per_min=int(per_min_cap) if per_min_cap is not None else -1,
             # OBSERVE-ONLY trailing-window real issue counts (DEC-RATE-MONITOR-EXPAND-001):
@@ -1128,7 +1115,6 @@ def build_app(
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
     prebuild_gate: PrebuildGate | None = None,
-    quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     pull_phase_probe: Callable[[], str | None] | None = None,
     liveproof: LiveProofAutorun | None = None,
@@ -1197,17 +1183,6 @@ def build_app(
         route gates; a ``dry_run`` pipeline does not. Injected so tests drive
         the gated/released transitions deterministically; ``None`` (the
         default) builds a fresh production gate.
-    quota_tracker
-        Optional read-only daily-quota source for the ``/api/v1/quota``
-        endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
-        ``current_count() -> int``, ``remaining() -> int`` and a
-        ``daily_limit`` int satisfies it (the live
-        :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`). When
-        ``None`` (the default) a real tracker is built lazily on first poll,
-        reading the IST-midnight LMDB counter the pulls write — so the
-        ``/universe`` gauge shows today's PERSISTED usage on page-load, before
-        any pull in this session reports onto the live rate panel. Injected so
-        tests drive a deterministic fake (no LMDB).
     pull_active_probe
         Optional pull-run signal for the ``/api/v1/pull/rate`` stall gate
         (DEC-RATE-STALL-PULL-GATE-001). A zero-arg callable returning ``True``
@@ -1445,13 +1420,59 @@ def build_app(
     # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
+
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
     # partitions must never be ranked); the pipeline job releases it in a
     # try/finally so a failed/stopped pull can never wedge the movers shut. Owned
     # by this app instance (no module-global mutable state — CLAUDE.md §4).
-    _prebuild_gate = prebuild_gate if prebuild_gate is not None else PrebuildGate()
+    def _cross_derive_probe() -> bool:
+        """``True`` iff a derive holds this lake's cross-process derive lock — O(1).
+
+        The gate's cross-process visibility probe
+        (DEC-DERIVE-LOCK-VISIBILITY-001, closing the named PrebuildGate
+        follow-up of DEC-ENGINE-MISC-PACK-001): resolves the lake root lazily
+        from the injected instrument store (its DuckDB file lives at
+        ``<lake_root>/instruments.duckdb`` — the same ``store.path.parent``
+        the movers route reads from) and takes the NON-BLOCKING shared-flock
+        probe of the fixed ``<lake_root>/.locks/derive.lock``
+        (:func:`~brutex.data.derive_lock.derive_in_progress` — never waits,
+        never writes). No store / no real ``Path`` → ``False`` (a bare app has
+        nothing to probe). Lake-volume I/O: the gate only consults it off the
+        event loop (the movers route snapshots via ``run_in_threadpool``), and
+        a probe ``OSError`` fails OPEN inside the gate with one WARN per
+        outage.
+        """
+        path = getattr(instrument_store, "path", None)
+        if not isinstance(path, Path):
+            return False
+        return derive_in_progress(path.parent)
+
+    def _local_derive_probe() -> bool:
+        """``True`` iff THIS process holds the lake's derive lock — pure, zero I/O.
+
+        The gate's same-process attribution probe (the round-1 review fold on
+        DEC-DERIVE-LOCK-VISIBILITY-001): ``fcntl.flock`` contends across open
+        file descriptions, so ``_cross_derive_probe`` alone reads ``True`` for
+        this process's OWN background derive too (the lake-heal L2 post-pull /
+        L3 startup recall, which derives while the gate is idle). The gate
+        consults THIS registry read FIRST
+        (:func:`~brutex.data.derive_lock.derive_lock_held_by_this_process` —
+        O(1), no filesystem I/O) and labels such a holder
+        ``source="local_derive"`` instead of fabricating an "another process"
+        claim (Golden Rule #1). No store / no real ``Path`` → ``False``.
+        """
+        path = getattr(instrument_store, "path", None)
+        if not isinstance(path, Path):
+            return False
+        return derive_lock_held_by_this_process(path.parent)
+
+    _prebuild_gate = (
+        prebuild_gate
+        if prebuild_gate is not None
+        else PrebuildGate(cross_probe=_cross_derive_probe, local_derive_probe=_local_derive_probe)
+    )
 
     def _pull_live() -> bool:
         """``True`` iff a dashboard pull is running IN THIS PROCESS — O(1), never raises.
@@ -1813,29 +1834,13 @@ def build_app(
         stamp_bridge_freshness(payload, bridge_result)
         return JSONResponse(payload)
 
-    @app.get("/api/v1/quota")
-    async def api_quota() -> JSONResponse:
-        """GET /api/v1/quota — today's PERSISTED vendor daily-quota usage (read-only).
-
-        The live vendor (Groww) has **no daily quota** for backtesting
-        (``GROWW_DAILY_QUOTA_UNVERIFIED=None``; the binding limit is the 500 req/min
-        governor — CLAUDE.md §6 / DEC-GROWW-RATE-PERMIN-001). So when no daily-quota
-        tracker is injected this returns the ``quota_limit=-1`` "no daily quota"
-        sentinel and the ``/universe`` gauge stays hidden — never a fabricated
-        ``X / 100,000`` (Golden Rule #1), and the route never constructs an LMDB
-        tracker. When a tracker IS wired (a vendor that genuinely caps calls/day) it
-        serves that tracker's IST-midnight ``used / limit / remaining`` (one O(1)
-        LMDB read; DEC-DASHBOARD-QUOTA-PERSISTED-001). Never touches the lake/store.
-        """
-        if quota_tracker is None:
-            return JSONResponse({"quota_used": 0, "quota_limit": -1, "quota_remaining": 0})
-        return JSONResponse(
-            {
-                "quota_used": quota_tracker.current_count(),
-                "quota_limit": quota_tracker.daily_limit,
-                "quota_remaining": quota_tracker.remaining(),
-            }
-        )
+    # The former ``GET /api/v1/quota`` route (DEC-DASHBOARD-QUOTA-PERSISTED-001)
+    # is DELETED (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has no
+    # daily quota (``GROWW_DAILY_QUOTA_UNVERIFIED=None``, CLAUDE.md §2 Rule 6),
+    # no production caller ever injected a tracker (``brutex serve`` passes
+    # none), so the route only ever returned the constant ``quota_limit=-1``
+    # sentinel — a second, divergent quota surface with no consumer beyond the
+    # /universe gauge deleted alongside it.
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
@@ -2575,8 +2580,8 @@ def build_app(
             pass the leftover failed windows are re-pulled in bounded rounds (over
             the SHARED coverage ledger — only the still-failed windows hit the vendor
             again, rate-safe) until ONE terminal state is reached: ``stop_clean``
-            (every window fetched — the normal exit), ``stop_quota`` (the day's
-            100,000-call vendor quota is spent — resume after the IST-midnight reset),
+            (every window fetched — the normal exit), ``stop_quota`` (dormant under
+            Groww — no daily quota, no tracker wired; DEC-QUOTA-VERDICT-MOOT-001),
             ``stop_dead`` (the token died — re-auth), or ``stop_no_progress`` /
             budget backstop. So the one-click pull DRIVES ITSELF to a clean lake with
             zero manual "Re-pull to finish" clicks (CLAUDE.md §11 AUTOMATED), bounded
@@ -3756,12 +3761,21 @@ def build_app(
                 _pull_job.set_phase("prebuild")
                 _prebuild_gate.set_phase("prebuild")
 
-                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001): resolve the forming-session
-                # daily cutoff ONCE per prebuild run and pin it into BOTH paths
-                # (the sequential closure below AND the threaded path via the
-                # guard) — so a run straddling midnight IST derives the same
-                # `1day` set regardless of path or symbol order.
-                prebuild_cutoff = datetime.now(UTC).astimezone(IST).date()
+                # M1/m-4 (DEC-HARDWARE-ENVELOPE-001) × DEC-DAILY-CUTOFF-
+                # GROUNDED-001: pin the forming-session cutoff's IST INSTANT
+                # ONCE per prebuild run and thread it into BOTH paths (the
+                # sequential closure below AND the threaded path via the
+                # guard) — one instant, so a run straddling midnight IST (or
+                # the session close) derives the same `1day` set regardless of
+                # path or symbol order. Pinning the INSTANT (not a plain
+                # today-IST DATE, the #1401 M1 regression this corrects) keeps
+                # the session-close-aware daily_derive_cutoff default LIVE on
+                # this production path — a POST-CLOSE pipeline run derives the
+                # run day's own 1day bar (DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001,
+                # restored) — and keeps the dense symbols' data-grounded arm
+                # reachable (an explicit daily_before date would be LAW and
+                # suppress both).
+                prebuild_cutoff_now = now_ist()
 
                 def _materialize(target: PrebuildTarget) -> MaterializeResult:
                     return materialize_lake_timeframes(
@@ -3771,7 +3785,7 @@ def build_app(
                         symbol=target.symbol,
                         kind=target.kind,
                         include_daily=True,
-                        daily_before=prebuild_cutoff,
+                        daily_cutoff_now=prebuild_cutoff_now,
                         # DEC-CALENDAR-EXPECTED-BARS-DAILY-OPEN-001: per-session
                         # substitution WARNs only for a SPOT INDEX target
                         # (PrebuildTarget.dense = Instrument.is_index).
@@ -3800,7 +3814,7 @@ def build_app(
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
                         workers=prebuild_workers,
-                        daily_before=prebuild_cutoff,
+                        daily_cutoff_now=prebuild_cutoff_now,
                         # PRE-RUN disk guard (DEC-LAKE-FOOTPRINT-MEASURED-001):
                         # skip the whole prebuild gracefully when the lake
                         # volume can't hold the estimated derived writes
@@ -3946,6 +3960,10 @@ def build_app(
             # Best-effort write (a failed write is logged, never blocks the
             # pull); the clear hook is wired for EVERY real pull regardless —
             # a completing real pull supersedes any lingering older intent.
+            # NOTE: the resume red-banner auto-clear does NOT live here — it
+            # fires AFTER start() below, gated on `started`
+            # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
+            # a refused start launches nothing and must not drop the banner).
             persist_intent_for_launch(
                 pull_intent_store,
                 dry_run=dry_run,
@@ -3963,6 +3981,14 @@ def build_app(
             ledger_synced=True,
             on_finally=on_finally,
         )
+        if pull_intent_store is not None:
+            # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
+            # stale resume red banner ONLY when the real pull actually started
+            # — start() acquired the in-process + cross-process guards and
+            # spawned the worker. A refused start (contention / foreign-host
+            # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
+            # touches it (both gates live inside the helper).
+            clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
         return {
             "started": started,
             "targets": len(targets),
@@ -3987,14 +4013,28 @@ def build_app(
         semantics docstring): the launch body is shared with the boot-time
         intent resume (DEC-PULL-INTENT-RESUME-001), so the operator's POST and
         a resumed pull can never drift onto two different launch paths.
+
+        Offloaded via ``run_in_threadpool`` (the app.py offload doctrine — the
+        round-1 review fold on DEC-ACCOUNT-LEASE-CROSSHOST-001): the launch
+        acquires the cross-process pull guards synchronously
+        (``BackgroundPullJob.start`` → ``_acquire_singleflight`` — two flock
+        opens, the lease read and an fsync'd lease write, ALL on the lake
+        volume), so running it on the event loop would freeze the WHOLE
+        dashboard at launch time on a wedged/stalled external volume — the
+        exact event-loop-freeze class DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001
+        (#1522) removed for ``/pull/rate``. ``HTTPException``s raised inside
+        the offloaded body propagate unchanged (the 400/503 contracts are
+        byte-identical).
         """
         return JSONResponse(
-            _launch_pipeline(
-                symbols=symbols,
-                symbol=symbol,
-                from_date=from_date,
-                to_date=to_date,
-                dry_run=dry_run,
+            await run_in_threadpool(
+                lambda: _launch_pipeline(
+                    symbols=symbols,
+                    symbol=symbol,
+                    from_date=from_date,
+                    to_date=to_date,
+                    dry_run=dry_run,
+                )
             )
         )
 
@@ -5091,7 +5131,12 @@ def build_app(
             # payload and ZERO lake reads — a half-filled lake / mid-overwrite
             # derived partitions must never be ranked. The page keeps polling and
             # recovers by itself the moment the pipeline job releases the gate.
-            gate = _prebuild_gate.snapshot()
+            # The snapshot ALSO consults the cross-process derive-lock probe
+            # (DEC-DERIVE-LOCK-VISIBILITY-001 — a CLI-process derive gates too),
+            # which is one flock syscall on the lake volume, so it runs on a
+            # threadpool worker — never on the event loop (the app.py offload
+            # doctrine, DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
+            gate = await run_in_threadpool(_prebuild_gate.snapshot)
             if gate.blocking:
                 return JSONResponse(
                     gated_movers_payload(
@@ -6491,6 +6536,8 @@ def build_app(
             "empty_streak",
             "in_pull_fetches",
             "bars_net_new",
+            "empty_retries",
+            "transient_retries",
         ]
         store = _require_store()
         lake_root = getattr(store, "path", None)
