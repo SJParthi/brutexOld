@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
+_Last updated: 2026-07-08 (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001, MIGRATION.md
 #1482 — the automatic lake healer is COMPLETED for the
 `options/<series>/<YYYY>-<MM>.parquet` expired-options table: foreign-month-row
 + overlapping-partition detection+heal on the SAME proven quarantine →
@@ -194,6 +194,29 @@ named with an embedded newline + bare ESC and pins the repr'd fields on
 both sites. NIT: the `log_lake_finding` docstring no longer claims a
 `series` field on the option-DUP event (it emits none — only its
 repr()'d `partition` token).
+ROUNDS 10-12 (REBUILT 2026-07-08 — an environment rollback lost the
+original commits; every defect re-reproduced pre-fix, every mutant
+re-applied + verified killed): ROUND 10 (MINORs, test-only pins) — the
+reassignment `HealAction.dropped` (dup collapse + keyed removals, the
+value the batch alert sums) had no dup-component teeth (a
+removed-only/zeroed mutant survived; pinned dropped == 3 exactly over a
+dup+reassign+overlap source) and the census OPTIONS row's `files` flipped
+to scanned+skipped survived (pinned scanned-only: a skipped file inflates
+neither `files` nor `clean`). ROUND 11 (MAJOR) — `lake_content_token`
+stat()-ed every `*.parquet`, so ONE dangling symlink (or a glob→stat
+deletion race) crashed the walk and the guarded L3 sweep went PERMANENTLY
+INERT (`lake_heal.sweep_failed` every boot, loud but never healing); the
+walk now lstat()s each entry under a per-entry OSError guard
+(`lake_heal.token_stat_skipped`, repr()'d path), token deterministic for
+identical content. ROUND 12 (MAJOR) — a `List(Utf8)`/`Struct` `side`
+column read back unhashable values, so the key-set builds raised
+`TypeError` — crashing the WHOLE scan (all healing inert) and, in the
+scan→heal window, aborting the WHOLE heal batch; NEW public
+`option_key_dtype_error` gates BOTH key columns BEFORE classification
+(side String/Null, timestamp Datetime/Null) at the scan loop + the
+canonical-sibling read (loud repr()'d scan_skip, counted skipped) and at
+`_heal_option_foreign` (isolated `OptionWriterError` — batch continues,
+report/stats/alert still emitted).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -725,10 +748,39 @@ hostile-review pass._
   `partition_error` `partition=` AND the observe `detail=` both pinned to the repr shape with no raw
   `\n`/`\x1b`. (R9-2·NIT, docs honesty) the `log_lake_finding` docstring claimed BOTH option events carry a
   repr()'d `series` field — the dup event emits NO `series` field (only its `partition` token is repr()'d);
-  reworded to the emitted truth. Remaining
+  reworded to the emitted truth. HOSTILE-REVIEW FOLDS (rounds 10-12, REBUILT 2026-07-08 — an environment rollback
+  lost the original round-10/11/12 commits; every defect RE-REPRODUCED at the rolled-back HEAD before re-fixing,
+  every mutant re-applied + verified killed): (R10·MINORs, test-only surviving-mutant pins) the reassignment
+  `HealAction.dropped` (= `dropped_duplicates + dropped_removed` — the exact value `emit_lake_heal_alert` sums into
+  the operator alert) had NO dup-component teeth (every covering fixture healed dup-free sources, so
+  `dropped=result.dropped_removed` and the dups-only/zeroed variants survived — the alert under-reports dropped
+  rows); pinned by ONE source carrying a duplicated HOME key + a reassignable foreign row + an overlap row →
+  `dropped == 3` EXACTLY plus the sum-over-actions aggregation; AND the census OPTIONS row's
+  `files=option_files_scanned` flipped to scanned+skipped survived (skip fixtures never asserted `files`) — pinned
+  scanned-only (one scanned-clean + one skipped-garbage file → `files == 1`, `clean == 1`; a skipped file inflates
+  neither, on `brutex lake audit-unique`/doctor/the `/universe` chip). (R11·MAJOR, DoS-of-healing)
+  `lake_content_token` `stat()`-ed every `*.parquet` under `bars/` + `options/`, so ONE dangling symlink — or a file
+  deleted between the glob and its stat — raised `FileNotFoundError` before the scan even started: the guarded
+  `StartupSweeper.run_sync` degraded to `lake_heal.sweep_failed` on EVERY boot and the L3 sweep went PERMANENTLY
+  INERT (loud, never healing; reproduced end-to-end); the walk now `lstat()`s each entry (never follows — a dangling
+  link contributes its OWN link metadata deterministically; the scanner symlink-skips such files anyway) under a
+  per-entry `OSError` guard skipping a raced-away entry LOUDLY (`lake_heal.token_stat_skipped`, repr()'d path — an
+  options entry embeds the vendor series dir name), the token deterministic for identical lake content; regressions:
+  dangling links in BOTH trees → token returned + the sweep heals a sibling poison; a monkeypatched mid-walk
+  `FileNotFoundError` → loud skip, token EQUAL to the genuinely-absent-file token. (R12·MAJOR, isolation-escape) a
+  hand-planted options file whose `side` dtype is `List(Utf8)`/`Struct` read back UNHASHABLE values, so the
+  `(side, timestamp)` key-set builds (`_option_foreign_keys` · `_canonical_option_keys` · the healer's removal-key
+  `frozenset`) raised `TypeError` — neither a `parquet_read_skip_errors` member nor in `_PER_FINDING_HEAL_ERRORS` —
+  crashing the WHOLE scan (ALL healing inert) and, planted in the scan→heal window, aborting the WHOLE heal batch
+  (the round-3/round-5 isolation-escape class; both reproduced); NEW public `option_key_dtype_error` (in `__all__`,
+  §11 COMMON — the `is_foreign_timestamp` precedent) validates BOTH key columns BEFORE classification (`side`
+  String/Null; `timestamp` Datetime — naive routes as-if-UTC — or Null), wired at the scan loop + the targeted
+  canonical-sibling read (loud `lake.invariant.scan_skip`, repr()'d path, counted `option_files_skipped`, never
+  classified) AND at `_heal_option_foreign` (isolated `OptionWriterError` refusal — batch continues,
+  report/stats/alert still emitted); 6 regressions + the gate-removal mutant verified killed. Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (447/152) + `option_parquet_writer.py`
-  (161/32) + `lake_heal.py` (596/168) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (464/160) + `option_parquet_writer.py`
+  (161/32) + `lake_heal.py` (603/170) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a
