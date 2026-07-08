@@ -1005,6 +1005,7 @@ class TradesReader(Protocol):
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
         """Return one page of trade rows for (*run_id*, *rank*)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 class AwaitingTradesReader:
