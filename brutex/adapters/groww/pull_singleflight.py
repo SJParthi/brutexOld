@@ -127,6 +127,7 @@ lease guard entirely, e.g. on a network volume with pathological clock skew).
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -154,6 +155,7 @@ from brutex.models import BruteXError
 
 __all__ = [
     "ACCOUNT_LOCK_FILE_PREFIX",
+    "NIGHTLY_SINGLEFLIGHT_LOCK_NAME",
     "PULL_LEASE_ENV",
     "PULL_LEASE_FILE_NAME",
     "PULL_LEASE_HEARTBEAT_S",
@@ -163,12 +165,15 @@ __all__ = [
     "PULL_LEASE_STALE_AFTER_S",
     "PULL_SINGLEFLIGHT_LOCK_NAME",
     "ForeignPullActiveError",
+    "NightlyAlreadyRunningError",
     "PullAlreadyRunningError",
     "PullLease",
     "account_pull_singleflight_lock",
     "account_singleflight_lock_path",
     "default_account_lock_dir",
     "foreign_pull_lease",
+    "nightly_singleflight_lock",
+    "nightly_singleflight_lock_path",
     "pull_lease_enabled",
     "pull_lease_guard",
     "pull_lease_path",
@@ -187,6 +192,16 @@ _LOCK_SUBDIR: Final[str] = ".locks"
 #: The single, stable filename for the account-wide pull single-flight lock. ONE name
 #: (not per-partition) so EVERY pull against this lake root contends on the same file.
 PULL_SINGLEFLIGHT_LOCK_NAME: Final[str] = "pull_singleflight.lock"
+
+#: The single, stable filename for the NIGHTLY single-flight lock
+#: (DEC-SWEEP-NIGHTLY-AUTOMATION-001). Beside the pull lock so two nightly chains
+#: against one lake are mechanically impossible — the same non-blocking flock core.
+NIGHTLY_SINGLEFLIGHT_LOCK_NAME: Final[str] = "nightly_singleflight.lock"
+
+#: Max bytes of the lock file read back as the best-effort HOLDER NOTE when a
+#: contended acquire builds its refusal message. Advisory only — a bound, not a
+#: format (a note longer than this is truncated in the echo, never an error).
+_HOLDER_NOTE_MAX_BYTES: Final[int] = 120
 
 #: Filename prefix for the ACCOUNT-keyed single-flight lock (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001).
 #: The full name is ``pull_account<pbkdf2_hmac_sha256(api_key)[:16]>.flock`` — a truncated
@@ -213,6 +228,35 @@ _ACCOUNT_LOCK_KDF_SALT: Final[bytes] = b"brutex-pull-account-lock"
 _ACCOUNT_LOCK_KDF_ITERATIONS: Final[int] = 200_000
 
 
+def _read_holder_note(lock_path: Path) -> str:
+    """Best-effort read of the holder note a lock owner wrote into *lock_path*.
+
+    Returns the first :data:`_HOLDER_NOTE_MAX_BYTES` bytes of the lock file,
+    UTF-8-decoded (``errors="replace"``) and stripped, or ``""`` when the file is
+    absent / unreadable / empty. Advisory only (DEC-SWEEP-NIGHTLY-AUTOMATION-001
+    holder-note honesty): a refusal message never LIES about who holds the lock,
+    and a read failure never turns a precise refusal into a crash.
+    """
+    try:
+        with open(lock_path, "rb") as fp:
+            raw = fp.read(_HOLDER_NOTE_MAX_BYTES)
+    except OSError:
+        return ""
+    return raw.decode("utf-8", errors="replace").strip()
+
+
+def _with_holder_suffix(message: str, lock_path: Path) -> str:
+    """Append ``" (holder: <note>)"`` to *message* when the lock file carries a note.
+
+    No note (the pre-holder-note state, or a holder that wrote none) ⇒ *message*
+    returned byte-identical — the existing-caller compatibility contract.
+    """
+    note = _read_holder_note(lock_path)
+    if note:
+        return f"{message} (holder: {note})"
+    return message
+
+
 class PullAlreadyRunningError(BruteXError):
     """Another pull already holds the account-wide single-flight lock for this lake root.
 
@@ -224,7 +268,11 @@ class PullAlreadyRunningError(BruteXError):
     for the operator-facing message + the log — this class is the ONE canonical
     owner of the attribute (subclasses pass their contended path up, never
     re-assign it; the :class:`ForeignPullActiveError` lease path rides the same
-    slot so every refusal handler reads one field).
+    slot so every refusal handler reads one field). When the holder wrote a note
+    into the lock file (e.g. ``nightly:<id>`` — DEC-SWEEP-NIGHTLY-AUTOMATION-001)
+    the default flock-flavoured message appends ``" (holder: <note>)"`` so a pull
+    refused during a nightly names the nightly instead of implying another pull;
+    no note ⇒ message byte-identical to the pre-note contract.
     """
 
     def __init__(self, lock_path: Path, message: str | None = None) -> None:
@@ -233,11 +281,33 @@ class PullAlreadyRunningError(BruteXError):
         super().__init__(
             message
             if message is not None
-            else (
+            else _with_holder_suffix(
                 "a pull is already running for this lake "
                 f"(account-wide single-flight lock held at {lock_path}); "
                 "refusing to start a second concurrent pull, which would double the "
-                "Groww account request rate"
+                "Groww account request rate",
+                lock_path,
+            )
+        )
+        self.lock_path = lock_path
+
+
+class NightlyAlreadyRunningError(BruteXError):
+    """Another nightly chain already holds the nightly single-flight lock for this lake.
+
+    Raised by :func:`nightly_singleflight_lock` on contention
+    (DEC-SWEEP-NIGHTLY-AUTOMATION-001): two overlapping nightly chains against one
+    lake are refused, never queued. Carries the same best-effort holder-note echo as
+    :class:`PullAlreadyRunningError` so the refusal names WHICH nightly holds it.
+    """
+
+    def __init__(self, lock_path: Path) -> None:
+        super().__init__(
+            _with_holder_suffix(
+                "a nightly chain is already running for this lake "
+                f"(nightly single-flight lock held at {lock_path}); "
+                "refusing to start a second concurrent nightly",
+                lock_path,
             )
         )
         self.lock_path = lock_path
@@ -263,7 +333,9 @@ def pull_singleflight_lock_path(lake_root: Path) -> Path:
 
 
 @contextmanager
-def pull_singleflight_lock(lake_root: Path) -> Generator[None, None, None]:
+def pull_singleflight_lock(
+    lake_root: Path, *, holder_note: str | None = None
+) -> Generator[None, None, None]:
     """Hold the account-wide single-flight lock for the *lake_root* for the ``with`` block.
 
     Opens (creating on first use) the stable single-flight lock file and takes a
@@ -277,6 +349,11 @@ def pull_singleflight_lock(lake_root: Path) -> Generator[None, None, None]:
     lake_root
         The lake root (locates the ``.locks`` sidecar dir). The lock file is created on
         first use; the directory is created with ``parents=True, exist_ok=True``.
+    holder_note
+        Optional advisory note best-effort-written into the lock file on a successful
+        acquire (e.g. ``nightly:<id>`` — DEC-SWEEP-NIGHTLY-AUTOMATION-001) so a
+        contended peer's :class:`PullAlreadyRunningError` names the true holder.
+        ``None`` (every pre-existing caller) ⇒ behavior byte-identical.
 
     Yields
     ------
@@ -295,7 +372,53 @@ def pull_singleflight_lock(lake_root: Path) -> Generator[None, None, None]:
         (DEC-PULL-HARDENING-FOLLOWUP-001, MIGRATION.md #996) — a raw ``OSError`` would
         otherwise escape the dashboard ``start()`` path uncaught.
     """
-    with _flock_singleflight(pull_singleflight_lock_path(lake_root)):
+    with _flock_singleflight(pull_singleflight_lock_path(lake_root), holder_note=holder_note):
+        yield
+
+
+def nightly_singleflight_lock_path(lake_root: Path) -> Path:
+    """Return the stable nightly single-flight lock path under *lake_root*.
+
+    ``<lake_root>/.locks/nightly_singleflight.lock`` — beside the pull lock
+    (:func:`pull_singleflight_lock_path`), never created here. O(1)
+    (DEC-SWEEP-NIGHTLY-AUTOMATION-001).
+    """
+    return lake_root / _LOCK_SUBDIR / NIGHTLY_SINGLEFLIGHT_LOCK_NAME
+
+
+@contextmanager
+def nightly_singleflight_lock(
+    lake_root: Path, *, holder_note: str | None = None
+) -> Generator[None, None, None]:
+    """Hold the NIGHTLY single-flight lock for *lake_root* for the ``with`` block.
+
+    The nightly chain's own gate (DEC-SWEEP-NIGHTLY-AUTOMATION-001): only ONE nightly
+    chain may run at a time per lake root, so a schedule mis-fire / manual re-run can
+    never overlap a running chain. Same mechanics as :func:`pull_singleflight_lock`
+    (the ONE :func:`_flock_singleflight` core — non-blocking exclusive ``flock``,
+    kernel-released on fd close / process death, no pid files, no stale-lock state).
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (locates the ``.locks`` sidecar dir).
+    holder_note
+        Optional advisory note (``nightly:<id>``) best-effort-written into the lock
+        file so a contended peer's refusal names this nightly.
+
+    Raises
+    ------
+    NightlyAlreadyRunningError
+        If another process holds the nightly lock — a nightly chain is in flight.
+    LakeWriteHalt
+        If creating the lock dir / file hits ENOSPC / OOM (the same
+        :func:`~brutex.data.atomic_io.lake_write_guard` contract as the pull locks).
+    """
+    with _flock_singleflight(
+        nightly_singleflight_lock_path(lake_root),
+        contention_error=NightlyAlreadyRunningError,
+        holder_note=holder_note,
+    ):
         yield
 
 
@@ -377,12 +500,23 @@ resolve_groww_aws_credentials` — the SOLE credential source, DEC-AWS-ONLY-CRED
 
 
 @contextmanager
-def _flock_singleflight(lock_path: Path) -> Generator[None, None, None]:
-    """The ONE non-blocking exclusive-flock core both single-flight locks share (COMMON).
+def _flock_singleflight(
+    lock_path: Path,
+    *,
+    contention_error: Callable[[Path], BruteXError] = PullAlreadyRunningError,
+    holder_note: str | None = None,
+) -> Generator[None, None, None]:
+    """The ONE non-blocking exclusive-flock core every single-flight lock shares (COMMON).
 
     Creates the lock dir/file (guarded — ENOSPC/OOM → ``LakeWriteHalt``), takes
-    ``LOCK_EX | LOCK_NB`` (contention → :class:`PullAlreadyRunningError`), and releases
-    by closing the fd on every exit.
+    ``LOCK_EX | LOCK_NB`` (contention → *contention_error*, default
+    :class:`PullAlreadyRunningError` — every pre-existing caller passes nothing and is
+    byte-identical), and releases by closing the fd on every exit. On a SUCCESSFUL
+    acquire the lock file's content is best-effort truncated (so a stale note from a
+    prior holder can never lie about who holds it now) and *holder_note*, when given,
+    is written for contended peers' refusal messages
+    (DEC-SWEEP-NIGHTLY-AUTOMATION-001) — a write failure is swallowed (advisory only,
+    never a lock failure).
     """
     # The lock-file creation runs inside ``lake_write_guard`` so a full disk at that step
     # becomes a ``LakeWriteHalt`` (the same contract the partition lock honours), never a
@@ -398,7 +532,13 @@ def _flock_singleflight(lock_path: Path) -> Generator[None, None, None]:
         except BlockingIOError as exc:
             # The lock is held by a peer process: a pull is already running. Refuse —
             # do NOT block (a pull runs for hours) and do NOT double the account rate.
-            raise PullAlreadyRunningError(lock_path) from exc
+            raise contention_error(lock_path) from exc
+        with contextlib.suppress(OSError):
+            # Best-effort holder note: truncate any stale note first, then write ours
+            # (advisory only — a failure never blocks the acquired lock).
+            os.ftruncate(fd, 0)
+            if holder_note is not None:
+                os.write(fd, holder_note.encode("utf-8"))
         yield
     finally:
         # Closing the fd releases the advisory lock — an ``flock`` is tied to the open

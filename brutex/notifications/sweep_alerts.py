@@ -44,7 +44,7 @@ clean (the same precedent as :mod:`brutex.observability.standard_monitor`).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Final, Protocol
 
 from brutex.notifications.telegram import (
@@ -111,6 +111,15 @@ def escape_markdown_v2(text: str) -> str:
             out.append("\\")
         out.append(char)
     return "".join(out)
+
+
+def _count_or_question(value: int | None) -> str:
+    """Unknown nightly counts render a literal ``"?"`` — NEVER a fabricated 0.
+
+    (DEC-SWEEP-NIGHTLY-AUTOMATION-001, the ``bars_net_new`` honest-unknown
+    precedent — Golden Rule #1.)
+    """
+    return "?" if value is None else str(value)
 
 
 def _resolve_singleton_notifier() -> NotifierLike | None:  # pragma: no cover — lazy wiring import
@@ -280,6 +289,51 @@ class LakeHealReportLike(Protocol):
     @property
     def actions(self) -> Sequence[LakeHealActionLike]:
         """The per-partition heal actions taken."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class GreeksBackfillReportLike(Protocol):
+    """The report slice the Greeks-backfill completion alert reads.
+
+    Structural (DEC-GREEKS-BULK-REENRICH-001) — matches
+    ``brutex.data.greeks_backfill.GreeksBackfillReport`` without importing the
+    data layer (this module stays wheel-free at import time; the same
+    precedent as :class:`LakeHealReportLike`).
+    """
+
+    @property
+    def backfill_id(self) -> str:
+        """The plan's content-addressed id (the dedupe key)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def planned(self) -> int:
+        """Contracts the plan targeted."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def enriched(self) -> int:
+        """Contracts whose overlay was (re)written."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def already_current(self) -> int:
+        """Contracts already carrying the current stamps (no write)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def errored(self) -> int:
+        """Contracts quarantined by a per-contract error (re-runnable)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def stale_unfixable(self) -> int:
+        """Contracts whose only staleness the driver cannot act on (fix round 4)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def bars_written(self) -> int:
+        """Bars carried in the latest-wins writes."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -684,6 +738,131 @@ class SweepAlerter:
             severity=TelegramSeverity.CRITICAL,
             message=message,
             dedupe_key=f"pull-halt:{reason}",
+        )
+
+    def nightly_summary(
+        self,
+        *,
+        nightly_id: str,
+        verdict: str,
+        link_verdicts: Mapping[str, str],
+        pull_bars: int | None,
+        prebuild_built: int | None,
+        sweep_run: int | None,
+        sweep_skipped_cache: int | None,
+        sweep_failed: int | None,
+        backup_files: int | None,
+        blocker: str | None,
+        duration_seconds: float,
+    ) -> bool:
+        """The morning nightly summary (DEC-SWEEP-NIGHTLY-AUTOMATION-001).
+
+        Severity law: INFO iff ``verdict == "OK"``, WARN iff ``"SUSPECT"`` (the
+        R39 trust-downgrade — green but untrusted), CRITICAL for
+        ``"REFUSED"``/``"FAILED"``. The ``dedupe_key`` is PER-RUN
+        (``nightly-summary:<id>``) so a same-night manual retry is never
+        swallowed by a dedupe window. Unknown counts render a literal ``"?"``
+        — NEVER a fabricated 0 (Golden Rule #1); a ``skipped`` backup link
+        appends the loud operator nag.
+
+        Parameters
+        ----------
+        nightly_id
+            The one R43 id threading report/audit/bundle/Telegram.
+        verdict
+            ``"OK"`` | ``"SUSPECT"`` | ``"REFUSED"`` | ``"FAILED"``
+            (:func:`brutex.nightly.report.summary_lines` computes it).
+        link_verdicts
+            Chain-order per-link verdict strings, e.g. ``{"collision": "ok",
+            …, "sweep": "blocked(pull)"}``.
+        pull_bars, prebuild_built, sweep_run, sweep_skipped_cache, sweep_failed, backup_files
+            Honest counts (``None`` = unknown ⇒ ``"?"``).
+        blocker
+            The first REFUSED/FAILED link's name, or ``None``.
+        duration_seconds
+            Wall-clock chain duration.
+        """
+        marker = {"OK": "✅ OK", "SUSPECT": "⚠️ SUSPECT"}.get(
+            verdict,
+            f"{'⛔' if verdict == 'REFUSED' else '❌'} {verdict} at {blocker or 'unknown'}",
+        )
+        hours, rem = divmod(int(max(0.0, duration_seconds)), 3600)
+        counts_by_link = {
+            "backup": f" ({_count_or_question(backup_files)} files)",
+            "pull": f" ({_count_or_question(pull_bars)} bars)",
+            "prebuild": f" ({_count_or_question(prebuild_built)} built)",
+            "sweep": (
+                f" ({_count_or_question(sweep_run)} run · "
+                f"{_count_or_question(sweep_skipped_cache)} skipped-cache · "
+                f"{_count_or_question(sweep_failed)} failed)"
+            ),
+        }
+        parts: list[str] = []
+        for link, link_verdict in link_verdicts.items():
+            suffix = ""
+            if not link_verdict.startswith("blocked"):
+                suffix = counts_by_link.get(link, "")
+            parts.append(f"{link} {link_verdict}{suffix}")
+        body = f"🌙 Nightly {nightly_id} — {marker} in {hours}:{rem // 60:02d}.\n" + " · ".join(
+            parts
+        )
+        if link_verdicts.get("backup") == "skipped":
+            body += "\n⚠️ backup SKIPPED by operator flag — stores unprotected tonight."
+        severity = {
+            "OK": TelegramSeverity.INFO,
+            "SUSPECT": TelegramSeverity.WARN,
+        }.get(verdict, TelegramSeverity.CRITICAL)
+        return self._publish(
+            kind=TelegramEventKind.RUN_COMPLETE,
+            severity=severity,
+            message=escape_markdown_v2(body),
+            dedupe_key=f"nightly-summary:{nightly_id}",
+        )
+
+    def nightly_refused(self, *, nightly_id: str, link: str, reason: str) -> bool:
+        """Instant CRITICAL refusal signal (collision / disk floor / liveness).
+
+        Fired the moment a nightly REFUSES (before the summary), so the
+        operator learns at 01:30, not at 06:00. PER-RUN dedupe key
+        (``nightly-refused:<id>:<link>``) — a same-night manual retry mints a
+        new id and is never swallowed by the PHASE_BLOCKED dedupe window.
+        """
+        body = (
+            f"🌙⛔ Nightly {nightly_id} REFUSED at {link}: {reason}. "
+            f"Nothing after {link} ran; links before it are intact. "
+            "Next attempt: next schedule fire."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=escape_markdown_v2(body),
+            dedupe_key=f"nightly-refused:{nightly_id}:{link}",
+        )
+
+    def nightly_deadman(self, *, detail: str, newest_run_age_seconds: float | None) -> bool:
+        """The row-20 dead-man alert: the scheduled nightly did NOT run.
+
+        A Mac asleep at the trigger starts no process, so no in-run alerter
+        can fire — this is the ONLY Telegram signal for that perfectly-silent
+        staleness, emitted by the surface that NOTICES it (``brutex nightly
+        status`` today; the P4 dashboard banner wires the same
+        ``deadman_verdict`` seam at merge-integration). CRITICAL with its own
+        DISTINCT dedupe key (``nightly-deadman`` — never colliding with the
+        per-run ``nightly-refused:<id>:<link>`` keys, which require a run to
+        exist). ``newest_run_age_seconds=None`` renders the honest "never" —
+        not a fabricated 0 (Golden Rule #1).
+        """
+        age = (
+            "never (no run evidence)"
+            if newest_run_age_seconds is None
+            else f"{int(newest_run_age_seconds)}s ago"
+        )
+        body = f"🌙💀 Nightly DEAD-MAN: scheduled run MISSED. Last run evidence: {age}. {detail}"
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=escape_markdown_v2(body),
+            dedupe_key="nightly-deadman",
         )
 
     def backup_failed(self, *, reason: str, detail: str = "") -> bool:
@@ -1151,6 +1330,51 @@ class SweepAlerter:
             dedupe_key=f"sweep-halt:{run_id}:{reason}",
         )
 
+    def greeks_backfill_complete(self, report: GreeksBackfillReportLike) -> bool:
+        """Alert that a bulk Greeks v1→v2 backfill run finished (INFO).
+
+        DEC-GREEKS-BULK-REENRICH-001 — mirrors :meth:`sweep_complete`'s honesty
+        pattern: the ✅ head downgrades to ⚠️ with an ``N errored (re-runnable)``
+        clause when any contract was quarantined (an errored contract keeps its
+        stale stamp, so the next run retries it automatically — Golden Rule
+        #10) AND when the scan found driver-UNFIXABLE contracts (fix rounds
+        4-7: a stale/null stamp on a row the enrich driver skips by design —
+        non-finite OHLC — or on a row its keep-first dedup / own-month-bound
+        read never sees; a ✅ while such a stamp persists would be a false
+        green; those need a lake repair, not a re-run). A zero-target run
+        still reads honestly ("0/0 contracts re-stamped") — an
+        operator-initiated one-shot deserves an answer. Best-effort; silent
+        no-op when Telegram is disabled.
+        """
+        clauses: list[str] = []
+        if report.errored > 0:
+            clauses.append(f"{report.errored} errored (re-runnable)")
+        if report.stale_unfixable > 0:
+            clauses.append(
+                f"{report.stale_unfixable} unfixable (driver-unactionable rows — "
+                "lake repair needed)"
+            )
+        if clauses:
+            head = (
+                f"⚠️ Greeks backfill complete with failures — "
+                f"{report.enriched}/{report.planned} contracts re-stamped v2; " + "; ".join(clauses)
+            )
+        else:
+            head = (
+                f"✅ Greeks backfill complete — "
+                f"{report.enriched}/{report.planned} contracts re-stamped v2"
+            )
+        message = escape_markdown_v2(
+            f"{head}; already current={report.already_current}, "
+            f"bars written={report.bars_written} (backfill {report.backfill_id[:12]})."
+        )
+        return self._publish(
+            kind=TelegramEventKind.RUN_COMPLETE,
+            severity=TelegramSeverity.INFO,
+            message=message,
+            dedupe_key=f"greeks-backfill:{report.backfill_id[:12]}",
+        )
+
     # ── Callback adapters for the existing seams ────────────────────
 
     def watchdog_hung_callback(self) -> Callable[[WorkerEventLike], None]:
@@ -1428,10 +1652,36 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
         )
 
 
+def emit_greeks_backfill_complete_alert(report: GreeksBackfillReportLike) -> None:
+    """Fire the ONE best-effort Greeks-backfill completion summary (DEC-GREEKS-BULK-REENRICH-001).
+
+    The COMMON module helper mirroring :func:`emit_pull_halt_alert` — the ONE
+    place the two backfill surfaces (the dashboard job's work-body tail + the
+    CLI ``brutex greeks-backfill`` clean finish) map a
+    ``brutex.data.greeks_backfill.GreeksBackfillReport`` onto
+    :meth:`SweepAlerter.greeks_backfill_complete`. EXACTLY-ONCE by call
+    discipline (one chokepoint per surface, never inside the batch loop) with
+    the ``backfill_id``-scoped dedupe key as the second belt. A DRY-RUN never
+    calls this (dry-run is inert by construction). The whole body is wrapped
+    in a blanket ``try/except`` so the fire-and-forget contract is STRUCTURAL:
+    an alert failure is swallowed + logged and can NEVER fail the backfill.
+    Silent no-op when Telegram is disabled (the default).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().greeks_backfill_complete(report)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never fails the backfill
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "greeks_backfill_alert_failed"
+        )
+
+
 __all__ = [
     "CONFLICT_DELTA_ALERT_ENV",
     "CRASH_LOOP_RELAUNCH_THRESHOLD",
     "DEFAULT_CONFLICT_DELTA_ALERT",
+    "GreeksBackfillReportLike",
     "LakeHealActionLike",
     "LakeHealReportLike",
     "NotifierResolver",
@@ -1441,6 +1691,7 @@ __all__ = [
     "SymbolFailureLike",
     "WorkerEventLike",
     "conflict_alert_threshold",
+    "emit_greeks_backfill_complete_alert",
     "emit_lake_heal_alert",
     "emit_pull_halt_alert",
     "emit_run_suspect_alert",
