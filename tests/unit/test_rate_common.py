@@ -1166,6 +1166,50 @@ class TestClockGapSleepWake:
         ctl.on_success()  # 0 s since the re-based step → no recovery from the gap alone
         assert ctl.current_rps == FLOOR_RPS
 
+    def test_smooth_gate_gap_capture_prevents_stale_baseline_stall(self) -> None:
+        """Kills the gate-0 ``gap_evt = self._handle_clock_gap_locked(now)`` → ``= None`` mutant.
+
+        The mutant DELETES the smooth gate's own gap handling (full-run
+        survivor 188): after a large BACKWARD clock glitch the gate then
+        computes its wait from the FUTURE-stamped ``_last_issue_ts`` baseline
+        and sleeps ~600 s before admitting — the exact stall the gate-seam gap
+        capture exists to prevent. The correct path detects the gap FIRST
+        (re-bases the baseline to ``-inf``) and admits with only sub-second
+        bucket pacing. It survived before because ``_maybe_log_snapshot``
+        re-emits ``rate.clock_gap`` LATER, satisfying any event-presence
+        assertion — the SLEEP behaviour is the discriminating observable
+        (DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        ctl, clock, slept = _smooth(ceiling_rps=CEILING_RPS)
+        ctl.pace()  # stamps _last_issue_ts = 1000.0; bucket → clock 1000.2
+        slept.clear()
+        clock.advance(-(2 * CLOCK_GAP_THRESHOLD_S))  # backward glitch → 400.2
+        ctl.pace()
+        # Correct: gate 0 gap-resets (baseline → -inf) → zero smooth wait; the
+        # only sleeps are the bucket's ≤ 1/rps pacing (bounded by its acquire
+        # cap on the backward clock). Mutant: one ~600 s smooth-gate sleep.
+        assert all(s < 1.0 for s in slept), f"smooth gate slept on a stale baseline: {slept}"
+
+    def test_governor_gate_gap_capture_prevents_stale_window_stall(self) -> None:
+        """Kills the gate-1 ``gov_gap_evt = self._handle_clock_gap_locked(now)`` → ``= None`` mutant.
+
+        The governor-seam twin (full-run survivor 209): the mutant deletes the
+        governor loop's own gap handling, so after a large backward glitch the
+        full rolling window holds FUTURE-stamped issues that never age out and
+        the governor sleeps ~660 s before a slot frees. The correct path
+        gap-resets the window at the seam and admits immediately
+        (DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        ctl, clock, slept = _governed(2)
+        ctl.pace()  # issue reserved @1000.0
+        ctl.pace()  # issue reserved @1000.2 → window FULL at the cap
+        slept.clear()
+        clock.advance(-(2 * CLOCK_GAP_THRESHOLD_S))  # backward glitch → 400.4
+        ctl.pace()
+        assert all(s < 1.0 for s in slept), f"governor slept on a stale window: {slept}"
+        # The gap reset cleared the stale window; the fresh issue is the only one.
+        assert list(ctl._issues) == [pytest.approx(400.4)]
+
     def test_threshold_is_above_every_operational_window(self) -> None:
         # The gap threshold sits comfortably ABOVE every normal operational gap (the
         # longest of which is one AIMD recovery window) so genuine pacing never
@@ -1397,7 +1441,10 @@ class TestSmoothPacingModeResolution:
         assert ctl.smooth_pacing_active is False
 
     def test_unknown_mode_fails_loud(self) -> None:
-        with pytest.raises(ValueError, match="unknown smooth_pacing_mode"):
+        # ``match=`` is re.search, so the anchor pins the message HEAD byte-exact —
+        # an XX-wrapped message mutant no longer matches (DEC-MUTATION-RUNTIME-003;
+        # the compute.py mutant-215 idiom, CLAUDE.md §11 COMMON).
+        with pytest.raises(ValueError, match=r"^unknown smooth_pacing_mode"):
             RateController(smooth_pacing_mode="banana")
 
 
@@ -1881,3 +1928,588 @@ class TestLogEmissionOutsideLock:
         assert logs[2]["to_rps"] == 7.0
         assert ctl.current_rps == 7.0
         assert ctl.smooth_pacing_active is True
+
+
+# ── DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) — mutmut survivor kills ────────
+# Boundary + literal pins for the survivors of the rate_common mutation probe
+# (read_rate.md §3; mutant ids cite that probe — matched by DIFF CONTENT on the
+# current tree, since DEC-RATE-LOG-OUTSIDE-LOCK-001 renumbered mutants). Every
+# test pins the CURRENT brake-EARLY / never-exceed direction of the rate-safety
+# invariants (CLAUDE.md §2 Rule 6) — no ceiling/cap/threshold value is changed
+# or loosened anywhere.
+
+
+class TestMutationBoundaryPins:
+    """Literal-boundary kills: thresholds, window-age evictions, exact-zero waits.
+
+    The existing suite fed ``hits=STEP_DOWN_HITS`` etc. SYMBOLICALLY, so a
+    threshold+1 mutant shifted the test and the threshold together and
+    survived; these tests feed LITERAL counts/instants so the boundary itself
+    is pinned (DEC-MUTATION-RUNTIME-003).
+    """
+
+    def test_step_down_after_exactly_three_literal_hits(self) -> None:
+        """Kills mutant 11 (``STEP_DOWN_HITS: 3 → 4``): 3 LITERAL hits DO step 5→4."""
+        ctl = _controller(_Clock())
+        for _ in range(3):  # literal 3 — NOT range(STEP_DOWN_HITS)
+            ctl.on_rate_limit()
+        assert ctl.current_rps == 4.0
+
+    def test_storm_steps_below_soft_floor_after_exactly_thirty_hits(self) -> None:
+        """Kills mutant 29 (``STORM_HITS: 30 → 31``): 30 LITERAL same-window hits ease 3→2."""
+        ctl = _controller(_Clock())
+        for _ in range(6):  # two 3-hit windows: 5→4→3 (each step clears _hits)
+            ctl.on_rate_limit()
+        assert ctl.current_rps == FLOOR_RPS
+        for _ in range(30):  # literal 30 — the storm threshold at/below the soft floor
+            ctl.on_rate_limit()
+        assert ctl.current_rps == FLOOR_RPS - STEP_RPS  # 2.0 — the storm step fired
+
+    def test_timeout_ladder_steps_after_exactly_five_literal_timeouts(self) -> None:
+        """Kills mutant 31 (``STEP_DOWN_TIMEOUT_HITS: 5 → 6``): 5 LITERAL stalls step 5→4."""
+        ctl = _controller(_Clock())
+        for _ in range(5):  # literal 5
+            ctl.on_timeout()
+        assert ctl.current_rps == 4.0
+
+    def test_adaptive_latch_scan_excludes_offset_three_seconds(self) -> None:
+        """Kills mutant 47 (``SMOOTH_LATCH_SCAN_SECONDS: 3 → 4``).
+
+        A burst exactly 3 s behind the 429 is OUTSIDE the 3-bucket trailing scan
+        (offsets 0/1/2) — the mutant's 4-bucket scan would latch on it. The
+        existing advance-2.0 test pins the 3→2 direction.
+        """
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)  # 9 > 8.0 — burst evidence
+        clock.advance(3.0)  # the burst bucket now sits at trailing offset 3
+        ctl.on_rate_limit()
+        assert ctl.smooth_pacing_active is False  # offset 3 is outside a 3-s scan
+
+    def test_clock_gap_exact_threshold_is_not_a_gap(self) -> None:
+        """Kills mutant 93 (gap check ``> CLOCK_GAP_THRESHOLD_S`` → ``>=``).
+
+        An EXACTLY-300 s delta is NOT a sleep/wake gap (strict ``>``), so the
+        observe-only issue ring is KEPT — the mutant resets it. The RING is the
+        observable (60 s hit-eviction would mask a ``recent_hits`` check).
+        """
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl.pace()  # seeds the issue ring with one real issue at t=1000.0
+        clock.advance(CLOCK_GAP_THRESHOLD_S)  # exactly the threshold — not a gap
+        ctl.on_success()  # runs the gap handler
+        recent = ctl.snapshot()["recent_3600s"]
+        assert recent == 1  # ring kept; the >= mutant zeroes it → 0
+
+    def test_smooth_exact_zero_wait_admits_without_spin(self) -> None:
+        """Kills mutant 190 (pace gate-0 ``wait <= 0.0`` → ``< 0.0``, BOTH sites).
+
+        At ``ceiling_rps=8.0`` the 0.125 s interval is float-EXACT, so the second
+        pace computes ``wait == 0.0`` precisely: the stamp site's mutant skips the
+        atomic stamp (pinned via ``_last_issue_ts``); the break site's mutant
+        burns ``sleep(0.0)`` re-check spins (pinned via the sleep log).
+        """
+        ctl, _clock, slept = _smooth(ceiling_rps=8.0)
+        ctl.pace()  # stamps @1000.0; bucket sleeps 0.125 → clock 1000.125
+        ctl.pace()  # gate-0 wait == 0.0 exactly → stamp + admit with NO smooth sleep
+        assert slept == [0.125, 0.125]  # only the bucket paced — no gate-0 spin
+        assert 0.0 not in slept  # the break-site mutant sleeps 0.0 before re-checking
+        assert ctl._last_issue_ts == 1000.125  # the stamp-site mutant never re-stamps
+
+    def test_smooth_fractional_wait_never_stamps_before_admission(self) -> None:
+        """Kills the gate-0 STAMP-site ``wait <= 0.0`` → ``<= 1.0`` mutant (full-run survivor 191).
+
+        With a FRACTIONAL wait (0 < wait ≤ 1) the gate must sleep once and
+        stamp ONLY at admission. The mutant stamps on every re-check pass
+        (moving the spacing baseline while still waiting), so the wait never
+        reaches ≤ 0 and the loop burns to ``_SMOOTH_LOOP_CAP`` — dozens of
+        extra sleeps. Pinning the exact sleep sequence + the admission stamp
+        kills it (and the ``<= 0.0`` → ``< 0.0`` no-stamp flip at the same
+        site, which would break WITHOUT stamping).
+        """
+        # Dyadic values throughout (1/8 s interval) so every float below is
+        # EXACT and the sleep-advance lands precisely on the admission instant.
+        ctl, clock, slept = _smooth(ceiling_rps=8.0)
+        ctl.pace()  # stamps @1000.0; bucket sleeps 0.125 → clock 1000.125
+        slept.clear()
+        clock.t = 1000.0625  # a jitter re-entry → smooth wait = 0.0625 (fractional)
+        ctl.pace()
+        # Exactly ONE 0.0625 s smooth sleep (to the admission instant 1000.125),
+        # then the bucket's own 0.125 s token wait — nothing else.
+        assert slept == [0.0625, 0.125]
+        assert ctl._last_issue_ts == 1000.125  # stamped at admission only
+
+    def test_governor_fractional_wait_reserves_only_at_admission(self) -> None:
+        """Kills the gate-1 BREAK-site ``gov_wait <= 0.0`` → ``<= 1.0`` mutant (full-run survivor 216).
+
+        A rate-safety boundary: with a fractional governor wait (0 < wait ≤ 1)
+        the mutant BREAKS out of the governor loop WITHOUT reserving the slot —
+        the issue proceeds unrecorded, so the rolling window under-counts and a
+        later caller can overshoot the HARD per-minute cap. The correct path
+        sleeps the fractional wait, evicts the aged slot, and reserves at
+        admission. (The RESERVE-site twin at the same boundary would reserve
+        into a FULL window — overshooting — and then still sleep a whole
+        window; the exact sleep-sequence pin kills both.)
+        """
+        ctl, clock, slept = _governed(1)
+        ctl.pace()  # slot reserved @1000.0; bucket → clock 1000.2
+        slept.clear()
+        # Dyadic offset (0.25) so the sleep-advance lands EXACTLY on the
+        # age-out instant 1060.0 — every float below is exact.
+        clock.t = 1000.0 + PER_MIN_WINDOW - 0.25  # 1059.75 → gov_wait = 0.25
+        ctl.pace()
+        # Exactly ONE 0.25 s governor sleep (to the age-out instant 1060.0); the
+        # bucket has long since refilled, so no token wait follows.
+        assert slept == [0.25]
+        # The stale slot aged out and the fresh issue was RESERVED at admission.
+        assert list(ctl._issues) == [1060.0]
+
+    def test_hit_at_exact_window_age_still_counts_toward_stepdown(self) -> None:
+        """Kills mutant 224 (``on_rate_limit`` evict ``<`` → ``<=``).
+
+        A hit EXACTLY ``STEP_DOWN_WINDOW`` old is still in-window evidence and
+        still brakes (the SAFE direction — the mutant evicts it → no step).
+        """
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl.on_rate_limit()  # hit at t=1000.0
+        clock.advance(STEP_DOWN_WINDOW)  # exactly 60 s — boundary age
+        ctl.on_rate_limit()
+        ctl.on_rate_limit()  # 3rd in-window hit → step 5→4
+        assert ctl.current_rps == 4.0
+
+    def test_timeout_at_exact_window_age_still_counts(self) -> None:
+        """Kills mutant 242 (``on_timeout`` evict ``<`` → ``<=``) — the stall twin."""
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl.on_timeout()  # stall at t=1000.0
+        clock.advance(STEP_DOWN_WINDOW)  # exactly 60 s
+        for _ in range(4):
+            ctl.on_timeout()  # 5th in-window stall → step 5→4
+        assert ctl.current_rps == 4.0
+
+    def test_recovery_blocked_by_hits_exactly_window_old(self) -> None:
+        """Kills mutant 258 (``on_success`` hits-evict ``<`` → ``<=``).
+
+        429 evidence EXACTLY ``STEP_UP_WINDOW`` old still counts as step-down-level
+        pressure and blocks recovery (the mutant evicts it → an EARLY step-up =
+        the less-safe direction).
+        """
+        clock = _Clock()
+        ctl = _controller(clock)
+        for _ in range(6):
+            ctl.on_rate_limit()  # 5→4→3 (the soft floor); _hits cleared each step
+        assert ctl.current_rps == FLOOR_RPS
+        for _ in range(STEP_DOWN_HITS):
+            ctl.on_rate_limit()  # 3 hits AT the floor (storm threshold → no step)
+        assert ctl.current_rps == FLOOR_RPS
+        clock.advance(STEP_UP_WINDOW)  # the hits are now EXACTLY window-old
+        ctl.on_success()
+        assert ctl.current_rps == FLOOR_RPS  # recovery held — boundary hits still count
+
+    def test_recovery_blocked_by_timeouts_exactly_window_old(self) -> None:
+        """Kills mutant 261 (``on_success`` timeouts-evict ``<`` → ``<=``) — the twin."""
+        clock = _Clock()
+        ctl = _controller(clock)
+        for _ in range(20):
+            ctl.on_timeout()  # 5→4→3→2→1 (the deep timeout floor)
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS
+        for _ in range(STEP_DOWN_TIMEOUT_HITS):
+            ctl.on_timeout()  # 5 stalls AT the floor (rps not > floor → no step)
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS
+        clock.advance(STEP_UP_WINDOW)  # the stalls are now EXACTLY window-old
+        ctl.on_success()
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS  # recovery held
+
+    def test_snapshot_recent_minute_evicts_at_exact_boundary(self) -> None:
+        """Kills mutant 279 (snapshot governor evict ``<= 0.0`` → ``< 0.0``).
+
+        An issue EXACTLY ``PER_MIN_WINDOW`` old has aged out of the rolling-60 s
+        gauge — the mutant keeps it (an inflated ``recent_minute``).
+        """
+        ctl, clock, _slept = _governed(5)
+        ctl.pace()  # issue reserved @1000.0 (admission instant, pre-bucket)
+        assert ctl.snapshot()["recent_minute"] == 1
+        clock.t = 1000.0 + PER_MIN_WINDOW  # exactly 60 s after the reserved instant
+        assert ctl.snapshot()["recent_minute"] == 0  # boundary-age issue evicted
+
+    def test_quota_exhausted_false_at_remaining_exactly_one(self, tmp_path: Path) -> None:
+        """Kills mutant 301 (``quota_exhausted`` ``remaining() <= 0`` → ``<= 1``).
+
+        One remaining call is NOT exhaustion — the loop may still spend it; the
+        mutant would stop the pull a call early (a silent under-use, still a
+        defect: the gate must fire at EXACTLY zero).
+        """
+        q = _quota(tmp_path, limit=2, used=1)
+        ctl = RateController(quota_tracker=q, clock=_Clock(), sleep=lambda _s: None)
+        assert q.remaining() == 1
+        assert ctl.quota_exhausted() is False
+
+    def test_issue_ring_advances_on_one_second_step(self) -> None:
+        """Kills every mutant of the rephrased ``steps < 1`` ring-advance guard.
+
+        A ONE-second step MUST advance the ring head (``<= 1`` / ``< 2`` mutants
+        return early → the 1001.0 issue lands in the 1000 bucket and the trailing
+        1 s count over (1001.5, 1002.5] reads 0, not 1). DEC-MUTATION-RUNTIME-003.
+        """
+        ctl = _controller(_Clock())
+        ctl._record_issue_locked(1000.0)
+        ctl._record_issue_locked(1001.0)
+        assert ctl._count_in_window_locked(1002.5, 1.0) == 1
+
+    def test_count_in_window_span_excludes_extra_bucket(self) -> None:
+        """Kills mutant 155 (``raw_span``'s ``+ 1`` → ``+ 2``).
+
+        With one issue at second 1000 only, the trailing 1 s of ``now=1002.5``
+        spans seconds 1001-1002 → 0; the mutant's extra bucket reaches second
+        1000 and reads a phantom 1.
+        """
+        ctl = _controller(_Clock())
+        ctl._record_issue_locked(1000.0)
+        assert ctl._count_in_window_locked(1002.5, 1.0) == 0
+
+    def test_recent_bucket_counts_cover_every_trailing_offset(self) -> None:
+        """Kills mutant 174 (``range(span - 1, -1, -1)`` step ``-1`` → ``-2``).
+
+        Distinct per-second counts at offsets 0/1/2 pin the EXACT oldest→newest
+        list — a ``-2`` step skips the middle bucket, a start/stop flip reshapes
+        the list.
+        """
+        ctl = _controller(_Clock())
+        _seed_burst(ctl, second=1000, count=1)
+        _seed_burst(ctl, second=1001, count=2)
+        _seed_burst(ctl, second=1002, count=3)
+        with ctl._lock:
+            counts = ctl._recent_bucket_counts_locked(1002.0, 3)
+        assert counts == [1, 2, 3]
+
+
+class TestMutationLiteralPins:
+    """Cheap exact-value pins: public tokens, telemetry fields, constants, anchors.
+
+    DEC-MUTATION-RUNTIME-003 — each pin holds a contract value callers may rely
+    on as a raw literal (mode tokens, log event names, documented constants).
+    """
+
+    def test_smooth_mode_tokens_are_public_contract(self) -> None:
+        """Kills mutants 40/42/44 (the mode-token strings XX-wrapped)."""
+        assert (SMOOTH_PACING_ON, SMOOTH_PACING_OFF, SMOOTH_PACING_ADAPTIVE) == (
+            "on",
+            "off",
+            "adaptive",
+        )
+
+    def test_clock_gap_logs_event_name_and_gap_seconds_exact(self) -> None:
+        """Kills mutants 103/104 (``rate.clock_gap`` event name; ``gap_s`` arithmetic)."""
+        clock = _Clock()
+        ctl = _controller(clock)
+        clock.advance(CLOCK_GAP_THRESHOLD_S + 1.0)  # a crafted 301.0 s gap
+        with capture_logs() as logs:
+            ctl.on_success()
+        gap_events = [e for e in logs if e["event"] == "rate.clock_gap"]
+        assert len(gap_events) == 1
+        assert gap_events[0]["gap_s"] == CLOCK_GAP_THRESHOLD_S + 1.0
+
+    def test_pacing_constants_pinned_exact(self) -> None:
+        """Kills mutants 19/36/38/52 (ring size, both loop caps, snapshot throttle)."""
+        assert TRAILING_LOG_BUCKETS == 3600
+        assert _GOVERNOR_LOOP_CAP == 64 == _SMOOTH_LOOP_CAP
+        assert SNAPSHOT_LOG_INTERVAL_S == 15.0
+
+    def test_last_step_anchored_to_construction_clock(self) -> None:
+        """Kills mutant 81 (``self._last_step = clock()`` → ``= None``)."""
+        ctl = _controller(_Clock())
+        assert ctl._last_step == 1000.0
+
+    def test_bucket_downshift_pinned_at_half_the_start_rate(self) -> None:
+        """Kills the ``downshift_rps=self._rps / 2.0`` value mutant (``/ 3.0``).
+
+        The value IS directly observable on the constructed bucket, so the
+        prior "unobservable by design" pragma was unnecessary AND its proof
+        false — the ``* 2.0`` operator half already dies at construction
+        (``AdaptiveTokenBucket.__post_init__`` requires downshift < initial);
+        this pin closes the value half (DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        ctl = _controller(_Clock())
+        assert ctl._bucket.initial_rps == CEILING_RPS
+        assert ctl._bucket.downshift_rps == CEILING_RPS / 2.0
+
+    def test_issue_ring_head_starts_and_gap_resets_at_slot_zero(self) -> None:
+        """Kills the ``self._issue_head = 0`` → ``= 1`` mutants at BOTH sites.
+
+        The head slot is behaviourally arbitrary while the ring is all-zero,
+        but the documented "starts at slot 0 / gap-reset re-bases to slot 0"
+        contract is pinned so the mutants are observable instead of pragma'd
+        (the #624 observable-over-pragma idiom; DEC-MUTATION-RUNTIME-003
+        fixer round — the crash-class ``= None`` halves die elsewhere).
+        """
+        clock = _Clock()
+        ctl = _controller(clock)
+        assert ctl._issue_head == 0  # construction site
+        with ctl._lock:
+            ctl._record_issue_locked(1000.0)  # seed the ring at second 1000
+            ctl._record_issue_locked(1005.0)  # advance the head 5 slots
+        assert ctl._issue_head == 5
+        clock.advance(CLOCK_GAP_THRESHOLD_S + 1.0)
+        ctl.on_success()  # trips the sleep/wake gap handler → full ring reset
+        assert ctl._issue_head == 0  # gap-reset site
+        assert ctl._issue_newest_sec is None
+
+    def test_smooth_wait_overdue_is_exactly_zero(self) -> None:
+        """Kills the rephrased ``max(wait, 0.0)`` line's ``0.0 → 1.0`` mutant.
+
+        A long-overdue previous issue clamps the smooth wait to EXACTLY 0.0
+        (mutant 126's tie-equivalent conditional is gone; the replacement mutant
+        returns 1.0 here). DEC-MUTATION-RUNTIME-003.
+        """
+        ctl, clock, _slept = _smooth(ceiling_rps=CEILING_RPS)
+        ctl.pace()  # stamps _last_issue_ts at 1000.0
+        clock.advance(100.0)  # far past the 1/5 s interval
+        assert ctl._smooth_wait_locked(ctl._clock()) == 0.0
+
+
+class TestPendingLogLevelSlotPins:
+    """T8 re-probe kills (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597).
+
+    The scoped mutmut re-run on THIS base enumerated never-probed #1202
+    deferred-log mutants. The level SLOT of a pending tuple is invisible to a
+    log-sink observer — ``_flush_rate_logs`` dispatches ``level == "info"`` vs
+    ELSE-warning, so a mutated ``"warning"`` (``"XXwarningXX"``) emits
+    identically — the ONLY kill surface is the raw tuple itself. These tests
+    pin every pending-tuple level slot byte-exact by capturing the tuples
+    BEFORE dispatch (monkeypatched ``_flush_rate_logs``) or from a
+    ``*_locked`` helper's return value, plus the ``_PendingLog`` alias object
+    (whose ``= None`` mutant is unobservable through PEP-563 annotations).
+    """
+
+    def test_pending_log_alias_is_the_exact_triple_shape(self) -> None:
+        """Kills the ``_PendingLog = tuple[...] → None`` alias mutant.
+
+        Under PEP 563 the alias is never evaluated inside an annotation, so
+        the module-level alias OBJECT is pinned directly instead. The slot
+        alias ``_PendingLogSlot`` (DEC-MUTATION-RUNTIME-003 fixer round) is
+        pinned the same way: its ``= None`` mutant never evaluates through a
+        PEP-563 annotation, and its ``|`` → ``&`` mutant already dies at
+        import (``TypeError`` — a ``GenericAlias`` does not support ``&``).
+        """
+        assert rate_common._PendingLog == tuple[str, str, dict[str, object]]
+        assert rate_common._PendingLogSlot == (rate_common._PendingLog | None)
+
+    def test_clock_gap_pending_tuple_is_byte_exact_including_level(self) -> None:
+        """Kills the clock-gap ``"warning" → "XXwarningXX"`` level-slot mutant."""
+        clock = _Clock()
+        ctl = _controller(clock)
+        clock.advance(400.0)  # > CLOCK_GAP_THRESHOLD_S — a real sleep/wake gap
+        with ctl._lock:
+            pending = ctl._handle_clock_gap_locked(clock.t)
+        assert pending == (
+            "warning",
+            "rate.clock_gap",
+            {"gap_s": 400.0, "current_rps": CEILING_RPS},
+        )
+
+    def test_smooth_latch_pending_tuple_level_slot_is_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kills the latch ``"warning" → "XXwarningXX"`` level-slot mutant.
+
+        The tuple is pinned BYTE-EXACT — including the full fields dict — so
+        every field KEY mutant dies too (the full-run survivor 183 was the
+        ``"scan_seconds"`` key XX-wrapped: the old loose per-field asserts
+        never read that key — DEC-MUTATION-RUNTIME-003 fixer round).
+        """
+        captured: list[tuple[str, str, dict[str, object]]] = []
+
+        def _capture(*events: tuple[str, str, dict[str, object]] | None) -> None:
+            captured.extend(e for e in events if e is not None)
+
+        monkeypatch.setattr(rate_common, "_flush_rate_logs", _capture)
+        ctl, clock, _slept = _adaptive(ceiling_rps=8.0)
+        _seed_burst(ctl, second=int(clock.t), count=9)  # 9 > 8.0 — burst evidence
+        ctl.on_rate_limit()  # latches → latch_evt rides the same flush
+        latch = [e for e in captured if e[1] == "rate.smooth_pacing_latched"]
+        assert latch == [
+            (
+                "warning",
+                "rate.smooth_pacing_latched",
+                {
+                    "bucket_counts": [0, 0, 9],  # trailing 3 s, oldest → newest
+                    "current_rps": 8.0,
+                    "scan_seconds": 3,
+                },
+            )
+        ]
+
+    def test_flush_fed_pending_tuples_are_byte_exact_including_levels(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kills the 429/stepdown/timeout/stepup level-slot mutants.
+
+        Mirrors the T2 deferred-emit golden's scenario but captures the RAW
+        (level, event, fields) tuples before dispatch, so the level slot of
+        EVERY flush-fed emission site is pinned byte-exact — including the
+        ``"info"`` stepup slot, whose mutation WOULD flip the emitted level
+        yet was never level-pinned (the existing goldens drop ``log_level``).
+        """
+        captured: list[tuple[str, str, dict[str, object]]] = []
+
+        def _capture(*events: tuple[str, str, dict[str, object]] | None) -> None:
+            captured.extend(e for e in events if e is not None)
+
+        monkeypatch.setattr(rate_common, "_flush_rate_logs", _capture)
+        clock = _Clock()
+        ctl = _controller(clock)
+        for _ in range(STEP_DOWN_HITS):  # 429 burst at one instant → 5→4
+            ctl.on_rate_limit()
+        for _ in range(STEP_DOWN_TIMEOUT_HITS):  # timeout storm → 4→3
+            ctl.on_timeout()
+        clock.advance(STEP_UP_WINDOW)  # one clean recovery window
+        ctl.on_success()  # → 3→4 (rate.stepup, the one "info" site)
+        expected: list[tuple[str, str, dict[str, object]]] = [
+            ("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 1}),
+            ("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 2}),
+            ("warning", "rate.429", {"current_rps": 5.0, "recent_hits": 3}),
+            (
+                "warning",
+                "rate.stepdown",
+                {"from_rps": 5.0, "to_rps": 4.0, "floor_rps": FLOOR_RPS},
+            ),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 1}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 2}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 3}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 4}),
+            ("warning", "rate.timeout", {"current_rps": 4.0, "recent_timeouts": 5}),
+            (
+                "warning",
+                "rate.stepdown",
+                {
+                    "from_rps": 4.0,
+                    "to_rps": 3.0,
+                    "floor_rps": TIMEOUT_FLOOR_RPS,
+                    "cause": "timeout",
+                },
+            ),
+            (
+                "info",
+                "rate.stepup",
+                {"from_rps": 3.0, "to_rps": 4.0, "ceiling_rps": CEILING_RPS},
+            ),
+        ]
+        assert captured == expected
+
+
+class _RaisingClock:
+    """A clock that reads normally until :meth:`arm`, then always raises.
+
+    The sanctioned injected-clock seam (``RateController(clock=...)``) used to
+    FORCE the in-lock exception path: ``now = self._clock()`` is the first
+    in-lock statement of ``pace``'s two gates and of every ``on_*`` method, so
+    once armed the raise fires with every pending-log slot still at its
+    ``None`` initializer — the exception-safety path those initializers exist
+    for. Construction stays benign (``RateController.__init__`` itself reads
+    the clock to seed ``_last_step`` and friends).
+    """
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+        self.armed = False
+
+    def __call__(self) -> float:
+        if self.armed:
+            raise RuntimeError("forced in-lock failure")
+        return self.t
+
+    def arm(self) -> None:
+        self.armed = True
+
+
+class TestInLockExceptionSlotSafety:
+    """The documented ``_flush_rate_logs`` exception-safety contract, forced.
+
+    DEC-MUTATION-RUNTIME-003 fixer round 3 (F2): the ``_PendingLogSlot``
+    ``None`` initializers on the unconditionally-overwritten slots are LIVE on
+    the in-lock-exception path — each method's ``finally`` reads them — and
+    that path is forceable through the injected-clock seam (or, for
+    ``_maybe_log_snapshot``, whose clock read sits OUTSIDE the try, a raising
+    ``_handle_clock_gap_locked``). Each test pins: (a) the injected error
+    propagates UNMASKED (an ``= ""`` initializer mutant instead crashes the
+    finally's flush — ``"" is not None`` passes the guard and the 3-tuple
+    unpack raises ValueError, replacing the RuntimeError); (b) the lock is
+    provably released; (c) NO partial rate.* event is emitted. This suite is
+    what licenses dropping the 9 line-scoped slot pragmas — the ``""`` mutants
+    are now suite-killed, not argued equivalent.
+    """
+
+    @staticmethod
+    def _assert_lock_released(ctl: RateController) -> None:
+        assert ctl._lock.acquire(blocking=False), "controller lock leaked"
+        ctl._lock.release()
+
+    def _assert_propagates_clean(self, ctl: RateController, call: Callable[[], None]) -> None:
+        with (
+            capture_logs() as logs,
+            pytest.raises(RuntimeError, match="forced in-lock failure"),
+        ):
+            call()
+        assert logs == []  # no partial event emitted from initializer slots
+        self._assert_lock_released(ctl)
+
+    @staticmethod
+    def _armed_controller(
+        *, smooth_pacing: bool = False, ceiling_per_min: int | None = None
+    ) -> RateController:
+        clock = _RaisingClock()
+        ctl = RateController(
+            clock=clock,
+            sleep=lambda _s: None,
+            smooth_pacing=smooth_pacing,
+            ceiling_per_min=ceiling_per_min,
+        )
+        clock.arm()
+        return ctl
+
+    def test_on_rate_limit_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the ``gap_evt``/``hit_evt``/``latch_evt`` ``None → ""`` mutants."""
+        ctl = self._armed_controller()
+        self._assert_propagates_clean(ctl, ctl.on_rate_limit)
+
+    def test_on_timeout_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the ``gap_evt``/``to_evt`` ``None → ""`` mutants."""
+        ctl = self._armed_controller()
+        self._assert_propagates_clean(ctl, ctl.on_timeout)
+
+    def test_on_success_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the ``gap_evt`` ``None → ""`` mutant in ``on_success``."""
+        ctl = self._armed_controller()
+        self._assert_propagates_clean(ctl, ctl.on_success)
+
+    def test_pace_smooth_gate_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the gate-0 ``gap_evt`` ``None → ""`` mutant in ``pace``."""
+        ctl = self._armed_controller(smooth_pacing=True)
+        self._assert_propagates_clean(ctl, ctl.pace)
+
+    def test_pace_governor_gate_in_lock_failure_propagates_unmasked(self) -> None:
+        """Kills the gate-1 ``gov_gap_evt`` ``None → ""`` mutant in ``pace``.
+
+        Smooth pacing stays OFF (the default) so gate 0 is skipped entirely and
+        the FIRST clock read is gate 1's — the raise lands with ``gov_gap_evt``
+        at its initializer.
+        """
+        ctl = self._armed_controller(ceiling_per_min=500)
+        self._assert_propagates_clean(ctl, ctl.pace)
+
+    def test_snapshot_log_in_lock_failure_propagates_unmasked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kills the ``gap_evt`` ``None → ""`` mutant in ``_maybe_log_snapshot``.
+
+        Its ``now = self._clock()`` read sits OUTSIDE the try, so the in-lock
+        exception is forced one statement deeper: the first in-lock statement
+        is ``self._handle_clock_gap_locked(now)`` — patched to raise.
+        """
+        ctl = _controller(_Clock())
+
+        def _raise(now: float) -> tuple[str, str, dict[str, object]] | None:
+            raise RuntimeError("forced in-lock failure")
+
+        monkeypatch.setattr(ctl, "_handle_clock_gap_locked", _raise)
+        self._assert_propagates_clean(ctl, ctl._maybe_log_snapshot)

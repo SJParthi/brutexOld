@@ -99,19 +99,29 @@ pub fn bitcount_u64s(data: Vec<u64>) -> u64 {
 /// (the Stage 1B caller must ensure mask shapes align).
 #[pyfunction]
 pub fn bitand_count_u64s(a: Vec<u64>, b: Vec<u64>) -> PyResult<u64> {
+    bitand_count_checked(&a, &b).map_err(PyValueError::new_err)
+}
+
+/// Pure-Rust core of [`bitand_count_u64s`] — `Result<_, String>` (NO `PyErr`)
+/// so the `#[cfg(test)]` suite can exercise the AND-popcount loop AND the
+/// length-mismatch reject WITHOUT referencing Python C-API symbols under the
+/// no-libpython `extension-module` `cargo test` link (the same split as
+/// [`add_u64_checked`] / [`count_supermasks_scoped`]; DEC-MUTATION-RUNTIME-003
+/// — extracted so the `&`-vs-`|`/`^` and `!=`-vs-`==` cargo-mutants classes
+/// are killable by in-file tests). The `#[pyfunction]` wrapper maps the error
+/// to a `ValueError`, byte-identical message.
+fn bitand_count_checked(a: &[u64], b: &[u64]) -> Result<u64, String> {
     if a.len() != b.len() {
-        return Err(PyValueError::new_err(format!(
+        return Err(format!(
             "bitand_count_u64s: length mismatch — a={}, b={}",
             a.len(),
             b.len(),
-        )));
+        ));
     }
-    let total: u64 = a
-        .iter()
+    Ok(a.iter()
         .zip(b.iter())
         .map(|(x, y)| u64::from((x & y).count_ones()))
-        .sum();
-    Ok(total)
+        .sum())
 }
 
 /// Return the 32-byte blake3 hash of ``data`` as bytes.
@@ -226,7 +236,10 @@ const PARALLEL_WORK_THRESHOLD: u64 = 1 << 20;
 #[inline]
 fn count_supermasks_dispatch(bars: &[u64], masks: &[u64]) -> Vec<u64> {
     let work = (masks.len() as u64).saturating_mul(bars.len() as u64);
-    if work < PARALLEL_WORK_THRESHOLD {
+    // Dispatch via the COMMON crate predicate (DEC-MUTATION-RUNTIME-003):
+    // both arms are output-identical by design, so the boundary itself is
+    // gated by `dispatch_tests::parallel_dispatch_boundary_is_exclusive`.
+    if crate::below_parallel_threshold(work, PARALLEL_WORK_THRESHOLD) {
         masks.iter().map(|&m| count_one(bars, m)).collect()
     } else {
         masks.par_iter().map(|&m| count_one(bars, m)).collect()
@@ -477,8 +490,9 @@ pub fn popcount_bytes(data: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        PARALLEL_WORK_THRESHOLD, ResidentBars, add_u64_checked, count_one, count_supermask_u64s,
-        count_supermasks_dispatch, count_supermasks_scoped,
+        PARALLEL_WORK_THRESHOLD, ResidentBars, add_u64_checked, bitand_count_checked,
+        bitcount_u64s, count_one, count_supermask_u64s, count_supermasks_dispatch,
+        count_supermasks_scoped, count_supermasks_u64s, popcount_bytes,
     };
 
     // ── add_u64_checked (R2-RC-F1 overflow guard at the FFI edge) ──
@@ -894,5 +908,49 @@ mod tests {
             rb.count_supermasks(masks.clone()),
             count_supermasks_dispatch(&bars, &masks)
         );
+    }
+
+    // ── DEC-MUTATION-RUNTIME-003 cargo-mutants survivor kills ──
+    // Exact-value pins on the GIL-free `#[pyfunction]` bodies (plain
+    // Vec<u64>/&[u8] args — callable without an interpreter). Each test names
+    // the mutant class it kills.
+
+    #[test]
+    fn bitcount_u64s_counts_across_words() {
+        // ≥2 result distinguishes the 0|1 fn-replacement mutants (3 + 1 = 4).
+        assert_eq!(bitcount_u64s(vec![0b1011, 0b1]), 4);
+    }
+
+    #[test]
+    fn bitand_count_matches_hand_popcount_and_rejects_mismatch() {
+        // & vs | vs ^ separate on (0b1100, 0b1010): 1 vs 3 vs 2;
+        // equal-length must SUCCEED and mismatch must ERR (kills != -> ==).
+        // Calls the pure `bitand_count_checked` core (the `#[pyfunction]`
+        // wrapper only adds `map_err` — no-libpython link constraint).
+        assert_eq!(
+            bitand_count_checked(&[0b1100], &[0b1010]).expect("equal lengths must pass"),
+            1
+        );
+        let err = bitand_count_checked(&[1], &[1, 2]).unwrap_err();
+        assert!(err.contains("length mismatch"), "{err}");
+    }
+
+    #[test]
+    fn count_supermasks_u64s_positional_counts() {
+        // len-2 output with values {2, 1} kills the vec![]/vec![0]/vec![1]
+        // whole-fn replacement mutants on the pyfunction wrapper.
+        assert_eq!(
+            count_supermasks_u64s(vec![0b11, 0b01, 0b10], vec![0b01, 0b11]),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn popcount_bytes_sums_body_and_tail() {
+        // ≥2 result kills the 0|1 replacements.
+        assert_eq!(popcount_bytes(&[0xFF, 0x01, 0x00]), 9);
+        // body=8 (one exact chunk of 0x01×8), tail=2 (0x03):
+        // sum 10 vs `-`→6 vs `*`→16 — kills the body/tail `+` flips.
+        assert_eq!(popcount_bytes(&[1, 1, 1, 1, 1, 1, 1, 1, 3]), 10);
     }
 }
