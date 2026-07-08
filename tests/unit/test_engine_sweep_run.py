@@ -125,7 +125,7 @@ def _dedup() -> ComboDedup:
 #
 # The wired sweep batch-simulates via `sweep_run.ResidentTradeSim`; failure
 # injection therefore targets (a) the batch call (a subclass whose
-# `simulate_masks` raises — the chunk-failure seam), (b) the construction
+# `simulate_masks_with_exit_indices` raises — the chunk-failure seam), (b) the construction
 # (`__init__` raises), and (c) the per-mask metrics tail
 # (`sweep_run.metrics_from_trades`). The per-mask ORACLE seam
 # (`sweep_run.metrics_for_mask`) is now exercised by the chunk-failure
@@ -152,14 +152,14 @@ def _chunk_raising_sim(exc_factory: Callable[[], BaseException]) -> type[Residen
     """A ResidentTradeSim subclass whose BATCH call raises — chunk-failure injection."""
 
     class _RaisingSim(ResidentTradeSim):
-        def simulate_masks(self, *args: object, **kwargs: object) -> NoReturn:
+        def simulate_masks_with_exit_indices(self, *args: object, **kwargs: object) -> NoReturn:
             raise exc_factory()
 
     return _RaisingSim
 
 
 class _ShortChunkSim(ResidentTradeSim):
-    """A sim that RETURNS one fewer trade list than masks — batch-contract violation.
+    """A sim that RETURNS one fewer pair than masks — batch-contract violation.
 
     The kernel-misbehaviour shape that RETURNS wrong instead of RAISING (a PyO3
     marshalling bug, a kernel bug): unreachable from the real kernel (Rust
@@ -169,8 +169,10 @@ class _ShortChunkSim(ResidentTradeSim):
     ``ValueError`` escaping ``run_persisted_sweep`` as a grid-wide abort.
     """
 
-    def simulate_masks(self, masks: Sequence[int], **kwargs: Any) -> list[list[ClosedTrade]]:
-        return super().simulate_masks(masks, **kwargs)[:-1]
+    def simulate_masks_with_exit_indices(
+        self, masks: Sequence[int], **kwargs: Any
+    ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
+        return super().simulate_masks_with_exit_indices(masks, **kwargs)[:-1]
 
 
 def _ctor_raising_sim(exc_factory: Callable[[], BaseException]) -> type[object]:
@@ -2407,7 +2409,7 @@ class TestChunkLengthContract:
         msg = str(excinfo.value)
         # The SweepComboError names the CHUNK + carries the length ValueError.
         assert "trade-sim chunk of 5 masks" in msg
-        assert "returned 4 trade lists for a chunk of 5 masks" in msg
+        assert "returned 4 trade/exit-index pairs for a chunk of 5 masks" in msg
         assert "batch-contract violation" in msg
         assert "every mask passed the per-mask Python-oracle re-run" in msg
         assert isinstance(excinfo.value.__cause__, ValueError)
@@ -2472,29 +2474,36 @@ class TestMetricsTailFailure:
 
 
 class TestU128EnvelopeThroughSweep:
-    """A bit ≥ 64 anywhere routes to the Python oracle — byte-equal, never OverflowError.
+    """Wide (>64-bit, ≤ u128) words are RUST-served through the whole sweep.
 
-    `iter_masks_k_of_bits` accepts bits up to 127 (MAX_VOCAB_BITS = 128) and the
-    kernel is u64-native, so BOTH FFI seams (ctor bar_bits + per-call masks) must
-    guard — mirroring `combo_mask.count_supermasks`'s dual check.
+    DEC-TRADE-SIM-U128-KERNEL-001: `iter_masks_k_of_bits` accepts bits up to
+    127 (MAX_VOCAB_BITS = 128) and the seam now width-dispatches onto the u128
+    sibling kernel — the old whole-chunk oracle degrade for a wide mask is
+    GONE, byte-equality with the forced-Python run preserved. Only a word
+    beyond even the u128 envelope still routes to the oracle (never a PyO3
+    OverflowError).
     """
 
-    def test_u128_mask_sweep_equals_forced_fallback(
+    def test_u128_mask_sweep_rust_served_equals_forced_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Bit 0 FIRES on `_trending_bars` (the default-config masks produce real
-        # trades), bits 64/65 never do — so ONE u128 mask in the batch routes
-        # the WHOLE chunk (incl. the firing mask 0b1) to the oracle, and the
-        # byte-equality below compares stores with REAL trade rows, never two
-        # degenerate zero-trade stores (the vacuous-equality trap).
+        # trades), bits 64/65 never do — the wide masks now PROMOTE the batch
+        # to the u128 kernel (no call fallback), and the byte-equality below
+        # compares stores with REAL trade rows, never two degenerate
+        # zero-trade stores (the vacuous-equality trap).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
-        # The per-CALL guard routed the batch to the oracle, loudly.
+        # NOT a fallback any more: the wide sibling kernel was promoted once.
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
-        assert len(fallbacks) == 1
-        assert fallbacks[0]["reason"] == "mask_u128"
+        assert fallbacks == []
+        promotions = [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
+        assert len(promotions) == 1
+        # The sweep-level path signal reads RUST for the wide-mask tuple.
+        paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert paths[0]["rust_active"] is True
         # Non-vacuous: the ranking gate drops the two zero-trade u128-bit
         # masks, so EXACTLY the firing mask 0b1 persists — the byte-equality
         # below compares stores carrying a real trade-bearing row, never two
@@ -2519,20 +2528,43 @@ class TestU128EnvelopeThroughSweep:
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
 
-    def test_u128_bar_bits_fall_back_at_construction(
+    def test_u128_bar_bits_rust_served_at_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # A wide bar_bits word now builds the u128 kernel at CONSTRUCTION —
+        # rust_active True for the wide window (the item-4 plan's sweep-level
+        # pin) — and the results stay byte-equal to the forced-Python run.
         bars = _trending_bars()
         kernel = ResidentSweepKernel(bars)
         kernel.bar_bits[0] |= 1 << 100  # the documented u128 headroom, in-place
         cfg = _make_config(min_hits=0)
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg, kernel=kernel)
-        # The CONSTRUCTION guard tripped (whole-object fallback), loudly …
+        # No construction fallback …
+        fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.fallback"]
+        assert fallbacks == []
+        # … and the sweep-level path signal reads RUST for the wide window.
+        paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
+        assert paths[0]["rust_active"] is True
+        monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
+        fallback = _run_sweep(tmp_path, "f", bars, cfg, kernel=kernel)
+        assert wired.store_content_hash == fallback.store_content_hash
+        assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
+
+    def test_beyond_u128_bar_bits_fall_back_at_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Beyond even the u128 envelope the fallback law is unchanged: whole-
+        # object oracle, loud, byte-equal — never a PyO3 OverflowError.
+        bars = _trending_bars()
+        kernel = ResidentSweepKernel(bars)
+        kernel.bar_bits[0] |= 1 << 130  # beyond MAX_VOCAB_BITS = 128
+        cfg = _make_config(min_hits=0)
+        with capture_logs() as logs:
+            wired = _run_sweep(tmp_path, "w", bars, cfg, kernel=kernel)
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.fallback"]
         assert len(fallbacks) == 1
-        assert fallbacks[0]["reason"] == "bar_bits_u128"
-        # … and the sweep-level path signal reads Python.
+        assert fallbacks[0]["reason"] == "bar_bits_beyond_u128"
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is False
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)

@@ -62,7 +62,10 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from brutex.data.greeks_enrich import GreeksEnrichTarget
 
 from brutex import __version__
 from brutex.config.hardware_envelope import apply_polars_thread_bound
@@ -806,6 +809,46 @@ def build_parser() -> argparse.ArgumentParser:
             "Telegram alert (never per window). Give-ups + the alert are stamped as "
             "hash-chained audit rows under <lake>/audit/. Omit to disable (default)."
         ),
+    )
+
+    # ── enrich-greeks (DEC-CLI-GREEKS-ENRICH-001) — bulk Greeks re-enrich ──
+    enrich = sub.add_parser(
+        "enrich-greeks",
+        help=(
+            "Bulk (re-)enrich stored F&O option candles with Greeks "
+            "(stamp-driven, idempotent — the #1188 bulk re-enrich)"
+        ),
+    )
+    enrich.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    enrich.add_argument(
+        "--underlying",
+        action="append",
+        default=None,
+        help=(
+            "Bare underlying token, repeatable (NIFTY, BAJAJ-AUTO); "
+            "matching is exact + case-sensitive; "
+            "default: every stored option underlying"
+        ),
+    )
+    enrich.add_argument(
+        "--start",
+        default=None,
+        help="IST window start YYYY-MM-DD (inclusive; default: all stored months)",
+    )
+    enrich.add_argument(
+        "--end",
+        default=None,
+        help="IST window end YYYY-MM-DD (INCLUSIVE; widened +1 day internally)",
+    )
+    enrich.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print discovery counts only; enrich nothing, take no lock",
     )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
@@ -3705,6 +3748,122 @@ def _publish_cli_pull_inactive(lake_root: Path, controller: Any, adapter: Any) -
         )
 
 
+def _next_day_saturating(day: date) -> date:
+    """Widen an inclusive end date to its half-open ``+1 day`` boundary, saturating.
+
+    ``date.max + timedelta(days=1)`` raises :class:`OverflowError`; the fetch
+    seam widens AFTER the pull completed, and its outcome must never be
+    replaced by a widening crash ("an enrich error NEVER fails the pull" —
+    DEC-CLI-GREEKS-ENRICH-001, review round-1 fix). Saturating at
+    ``date.max`` loses nothing: the widened value only clamps lake
+    discovery, and the canonical partition window ends at
+    ``MAX_PARTITION_YEAR`` (2100) — no stored bar can sit ON ``9999-12-31``
+    for the exclusive end to drop.
+
+    Parameters
+    ----------
+    day
+        The inclusive end date to widen.
+
+    Returns
+    -------
+    datetime.date
+        ``day + 1 day`` — or ``date.max`` unchanged when no later date exists.
+    """
+    if day == date.max:
+        return date.max
+    return day + timedelta(days=1)
+
+
+def _run_cli_greeks_enrich(
+    *, lake_root: Path, instruments: Sequence[Any], start: date, end: date
+) -> Any:  # -> GreeksEnrichOutcome
+    """Post-fetch Greeks enrich over the pulled-underlyings × pulled-window slice.
+
+    The CLI twin of the dashboard's post-drain enrich seam
+    (``historical_pull.pull_contract_candles``) via the COMMON
+    :func:`~brutex.data.greeks_enrich_pass.run_greeks_enrich_pass`
+    (DEC-CLI-GREEKS-ENRICH-001). Best-effort: a fenced failure never fails the
+    pull; a pull-wide halt (:class:`~brutex.data.errors.LakeWriteHalt` /
+    :class:`~brutex.data.errors.GreeksEnrichPoolBroken`) fires the CRITICAL
+    Telegram alert then re-raises (the ``_one_fetch_pass`` halt pattern). A
+    lake with no option candles skips in O(exchange dirs) with one DEBUG event
+    — no wheel import, no rate resolution, no prints (the dominant pure-spot
+    CLI case).
+
+    Parameters
+    ----------
+    lake_root
+        The resolved production lake root (targets + driver reads/writes).
+    instruments
+        The pulled instruments — their
+        :func:`~brutex.dashboard.gated_prebuild.underlying_match_tokens`
+        union scopes lake discovery to the pulled underlyings.
+    start
+        Half-open enrichment window start (the pulled start date, IST).
+    end
+        Half-open enrichment window end (exclusive — the pulled end + 1 day).
+
+    Returns
+    -------
+    Any
+        The pass's ``GreeksEnrichOutcome`` (``GREEKS_NOT_RUN`` on the
+        no-option-candles pre-gate skip).
+
+    Raises
+    ------
+    LakeWriteHalt
+        Re-raised after the halt alert — a pull-wide host condition.
+    GreeksEnrichPoolBroken
+        Re-raised after the halt alert — the parallel pool died.
+    """
+    import structlog
+
+    from brutex.data.greeks_enrich_pass import (
+        CLI_GREEKS_ENRICH_ENV,
+        GREEKS_NOT_RUN,
+        has_option_candles,
+        lake_target_builder,
+        run_greeks_enrich_pass,
+    )
+
+    if not has_option_candles(lake_root):
+        structlog.get_logger("brutex.cli").debug(
+            "cli.greeks_enrich.skipped_no_options", lake_root=str(lake_root)
+        )
+        return GREEKS_NOT_RUN
+
+    from brutex.dashboard.gated_prebuild import underlying_match_tokens
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+
+    tokens = frozenset[str]().union(*(underlying_match_tokens(i) for i in instruments))
+    print(
+        f"[brutex] greeks enrich — post-pull pass ({CLI_GREEKS_ENRICH_ENV}=0 skips)",
+        file=sys.stderr,
+    )
+    try:
+        outcome = run_greeks_enrich_pass(
+            build_targets=lake_target_builder(lake_root, underlyings=tokens, start=start, end=end),
+            lake_root=lake_root,
+        )
+    except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+        # Pull-wide HOST condition mid-enrich: CRITICAL alert then re-raise —
+        # exactly the _one_fetch_pass halt convention. emit_pull_halt_alert
+        # renders GreeksEnrichPoolBroken via its generic type-name branch —
+        # zero notifier changes (DEC-CLI-GREEKS-ENRICH-001).
+        _emit_pull_halt_alert(exc)
+        raise
+    if outcome.ok:
+        print(f"[brutex] greeks enrich — done, errored_targets={outcome.errored_targets}")
+    else:
+        print(
+            f"[brutex] greeks enrich FAILED ({outcome.error}) — overlay re-attempted "
+            "on the next pull / `brutex enrich-greeks`",
+            file=sys.stderr,
+        )
+    return outcome
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -3844,6 +4003,14 @@ def cmd_fetch(
     resolved = _resolve_lake_root(lake_root)
     try:
         intervals = _resolve_fetch_intervals(interval)
+        # Fail-loud env gate for the post-pull Greeks stage
+        # (DEC-CLI-GREEKS-ENRICH-001): resolved HERE — before any vendor work —
+        # so a junk BRUTEX_CLI_GREEKS_ENRICH value exits EXIT_USER_ERROR without
+        # burning a paced pull (the DEC-RAM-BUDGETS-001 fail-loud env
+        # convention; greeks_enrich_pass is wheel-free at import).
+        from brutex.data.greeks_enrich_pass import resolve_cli_greeks_enrich
+
+        greeks_enrich_enabled = resolve_cli_greeks_enrich()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -4320,8 +4487,10 @@ def cmd_fetch(
                 # LakeWriteHalt fires the CRITICAL pull-halt Telegram alert HERE
                 # (DEC-TELEGRAM-PULL-HALT-001) then RE-RAISES — non-zero exit via
                 # main's raw propagation, byte-identical to an ingest halt. The CLI
-                # runs NO Greeks enrichment and NO prebuild (#1145/#1188), so
-                # post-drain IS "before every downstream derivation" on this path.
+                # runs NO prebuild (#1145); its ONE downstream derivation — the
+                # post-pull Greeks enrichment (DEC-CLI-GREEKS-ENRICH-001) — runs
+                # AFTER this heal, below the `finally`, so the dashboard's
+                # heal-L2-BEFORE-Greeks-enrich ordering law holds on this path too.
                 # HONEST: the scan is O(files) over pulled-targets x span-months,
                 # NOT O(1) (MIGRATION.md #1175).
                 if fetch_ok and not _no_persist:
@@ -4348,6 +4517,28 @@ def cmd_fetch(
                 # is already exiting and its real outcome must never be masked. A None
                 # controller (--dry-run / --inspect) is a no-op.
                 _publish_cli_pull_inactive(resolved, rate_controller, adapter)
+            # ── Post-pull Greeks enrichment (DEC-CLI-GREEKS-ENRICH-001, the #1188 CLI
+            # follow-up) ── Seam A: fetch lane fully drained, L2 lake heal already run
+            # (the `finally` above — DEC-CLI-LAKE-HEAL-L2-001; the dashboard's
+            # heal-BEFORE-enrich ordering law), ledger persisted (settle-after-durable
+            # holds), single-flight lock still HELD (no concurrent dashboard pull can
+            # start mid-enrich), keep_awake still active. Targets come
+            # from the LAKE (the CLI pull is spot-only — no in-memory contract list),
+            # bounded to the pulled underlyings × the pulled [start, end) span.
+            # DELIBERATELY NOT gated on bars_appended > 0: in async-pipeline mode the
+            # per-pair counts are only reconciled AFTER this seam (the
+            # reconcile_pairs_with_pipeline fold below), so any such gate would misread
+            # 0 — running unconditionally is stamp-idempotent-safe.
+            if greeks_enrich_enabled and not _no_persist:
+                _run_cli_greeks_enrich(
+                    lake_root=resolved,
+                    instruments=fetch_instruments,
+                    start=start_dt.date(),
+                    # Inclusive pull end → half-open, SATURATING at date.max so a
+                    # degenerate `--end 9999-12-31` pull can never crash the seam
+                    # after the pull completed (review round-1 fix).
+                    end=_next_day_saturating(end_dt.date()),
+                )
     # Fold the async pipeline's post-drain per-series totals back into the deferred per-pair
     # reports (DEC-GROWW-FETCH-ASYNC-SEPARATION-001 completion-count fix): in async-pipeline
     # mode the producer returned `bars_appended == 0` per series (the durable append + ledger
@@ -4397,6 +4588,193 @@ def cmd_fetch(
     if report.failed_pairs > 0 or residual > 0:
         return EXIT_INTERNAL_ERROR
     return EXIT_OK
+
+
+def cmd_enrich_greeks(
+    lake_root: Path | None,
+    *,
+    underlying: list[str] | None,
+    start: str | None,
+    end: str | None,
+    dry_run: bool,
+) -> int:
+    """Bulk (re-)enrich stored option contracts with Greeks — the #1188 follow-up.
+
+    Discovery =
+    :func:`~brutex.data.greeks_enrich_pass.discover_option_windows` over the
+    WHOLE lake (or the ``--underlying`` / ``--start``/``--end`` slice; dates
+    INCLUSIVE at the CLI, the end widened ``+1 day`` internally to the
+    half-open window). ``--dry-run`` prints discovery counts only — wheel-free,
+    zero writes, zero locks, zero ``fno.greeks_enrich.*`` events. Live: takes
+    the cross-process pull single-flight lock (deterministic refusal under a
+    peer pull), runs the COMMON fenced pass under ``keep_awake``, and alerts +
+    re-raises halts (the ``_one_fetch_pass`` pattern). The clean-done summary
+    echoes ``contracts=N`` (the fenced build's ACTUAL target count — captured
+    by wrapping the builder, never a second discovery walk; the ``?`` leg is
+    a DEFENSIVE belt only — with the real pass, ``ok=True`` implies the build
+    already ran, and a pre-build failure reads ``ok=False`` → the FAILED
+    branch, so ``?`` is production-unreachable and guards a future
+    pass-contract change, never fabricating a 0), and an explicit ``--underlying``
+    that matched ZERO stored option contracts prints a loud stderr WARNING
+    naming the tokens — matching is exact + case-sensitive, so ``nifty``
+    never matches stored ``NIFTY`` (review round-4 fix, the one-level-down
+    sibling of the typo'd ``--lake-root`` guard). Exit: :data:`EXIT_OK`
+    iff ``ok is True`` AND ``errored_targets == 0``; :data:`EXIT_INTERNAL_ERROR`
+    otherwise (the ``lake audit-unique`` cron-visible precedent — a DELIBERATE,
+    documented divergence from the never-fail ``fetch`` pull path).
+
+    Parameters
+    ----------
+    lake_root
+        ``--lake-root`` override; ``None`` resolves via ``$BRUTEX_LAKE_ROOT``
+        → ``~/.brutex/lake``.
+    underlying
+        Repeatable bare underlying tokens (``NIFTY``, ``BAJAJ-AUTO``);
+        ``None`` = every stored option underlying.
+    start
+        Optional inclusive IST window start, ``YYYY-MM-DD``.
+    end
+        Optional INCLUSIVE IST window end, ``YYYY-MM-DD`` (``+1 day``
+        internally; ``9999-12-31`` = ``date.max`` is refused as a clean
+        user error — the widening would overflow, review round-1 fix).
+    dry_run
+        Discovery-only counts; enrich nothing, take no lock.
+
+    Returns
+    -------
+    int
+        Process exit code (see above).
+
+    Raises
+    ------
+    CliUserError
+        If the resolved lake root is not an existing directory — the
+        DEC-CLI-USER-ERROR-HYGIENE-001 read-command guard (a typo'd
+        ``--lake-root`` must never read as a green zero-target run, nor
+        materialise a phantom ``.locks/`` tree; review round-1 fix).
+    """
+    from brutex.data.greeks_enrich_pass import (
+        discover_option_windows,
+        lake_target_builder,
+        run_greeks_enrich_pass,
+    )
+
+    resolved = _resolve_lake_root(lake_root)
+    # Refuse a nonexistent lake root LOUDLY (dry-run included): enrich-greeks
+    # READS an existing lake, and a typo'd --lake-root previously exited green
+    # ("errored_targets=0") while the live path even materialised the phantom
+    # lake's .locks/ dir — the exact silent-illusion class _require_lake_dir
+    # exists to prevent (review round-1 fix, DEC-CLI-USER-ERROR-HYGIENE-001).
+    _require_lake_dir(resolved, command="enrich-greeks")
+    try:
+        start_d = date.fromisoformat(start) if start else None
+        end_given = date.fromisoformat(end) if end else None
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if start_d is not None and end_given is not None and start_d > end_given:
+        print(
+            f"[brutex] --start {start_d} is after --end {end_given}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    if end_given is not None and end_given == date.max:
+        # date.max is the ONE valid ISO date the +1-day widening below cannot
+        # represent (OverflowError) — refuse it as cleanly as every other
+        # malformed date instead of a raw traceback (review round-1 fix).
+        print(
+            f"[brutex] --end {end_given.isoformat()} is out of range: the "
+            "inclusive end is widened +1 day internally and no later date "
+            "exists — pass a real trading date",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    end_d = end_given + timedelta(days=1) if end_given is not None else None
+    tokens = frozenset(underlying) if underlying else None
+    span = f"[{start_d.isoformat() if start_d else 'lake-start'} → " + (
+        f"{end_d.isoformat()})" if end_d else "lake-end)"
+    )
+
+    if dry_run:
+        try:
+            windows = discover_option_windows(
+                resolved, underlyings=tokens, start=start_d, end=end_d
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            print(f"[brutex] enrich-greeks --dry-run discovery FAILED: {exc}", file=sys.stderr)
+            return EXIT_INTERNAL_ERROR
+        chains = len({(w.exchange, w.underlying, w.expiry) for w in windows})
+        print(
+            f"[brutex] enrich-greeks --dry-run — contracts={len(windows)} "
+            f"chains={chains} window={span} (nothing enriched)"
+        )
+        return EXIT_OK
+
+    from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
+    from brutex.observability.power_keepawake import keep_awake
+
+    build_targets = lake_target_builder(resolved, underlyings=tokens, start=start_d, end=end_d)
+    # contracts = how many targets the fenced build ACTUALLY put in scope,
+    # captured by wrapping the builder — NEVER a second discovery walk
+    # (discovery is O(option partition dirs); doubling it would be a hidden
+    # cost, Golden Rule #10). -1 = the build never ran. With the REAL pass
+    # this sentinel cannot survive to the clean-done render: ok=True is
+    # returned only AFTER list(build_targets()) completed, and a pre-build
+    # failure reads ok=False → the FAILED branch below. The "?" render is
+    # therefore a DEFENSIVE belt against a future pass-contract change —
+    # a count the pass did not produce is never fabricated as 0.
+    contracts = -1
+
+    def _counting_build() -> Sequence[GreeksEnrichTarget]:
+        """Delegate to the fence-safe builder, capturing the target count."""
+        nonlocal contracts
+        targets = build_targets()
+        contracts = len(targets)
+        return targets
+
+    with contextlib.ExitStack() as stack:
+        if not _enter_pull_singleflight(stack, resolved):
+            return EXIT_USER_ERROR
+        with keep_awake("brutex enrich-greeks"):
+            print(f"[brutex] enrich-greeks — window={span} lake: {resolved}", file=sys.stderr)
+            try:
+                outcome = run_greeks_enrich_pass(
+                    build_targets=_counting_build,
+                    lake_root=resolved,
+                )
+            except (LakeWriteHalt, GreeksEnrichPoolBroken) as exc:
+                # A pull-wide HOST condition (disk full / OOM / a dead pool
+                # worker): CRITICAL alert then re-raise — the _one_fetch_pass
+                # halt convention (DEC-CLI-GREEKS-ENRICH-001).
+                _emit_pull_halt_alert(exc)
+                raise
+    if outcome.ok is True and tokens is not None and contracts == 0:
+        # An explicit --underlying that matched NOTHING must never read as a
+        # silent green run — matching is exact + case-sensitive ("nifty" never
+        # matches stored NIFTY), the one-level-down sibling of the typo'd
+        # --lake-root guard (review round-4 fix, DEC-CLI-GREEKS-ENRICH-001).
+        # Exit code deliberately unchanged: the pass genuinely completed.
+        print(
+            "[brutex] WARNING: --underlying matched ZERO stored option contracts "
+            f"(tokens: {', '.join(sorted(tokens))}) — matching is exact and "
+            "case-sensitive ('NIFTY', not 'nifty'); check the spelling/case or "
+            "run --dry-run to inspect the scope",
+            file=sys.stderr,
+        )
+    if outcome.ok is True and outcome.errored_targets == 0:
+        shown = str(contracts) if contracts >= 0 else "?"
+        print(f"[brutex] enrich-greeks done — contracts={shown} errored_targets=0")
+        return EXIT_OK
+    if outcome.ok is True:
+        print(
+            f"[brutex] enrich-greeks completed with {outcome.errored_targets} quarantined "
+            "target(s) — see the greeks_enrich.target_errored logs; the stamp-driven pass "
+            "is idempotent, re-run after fixing",
+            file=sys.stderr,
+        )
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] enrich-greeks FAILED ({outcome.error})", file=sys.stderr)
+    return EXIT_INTERNAL_ERROR
 
 
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
@@ -5662,9 +6040,10 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     """MANUAL feed-ordering + cursor-invariant recheck over a lake slice.
 
     The hand-trigger counterpart of the barrier that
-    :class:`~brutex.strategies.runner.StrategyRunner` /
-    :class:`~brutex.execution.driver.BacktestDriver` build on every sweep eval
-    (DEC-LOOKAHEAD-BARRIER-001). It loads one ``(symbol, interval)`` window
+    :class:`~brutex.strategies.runner.StrategyRunner` builds on every
+    sweep eval (DEC-LOOKAHEAD-BARRIER-001; the deleted ``BacktestDriver``
+    built the same barrier until DEC-EXECUTION-TRIO-DELETE-001). It loads
+    one ``(symbol, interval)`` window
     from the lake via the SAME ``Catalog`` / ``ReplayFeed`` path the engine
     uses, then walks those bars **forward** through a recording
     :class:`~brutex.feed.lookahead.LookAheadBarrier` — advancing the cursor to
@@ -7062,6 +7441,14 @@ def _dispatch(argv: list[str] | None) -> int:
             until_clean=args.until_clean,
             until_clean_rounds=args.until_clean_rounds,
             max_retry_minutes=args.max_retry_minutes,
+        )
+    if args.command == "enrich-greeks":
+        return cmd_enrich_greeks(
+            args.lake_root,
+            underlying=args.underlying,
+            start=args.start,
+            end=args.end,
+            dry_run=args.dry_run,
         )
     if args.command == "doctor":
         if args.live:

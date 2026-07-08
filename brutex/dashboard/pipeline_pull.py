@@ -71,6 +71,7 @@ A clean run reaches all three and reports ``stopped_after = None``.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -82,6 +83,19 @@ from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
 from brutex.dashboard.movers_warm import MoversWarmResult
 from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
+
+# The verdict dataclass lives in the LEAF brutex.dashboard.pipeline_verdict
+# (DEC-PULL-SIX-STEP-ORDER-001): its consumers (composite_pull/historical_pull)
+# sit BELOW this sequencer in the module import graph, so housing it here made
+# every edge of that chain a module-level import cycle. Imported — and thereby
+# RE-EXPORTED — so existing ``from brutex.dashboard.pipeline_pull import
+# PriorStepsVerdict`` callers (the route wiring + the suites) stay byte-valid.
+# The ``as`` self-alias is the explicit-re-export idiom mypy strict's
+# no-implicit-reexport demands; ruff PLC0414 flags exactly that idiom, hence
+# the per-line noqa (the repo's per-line-noqa-with-rationale house style).
+from brutex.dashboard.pipeline_verdict import (
+    PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
+)
 from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
@@ -129,10 +143,17 @@ def spot_phase_ok(report: BulkSpotReport) -> bool:
     The spot pull may proceed to the metadata phase only when it neither (a) died
     on a dead Groww token mid-pull (``auth_aborted`` — the loud ``auth_expired``
     verdict), (b) paused on the daily vendor quota (``quota_exhausted`` — resume
-    after the IST-midnight reset), nor (c) left any window still failing after the
-    in-run retry budget (``still_failed_windows``). A dry-run with zero bars is NOT
-    a failure (no creds is reported separately); the gate detects FAILURE signals,
-    not absence of work.
+    after the IST-midnight reset), (c) left any window still failing after the
+    in-run retry budget (``still_failed_windows``), nor (d) HALTED on the
+    mass-empty circuit breaker (``mass_empty_cause`` — the needs-operator
+    ``mass_empty_halt`` verdict; DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001). The (d)
+    arm is a DEC-PULL-SIX-STEP-ORDER-001 review fix: the aborted pass never
+    appends, so a mass-empty halt left ``still_failed_windows == 0`` and this
+    gate read a HALTED spot step as clean — the chain proceeded to metadata +
+    F&O vendor calls and, under ``BRUTEX_PIPELINE_STRICT_GATE=1``, the strict
+    all-or-nothing barrier fired the post-steps after a pull-wide halt. A
+    dry-run with zero bars is NOT a failure (no creds is reported separately);
+    the gate detects FAILURE signals, not absence of work.
 
     Parameters
     ----------
@@ -146,7 +167,10 @@ def spot_phase_ok(report: BulkSpotReport) -> bool:
         ``True`` when the phase is clean enough to proceed to metadata.
     """
     return (
-        not report.auth_aborted and not report.quota_exhausted and report.still_failed_windows == 0
+        not report.auth_aborted
+        and not report.quota_exhausted
+        and report.still_failed_windows == 0
+        and report.mass_empty_cause is None
     )
 
 
@@ -200,8 +224,11 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
       when there was no tradable contract to pull — a dry-run / all-reference-only
       selection — a zero-call no-op, NOT a failure) is clean only when it neither
       died on auth (``auth_aborted``), left any window failing
-      (``still_failed_windows``), nor quarantined any contract pair on a terminal
-      error (``failed_pairs``).
+      (``still_failed_windows``), quarantined any contract pair on a terminal
+      error (``failed_pairs``), nor HALTED on the F&O mass-empty circuit breaker
+      (``mass_empty_cause`` — the DEC-PULL-SIX-STEP-ORDER-001 review fix, the
+      symmetric twin of the :func:`spot_phase_ok` (d) arm: a halted phase must
+      never read settled to the post-step barrier).
 
     Parameters
     ----------
@@ -220,7 +247,108 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
     hist = report.historical
     if hist is None:
         return True
-    return not hist.auth_aborted and hist.still_failed_windows == 0 and hist.failed_pairs == 0
+    return (
+        not hist.auth_aborted
+        and hist.still_failed_windows == 0
+        and hist.failed_pairs == 0
+        and hist.mass_empty_cause is None
+    )
+
+
+#: The strict post-step barrier's opt-in env knob (DEC-PULL-SIX-STEP-ORDER-001).
+#: Unset / blank / ``"0"`` ⇒ the cleanset default; ``"1"`` ⇒ the literal
+#: all-or-nothing barrier; anything else ⇒ ``ValueError`` (fail-LOUD — a broken
+#: knob must never silently fall back, the ``hardware_envelope`` env convention).
+STRICT_GATE_ENV: Final[str] = "BRUTEX_PIPELINE_STRICT_GATE"
+
+
+def strict_gate_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Parse the :data:`STRICT_GATE_ENV` strict post-step gate knob — fail-loud.
+
+    DEC-PULL-SIX-STEP-ORDER-001: resolved ONCE, eagerly, at pipeline LAUNCH
+    (``_launch_pipeline`` wraps this in its validation ``try`` so garbage is a
+    clean 400 at launch, never a mid-pull 500). Unset / blank / ``"0"`` return
+    ``False`` (the DEC-PREBUILD-CLEANSET-001 cleanset default, byte-identical);
+    ``"1"`` returns ``True``; any other value raises ``ValueError`` — a broken
+    knob must never silently fall back (Golden Rule #1).
+
+    Parameters
+    ----------
+    env
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+
+    Returns
+    -------
+    bool
+        Whether the strict all-or-nothing post-step barrier is enabled.
+
+    Raises
+    ------
+    ValueError
+        When the variable holds anything other than ``""``/``"0"``/``"1"``.
+    """
+    source = os.environ if env is None else env
+    raw = source.get(STRICT_GATE_ENV, "").strip()
+    if raw in ("", "0"):
+        return False
+    if raw == "1":
+        return True
+    raise ValueError(f"{STRICT_GATE_ENV} must be unset, '', '0' or '1'; got {raw!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class StepSettleVerdict:
+    """The pure post-step barrier verdict (DEC-PULL-SIX-STEP-ORDER-001).
+
+    Attributes
+    ----------
+    settled
+        Every applicable step settled (all three phase gates passed) — the
+        CLEANSET barrier. Settle-based, never a ``bars > 0`` gate: a 0-bar
+        EMPTY / session-filtered / far-expiry-all-skipped step is settled.
+    clean
+        :attr:`settled` AND zero quarantined symbols — the STRICT barrier
+        (the literal all-or-nothing law: a per-symbol quarantine withholds
+        the post-steps under ``BRUTEX_PIPELINE_STRICT_GATE=1``).
+    blocking
+        Human-readable labels of the blocking signals, for the note + the
+        ``pipeline.post_steps.strict_skipped`` log. Empty iff :attr:`clean`.
+    """
+
+    settled: bool
+    clean: bool
+    blocking: tuple[str, ...]
+
+
+def step_settle_verdict(
+    *,
+    spot_ok: bool,
+    metadata_ok: bool,
+    historical_ok: bool,
+    quarantined: frozenset[str],
+) -> StepSettleVerdict:
+    """Fold the three phase gates + the quarantine set into one pure verdict.
+
+    DEC-PULL-SIX-STEP-ORDER-001 — the ONE place the post-step barrier
+    predicate lives (pure + testable over ALL input combinations; at the
+    sequencer call site only the reachable outcomes occur — spot/metadata
+    failures already early-returned). ``settled`` is the cleanset barrier
+    (all gates ok); ``clean`` additionally demands ZERO quarantined symbols
+    (the strict barrier); ``blocking`` names every failing signal.
+    """
+    blocking: list[str] = []
+    if not spot_ok:
+        blocking.append("spot unclean")
+    if not metadata_ok:
+        blocking.append("metadata unclean")
+    if not historical_ok:
+        blocking.append("historical unclean")
+    settled = not blocking
+    if quarantined:
+        blocking.append(f"{len(quarantined)} quarantined symbol(s)")
+    return StepSettleVerdict(
+        settled=settled, clean=settled and not quarantined, blocking=tuple(blocking)
+    )
 
 
 #: How many quarantined symbol NAMES :attr:`PipelinePullReport.quarantined_symbols`
@@ -229,6 +357,22 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
 #: ``(+K more)`` remainder computed from it (Golden Rule #1 — the cap never
 #: hides the real count).
 MAX_QUARANTINED_NAMES: Final[int] = 10
+
+
+def _spot_quarantine_names(spot: BulkSpotReport | None) -> frozenset[str]:
+    """The SPOT arm of :func:`derive_quarantined_name_set` — pure.
+
+    Extracted (DEC-PULL-SIX-STEP-ORDER-001) so the sequencer's
+    :class:`PriorStepsVerdict` can judge spot cleanliness BEFORE the
+    historical phase runs, with the SAME predicate the quarantine headline
+    uses (CLAUDE.md §11 COMMON — one source of truth, no duplication): every
+    :class:`~brutex.dashboard.pull_controller.SymbolPullResult` with
+    ``failed > 0`` (a terminally-quarantined ``(symbol, interval)`` pair).
+    ``None`` / a clean report ⇒ the empty frozenset.
+    """
+    if spot is None:
+        return frozenset()
+    return frozenset(s.symbol for s in spot.symbols if s.failed > 0)
 
 
 def derive_quarantined_name_set(
@@ -254,9 +398,7 @@ def derive_quarantined_name_set(
 
     Returns the empty frozenset for a clean run.
     """
-    names: set[str] = set()
-    if spot is not None:
-        names.update(s.symbol for s in spot.symbols if s.failed > 0)
+    names: set[str] = set(_spot_quarantine_names(spot))
     hist = historical.historical if historical is not None else None
     if hist is not None:
         for symbol in set(hist.start_dates) - set(hist.phase1_complete):
@@ -393,6 +535,15 @@ class PipelinePullReport:
     quarantined_count
         The TRUE (uncapped) quarantined-symbol total — the note's ``(+K more)``
         remainder derives from it, so the cap never lies (Golden Rule #1).
+    post_steps_strict_skipped
+        ``True`` when the OPT-IN strict barrier
+        (``BRUTEX_PIPELINE_STRICT_GATE=1`` — DEC-PULL-SIX-STEP-ORDER-001)
+        withheld the post-steps (prebuild + movers warm) on a completed chain
+        because :attr:`StepSettleVerdict.clean` was ``False`` (any unclean
+        step OR any per-symbol quarantine). The note names the blocking
+        signals; nothing is lost — the next pull re-derives. ``False`` on the
+        cleanset default (byte-identical behavior) and on every
+        gate-stopped run (the post-steps were never reachable there).
     """
 
     spot: BulkSpotReport | None
@@ -411,6 +562,7 @@ class PipelinePullReport:
     prebuild_opens_substituted: int | None = None
     quarantined_symbols: tuple[str, ...] = ()
     quarantined_count: int = 0
+    post_steps_strict_skipped: bool = False
     #: True when the PRE-RUN disk guard skipped the whole prebuild
     #: (DEC-LAKE-FOOTPRINT-MEASURED-001) — the note carries the guard's honest
     #: numbers, and the movers warm was consequently skipped (gated on
@@ -452,6 +604,7 @@ class PipelinePullReport:
             "prebuild_opens_substituted": self.prebuild_opens_substituted,
             "quarantined_symbols": list(self.quarantined_symbols),
             "quarantined_count": self.quarantined_count,
+            "post_steps_strict_skipped": self.post_steps_strict_skipped,
             "spot": self.spot.to_dict() if self.spot is not None else None,
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
@@ -630,6 +783,7 @@ def _complete_note(
     quarantined: tuple[str, ...] = (),
     quarantined_count: int = 0,
     segment_movers_failed: Mapping[str, int] | None = None,
+    strict_blocking: tuple[str, ...] | None = None,
 ) -> str:
     """Build the honest summary note for a fully-run pipeline.
 
@@ -645,6 +799,12 @@ def _complete_note(
     names), THEN a per-segment movers-warm clause ONLY for the segments that
     actually warmed (:func:`_movers_note_clause`) — the prebuild-then-movers
     order mirrors the execution order (DEC-PIPELINE-AUTOPREBUILD-001).
+
+    *strict_blocking* (DEC-PULL-SIX-STEP-ORDER-001): non-``None`` when the
+    opt-in strict barrier withheld the post-steps — appends the LOUD
+    ``", post-steps SKIPPED (strict gate: <blocking…>)"`` clause naming every
+    blocking signal (:attr:`StepSettleVerdict.blocking`). ``None`` (the
+    cleanset default) renders byte-identically to before.
     """
     hist = historical.historical
     bars = hist.bars_appended if hist is not None else 0
@@ -686,6 +846,14 @@ def _complete_note(
         if hist is not None and hist.greeks_enrich_ok is False
         else ""
     )
+    # Strict-barrier honesty (DEC-PULL-SIX-STEP-ORDER-001): a strict-withheld
+    # post-step stage is NAMED loudly — never a silent absence of the prebuild
+    # + movers clauses. None (the cleanset default) renders nothing.
+    strict_clause = (
+        f", post-steps SKIPPED (strict gate: {'; '.join(strict_blocking)})"
+        if strict_blocking is not None
+        else ""
+    )
     return (
         f"{prefix}pipeline complete — "
         f"{_quarantine_clause(quarantined, quarantined_count)}spot {spot.verdict.kind} "
@@ -696,6 +864,7 @@ def _complete_note(
         f"{_conflict_clause(conflicts, dup_rows, max_delta)}"
         f"{_prebuild_note_clause(prebuild)}"
         f"{_movers_note_clause(segment_movers_warmed, segment_movers_failed)}"
+        f"{strict_clause}"
     )
 
 
@@ -715,11 +884,12 @@ def run_full_pipeline(
     *,
     run_spot: Callable[[], BulkSpotReport],
     run_metadata: Callable[[], MetadataPullReport],
-    run_historical: Callable[[], CompositePullReport],
+    run_historical: Callable[[PriorStepsVerdict], CompositePullReport],
     warm_spot_movers: Callable[[], MoversWarmResult] | None = None,
     warm_futures_movers: Callable[[], MoversWarmResult] | None = None,
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
+    strict_gate: bool = False,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
 
@@ -727,8 +897,25 @@ def run_full_pipeline(
     vendor call for the later phases) and the report carries ``stopped_after =
     "spot"`` with metadata + historical ``None``. Otherwise ``run_metadata`` runs;
     if :func:`metadata_phase_ok` fails the chain stops (``stopped_after =
-    "metadata"``, historical ``None``). Otherwise ``run_historical`` runs and the
-    report carries all three with ``stopped_after = None``.
+    "metadata"``, historical ``None``). Otherwise ``run_historical`` runs —
+    receiving the :class:`PriorStepsVerdict` (spot + metadata cleanliness +
+    the strict flag, DEC-PULL-SIX-STEP-ORDER-001) so the Greeks seam at the
+    historical tail sees the prior steps' state under the strict barrier —
+    and the report carries all three with ``stopped_after = None``.
+
+    **Strict post-step barrier (opt-in — DEC-PULL-SIX-STEP-ORDER-001):** with
+    ``strict_gate=True`` (``BRUTEX_PIPELINE_STRICT_GATE=1``, resolved once at
+    launch) the post-steps are literal all-or-nothing: after the historical
+    phase the pure :func:`step_settle_verdict` folds the three phase gates +
+    the UNCAPPED quarantine set — ANY unclean step or ANY per-symbol
+    quarantine (``verdict.clean`` False) withholds the prebuild (never
+    called) AND the movers warm (already gated on the prebuild), logs ONE
+    ``pipeline.post_steps.strict_skipped`` WARNING naming the blocking
+    signals, sets :attr:`PipelinePullReport.post_steps_strict_skipped`, and
+    appends the loud ``", post-steps SKIPPED (strict gate: …)"`` note clause.
+    Nothing is lost — derived timeframes re-derive on the next clean pull.
+    ``strict_gate=False`` (the default) is the DEC-PREBUILD-CLEANSET-001
+    cleanset path, byte-identical to before.
 
     **Clean-set PREBUILD, then movers (DEC-PREBUILD-CLEANSET-001, superseding
     the fetch_clean all-or-nothing gate arm of DEC-PIPELINE-AUTOPREBUILD-001
@@ -784,8 +971,13 @@ def run_full_pipeline(
         Zero-arg callable returning a
         :class:`~brutex.dashboard.metadata_pull.MetadataPullReport` (phase 2).
     run_historical
-        Zero-arg callable returning a
-        :class:`~brutex.dashboard.composite_pull.CompositePullReport` (phase 3).
+        Callable receiving the sequencer's :class:`PriorStepsVerdict`
+        (DEC-PULL-SIX-STEP-ORDER-001 — the route threads it as
+        ``prior_steps=`` into the composite → ``pull_contract_candles`` so
+        the Greeks seam sees spot + metadata cleanliness under the strict
+        barrier) and returning a
+        :class:`~brutex.dashboard.composite_pull.CompositePullReport`
+        (phase 3).
     warm_spot_movers
         OPTIONAL zero-arg callable that warms the SPOT movers snapshots and
         returns its :class:`~brutex.dashboard.movers_warm.MoversWarmResult`
@@ -808,6 +1000,11 @@ def run_full_pipeline(
         set and fires on EVERY completed-chain run — clean or dirty
         (DEC-PREBUILD-CLEANSET-001). ``None`` (default) skips the prebuild
         AND the movers warm (movers gate on the prebuild having run).
+    strict_gate
+        The resolved :func:`strict_gate_enabled` flag
+        (DEC-PULL-SIX-STEP-ORDER-001). ``True`` makes the post-step barrier
+        literal all-or-nothing (see above); ``False`` (default) keeps the
+        cleanset path byte-identical.
 
     Returns
     -------
@@ -840,7 +1037,17 @@ def run_full_pipeline(
             quarantined_count=quarantined_count,
         )
 
-    historical = run_historical()
+    # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
+    # cleanliness threaded INTO the historical phase (the Greeks seam at the
+    # historical tail cannot otherwise see a spot-side quarantine under the
+    # strict barrier). Computed AFTER both gates passed — the gate arms are
+    # True by construction here; the quarantine check is the strict extra.
+    prior = PriorStepsVerdict(
+        spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
+        metadata_clean=metadata_phase_ok(metadata),
+        strict=strict_gate,
+    )
+    historical = run_historical(prior)
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of
@@ -848,12 +1055,31 @@ def run_full_pipeline(
     # gate); the capped view feeds the headline (chunk-3 honesty, unchanged).
     quarantined_names = derive_quarantined_name_set(spot, historical)
     quarantined, quarantined_count = _cap_quarantined(quarantined_names)
+    # The strict post-step barrier (DEC-PULL-SIX-STEP-ORDER-001): the pure
+    # settle verdict folds the three phase gates + the UNCAPPED quarantine
+    # set. Settle-based, never bars>0 — a 0-bar EMPTY / far-expiry-all-
+    # skipped step is settled. Cleanset (strict_gate=False) never skips.
+    verdict = step_settle_verdict(
+        spot_ok=spot_phase_ok(spot),
+        metadata_ok=metadata_phase_ok(metadata),
+        historical_ok=historical_phase_ok(historical),
+        quarantined=quarantined_names,
+    )
+    strict_skipped = strict_gate and not verdict.clean
     # 1) PREBUILD — the FINAL data stage: derived timeframes are written ONLY
     #    here (DEC-PIPELINE-AUTOPREBUILD-001), never mid-pull. It ALWAYS runs
     #    on the completed-chain path, over the CLEAN symbol set (every target
-    #    minus the uncapped quarantined names — DEC-PREBUILD-CLEANSET-001).
+    #    minus the uncapped quarantined names — DEC-PREBUILD-CLEANSET-001) —
+    #    UNLESS the opt-in strict barrier withheld the post-steps (LOUD WARN,
+    #    flagged on the report + note; nothing lost — the next pull derives).
     prebuild: PrebuildOutcome | None = None
-    if run_prebuild is not None:
+    if strict_skipped:
+        _LOG.warning(
+            "pipeline.post_steps.strict_skipped",
+            blocking=list(verdict.blocking),
+            quarantined=sorted(quarantined_names),
+        )
+    elif run_prebuild is not None:
         prebuild = run_prebuild(quarantined_names)
     # 2) MOVERS WARM — strictly AFTER the prebuild (movers read the derived
     #    timeframes the prebuild just wrote); gated on the prebuild having
@@ -919,6 +1145,7 @@ def run_full_pipeline(
             quarantined,
             quarantined_count,
             segment_movers_failed,
+            strict_blocking=verdict.blocking if strict_skipped else None,
         ),
         movers_warmed=_total_warmed(segment_movers_warmed),
         segment_movers_warmed=segment_movers_warmed,
@@ -932,4 +1159,5 @@ def run_full_pipeline(
         prebuild_opens_substituted=(prebuild.opens_substituted if prebuild is not None else None),
         quarantined_symbols=quarantined,
         quarantined_count=quarantined_count,
+        post_steps_strict_skipped=strict_skipped,
     )

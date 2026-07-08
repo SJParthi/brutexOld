@@ -25,8 +25,10 @@ whole-package floor — stage1a.py remains on ``COVERAGE_DISCOVERY_EXCLUDE``
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import cast
 
 import pytest
 from brutex.data.models import CandleBar
@@ -47,6 +49,7 @@ from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadReport
 from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.types import ClosedTrade
+from brutex.strategies.combo import canonicalise_params
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -488,7 +491,7 @@ def test_walk_forward_dual_arm_rust_metrics_flag_is_bit_identical(
             step_days=5,
         )
 
-    monkeypatch.delenv("BRUTEX_SWEEP_RUST_METRICS", raising=False)
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "0")
     off = _run()
     monkeypatch.setenv("BRUTEX_SWEEP_RUST_METRICS", "1")
     on = _run()
@@ -501,3 +504,85 @@ def test_walk_forward_dual_arm_rust_metrics_flag_is_bit_identical(
         assert fr_off.train_metrics == fr_on.train_metrics
         assert fr_off.test_metrics == fr_on.test_metrics
         assert fr_off.test_gates_held == fr_on.test_gates_held
+
+
+# ── _walk_forward_run_hash: guard parity (DEC-RUN-IDENTITY-GUARD-PARITY-001) ──
+
+
+def _run_hash(*, schedule_hash: str = "cd" * 32, start_equity_paisa: int = 10_000_000) -> str:
+    """Call the private run-hash with fixed base fields (whitebox seam)."""
+    return sweep_driver._walk_forward_run_hash(
+        schedule_hash,
+        required_mask=11,
+        direction=Side.BUY,
+        tf_minutes=5,
+        stop_loss_paisa=None,
+        take_profit_paisa=None,
+        start_equity_paisa=start_equity_paisa,
+        proximity=None,
+        prior_n=3,
+    )
+
+
+def test_walk_forward_run_hash_rejects_unit_separator_in_schedule_hash() -> None:
+    """A ``\\x1f``-carrying schedule_hash could shift the payload's field
+    boundary and forge another run identity — rejected via the COMMON
+    ``reject_unit_separator`` guard BEFORE any digest byte is produced."""
+    with pytest.raises(ValueError, match="schedule_hash"):
+        _run_hash(schedule_hash="cd" * 15 + "\x1f" + "cd" * 16)
+
+
+def test_walk_forward_run_hash_rejects_nan_param() -> None:
+    """``allow_nan=False``: a smuggled non-finite float raises instead of
+    silently emitting non-canonical ``NaN`` JSON (unreachable for the typed
+    int/str/None fields — a defence-in-depth rider)."""
+    with pytest.raises(ValueError, match="[Oo]ut of range float"):
+        _run_hash(start_equity_paisa=cast(int, float("nan")))
+
+
+def test_walk_forward_payload_canonicalise_params_equivalence() -> None:
+    """Tripwire: the run-hash's raw ``json.dumps`` ≡ ``canonicalise_params``
+    over the production value domain (int / str / None).
+
+    Documents WHY the DEC-RUN-IDENTITY-GUARD-PARITY-001 review REJECTED
+    routing ``_walk_forward_run_hash`` through the combo canonicaliser: today
+    the two encodings are byte-identical for every value this payload can
+    carry, but the canonicaliser serialises floats via ``repr()`` into JSON
+    *strings* (``{"x":"1.5"}`` vs raw ``{"x":1.5}``), so a swap would bind
+    this hash to that future-float convention. If this test ever fails, the
+    two conventions have drifted for the CURRENT domain — re-open the
+    consolidation decision before touching either encoder."""
+    variants: list[dict[str, object]] = [
+        {
+            "mask": 11,
+            "direction": "BUY",
+            "tf_minutes": 5,
+            "stop_loss_paisa": None,
+            "take_profit_paisa": None,
+            "start_equity_paisa": 10_000_000,
+            "pivot_proximity_bps": 10,
+            "pdh_pdl_proximity_bps": 10,
+            "fib_proximity_bps": 10,
+            "prior_n": 3,
+        },
+        {
+            "mask": (1 << 52) - 1,
+            "direction": "SELL",
+            "tf_minutes": 15,
+            "stop_loss_paisa": 1500,
+            "take_profit_paisa": 4500,
+            "start_equity_paisa": 1,
+            "pivot_proximity_bps": 25,
+            "pdh_pdl_proximity_bps": 5,
+            "fib_proximity_bps": 50,
+            "prior_n": 1,
+        },
+    ]
+    for payload in variants:
+        assert canonicalise_params(payload) == json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )

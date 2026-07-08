@@ -135,6 +135,9 @@ def _patch_historical(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any])
         captured["intervals"] = kwargs["intervals"]
         captured["until_clean"] = kwargs["until_clean"]
         captured["dry_run"] = kwargs["dry_run"]
+        # DEC-PULL-SIX-STEP-ORDER-001 (review fix): the direct-selection route now
+        # threads the index/stock classification map — captured for assertion.
+        captured["underlying_kinds"] = kwargs["underlying_kinds"]
         return HistoricalPullReport(
             dry_run=kwargs["dry_run"],
             intervals=tuple(kwargs["intervals"]),
@@ -196,6 +199,31 @@ def test_underlying_form_resolves_whole_chain(
         "NSE-NIFTY-25Jan24-21000-PE",
         "NSE-NIFTY-25Jan24-FUT",
     }
+
+
+def test_direct_selection_threads_six_step_underlying_kinds(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct-selection grammars run the six-step order (review fix).
+
+    DEC-PULL-SIX-STEP-ORDER-001 round 1 MAJOR: this route's
+    ``?contract/?contracts/?underlying/?kind/?all`` paths passed NO
+    ``underlying_kinds``, so a real vendor pull over a mixed index+stock
+    selection ran the pre-change legacy 2-bucket FUT-then-OPT order —
+    reproducing the motivating 2026-07-05 inversion. The route now builds the
+    classification map over every admitted underlying (index + stock kinds via
+    the SAME resolved-key builder the composite uses) and threads it into
+    ``pull_contract_candles``. The seeded store admits ONE index (NIFTY), so
+    the map classifies it index-side.
+    """
+    _pin_creds_present(monkeypatch)
+    captured = _captured()
+    _patch_historical(monkeypatch, captured)
+    _seed_registry(_lake_root(store))
+    resp = client.post("/api/v1/universe/pull-historical", params={"underlying": "NIFTY"})
+    assert resp.status_code == 200
+    assert _wait_for_job(client)["state"] == "done"
+    assert captured["underlying_kinds"] == {"NIFTY": True}
 
 
 def test_pull_historical_work_feeds_greeks_health_counter(
