@@ -797,6 +797,7 @@ class TestCellRecountCodes:
 
 _INGEST_AUDIT = "sweep-all.jsonl"
 _SUPERVISOR_AUDIT = "sweep-all-supervisor.jsonl"
+_DAEMON_AUDIT = "sweep-daemon.jsonl"
 
 
 def _audit_dir(root: Path) -> Path:
@@ -827,6 +828,17 @@ def _write_clean_supervisor_chain(root: Path) -> Path:
     with SweepAuditWriter.open(path) as w:
         w.append(action="SWEEP_START", subject="sweep:x", payload={"total": 3})
         w.append(action="COMBO_DONE", subject="combo:1", payload={"mask": 7})
+    return path
+
+
+def _write_clean_daemon_chain(root: Path) -> Path:
+    # The daemon writes its per-cycle plan lines through the SAME
+    # ``SweepAuditWriter`` (``cmd_sweep_daemon``), so a clean daemon chain is
+    # built exactly like the supervisor one — the BLAKE3 verifier applies.
+    path = _audit_dir(root) / _DAEMON_AUDIT
+    with SweepAuditWriter.open(path) as w:
+        w.append(action="DAEMON_CYCLE_PLAN", subject="sweep-daemon:cycle-0", payload={"cycle": 0})
+        w.append(action="DAEMON_CYCLE_PLAN", subject="sweep-daemon:cycle-1", payload={"cycle": 1})
     return path
 
 
@@ -950,3 +962,43 @@ class TestVerifyAuditChains:
         (corrupt,) = verdict.corrupt
         assert corrupt.filename == _SUPERVISOR_AUDIT
         assert corrupt.reason is not None and "malformed" in corrupt.reason.lower()
+
+    # ── FIX D: the daemon-cycle BLAKE3 chain is verified too ─────────────────
+
+    def test_clean_daemon_chain_verifies(self, tmp_path: Path) -> None:
+        # present + clean → ok, and it appears in the checked results.
+        _write_clean_daemon_chain(tmp_path)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is True
+        assert [r.filename for r in verdict.results] == [_DAEMON_AUDIT]
+        assert verdict.results[0].entries == 2
+
+    def test_missing_daemon_chain_is_skipped(self, tmp_path: Path) -> None:
+        # A tree with ONLY the ingest chain (no daemon file) → the daemon slot is
+        # skipped, never a spurious failure.
+        _write_clean_ingest_chain(tmp_path)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is True
+        assert _DAEMON_AUDIT not in {r.filename for r in verdict.results}
+
+    def test_forked_daemon_chain_is_detected(self, tmp_path: Path) -> None:
+        # A forked daemon chain (two concurrent daemons — the daemon log is opened
+        # OUTSIDE the sweep lock) is caught by its OWN BLAKE3 verifier.
+        _write_clean_ingest_chain(tmp_path)  # clean alongside
+        daemon = _write_clean_daemon_chain(tmp_path)
+        _fork_last_line(daemon)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is False
+        assert {r.filename for r in verdict.corrupt} == {_DAEMON_AUDIT}
+
+    def test_all_three_chains_checked_together(self, tmp_path: Path) -> None:
+        _write_clean_ingest_chain(tmp_path)
+        _write_clean_supervisor_chain(tmp_path)
+        _write_clean_daemon_chain(tmp_path)
+        verdict = verify_audit_chains(tmp_path)
+        assert verdict.ok is True
+        assert {r.filename for r in verdict.results} == {
+            _INGEST_AUDIT,
+            _SUPERVISOR_AUDIT,
+            _DAEMON_AUDIT,
+        }

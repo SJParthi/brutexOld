@@ -332,6 +332,17 @@ def test_malformed_updated_wall_running_refuses_safely() -> None:
     )
 
 
+def test_bool_updated_wall_running_refuses_safely() -> None:
+    # A bool is an int subclass (`float(True) == 1.0`), so WITHOUT the explicit
+    # bool guard it would read as a valid ancient finite stamp and PERMIT the heal.
+    # Safety-first: a bool wall stamp on a running sweep is malformed → refuse.
+    assert progress_running_fresh({"running": True, "updated_wall": True}, now_wall=1.0) is True
+    assert progress_running_fresh({"running": True, "updated_wall": False}, now_wall=1.0) is True
+    # And a NOT-running snapshot with a bool stamp is still not-fresh (the running
+    # short-circuit wins before the stamp is ever inspected).
+    assert progress_running_fresh({"running": False, "updated_wall": True}, now_wall=1.0) is False
+
+
 def test_default_wall_clock_is_time_time() -> None:
     # The default wall_clock is a real epoch (~1.7e9), distinct from monotonic.
     sp = SweepProgress()  # default monotonic + wall clocks

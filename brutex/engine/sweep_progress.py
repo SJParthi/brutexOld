@@ -355,6 +355,14 @@ def progress_running_fresh(
         # Missing key (old-format file) or an explicit null: a running sweep with
         # no wall stamp is treated as LIVE (safety-first refuse).
         return True
+    if isinstance(raw_wall, bool):
+        # A bool is an ``int`` subclass, so ``float(True) == 1.0`` — it would pass
+        # the ``float()`` conversion below as a valid (ancient) finite stamp and
+        # PERMIT the heal. A running sweep with a bool wall stamp is a malformed /
+        # hand-edited file — same safety-first rule as a non-numeric value: treat
+        # as LIVE (refuse). Checked BEFORE ``float()``, which a bool silently
+        # satisfies.
+        return True
     try:
         updated_wall = float(raw_wall)
     except (TypeError, ValueError):

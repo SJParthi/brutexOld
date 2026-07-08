@@ -7877,6 +7877,11 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         read_heal_plan,
     )
     from brutex.engine.sweep_progress import progress_running_fresh
+    from brutex.engine.sweep_singleflight import (
+        SweepAlreadyRunningError,
+        sweep_singleflight_lock,
+        sweep_singleflight_lock_path,
+    )
     from brutex.engine.sweep_supervisor import read_progress
     from brutex.orchestrator.audit import AuditWriter
 
@@ -7888,53 +7893,89 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
-    # C6 best-effort guard: a fresh "running" progress snapshot refuses. A
-    # snapshot older than the freshness window is a crashed sweep's leftover.
-    # DEFECT 2 fix: freshness compares the WALL-clock `updated_wall` stamp
-    # against `time.time()` — the old inline `time.time() - updated_at` compared
-    # wall-clock to a MONOTONIC stamp (~1.7e9 vs a small per-process value), so
-    # `fresh` was ALWAYS False, `sweep_running` ALWAYS False, and the C6 refusal
-    # NEVER fired even while a sweep was LIVE. The pure helper reads the correct
-    # stamp (and safety-refuses an old-format / malformed snapshot).
-    progress = read_progress(out_root / "progress" / "sweep-progress.json")
-    sweep_running = progress_running_fresh(progress, now_wall=time.time())
-
+    # ── C6 liveness — TWO-TIER, defence-in-depth (FIX A over DEFECT 2) ──
+    #
+    # (1) PRIMARY, path-AGNOSTIC — hold the SAME cross-process single-flight
+    #     flock ``cmd_sweep_all`` holds for its ENTIRE run. That lock wraps the
+    #     whole sweep body via the ExitStack, so it is held on EVERY sweep path —
+    #     supervised, PARALLEL, and the dashboard pull-job — not just the ones
+    #     that publish progress. The flock is therefore the authoritative
+    #     cross-process liveness signal: a live sweep holds it, so this
+    #     non-blocking acquire RAISES ``SweepAlreadyRunningError`` and the heal
+    #     REFUSES. Holding it for the heal's duration ALSO closes the TOCTOU — a
+    #     sweep cannot START mid-heal, since it would need this very lock.
+    #
+    #     Why this is the real guard (honest — Golden Rule #10): the DEFECT-2
+    #     wall-clock progress-freshness verdict alone does NOT cover the parallel
+    #     path. ``publish_progress`` (which writes ``sweep-progress.json``) is
+    #     wired ONLY into ``run_supervised_grid``; a large production grid
+    #     auto-resolves to ``run_parallel_grid``, which mutates only the
+    #     in-process ``SweepProgress`` and never publishes — so the progress file
+    #     stays stale, ``progress_running_fresh`` reads not-fresh, and a
+    #     freshness-only guard would let the heal proceed WHILE a live parallel
+    #     sweep runs. The flock is held on every path, so it — not the progress
+    #     file — is the guarantee.
+    #
+    # (2) SECONDARY net, evaluated INSIDE the lock — the wall-clock progress
+    #     freshness verdict still feeds ``assess_heal``. It catches a sweep
+    #     started under an OLD binary that predates this flock (a migration edge):
+    #     such a sweep takes no flock, so tier (1) is blind to it, but it still
+    #     publishes a fresh ``sweep-progress.json`` that the pure
+    #     ``progress_running_fresh`` (the DEFECT-2 wall-clock fix) reads
+    #     correctly. It is also the signal any OTHER consumer of
+    #     ``sweep-progress.json`` relies on.
     try:
-        assessment = assess_heal(
-            out_root,
-            heal_plan,
-            sweep_running=sweep_running,
-            allow_mass_quarantine=allow_mass_quarantine,
+        with sweep_singleflight_lock(out_root):
+            progress = read_progress(out_root / "progress" / "sweep-progress.json")
+            sweep_running = progress_running_fresh(progress, now_wall=time.time())
+
+            try:
+                assessment = assess_heal(
+                    out_root,
+                    heal_plan,
+                    sweep_running=sweep_running,
+                    allow_mass_quarantine=allow_mass_quarantine,
+                )
+            except SweepHealError as exc:
+                print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
+                return EXIT_USER_ERROR
+            print(assessment.render(out_root, heal_plan))
+            if not assessment.ok:
+                return EXIT_HEAL_REFUSED
+            if not execute:
+                print("[brutex] DRY-RUN (no changes made) — re-run with --execute to act")
+                return EXIT_OK
+
+            audit_path = out_root / "audit" / "sweep-all.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+                    report = execute_heal(out_root, heal_plan, assessment, audit=audit)
+            except SweepHealError as exc:
+                print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
+                return EXIT_USER_ERROR
+            print(
+                f"[brutex] healed — moved={report.moved} "
+                f"completed_partial={report.completed_partial} "
+                f"already_quarantined={report.already_quarantined} wiped={list(report.wiped)}"
+            )
+            print(
+                "[brutex] NOW re-run `brutex sweep-all` with the SAME flags BEFORE any lake "
+                "change (C11 — the path digest folds in the data snapshot; a drifted lake "
+                "re-sweeps to new paths). Intact tuples short-circuit at their sentinels; "
+                "the cascade/ report is stale until that re-run."
+            )
+            return EXIT_OK
+    except SweepAlreadyRunningError:
+        lock_path = sweep_singleflight_lock_path(out_root)
+        print(
+            "[brutex] sweep-heal REFUSED (C6): a sweep appears to be running on this "
+            f"results root: {out_root} (single-flight lock held at {lock_path}). Stop the "
+            "sweep (and any sweep-daemon) and retry. If you are CERTAIN none is running, "
+            f"remove the stale lock at {lock_path} and retry.",
+            file=sys.stderr,
         )
-    except SweepHealError as exc:
-        print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
-    print(assessment.render(out_root, heal_plan))
-    if not assessment.ok:
         return EXIT_HEAL_REFUSED
-    if not execute:
-        print("[brutex] DRY-RUN (no changes made) — re-run with --execute to act")
-        return EXIT_OK
-
-    audit_path = out_root / "audit" / "sweep-all.jsonl"
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
-            report = execute_heal(out_root, heal_plan, assessment, audit=audit)
-    except SweepHealError as exc:
-        print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
-    print(
-        f"[brutex] healed — moved={report.moved} completed_partial={report.completed_partial} "
-        f"already_quarantined={report.already_quarantined} wiped={list(report.wiped)}"
-    )
-    print(
-        "[brutex] NOW re-run `brutex sweep-all` with the SAME flags BEFORE any lake "
-        "change (C11 — the path digest folds in the data snapshot; a drifted lake "
-        "re-sweeps to new paths). Intact tuples short-circuit at their sentinels; "
-        "the cascade/ report is stale until that re-run."
-    )
-    return EXIT_OK
 
 
 # ────────────────────────────────────────────────────────────────────────

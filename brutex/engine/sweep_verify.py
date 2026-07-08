@@ -1046,14 +1046,20 @@ def compare_recount(
 # chain, so a FORKED / interleaved chain (two concurrent resume-writers stamping
 # the same seq + prev_hash, the exact damage the CLI sweep single-flight of
 # DEFECT 1a now prevents) parses fine and every tier reports CLEAN. This tier
-# calls the two chains' OWN end-to-end verifiers so that damage is DETECTED.
+# calls the chains' OWN end-to-end verifiers so that damage is DETECTED.
 
-#: The sweep tree's two hash-chained audit logs under ``<out_root>/audit/`` —
-#: each with its OWN chain format + verifier: ``sweep-all.jsonl`` is the
-#: orchestrator SHA-256 ``AuditWriter`` chain, ``sweep-all-supervisor.jsonl`` is
-#: the engine BLAKE3 ``SweepAuditWriter`` chain.
+#: The sweep tree's hash-chained audit logs under ``<out_root>/audit/`` — each with
+#: its OWN chain format + verifier: ``sweep-all.jsonl`` is the orchestrator SHA-256
+#: ``AuditWriter`` chain; ``sweep-all-supervisor.jsonl`` AND ``sweep-daemon.jsonl``
+#: are both engine BLAKE3 ``SweepAuditWriter`` chains (the daemon writes its
+#: per-cycle ``DAEMON_CYCLE_PLAN`` lines through the SAME ``SweepAuditWriter`` in
+#: ``cmd_sweep_daemon``, so the BLAKE3 verifier applies to it verbatim — FIX D).
+#: The daemon log is opened OUTSIDE the sweep single-flight lock, so two concurrent
+#: daemons on one root could fork it exactly like the supervisor chain; verifying it
+#: here closes that gap end-to-end.
 _INGEST_AUDIT_FILENAME: Final[str] = "sweep-all.jsonl"
 _SUPERVISOR_AUDIT_FILENAME: Final[str] = "sweep-all-supervisor.jsonl"
+_DAEMON_AUDIT_FILENAME: Final[str] = "sweep-daemon.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1166,9 +1172,11 @@ def _verify_supervisor_chain(path: Path) -> AuditChainResult:
 def verify_audit_chains(out_root: Path) -> AuditChainVerdict:
     """Tier 0: verify every present sweep audit hash chain end-to-end.
 
-    Runs each of ``<out_root>/audit/sweep-all.jsonl`` (SHA-256 ingest chain) and
-    ``sweep-all-supervisor.jsonl`` (BLAKE3 supervisor chain) that EXISTS through
-    its own :func:`verify_chain`, capturing the entry count or the corruption /
+    Runs each of ``<out_root>/audit/sweep-all.jsonl`` (SHA-256 ingest chain),
+    ``sweep-all-supervisor.jsonl`` (BLAKE3 supervisor chain) and
+    ``sweep-daemon.jsonl`` (BLAKE3 daemon-cycle chain — same ``SweepAuditWriter``
+    format, verified by the same BLAKE3 verifier; FIX D) that EXISTS through its
+    own :func:`verify_chain`, capturing the entry count or the corruption /
     read-failure reason. A missing chain is SKIPPED — a fresh or otherwise-shaped
     root is not a failure. The verdict is ``ok`` iff every present chain verified;
     a forked/interleaved chain (duplicate seq or broken ``prev_hash``) flips it to
@@ -1179,6 +1187,7 @@ def verify_audit_chains(out_root: Path) -> AuditChainVerdict:
     for filename, verifier in (
         (_INGEST_AUDIT_FILENAME, _verify_ingest_chain),
         (_SUPERVISOR_AUDIT_FILENAME, _verify_supervisor_chain),
+        (_DAEMON_AUDIT_FILENAME, _verify_supervisor_chain),
     ):
         path = audit_dir / filename
         if not path.exists():
