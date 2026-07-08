@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine import results_depth_pass
 from brutex.engine.combo_aggregates import ComboAggregate
 from brutex.engine.results_depth_pass import (
     RESULTS_DEPTH_ENV,
@@ -418,12 +419,10 @@ class TestFences:
     def test_tuple_error_is_quarantined_not_fatal(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.results_depth_pass as mod
-
         def _boom(*_args: object, **_kwargs: object) -> list[int]:
             raise ValueError("stage1a exploded")
 
-        monkeypatch.setattr(mod, "build_bar_bits", _boom)
+        monkeypatch.setattr(results_depth_pass, "build_bar_bits", _boom)
         with capture_logs() as logs:
             report = _run_pass(out_root)
         assert report.tuples_errored == 1
@@ -437,24 +436,20 @@ class TestFences:
     def test_memory_error_re_raises_raw(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.results_depth_pass as mod
-
         def _oom(*_args: object, **_kwargs: object) -> list[int]:
             raise MemoryError
 
-        monkeypatch.setattr(mod, "build_bar_bits", _oom)
+        monkeypatch.setattr(results_depth_pass, "build_bar_bits", _oom)
         with pytest.raises(MemoryError):
             _run_pass(out_root)
 
     def test_top100_write_failure_is_loud_and_reported(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.results_depth_pass as mod
-
         def _fail(*_args: object, **_kwargs: object) -> Path:
             raise OSError("disk gone")
 
-        monkeypatch.setattr(mod, "write_top100", _fail)
+        monkeypatch.setattr(results_depth_pass, "write_top100", _fail)
         with capture_logs() as logs:
             report = _run_pass(out_root)
         assert report.top100_written is False
@@ -465,36 +460,30 @@ class TestFences:
     def test_baseline_memory_error_re_raises_raw(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.results_depth_pass as mod
-
         def _oom(*_args: object, **_kwargs: object) -> object:
             raise MemoryError
 
-        monkeypatch.setattr(mod, "compute_baseline", _oom)
+        monkeypatch.setattr(results_depth_pass, "compute_baseline", _oom)
         with pytest.raises(MemoryError):
             _run_pass(out_root)
 
     def test_top100_memory_error_re_raises_raw(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.results_depth_pass as mod
-
         def _oom(*_args: object, **_kwargs: object) -> object:
             raise MemoryError
 
-        monkeypatch.setattr(mod, "build_top100", _oom)
+        monkeypatch.setattr(results_depth_pass, "build_top100", _oom)
         with pytest.raises(MemoryError):
             _run_pass(out_root)
 
     def test_baseline_failure_is_loud_and_non_fatal(
         self, out_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.results_depth_pass as mod
-
         def _fail(*_args: object, **_kwargs: object) -> object:
             raise OSError("volume yanked")
 
-        monkeypatch.setattr(mod, "compute_baseline", _fail)
+        monkeypatch.setattr(results_depth_pass, "compute_baseline", _fail)
         with capture_logs() as logs:
             report = _run_pass(out_root)
         assert report.baselines_written == 0
