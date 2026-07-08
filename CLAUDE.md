@@ -49,6 +49,32 @@ registered" wording swept across every remaining claim site and locked by a
 grep doc-pin test. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
 ruff/ruff-format/mypy --strict/pyright clean).
+Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
 Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
@@ -1005,6 +1031,30 @@ hostile-review pass._
   remain the persistent alarm); the CLI bridge still carries no `failed_rps` (#1211 named follow-up). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright`
   clean).
+  Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
   Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
   the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
   twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
@@ -2844,6 +2894,11 @@ hostile-review pass._
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1544 — the #1056 pull-rate
   CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
   full blurb)
+  Earlier: `claude/peaceful-wright-r7l8l9`
+  (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
+  retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
+  fields replace the wrong bearish alias; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/stoic-davinci-7c7xp0`
   (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
   DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +

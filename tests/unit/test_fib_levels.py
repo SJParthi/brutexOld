@@ -10,7 +10,14 @@ screenshots provided by operator on 2026-05-16:
    PDH=56,502.00, PDL=55,650.00 -> 38% = 56,176.54, 200% DOWN = 54,798.00
 
 3. NIFTY 07-May-2026 (BULLISH gap-up setup):
-   PDH=24,313.00, PDL=24,056.00 -> 200% UP = 24,570.00, 78% retrace = 24,258
+   PDH=24,313.00, PDL=24,056.00 -> 200% UP = 24,570.00,
+   BULLISH 78% retrace = 24,258.00 (chart-exact; DEC-FIB-BULLISH-RETRACE-001
+   fixed the bearish-alias mapping that returned 24,252.35 — a 565-paisa
+   error, because 0.236 + 0.786 = 1.022 != 1.000)
+
+Plus the bullish-retracement ladder suite (frozen kernel goldens, ordering,
+asymmetry teeth, zero-range collapse) and the kernel FFI contract pins
+(compute projection = 19, frozen evaluator ABI = 15).
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+import trading_core
 from brutex.indicators.fib_levels import (
     ALL_EXTENSION_KEYS,
     ALL_RETRACEMENT_KEYS,
@@ -167,17 +175,13 @@ class TestNiftyMay7BullishGapUp:
         200% UP = PDH + 1*range = 24,570 -> range = 257.00
         -> PDL = PDH - range = 24,313 - 257 = 24,056.00
 
-    Verify 78% retracement (bullish convention):
-        Bullish 78% level should be PDL + 0.786 * range (i.e., 78% UP from PDL)
-        = 24,056 + 0.786 * 257 = 24,056 + 202.0 = 24,258.00 ✓ matches chart
-        OR equivalently: bearish 23% = PDH - 0.236*range = 24,313 - 60.7 = 24,252.3
-        Chart shows 78% (bullish label) = 24,258 -> this is bullish 78% = bearish 23%... wait
-        24,258 corresponds to bearish-label 22% (i.e., between 23% and 0%).
-        Let me re-check: PDL + 0.786 * range = 24,056 + 201.96 = 24,257.96 ≈ 24,258 ✓
-        And the bearish-label equivalent: PDH - (1 - 0.786) * range = PDH - 0.214 * range
-                                       = 24,313 - 54.998 = 24,258 ✓
-        So "bullish 78%" = "bearish 22%" — same physical level, different label.
-        Our class maps bullish "78" to retrace_23 (78% up = 23% down).
+    Bullish 78% retracement (chart-verified, DEC-FIB-BULLISH-RETRACE-001):
+        Bullish 78% = 78% UP from PDL = PDL + 0.786 * range
+        = 24,056 + 0.786 * 257 = 24,056 + 202.002 -> 24,258.00 (chart-exact).
+        This is NOT the bearish 23% rung (PDH - 0.236 * range = 24,252.35):
+        Fibonacci ratios are asymmetric (0.236 + 0.786 = 1.022 != 1.000), so
+        the bullish ladder needs its own PDL-anchored fields — the pre-fix
+        alias mapping was wrong by 0.022 * range = 565 paisa here.
     """
 
     @pytest.fixture
@@ -219,30 +223,158 @@ class TestNiftyMay7BullishGapUp:
         assert levels.get_by_bullish_label("127") == 2_438_290
 
     def test_bullish_78_retracement_matches_screenshot(self, levels: FibLevels) -> None:
-        # Chart: 78% (bullish convention) = 24,258
+        # Chart: 78% (bullish convention) = 24,258.00 (chart-EXACT)
         # Bullish 78% = "78% up from PDL" = PDL + 0.786 * range
-        #             = 2,405,600 + 0.786 * 25,700 = 2,405,600 + 20,200.2 = 2,425,800
-        # But our class maps bullish "78" -> retrace_23 (since 78% up = 23% down).
-        # retrace_23 = PDH - 0.236 * range = 2,431,300 - 0.236 * 25,700 = 2,431,300 - 6,065.2 = 2,425,235
-        # Hmm, these don't match! Let me reconcile.
-        # 78% UP from PDL: 24,056 + 0.786 * 257 = 24,056 + 201.96 = 24,257.96 ≈ 24,258 ✓
-        # 23% DOWN from PDH: 24,313 - 0.236 * 257 = 24,313 - 60.65 = 24,252.35 ≈ 24,252 ✗
-        # These are DIFFERENT — 78% up != 23% down (because 0.786 + 0.236 = 1.022, not 1.000)
-        # The Fibonacci ratios aren't perfectly symmetric.
-        # CORRECTION: I need to compute bullish retracements SEPARATELY from bearish,
-        # using PDL as the anchor. Let me fix this in the implementation.
+        #             = 2,405,600 + 0.786 * 25,700 = 2,405,600 + 20,200.2 -> 2,425,800
+        # The pre-fix bearish-alias mapping returned retrace_23
+        # = PDH - 0.236 * range = 2,425,235 — a 565-paisa error
+        # (0.236 + 0.786 = 1.022 != 1.000; DEC-FIB-BULLISH-RETRACE-001).
+        assert levels.get_by_bullish_label("78") == 2_425_800
+        assert levels.retrace_bull_78_paisa == 2_425_800
 
-        # For now, test what our class returns and document the discrepancy.
-        # Expected from chart: ~2,425,800 (bullish 78% up from PDL)
-        # Our class returns retrace_23 = 2,425,235 (bearish 23% down from PDH)
-        # These differ by ~565 paisa due to asymmetric Fib ratios.
 
-        # Skipping strict assert for now — bullish retracements need their own computation.
-        # This test is a known TODO documented below.
-        pytest.skip(
-            "Bullish retracement levels need separate computation from PDL anchor "
-            "(0.236+0.786=1.022, not 1.000). See follow-up commit."
+class TestBullishRetracements:
+    """The PDL-anchored bullish retracement ladder (DEC-FIB-BULLISH-RETRACE-001).
+
+    Frozen kernel goldens on the NIFTY 07-May-2026 anchor
+    (PDH=2,431,300 / PDL=2,405,600 / range=25,700 paisa):
+    the 78% rung is chart-verified (24,258.00 exact); the 23/38/62 rungs are
+    formula-derived, mirror-of-bearish (``pdl + ratio * range``), NOT
+    screenshot-verified (Golden Rule #10).
+    """
+
+    @pytest.fixture
+    def levels(self) -> FibLevels:
+        return compute_fib_levels(
+            trading_day=date(2026, 5, 7),
+            pdh_paisa=2_431_300,
+            pdl_paisa=2_405_600,
         )
+
+    def test_frozen_kernel_goldens(self, levels: FibLevels) -> None:
+        # FROZEN kernel goldens (re-captured from the rebuilt kernel and
+        # verified identical to the previously-verified implementation):
+        # bull_78 is chart-verified; bull_23/38/62 are formula-derived,
+        # mirror-of-bearish, not screenshot-verified.
+        assert levels.retrace_bull_23_paisa == 2_411_665
+        assert levels.retrace_bull_38_paisa == 2_415_417
+        assert levels.retrace_bull_62_paisa == 2_421_483
+        assert levels.retrace_bull_78_paisa == 2_425_800
+
+    def test_bull_23_label_formula_derived(self, levels: FibLevels) -> None:
+        # pdl + 0.236 * range = 2,405,600 + 6,065.2 -> 2,411,665
+        # (formula-derived, not screenshot-verified)
+        assert levels.get_by_bullish_label("23") == 2_411_665
+
+    def test_bull_38_label_formula_derived(self, levels: FibLevels) -> None:
+        # pdl + 0.382 * range = 2,405,600 + 9,817.4 -> 2,415,417
+        # (formula-derived, not screenshot-verified)
+        assert levels.get_by_bullish_label("38") == 2_415_417
+
+    def test_bull_62_label_formula_derived(self, levels: FibLevels) -> None:
+        # pdl + 0.618 * range = 2,405,600 + 15,882.6 -> 2,421,483
+        # (formula-derived, not screenshot-verified)
+        assert levels.get_by_bullish_label("62") == 2_421_483
+
+    def test_ladder_ordering(self, levels: FibLevels) -> None:
+        # pdl <= b23 <= b38 <= 50% <= b62 <= b78 <= pdh — the shared
+        # retrace_50 IS the bullish midpoint (no separate bull_50 field).
+        assert (
+            levels.retrace_level_at_pdl_paisa
+            <= levels.retrace_bull_23_paisa
+            <= levels.retrace_bull_38_paisa
+            <= levels.retrace_50_paisa
+            <= levels.retrace_bull_62_paisa
+            <= levels.retrace_bull_78_paisa
+            <= levels.retrace_level_at_pdh_paisa
+        )
+
+    def test_asymmetry_teeth_on_second_anchor(self) -> None:
+        # BANKNIFTY-style anchor (30-Apr-2026: PDH=5,650,200 / PDL=5,565,000,
+        # range=85,200): the bullish rungs are NOT the reversed bearish rungs —
+        # 0.236 + 0.786 = 1.022 != 1.000, so a revert-to-alias mutant dies here.
+        levels = compute_fib_levels(
+            trading_day=date(2026, 4, 30),
+            pdh_paisa=5_650_200,
+            pdl_paisa=5_565_000,
+        )
+        assert levels.retrace_bull_78_paisa != levels.retrace_23_paisa
+        assert levels.retrace_bull_23_paisa != levels.retrace_78_paisa
+        # The gap is 0.022 * range = 1,874.4 paisa on both pairs.
+        assert levels.retrace_bull_78_paisa - levels.retrace_23_paisa == 1_874
+        assert levels.retrace_bull_23_paisa - levels.retrace_78_paisa == 1_874
+
+    def test_zero_range_collapse(self) -> None:
+        # pdh == pdl -> the whole bullish ladder collapses onto pdl.
+        levels = compute_fib_levels(
+            trading_day=date(2026, 5, 7),
+            pdh_paisa=2_431_300,
+            pdl_paisa=2_431_300,
+        )
+        assert levels.retrace_bull_23_paisa == 2_431_300
+        assert levels.retrace_bull_38_paisa == 2_431_300
+        assert levels.retrace_bull_62_paisa == 2_431_300
+        assert levels.retrace_bull_78_paisa == 2_431_300
+
+
+class TestKernelFfiContract:
+    """The two DISTINCT kernel list lengths (DEC-FIB-BULLISH-RETRACE-001).
+
+    ``compute_fib_levels`` (the COMPUTE FFI projection) grew 15 -> 19 with the
+    bullish tail appended LAST; ``evaluate_with_levels``'s ``fib_levels`` ABI
+    (``FIB_LEVELS_LEN``) stays FROZEN at 15 — two different lists that
+    happened to both be 15-tuples before this change (an accidental pun).
+    """
+
+    def test_compute_ffi_returns_19(self) -> None:
+        raw = trading_core.compute_fib_levels(2_431_300, 2_405_600)
+        assert len(raw) == 19
+
+    def test_evaluator_abi_stays_15(self) -> None:
+        # The FROZEN evaluate_with_levels fib_levels ABI — the evaluator never
+        # reads the bullish fields, so its length constant must NOT grow.
+        assert trading_core.FIB_LEVELS_LEN == 15
+
+    def test_appended_tail_matches_dataclass_bull_fields(self) -> None:
+        raw = trading_core.compute_fib_levels(2_431_300, 2_405_600)
+        levels = compute_fib_levels(
+            trading_day=date(2026, 5, 7),
+            pdh_paisa=2_431_300,
+            pdl_paisa=2_405_600,
+        )
+        assert raw[15:] == [
+            levels.retrace_bull_23_paisa,
+            levels.retrace_bull_38_paisa,
+            levels.retrace_bull_62_paisa,
+            levels.retrace_bull_78_paisa,
+        ]
+
+    def test_original_15_prefix_unchanged(self) -> None:
+        # The original 15 order is byte-stable — the bullish tail is a pure
+        # APPEND, so every pre-existing index still means what it meant.
+        raw = trading_core.compute_fib_levels(2_431_300, 2_405_600)
+        levels = compute_fib_levels(
+            trading_day=date(2026, 5, 7),
+            pdh_paisa=2_431_300,
+            pdl_paisa=2_405_600,
+        )
+        assert raw[:15] == [
+            levels.retrace_23_paisa,
+            levels.retrace_38_paisa,
+            levels.retrace_50_paisa,
+            levels.retrace_62_paisa,
+            levels.retrace_78_paisa,
+            levels.ext_up_127_paisa,
+            levels.ext_up_162_paisa,
+            levels.ext_up_200_paisa,
+            levels.ext_up_262_paisa,
+            levels.ext_up_424_paisa,
+            levels.ext_down_127_paisa,
+            levels.ext_down_162_paisa,
+            levels.ext_down_200_paisa,
+            levels.ext_down_262_paisa,
+            levels.ext_down_424_paisa,
+        ]
 
 
 class TestDirectionFlip:
