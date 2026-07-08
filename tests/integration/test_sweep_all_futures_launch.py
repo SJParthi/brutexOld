@@ -351,25 +351,24 @@ def test_dashboard_cascade_route_400s_a_drifted_lake(tmp_path: Path) -> None:
         **_kwargs(lake_root, catalog_path, lake_root / "sweeps", intervals="1minute")
     )
     assert rc == EXIT_OK
-    store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    try:
-        with TestClient(build_app(DashboardState(), instrument_store=store)) as client:
-            # (a) schedule drift: the lake loses its newest contract.
-            shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _AUG[0])
-            resp = client.post("/api/v1/cascade/run")
-            assert resp.status_code == 400
-            payload = resp.json()
-            assert payload["ok"] is False
-            assert "contract set changed" in payload["error"]
-            # (b) resolution refusal (FuturesSeriesError): the whole futures
-            # tree vanished since launch — re-resolution refuses loudly.
-            shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUL[0])
-            shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUN[0])
-            resp = client.post("/api/v1/cascade/run")
-            assert resp.status_code == 400
-            assert "zero NIFTY futures contract dirs" in resp.json()["error"]
-    finally:
-        store.close()
+    with (
+        InstrumentStore.open(lake_root / "instruments.duckdb") as store,
+        TestClient(build_app(DashboardState(), instrument_store=store)) as client,
+    ):
+        # (a) schedule drift: the lake loses its newest contract.
+        shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _AUG[0])
+        resp = client.post("/api/v1/cascade/run")
+        assert resp.status_code == 400
+        payload = resp.json()
+        assert payload["ok"] is False
+        assert "contract set changed" in payload["error"]
+        # (b) resolution refusal (FuturesSeriesError): the whole futures
+        # tree vanished since launch — re-resolution refuses loudly.
+        shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUL[0])
+        shutil.rmtree(lake_root / "bars" / "NSE" / "FNO" / _JUN[0])
+        resp = client.post("/api/v1/cascade/run")
+        assert resp.status_code == 400
+        assert "zero NIFTY futures contract dirs" in resp.json()["error"]
 
 
 def test_manual_cascade_interior_hole_is_a_clean_user_error(
@@ -843,11 +842,10 @@ def test_dashboard_route_400s_the_alias_under_the_default_index_segment(
         raise AssertionError("a refused launch must never start a sweep job")
 
     monkeypatch.setattr(app_module, "run_sweep_from_request", _never_runs)
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
-        with TestClient(build_app(DashboardState(), instrument_store=store)) as client:
-            resp = client.post("/api/v1/sweep/run", params={"symbols": _ALIAS})
-            assert resp.status_code == 400
-            assert "NSE/FNO" in resp.json()["detail"]
-    finally:
-        store.close()
+    with (
+        InstrumentStore.open(tmp_path / "instruments.duckdb") as store,
+        TestClient(build_app(DashboardState(), instrument_store=store)) as client,
+    ):
+        resp = client.post("/api/v1/sweep/run", params={"symbols": _ALIAS})
+        assert resp.status_code == 400
+        assert "NSE/FNO" in resp.json()["detail"]

@@ -1005,7 +1005,7 @@ class TestIsEngineSweepSymbol:
     def test_alias_import_identity_with_the_resolver(self) -> None:
         # brutex.data.futures_series consumes THIS module's constant — no
         # second literal exists to drift (DEC-FUTURES-ADDRESSING-PIN-001).
-        import brutex.universe as universe_module
+        from brutex import universe as universe_module
         from brutex.data import futures_series
 
         assert (

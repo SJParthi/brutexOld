@@ -423,7 +423,7 @@ class TestRecordedAuditFacts:
     ) -> None:
         # The regression teeth: pre-fix cmd_sweep_verify's two single-fact
         # readers each ran their own full O(entries) read+parse.
-        import brutex.orchestrator.audit as audit_mod
+        from brutex.orchestrator import audit as audit_mod
 
         path = tmp_path / "a.jsonl"
         self._write(path)
@@ -1281,7 +1281,7 @@ class TestStaleRollScheduleRefusal:
         # Pre-fix the gate invoked recorded_context_from_audit AND
         # recorded_roll_schedules_from_audit, each re-reading + re-chain-
         # verifying the WHOLE audit log — a doubled O(entries) launch cost.
-        import brutex.orchestrator.audit as audit_mod
+        from brutex.orchestrator import audit as audit_mod
 
         path = tmp_path / "a.jsonl"
         self._write_audit(path, schedule=self._S1)
