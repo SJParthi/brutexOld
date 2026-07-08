@@ -111,6 +111,29 @@ def test_preflight_route_reports_estimator(client: TestClient) -> None:
     assert estimator["estimate_basis"] == "provisional"
 
 
+def test_preflight_route_mints_a_fresh_run_id_by_default(client: TestClient) -> None:
+    """Round-9 adversarial-refuter finding: without a caller-supplied
+    ``run_id``, two independent preflight calls (or a preflight followed by
+    a launch) each mint their OWN fresh id — the default, pre-existing
+    behavior, preserved byte-for-byte when the new ``run_id`` param is
+    omitted."""
+    first = client.get("/api/v1/sweep/oneclick/preflight", params={"symbols": "NIFTY"})
+    second = client.get("/api/v1/sweep/oneclick/preflight", params={"symbols": "NIFTY"})
+    assert first.json()["sweep_run_id"] != second.json()["sweep_run_id"]
+
+
+def test_preflight_route_honors_a_caller_supplied_run_id(client: TestClient) -> None:
+    """Round-9 adversarial-refuter finding: a future UI that wants the id
+    shown at preflight time to be THE id an eventual launch uses must be
+    able to mint one client-side and pass it to both calls."""
+    resp = client.get(
+        "/api/v1/sweep/oneclick/preflight",
+        params={"symbols": "NIFTY", "run_id": "operator-chosen-id-123"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["sweep_run_id"] == "operator-chosen-id-123"
+
+
 def test_preflight_route_bad_interval_400(client: TestClient) -> None:
     resp = client.get("/api/v1/sweep/oneclick/preflight", params={"intervals": "7tick"})
     assert resp.status_code == 400
@@ -205,6 +228,43 @@ def test_run_route_launches_every_group_when_preflight_ok(
     assert _wait_for_job(client)["state"] == "done"
     assert len(_CAPTURED["requests"]) == 2  # NSE (NIFTY) + BSE (SENSEX), sequential
     assert {r.exchange for r in _CAPTURED["requests"]} == {"NSE", "BSE"}
+
+
+def test_preflight_then_run_share_the_same_id_when_caller_supplies_one(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-9 adversarial-refuter finding, end-to-end: a preflight poll
+    followed by the actual launch, both carrying the SAME caller-supplied
+    ``run_id``, must report the identical ``sweep_run_id`` in both
+    responses — the continuity the default (server-minted) behavior cannot
+    provide across two independently-stateless calls."""
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    monkeypatch.setattr(
+        app_module,
+        "oneclick_preflight_for_plan",
+        lambda plan, **kw: {
+            "sweep_run_id": plan.sweep_run_id,
+            "ok": True,
+            "refusals": [],
+            "clamps": [],
+            "estimator": {
+                "trials": 1,
+                "est_seconds_provisional": 0.1,
+                "est_bytes": 1,
+                "estimate_basis": "provisional",
+            },
+        },
+    )
+    pre = client.get(
+        "/api/v1/sweep/oneclick/preflight",
+        params={"symbols": "NIFTY", "run_id": "shared-continuity-id"},
+    )
+    run = client.post(
+        "/api/v1/sweep/oneclick/run",
+        params={"symbols": "NIFTY", "run_id": "shared-continuity-id"},
+    )
+    assert pre.json()["sweep_run_id"] == "shared-continuity-id"
+    assert run.json()["sweep_run_id"] == "shared-continuity-id"
 
 
 def test_run_route_surfaces_a_per_group_failure_not_a_false_done(

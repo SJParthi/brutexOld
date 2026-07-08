@@ -5778,6 +5778,7 @@ def build_app(
         start: str | None,
         end: str | None,
         acknowledge_sla_overrun: bool,
+        run_id: str | None,
     ) -> Any:
         """Shared plan-resolution body for the one-click institutional routes below.
 
@@ -5785,7 +5786,38 @@ def build_app(
         :func:`~brutex.dashboard.sweep_runner.resolve_oneclick_sweep_plan` — a
         bad field raises :class:`ValueError`, mapped to a 400 by the two
         caller routes (never a deep background crash, Golden Rule #10).
+
+        run_id
+            Round-9 adversarial-refuter finding: the preflight (GET) and
+            launch (POST) routes each independently mint a fresh
+            ``sweep_run_id`` by default (``resolve_oneclick_sweep_plan``'s
+            own ``run_id_factory`` default), so a preflight's displayed id
+            NEVER matches the id the later launch actually uses — contrary
+            to ``OneClickSweepPlan``'s own R43 "one run_id threads
+            everything" documentation, which only actually holds WITHIN one
+            call. Passing the SAME caller-supplied ``run_id`` to both calls
+            (e.g. a future UI mints one client-side at first preflight and
+            reuses it through the confirm→launch step) achieves real
+            continuity; omitting it preserves the prior server-generated
+            behavior byte-for-byte.
         """
+        if run_id is not None:
+            return resolve_oneclick_sweep_plan(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+                today=date.today(),
+                run_id_factory=lambda: run_id,
+            )
         return resolve_oneclick_sweep_plan(
             symbols=symbols,
             intervals=intervals,
@@ -5816,6 +5848,7 @@ def build_app(
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
         acknowledge_sla_overrun: bool = Query(default=False),
+        run_id: str | None = Query(default=None),
     ) -> JSONResponse:
         """GET /api/v1/sweep/oneclick/preflight — R4/R20: preflight + LIVE estimate, NEVER launches.
 
@@ -5826,6 +5859,15 @@ def build_app(
         estimator}`` verdict — the proceed-dialog's data source. Pure
         read-only: no lock is taken, no lake write happens, nothing is
         launched — safe to poll repeatedly.
+
+        run_id
+            Optional caller-supplied id (round-9 adversarial-refuter
+            finding): omitted, this route mints a fresh ``sweep_run_id``
+            server-side EVERY call, so it never matches whatever the later
+            ``POST /oneclick/run`` call mints on its own — a future UI that
+            wants the id shown at preflight time to be THE id the eventual
+            launch uses should mint one client-side and pass the SAME value
+            to both calls.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -5846,6 +5888,7 @@ def build_app(
                 start=start,
                 end=end,
                 acknowledge_sla_overrun=acknowledge_sla_overrun,
+                run_id=run_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5866,6 +5909,7 @@ def build_app(
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
         acknowledge_sla_overrun: bool = Query(default=False),
+        run_id: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/sweep/oneclick/run — launch the ONE-CLICK institutional sweep.
 
@@ -5879,6 +5923,14 @@ def build_app(
         is provably runnable"). On ``ok`` every group's engine run executes
         SEQUENTIALLY on the ONE single-flight background job (one lake, one
         writer); a second click while running is the existing no-op.
+
+        run_id
+            Optional caller-supplied id — see
+            :func:`api_sweep_oneclick_preflight`'s parameter of the same
+            name (round-9 adversarial-refuter finding): pass the SAME value
+            given to that earlier preflight call to make this launch's
+            ``sweep_run_id`` match what the operator was shown before
+            confirming, instead of a fresh server-generated id.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -5899,6 +5951,7 @@ def build_app(
                 start=start,
                 end=end,
                 acknowledge_sla_overrun=acknowledge_sla_overrun,
+                run_id=run_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
