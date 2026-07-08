@@ -245,10 +245,12 @@
     { key: "funnel_reconcile", id: "chkFunnel", title: "7 · Funnel reconcile" },
   ];
 
-  //: STATUS_STYLE mirrors brutex.dashboard.oneclick_badges.check_badge_for()
-  //: verbatim (the module docstring there documents this as the canonical
+  //: STATUS_STYLE mirrors brutex.dashboard.oneclick_artifacts.check_badge_for()
+  //: verbatim (that function's docstring documents this as the canonical
   //: mapping) — kept as a small local JS object because this dashboard has
   //: no server-side template rendering to import a Python module into.
+  //: See tests/unit/test_oneclick_badges.py::test_status_style_maps_match_templates
+  //: for the regression test that pins this object against the Python vocab.
   var STATUS_STYLE = {
     pass: { cls: "ok", label: "PASS" },
     fail: { cls: "bad", label: "FAIL" },
@@ -311,7 +313,7 @@
     });
   }
 
-  // ── status pill builder (mirrors oneclick_badges.check_badge_for) ─────
+  // ── status pill builder (mirrors oneclick_artifacts.check_badge_for) ──
   function statusPill(status) {
     var style = STATUS_STYLE[status] || STATUS_STYLE.awaiting;
     var chip = BX.el("span", "bx-chip " + style.cls, style.label);

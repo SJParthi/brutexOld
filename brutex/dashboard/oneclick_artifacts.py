@@ -70,6 +70,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -824,7 +825,7 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
     join_key_inferred = False
 
     instrument = raw.get("instrument")
-    if instrument is None:
+    if not instrument:
         instrument = "—"
         join_key_inferred = True
 
@@ -1188,13 +1189,144 @@ def read_verify_me(lake_root: Path, run_id: str | None = None) -> dict[str, Any]
     }
 
 
+# ─────────────────────────── presentation-only status badges ───────────────────────────
+#
+# Pure presentation mapping (DEC-INSTITUTIONAL-ONECLICK-001), living in this
+# module rather than a second free-standing one because the P4 ownership
+# grant is a single adapter file, not a second module (round-3 review
+# finding). Mirrors :func:`~brutex.dashboard.verdict_banner.banner_for`'s
+# pattern: maps an *already-computed* status/state string onto a small,
+# deterministic presentation dict — a CSS modifier class + a human colour
+# name + a display label — that a caller renders verbatim. Pure O(1) dict
+# lookups, zero I/O.
+#
+# Two vocabularies are covered:
+#
+# - :func:`check_badge_for` — the R44 VERIFY-ME per-check status
+#   (``pass``/``fail``/``awaiting``, see :data:`VERIFY_ME_CHECKS` /
+#   :func:`read_verify_me`).
+# - :func:`link_badge_for` — the R41 chain-map link state
+#   (``pending``/``running``/``green``/``amber``/``red``, see
+#   :func:`read_chain_map`).
+#
+# **No server-side templating exists in this dashboard** (see module
+# docstring above: plain static HTML + client-side JS, never Jinja) — so
+# these functions are not literally `import`-ed by a template. They are
+# instead the documented reference mapping that a client-side mirror is
+# expected to stay consistent with: ``templates/verify_me.html``'s inline
+# ``STATUS_STYLE`` map carries an explicit comment pointing back here.
+# ``templates/v29.html``'s pre-existing inline ``CM_STATE_CLASS`` map has no
+# such back-reference comment today, and no test reads either template's JS
+# map to pin it against :func:`link_badge_for` / :func:`check_badge_for` —
+# that regression-test gap is open, not asserted-away here.
+
+
+@dataclass(frozen=True, slots=True)
+class StatusBadge:
+    """The display-ready badge for one status/state value.
+
+    Immutable + JSON-serialisable. Every field is either a pure presentation
+    decision (``css_class``/``colour``/``label``) or a verbatim echo of the
+    input ``status`` — never a re-derivation.
+    """
+
+    status: str
+    css_class: str
+    colour: str
+    label: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Return a JSON-friendly dict (e.g. for a future JSON-serving route)."""
+        return {
+            "status": self.status,
+            "css_class": self.css_class,
+            "colour": self.colour,
+            "label": self.label,
+        }
+
+
+#: R44 VERIFY-ME per-check status → badge. Reuses the same green/red/amber
+#: severity vocabulary as :mod:`brutex.dashboard.verdict_banner` (green =
+#: trustworthy, red = broken, amber = not yet knowable — never a blank or
+#: silently-omitted state).
+_CHECK_STYLE: Final[dict[str, tuple[str, str, str]]] = {
+    "pass": ("bx-chip ok", "green", "PASS"),
+    "fail": ("bx-chip bad", "red", "FAIL"),
+    "awaiting": ("bx-chip warn", "amber", "AWAITING"),
+}
+
+#: R41 chain-map link state → badge. Intended to be byte-consistent with
+#: ``templates/v29.html``'s pre-existing inline ``CM_STATE_CLASS`` map
+#: (``{pending: 'muted', running: 'info', green: 'ok', amber: 'warn', red:
+#: 'bad'}``) — this module documents that mapping's canonical source, though
+#: (see section note above) nothing currently tests the two stay in sync.
+_LINK_STYLE: Final[dict[str, tuple[str, str, str]]] = {
+    "pending": ("bx-chip muted", "grey", "pending"),
+    "running": ("bx-chip info", "blue", "running"),
+    "green": ("bx-chip ok", "green", "green"),
+    "amber": ("bx-chip warn", "amber", "amber"),
+    "red": ("bx-chip bad", "red", "red"),
+}
+
+
+def check_badge_for(status: str) -> StatusBadge:
+    """Map an R44 VERIFY-ME check ``status`` onto its display-ready badge.
+
+    Parameters
+    ----------
+    status
+        One of ``"pass"``/``"fail"``/``"awaiting"`` (the
+        :data:`_VERIFY_ME_STATUSES` vocabulary).
+
+    Raises
+    ------
+    ValueError
+        If *status* is not one of the three known values — a fail-closed
+        guard so an unknown status is never rendered uncoloured / silently
+        treated as a pass.
+    """
+    style = _CHECK_STYLE.get(status)
+    if style is None:
+        raise ValueError(
+            f"unknown VERIFY-ME check status {status!r} — expected one of {sorted(_CHECK_STYLE)}"
+        )
+    css_class, colour, label = style
+    return StatusBadge(status=status, css_class=css_class, colour=colour, label=label)
+
+
+def link_badge_for(state: str) -> StatusBadge:
+    """Map an R41 chain-map link ``state`` onto its display-ready badge.
+
+    Parameters
+    ----------
+    state
+        One of ``"pending"``/``"running"``/``"green"``/``"amber"``/``"red"``
+        (the chain-map link state vocabulary from :func:`read_chain_map`).
+
+    Raises
+    ------
+    ValueError
+        If *state* is not one of the five known values.
+    """
+    style = _LINK_STYLE.get(state)
+    if style is None:
+        raise ValueError(
+            f"unknown chain-map link state {state!r} — expected one of {sorted(_LINK_STYLE)}"
+        )
+    css_class, colour, label = style
+    return StatusBadge(status=state, css_class=css_class, colour=colour, label=label)
+
+
 __all__ = [
     "FIXTURE_ROOT_ENV",
     "VERIFY_ME_CHECKS",
     "ReadState",
+    "StatusBadge",
+    "check_badge_for",
     "dedupe_family_representatives",
     "door_labels",
     "iter_timeline",
+    "link_badge_for",
     "list_runs",
     "preflight_estimate",
     "read_chain_map",
