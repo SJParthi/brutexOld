@@ -262,6 +262,7 @@ from brutex.data.mapping_integrity import (
 )
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
+from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.doctor_autorun import LiveProofAutorun
@@ -5194,6 +5195,7 @@ def build_app(
                         expiry_track=opt_cands.expiry_track,
                         min_volume=min_volume,
                         calendar_only_expiry=opt_cands.calendar_only_expiry,
+                        pcr=opt_cands.pcr,
                         latest_time=latest_time,
                     )
                 if asset == "futures":
@@ -5278,6 +5280,21 @@ def build_app(
 
             payload = await run_in_threadpool(_resolve)
             return JSONResponse(payload)
+        except PcrCorruptionError as exc:
+            # Lake VALUE corruption (an out-of-band negative OI/volume cell —
+            # the ingest boundary clamps negatives and CandleBar rejects them,
+            # so only a tampered/bit-rotted Parquet reaches here) is a
+            # SERVER-side fault, never a client error: the PCR fold stays
+            # fail-loud per the DEC-MOVERS-OPTIONS-PCR-001 design (edge 5), but
+            # it must surface as an honest 500 with a corruption-specific
+            # detail — NOT ride the malformed-date/time 400 mapping below
+            # (round-1 hostile-review fold). Checked BEFORE ValueError (it is a
+            # ValueError subclass, so ordering is load-bearing). ONE structlog
+            # WARN so the corruption (named by the adapter-enriched
+            # underlying/expiry group key, round-7 fold) reaches the log even
+            # when nobody is watching the wire.
+            _LOG.warning("movers.pcr_corruption", error=str(exc))
+            raise HTTPException(status_code=500, detail=f"lake corruption: {exc}") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -39,19 +39,13 @@ from brutex.data.instrument_store import (
     compute_raw_hash,
     open_instrument_store,
 )
+from brutex.execution.types import InstrumentMeta
 from brutex.models import (
     Exchange,
     Instrument,
     InstrumentType,
     Segment,
 )
-
-# The dormant IndianCostModel is deprecated (R2-OC-8): constructing it (directly
-# or via ExecutionSimulator's default cost model) emits a DeprecationWarning.
-# This legacy suite exercises the FROZEN dormant stack, so the warning is
-# expected here — ignore it (message-scoped) instead of failing under the
-# repo-wide ``filterwarnings = error`` gate.
-pytestmark = pytest.mark.filterwarnings("ignore:IndianCostModel:DeprecationWarning")
 
 pytest.importorskip("duckdb")
 
@@ -936,7 +930,13 @@ class TestInstrumentSnapshot:
         """Track 2 work \u2014 derivatives grouping requires F&O instrument data."""
 
     def test_snapshot_meta_map_direct_handoff(self, tmp_path: Path) -> None:
-        """``meta_map()`` produces the exact dict ExecutionSimulator wants."""
+        """``meta_map()`` hands off the exact ``{symbol: InstrumentMeta}`` shape.
+
+        Rewritten under DEC-EXECUTION-TRIO-DELETE-001: the deleted
+        ``ExecutionSimulator`` construction is replaced by a direct
+        shape assertion on the ``dict[str, InstrumentMeta]`` contract
+        every ``Mapping[str, InstrumentMeta]``-accepting API relies on.
+        """
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
                 [_idx("NIFTY"), _idx("BANKNIFTY")],
@@ -946,16 +946,18 @@ class TestInstrumentSnapshot:
             )
             snap = s.load_snapshot()
 
-        from brutex.execution.simulator import ExecutionSimulator
-
-        sim = ExecutionSimulator(
-            initial_cash=Decimal("1_000_000"),
-            instruments=snap.meta_map(),
-            default_qty=25,
-            slippage_bps=Decimal("0"),
-        )
-        assert len(sim.positions) == 0
-        assert sim.cash == Decimal("1_000_000")
+        meta_map = snap.meta_map()
+        assert set(meta_map) == {"NIFTY", "BANKNIFTY"}
+        for symbol, meta in meta_map.items():
+            assert isinstance(meta, InstrumentMeta)
+            assert meta.symbol == symbol
+            assert meta.segment == Segment.CASH
+            assert meta.instrument_type == InstrumentType.IDX
+            assert meta.lot_size == 1
+            assert meta.freeze_quantity is None
+        # meta_map() returns a COPY — mutating it never poisons the snapshot.
+        meta_map.pop("NIFTY")
+        assert snap.meta("NIFTY") is not None
 
     def test_snapshot_rejects_duplicates_at_construction(self) -> None:
         nifty = _idx("NIFTY")

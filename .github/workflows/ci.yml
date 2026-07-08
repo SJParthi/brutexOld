@@ -88,6 +88,15 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # Reproducibility (matches REQUIREMENTS.md NFR-DET-001)
   PYTHONHASHSEED: "0"
+  # DEC-TEST-APPARATUS-DEBTS-001(b): deterministic hypothesis — loads the
+  # `ci` profile registered in tests/conftest.py (derandomize=True,
+  # print_blob=True), so property-test example generation is a pure function
+  # of each test and any failure reproduces on re-run. (Honest: GHA was
+  # already implicitly derandomized by hypothesis's built-in auto-CI profile;
+  # this makes the selection explicit + in-repo.) stress-nightly.yml
+  # deliberately does NOT set this — the conftest then loads the random
+  # default, overriding the auto-load (deliberate exploration off the PR path).
+  HYPOTHESIS_PROFILE: "ci"
   PYTHONDONTWRITEBYTECODE: "1"
   # BruteX runtime config
   BRUTEX_SAFETY_FACTOR: "0.6"
@@ -389,13 +398,20 @@ jobs:
           # can identify which exact gate aborted the step when the
           # raw log is auth-gated.
           trap 'echo "❌ Last gate failed at: $BASH_COMMAND (exit $?)" >> "$GITHUB_STEP_SUMMARY"' ERR
+          # DEC-FUTURES-EXEC-TRANSLATION-001 (MIGRATION.md #1542): the
+          # whole-package --cov=brutex.costs gate must also run the
+          # futures cost-stack suite — brutex/costs/futures_costs.py is
+          # stem-matched by tests/unit/test_futures_costs.py, which the
+          # test_costs_*.py glob does NOT collect (the same static-list
+          # addition precedent as the pull_jobs gate, PR #1248).
           if compgen -G "tests/unit/test_costs_*.py" > /dev/null; then
             pytest \
               --cov=brutex.costs \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_costs_*.py
+              tests/unit/test_costs_*.py \
+              tests/unit/test_futures_costs.py
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
@@ -580,15 +596,8 @@ jobs:
           else
             echo "(brutex.indicators.fib_levels test file not present yet — gate inactive)"
           fi
-          # DEC-COVERAGE-DRIVER-001 (2026-06-02): brutex.execution.driver
-          # un-omitted at 100% line+branch. Reaching 100% needs BOTH the
-          # edge-case unit tests (guard/error branches via light fakes) AND
-          # the integration test (happy-path run() over a real lake).
-          if compgen -G "tests/unit/test_execution_driver_edges.py" > /dev/null; then
-            pytest --cov=brutex.execution.driver --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_driver_edges.py tests/integration/test_execution_driver.py
-          else
-            echo "(brutex.execution.driver edge test file not present yet — gate inactive)"
-          fi
+          # DEC-EXECUTION-TRIO-DELETE-001: the brutex.execution.driver gate
+          # (DEC-COVERAGE-DRIVER-001) was removed with the deleted module.
           # DEC-LOOKAHEAD-BARRIER-001 (2026-06-07): brutex.feed.lookahead —
           # Property P-06's LIVE runtime enforcer (the instrumented bar
           # accessor). 100% line+branch is reachable wheel-free: the
@@ -1110,12 +1119,8 @@ jobs:
           else
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
-          # 19g · brutex.execution.costs (57 stmts, 20 branches, 27 tests)
-          if compgen -G "tests/unit/test_execution_costs.py" > /dev/null; then
-            pytest --cov=brutex.execution.costs --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_costs.py
-          else
-            echo "(brutex.execution.costs test file not present yet — gate inactive)"
-          fi
+          # 19g · brutex.execution.costs gate removed with the deleted module
+          #       (DEC-EXECUTION-TRIO-DELETE-001).
           # 19h · brutex.data.models (54 stmts, 24 branches, 21 tests)
           if compgen -G "tests/unit/test_data_models.py" > /dev/null; then
             pytest --cov=brutex.data.models --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_models.py
@@ -1401,28 +1406,9 @@ jobs:
           else
             echo "(brutex.config.runtime test file not present yet — gate inactive)"
           fi
-          # DEC-COV-BACKFILL-004 (entry #260, 2026-05-27): 1-module
-          # backfill — close execution/simulator gap via 2 source-level
-          # `# pragma: no cover — defensive` markers on structurally
-          # unreachable paths (line 247 + 312). Lifts strict-100% gate
-          # count 50 → 51.
-          # 23a · brutex.execution.simulator (114 stmts post-pragma, 36 branches,
-          #       25 tests). Closes 93.67→100% via 2 `# pragma: no cover
-          #       — defensive` markers:
-          #       - Line 247 (`if qty <= 0: raise InvalidLotSizeError`):
-          #         structurally unreachable from public API — __init__
-          #         validates default_qty > 0 at line 120-121; execute()
-          #         uses self._default_qty so qty <= 0 is impossible
-          #         without bypassing the constructor.
-          #       - Line 312 (`if pos.qty == 0: pos.avg_price = ...`)
-          #         inside the partial-close branch: unreachable because
-          #         partial close requires strict |signed_delta| < |pos.qty|,
-          #         so pos.qty cannot reach 0 after the += signed_delta.
-          if compgen -G "tests/unit/test_execution_simulator.py" > /dev/null; then
-            pytest --cov=brutex.execution.simulator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_simulator.py
-          else
-            echo "(brutex.execution.simulator test file not present yet — gate inactive)"
-          fi
+          # 23a · brutex.execution.simulator gate (DEC-COV-BACKFILL-004)
+          #       removed with the deleted module
+          #       (DEC-EXECUTION-TRIO-DELETE-001).
           # DEC-FETCH-WATERMARK-001 (entry #282): strict gate on the pure
           # per-chunk fetch-status tracker (the G-10 anti-loop core).
           if compgen -G "tests/unit/test_watermark.py" > /dev/null; then
@@ -1583,6 +1569,19 @@ jobs:
             pytest --cov=brutex.data.session --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session.py
           else
             echo "(brutex.data.session test file not present yet — gate inactive)"
+          fi
+          # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
+          # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
+          # adapter. Both ship at 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_data_pcr.py" > /dev/null; then
+            pytest --cov=brutex.data.pcr --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_pcr.py
+          else
+            echo "(brutex.data.pcr test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_movers_pcr.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.movers_pcr --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_movers_pcr.py
+          else
+            echo "(brutex.dashboard.movers_pcr test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_spot_features.py" > /dev/null; then
             pytest --cov=brutex.data.spot_features --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_spot_features.py
@@ -2382,10 +2381,7 @@ jobs:
             sleep 10
           done
       - name: pytest golden tests
-        # Discovers every tests/golden/*.py oracle by placement, including
-        # test_execution_driver_golden.py (DEC-EXEC-GOLDEN-PIN-001) — the frozen
-        # byte-equality answer-key for the execution driver's slippage +
-        # fill/no-fill + cash/freeze boundary geometry (audit Gap #5).
+        # Discovers every tests/golden/*.py oracle by placement.
         run: |
           if [ -d tests/golden ]; then
             pytest tests/golden -x
@@ -3086,14 +3082,20 @@ jobs:
         run: npm install -g jscpd@3.5.10
       - name: Run jscpd (blocking — DEC-P0-001)
         run: |
-          # DEC-P0-001 (2026-05-17) removed `|| true`; jscpd now blocks merge
-          # if duplication >3%. tests/ deliberately repeat fixture patterns,
-          # so scan brutex/ only (tighter signal). Threshold stays at 3% per
-          # STANDARDS_100PCT row 7 interim target (1% is the eventual goal).
+          # DEC-P0-001 (2026-05-17) removed `|| true`; jscpd blocks merge.
+          # DEC-TEST-APPARATUS-DEBTS-001(f): threshold tightened 3% → 1% — the
+          # STANDARDS_100PCT row-7 TARGET, no longer the interim value.
+          # Measured baseline at tightening (2026-07-06, jscpd@3.5.10 pinned
+          # per DEC-JSCPD-PIN-001, these exact flags): 0.37% duplicated LINES /
+          # 0.82% tokens (21 clones / 328 files / 106,036 lines). jscpd
+          # 3.5.10's ThresholdReporter compares the grand-total LINES % only
+          # (@jscpd/finder threshold.js:9) — not tokens, not per-format.
+          # tests/ deliberately repeat fixture patterns, so scan brutex/ only
+          # (tighter signal).
           jscpd brutex \
             --min-lines 10 \
             --min-tokens 70 \
-            --threshold 3 \
+            --threshold 1 \
             --reporters console
 
   # ─────────────────────────────────────────────────────────────────
@@ -3416,6 +3418,8 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # need history to diff against base (appropriateness check)
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -3423,10 +3427,19 @@ jobs:
       - name: Validate DEC-IDs cited in PR body against MIGRATION.md
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          # DEC-TEST-APPARATUS-DEBTS-001(e): the appropriateness heuristic
+          # consumes the PR title/author + changed-file list (copied
+          # byte-for-byte from bugfix-regression-scan below).
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
           printf '%s\n' "$PR_BODY" > "$tmp"
+          # Build list of changed files (newline-separated).
+          PR_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" || true)
+          export PR_FILES
           python3 scripts/ci/validate_dec_ids.py "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
@@ -3461,6 +3474,61 @@ jobs:
           python3 scripts/ci/validate_bugfix_regression.py "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
+  # BUG-FIX FIX-REVERSION GATE — DEC-TEST-APPARATUS-DEBTS-001(c)
+  # A fix:-titled PR's shipped tests must FAIL with its modified brutex
+  # source reverted to merge-base in a scratch worktree (STANDARDS row
+  # 10 hardening; closes the MIGRATION.md #1154 surviving-fixture class).
+  # ─────────────────────────────────────────────────────────────────
+  bugfix-reversion-check:
+    name: Bug-fix fix-reversion check (STANDARDS row 10 hardening)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # need history for merge-base against the PR base
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev,data,ui,optimize]"
+      - name: Install Rust toolchain (for fno_math + trading_core wheels)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        # Belt-and-suspenders crates.io flake guard (see mutation-py job).
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Revert fix to merge-base + run shipped tests
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: python3 scripts/ci/validate_bugfix_reversion.py
+
+  # ─────────────────────────────────────────────────────────────────
   # NO-HALLUCINATION CITATION SCANNER — partial automation of STANDARDS row 17
   # Catches external-system claims in PR body lacking nearby citations.
   # ─────────────────────────────────────────────────────────────────
@@ -3483,6 +3551,31 @@ jobs:
           tmp=$(mktemp)
           printf '%s\n' "$PR_BODY" > "$tmp"
           python3 scripts/ci/validate_no_hallucination.py "$tmp"
+
+  # ─────────────────────────────────────────────────────────────────
+  # CITATION ACCURACY SCANNER — DEC-TEST-APPARATUS-DEBTS-001(d)
+  # Upgrades STANDARDS row 17 from citation PRESENCE to citation
+  # CORRECTNESS: file:line cites in the normative docs must resolve
+  # (Tier 1 exists / Tier 2 in-range / Tier 3 anchored symbol ±5) and
+  # MIGRATION.md #NNN refs must resolve to real ledger entries.
+  # ─────────────────────────────────────────────────────────────────
+  citation-accuracy-scan:
+    name: Citation accuracy scan (STANDARDS row 17 correctness upgrade)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    # DEC-TEST-APPARATUS-DEBTS-001(d): deliberately NO job-level `if:` — this
+    # job scans TRACKED docs (not the PR body), so it runs on push AND PR and
+    # is never legitimately skipped (safe under the ci-ok skipped==pass loop).
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Validate file:line + MIGRATION.md citations in the normative docs
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/validate_citation_accuracy.py
 
   # ─────────────────────────────────────────────────────────────────
   proof-bundle:
@@ -3669,10 +3762,19 @@ jobs:
       # test scanner — partial automation of STANDARDS row 10.
       # Skipped on push events.
       - bugfix-regression-scan
+      # DEC-TEST-APPARATUS-DEBTS-001(c): fix-reversion gate — a fix:-titled
+      # PR's shipped tests must FAIL with the fix reverted to merge-base in
+      # a scratch worktree. Skipped on push events (PR-only, identical to
+      # the 5 existing PR-only siblings).
+      - bugfix-reversion-check
       # DEC-HALLUCINATION-SCAN-001 (entry #230): no-hallucination
       # citation scanner — partial automation of STANDARDS row 17.
       # Skipped on push events.
       - no-hallucination-scan
+      # DEC-TEST-APPARATUS-DEBTS-001(d): citation ACCURACY scanner — file:line
+      # cites resolve (Tier 1/2/3) + MIGRATION #NNN refs resolve. Runs on push
+      # AND PR (no job-level if:), so never legitimately skipped.
+      - citation-accuracy-scan
       # DEC-AUTOMERGE-SAFETY-001 (G3): the conv-commits job RAN on every
       # PR but was absent from ci-ok.needs, so a non-conforming commit
       # message could not actually block merge despite the job being red.
@@ -3721,7 +3823,9 @@ jobs:
           echo "  definition-of-ready:${{ needs.definition-of-ready.result }}"
           echo "  dec-id-validator:${{ needs.dec-id-validator.result }}"
           echo "  bugfix-regression-scan:${{ needs.bugfix-regression-scan.result }}"
+          echo "  bugfix-reversion-check:${{ needs.bugfix-reversion-check.result }}"
           echo "  no-hallucination-scan:${{ needs.no-hallucination-scan.result }}"
+          echo "  citation-accuracy-scan:${{ needs.citation-accuracy-scan.result }}"
           echo "  conv-commits:  ${{ needs.conv-commits.result }}"
           echo "  chaos-race:    ${{ needs.chaos-race.result }}"
           for result in \
@@ -3754,7 +3858,9 @@ jobs:
             "${{ needs.definition-of-ready.result }}" \
             "${{ needs.dec-id-validator.result }}" \
             "${{ needs.bugfix-regression-scan.result }}" \
+            "${{ needs.bugfix-reversion-check.result }}" \
             "${{ needs.no-hallucination-scan.result }}" \
+            "${{ needs.citation-accuracy-scan.result }}" \
             "${{ needs.conv-commits.result }}" \
             "${{ needs.chaos-race.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
