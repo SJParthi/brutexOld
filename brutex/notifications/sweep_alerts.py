@@ -44,7 +44,7 @@ clean (the same precedent as :mod:`brutex.observability.standard_monitor`).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Final, Protocol
 
 from brutex.notifications.telegram import (
@@ -111,6 +111,15 @@ def escape_markdown_v2(text: str) -> str:
             out.append("\\")
         out.append(char)
     return "".join(out)
+
+
+def _count_or_question(value: int | None) -> str:
+    """Unknown nightly counts render a literal ``"?"`` — NEVER a fabricated 0.
+
+    (DEC-SWEEP-NIGHTLY-AUTOMATION-001, the ``bars_net_new`` honest-unknown
+    precedent — Golden Rule #1.)
+    """
+    return "?" if value is None else str(value)
 
 
 def _resolve_singleton_notifier() -> NotifierLike | None:  # pragma: no cover — lazy wiring import
@@ -684,6 +693,131 @@ class SweepAlerter:
             severity=TelegramSeverity.CRITICAL,
             message=message,
             dedupe_key=f"pull-halt:{reason}",
+        )
+
+    def nightly_summary(
+        self,
+        *,
+        nightly_id: str,
+        verdict: str,
+        link_verdicts: Mapping[str, str],
+        pull_bars: int | None,
+        prebuild_built: int | None,
+        sweep_run: int | None,
+        sweep_skipped_cache: int | None,
+        sweep_failed: int | None,
+        backup_files: int | None,
+        blocker: str | None,
+        duration_seconds: float,
+    ) -> bool:
+        """The morning nightly summary (DEC-SWEEP-NIGHTLY-AUTOMATION-001).
+
+        Severity law: INFO iff ``verdict == "OK"``, WARN iff ``"SUSPECT"`` (the
+        R39 trust-downgrade — green but untrusted), CRITICAL for
+        ``"REFUSED"``/``"FAILED"``. The ``dedupe_key`` is PER-RUN
+        (``nightly-summary:<id>``) so a same-night manual retry is never
+        swallowed by a dedupe window. Unknown counts render a literal ``"?"``
+        — NEVER a fabricated 0 (Golden Rule #1); a ``skipped`` backup link
+        appends the loud operator nag.
+
+        Parameters
+        ----------
+        nightly_id
+            The one R43 id threading report/audit/bundle/Telegram.
+        verdict
+            ``"OK"`` | ``"SUSPECT"`` | ``"REFUSED"`` | ``"FAILED"``
+            (:func:`brutex.nightly.report.summary_lines` computes it).
+        link_verdicts
+            Chain-order per-link verdict strings, e.g. ``{"collision": "ok",
+            …, "sweep": "blocked(pull)"}``.
+        pull_bars, prebuild_built, sweep_run, sweep_skipped_cache, sweep_failed, backup_files
+            Honest counts (``None`` = unknown ⇒ ``"?"``).
+        blocker
+            The first REFUSED/FAILED link's name, or ``None``.
+        duration_seconds
+            Wall-clock chain duration.
+        """
+        marker = {"OK": "✅ OK", "SUSPECT": "⚠️ SUSPECT"}.get(
+            verdict,
+            f"{'⛔' if verdict == 'REFUSED' else '❌'} {verdict} at {blocker or 'unknown'}",
+        )
+        hours, rem = divmod(int(max(0.0, duration_seconds)), 3600)
+        counts_by_link = {
+            "backup": f" ({_count_or_question(backup_files)} files)",
+            "pull": f" ({_count_or_question(pull_bars)} bars)",
+            "prebuild": f" ({_count_or_question(prebuild_built)} built)",
+            "sweep": (
+                f" ({_count_or_question(sweep_run)} run · "
+                f"{_count_or_question(sweep_skipped_cache)} skipped-cache · "
+                f"{_count_or_question(sweep_failed)} failed)"
+            ),
+        }
+        parts: list[str] = []
+        for link, link_verdict in link_verdicts.items():
+            suffix = ""
+            if not link_verdict.startswith("blocked"):
+                suffix = counts_by_link.get(link, "")
+            parts.append(f"{link} {link_verdict}{suffix}")
+        body = f"🌙 Nightly {nightly_id} — {marker} in {hours}:{rem // 60:02d}.\n" + " · ".join(
+            parts
+        )
+        if link_verdicts.get("backup") == "skipped":
+            body += "\n⚠️ backup SKIPPED by operator flag — stores unprotected tonight."
+        severity = {
+            "OK": TelegramSeverity.INFO,
+            "SUSPECT": TelegramSeverity.WARN,
+        }.get(verdict, TelegramSeverity.CRITICAL)
+        return self._publish(
+            kind=TelegramEventKind.RUN_COMPLETE,
+            severity=severity,
+            message=escape_markdown_v2(body),
+            dedupe_key=f"nightly-summary:{nightly_id}",
+        )
+
+    def nightly_refused(self, *, nightly_id: str, link: str, reason: str) -> bool:
+        """Instant CRITICAL refusal signal (collision / disk floor / liveness).
+
+        Fired the moment a nightly REFUSES (before the summary), so the
+        operator learns at 01:30, not at 06:00. PER-RUN dedupe key
+        (``nightly-refused:<id>:<link>``) — a same-night manual retry mints a
+        new id and is never swallowed by the PHASE_BLOCKED dedupe window.
+        """
+        body = (
+            f"🌙⛔ Nightly {nightly_id} REFUSED at {link}: {reason}. "
+            f"Nothing after {link} ran; links before it are intact. "
+            "Next attempt: next schedule fire."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=escape_markdown_v2(body),
+            dedupe_key=f"nightly-refused:{nightly_id}:{link}",
+        )
+
+    def nightly_deadman(self, *, detail: str, newest_run_age_seconds: float | None) -> bool:
+        """The row-20 dead-man alert: the scheduled nightly did NOT run.
+
+        A Mac asleep at the trigger starts no process, so no in-run alerter
+        can fire — this is the ONLY Telegram signal for that perfectly-silent
+        staleness, emitted by the surface that NOTICES it (``brutex nightly
+        status`` today; the P4 dashboard banner wires the same
+        ``deadman_verdict`` seam at merge-integration). CRITICAL with its own
+        DISTINCT dedupe key (``nightly-deadman`` — never colliding with the
+        per-run ``nightly-refused:<id>:<link>`` keys, which require a run to
+        exist). ``newest_run_age_seconds=None`` renders the honest "never" —
+        not a fabricated 0 (Golden Rule #1).
+        """
+        age = (
+            "never (no run evidence)"
+            if newest_run_age_seconds is None
+            else f"{int(newest_run_age_seconds)}s ago"
+        )
+        body = f"🌙💀 Nightly DEAD-MAN: scheduled run MISSED. Last run evidence: {age}. {detail}"
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=escape_markdown_v2(body),
+            dedupe_key="nightly-deadman",
         )
 
     def backup_failed(self, *, reason: str, detail: str = "") -> bool:
