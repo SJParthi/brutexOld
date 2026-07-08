@@ -1368,6 +1368,29 @@ class TestOptionKeyDtypeGate:
         assert ts_error is not None
         assert "timestamp" in ts_error
 
+    def test_option_key_dtype_error_missing_column_is_verdict_not_keyerror(self) -> None:
+        # Round-14 fold: the gate must be TOTAL over its input shapes — a
+        # frame MISSING a key column (a scan→heal swap to a bars-style
+        # timestamp-only parquet) returned a bare KeyError from
+        # ``frame.schema["side"]``, escaping the healer's per-finding
+        # isolation set and aborting the WHOLE heal batch.
+        no_side = pl.DataFrame(
+            {"timestamp": pl.Series("timestamp", [_ts(1)], dtype=pl.Datetime("us", "UTC"))}
+        )
+        side_error = option_key_dtype_error(no_side)  # pre-fix: KeyError right here
+        assert side_error is not None
+        assert "side" in side_error
+        assert "missing" in side_error
+        no_ts = pl.DataFrame({"side": pl.Series("side", ["CE"], dtype=pl.Utf8)})
+        ts_error = option_key_dtype_error(no_ts)
+        assert ts_error is not None
+        assert "timestamp" in ts_error
+        assert "missing" in ts_error
+        neither = pl.DataFrame({"foo": [1, 2]})
+        neither_error = option_key_dtype_error(neither)
+        assert neither_error is not None
+        assert "side" in neither_error  # side checked first — deterministic verdict
+
 
 class TestScanIncludeBars:
     def test_include_bars_false_scans_only_options(

@@ -232,6 +232,26 @@ datetime month routes there — the "only the writer's stem parses" claim
 now true as written); the census-files-with-skips gap was found ALREADY
 pinned by the round-10 test (mutant re-applied + verified killed — no
 change needed).
+ROUND 14 (refuter-confirmed MAJOR): the round-12 gate was not TOTAL —
+`option_key_dtype_error` indexed `frame.schema["side"]`/`["timestamp"]`,
+a bare `KeyError` on an ABSENT column, so a scan→heal swap of the
+flagged source to a valid parquet MISSING a key column (a bars-style
+timestamp-only file) escaped the per-finding isolation set at the
+healer's consistent read — the ONE site fed a FULL no-column-selection
+read — and aborted the WHOLE heal batch (reproduced end-to-end; the
+round-3/5/12/13 isolation-escape class the gate itself was meant to
+close). The gate now `schema.get()`s both columns and returns a
+"column missing — unclassifiable" verdict → the documented isolated
+`OptionWriterError` at both consumer sites at once; every other call
+site reads the key columns by name first (missing column →
+`PolarsError`, already loudly skipped/isolated). Regressions: the pure
+missing-side/missing-ts/neither gate verdicts + the parametrized e2e
+side-less AND timestamp-less swaps (errors=1 isolated, later same-batch
+dup still heals, on_report fires, swapped source byte-untouched, no
+quarantine) — verified failing pre-fix with the exact bare
+`KeyError: 'side'`. NIT: the ledger #1482 `TestOptionForeignHeal` count
+corrected again (said 21; carried 22 pre-round-14 — the round-13
+addition was uncounted — now 23).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -814,9 +834,33 @@ hostile-review pass._
   there); the year is now bounded to `datetime.MINYEAR..MAXYEAR` (1..9999), 5 new stem-matrix rows incl. both
   boundaries verified failing pre-fix; the census-OPTIONS-`files`-with-skips NIT was found ALREADY pinned by the
   round-10 `test_census_options_files_count_scanned_only` (the `+ option_files_skipped` mutant re-applied 2026-07-08
-  + verified killed by it — no change needed, reported honestly). Remaining
+  + verified killed by it — no change needed, reported honestly). HOSTILE-REVIEW FOLDS (round 14, refuter-confirmed
+  MAJOR — the regression verified failing pre-fix with the exact bare `KeyError: 'side'`): (R14·MAJOR,
+  isolation-escape) the round-12 gate was NOT TOTAL over its input shapes — `option_key_dtype_error` indexed
+  `frame.schema["side"]` / `["timestamp"]` directly, a bare `KeyError` on an ABSENT column (in neither
+  `_PER_FINDING_HEAL_ERRORS` nor `LakeWriteHalt`), and the healer's consistent-read site (`_heal_option_foreign`)
+  is the ONE consumer fed a FULL `read_partition_frame` read with NO column selection — so a scan→heal swap of the
+  flagged source to a valid parquet MISSING `side` or `timestamp` (e.g. a bars-style timestamp-only file) escaped
+  the per-finding isolation loop and aborted the WHOLE heal batch (no HealReport/stats/on_report alert/
+  AUDIT_HEAL_BATCH line, later same-batch findings unhealed, the L3 sentinel unstamped; reproduced end-to-end — the
+  round-3/5/12/13 isolation-escape class the round-12 gate itself INTRODUCED for this shape: pre-gate the first
+  key-column touch was polars `unique(subset=…)`, whose `ColumnNotFoundError` IS a `PolarsError` = the documented
+  isolated refusal). FIXED at the ONE COMMON chokepoint: the gate now `schema.get()`s both key columns and returns
+  an "option side/timestamp column missing — unclassifiable" verdict, converting the swap into the documented
+  isolated `OptionWriterError` at BOTH consumer sites at once (the healer's consistent read AND the writer's
+  round-13 `remove_keys` re-read); every OTHER call site is verified safe — the scanner + `_canonical_option_keys`
+  read via `_read_key_columns(path, UNIQUE_KEY_OPTIONS)` (missing column → `PolarsError` → loud scan skip, so no
+  finding is ever produced for such a file — reaching the healer REQUIRES the post-scan swap) and the writer's gate
+  runs only after its own `unique(subset=…)` already succeeded. Regressions: the pure-gate
+  missing-side / missing-timestamp / neither-column verdicts (never a raise, side checked first — deterministic)
+  + the parametrized end-to-end side-less AND timestamp-less swaps (errors=1 isolated, the later same-batch
+  CALL-series dup still heals, on_report fires, the verdict names the missing column, swapped source
+  byte-untouched, canonical sibling untouched, no quarantine dir). (R14·NIT) the ledger #1482
+  `TestOptionForeignHeal` count corrected AGAIN per the round-6/rebuild precedent (said 21; the class carried 22
+  pre-round-14 — the round-13 mid-heal test was added without bumping the count — now 23 with the new swap pin).
+  Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (466/162) + `option_parquet_writer.py`
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (470/166) + `option_parquet_writer.py`
   (165/34) + `lake_heal.py` (603/170) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory

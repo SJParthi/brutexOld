@@ -2110,6 +2110,59 @@ class TestOptionForeignHeal:
         assert june.read_bytes() == swapped[0]  # the swapped source refused byte-untouched
         assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
 
+    @pytest.mark.parametrize("missing", ["side", "timestamp"])
+    def test_option_missing_key_column_swap_isolated_batch_continues(
+        self, tmp_path: Path, missing: str
+    ) -> None:
+        """Round-14 fold (refuter-confirmed MAJOR): a scan→heal swap to a valid
+        parquet MISSING a key column is the ISOLATED refusal, never a batch abort.
+
+        The round-12 dtype gate was not total: ``option_key_dtype_error`` did
+        ``frame.schema["side"]`` / ``["timestamp"]`` — a bare ``KeyError`` on
+        an ABSENT column, in neither ``_PER_FINDING_HEAL_ERRORS`` nor
+        ``LakeWriteHalt``, so the healer's consistent-read gate (the ONE site
+        fed a FULL ``read_partition_frame`` read with no column selection)
+        aborted the WHOLE batch (later findings unhealed, no
+        report/stats/alert/AUDIT_HEAL_BATCH — the round-3/5/12/13
+        isolation-escape class the gate itself was meant to close)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        _poison_option_lake(lake)  # a healable dup in the CALL series
+        june, july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        # Swap the flagged source to a valid parquet LACKING one key column
+        # AFTER the scan (a bars-style timestamp-only file / a side-only file).
+        if missing == "side":
+            table = pa.table({"timestamp": pa.array([_ts(1)], type=pa.timestamp("us", tz="UTC"))})
+        else:
+            table = pa.table({"side": pa.array(["CE"], type=pa.string())})
+        pq.write_table(table, june)
+        swapped = june.read_bytes()
+        july_before = july.read_bytes()
+        reports: list[HealReport] = []
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                on_report=reports.append,
+                now=_now,
+            )
+        assert report.errors == 1  # pre-fix: bare KeyError aborts the batch here
+        assert report.healed == 1  # the CALL-series dup sibling still heals
+        assert reports == [report]  # the alert seam still fires post-batch
+        (error,) = _events(logs, "lake_heal.partition_error")
+        assert error["finding"] == "OptionForeignMonthRows"
+        assert missing in str(error["error"])  # the verdict names the column
+        assert june.read_bytes() == swapped  # refused byte-untouched
+        assert july.read_bytes() == july_before  # nothing merged/imported home
+        assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
+
     def test_lake_write_halt_propagates_from_option_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

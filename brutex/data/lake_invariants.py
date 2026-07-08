@@ -674,11 +674,28 @@ def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
     never classified, never healed, never a crash. PUBLIC + in ``__all__``
     for the healer's + writer's reuse (§11 COMMON — the
     :func:`is_foreign_timestamp` precedent).
+
+    TOTAL over its input shapes (round-14 fold): an ABSENT key column is the
+    same "unclassifiable" verdict, never a raise — the healer's
+    consistent-read site is the ONE consumer fed a FULL
+    ``read_partition_frame`` read with no column selection, so a scan→heal
+    swap of the flagged source to a valid parquet MISSING ``side`` or
+    ``timestamp`` (e.g. a bars-style timestamp-only file) previously raised
+    bare ``KeyError`` from ``frame.schema[...]`` — in neither
+    ``_PER_FINDING_HEAL_ERRORS`` nor ``LakeWriteHalt`` — aborting the WHOLE
+    heal batch (the round-3/5/12/13 isolation-escape class the round-12 gate
+    itself introduced for this shape; every other call site reads the key
+    columns by name first, so a missing column raises ``PolarsError`` at the
+    read and is loudly skipped/isolated there).
     """
-    side_dtype = frame.schema["side"]
+    side_dtype = frame.schema.get("side")
+    if side_dtype is None:
+        return "option side column missing — unclassifiable"
     if not (isinstance(side_dtype, pl.String) or side_dtype == pl.Null):
         return f"option side column dtype {side_dtype} is not String/Null — unclassifiable"
-    ts_dtype = frame.schema["timestamp"]
+    ts_dtype = frame.schema.get("timestamp")
+    if ts_dtype is None:
+        return "option timestamp column missing — unclassifiable"
     if not (isinstance(ts_dtype, pl.Datetime) or ts_dtype == pl.Null):
         return f"option timestamp column dtype {ts_dtype} is not Datetime/Null — unclassifiable"
     return None
