@@ -34,8 +34,8 @@
 use libfuzzer_sys::fuzz_target;
 use trading_core::bits;
 use trading_core::{
-    IndicatorSnapshot, MarketStructureSignal, PriorBarHistory, ProximityParams,
-    compute_fib_levels, compute_pivot_levels, evaluate_atoms,
+    IndicatorSnapshot, MarketStructureSignal, PriorBarHistory, ProximityParams, compute_fib_levels,
+    compute_pivot_levels, evaluate_atoms,
 };
 
 const MAX_PAISA: i64 = 10_000_000_000;
