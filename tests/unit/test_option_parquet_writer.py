@@ -724,6 +724,44 @@ class TestHealPartitionRemoveKeys:
         assert result.dropped_removed == 1
         assert pl.read_parquet(dest)["side"].to_list() == ["CE"]
 
+    def test_heal_remove_keys_refuses_nested_key_dtype(self, tmp_path: Path) -> None:
+        """Round-13 fold (refuter-confirmed): heal_partition's OWN re-read is
+        dtype-gated when *remove_keys* is given.
+
+        The round-12 gate covered only the healer's earlier consistent read;
+        this method RE-reads the source under its own locks, so a
+        ``List(Utf8)``-side file swapped in after that gated read reached the
+        Python-hash removal mask and raised bare ``TypeError: unhashable
+        type`` — NOT ``OptionWriterError`` — escaping the healer's
+        per-finding isolation set. Now the documented refusal, file
+        byte-untouched, no quarantine copy."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array([["CE"], ["PE"]], type=pa.list_(pa.string())),
+                    "timestamp": pa.array(
+                        [ts0, datetime(2021, 1, 4, 4, 1, tzinfo=UTC)],
+                        type=pa.timestamp("us", tz="UTC"),
+                    ),
+                }
+            ),
+            dest,
+        )
+        before = dest.read_bytes()
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        with pytest.raises(OptionWriterError, match="unclassifiable"):
+            _writer(tmp_path).heal_partition(
+                dest, remove_keys={("CE", ts0)}, quarantine_to=quarantine_to
+            )
+        assert dest.read_bytes() == before  # refused byte-untouched
+        assert not quarantine_to.exists()  # refusal precedes any quarantine copy
+
     def test_heal_remove_keys_oom_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

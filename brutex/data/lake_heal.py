@@ -962,7 +962,11 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
         # ``frozenset`` below hashes raw side/timestamp values, so an ungated
         # frame raised ``TypeError`` (NOT in ``_PER_FINDING_HEAL_ERRORS``) and
         # aborted the WHOLE batch (the round-3/round-5 isolation-escape
-        # class). Same gate as the scanner (§11 COMMON).
+        # class). Same gate as the scanner (§11 COMMON). This gate covers the
+        # CONSISTENT read only; ``heal_partition`` RE-reads the source under
+        # its own locks AFTER the merge legs below, and runs the SAME gate on
+        # that re-read (round-13 fold — pre-fix a swap in that second, wider
+        # window still aborted the batch through the ungated re-read).
         raise OptionWriterError(f"unclassifiable option partition {src}: {dtype_error}")
     home = (finding.year, finding.month)
     foreign = _option_foreign_frame(home, frame)  # keep-first unique foreign rows, all cols

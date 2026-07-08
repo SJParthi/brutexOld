@@ -217,6 +217,21 @@ scan→heal window, aborting the WHOLE heal batch; NEW public
 canonical-sibling read (loud repr()'d scan_skip, counted skipped) and at
 `_heal_option_foreign` (isolated `OptionWriterError` — batch continues,
 report/stats/alert still emitted).
+ROUND 13 (refuter-confirmed MAJOR + MINOR, one root): the round-12 gate
+missed `heal_partition`'s OWN re-read — the merge legs run between the
+gated consistent read and that re-read (a WIDER swap window), so a
+mid-heal nested-dtype swap reached the ungated Python-hash removal mask
+and the bare `TypeError` STILL aborted the whole batch (reproduced
+end-to-end); the writer now runs the SAME `option_key_dtype_error` gate
+on its own re-read when `remove_keys` is given → the documented isolated
+`OptionWriterError`, batch continues (2 regressions verified failing
+pre-fix; dup heal + production `write()` byte-unchanged). NITs:
+`_option_file_month`'s year is bounded to `datetime.MINYEAR..MAXYEAR`
+(a 5+-digit/year-0 stem round-tripped the canonical check yet no
+datetime month routes there — the "only the writer's stem parses" claim
+now true as written); the census-files-with-skips gap was found ALREADY
+pinned by the round-10 test (mutant re-applied + verified killed — no
+change needed).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -777,10 +792,32 @@ hostile-review pass._
   String/Null; `timestamp` Datetime — naive routes as-if-UTC — or Null), wired at the scan loop + the targeted
   canonical-sibling read (loud `lake.invariant.scan_skip`, repr()'d path, counted `option_files_skipped`, never
   classified) AND at `_heal_option_foreign` (isolated `OptionWriterError` refusal — batch continues,
-  report/stats/alert still emitted); 6 regressions + the gate-removal mutant verified killed. Remaining
+  report/stats/alert still emitted); 6 regressions + the gate-removal mutant verified killed. HOSTILE-REVIEW FOLDS
+  (round 13, refuter-confirmed MAJOR + MINOR — ONE root, both regressions verified failing pre-fix with the exact
+  `TypeError: unhashable type: 'list'` at the removal mask): (R13·MAJOR, isolation-escape) the round-12 gate covered
+  the healer's CONSISTENT read but NOT `OptionParquetWriter.heal_partition`'s OWN re-read — the healer's locks are
+  deliberately SEQUENTIAL, so the per-month copy-forward merge legs run BETWEEN the gated read and the re-read (a
+  WIDER swap window than round 12 closed), and the keyed-removal mask hashed the re-read stored values UNGATED: an
+  in-window swap of the flagged source to a `List(Utf8)`/`Struct`-side parquet (a regular in-lake file — passes
+  polars unique/sort + every containment rail) raised bare `TypeError` — NOT in `_PER_FINDING_HEAL_ERRORS` — and
+  aborted the WHOLE heal batch (no HealReport/stats/on_report alert/AUDIT_HEAL_BATCH line, the later same-batch dup
+  unhealed; the round-3/5/12 isolation-escape class, reproduced end-to-end, contradicting the round-12
+  "batch continues" claim). FIXED at the one hashing site: when `remove_keys` is non-empty the writer runs the SAME
+  `option_key_dtype_error` gate on its OWN re-read (function-local import — `lake_invariants` imports nothing from
+  the writer, no cycle) → the documented isolated `OptionWriterError`; reachable ONLY via the foreign-heal path (the
+  dup heal passes `remove_keys=frozenset()` so its Python hashing never runs; production `write()` byte-unchanged).
+  Regressions: the writer-level nested-dtype `remove_keys` refusal (byte-untouched, no quarantine copy) + the
+  end-to-end mid-heal swap via a `merge_partition_frame` spy rewriting the source BEFORE delegating (errors=1
+  isolated, the later same-batch CALL-series dup still heals, on_report fires, swapped source byte-untouched).
+  (R13·NITs) `_option_file_month`'s "only the writer's canonical stem parses" claim was falsifiable for a
+  5+-digit/year-0 stem (`f"{12024:04d}" == "12024"` round-trips the canonical check yet no datetime month can route
+  there); the year is now bounded to `datetime.MINYEAR..MAXYEAR` (1..9999), 5 new stem-matrix rows incl. both
+  boundaries verified failing pre-fix; the census-OPTIONS-`files`-with-skips NIT was found ALREADY pinned by the
+  round-10 `test_census_options_files_count_scanned_only` (the `+ option_files_skipped` mutant re-applied 2026-07-08
+  + verified killed by it — no change needed, reported honestly). Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (464/160) + `option_parquet_writer.py`
-  (161/32) + `lake_heal.py` (603/170) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (466/162) + `option_parquet_writer.py`
+  (165/34) + `lake_heal.py` (603/170) ALL 100% line+branch; ruff/ruff-format clean, mypy `--strict` + pyright at the
   pre-change baseline).
   Earlier: `claude/hw-pr5-ram-budgets` (**DEC-RAM-BUDGETS-001, MIGRATION.md #1360** — RAM-scaled memory
   budgets: NEW stdlib-only `brutex/hardware_envelope.py` (total-physical-RAM detection, cached once per process with a

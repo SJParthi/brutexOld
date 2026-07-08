@@ -40,7 +40,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import MAXYEAR, MINYEAR, UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -620,7 +620,14 @@ def _option_file_month(path: Path) -> tuple[int, int] | None:
     year) would claim the SAME month as its canonical twin file — two files
     addressing one month is exactly the state the one-file-per-month
     invariant forbids, so such a stem honestly abstains to dup-only instead
-    of masquerading as the month's home file.
+    of masquerading as the month's home file. The year is additionally
+    bounded to ``datetime.MINYEAR..MAXYEAR`` (1..9999, round-13 NIT): a
+    5+-digit or year-0 stem zero-pad round-trips (``f"{12024:04d}" ==
+    "12024"``) yet no ``partition_for_timestamp`` output can ever route a
+    row there — the writer renders stems from datetime-derived months only,
+    so pre-bound such a stem falsified the "only the writer's canonical
+    stem parses" claim above; it now abstains to dup-only like any other
+    non-writer name.
     """
     stem, sep, month_text = path.stem.rpartition("-")
     if not sep or not stem.isdigit() or not month_text.isdigit():
@@ -632,6 +639,8 @@ def _option_file_month(path: Path) -> tuple[int, int] | None:
         return None  # Unicode digit-property chars pass isdigit() but not int()
     if not 1 <= month <= _MAX_MONTH:
         return None
+    if not MINYEAR <= year <= MAXYEAR:
+        return None  # a 5+-digit / year-0 stem — no datetime month routes there
     if path.stem != f"{year:04d}-{month:02d}":
         return None  # non-canonical stem — the same-month twin-file blind spot
     return year, month
@@ -657,10 +666,14 @@ def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
     :func:`utc_aware`) or ``Null`` (abstains from routing). Anything else:
     the file is skipped LOUDLY at scan (``lake.invariant.scan_skip``, path
     repr()'d — the rounds-8/9 log-injection convention) and refused as an
-    isolated ``OptionWriterError`` at heal
-    (``lake_heal._heal_option_foreign``) — never classified, never healed,
-    never a crash. PUBLIC + in ``__all__`` for the healer's reuse (§11
-    COMMON — the :func:`is_foreign_timestamp` precedent).
+    isolated ``OptionWriterError`` at heal — BOTH at the healer's consistent
+    read (``lake_heal._heal_option_foreign``) AND at the writer's OWN keyed
+    re-read (``OptionParquetWriter.heal_partition`` with ``remove_keys`` —
+    the round-13 fold: that re-read happens AFTER the merge legs, so gating
+    only the consistent read left the second, wider swap window open) —
+    never classified, never healed, never a crash. PUBLIC + in ``__all__``
+    for the healer's + writer's reuse (§11 COMMON — the
+    :func:`is_foreign_timestamp` precedent).
     """
     side_dtype = frame.schema["side"]
     if not (isinstance(side_dtype, pl.String) or side_dtype == pl.Null):

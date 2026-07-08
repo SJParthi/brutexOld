@@ -736,6 +736,15 @@ class TestOptionFileMonth:
             ("2024-6", None),
             ("02024-06", None),
             ("٢٠٢٤-٠٦", None),  # Arabic-Indic digits: int() ACCEPTS these — non-canonical
+            # Round-13 NIT: a 5+-digit / year-0 stem zero-pad ROUND-TRIPS
+            # (f"{12024:04d}" == "12024") so it passed the canonical check yet
+            # no datetime month can ever route there — the writer can never
+            # render it; bounded to datetime.MINYEAR..MAXYEAR (1..9999).
+            ("12024-06", None),
+            ("99999-12", None),
+            ("0000-06", None),
+            ("0001-01", (1, 1)),  # MINYEAR boundary — a writer-renderable stem parses
+            ("9999-12", (9999, 12)),  # MAXYEAR boundary
         ],
     )
     def test_stem_parse_matrix(self, stem: str, expected: tuple[int, int] | None) -> None:

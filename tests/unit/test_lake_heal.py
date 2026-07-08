@@ -2047,6 +2047,69 @@ class TestOptionForeignHeal:
         assert july.read_bytes() == july_before  # nothing merged/imported home
         assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
 
+    def test_option_nested_dtype_swap_mid_heal_isolated_batch_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-13 fold (refuter-confirmed MAJOR): a nested-dtype swap landing
+        AFTER the healer's gated consistent read — between the copy-forward
+        merge legs and ``heal_partition`` — is STILL the isolated refusal.
+
+        The round-12 gate covered only the FIRST read;
+        ``OptionParquetWriter.heal_partition`` RE-reads the source under its
+        own locks and hashed the re-read stored keys ungated, so a
+        ``List(Utf8)``-side swap in that second, WIDER window raised bare
+        ``TypeError: unhashable type`` — NOT in the per-finding isolation set
+        — aborting the WHOLE batch (no report/stats/alert, the later
+        same-batch dup unhealed; the round-3/round-5/round-12
+        isolation-escape class). The swap is injected via a
+        ``merge_partition_frame`` spy that rewrites the SOURCE before
+        delegating — exactly the mid-heal window."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        _poison_option_lake(lake)  # a healable dup in the CALL series (heals LATER)
+        june, _july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        nested = pa.table(
+            {
+                "side": pa.array([["CE"], ["CE"]], type=pa.list_(pa.string())),
+                "timestamp": pa.array(
+                    [_ts(1), _ts(1, month=7, day=1)], type=pa.timestamp("us", tz="UTC")
+                ),
+            }
+        )
+        real_merge = OptionParquetWriter.merge_partition_frame
+        swapped: list[bytes] = []
+
+        def _swap_then_merge(self: OptionParquetWriter, dest: Path, frame: Any) -> int:
+            if not swapped:  # swap the SOURCE after the gated consistent read
+                pq.write_table(nested, june)
+                swapped.append(june.read_bytes())
+            return real_merge(self, dest, frame)
+
+        monkeypatch.setattr(OptionParquetWriter, "merge_partition_frame", _swap_then_merge)
+        reports: list[HealReport] = []
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                on_report=reports.append,
+                now=_now,
+            )
+        assert swapped  # the spy really fired inside the foreign heal
+        assert report.errors == 1  # pre-fix: bare TypeError aborted the batch HERE
+        assert report.healed == 1  # the CALL-series dup — a LATER finding — still heals
+        assert reports == [report]  # the alert seam still fires post-batch
+        (error,) = _events(logs, "lake_heal.partition_error")
+        assert error["finding"] == "OptionForeignMonthRows"
+        assert june.read_bytes() == swapped[0]  # the swapped source refused byte-untouched
+        assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
+
     def test_lake_write_halt_propagates_from_option_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

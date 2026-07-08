@@ -596,10 +596,16 @@ class OptionParquetWriter:
         OptionWriterError
             Vanished/corrupt file, a changing heal with no *quarantine_to*,
             a *dest* whose RESOLVED path escapes ``<lake_root>/options/``,
-            or a symlinked *dest* / series dir even when the target stays
+            a symlinked *dest* / series dir even when the target stays
             in-lake (:meth:`_assert_options_containment` — the round-2 +
             round-6 rails; this method unlinks/rewrites, so it must never
-            follow a symlink out of the lake OR across series).
+            follow a symlink out of the lake OR across series), or — when
+            *remove_keys* is given — a re-read frame whose key columns carry
+            a nested/unclassifiable dtype
+            (:func:`~brutex.data.lake_invariants.option_key_dtype_error`,
+            the round-13 twin of the healer's consistent-read gate: the
+            keyed removal hashes raw stored values, so an ungated swapped
+            frame raised bare ``TypeError`` past the per-finding isolation).
         LakeWriteHalt
             Disk-full / OOM during the quarantine copy or the rewrite.
         PartitionLockTimeout
@@ -627,6 +633,26 @@ class OptionParquetWriter:
             dropped_duplicates = physical - int(deduped.height)
             dropped_removed = 0
             if remove_keys:
+                # Round-13 fold (refuter-confirmed): this method RE-reads the
+                # source under its OWN locks, so the round-12 dtype gate on the
+                # healer's earlier consistent read left THIS read ungated — a
+                # nested-key-dtype (List/Struct) swap landing AFTER that gated
+                # read (a WIDE window: the per-month copy-forward merge legs
+                # run in between) reached the Python-hash membership below and
+                # raised bare ``TypeError: unhashable type`` — NOT
+                # ``OptionWriterError``, so it escaped the healer's
+                # per-finding isolation set and aborted the WHOLE heal batch.
+                # Same gate as the scanner + the healer (§11 COMMON), applied
+                # to the frame THIS method actually hashes. Function-local
+                # import — ``lake_invariants`` imports nothing from this
+                # module (no cycle) and stays off the writer's import path.
+                from brutex.data.lake_invariants import option_key_dtype_error
+
+                dtype_error = option_key_dtype_error(deduped)
+                if dtype_error is not None:
+                    raise OptionWriterError(
+                        f"unclassifiable option partition {dest}: {dtype_error}"
+                    )
                 # RAW stored-value boolean-mask removal (never a tz-cast join):
                 # exact membership against the stored (side, timestamp) values.
                 keyset = set(remove_keys)
