@@ -130,6 +130,86 @@ def test_wedged_heavy_read_never_starves_the_poll_routes(
     asyncio.run(scenario())
 
 
+def test_wedged_coverage_options_read_never_starves_the_poll_routes(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged ``/api/v1/coverage/options`` summarize leaves the poll routes live.
+
+    The hostile-review MAJOR (asymmetric isolation): this route's
+    ``summarize_option_datasets`` — the self-described "O(files) full-lake
+    aggregate", polled every 4 s by coverage.html and the literal twin of the
+    ALREADY-moved ``/coverage/spot`` scan — had been left on the shared default
+    ``run_in_threadpool`` pool, so wedging it re-opened the exact original drain
+    vector the fix closed for the moved routes. This oracle wedges THROUGH the
+    route (a hanging summarize seam) and proves the three poll routes still
+    answer — it fails with the route body reverted onto ``run_in_threadpool``
+    (verified).
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_summarize(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        entered.set()
+        release.wait(timeout=_WEDGE_HOLD_S)
+        return [
+            {
+                "underlying": "STUB",
+                "exchange": "NSE",
+                "series": 1,
+                "bars": 0,
+                "first_date": None,
+                "last_date": None,
+            }
+        ]
+
+    # app.py imports the name directly (`from ...db_view import summarize_option_datasets`),
+    # so patch the BOUND name in brutex.dashboard.app — the seam the route reads.
+    monkeypatch.setattr("brutex.dashboard.app.summarize_option_datasets", _blocking_summarize)
+
+    # A 1-token lake pool: the ONE wedged options summarize saturates the whole
+    # heavy-read budget.
+    app = build_app(DashboardState(), instrument_store=store, lake_offload=LakeOffloadPool(limit=1))
+
+    async def scenario() -> None:
+        # Shrink the DEFAULT AnyIO thread limiter to 1 so the pre-fix placement
+        # (this route on the shared default pool) reproduces the shared-pool
+        # starvation cheaply; the fixed route holds the LAKE pool's token instead.
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 1
+
+        async with _asgi_client(app) as client:
+            # Wedge the options coverage read: it acquires the lake pool's only
+            # token and blocks inside the summarize recompute.
+            wedged = asyncio.ensure_future(client.get("/api/v1/coverage/options"))
+            assert await asyncio.to_thread(entered.wait, 5.0), "options summarize never entered"
+
+            # A SECOND lake-pool route confirms the lake pool is SATURATED (its
+            # offload suspends awaiting the held token — never finishes in budget).
+            saturating = asyncio.ensure_future(client.get("/api/v1/coverage/options"))
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(saturating), timeout=0.5)
+
+            # The poll routes must answer within budget despite the saturated lake pool.
+            for path in (
+                "/api/v1/state",
+                "/api/v1/pull/rate",
+                "/api/v1/universe/pull-progress",
+            ):
+                resp = await asyncio.wait_for(client.get(path), timeout=_POLL_BUDGET_S)
+                assert resp.status_code == 200, f"{path} did not answer while a heavy read wedged"
+
+            # Release the wedge; both requests drain with the stub-derived payload
+            # (the second is a cache HIT of the entry the first stored).
+            release.set()
+            first = await asyncio.wait_for(wedged, timeout=_POLL_BUDGET_S)
+            second = await asyncio.wait_for(saturating, timeout=_POLL_BUDGET_S)
+            assert first.status_code == 200
+            assert first.json()["rows"][0]["underlying"] == "STUB"
+            assert second.status_code == 200
+            assert second.json()["rows"][0]["underlying"] == "STUB"
+
+    asyncio.run(scenario())
+
+
 def test_healthy_lake_pool_serve_returns_the_payload_byte_identically(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

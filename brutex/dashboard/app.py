@@ -4928,7 +4928,7 @@ def build_app(
         ``{"present": false}``.
         """
         _require_store()
-        payload = await run_in_threadpool(_build_lake_census_payload_cached)
+        payload = await _lake_offload.run(_build_lake_census_payload_cached)
         return JSONResponse(payload)
 
     @app.get("/api/v1/coverage/windows")
@@ -5033,7 +5033,7 @@ def build_app(
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await run_in_threadpool(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        rows = await _lake_offload.run(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
         # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
         return JSONResponse(

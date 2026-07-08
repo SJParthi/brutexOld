@@ -48,6 +48,11 @@ Honest envelope (Golden Rule #10)
   Composing a per-read wall-clock deadline + honest stale-serve on top (the
   #1522 ``rate_bridge_cache`` pattern) for the individual heavy routes is a
   named follow-up, orthogonal to this isolation.
+* Remaining default-pool heavy reads: the /db DuckDB pagers + the /results
+  XLSX builders (app.py:5610/5696/6087/6163/6446/6559) still offload via plain
+  ``run_in_threadpool`` — the named follow-up DEC-LAKE-OFFLOAD-COMPLETE-002,
+  which also covers the sibling coverage pages' missing client-side no-overlap
+  poll guard (the ``guardedPollJson`` pattern universe.html gained here).
 """
 
 from __future__ import annotations
