@@ -13,45 +13,103 @@ the sweep publishes (:func:`sweep_progress_file`), so the EXISTING
 ``GET /api/v1/sweep-progress`` serves the live per-tuple tick with no new progress
 plumbing (DEC-SWEEP-RUN-BUTTON-001).
 
-The defaults mirror the CLI's ``_add_sweep_grid_args`` declaration (the one source
-of truth for the sweep CLI contract, CLAUDE.md §2 Rule 11 COMMON): NSE index
-symbols on the ``INDEX`` segment, the ``1minute,5minute,15minute`` interval set,
-both directions, ``K∈{1,2}``, no SL/TP legs, top-20. SENSEX rides the BSE
-exchange, so a SENSEX sweep is a separate run with ``exchange=BSE`` — never
-silently mixed into an NSE grid (Golden Rule #1, honest scope).
+## R5 institutional flip (gap-hunt BLOCKER #1, ruling 1)
+
+``build_sweep_kwargs`` used to pin the LIGHT research defaults
+(``overfit_gate=False``, ``stage3_enable=False``, ``top=20``,
+``allow_missing_slices=True``) — so the "one-click institutional sweep"
+button actually launched a gate-less, un-refined, top-20, hole-skipping
+research sweep while the page claimed otherwise. It now pins the
+INSTITUTIONAL defaults: 5 hard gates → composite ranking → Stage-3 CMA-ES
+refinement ON, top-1000 kept per tuple, missing slices REFUSE the whole
+launch (ruling O-a, refuse-whole) rather than silently skip. ``k`` defaults
+to ``1,2,3`` (O-f). SL/TP legs default to a 3×3 on-grid paisa grid (O-g) —
+see :data:`DEFAULT_SL`/:data:`DEFAULT_TP` for why the ``NONE`` leg (no
+stop-loss) is NOT part of the institutional default: ``stage3_enable=True``
+makes :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig` reject any
+``None`` SL/TP value at construction time (every base-grid value must
+normalize onto the Mode-A grid so CMA-ES can seed its ``x0`` from it, ADR-0007
+condition 3) — R19's 4th arm (the ``NONE``/signal-to-signal exit) is
+therefore structurally incompatible with the institutional Stage-3 default
+today; this is an OPEN engineering question for the operator, not a silent
+drop (flagged in the PR, not swept under the rug).
+
+## SLA-overrun acknowledge (gap-hunt BLOCKER #2, ruling 2)
+
+:func:`~brutex.engine.sweep_sla_guard.check_sweep_sla` already accepts an
+``acknowledge`` flag but nothing on the dashboard path could set it — an
+institutional grid past the §8 4-day envelope refused invisibly inside the
+background job thread. :attr:`SweepRunRequest.acknowledge_sla_overrun` now
+threads an explicit ``acknowledge_sla_overrun=True`` (set only after the
+operator confirms the R20 proceed-dialog) down to ``cmd_sweep_all``'s
+existing parameter of the same name — zero new SLA logic, pure wiring.
+
+## Multi-symbol / SENSEX fan-out (gap-hunt MAJOR #9, ruling 9)
+
+SENSEX is BSE-listed while NIFTY/BANKNIFTY are NSE-listed, but one
+:class:`SweepRunRequest` carries exactly ONE ``exchange``. R2's "blank ⇒ all
+3 (NIFTY-first)" default therefore needs a FAN-OUT: :func:`group_symbols_by_exchange`
++ :func:`resolve_oneclick_sweep_plan` build ONE :class:`SweepRunRequest` per
+exchange group, sharing ONE logical ``sweep_run_id`` (:class:`OneClickSweepPlan`).
+Run semantics beyond "one logical id wraps N engine runs, a refusal in any
+group refuses the whole logical run" are an OPEN operator decision (ruling
+9) — this module DEFAULTS to flag-and-run with an explicit note, never
+silently drops a group.
 
 Honest envelope (Golden Rule #10): this module is O(1)-per-field validation/mapping
-only. The sweep it launches is O(T·N) over the grid — NOT O(1) total; the live
-progress file reports the honest tuple/combo counts as they run.
+only (the fan-out is O(#exchange-groups), at most 2 today). The sweep it
+launches is O(T·N) over the grid — NOT O(1) total; the live progress file
+reports the honest tuple/combo counts as they run.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
+from brutex.universe import ENGINE_SWEEP_SPOT_TRIPLES
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
 #: ``EXCH-SYMBOL`` groww keys) — mirrors the CLI ``--symbols`` default in
-#: ``brutex.cli._add_sweep_grid_args``. SENSEX is BSE-listed, so it is run
-#: separately with ``exchange=BSE`` (never silently folded into an NSE grid).
+#: ``brutex.cli._add_sweep_grid_args``. This is :func:`resolve_sweep_request`'s
+#: OWN single-exchange default (NSE) — the cross-exchange "all 3" default
+#: (R2) lives in :data:`DEFAULT_ONECLICK_SYMBOLS`, consumed only by the
+#: fan-out entry point :func:`resolve_oneclick_sweep_plan`, since a bare
+#: single-exchange call cannot sanely default to a symbol outside its one
+#: ``exchange``.
 DEFAULT_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY"
+#: R2's "blank ⇒ all 3 (NIFTY-first)" default for the ONE-CLICK fan-out entry
+#: point only (gap-hunt finding #9 — the old bare default silently dropped
+#: SENSEX, 2 of 3).
+DEFAULT_ONECLICK_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY,SENSEX"
 #: Default lake interval set to sweep (mirrors the CLI ``--intervals`` default).
 DEFAULT_INTERVALS: Final[str] = "1minute,5minute,15minute"
 #: Default trade directions (both legs of a directional edge).
 DEFAULT_DIRECTIONS: Final[str] = "BUY,SELL"
-#: Default conditions-per-combo K values (mirrors the CLI ``--k`` default).
-DEFAULT_K: Final[str] = "1,2"
-#: Default stop-loss / take-profit — ``none`` disables that leg (signal-only).
-DEFAULT_SL: Final[str] = "none"
-DEFAULT_TP: Final[str] = "none"
-#: Default top-N composite-ranked combos persisted per tuple.
-DEFAULT_TOP: Final[int] = 20
-#: Default run-mode identity label stamped on the run hash.
-DEFAULT_MODE: Final[str] = "A"
+#: Default conditions-per-combo K values — institutional default k<=3 (O-f);
+#: mirrors the CLI ``--k`` default shape (a CSV of small depths).
+DEFAULT_K: Final[str] = "1,2,3"
+#: Default stop-loss / take-profit legs — a 3×3 on-grid paisa grid (O-g),
+#: chosen to satisfy the Mode-A CMA-ES refinement axes
+#: (:data:`brutex.engine.stage3_grid.MODE_A_SL_AXIS` = ``[5, 200]`` paisa
+#: step 5; :data:`~brutex.engine.stage3_grid.MODE_A_TP_AXIS` = ``[10, 500]``
+#: paisa step 10) that ``stage3_enable=True`` (R5) REQUIRES every SL/TP value
+#: to normalize onto — see the module docstring for why the ``NONE`` leg is
+#: therefore not part of this default.
+DEFAULT_SL: Final[str] = "50,100,150"
+DEFAULT_TP: Final[str] = "100,200,300"
+#: Default top-N composite-ranked combos persisted per tuple (R21).
+DEFAULT_TOP: Final[int] = 1000
+#: Default run-mode identity label stamped on the run hash — distinguishes
+#: an institutional launch from the retired light "A"-moded research runs.
+DEFAULT_MODE: Final[str] = "INSTITUTIONAL"
 #: Default lake exchange / segment partition for the index sweep.
 DEFAULT_EXCHANGE: Final[str] = "NSE"
 DEFAULT_SEGMENT: Final[str] = "INDEX"
@@ -66,6 +124,15 @@ _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
 #: docstring; ``TOTAL_CONDITIONS`` is the one source of truth, so a future
 #: vocab growth moves this bound automatically — DEC-VOCAB-U128-CODEGEN-001).
 _MAX_K: Final[int] = TOTAL_CONDITIONS
+
+#: ``symbol -> canonical exchange`` for the 3 brute-force spot indexes,
+#: derived from the ONE canonical
+#: :data:`brutex.universe.ENGINE_SWEEP_SPOT_TRIPLES` source (never a
+#: hand-typed copy) — the fan-out's symbol-to-exchange resolver
+#: (:func:`group_symbols_by_exchange`).
+_SPOT_SYMBOL_EXCHANGE: Final[dict[str, str]] = {
+    symbol: exchange for exchange, _segment, symbol in ENGINE_SWEEP_SPOT_TRIPLES
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +155,13 @@ class SweepRunRequest:
         Run-mode identity label stamped on the reproducibility hash.
     top
         Top-N composite-ranked combos persisted per tuple (``>= 1``).
+    acknowledge_sla_overrun
+        ``True`` iff the operator confirmed the R20 proceed-dialog for a
+        selection whose projected wall-clock exceeds the CLAUDE.md §8
+        envelope — threaded verbatim into ``cmd_sweep_all``'s existing
+        ``acknowledge_sla_overrun`` parameter (gap-hunt ruling 2). Defaults
+        ``False`` — an un-acknowledged overrun still REFUSES, never a silent
+        proceed.
     """
 
     symbols: str
@@ -102,6 +176,7 @@ class SweepRunRequest:
     end: str
     mode: str
     top: int
+    acknowledge_sla_overrun: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe echo of the resolved request (for the route response)."""
@@ -118,6 +193,7 @@ class SweepRunRequest:
             "end": self.end,
             "mode": self.mode,
             "top": self.top,
+            "acknowledge_sla_overrun": self.acknowledge_sla_overrun,
         }
 
 
@@ -223,6 +299,7 @@ def resolve_sweep_request(
     segment: str | None = None,
     start: str | None = None,
     end: str | None = None,
+    acknowledge_sla_overrun: bool = False,
     today: date,
 ) -> SweepRunRequest:
     """Validate + normalise raw dashboard form params into a :class:`SweepRunRequest`.
@@ -245,6 +322,10 @@ def resolve_sweep_request(
     start, end
         Raw ``YYYY-MM-DD`` window bounds; ``end`` defaults to *today*. ``end`` must
         not precede ``start``.
+    acknowledge_sla_overrun
+        Passed straight through to the resulting :class:`SweepRunRequest`
+        (no validation — either the operator confirmed the proceed-dialog or
+        did not; gap-hunt ruling 2).
     today
         The injected "now" date used as the ``end`` default + ``end >= start`` check.
 
@@ -302,6 +383,7 @@ def resolve_sweep_request(
         end=resolved_end,
         mode=_normalise_nonblank(mode, DEFAULT_MODE),
         top=resolved_top,
+        acknowledge_sla_overrun=acknowledge_sla_overrun,
     )
 
 
@@ -334,14 +416,17 @@ def build_sweep_kwargs(
 ) -> dict[str, Any]:
     """Map a validated *request* onto the ``cmd_sweep_all`` keyword contract.
 
-    A pure 1:1 mapping (the request is already validated). The non-swept knobs are
-    pinned to the safe dashboard defaults: ``conditions=None`` (the full
-    60-condition vocabulary — ``default_condition_bits()``),
-    ``options_sim=False`` (signal-only research — no option lake required),
-    ``allow_missing_slices=True`` (a one-click sweep runs on WHATEVER is in the
-    lake, skipping empty ``(symbol, interval)`` slices honestly rather than hard
-    failing), and the overfit / Stage-3 gates OFF (the operator opts in via the
-    CLI for a production run).
+    A pure 1:1 mapping (the request is already validated). The non-swept knobs
+    are pinned to the INSTITUTIONAL dashboard defaults (R5, gap-hunt BLOCKER
+    #1): ``conditions=None`` (the full 60-condition vocabulary —
+    ``default_condition_bits()``), ``options_sim=False`` (signal-only —
+    options are R12, parked), ``overfit_gate=True`` + ``stage3_enable=True``
+    (the 5 hard gates → composite ranking → Stage-3 CMA-ES refinement chain
+    ON by default), and ``allow_missing_slices=False`` (a named gap REFUSES
+    the whole launch — ruling O-a refuse-whole — never a silent partial
+    sweep). ``acknowledge_sla_overrun`` threads the operator's R20
+    proceed-dialog confirmation straight to ``cmd_sweep_all``'s existing
+    parameter of the same name (ruling 2).
 
     Parameters
     ----------
@@ -379,10 +464,11 @@ def build_sweep_kwargs(
         "max_tuples": None,
         "max_combos": None,
         "data_snapshot_hash": None,
-        "overfit_gate": False,
+        "overfit_gate": True,
         "options_sim": False,
-        "stage3_enable": False,
-        "allow_missing_slices": True,
+        "stage3_enable": True,
+        "allow_missing_slices": False,
+        "acknowledge_sla_overrun": request.acknowledge_sla_overrun,
         # DEC-ENGINE-SCOPE-GUARD-001: the dashboard NEVER overrides the engine
         # scope — explicit here to keep the 1:1 cmd_sweep_all kwargs doctrine
         # visible (the request was already scope-checked in
@@ -415,21 +501,244 @@ def run_sweep_from_request(  # pragma: no cover — orchestration shim over the 
     )
 
 
+# ── multi-symbol / SENSEX fan-out (gap-hunt MAJOR #9, ruling 9) ──────────────
+
+
+@dataclass(frozen=True, slots=True)
+class OneClickSweepPlan:
+    """ONE logical ``sweep_run_id`` wrapping N per-exchange engine-run requests.
+
+    Attributes
+    ----------
+    sweep_run_id
+        ONE logical identifier threading every per-exchange request (R43 —
+        "one run_id threads page, logs, Telegram, artifacts, audit chain";
+        here it threads the N engine runs this ONE click fans out into).
+    requests
+        One :class:`SweepRunRequest` per exchange group, in exchange-sorted
+        (deterministic) order.
+    """
+
+    sweep_run_id: str
+    requests: tuple[SweepRunRequest, ...]
+
+
+def group_symbols_by_exchange(symbols: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    """Partition *symbols* by canonical exchange (SENSEX→BSE, NIFTY/BANKNIFTY→NSE).
+
+    Order-preserving within each group. A symbol outside the 3 canonical spot
+    indexes (e.g. a stock) is bucketed under :data:`DEFAULT_EXCHANGE` — it is
+    NOT refused here; the per-group :func:`resolve_sweep_request` call
+    downstream refuses it with the full existing
+    :func:`~brutex.engine.sweep_scope.check_sweep_scope` law citation, so
+    there is exactly ONE out-of-scope refusal message in the codebase, never
+    a duplicate.
+    """
+    groups: dict[str, list[str]] = {}
+    for symbol in symbols:
+        exchange = _SPOT_SYMBOL_EXCHANGE.get(symbol, DEFAULT_EXCHANGE)
+        groups.setdefault(exchange, []).append(symbol)
+    return {exchange: tuple(syms) for exchange, syms in groups.items()}
+
+
+def resolve_oneclick_sweep_plan(
+    *,
+    symbols: str | None = None,
+    intervals: str | None = None,
+    directions: str | None = None,
+    k: str | None = None,
+    sl: str | None = None,
+    tp: str | None = None,
+    top: int | None = None,
+    mode: str | None = None,
+    segment: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    acknowledge_sla_overrun: bool = False,
+    today: date,
+    run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+) -> OneClickSweepPlan:
+    """Fan a (possibly cross-exchange) one-click selection into ONE :class:`OneClickSweepPlan`.
+
+    R2's "blank ⇒ all 3 (NIFTY-first)" default (:data:`DEFAULT_ONECLICK_SYMBOLS`)
+    lives HERE, not in :func:`resolve_sweep_request` (whose own bare default
+    stays the single-exchange :data:`DEFAULT_SYMBOLS` — gap-hunt finding #9: a
+    blank cross-exchange default cannot be resolved by a function that only
+    accepts ONE ``exchange``).
+
+    Groups the requested symbols by canonical exchange
+    (:func:`group_symbols_by_exchange`), then calls :func:`resolve_sweep_request`
+    ONCE per exchange group — each group independently validated (scope,
+    dates, legs, ...) with its own resolved ``exchange`` — and stamps every
+    resulting request under ONE shared ``sweep_run_id``. Deliberately NO
+    ``exchange`` parameter here (the fan-out RESOLVES it per group).
+
+    Parameters
+    ----------
+    run_id_factory
+        Injectable ``sweep_run_id`` generator (Golden Rule #4 reproducibility
+        in tests); defaults to a fresh :func:`uuid.uuid4` hex per call.
+    (every other parameter mirrors :func:`resolve_sweep_request` verbatim,
+    minus ``exchange``.)
+
+    Raises
+    ------
+    ValueError
+        Propagated from any per-group :func:`resolve_sweep_request` call
+        (e.g. an out-of-engine-scope symbol, an unknown interval, ...).
+    """
+    raw_symbols = _clean_csv(symbols, DEFAULT_ONECLICK_SYMBOLS)
+    groups = group_symbols_by_exchange(raw_symbols)
+    run_id = run_id_factory()
+    requests = tuple(
+        resolve_sweep_request(
+            symbols=",".join(groups[exchange]),
+            intervals=intervals,
+            directions=directions,
+            k=k,
+            sl=sl,
+            tp=tp,
+            top=top,
+            mode=mode,
+            exchange=exchange,
+            segment=segment,
+            start=start,
+            end=end,
+            acknowledge_sla_overrun=acknowledge_sla_overrun,
+            today=today,
+        )
+        for exchange in sorted(groups)
+    )
+    return OneClickSweepPlan(sweep_run_id=run_id, requests=requests)
+
+
+def _axes_counts(request: SweepRunRequest) -> tuple[list[int], int, int]:
+    """Return ``(k_values, other_axes_product, tuple_count)`` for *request* — pure arithmetic.
+
+    ``other_axes_product`` = every axis EXCEPT ``k`` (symbols × intervals ×
+    directions × sl × tp — proximities/fib-anchors are not dashboard-exposed,
+    so both count as 1); ``tuple_count`` additionally multiplies in
+    ``len(k_values)`` (mirroring
+    :func:`brutex.engine.sweep_orchestrator.count_sweep_tuples`'s own product
+    definition, without constructing a full
+    :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig` — no data
+    snapshot exists yet at preflight time).
+    """
+    k_values = [int(tok) for tok in request.k.split(",")]
+    other_axes_product = (
+        len(request.symbols.split(","))
+        * len(request.intervals.split(","))
+        * len(request.directions.split(","))
+        * len(request.sl.split(","))
+        * len(request.tp.split(","))
+    )
+    return k_values, other_axes_product, other_axes_product * len(k_values)
+
+
+def oneclick_preflight_for_plan(
+    plan: OneClickSweepPlan,
+    *,
+    lake_root: Path,
+    today: date,
+    free_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Run the R4/R20 preflight+estimate for EVERY exchange group in *plan*.
+
+    Folds every per-exchange-group :class:`~brutex.engine.sweep_oneclick_preflight.OneClickPreflightVerdict`
+    into ONE contract dict (ruling 9: a refusal in ANY group refuses the
+    WHOLE logical run; the estimator sums trials/seconds/bytes across
+    groups — ``O(#groups)``, at most 2 today).
+
+    Parameters
+    ----------
+    plan
+        The resolved :class:`OneClickSweepPlan`.
+    lake_root
+        The lake root (shared across every group — one lake, one writer).
+    today
+        Injected "now" (Golden Rule #4).
+    free_bytes
+        Injectable free-disk override (tests); ``None`` reads the real disk.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{sweep_run_id, ok, refusals, clamps, estimator}`` — the contract
+        shape plus the one logical run id threading every group.
+    """
+    from brutex.engine.sweep_estimator import CALIBRATED_BASIS, PROVISIONAL_BASIS
+    from brutex.engine.sweep_oneclick_preflight import run_oneclick_preflight
+
+    results_root = default_results_root(lake_root)
+    all_refusals: list[dict[str, Any]] = []
+    all_clamps: list[dict[str, Any]] = []
+    total_trials = 0
+    total_seconds = 0.0
+    total_bytes = 0
+    any_provisional = False
+    for request in plan.requests:
+        k_values, other_axes_product, tuple_count = _axes_counts(request)
+        verdict = run_oneclick_preflight(
+            lake_root=lake_root,
+            results_root=results_root,
+            exchange=request.exchange,
+            segment=request.segment,
+            symbols=tuple(request.symbols.split(",")),
+            intervals=tuple(request.intervals.split(",")),
+            start=date.fromisoformat(request.start),
+            end=date.fromisoformat(request.end),
+            today=today,
+            k_values=k_values,
+            other_axes_product=other_axes_product,
+            tuple_count=tuple_count,
+            top=request.top,
+            allow_missing_slices=False,
+            acknowledge_sla_overrun=request.acknowledge_sla_overrun,
+            check_vix_coverage=True,
+            free_bytes=free_bytes,
+        )
+        all_refusals.extend(r.to_dict() for r in verdict.refusals)
+        all_clamps.extend(c.to_dict() for c in verdict.clamps)
+        total_trials += verdict.estimator.trials
+        total_seconds += verdict.estimator.est_seconds_provisional
+        total_bytes += verdict.estimator.est_bytes
+        if verdict.estimator.estimate_basis != CALIBRATED_BASIS:
+            any_provisional = True
+
+    return {
+        "sweep_run_id": plan.sweep_run_id,
+        "ok": not all_refusals,
+        "refusals": all_refusals,
+        "clamps": all_clamps,
+        "estimator": {
+            "trials": total_trials,
+            "est_seconds_provisional": total_seconds,
+            "est_bytes": total_bytes,
+            "estimate_basis": PROVISIONAL_BASIS if any_provisional else CALIBRATED_BASIS,
+        },
+    }
+
+
 __all__ = [
     "DEFAULT_DIRECTIONS",
     "DEFAULT_EXCHANGE",
     "DEFAULT_INTERVALS",
     "DEFAULT_K",
     "DEFAULT_MODE",
+    "DEFAULT_ONECLICK_SYMBOLS",
     "DEFAULT_SEGMENT",
     "DEFAULT_SL",
     "DEFAULT_START",
     "DEFAULT_SYMBOLS",
     "DEFAULT_TOP",
     "DEFAULT_TP",
+    "OneClickSweepPlan",
     "SweepRunRequest",
     "build_sweep_kwargs",
     "default_results_root",
+    "group_symbols_by_exchange",
+    "oneclick_preflight_for_plan",
+    "resolve_oneclick_sweep_plan",
     "resolve_sweep_request",
     "run_sweep_from_request",
     "sweep_progress_file",

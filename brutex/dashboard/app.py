@@ -234,6 +234,8 @@ from brutex.dashboard.sweep_results_view import (
 )
 from brutex.dashboard.sweep_runner import (
     default_results_root,
+    oneclick_preflight_for_plan,
+    resolve_oneclick_sweep_plan,
     resolve_sweep_request,
     run_sweep_from_request,
     sweep_progress_file,
@@ -5669,6 +5671,7 @@ def build_app(
         segment: str | None = Query(default=None),
         start: str | None = Query(default=None),
         end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/sweep/run — launch the brute-force grid sweep from the dashboard.
 
@@ -5687,6 +5690,14 @@ def build_app(
         The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
         partly-pulled lake simply sweeps whatever slices exist and reports the
         honest tuple count in the progress feed (Golden Rule #10).
+
+        This single-exchange surface stays available for a targeted launch;
+        the multi-exchange R2 "blank ⇒ all 3 (NIFTY-first)" ONE-CLICK
+        institutional button — with the full R4 preflight + R20 estimator —
+        is ``POST /api/v1/sweep/oneclick/run`` (gap-hunt ruling 1/2/9).
+        ``acknowledge_sla_overrun`` threads straight to ``cmd_sweep_all``'s
+        parameter of the same name (ruling 2) — the kwargs it builds now pin
+        the SAME institutional defaults (R5) as the one-click route.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -5707,6 +5718,7 @@ def build_app(
                 segment=segment,
                 start=start,
                 end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
                 today=date.today(),
             )
         except ValueError as exc:
@@ -5749,6 +5761,180 @@ def build_app(
             on_success=_summary_cache.mark_dirty,
         )
         payload = request.to_dict()
+        payload["started"] = started
+        return JSONResponse(payload)
+
+    def _oneclick_plan_from_query(
+        *,
+        symbols: str | None,
+        intervals: str | None,
+        directions: str | None,
+        k: str | None,
+        sl: str | None,
+        tp: str | None,
+        top: int | None,
+        mode: str | None,
+        segment: str | None,
+        start: str | None,
+        end: str | None,
+        acknowledge_sla_overrun: bool,
+    ) -> Any:
+        """Shared plan-resolution body for the one-click institutional routes below.
+
+        A thin route-layer wrapper over
+        :func:`~brutex.dashboard.sweep_runner.resolve_oneclick_sweep_plan` — a
+        bad field raises :class:`ValueError`, mapped to a 400 by the two
+        caller routes (never a deep background crash, Golden Rule #10).
+        """
+        return resolve_oneclick_sweep_plan(
+            symbols=symbols,
+            intervals=intervals,
+            directions=directions,
+            k=k,
+            sl=sl,
+            tp=tp,
+            top=top,
+            mode=mode,
+            segment=segment,
+            start=start,
+            end=end,
+            acknowledge_sla_overrun=acknowledge_sla_overrun,
+            today=date.today(),
+        )
+
+    @app.get("/api/v1/sweep/oneclick/preflight")
+    async def api_sweep_oneclick_preflight(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/oneclick/preflight — R4/R20: preflight + LIVE estimate, NEVER launches.
+
+        The one-click institutional sweep button's "on click, BEFORE any
+        compute" step (R20): resolves the (possibly cross-exchange, R2 "blank
+        ⇒ all 3") selection into a :class:`~brutex.dashboard.sweep_runner.OneClickSweepPlan`
+        and returns the composed ``{sweep_run_id, ok, refusals, clamps,
+        estimator}`` verdict — the proceed-dialog's data source. Pure
+        read-only: no lock is taken, no lake write happens, nothing is
+        launched — safe to poll repeatedly.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            plan = _oneclick_plan_from_query(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        verdict = oneclick_preflight_for_plan(plan, lake_root=lake, today=date.today())
+        return JSONResponse(verdict)
+
+    @app.post("/api/v1/sweep/oneclick/run")
+    async def api_sweep_oneclick_run(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        acknowledge_sla_overrun: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/sweep/oneclick/run — launch the ONE-CLICK institutional sweep.
+
+        R5's institutional flip (gates ON, top-1000, refuse-whole) fanned out
+        across every exchange group the selection needs (SENSEX/BSE vs
+        NIFTY·BANKNIFTY/NSE, ruling 9), sharing ONE logical ``sweep_run_id``.
+        Re-runs the SAME preflight :func:`api_sweep_oneclick_preflight` computes
+        — a refusal in ANY group refuses the WHOLE logical run (never a
+        partial silent launch): the response is ``{"started": false, ...the
+        verdict}`` (loud, not an HTTP error — R16 layer 2, "a run that starts
+        is provably runnable"). On ``ok`` every group's engine run executes
+        SEQUENTIALLY on the ONE single-flight background job (one lake, one
+        writer); a second click while running is the existing no-op.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            plan = _oneclick_plan_from_query(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                segment=segment,
+                start=start,
+                end=end,
+                acknowledge_sla_overrun=acknowledge_sla_overrun,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        verdict = oneclick_preflight_for_plan(plan, lake_root=lake, today=date.today())
+        if not verdict["ok"]:
+            payload = dict(verdict)
+            payload["started"] = False
+            return JSONResponse(payload)
+
+        results_root = default_results_root(lake)
+        state.sweep_progress_path = sweep_progress_file(results_root)
+        _LOG.info(
+            "sweep.oneclick.run.requested",
+            sweep_run_id=plan.sweep_run_id,
+            groups=[req.exchange for req in plan.requests],
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: run every exchange group's engine run, sequentially."""
+            exit_code = 0
+            for group_request in plan.requests:
+                code = run_sweep_from_request(
+                    group_request, lake_root=lake, results_root=results_root
+                )
+                if code != 0 and exit_code == 0:
+                    exit_code = code
+            return exit_code
+
+        started = _pull_job.start(
+            _work,
+            total=len(plan.requests),
+            detail=f"oneclick sweep {plan.sweep_run_id}",
+            on_success=_summary_cache.mark_dirty,
+        )
+        payload = dict(verdict)
         payload["started"] = started
         return JSONResponse(payload)
 

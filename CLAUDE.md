@@ -18,7 +18,40 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
+_Last updated: 2026-07-08 (DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, MIGRATION.md #1568 —
+Phase P1 of the one-click institutional sweep: the R4 hard data preflight (real
+NSE calendar coverage, DISK-verified 1-minute months, G1 derived-freshness reuse,
+lake-invariant/quarantine check, sweep-vs-pull exclusion probe, futures-execution
+coverage via P5's shipped `preflight_futures_months`, India-VIX coverage arm,
+free-disk refusal) + the R20 live pre-run estimator (true trial count
+`Σ C(60,k)·other_axes`, VWAP dead-bits 60-vs-58 flag-and-run annotation, the
+calibrated/provisional discriminator, a new `estimator_calibration.json`
+schema+reader — P1 owns reads, no writer on `main` yet so every estimate is
+honestly "provisional") in ONE `{ok, refusals, clamps, estimator}` verdict
+(`brutex/engine/sweep_oneclick_preflight.py` + `sweep_estimator.py` +
+`estimator_calibration.py`). THE FLIP (gap-hunt BLOCKER #1): `build_sweep_kwargs`
+now pins the INSTITUTIONAL defaults (`overfit_gate=True`, `stage3_enable=True`,
+`top=1000`, `allow_missing_slices=False`, `k<=3`, a 3×3 on-grid SL/TP paisa
+grid) — the one-click button launches the institutional sweep, never the
+retired light research one. SLA-acknowledge wiring (`acknowledge_sla_overrun`
+threads to `cmd_sweep_all`'s existing param, ruling 2) + the multi-symbol/
+SENSEX fan-out (`group_symbols_by_exchange` + `resolve_oneclick_sweep_plan`,
+ONE logical `sweep_run_id` wrapping N per-exchange engine runs, ruling 9) round
+out `brutex/dashboard/sweep_runner.py`; two NEW dashboard routes
+(`GET/POST /api/v1/sweep/oneclick/{preflight,run}`) — the existing
+`/api/v1/sweep/run` single-exchange surface stays contract-unchanged.
+DISCOVERED CONSTRAINT (honestly flagged, not routed around): `stage3_enable=True`
+structurally forbids a `None` SL/TP leg (`SweepGridConfig.__post_init__`,
+ADR-0007 condition 3) — R19's 4th (NONE/signal-to-signal) arm is therefore
+incompatible with the institutional default as it exists today; an open
+question for the operator/coordinator. VWAP exclude-vs-flag and the exact
+multi-exchange run semantics stay DEFAULT flag-and-run per the two pre-declared
+operator UNDECIDED items. P1 ownership zone ONLY — zero P2/P3/P4/P5/P6 files
+touched (calls P5's shipped `brutex/futures/preflight.py`, never edits it).
+100.00% line+branch on all 4 touched/new modules; ruff/mypy --strict/pyright
+clean. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX + the ADR-0012 NIFTY-futures
+track; no vocab/rate/lake-schema change.)
+Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
 executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
