@@ -1327,7 +1327,7 @@ class TestRegisterPullMeter:
 
         holder = SessionRateController()
         stale = CallMeter()
-        holder.register_meter(stale)  # a prior real pull's meter, never evicted pre-#1544
+        holder.register_meter(stale)  # a prior real pull's meter, never evicted pre-#1593
         register_pull_meter(holder, _Client(), dry_run=True)
         assert holder.peek_meter() is None, (
             "a dry-run must evict the stale meter AND never register the synthetic one"
@@ -1574,7 +1574,7 @@ class TestPullMeterWiring:
         )
 
     def test_spot_dry_run_clears_stale_meter(self, tmp_path: Path) -> None:
-        """The C0 headline pin (FAILS on pre-#1544 HEAD): a spot dry-run with the
+        """The C0 headline pin (FAILS on pre-#1593 HEAD): a spot dry-run with the
         DEFAULT synthetic adapter EVICTS a prior real pull's registered meter.
 
         MUTANT KILLED: the ``dry_run=dry_run`` kwarg dropped at the ``pull_all_spot``
@@ -3622,7 +3622,7 @@ class TestObservedHolidaysArming:
 class TestMeterLifecycleInvariantDocPin:
     """Grep-based doc pin (DEC-RATE-METER-LIFECYCLE-001 round 3, Golden Rule #1).
 
-    Review rounds 2-3 proved the ORIGINAL #1544 claim — "no job running ⇒ no meter
+    Review rounds 2-3 proved the ORIGINAL #1593 claim — "no job running ⇒ no meter
     registered" — FALSE: the direct off-job ``POST /api/v1/universe/pull`` route
     registers the session meter with no ``BackgroundPullJob`` involved, so "no job"
     never implied "no meter". The corrected, route-clear-backed invariant is scoped

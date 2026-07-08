@@ -86,7 +86,7 @@ FinallyHook = Callable[[], None]
 #: The single-flight job runs BOTH vendor pulls AND the zero-vendor-call brute-force
 #: sweep; the kind lets the ``/api/v1/pull/rate`` probe distinguish them so a 2-4-day
 #: sweep reads an honest "idle" on the PULL RATE widget instead of a site-wide red
-#: "stalled" (the #1544 C5 fix). Every pull-shaped ``start`` keeps the default
+#: "stalled" (the #1593 C5 fix). Every pull-shaped ``start`` keeps the default
 #: :data:`JOB_KIND_PULL`; only the sweep route passes :data:`JOB_KIND_SWEEP`.
 JOB_KIND_PULL: Final[str] = "pull"
 JOB_KIND_SWEEP: Final[str] = "sweep"
@@ -562,7 +562,7 @@ class BackgroundPullJob:
         dry-run included) or :data:`JOB_KIND_SWEEP` (the zero-vendor-call brute-force
         sweep route). Read via :attr:`running_job_kind` by the ``/api/v1/pull/rate``
         probe so a 2-4-day sweep reads an honest "idle", never a site-wide red
-        "stalled" (the #1544 C5 fix). It changes NOTHING else — ``running``, the
+        "stalled" (the #1593 C5 fix). It changes NOTHING else — ``running``, the
         progress feed and the single-flight are byte-identical for either kind.
         """
         # Build the per-run stall watchdog BEFORE the lock (DEC-PULL-STALL-DETECTION-001):

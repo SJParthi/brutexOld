@@ -1476,7 +1476,7 @@ class TestOnFinally:
 
 class TestOnRunEnd:
     """`BackgroundPullJob(on_run_end=…)` — the per-JOB run-end hook (the production
-    wiring is ``SessionRateController.clear_meter``, the #1544 C0 cross-pull meter-leak
+    wiring is ``SessionRateController.clear_meter``, the #1593 C0 cross-pull meter-leak
     fix): fires ONCE per run — success AND failure — inside the identity-gated finally,
     strictly AFTER ``on_finally`` and strictly BEFORE the single-flight release, in its
     OWN try/except; never on a refused start; never from a superseded stale worker."""

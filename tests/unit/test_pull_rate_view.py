@@ -1194,7 +1194,7 @@ class TestBridgeMaxAge:
     """`build_pull_rate_view_merged`'s bridge TTL — dead evidence ≡ absent."""
 
     def test_dead_bridge_beyond_ttl_reads_idle(self) -> None:
-        """The C3 repro pin (FAILS on pre-#1544 HEAD — it read FLOW_STALLED forever).
+        """The C3 repro pin (FAILS on pre-#1593 HEAD — it read FLOW_STALLED forever).
 
         MUTANT KILLED: the ``<= bridge_max_age_s`` conjunct severed → the 2-day-old
         SIGKILLed CLI file out-freshes the never-ticked panel and fabricates a

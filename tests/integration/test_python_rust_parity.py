@@ -301,6 +301,13 @@ class TestIndicatorComputeParity:
                 fb.ext_down_200_paisa,
                 fb.ext_down_262_paisa,
                 fb.ext_down_424_paisa,
+                # The bullish retracement tail, appended LAST to the compute-FFI
+                # projection (19 entries; the evaluator ABI stays 15 —
+                # DEC-FIB-BULLISH-RETRACE-001).
+                fb.retrace_bull_23_paisa,
+                fb.retrace_bull_38_paisa,
+                fb.retrace_bull_62_paisa,
+                fb.retrace_bull_78_paisa,
             ]
             if list(rust) != expected:
                 mismatches += 1

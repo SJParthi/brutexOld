@@ -2116,7 +2116,7 @@ def pull_contract_candles(
     # empty-candle dry-run GrowwClient DOES carry a real CallMeter (``client.py``
     # ``default_factory=CallMeter``), so honesty comes from the explicit ``dry_run=True``
     # gate, which DEREGISTERS (clears any stale prior-pull meter, never registers the
-    # synthetic one) — never from a meterless client (the pre-#1544 "no ``.meter`` silent
+    # synthetic one) — never from a meterless client (the pre-#1593 "no ``.meter`` silent
     # no-op" claim here was factually FALSE; DEC-RATE-METER-LIFECYCLE-001). Best-effort +
     # observe-only. The lazy import avoids any module-load ordering coupling with
     # pull_controller.
