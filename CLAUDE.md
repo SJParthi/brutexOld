@@ -18,7 +18,42 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+_Last updated: 2026-07-08 (DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1601 —
+the dashboard read-path pool-wide wedge fix, closing the DEC-PULL-RATE-BRIDGE-
+NONBLOCK-CACHE-001 (#1522) named follow-up "pool-wide wedge protection". FORENSIC
+(operator's 2026-07-08 live log): during the write-heavy options phase the
+page-serving path HARD-WEDGED at 05:02:52Z and stayed frozen ~37 min while the
+pull stayed healthy — the heavy full-lake read offloads (completeness SPOT scan,
+pull-progress ledger fold, `/coverage/windows`, mapping-integrity), all routed
+through Starlette's ONE process-wide 40-token AnyIO thread limiter via
+`run_in_threadpool`, wedged on the write-bound SSD and drained the shared pool, so
+every threadpool route starved for a worker token; browser-side, seven unaborted
+`universe.html` `setInterval` pollers stacked hung fetches until the per-origin
+connection pool exhausted. F1 (server, root): NEW
+`brutex/dashboard/lake_offload.py` `LakeOffloadPool` — a `run_in_threadpool`
+drop-in accounting each offload against its OWN `anyio.CapacityLimiter`
+(`DEFAULT_LAKE_OFFLOAD_LIMIT`=8, env `BRUTEX_LAKE_OFFLOAD_LIMIT` fail-loud),
+DISJOINT from the default limiter; `build_app` gains an injectable `lake_offload`
+param and the 8 heavy full-lake read seams (`/coverage`, `/coverage/spot`,
+`/completeness/scoreboard{,.csv}`, `/universe/completeness`,
+`/universe/mapping-integrity{,.csv}`, `/coverage/windows`) are re-pointed onto it,
+so a wedged SSD consumes at most the lake pool's 8 tokens and can NEVER starve the
+light poll routes (`/api/v1/state`, `/api/v1/pull/rate`, `/api/v1/universe/pull-
+progress`) of default-limiter tokens. The pull-progress POLL fold deliberately
+STAYS on the default pool (isolating the heavy SCANS leaves its budget free; a
+wedge of the fold-read itself is the orthogonal deadline+stale-serve follow-up).
+F2 (client, belt): the seven unaborted pollers + the `refreshWindowsLine`
+`/coverage/windows` poll (the identical hazard) route through ONE `guardedPollJson`
+carrying the same 10 s AbortController + per-URL no-overlap in-flight guard
+`pollProgress` already uses. HONEST (Golden Rule #10): ISOLATION not a kill — a
+wedged read syscall still can't be interrupted; the guarantee is a wedge is
+CONTAINED to the lake pool's tokens; a latency/liveness fix, NO throughput claim.
+Regression oracle injects a 1-token lake pool + shrinks the default limiter to 1,
+wedges a heavy read, and proves the three poll routes answer within bound (VERIFIED
+fails-without-fix). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; READ-side dashboard
+only; `lake_offload.py` 100% line+branch, `app.py` stays 100%; ruff/ruff-format/
+`mypy --strict`/pyright clean.
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
 the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
 pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
 `dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
@@ -1081,7 +1116,39 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593** — the #1056
+- **Active branch:** `claude/dashboard-wedge-fix` (**DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1601** — the
+  dashboard read-path pool-wide wedge fix, closing the #1522 "pool-wide wedge protection" named follow-up. FORENSIC
+  (operator's 2026-07-08 live log): during the write-heavy options phase the page-serving path HARD-WEDGED at
+  05:02:52Z and stayed frozen ~37 min while the pull stayed healthy — the heavy full-lake read offloads (completeness
+  SPOT scan, pull-progress ledger fold, `/coverage/windows`, mapping-integrity), all routed through Starlette's ONE
+  process-wide 40-token AnyIO thread limiter via `run_in_threadpool`, wedged on the write-bound SSD and drained the
+  shared pool, so every threadpool route starved for a worker token; browser-side, seven unaborted `universe.html`
+  `setInterval` pollers stacked hung fetches until the per-origin connection pool exhausted. **F1 (server, root):**
+  NEW `brutex/dashboard/lake_offload.py` `LakeOffloadPool` — a `run_in_threadpool` drop-in accounting each offload
+  against its OWN `anyio.CapacityLimiter` (`DEFAULT_LAKE_OFFLOAD_LIMIT`=8, env `BRUTEX_LAKE_OFFLOAD_LIMIT` fail-loud
+  int ≥ 1), DISJOINT from the process-wide default 40-token limiter; `build_app` gains an injectable `lake_offload`
+  param and the 8 heavy full-lake read seams (`/api/v1/coverage`, `/coverage/spot`, `/completeness/scoreboard{,.csv}`,
+  `/universe/completeness`, `/universe/mapping-integrity{,.csv}`, `/coverage/windows`) are re-pointed onto it, so a
+  wedged SSD consumes at most the lake pool's 8 tokens and can NEVER starve the light poll routes (`/api/v1/state` —
+  pure in-memory; `/api/v1/pull/rate` — the #1522 deadline-guarded bridge cache; `/api/v1/universe/pull-progress`) of
+  default-limiter tokens. The `/api/v1/universe/pull-progress` `_phases` fold DELIBERATELY STAYS on the default pool
+  (isolating the heavy SCANS leaves its budget free; pulling the poll route onto the same bounded pool would make it
+  vulnerable to a heavy-read wedge — its own fold is generation+ledger-mtime cached; a wedge of the fold-read ITSELF
+  is the orthogonal deadline+stale-serve follow-up, the #1522 pattern, not this isolation fix). **F2 (client,
+  belt):** the seven unaborted `setInterval` pollers (`pollQuota` + the six integrity/completeness loaders) PLUS the
+  `refreshWindowsLine` `/coverage/windows` poll (the identical hazard on an F1 heavy route) route through ONE
+  `guardedPollJson` carrying the same 10 s `AbortController` + per-URL no-overlap in-flight guard `pollProgress`
+  already uses, so a hung fetch can never exhaust the browser connection pool (textContent-only, source-pinned —
+  honest no-headless-JS envelope). **HONEST (Golden Rule #10):** ISOLATION not a kill — a wedged read syscall still
+  can't be interrupted (the #1522 / DEC-FETCH-HUNG-WRITE-DEADLINE-001 stance); the guarantee is a wedge is CONTAINED
+  to the lake pool's tokens so the poll routes' default budget is never starved, NOT that the wedged worker thread is
+  reaped; a latency/liveness fix, NO throughput claim (a healthy-disk pass-through). Regression oracle injects a
+  1-token lake pool + shrinks the default limiter to 1, wedges a heavy read (a SECOND read proves the pool
+  SATURATED), and asserts the three poll routes answer within a 3 s budget — VERIFIED fails-without-fix by reverting
+  the seam onto `run_in_threadpool`. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; READ-side
+  dashboard only, no lake/schema/scope/vocab/rate change; `lake_offload.py` 100% line+branch, `app.py` stays 100%;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593** — the #1056
   pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
   set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
   `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
@@ -3011,10 +3078,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/upbeat-tesla-mfrovq`
+- **Active feature branch:** `claude/dashboard-wedge-fix`
+  (DEC-DASHBOARD-READPATH-WEDGE-001, MIGRATION.md #1601 — the dashboard read-path
+  pool-wide wedge fix: heavy full-lake read routes isolated onto a dedicated
+  bounded `anyio.CapacityLimiter` (F1) + the `/universe` `setInterval` pollers
+  abort-guarded (F2); see §1 Active branch for the full blurb)
+  Earlier: `claude/upbeat-tesla-mfrovq`
   (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
-  CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
-  full blurb)
+  CallMeter lifecycle + rate-widget truth pack)
   Earlier: `claude/sleepy-hawking-l87497`
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci

@@ -132,6 +132,7 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
+from brutex.dashboard.lake_offload import LakeOffloadPool
 from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
@@ -1127,6 +1128,7 @@ def build_app(
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
+    lake_offload: LakeOffloadPool | None = None,
     prebuild_gate: PrebuildGate | None = None,
     quota_tracker: Any = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
@@ -1187,6 +1189,15 @@ def build_app(
         drive the slow-read / cache-hit / provenance behaviour
         deterministically; ``None`` (the default) builds a fresh production
         cache.
+    lake_offload
+        Optional :class:`~brutex.dashboard.lake_offload.LakeOffloadPool` backing
+        the heavy full-lake read routes (DEC-DASHBOARD-READPATH-WEDGE-001). Its
+        dedicated bounded ``anyio.CapacityLimiter`` is disjoint from the
+        process-wide default 40-token AnyIO thread limiter, so a write-heavy pull
+        that wedges the external SSD cannot drain the tokens the light poll routes
+        need. Injected so a test can size it (e.g. a 1-token limiter) to drive a
+        wedge deterministically; ``None`` (the default) builds a fresh production
+        pool.
     prebuild_gate
         Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
         the ``/api/v1/movers`` screens while the one-click pull pipeline runs
@@ -1445,6 +1456,16 @@ def build_app(
     # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
+    # The dedicated bounded lake-offload pool (DEC-DASHBOARD-READPATH-WEDGE-001):
+    # every HEAVY full-lake read route below is offloaded through this pool's OWN
+    # anyio.CapacityLimiter (8 tokens by default), DISJOINT from the process-wide
+    # default 40-token AnyIO thread limiter that plain run_in_threadpool uses. So a
+    # write-heavy pull that wedges the external SSD can drain at most this pool's
+    # tokens and can NEVER starve the light poll routes (/api/v1/state,
+    # /api/v1/pull/rate, /api/v1/universe/pull-progress) of default-limiter tokens —
+    # the 05:02:52Z read-path wedge fix. Injected so a test can size it (e.g. a
+    # 1-token limiter) to drive saturation deterministically.
+    _lake_offload = lake_offload if lake_offload is not None else LakeOffloadPool()
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
@@ -4206,6 +4227,15 @@ def build_app(
                 generation=_summary_cache.generation,
             )
 
+        # DEC-DASHBOARD-READPATH-WEDGE-001: this POLL route stays on the DEFAULT
+        # AnyIO thread limiter (plain run_in_threadpool), NOT the bounded
+        # `_lake_offload` pool. The heavy full-lake SCAN routes are what drained the
+        # shared pool and wedged the read path; isolating THEM onto the dedicated
+        # limiter leaves the default pool's full budget for this poll — so pulling
+        # this fold onto the same bounded pool would instead make it vulnerable to a
+        # heavy-read wedge. Its own fold is generation+ledger-mtime cached (O(1) on a
+        # repeat poll); a wedge of the fold-read ITSELF is the orthogonal
+        # deadline+stale-serve follow-up (#1522 pattern), not this isolation fix.
         snap["phases"] = await run_in_threadpool(_phases)
         return JSONResponse(snap)
 
@@ -4348,7 +4378,7 @@ def build_app(
                 compute=_build,
             )
 
-        return JSONResponse(await run_in_threadpool(_cached_build))
+        return JSONResponse(await _lake_offload.run(_cached_build))
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -4412,7 +4442,7 @@ def build_app(
                 SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
             )
 
-        return JSONResponse(await run_in_threadpool(_rows_and_rollup))
+        return JSONResponse(await _lake_offload.run(_rows_and_rollup))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
@@ -4535,7 +4565,7 @@ def build_app(
             return _summary_cache.stamp_freshness(
                 SPOT, build_completeness_scoreboard([], {}, [], {})
             )
-        board: dict[str, Any] = await run_in_threadpool(
+        board: dict[str, Any] = await _lake_offload.run(
             _build_completeness_board, store, lake_root.parent
         )
         return board
@@ -4546,7 +4576,7 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return scoreboard_to_csv(build_completeness_scoreboard([], {}, [], {}))
-        csv_text: str = await run_in_threadpool(_build_completeness_csv, store, lake_root.parent)
+        csv_text: str = await _lake_offload.run(_build_completeness_csv, store, lake_root.parent)
         return csv_text
 
     @app.get("/api/v1/completeness/scoreboard.csv")
@@ -4601,7 +4631,7 @@ def build_app(
                 compute=lambda: _build_per_symbol_completeness(store, lake),
             )
 
-        per_symbol = await run_in_threadpool(_cached_per_symbol)
+        per_symbol = await _lake_offload.run(_cached_per_symbol)
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -4674,7 +4704,7 @@ def build_app(
         line+branch); READ-ONLY, no pull. No store wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
+        report = await _lake_offload.run(_build_mapping_integrity_report_cached)
         return JSONResponse(report_to_dict(report))
 
     @app.get("/api/v1/universe/mapping-integrity.csv")
@@ -4691,7 +4721,7 @@ def build_app(
         wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
+        report = await _lake_offload.run(_build_mapping_integrity_report_cached)
         return Response(
             content=mapping_integrity_to_csv(report),
             media_type="text/csv; charset=utf-8",
@@ -4965,7 +4995,7 @@ def build_app(
                 since=last_pull_start_utc(lake),
             )
 
-        return JSONResponse(await run_in_threadpool(_payload))
+        return JSONResponse(await _lake_offload.run(_payload))
 
     @app.get("/api/v1/coverage/options")
     async def api_coverage_options() -> JSONResponse:
