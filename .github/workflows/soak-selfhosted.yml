@@ -1,0 +1,449 @@
+# soak-selfhosted.yml — The REAL multi-hour soak on the self-hosted M4-Pro runner.
+#
+# WHY (DEC-SOAK-REAL-TIER-001, MIGRATION.md entry #1580)
+# ------------------------------------------------------
+# The nightly `stress-nightly.yml` runs on GitHub-hosted `ubuntu-24.04` with a
+# FIXED 60-minute job timeout — which STRUCTURALLY forbids a real multi-hour
+# soak from ever completing (a 10M-event dispatch linearly extrapolates to
+# ~16.7 h and self-kills at 60 min, ~1/17th done; see the honest #208 rewrite).
+# This workflow is the tier where a genuine hours-long soak actually RUNS: on
+# the operator's registered self-hosted Apple M4-Pro (CLAUDE.md §8), with a job
+# timeout DERIVED from the requested duration so it can never outrun its own
+# clock — bounded to 20 h (1200 min), because on a self-hosted runner the job's
+# GITHUB_TOKEN can only be refreshed for up to 24 hours (documented): every
+# step executing past the 24-h mark holds a DEAD token, so the "open issue on
+# failure" watchdog below would 401 and file NOTHING — the derived timeout
+# (m + 30 + m/6) must stay under 1440 min, giving m <= 1208 → 1200 (SEC9-1;
+# this 24-h token bound is TIGHTER than — and supersedes as the binding
+# bound — the 5-day/7200-min platform execution kill of SOAK-R8-1/SEC8-2; a
+# larger dispatch would burn hours then lose its own failure signal or be
+# platform-killed mid-soak, the exact un-completable-tier trap this workflow
+# exists to close; a >20 h tier is BLOCKED on the ADR-0018 out-of-job watchdog
+# follow-up, which authenticates with its own fresh token). It drives `tests/stress/test_soak_sustained.py::test_soak_sustained`
+# (the `soak` marker) for the full `STRESS_DURATION_S`, feeding each time window
+# to the pure `brutex.observability.soak_drift.SoakDriftMonitor` (RSS ceiling /
+# fd growth / p99 latency drift). The failure signal is AUTOMATIC (CLAUDE.md §11):
+# the driver WIRES the monitor's on_breach to `SweepAlerter.soak_drift`, so the
+# INSTANT a MONOTONE RSS-ceiling / fd-growth rule edges into breach a CRITICAL
+# Telegram alert fires in real time (trigger-independent; a silent no-op when
+# Telegram is disabled). HONEST prerequisite (OH7-1): this workflow wires NO
+# Telegram secrets/env — the real-time push is LIVE only if the self-hosted
+# runner daemon's own environment exports BRUTEX_TELEGRAM_BOT_TOKEN /
+# BRUTEX_TELEGRAM_CHAT_ID / BRUTEX_TELEGRAM_ENABLED=true (an operator
+# runner-service configuration, out-of-band of this file); without them the
+# alert is a SILENT NO-OP and the issue watchdog below is the ONLY automatic
+# signal — and that watchdog itself has TWO structurally-uncoverable paths
+# (a never-started run and a runner lost mid-soak; see the runner/trigger
+# section below). The end-of-run HARD gate is the DETERMINISTIC oracles —
+# an RSS-ceiling / fd-growth / audit-chain breach fails the pytest run so the
+# "open issue on failure" step files a tracked issue. `soak.p99_drift` is
+# OBSERVE-ONLY (a sub-second window's p99 is fsync/GC/scheduler-jitter-bound, so
+# asserting on it false-fails ~15% of runs and pushing each oscillating
+# up-crossing would storm the operator) — it fires NEITHER the real-time alert
+# NOR the CI gate, visible only via structlog + the brutex_soak_p99_ratio gauge
+# (DEC-SOAK-REAL-TIER-001).
+#
+# DERIVED TIMING VIA THE `plan` JOB (SOAK-R6-1 / OH6-1 fix)
+# ---------------------------------------------------------
+# GitHub Actions expressions have NO arithmetic operators (the supported set is
+# exactly `( ) [ ] . ! < <= > >= == != && ||`), so an in-expression `+ 30` /
+# `* 60` is INVALID — a workflow using one fails startup validation and NO job
+# (including the failure watchdog) ever runs.
+# The derivation therefore happens in SHELL arithmetic inside a tiny `plan`
+# job, whose validated numeric outputs feed the soak job's `timeout-minutes`
+# (`fromJSON()` of a precomputed needs-output IS a valid expression) and
+# `STRESS_DURATION_S`. The claim "timeout DERIVED from the requested duration"
+# stands — only the computation site moved from an (impossible) expression to
+# the plan job's shell.
+#
+# RUNNER + TRIGGER PRECEDENT (verify-m4pro.yml / bench-m4pro.yml)
+# --------------------------------------------------------------
+# `runs-on: [self-hosted, macos, m4pro]`, NO `pull_request` trigger — a runner
+# that is offline (the Mac asleep) would otherwise hang a PR's mergeable state.
+# It runs on a weekly cron + manual dispatch, so a queued run blocks no PR —
+# but it is NOT harmless (SOAK-R8-2): GitHub AUTO-CANCELS a job that has been
+# queued for 24 hours (documented self-hosted job-queue limit), WITHOUT any
+# step ever executing — so the in-job issue watchdog below structurally cannot
+# fire for a never-started run, and a weekly cron soak on an offline Mac dies
+# SILENTLY, week after week. The SAME in-job blindness applies to a run that
+# STARTED and then LOST its runner (the Mac sleeps / reboots / loses power
+# mid-soak — SOAK-R9-1, at least as plausible unattended as the never-started
+# case): GitHub marks the job failed after losing runner communication, but NO
+# further step can execute on the dead runner — the `failure() || cancelled()`
+# watchdog never runs, no issue is filed, no Telegram fires. An out-of-job
+# watchdog — a cheap GitHub-hosted cron (with its own fresh GITHUB_TOKEN) that
+# opens an issue whenever the last soak-selfhosted run concluded anything but
+# success and no tracking issue exists — is the named ADR-0018 follow-up that
+# covers BOTH gaps (NOT built here).
+#
+# HONEST ENVELOPE (Golden Rule #10)
+# ---------------------------------
+# This is NOT a claim that a 24h run happens in PR CI. The PR/ubuntu tiers verify
+# the drift LOGIC (100% line+branch on synthetic series) + a FEW-SECOND real
+# driver run; only THIS scheduled self-hosted job runs the multi-hour wall-clock,
+# and only for the `soak_minutes` you dispatch. The default weekly cron soaks for
+# 6 h (`soak_minutes` default 360). ru_maxrss on macOS is a PEAK not a slope, so
+# the RSS rule is an absolute ceiling backstop, not a growth gate (see
+# process_probe.py). A garbage `soak_minutes` dispatch fails the `plan` job
+# (operator-watched — a dispatch is interactive) and the soak job is SKIPPED —
+# including the numeric-but-degenerate shapes: a leading-zero value is
+# base-10-coerced (never silently octal-shortened, SOAK-R7-3), a literal zero
+# ('0'/'00'/'0_0') is REFUSED (SOAK-R8-3/SEC8-1 — it would fake-green a ~1 s
+# 'Real multi-hour soak' that soaked nothing; SEC7-2 had closed only the
+# int64-WRAP route to zero, not the literal-zero input), and an above-20-h /
+# int64-wrapping value is REFUSED (SEC7-2 + SEC9-1), so a zero or
+# negative timeout/duration can never reach the soak job;
+# the issue watchdog covers a STARTED soak job's failure/cancellation while
+# the runner is still alive and the job token still valid (the 1200-min fence
+# guarantees the token half; SEC9-1) — the unattended (cron) risk the watchdog
+# exists for; a never-started or runner-lost run needs the ADR-0018 out-of-job
+# watchdog (SOAK-R8-2 + SOAK-R9-1, not built here).
+
+name: Real soak (self-hosted M4-Pro)
+
+on:
+  schedule:
+    # Weekly Sunday 02:00 UTC = 07:30 IST — the PRIMARY real soak run.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      soak_minutes:
+        description: "Soak wall-clock minutes, 1..1200 (20 h; job timeout is this + 30 + this/6, which must stay under the 24-h GITHUB_TOKEN validity on self-hosted jobs so the failure watchdog can still authenticate — SEC9-1. Disk: the fsync'd audit JSONL grows ~1.5 GiB per soak-hour under RUNNER_TEMP, preflight-checked)"
+        required: false
+        default: "360"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Cargo network resilience (CI-only flake hardening) — see ci.yml. Pure
+  # download-retry; changes nothing about what is built or run.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  plan:
+    name: Derive soak timing (shell arithmetic)
+    # GHA expressions cannot add or multiply (see header), so the duration
+    # derivation runs here in POSIX shell. Cheap GitHub-hosted job — it must
+    # never queue behind an asleep self-hosted Mac.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      timeout_minutes: ${{ steps.derive.outputs.timeout_minutes }}
+      duration_s: ${{ steps.derive.outputs.duration_s }}
+    steps:
+      - name: Validate soak_minutes and derive timeout + duration
+        id: derive
+        # Same env-indirection + strict digits-only fence as stress-nightly's
+        # stress_events guard (COMMON pattern): the input is DATA not code, an
+        # underscore-grouped value is normalised, anything non-numeric is
+        # REFUSED (never error-suppressed into shell arithmetic).
+        env:
+          SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '360' }}
+        run: |
+          m=${SOAK_MINUTES//_/}
+          case "$m" in
+            ''|*[!0-9]*)
+              echo "::error::soak_minutes='$SOAK_MINUTES' is not a non-negative integer." >&2
+              exit 1
+              ;;
+          esac
+          # Magnitude fence BEFORE any arithmetic (SEC7-2): bash arithmetic is
+          # 64-bit and WRAPS modulo 2^64 — a digits-only value near 2^64 turns
+          # `$((m + 30))` into 0 and `$((m * 60))` NEGATIVE, which would emit a
+          # degenerate job timeout plus a negative STRESS_DURATION_S that the
+          # soak's deadline loop treats as "one window" (a fake-green ~1 s
+          # 'multi-hour' soak). Refuse on LENGTH first (never parsing the
+          # oversized number), then bound to the platform-feasible ceiling.
+          if [ "${#m}" -gt 5 ]; then
+            echo "::error::soak_minutes='$SOAK_MINUTES' is absurdly large (max 1200 = 20 h; the job's GITHUB_TOKEN dies at 24 h on self-hosted runners)." >&2
+            exit 1
+          fi
+          # Force DECIMAL (SOAK-R7-3): the digits fence admits a leading zero,
+          # and $(( )) would parse '0360' as OCTAL 240 — a silent 2/3-length
+          # soak ('090' would instead abort with a raw bash base error). The
+          # fence guarantees non-empty digits, so base-10 coercion is safe.
+          m=$((10#$m))
+          # Lower bound (SOAK-R8-3/SEC8-1): a literal '0' (also '00', '0_0')
+          # passed every earlier fence and reached the soak job as
+          # STRESS_DURATION_S=0 — one ~0.15 s window, green — a fake 'Real
+          # multi-hour soak' that soaked nothing. SEC7-2 closed only the
+          # int64-WRAP route to zero; this closes the literal-zero route.
+          if [ "$m" -lt 1 ]; then
+            echo "::error::soak_minutes must be >= 1 — a zero-minute dispatch would report a fake-green ~1 s 'multi-hour' soak." >&2
+            exit 1
+          fi
+          # Upper bound (SEC9-1 — supersedes SOAK-R8-1's 5760 as the binding
+          # bound): on self-hosted runners the job's GITHUB_TOKEN can only be
+          # refreshed for up to 24 hours (documented) — every step past the
+          # 24-h mark holds a DEAD token, so the "open issue on failure"
+          # watchdog (which authenticates with github.token) would 401 from
+          # issues.listForRepo/create and file NOTHING: the run dies with no
+          # signal, the exact pathology AL-SOAK-1/SOAK-R8-2 were fixed for.
+          # The derived timeout (m + 30 + m/6) must therefore fit under
+          # 1440 min: m <= 1208 → ceiling 1200 (20 h; derived timeout 1430).
+          # The 5-day platform execution kill (7200 min, SOAK-R8-1/SEC8-2)
+          # remains the outer bound but is no longer binding. A >20 h tier is
+          # BLOCKED on the ADR-0018 out-of-job watchdog follow-up (its own
+          # fresh token), NOT re-enabled by raising this fence.
+          if [ "$m" -gt 1200 ]; then
+            echo "::error::soak_minutes=$m exceeds the 20-hour ceiling (1200): the job's GITHUB_TOKEN expires at 24 h on self-hosted runners, so a longer soak's failure watchdog could never file its issue (SEC9-1). A >20 h tier needs the ADR-0018 out-of-job watchdog first." >&2
+            exit 1
+          fi
+          # Slack SCALES with duration (SOAK-R7-4): the end-of-run cost is
+          # LINEAR in soak minutes (the in-step verify_chain over the grown
+          # audit JSONL, artifact summarize/upload, teardown) while a fixed
+          # +30 is not — a 6 h soak whose oracles all PASSED could be
+          # timeout-killed mid-teardown and file a spurious CRITICAL issue.
+          # +30 covers the fixed install/rebuild cost; +m/6 the linear tail.
+          timeout_minutes=$((m + 30 + m / 6))
+          duration_s=$((m * 60))
+          echo "timeout_minutes=$timeout_minutes" >> "$GITHUB_OUTPUT"
+          echo "duration_s=$duration_s" >> "$GITHUB_OUTPUT"
+          echo "Soak plan: soak_minutes=$m timeout_minutes=$timeout_minutes duration_s=$duration_s"
+
+  soak:
+    name: Real multi-hour soak (drift-gated)
+    needs: plan
+    # Gated to the registered self-hosted M4-Pro. If no runner with this label
+    # set is online the job queues, blocks no PR, and GitHub AUTO-CANCELS it
+    # after 24 h (documented job-queue limit) with NO step ever running — the
+    # in-job issue watchdog below cannot fire for a never-started run, so an
+    # offline-runner cron soak dies silently (SOAK-R8-2; the ADR-0018
+    # queue-age watchdog follow-up covers this gap). Same runner precedent as
+    # verify-m4pro.yml / bench-m4pro.yml.
+    runs-on: [self-hosted, macos, m4pro]
+    # SELF-KILL FIX (DEC-SOAK-REAL-TIER-001): the job timeout is DERIVED from the
+    # requested duration (+30 min fixed install/rebuild slack + m/6 for the
+    # duration-LINEAR teardown cost — verify_chain over the grown audit JSONL,
+    # artifact summarize/upload; SOAK-R7-4), NOT a fixed 60 — computed by the
+    # `plan` job (GHA expressions have no arithmetic; fromJSON of a precomputed
+    # needs-output is valid). A scheduled run reads the '360' default → 450.
+    # This is the structural fix for the #208 trap where a soak could never fit
+    # its own fixed-60 timeout.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+
+    env:
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # SEC13-1: never persist the job-scoped issues:write GITHUB_TOKEN
+          # into .git/config — later steps run third-party code (pip build
+          # backends + cargo build.rs/proc-macros) on the persistent
+          # self-hosted M4-Pro for up to 20 h, and a malicious dependency
+          # reading .git/config could close/tamper the watchdog issue this
+          # workflow declares its PRIMARY failure signal. Nothing after
+          # checkout uses authenticated git (the watchdog authenticates via
+          # `github.token` inside actions/github-script). Same convention as
+          # doctor-daily.yml / auto-merge.yml / pre-merge-gate.yml
+          # (DEC-CI-FORK-PR-HARDEN-001).
+          persist-credentials: false
+
+      - name: Show runner identity (real hardware proof)
+        # Never interpolate the dispatch input into the script text: pass it via
+        # env and reference the shell variable, so a value with shell
+        # metacharacters is DATA not code (same pattern as stress-nightly.yml's
+        # stress_events). The plan-job outputs are already digits-validated.
+        env:
+          SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '360' }}
+        run: |
+          echo "Runner: $(uname -a)"
+          echo "Soak minutes: $SOAK_MINUTES"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[dev,data]"
+
+      - name: Verify runner Rust toolchain (for the fno_math + trading_core wheels)
+        # GitHub-owned-actions-ONLY on the self-hosted M4 Pro (SEC12-1,
+        # ADR-0018 §3 risk register): verify-m4pro.yml + bench-m4pro.yml
+        # deliberately run zero third-party actions on this PERSISTENT
+        # personal machine — a mutable third-party tag (the prior
+        # `dtolnay/rust-toolchain@stable`) would execute unattended, weekly,
+        # with state persisting across runs if the tag were ever moved
+        # maliciously (the runner daemon's environment may export the
+        # Telegram token per the header above). The identical action on
+        # stress-nightly.yml / ci.yml is materially different: those run on
+        # disposable GitHub-hosted VMs. The wheels build with the runner's
+        # OWN local rustup/cargo exactly like the two precedent workflows; a
+        # missing toolchain fails LOUDLY here with the remediation named
+        # instead of a confusing pip build-backend backtrace.
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "cargo not found on the self-hosted runner PATH — install rustup" >&2
+            echo "(https://rustup.rs) in the runner daemon's environment: the same" >&2
+            echo "local-toolchain contract verify-m4pro.yml / bench-m4pro.yml rely on" >&2
+            exit 1
+          fi
+          cargo --version
+          rustc --version
+
+      - name: Install fno_math Rust extension
+        # Belt-and-suspenders crates.io flake guard (reused from stress-nightly.yml).
+        run: |
+          n=0
+          until pip install ./rust/fno-math; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/fno-math failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/fno-math failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # The engine stress tests import trading_core; mirror the main CI + the
+        # stress-nightly install so the `soak` selection collects.
+        run: |
+          n=0
+          until pip install ./rust/trading-core; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/trading-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Preflight — refuse when the runner disk cannot hold the soak's audit JSONL (SOAK-R9-3)
+        # The soak driver fsyncs one hash-chained audit record per op — the
+        # SOAK-R7-4 measurement (~1.4K appends/s, a 6 h soak ≈ 8.3 GiB under
+        # $RUNNER_TEMP) is ~410 KiB/s ≈ 1.5 GiB per soak-hour. soak_minutes was
+        # previously bounded only on the CLOCK axis (SOAK-R8-1/SEC9-1), so a
+        # long dispatch on a near-full runner disk would burn hours then die at
+        # ENOSPC mid-run — the same burn-then-die shape the clock fences close.
+        # Refuse LOUDLY up front when free space under $RUNNER_TEMP is below
+        # the derived need (+25% slack + 2 GiB fixed for checkout/wheels/the
+        # bounded summary). duration_s is the plan job's digits-validated
+        # output (max 72000 — the arithmetic cannot overflow).
+        env:
+          DURATION_S: ${{ needs.plan.outputs.duration_s }}
+        run: |
+          required_kib=$((DURATION_S * 410))
+          required_kib=$((required_kib + required_kib / 4 + 2097152))
+          free_kib=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          # Digits fence (SOAK-R10-1 — the SEC7-1 class, same COMMON pattern
+          # as the plan job's soak_minutes fence): without pipefail a failing
+          # `df` (or an awk row shape yielding empty/non-numeric $4) leaves
+          # free_kib empty, and `[ "" -lt N ]` errors with status 2 — which an
+          # `if` swallows as FALSE, silently PASSING the preflight and
+          # reverting to the burn-hours-then-ENOSPC shape SOAK-R9-3 closed.
+          # Refuse LOUDLY instead of comparing garbage.
+          case "$free_kib" in
+            ''|*[!0-9]*)
+              echo "::error::Disk preflight could not read free space under \$RUNNER_TEMP (df/awk yielded '$free_kib') — refusing to launch a multi-hour soak blind (SOAK-R9-3/SOAK-R10-1)." >&2
+              exit 1
+              ;;
+          esac
+          echo "Disk preflight: need ~${required_kib} KiB under \$RUNNER_TEMP, free ${free_kib} KiB"
+          if [ "$free_kib" -lt "$required_kib" ]; then
+            echo "::error::Insufficient disk for this soak: ~${required_kib} KiB required under \$RUNNER_TEMP (the fsync'd audit JSONL grows ~1.5 GiB per soak-hour) but only ${free_kib} KiB free. Free up space or dispatch a shorter soak_minutes (SOAK-R9-3)." >&2
+            exit 1
+          fi
+
+      - name: Run soak (drift-gated)
+        # G2 belt-and-suspenders: the SAME derived bound is ALSO applied as a
+        # per-step timeout, so even if the job-level expression silently
+        # no-op'd the run still cannot outrun `soak_minutes + 30 + m/6`.
+        # --basetemp pins pytest's temp root to the JOB-scoped $RUNNER_TEMP
+        # (SOAK-R6-2 / SEC6-1): on this persistent macOS runner the default
+        # basetemp lives under TMPDIR (`/var/folders/.../T/`, NOT `/tmp`), so a
+        # `/tmp/pytest-*` artifact glob matched NOTHING — and an unset-TMPDIR
+        # daemon config would instead have matched OTHER local pytest runs'
+        # temp trees and uploaded them to a PUBLIC-repo artifact. RUNNER_TEMP
+        # is job-scoped and cleaned between runs — both hazards closed.
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+        env:
+          # DYNAMIC duration knob: minutes → seconds for STRESS_DURATION_S
+          # (derived by the plan job — GHA expressions have no `* 60`), which
+          # test_soak_sustained honours. `-m 'stress or soak'` selects the short
+          # nightly driver AND the full sustained soak.
+          STRESS_DURATION_S: ${{ needs.plan.outputs.duration_s }}
+        run: |
+          echo "Soaking for STRESS_DURATION_S=$STRESS_DURATION_S seconds"
+          pytest tests/stress -m 'stress or soak' --tb=short --basetemp "$RUNNER_TEMP/soak-tmp"
+
+      - name: Summarize soak artifacts (bounded)
+        # SOAK-R7-4: NEVER upload the raw soak tree — a 6 h soak measurably
+        # produces a multi-GiB fsync'd audit JSONL (~1.4K appends/s extrapolates
+        # to ~8+ GiB), whose upload (a) burns public-repo artifact storage and
+        # (b) runs inside the job clock, risking a mid-teardown timeout-kill
+        # that files a spurious CRITICAL issue for a soak that PASSED. The
+        # chain was already verified IN-RUN by the pytest oracle; the drift
+        # verdicts live in the last windows — so upload a small bounded
+        # summary: the tree listing + the last 64 KiB of each log/JSONL.
+        if: always()
+        run: |
+          src="$RUNNER_TEMP/soak-tmp"
+          dst="$RUNNER_TEMP/soak-drift-summary"
+          mkdir -p "$dst"
+          if [ -d "$src" ]; then
+            ls -lR "$src" > "$dst/tree.txt" || true
+            i=0
+            find "$src" -type f \( -name '*.jsonl' -o -name '*.log' -o -name '*.json' -o -name '*.txt' \) -print |
+              while IFS= read -r f; do
+                i=$((i + 1))
+                {
+                  echo "== $f (last 64 KiB) =="
+                  tail -c 65536 "$f"
+                } > "$dst/tail-$i-$(basename "$f").txt" || true
+              done
+          fi
+
+      - name: Upload soak drift artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-drift-logs
+          path: ${{ runner.temp }}/soak-drift-summary/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Open issue on failure
+        # A soak failure (a drift breach OR a timeout-kill) must never be
+        # eyeball-only (CLAUDE.md §11 AUTOMATED). Unlike stress-nightly's
+        # schedule-only gate, this fires on BOTH schedule AND a manual dispatch,
+        # so a manually-launched soak's failure is also tracked. Dedup-by-title
+        # (COMMON, reused from safety.yml / stress-nightly.yml).
+        # AL-SOAK-1: `|| cancelled()` because a job killed by its own
+        # job-level timeout-minutes reports CANCELLED, not FAILED, so a bare
+        # `failure()` step SKIPS — the exact DEC-MUTATION-ALERT-CANCELLED-001
+        # (mutation.yml) pathology. A hung/over-running soak is precisely what
+        # this issue-open watchdog exists to catch, so it must cover CANCELLED.
+        if: failure() || cancelled()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `soak-selfhosted: failure on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,soak',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Real soak failed on ${context.sha} (RSS/fd/chain drift breach or timeout-kill). See [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Any MONOTONE RSS/fd drift breach ALSO fired a CRITICAL Telegram soak_drift alert in real time ONLY IF the runner daemon's environment exports the BRUTEX_TELEGRAM_* credentials (this workflow wires no Telegram secrets; without them the push is a silent no-op — and a timeout-kill fires none either), so this issue is the primary automatic signal — guaranteed only for a run that STARTED and kept its runner: a never-started run (24 h queue auto-cancel, SOAK-R8-2) or a runner lost mid-soak (sleep/reboot/power loss, SOAK-R9-1) executes no step and files nothing; the ADR-0018 out-of-job watchdog follow-up covers those paths; soak.p99_drift is observe-only (structlog + the brutex_soak_p99_ratio gauge) — it fires no Telegram alert and never opens this issue.`,
+              labels: ['bug', 'soak', 'critical'],
+            });

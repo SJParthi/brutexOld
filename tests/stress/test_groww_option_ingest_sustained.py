@@ -12,12 +12,18 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 
+import pytest
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.option_ingest import run_groww_option_ingest
 from brutex.adapters.protocol import DerivativeContract
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
+
+# Marker discipline (tests/stress/__init__.py): the nightly (`-m stress`) and
+# self-hosted soak (`-m 'stress or soak'`) tiers select BY MARKER — an unmarked
+# stress test silently drops out of both tiers (SOAK-R7-1).
+pytestmark = pytest.mark.stress
 
 _N = 2_000  # leg-set scale (index strikes × CE/PE × expiries fan out to this order)
 
