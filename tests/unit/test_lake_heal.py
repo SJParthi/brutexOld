@@ -321,6 +321,35 @@ class TestObserveMode:
 # ── mass-heal refusal rail ─────────────────────────────────────────────────
 
 
+def _seed_mass_poisoned_option_series(lake: Path) -> Path:
+    """21 raw option month files under ONE series, 11 each carrying ONE
+    foreign 2019-12 row (> 50% of ≥ ``MASS_HEAL_MIN_FILES`` — the rail
+    fixture). Planted raw via pyarrow (#1067 — the real writer refuses
+    foreign months). Returns the series dir."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    series = lake / "options" / "SERIES"
+    series.mkdir(parents=True)
+    for idx in range(21):
+        year = 2020 + idx // 12
+        month = 1 + idx % 12
+        home_ts = datetime(year, month, 3, 4, 0, tzinfo=UTC)
+        rows: list[datetime] = [home_ts]
+        if idx < 11:  # 11 of 21 carry ONE foreign row
+            rows.append(datetime(2019, 12, 2, 4, 0, tzinfo=UTC))
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE"] * len(rows), type=pa.string()),
+                    "timestamp": pa.array(rows, type=pa.timestamp("us", tz="UTC")),
+                }
+            ),
+            series / f"{year:04d}-{month:02d}.parquet",
+        )
+    return series
+
+
 class TestMassHealRefusal:
     def _synthetic_dup(self, index: int) -> IntraFileDup:
         coords = PartitionCoords(
@@ -392,28 +421,8 @@ class TestMassHealRefusal:
         11 flagged foreign (> 50%) ⇒ the WHOLE batch refused byte-untouched
         (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 — option files ride BOTH the
         numerator and the denominator)."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
         lake = tmp_path / "lake"
-        series = lake / "options" / "SERIES"
-        series.mkdir(parents=True)
-        for idx in range(21):
-            year = 2020 + idx // 12
-            month = 1 + idx % 12
-            home_ts = datetime(year, month, 3, 4, 0, tzinfo=UTC)
-            rows: list[datetime] = [home_ts]
-            if idx < 11:  # 11 of 21 carry ONE foreign row
-                rows.append(datetime(2019, 12, 2, 4, 0, tzinfo=UTC))
-            pq.write_table(
-                pa.table(
-                    {
-                        "side": pa.array(["CE"] * len(rows), type=pa.string()),
-                        "timestamp": pa.array(rows, type=pa.timestamp("us", tz="UTC")),
-                    }
-                ),
-                series / f"{year:04d}-{month:02d}.parquet",
-            )
+        _seed_mass_poisoned_option_series(lake)
         scan = scan_lake_invariants(lake)
         assert scan.option_files_scanned == 21
         assert len(scan.findings) == 11
@@ -1912,7 +1921,12 @@ class TestOptionForeignHeal:
         ``lake_heal.partition_error`` is precisely the attacker-triggerable
         site (containment refusal / corrupt partition / lock timeout); the
         observe-mode ``detail`` list rides the SAME ``_finding_token`` guard
-        (the #907 convention, matching the round-8 option-tree fold)."""
+        (the #907 convention, matching the round-8 option-tree fold).
+
+        Round-16 NIT extension: the ``error=`` payload rides ``repr()`` too —
+        ``OptionWriterError`` messages interpolate the SAME raw dest path
+        (``corrupt existing partition <dest>: …``), so pre-fix the raw
+        newline/ESC re-entered the site AROUND the round-9 token guard."""
         lake = tmp_path / "lake"
         # A bare ESC (\x1bM, ANSI Reverse Index) — not \x1b[ — kept
         # bracket-free so THIS test exercises ONLY the log-injection guard:
@@ -1957,6 +1971,14 @@ class TestOptionForeignHeal:
         assert partition == repr(str(june))  # the raw path would embed \n + ESC
         assert "\n" not in partition
         assert "\x1b" not in partition
+        # Round-16: the exception TEXT embeds the same vendor-derived path —
+        # the error= field is repr()'d, so no raw control chars ride through.
+        error_text = error["error"]
+        assert isinstance(error_text, str)
+        assert error_text.startswith(("'", '"'))  # repr shape, escapes visible
+        assert "corrupt existing partition" in error_text
+        assert "\n" not in error_text
+        assert "\x1b" not in error_text
 
     def test_option_foreign_action_dropped_sums_dups_and_removals(self, tmp_path: Path) -> None:
         """Round-10 pin (surviving mutant): the reassignment ``HealAction.dropped``
@@ -3711,6 +3733,38 @@ class TestRunStartupSweep:
         assert load_last_sweep(lake) is not None  # stamped — genuinely complete
         again = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert again.ran is False  # token match over the healed tree
+
+    def test_startup_sweep_mass_rail_counts_option_files_in_denominator(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-16 fold (surviving-mutant pin): run_startup_sweep's OWN
+        denominator fold ``scan.files_scanned + scan.option_files_scanned``
+        is what arms the rail on an OPTIONS-ONLY lake. Dropping the option
+        term (the mutant that survived the whole prior suite — the earlier
+        rail pin computed the denominator inside the TEST body and called
+        heal_findings() directly, so it never saw the L3 fold) reads
+        ``files_scanned=0``, the ``>= MASS_HEAL_MIN_FILES`` small-lake guard
+        disarms, and the boot sweep HEALS the mass-poisoned tree the rail
+        exists to refuse. The real 20-file threshold is deliberately NOT
+        monkeypatched — that is the mutant's escape hatch."""
+        monkeypatch.delenv(LAKE_HEAL_ENV, raising=False)
+        lake = tmp_path / "lake"
+        _seed_mass_poisoned_option_series(lake)
+        before = _tree_state(lake)
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.scan is not None
+        assert result.scan.files_scanned == 0  # options-ONLY lake: no bars term
+        assert result.scan.option_files_scanned == 21
+        assert len(result.scan.findings) == 11
+        assert result.report is not None
+        assert result.report.refused_mass_heal is True  # mutant: heals instead
+        assert result.report.healed == 0
+        assert _tree_state(lake) == before  # not one byte moved
+        assert load_last_sweep(lake) is None  # a refused sweep never stamps
+        (refusal,) = _events(logs, "lake_heal.mass_heal_refused")
+        assert refusal["files_scanned"] == 21  # bars 0 + options 21
 
     def test_sweep_proceeds_past_dangling_symlinks_and_heals(self, tmp_path: Path) -> None:
         """Round-11 fold: pre-fix ONE dangling ``*.parquet`` symlink crashed

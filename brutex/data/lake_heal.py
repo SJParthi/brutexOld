@@ -998,7 +998,10 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
         return False  # defensive convergence guard (the _heal_foreign symmetry)
     state.quarantined_files += 1
     partition = f"{OPTIONS_DIR_NAME}/{finding.series}/{src.name}"
-    months_str = [f"{y:04d}-{m:02d}" for y, m in target_months]
+    # option_partition_stem — the §11 COMMON stem source (round-16 NIT: this
+    # audit/log months list was a FIFTH f-string copy bypassing the round-15
+    # helper; byte-identical output, one formatter to drift).
+    months_str = [option_partition_stem(y, m) for y, m in target_months]
     _LOG.warning(
         "lake_heal.rows_reassigned",  # the SAME pinned event as bars
         # repr() — the token embeds the RAW series dir name (round-7 NIT: the
@@ -1491,7 +1494,16 @@ def heal_findings(
                 "lake_heal.partition_error",
                 finding=type(finding).__name__,
                 partition=_finding_token(finding),
-                error=str(exc),
+                # repr() — round-16 NIT: an OptionWriterError message embeds
+                # the RAW vendor-derived options/<series>/ path (containment
+                # refusals + the unclassifiable-partition verdicts interpolate
+                # the dest), so the raw exception text re-entered THIS
+                # attacker-triggerable site around the round-9 token guard; a
+                # newline/ANSI series name must not forge log lines here
+                # (#907). Other lake_heal error= fields keep the repo-wide
+                # raw-exception-message convention (operator-controlled or
+                # catalogued subjects).
+                error=repr(str(exc)),
             )
             continue
         if did_heal:

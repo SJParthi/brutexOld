@@ -278,6 +278,34 @@ O(month-rows) unique() baseline pass per flush documented honestly
 (constant-factor, un-benched); two once-seen combined-suite failures
 were unreproducible (suspected sandbox transient — reported, not
 claimed fixed).
+ROUND 16 (refuter-confirmed MINOR + 2 NITs): MINOR — the L3
+`run_startup_sweep` mass-rail denominator fold (`scan.files_scanned +
+scan.option_files_scanned`) was a SURVIVING MUTANT: dropping the option
+term passed the entire 122-test covering suite (the only rail pin
+computed the denominator inside the TEST body and called
+`heal_findings()` directly, never through the L3 fold), and under the
+mutant an OPTIONS-ONLY lake read `files_scanned=0` → the ≥20-file
+small-lake guard DISARMED the >50% refusal rail and the default AUTO-ON
+boot sweep HEALED the mass-poisoned tree the rail exists to refuse
+(reproduced under the mutant: healed=11, refused_mass_heal=False). Now
+pinned at the L3 level: the 21-file/11-poisoned options-only fixture
+(extracted to ONE shared helper, §11 COMMON) driven through
+`run_startup_sweep` against the REAL un-monkeypatched 20-file threshold
+— refused, byte-untouched, sentinel unstamped, refusal event
+files_scanned==21 (mutant re-applied + verified killed by exactly the
+new pin; the production line itself was already correct — this closes
+the "option files in the mass-rail denominator … L3 rides
+automatically" claim's missing teeth). NITs: `partition_error`'s
+`error=str(exc)` re-admitted the RAW vendor-derived series path AROUND
+the round-9 token guard (`OptionWriterError` messages interpolate the
+dest — corrupt-partition + containment + unclassifiable verdicts) — the
+field now rides `repr(str(exc))` at THIS one attacker-triggerable site
+(supersedes the round-9 "the sibling error= field keeps the raw
+convention" clause for this site only; other lake_heal `error=` fields
+stay raw — operator-controlled/catalogued subjects; regression verified
+failing pre-fix); the reassignment audit/log `months` list was a FIFTH
+`YYYY-MM` f-string copy bypassing the round-15 `option_partition_stem`
+COMMON helper — collapsed onto it (byte-identical output).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
@@ -916,7 +944,33 @@ hostile-review pass._
   `__all__`, both gate consumers); the production merge's extra O(month-rows) `unique()` baseline pass per flush
   documented honestly in `_merge_frame_locked` (constant factor, accepted un-benched — the merge read dominates);
   HONEST: two combined-suite failures observed ONCE were unreproducible on re-run (suspected sandbox transient — no
-  evidenced code defect, nothing claimed fixed).
+  evidenced code defect, nothing claimed fixed). HOSTILE-REVIEW FOLDS (round 16, refuter-confirmed MINOR + 2 NITs;
+  the surviving mutant re-applied + verified KILLED by exactly the new pin, the error-repr regression verified
+  failing pre-fix): (R16-1·MINOR surviving mutant) the L3 `run_startup_sweep` denominator fold `files_scanned =
+  scan.files_scanned + scan.option_files_scanned` had NO teeth — dropping the option term passed the ENTIRE 122-test
+  covering suite, because the only rail pin (`test_mass_heal_refused_over_option_foreign_files`) computed the
+  denominator inside the TEST body and called `heal_findings()` directly, never through the L3 fold; under the
+  mutant an OPTIONS-ONLY lake read `files_scanned=0`, the `>= MASS_HEAL_MIN_FILES` (20) small-lake guard DISARMED
+  the >50% refusal rail, and the default AUTO-ON boot sweep HEALED a mass-poisoned options tree the rail exists to
+  refuse (reproduced under the mutant: healed=11, refused_mass_heal=False, quarantine created). PINNED at the L3
+  level (`test_startup_sweep_mass_rail_counts_option_files_in_denominator`): the SAME 21-file/11-poisoned
+  options-only fixture — extracted to ONE `_seed_mass_poisoned_option_series` helper, the inline copy killed (§11
+  COMMON) — driven through `run_startup_sweep` against the REAL un-monkeypatched 20-file threshold (that threshold
+  IS the mutant's escape hatch), asserting refused_mass_heal=True, healed=0, tree byte-untouched, sentinel NOT
+  stamped, and the refusal event's files_scanned==21 (bars 0 + options 21); the mutant re-applied post-pin fails
+  EXACTLY this test, 122 siblings green. The production line itself is UNCHANGED (pre-existing + correct) — this
+  closes the missing teeth of the advertised "option files in the mass-rail DENOMINATOR … L3 rides automatically"
+  claim. (R16-2·NIT, log-injection completeness) `lake_heal.partition_error`'s `error=str(exc)` re-admitted the RAW
+  vendor-derived `options/<series>/` path AROUND the round-9 token guard — `OptionWriterError` messages interpolate
+  the dest (`corrupt existing partition <dest>: …`, the containment refusals, the unclassifiable-partition
+  verdicts), so a newline/ESC series name forged log lines through the error PAYLOAD at the one
+  attacker-triggerable site; the field now rides `repr(str(exc))` (superseding the round-9 "the sibling `error=`
+  field keeps the raw convention" clause for THIS site only — every other lake_heal `error=` field keeps the
+  repo-wide raw-exception-message convention, operator-controlled or catalogued subjects); the round-9 regression
+  extends to pin the repr'd error text (repr shape, no raw `\n`/`\x1b` — verified failing pre-fix). (R16-3·NIT) the
+  reassignment audit/log `months` list was a FIFTH `YYYY-MM` stem f-string copy bypassing the round-15
+  `partition.option_partition_stem` COMMON helper — collapsed onto the helper (byte-identical output, the existing
+  months-list pins unchanged).
   Remaining
   #1175 follow-up: the CLI-`brutex fetch` L2 seam (bars AND options). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
   lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (472/166) + `option_parquet_writer.py`
