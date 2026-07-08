@@ -3255,7 +3255,7 @@ class TestMassAllFilteredBreaker:
         # into EVERY pass, so a pass-1 trip stays latched through the retry
         # rounds. Fail-before: it forwarded the None verbatim and each pass
         # resolved its OWN fresh instance.
-        import brutex.adapters.groww.run_ingest as ri
+        from brutex.adapters.groww import run_ingest as ri
 
         breakers: list[object] = []
         still_failed = ri.GrowwIngestReport(
@@ -3294,7 +3294,7 @@ class TestMassAllFilteredBreaker:
     ) -> None:
         # The other resolve arm: an injected instance (a pull entrypoint's
         # pull-scoped breaker, or a test's) reaches every pass unwrapped.
-        import brutex.adapters.groww.run_ingest as ri
+        from brutex.adapters.groww import run_ingest as ri
 
         sentinel = self._tiny_breaker()
         breakers: list[object] = []
@@ -3331,10 +3331,10 @@ class TestMassAllFilteredBreaker:
         # and settled SKIPPED minutes AFTER the alarm, un-rescinded and
         # un-alarmed. The latched pull-scoped breaker keeps every AF window
         # FAILED + re-pullable.
-        import brutex.adapters.groww.ingest as ingest_mod
         from brutex.adapters.all_filtered_breaker import (
             ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV,
         )
+        from brutex.adapters.groww import ingest as ingest_mod
         from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
         from brutex.data.session import ALL_FILTERED
         from brutex.data.window_ledger import WindowLedger

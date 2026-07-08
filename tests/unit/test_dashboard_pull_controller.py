@@ -3544,7 +3544,7 @@ class TestObservedHolidaysArming:
     def test_pull_all_spot_dry_run_threads_empty_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         assert expected  # the sidecar IS present — the dry-run must still ignore it
@@ -3563,7 +3563,7 @@ class TestObservedHolidaysArming:
     def test_pull_all_spot_live_threads_loaded_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3587,7 +3587,7 @@ class TestObservedHolidaysArming:
     def test_pull_candles_live_threads_loaded_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3612,7 +3612,7 @@ class TestObservedHolidaysArming:
     def test_pull_candles_dry_run_threads_empty_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3785,7 +3785,7 @@ class TestSeedObservedOverlayOrdering:
     def test_pull_all_spot_loads_once_and_threads_the_seed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         order: list[str] = []
@@ -3829,7 +3829,7 @@ class TestSeedObservedOverlayOrdering:
     def test_pull_candles_loads_once_and_threads_both_reconciles(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         order: list[str] = []
@@ -3864,7 +3864,7 @@ class TestSeedObservedOverlayOrdering:
     def test_pull_all_spot_dry_run_never_loads_the_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         _write_overlay_sidecar(tmp_path)
         loads: list[Path] = []
