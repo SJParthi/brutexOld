@@ -55,7 +55,13 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: (``rate.429``), a step DOWN under sustained pressure (``rate.stepdown``), and
 #: the recovery back up (``rate.stepup``) into the ``/logs`` stream so the
 #: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
-_LOG = structlog.get_logger("brutex.adapters.rate_common")
+#: (The name derives from ``__name__`` — the identical
+#: ``"brutex.adapters.rate_common"`` string — so the line carries NO string
+#: literal to mutate, and its one remaining ``= None`` mutant crashes the first
+#: emission (suite-killed). The prior pragma here hid that killable ``= None``
+#: mutant — removed by the DEC-MUTATION-RUNTIME-003 fixer round, MIGRATION.md
+#: #1597.)
+_LOG = structlog.get_logger(__name__)
 
 # ── Deferred rate.* emission (DEC-RATE-LOG-OUTSIDE-LOCK-001) ────────────────
 # structlog routes through stdlib handlers (a stderr StreamHandler + a rotating
@@ -78,6 +84,45 @@ _LOG = structlog.get_logger("brutex.adapters.rate_common")
 # file's own ``rate.snapshot`` emit-outside-the-lock precedent
 # (:meth:`RateController._maybe_log_snapshot`).
 _PendingLog = tuple[str, str, dict[str, object]]  # (level, event, fields)
+
+# ── The pending-slot annotation alias (DEC-MUTATION-RUNTIME-003 fixer round) ──
+# Every local ``= None`` capture slot in this module is annotated with THIS
+# runtime-evaluated alias instead of a per-line ``_PendingLog | None`` union, so
+# no ``|`` sits on any local slot line: the PEP-563 ``|`` → ``&`` annotation
+# mutants that previously needed 13 line-scoped pragmas disappear STRUCTURALLY
+# (a bare alias NAME generates no operator mutant). The alias line's own two
+# mutants are both hard-killed: ``|`` → ``&`` raises ``TypeError`` at import (a
+# ``types.GenericAlias`` does not support ``&``) and ``= None`` is pinned by the
+# alias-object test. The ONLY mutant left on a local slot line is the
+# initializer value ``None`` → ``""`` (mutmut 2.5.1 mutates an annotated
+# ``= None`` to ``= ""`` — measured; the earlier "``None`` is not a mutmut
+# target" proof comment was FALSE and is superseded by this one). That ``""``
+# mutant is SUITE-KILLED on EVERY slot line — no pragma anywhere
+# (DEC-MUTATION-RUNTIME-003 fixer round 3, F2; supersedes the earlier
+# "dominated dead store … unobservable" claim, which was an untested-path
+# admission, not an equivalence proof):
+#
+# * wherever the initializer can FLOW into ``_flush_rate_logs`` on a plain
+#   tested path: the RETURNED ``pending`` slot in
+#   :meth:`RateController._handle_clock_gap_locked` (the common no-gap path
+#   returns it) and every CONDITIONALLY-assigned ``step_evt`` slot (the
+#   no-step path flushes the initializer). ``""`` fails the callers'
+#   ``is not None`` guard and crashes the tuple unpack — loud.
+# * on the unconditionally-overwritten slots (``gap_evt`` / ``gov_gap_evt`` /
+#   ``hit_evt`` / ``latch_evt`` / ``to_evt``): the initializer is LIVE on the
+#   in-lock-exception path — each method's ``finally`` reads it — and that
+#   path is FORCED through the sanctioned injected-clock seam
+#   (``now = self._clock()`` is the first in-lock statement of both ``pace``
+#   gates and every ``on_*`` method; ``_maybe_log_snapshot`` reads its clock
+#   pre-try, so its gap handler is patched to raise instead) by
+#   ``TestInLockExceptionSlotSafety`` (tests/unit/test_rate_common.py), which
+#   pins the documented :func:`_flush_rate_logs` exception-safety contract:
+#   the injected error propagates unmasked, the lock is released, and NO
+#   partial event is emitted. A ``""`` mutant instead passes the flush's
+#   ``is not None`` guard and dies on the 3-tuple unpack (ValueError replaces
+#   the injected error) — all 9 mutants probe-verified killed, one slot line
+#   each.
+_PendingLogSlot = _PendingLog | None
 
 
 def _flush_rate_logs(*events: _PendingLog | None) -> None:
@@ -358,6 +403,19 @@ class RateController:
     token math stays the shared rate gate (Rule #6) across all workers.
     """
 
+    # Attribute TYPE declarations (DEC-MUTATION-RUNTIME-003 fixer round): a bare
+    # class-body annotation generates NO mutmut mutant (measured on the pinned
+    # mutmut 2.5.1), so the PEP-563 ``|`` → ``&`` annotation mutants that
+    # previously needed line-scoped pragmas on the ``__init__`` assignments
+    # disappear STRUCTURALLY — while the un-annotated ``__init__`` assignments'
+    # VALUE mutants (``= None`` / ``= ""`` / ``0 → 1``) stay in the gate and are
+    # suite-killed (the ``= None`` mutant of ``_ceiling_per_min`` DISABLES the
+    # operator-confirmed 500/min governor — exactly the regression detector the
+    # prior pragma was hiding).
+    _ceiling_per_min: int | None
+    _issue_head: int
+    _issue_newest_sec: int | None
+
     def __init__(
         self,
         *,
@@ -442,7 +500,11 @@ class RateController:
         #: Per-minute governor (DEC-GROWW-RATE-PERMIN-001): the injected HARD cap +
         #: the rolling deque of issue instants. ``None`` cap ⇒ governor disabled, the
         #: deque stays empty + ``pace`` skips both governor phases entirely.
-        self._ceiling_per_min: int | None = ceiling_per_min
+        #: (Type declared on the class body; this un-annotated assignment's only
+        #: mutant — ``= None``, which silently DISABLES the governor — is
+        #: suite-killed. DEC-MUTATION-RUNTIME-003 fixer round: the prior
+        #: annotation+pragma hid that mutant behind the equivalent ``|`` one.)
+        self._ceiling_per_min = ceiling_per_min
         self._issues: deque[float] = deque()
         #: OBSERVE-ONLY trailing-hour issue COUNTER (DEC-RATE-MONITOR-EXPAND-001). A
         #: FIXED-SIZE ring of :data:`TRAILING_LOG_BUCKETS` (3600) per-second COUNT buckets —
@@ -463,10 +525,18 @@ class RateController:
         #: a windowed count is O(window-seconds) (a bounded sum over the last W buckets).
         self._issue_buckets: list[int] = [0] * TRAILING_LOG_BUCKETS
         #: Ring index of the bucket holding :attr:`_issue_newest_sec` (the current second).
-        self._issue_head: int = 0
+        #: (The head start IS behaviourally arbitrary while every bucket is still
+        #: zero, but the documented "starts at slot 0" contract is pinned by the
+        #: ring-head regression test so BOTH the ``0 → 1`` and the crash-class
+        #: ``= None`` mutants are observable — no pragma;
+        #: DEC-MUTATION-RUNTIME-003 fixer round.)
+        self._issue_head = 0
         #: The integer second (``floor(clock())``) the head bucket currently counts. ``None``
         #: until the FIRST issue is recorded (an all-zero ring reads 0 in every window).
-        self._issue_newest_sec: int | None = None
+        #: (Type declared on the class body; the un-annotated assignment's only
+        #: mutant — ``= ""`` — TypeErrors on the first recorded issue, suite-killed;
+        #: no pragma. DEC-MUTATION-RUNTIME-003 fixer round.)
+        self._issue_newest_sec = None
         #: Resolved smooth-pacing MODE (DEC-SMOOTH-PACING-AUTOLATCH-001): the explicit
         #: *smooth_pacing_mode* wins; ``None`` derives it from the legacy boolean
         #: (``True`` → ON, ``False`` → OFF — byte-identical for every existing caller).
@@ -534,7 +604,15 @@ class RateController:
         """
         return AdaptiveTokenBucket(
             initial_rps=self._rps,
-            downshift_rps=self._rps / 2.0,  # unused (we never feed the bucket hits); just < initial
+            # unused (we never feed the bucket hits); just < initial. NOT
+            # pragma'd (DEC-MUTATION-RUNTIME-003 fixer round — the prior
+            # "value mutant is unobservable" claim was FALSE): the value IS
+            # directly observable via ``bucket.downshift_rps``, pinned at half
+            # the live rate by the bucket-attribute test (kills the ``/ 3.0``
+            # mutant), and the ``* 2.0`` operator mutant already dies at
+            # construction (``AdaptiveTokenBucket.__post_init__`` requires
+            # ``downshift_rps < initial_rps``).
+            downshift_rps=self._rps / 2.0,
             burst=BURST,
             # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): the bucket starts EMPTY, so
             # the opening call cannot release a free burst token — it waits a full
@@ -605,7 +683,12 @@ class RateController:
         accumulates into a false trip. O(1): one subtraction + (rarely) a few deque
         clears.
         """
-        pending: _PendingLog | None = None
+        # ``pending`` is the RETURNED slot — its ``None → ""`` initializer
+        # mutant flows straight into every caller's ``_flush_rate_logs`` on the
+        # common no-gap path and is suite-killed, so NO pragma (the pragma-class
+        # proof for the capture slots lives at :data:`_PendingLogSlot`;
+        # DEC-MUTATION-RUNTIME-003 fixer round, MIGRATION.md #1597).
+        pending: _PendingLogSlot = None
         if abs(now - self._last_seen) > CLOCK_GAP_THRESHOLD_S:
             self._issues.clear()
             # Clear the observe-only trailing-hour issue counter ring too
@@ -615,6 +698,10 @@ class RateController:
             # only — no pacing effect (the ring is never read by a gate).
             for i in range(TRAILING_LOG_BUCKETS):
                 self._issue_buckets[i] = 0
+            # (The gap-reset twin of the constructor's head start — pinned at
+            # slot 0 by the ring-head regression test so both the ``0 → 1`` and
+            # the crash-class ``= None`` mutants are observable — no pragma;
+            # DEC-MUTATION-RUNTIME-003 fixer round.)
             self._issue_head = 0
             self._issue_newest_sec = None
             self._hits.clear()
@@ -677,7 +764,11 @@ class RateController:
         """
         interval = 1.0 / self._rps
         wait = (self._last_issue_ts + interval) - now
-        return wait if wait > 0.0 else 0.0
+        # ``max(wait, 0.0)`` — identical to ``wait if wait > 0.0 else 0.0`` (an
+        # overdue/at-boundary wait clamps to exactly 0.0) but rephrased so the ONLY
+        # generated mutant on this line is boundary-observable, never a silent
+        # tie-equivalent (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597).
+        return max(wait, 0.0)
 
     def _advance_issue_ring_locked(self, sec: int) -> None:
         """Advance the per-second issue ring's head to integer second *sec* (caller holds lock).
@@ -695,7 +786,11 @@ class RateController:
         if newest is None:
             return  # ring unseeded — nothing to advance (both callers guard, defensive)
         steps = sec - newest
-        if steps <= 0:
+        # ``steps < 1`` — int-identical to ``steps <= 0`` but rephrased so EVERY
+        # generated mutant of this guard is boundary-observable (the ``<= 0 → < 0``
+        # tie-equivalent disappears; DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597).
+        # NEVER pragma this line: it also carries the REAL off-by-one boundary mutant.
+        if steps < 1:
             return  # same second (or a tiny backward skew already gap-handled): no advance
         # Zero at most a full ring: beyond 3600 elapsed seconds every old bucket has aged out.
         for _ in range(min(steps, TRAILING_LOG_BUCKETS)):
@@ -753,7 +848,20 @@ class RateController:
         # ``floor`` (not ``ceil``): the bucket holding ``now - window`` also holds the sub-range
         # ``(now - window, …)`` inside the window, so ``ceil`` would drop that boundary second.
         oldest_sec = math.floor(now - window)
-        span = min(max(head_sec - oldest_sec + 1, 0), TRAILING_LOG_BUCKETS)
+        # The raw bucket span for ``(now - window, now]``: the ``+ 1`` closes the
+        # inclusive ``floor(now - window) .. floor(now)`` range (split onto its own
+        # line so its off-by-one mutants stay observable; DEC-MUTATION-RUNTIME-003,
+        # MIGRATION.md #1597).
+        raw_span = head_sec - oldest_sec + 1
+        # Cap at the ring size only. The former defensive ``max(raw_span, 0)``
+        # clamp was PROVABLY DEAD and is DELETED instead of pragma'd (the #624
+        # dead-clamp idiom; DEC-MUTATION-RUNTIME-003 fixer round): every caller
+        # passes ``window >= 1``, so ``head_sec >= oldest_sec`` and
+        # ``raw_span >= 1`` always — and even a pathological ``window < 0``
+        # would only make ``range(span)`` empty (an honest 0 count), never an
+        # error. The line's remaining ``= None`` mutant crashes ``range(span)``
+        # below — suite-killed.
+        span = min(raw_span, TRAILING_LOG_BUCKETS)
         count = 0
         for offset in range(span):
             count += self._issue_buckets[(self._issue_head - offset) % TRAILING_LOG_BUCKETS]
@@ -885,11 +993,13 @@ class RateController:
             iterations = 0
             while True:
                 # ``gap_evt`` NEEDS the None initializer (the finally reads it on an
-                # in-lock exception path); ``wait`` deliberately has NO initializer —
-                # every path that reads it is dominated by the in-lock assignment
-                # below (an in-lock exception propagates past all reads), and a dead
-                # ``wait = 0.0`` here was flagged by CodeQL (py/multiple-definition).
-                gap_evt: _PendingLog | None = None
+                # in-lock exception path — forced by the raising-clock test, so its
+                # ``""`` mutant is suite-killed; :data:`_PendingLogSlot`); ``wait``
+                # deliberately has NO initializer — every path that reads it is
+                # dominated by the in-lock assignment below (an in-lock exception
+                # propagates past all reads), and a dead ``wait = 0.0`` here was
+                # flagged by CodeQL (py/multiple-definition).
+                gap_evt: _PendingLogSlot = None
                 try:
                     with self._lock:
                         now = self._clock()
@@ -933,10 +1043,12 @@ class RateController:
             iterations = 0
             while True:
                 # Mirrors gate 0: ``gov_gap_evt`` keeps its None initializer (read in
-                # the finally on an in-lock exception); ``gov_wait`` has NO initializer
-                # — the in-lock assignment dominates every read (CodeQL
-                # py/multiple-definition on the dead ``gov_wait = 0.0``).
-                gov_gap_evt: _PendingLog | None = None
+                # the finally on an in-lock exception — forced by the raising-clock
+                # test, ``""`` mutant suite-killed; :data:`_PendingLogSlot`);
+                # ``gov_wait`` has NO initializer — the in-lock assignment dominates
+                # every read (CodeQL py/multiple-definition on the dead
+                # ``gov_wait = 0.0``).
+                gov_gap_evt: _PendingLogSlot = None
                 try:
                     with self._lock:
                         now = self._clock()
@@ -1005,8 +1117,9 @@ class RateController:
         Observability only — it changes no pacing decision.
         """
         now = self._clock()
-        gap_evt: _PendingLog | None = None
-        due = False
+        # Read in the finally on an in-lock exception (forced by the raising
+        # gap-handler test, ``""`` mutant suite-killed; :data:`_PendingLogSlot`).
+        gap_evt: _PendingLogSlot = None
         try:
             with self._lock:
                 # Re-base on a sleep/wake gap FIRST (DEC-RATE-CLOCK-SLEEPWAKE-001) so even a
@@ -1015,9 +1128,17 @@ class RateController:
                 # gap reset sets ``_last_snapshot_log = now``, so the throttle check below
                 # then correctly suppresses an immediate post-wake snapshot.
                 gap_evt = self._handle_clock_gap_locked(now)
-                if now - self._last_snapshot_log >= SNAPSHOT_LOG_INTERVAL_S:
+                # ``due`` is ONE boolean expression branched on twice — reshaped
+                # from a ``due = False`` flag + in-branch ``due = True`` whose
+                # ``False → None`` assignment mutant was falsy-EQUIVALENT
+                # (unkillable; DEC-MUTATION-RUNTIME-003 fixer round). Every
+                # mutant of this shape is behavior-observable: an always-None
+                # ``due`` never logs a snapshot, and the arithmetic/boundary
+                # mutants shift the throttle window (both pinned by the
+                # throttle tests).
+                due = now - self._last_snapshot_log >= SNAPSHOT_LOG_INTERVAL_S
+                if due:
                     self._last_snapshot_log = now
-                    due = True
         finally:
             # Emit AFTER releasing the lock (DEC-RATE-LOG-OUTSIDE-LOCK-001). Per-thread
             # order kept: clock_gap → snapshot. The gap event now survives the
@@ -1041,10 +1162,16 @@ class RateController:
         values are captured at the decision point; telemetry is emitted
         post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        gap_evt: _PendingLog | None = None
-        hit_evt: _PendingLog | None = None
-        latch_evt: _PendingLog | None = None
-        step_evt: _PendingLog | None = None
+        # The first three slots are unconditionally overwritten in the lock but
+        # their initializers are LIVE on the in-lock-exception path (the finally
+        # flushes them) — forced by the raising-clock test, so every ``None →
+        # ""`` mutant here is suite-killed (:data:`_PendingLogSlot`).
+        # ``step_evt`` is CONDITIONALLY assigned: on the no-step path its
+        # initializer reaches ``_flush_rate_logs`` on the plain tested path too.
+        gap_evt: _PendingLogSlot = None
+        hit_evt: _PendingLogSlot = None
+        latch_evt: _PendingLogSlot = None
+        step_evt: _PendingLogSlot = None
         try:
             with self._lock:
                 now = self._clock()
@@ -1138,9 +1265,14 @@ class RateController:
         are captured at the decision point; telemetry is emitted post-release
         (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        gap_evt: _PendingLog | None = None
-        to_evt: _PendingLog | None = None
-        step_evt: _PendingLog | None = None
+        # ``gap_evt``/``to_evt``: initializers LIVE on the in-lock-exception
+        # path (the finally flushes them) — forced by the raising-clock test,
+        # ``""`` mutants suite-killed (:data:`_PendingLogSlot`); ``step_evt``:
+        # conditionally assigned — its ``""`` mutant reaches the flush on the
+        # plain no-step path too.
+        gap_evt: _PendingLogSlot = None
+        to_evt: _PendingLogSlot = None
+        step_evt: _PendingLogSlot = None
         try:
             with self._lock:
                 now = self._clock()
@@ -1193,8 +1325,13 @@ class RateController:
         trickle-trap this closes. Field values are captured at the decision
         point; telemetry is emitted post-release (DEC-RATE-LOG-OUTSIDE-LOCK-001).
         """
-        gap_evt: _PendingLog | None = None
-        step_evt: _PendingLog | None = None
+        # ``gap_evt``: initializer LIVE on the in-lock-exception path (the
+        # finally flushes it) — forced by the raising-clock test, ``""`` mutant
+        # suite-killed (:data:`_PendingLogSlot`); ``step_evt``: conditionally
+        # assigned — its ``""`` mutant reaches the flush on the plain no-step
+        # path too.
+        gap_evt: _PendingLogSlot = None
+        step_evt: _PendingLogSlot = None
         try:
             with self._lock:
                 now = self._clock()

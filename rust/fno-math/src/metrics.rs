@@ -136,31 +136,32 @@ pub fn drawdown_stats_checked(
     let mut sum_sq_pct: f64 = 0.0;
     let mut current_dd_bars: i64 = 0;
     let mut max_dd_bars: i64 = 0;
+    // The four running-max folds below use `.max()` instead of `if new > acc`
+    // — behavior-identical BY CONSTRUCTION for the i64 folds (a tie assigns
+    // the same value) and for the f64 pct fold (`dd_pct` is guarded finite,
+    // never NaN, by the `peak > 0` gate + bounded operands; `drop ≥ 0` casts
+    // to +0.0 so signed-zero ties are bit-identical too). This mirrors the
+    // Python oracle's own `max()` shape (compute.py) and removes the
+    // tie-equivalent `>`→`>=` cargo-mutants class structurally
+    // (DEC-MUTATION-RUNTIME-003; proven bitwise by the two-pass-oracle
+    // proptest below + the Python↔Rust byte-parity suites).
     for &delta in &realized {
         running += delta;
         let value = running;
-        if value > peak {
-            peak = value;
-        }
+        peak = peak.max(value);
         let drop = peak - value;
         if drop > 0 {
             current_dd_bars += 1;
         } else {
             current_dd_bars = 0;
         }
-        if current_dd_bars > max_dd_bars {
-            max_dd_bars = current_dd_bars;
-        }
-        if drop > max_dd_paisa {
-            max_dd_paisa = drop;
-        }
+        max_dd_bars = max_dd_bars.max(current_dd_bars);
+        max_dd_paisa = max_dd_paisa.max(drop);
         if peak > 0 {
             // Both operands ≤ 2⁵³ ⇒ exact f64s ⇒ the IEEE division is the
             // correctly rounded quotient — CPython's `drop / peak` result.
             let dd_pct = (drop as f64) / (peak as f64);
-            if dd_pct > max_dd_pct {
-                max_dd_pct = dd_pct;
-            }
+            max_dd_pct = max_dd_pct.max(dd_pct);
             // Sequential left-to-right fold; plain mul then add (NO mul_add —
             // a fused multiply-add would round once where CPython rounds twice).
             sum_sq_pct += dd_pct * dd_pct;
@@ -308,6 +309,20 @@ mod tests {
         assert_eq!(bars, 0);
         assert_eq!(bits(pct), bits(0.0));
         assert_eq!(bits(ulcer), bits(0.0));
+    }
+
+    #[test]
+    fn zero_peak_never_enters_the_pct_scan() {
+        // DEC-MUTATION-RUNTIME-003: kills the `peak > 0` → `peak >= 0` mutant.
+        // start=1, bar0 pnl −1 → running 0 (peak exactly 0), bar1 pnl −1 →
+        // running −1, drop = 1 with peak == 0. The pct scan must SKIP
+        // (peak > 0 strictly): the `>=` mutant divides drop/0 → inf pct +
+        // inf/NaN ulcer.
+        let out = drawdown_stats_checked(2, 1, &[(0, -1), (1, -1)]).expect("in envelope");
+        assert_eq!(out.0, 1); // max_dd_paisa
+        assert_eq!(bits(out.1), bits(0.0)); // max_dd_pct — NOT inf (NaN/inf-path pin)
+        assert_eq!(out.2, 1); // one bar below the 0 peak
+        assert_eq!(bits(out.3), bits(0.0)); // ulcer — NOT inf/NaN
     }
 
     #[test]

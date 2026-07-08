@@ -13,7 +13,7 @@ from brutex.data import (
     parse_partition_path,
     partition_for_timestamp,
 )
-from brutex.data.partition import option_partition_stem
+from brutex.data.partition import SPOT_PROBE_SEGMENTS, option_partition_stem
 
 # ────────────────────────────────────────────────────────────────────────
 # build_partition_path
@@ -573,3 +573,39 @@ class TestErrorMessagesByteExact:
             "partition_for_timestamp requires tz-aware datetime, "
             "got naive datetime.datetime(2024, 1, 1, 0, 0)"
         )
+
+
+class TestSpotProbeSegmentsPins:
+    """``SPOT_PROBE_SEGMENTS`` is the ONE COMMON spot probe order.
+
+    The movers underlying-spot resolver (``movers_futures._SPOT_SEGMENTS``),
+    the ``/db`` per-bar moneyness spot join (``db_view._SPOT_PROBE_SEGMENTS``),
+    the Greeks spot join (``spot_join``), the drift scanner (``spot_drift``),
+    the lake invariant scanner and the completeness rollup ALL import this
+    tuple, so its exact members AND their order (an index underlying is
+    probed under ``INDEX`` BEFORE the single-stock ``CASH``) are a
+    cross-surface contract (CLAUDE.md §11 COMMON; DEC-FNO-MONEYNESS-001).
+    test_data_partition.py never referenced it, so mutmut's member /
+    tuple-``None`` mutants survived the DEC-MUTATION-RUNTIME-003 rehearsal
+    probe — pin the tuple byte-exact to kill all three
+    (mutating a member would silently break every consumer's spot probe).
+    """
+
+    def test_probe_order_is_index_then_cash(self) -> None:
+        assert SPOT_PROBE_SEGMENTS == ("INDEX", "CASH")
+
+    def test_every_probe_segment_routes_through_the_partition_path(self, tmp_path: Path) -> None:
+        # Each probe segment must be a VALID partition segment — a member
+        # `_validate_segment` rejects could never exist on disk, so every
+        # consumer's probe of it would be dead code.
+        for segment in SPOT_PROBE_SEGMENTS:
+            p = build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment=segment,
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+            assert segment in p.parts

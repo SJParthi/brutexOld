@@ -14,11 +14,13 @@ Covers:
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
 import math
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 from brutex.orchestrator.audit import (
@@ -35,6 +37,24 @@ from brutex.orchestrator.audit import (
     BufferedAuditRecord,
     read_entries,
     verify_chain,
+)
+from brutex.orchestrator.audit import (
+    _find_last_newline_offset as find_last_newline_offset,
+)
+from brutex.orchestrator.audit import (
+    _has_torn_tail as has_torn_tail,
+)
+from brutex.orchestrator.audit import (
+    _iter_reverse_chunks as iter_reverse_chunks,
+)
+from brutex.orchestrator.audit import (
+    _last_nonblank_committed_line as last_nonblank_committed_line,
+)
+from brutex.orchestrator.audit import (
+    _read_tail_entry as read_tail_entry,
+)
+from brutex.orchestrator.audit import (
+    _truncate_torn_tail as truncate_torn_tail,
 )
 from hypothesis import given
 from hypothesis import strategies as st
@@ -64,6 +84,104 @@ class TestConstants:
         assert GENESIS_PREV_HASH == "0" * 64
         assert len(GENESIS_PREV_HASH) == 64
         assert set(GENESIS_PREV_HASH) == {"0"}
+
+
+# ────────────────────────────────────────────────────────────────────────
+# _iter_reverse_chunks — bounded termination + exact 8192-byte tiling
+# (DEC-MUTATION-RUNTIME-003). Deliberately placed EARLY in this file: this
+# generator is the shared reverse-seek walk under _read_tail_entry and
+# _find_last_newline_offset, and a loop mutant in it (e.g. `pos > 0` →
+# `pos >= 0`, or `pos -= read_size` → `pos = read_size`) SPINS FOREVER
+# instead of failing. islice-bounding the generator makes THIS test fail
+# fast under any such mutant, and running it before every consumer test
+# means the mutation runner (`pytest -x`) dies here in milliseconds instead
+# of wedging on a later hung test (the orphaned-pytest pipe wedge the
+# 2026-07-07 rehearsal hit on this module's pass).
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestReverseChunkWalkBounded:
+    """The O(1)-memory reverse walk: exact tiling, tail-first order, termination."""
+
+    @pytest.mark.parametrize("size", [1, 5, 8191, 8192, 8193, 16384, 20000])
+    def test_terminates_with_exact_8192_tiling_and_reconstruction(
+        self, tmp_path: Path, size: int
+    ) -> None:
+        # The documented memory envelope: blocks of AT MOST 8192 bytes (the
+        # hardcoded boundary — a drifted chunk constant is a real change to
+        # the O(_TAIL_CHUNK_BYTES) resident-bytes contract), yielded from the
+        # file END back to offset 0, terminating after exactly
+        # ceil(size / 8192) blocks that tile the file bytes exactly.
+        data = bytes(i % 251 for i in range(size))
+        blob = tmp_path / "blob.bin"
+        blob.write_bytes(data)
+        expected_blocks = -(-size // 8192)  # ceil(size / 8192)
+        with open(blob, "rb") as f:
+            # islice bound: an infinite-loop mutant yields extra blocks and
+            # FAILS the length assert fast instead of hanging the runner.
+            blocks = list(itertools.islice(iter_reverse_chunks(f, size), expected_blocks + 2))
+        assert len(blocks) == expected_blocks
+        # Tail-first: the first block ends at EOF; the last begins at 0.
+        assert blocks[0][0] == size - len(blocks[0][1])
+        assert blocks[-1][0] == 0
+        positions = [pos for pos, _ in blocks]
+        assert positions == sorted(positions, reverse=True)
+        for pos, block in blocks:
+            assert 1 <= len(block) <= 8192
+            assert data[pos : pos + len(block)] == block
+        assert b"".join(block for _, block in reversed(blocks)) == data
+
+    def test_empty_file_yields_nothing(self, tmp_path: Path) -> None:
+        blob = tmp_path / "empty.bin"
+        blob.write_bytes(b"")
+        with open(blob, "rb") as f:
+            assert list(itertools.islice(iter_reverse_chunks(f, 0), 2)) == []
+
+
+class TestLastNonblankCommittedLinePins:
+    """_last_nonblank_committed_line — the committed-line scanner, edge-pinned.
+
+    Placed EARLY (before the first resume test) and with a deliberate case
+    order: the scanner's blank-walk loop mutants (`end != -1` comparison
+    flips, `end = start` → None) SPIN on the empty/blank chunks that every
+    single-entry resume reaches via scan(b"") — but they return a fast
+    WRONG value on the torn-suffix / blank+torn / no-newline cases below.
+    Under the mutation runner's `-x`, those fast failures must fire before
+    any resume test (or the blank-only cases further down) can hang.
+    """
+
+    def test_returns_last_committed_line_with_newline(self) -> None:
+        assert last_nonblank_committed_line(b"a\nb\nc\n") == b"c\n"
+
+    def test_ignores_the_unterminated_torn_suffix(self) -> None:
+        assert last_nonblank_committed_line(b"a\nb\ntorn") == b"b\n"
+
+    def test_blank_walk_with_torn_suffix_skips_both(self) -> None:
+        # Blank committed filler AND a torn suffix together: the scanner
+        # must walk back to the real committed line, never surface the
+        # torn bytes.
+        assert last_nonblank_committed_line(b"a\n\ntorn") == b"a\n"
+
+    def test_walks_back_over_blank_committed_lines(self) -> None:
+        assert last_nonblank_committed_line(b"a\n\n\n") == b"a\n"
+
+    def test_line_after_a_leading_newline_is_cut_exactly(self) -> None:
+        # The start-boundary pin: the candidate begins one byte AFTER the
+        # preceding "\n", never at/before it.
+        assert last_nonblank_committed_line(b"\nabc\n") == b"abc\n"
+
+    def test_first_line_of_chunk_is_reachable(self) -> None:
+        # start == -1 → the candidate is taken from offset 0.
+        assert last_nonblank_committed_line(b"only\n") == b"only\n"
+
+    def test_no_committed_line_returns_none(self) -> None:
+        assert last_nonblank_committed_line(b"torn-only") is None
+
+    def test_blank_only_returns_none(self) -> None:
+        assert last_nonblank_committed_line(b"\n\n") is None
+
+    def test_empty_chunk_returns_none(self) -> None:
+        assert last_nonblank_committed_line(b"") is None
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1366,3 +1484,304 @@ class TestOpenIngestAudit:
         with open_ingest_audit(tmp_path, enabled=False) as writer:
             assert writer is None
         assert not (tmp_path / "audit").exists()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mutation-survivor kill pack (DEC-MUTATION-RUNTIME-003): the 2026-07-07
+# rehearsal (run 28853009068, PR #1239) found 16 surviving mutants in this
+# module — clustered in the torn-tail / BufferedAuditRecord code that
+# postdates the last audit mutation enumeration — plus an untested tail
+# (mutants 174-274) the 120-min job kill never reached; a local scoped
+# re-enumeration measured 70 survivors + 5 suspicious against the prior
+# suite. The classes below pin the exact behaviours those mutants flip:
+# torn-tail recovery semantics, the auto-repair truncation boundary, the
+# O(1) tail-read consumption contract, the final-byte discriminator, and
+# the buffered-record dataclass discipline.
+#
+# ORDER MATTERS (deliberate): the scanner-direct classes run BEFORE any
+# class that feeds blank-heavy input into _read_tail_entry, because the
+# blank-walk loop mutants (`end = start` → None, `end != -1` comparison
+# flips) SPIN on blank input but fail FAST on the scanner-direct cases —
+# under the mutation runner's `-x` the fast failure must come first so a
+# spin mutant records a quick KILLED, never a hung/suspicious run.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAuditFieldErrorMessagePin:
+    def test_delimiter_rejection_message_pinned_byte_exact(self) -> None:
+        # Byte-exact pin: the diagnostic must name the FIELD, the DELIMITER
+        # and the offending VALUE verbatim (kills the f-string mutants on
+        # both message halves).
+        with pytest.raises(AuditFieldError) as exc_info:
+            AuditEntry(
+                seq=0,
+                prev_hash=GENESIS_PREV_HASH,
+                ts_utc=1.0,
+                actor="bru|tex",
+                action="A",
+                subject="s",
+                payload={},
+            )
+        assert str(exc_info.value) == (
+            "Audit field 'actor' must not contain the '|' hash-preimage delimiter: 'bru|tex'"
+        )
+
+
+class TestBufferedAuditRecordDataclassPins:
+    """BufferedAuditRecord dataclass discipline — frozen + slots flag pins."""
+
+    def _record(self) -> BufferedAuditRecord:
+        return BufferedAuditRecord(action="SWEEP_START", subject="s", payload={"i": 1})
+
+    def test_frozen(self) -> None:
+        # frozen=True — the record crosses a worker→parent process boundary
+        # and must be immutable data (kills the `frozen=False` flip).
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            self._record().action = "TAMPERED"  # type: ignore[misc]
+
+    def test_slots(self) -> None:
+        # slots=True — no per-instance __dict__ (kills the `slots=False` flip).
+        assert not hasattr(self._record(), "__dict__")
+        assert hasattr(BufferedAuditRecord, "__slots__")
+
+
+class TestHasTornTailPins:
+    """_has_torn_tail — the O(1) final-byte torn discriminator, every boundary pinned."""
+
+    def _probe(self, tmp_path: Path, data: bytes) -> bool:
+        p = tmp_path / "log.jsonl"
+        p.write_bytes(data)
+        return has_torn_tail(p)
+
+    def test_empty_file_is_not_torn(self, tmp_path: Path) -> None:
+        # An empty file has no lines, so it can never be torn.
+        assert self._probe(tmp_path, b"") is False
+
+    def test_newline_terminated_file_is_not_torn(self, tmp_path: Path) -> None:
+        assert self._probe(tmp_path, b'{"seq": 0}\n') is False
+
+    def test_unterminated_final_line_is_torn(self, tmp_path: Path) -> None:
+        assert self._probe(tmp_path, b'{"seq": 0}\n{"seq') is True
+
+    def test_single_torn_byte_is_torn(self, tmp_path: Path) -> None:
+        # The 1-byte boundary: size == 1 must NOT be mistaken for empty.
+        assert self._probe(tmp_path, b"x") is True
+
+    def test_single_newline_file_is_not_torn(self, tmp_path: Path) -> None:
+        assert self._probe(tmp_path, b"\n") is False
+
+
+class TestFindLastNewlineOffsetPins:
+    """_find_last_newline_offset — exact absolute offsets across chunk seams."""
+
+    def _offset(self, tmp_path: Path, data: bytes) -> int:
+        p = tmp_path / "blob.bin"
+        p.write_bytes(data)
+        with open(p, "rb") as f:
+            return find_last_newline_offset(f, len(data))
+
+    def test_last_newline_in_the_tail_chunk(self, tmp_path: Path) -> None:
+        assert self._offset(tmp_path, b"a\nbc\ndef") == 4
+
+    def test_trailing_newline_is_found_at_size_minus_one(self, tmp_path: Path) -> None:
+        assert self._offset(tmp_path, b"abc\n") == 3
+
+    def test_no_newline_returns_minus_one(self, tmp_path: Path) -> None:
+        assert self._offset(tmp_path, b"abc") == -1
+
+    def test_empty_file_returns_minus_one(self, tmp_path: Path) -> None:
+        assert self._offset(tmp_path, b"") == -1
+
+    def test_newline_only_in_an_earlier_chunk(self, tmp_path: Path) -> None:
+        # The last "\n" sits more than one full 8192-byte chunk back from
+        # EOF, so the answer comes from a NON-final block: the absolute
+        # offset must be pos + idx of THAT block (kills the offset
+        # arithmetic mutants).
+        data = b"x" * 8193 + b"\n" + b"y" * 9000
+        assert self._offset(tmp_path, data) == 8193
+
+
+class TestResumeTornTailAutoRepairPins:
+    """resume=True auto-repairs a torn tail through the REAL open() path."""
+
+    def test_resume_truncates_the_torn_tail_to_the_committed_prefix(self, audit_path: Path) -> None:
+        # Kills the `_truncate_torn_tail(None)` argument mutant: the repair
+        # must run against the REAL log path, byte-exactly restoring the
+        # durable prefix before the resumed chain appends.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s1", ts_utc=1.0)
+            log.append(action="B", subject="s2", ts_utc=2.0)
+        durable = audit_path.read_bytes()
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write('{"seq": 2, "prev_hash": "torn')  # crash mid-append, no newline
+        with AuditWriter.open(audit_path, resume=True) as log:
+            # The torn remnant is gone the moment open() returns…
+            assert audit_path.read_bytes() == durable
+            # …and the chain continues from the last committed entry.
+            entry = log.append(action="C", subject="s3", ts_utc=3.0)
+        assert entry.seq == 2
+        assert verify_chain(audit_path) == 3
+
+
+class TestReadTailEntryPins:
+    """_read_tail_entry — the O(1) resume tail-read: boundaries + multi-chunk walks."""
+
+    def _chain(self, path: Path, n: int) -> list[AuditEntry]:
+        with AuditWriter.open(path) as log:
+            return [log.append(action="A", subject=f"s:{i}", ts_utc=float(i)) for i in range(n)]
+
+    def _raw(self, audit_path: Path, data: bytes) -> Path:
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_bytes(data)
+        return audit_path
+
+    def test_clean_file_returns_last_entry_and_no_torn_flag(self, audit_path: Path) -> None:
+        entries = self._chain(audit_path, 3)
+        assert read_tail_entry(audit_path) == (entries[-1], False)
+
+    def test_torn_tail_returns_last_committed_entry_and_flag(self, audit_path: Path) -> None:
+        entries = self._chain(audit_path, 2)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write('{"seq": 2, "prev')
+        assert read_tail_entry(audit_path) == (entries[-1], True)
+
+    def test_empty_file_returns_none_and_no_torn_flag(self, audit_path: Path) -> None:
+        assert read_tail_entry(self._raw(audit_path, b"")) == (None, False)
+
+    def test_torn_only_file_returns_none_with_flag(self, audit_path: Path) -> None:
+        assert read_tail_entry(self._raw(audit_path, b'{"seq": 0, "never')) == (None, True)
+
+    def test_single_torn_byte_returns_none_with_flag(self, audit_path: Path) -> None:
+        # The size == 1 boundary must not short-circuit as empty.
+        assert read_tail_entry(self._raw(audit_path, b"x")) == (None, True)
+
+    def test_blank_only_file_returns_none_without_flag(self, audit_path: Path) -> None:
+        # Newline-terminated blank filler is committed-but-benign: no entry,
+        # and NOT torn (the file ends in "\n").
+        assert read_tail_entry(self._raw(audit_path, b"\n\n\n")) == (None, False)
+
+    def test_multi_chunk_torn_tail_recovers_the_entry(self, audit_path: Path) -> None:
+        # The torn remnant spans >2 reverse-seek chunks (20000 > 2 × 8192):
+        # the walk must keep accumulating until the committed entry appears.
+        entries = self._chain(audit_path, 1)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write('{"pad": "' + "x" * 20000)
+        assert read_tail_entry(audit_path) == (entries[-1], True)
+
+    def test_blank_padding_before_tail_walks_back_to_the_entry(self, audit_path: Path) -> None:
+        # >1 chunk of committed blank filler after the only entry exercises
+        # the candidate-None continue path (blank lines are walked over).
+        entries = self._chain(audit_path, 1)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write("\n" * 9000)
+        assert read_tail_entry(audit_path) == (entries[-1], False)
+
+    def test_giant_last_entry_spanning_chunks_is_recovered(self, audit_path: Path) -> None:
+        # A committed FINAL entry larger than one 8192-byte chunk: the first
+        # chunk holds no newline, so the walk accumulates backwards first.
+        with AuditWriter.open(audit_path) as log:
+            log.append(action="A", subject="s:0", ts_utc=1.0)
+            big = log.append(action="B", subject="s:1", payload={"pad": "y" * 12000}, ts_utc=2.0)
+        assert read_tail_entry(audit_path) == (big, False)
+
+    def test_tail_read_consumes_only_the_final_chunk(
+        self, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The O(1)-tail contract itself (DEC-AUDIT-RESUME-TAILREAD-001):
+        # when the last committed entry sits inside the FINAL 8192-byte
+        # chunk of a multi-chunk log, the reverse walk stops after ONE
+        # chunk — a mutant that degrades the early-exit into an
+        # accumulate-the-whole-log walk changes NO answer, only the read
+        # complexity, so the consumption count is the observable.
+        entries = self._chain(audit_path, 300)
+        assert audit_path.stat().st_size > 3 * 8192  # the fixture really spans >3 chunks
+        consumed: list[int] = []
+
+        def _spy(f: BinaryIO, size: int) -> Iterator[tuple[int, bytes]]:
+            for item in iter_reverse_chunks(f, size):
+                consumed.append(item[0])
+                yield item
+
+        monkeypatch.setattr("brutex.orchestrator.audit._iter_reverse_chunks", _spy)
+        assert read_tail_entry(audit_path) == (entries[-1], False)
+        assert len(consumed) == 1
+
+    def test_committed_trailing_garbage_is_not_trimmed(self, audit_path: Path) -> None:
+        # A committed (newline-terminated) line carrying trailing junk after
+        # the JSON is REAL corruption: it must raise, never be silently
+        # repaired by over-stripping the line.
+        self._chain(audit_path, 1)
+        raw = audit_path.read_bytes()
+        self._raw(audit_path, raw[:-1] + b"X\n")  # "…}X\n" — committed, malformed
+        with pytest.raises(AuditError):
+            read_tail_entry(audit_path)
+
+    def test_missing_file_message_pinned_byte_exact(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nope.jsonl"
+        with pytest.raises(AuditError) as exc_info:
+            read_tail_entry(missing)
+        assert str(exc_info.value) == f"Audit log not found: {missing}"
+
+
+class TestTruncateTornTailPins:
+    """_truncate_torn_tail — byte-exact repair boundary + error-wrap pins."""
+
+    def test_keeps_exactly_the_committed_prefix(self, tmp_path: Path) -> None:
+        p = tmp_path / "log.jsonl"
+        committed = b'{"seq": 0}\n{"seq": 1}\n'
+        p.write_bytes(committed + b'{"seq": 2, "torn')
+        truncate_torn_tail(p)
+        assert p.read_bytes() == committed
+
+    def test_two_byte_committed_prefix_is_kept_exactly(self, tmp_path: Path) -> None:
+        # The smallest interesting cut: the last "\n" at offset 1 (the
+        # keep-boundary arithmetic must hold at tiny offsets too).
+        p = tmp_path / "log.jsonl"
+        p.write_bytes(b"a\ntorn")
+        truncate_torn_tail(p)
+        assert p.read_bytes() == b"a\n"
+
+    def test_multi_chunk_torn_tail_repairs_to_the_last_newline(self, tmp_path: Path) -> None:
+        # A torn remnant spanning >2 chunks must still cut at EXACTLY the
+        # last "\n" — one byte more would keep torn garbage, one byte less
+        # would eat the committed terminator.
+        p = tmp_path / "log.jsonl"
+        committed = b'{"seq": 0}\n'
+        p.write_bytes(committed + b"z" * 20000)
+        truncate_torn_tail(p)
+        assert p.read_bytes() == committed
+
+    def test_no_committed_newline_truncates_to_empty(self, tmp_path: Path) -> None:
+        p = tmp_path / "log.jsonl"
+        p.write_bytes(b"never terminated")
+        truncate_torn_tail(p)
+        assert p.read_bytes() == b""
+
+    def test_clean_file_is_unchanged(self, tmp_path: Path) -> None:
+        p = tmp_path / "log.jsonl"
+        committed = b'{"seq": 0}\n'
+        p.write_bytes(committed)
+        truncate_torn_tail(p)
+        assert p.read_bytes() == committed
+
+    def test_repair_is_idempotent(self, tmp_path: Path) -> None:
+        p = tmp_path / "log.jsonl"
+        committed = b'{"seq": 0}\n'
+        p.write_bytes(committed + b"torn")
+        truncate_torn_tail(p)
+        truncate_torn_tail(p)
+        assert p.read_bytes() == committed
+
+    def test_io_error_wraps_with_pinned_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p = tmp_path / "log.jsonl"
+        p.write_bytes(b"torn")
+
+        def _boom(_fd: int, _length: int) -> None:
+            raise OSError("boom")
+
+        monkeypatch.setattr("brutex.orchestrator.audit.os.truncate", _boom)
+        with pytest.raises(AuditWriteError) as exc_info:
+            truncate_torn_tail(p)
+        assert str(exc_info.value) == f"Failed to truncate torn tail of audit log {p}: boom"
