@@ -252,12 +252,19 @@ def _entries_from_audit(audit_path: Path) -> list[AuditEntry]:
     twice per launch (review round-3 finding 4 — the dashboard-side #1492 D3
     precedent).
 
-    HONEST envelope (review round-4 finding 4, Golden Rule #10): this is a
-    PARSE, not an integrity check — :func:`brutex.orchestrator.audit.
-    read_entries`'s own contract reads the lines WITHOUT verifying the hash
-    chain. A well-formed-JSONL audit whose chain was tampered still parses
-    here; chain integrity is owned by ``verify_chain`` under the Tier-1
-    ``sweep-verify`` diagnosis, never silently claimed by these readers.
+    HONEST envelope (review round-4 finding 4 + round-8 finding 12, Golden
+    Rule #10): this is a PARSE, not an integrity check —
+    :func:`brutex.orchestrator.audit.read_entries`'s own contract reads the
+    lines WITHOUT verifying the hash chain, so a well-formed-JSONL audit
+    whose chain was tampered still parses here. Chain integrity for the
+    VERDICT-grade consumers is owned by :func:`_verified_entries_from_audit`
+    (the ``verify_chain``-first wrapper :func:`recorded_audit_facts` — the
+    ``sweep-verify`` facts seam — and :func:`stale_roll_schedule_refusal` —
+    the launch resume gate — both ride); the display-surface context read
+    (:func:`recorded_context_from_audit`, the ``/results`` report header)
+    deliberately stays parse-only (an O(entries) SHA-256 sweep per dashboard
+    poll would violate the read-side latency law), which is why its facts
+    never gate a verdict.
 
     Raises
     ------
@@ -273,6 +280,39 @@ def _entries_from_audit(audit_path: Path) -> list[AuditEntry]:
         return list(read_entries(audit_path))
     except AuditError as exc:
         raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+
+
+def _verified_entries_from_audit(audit_path: Path) -> list[AuditEntry]:
+    """Chain-verify then parse the audit — the VERDICT-grade read (round-8 f12).
+
+    Review round-8 finding 12: every recorded fact that gates a verdict-grade
+    outcome — the Tier-2 context, the F16 recorded roll schedules, the Tier-3
+    ``context_match`` gate, and the launch resume gate's recorded-vs-fresh
+    schedule comparison — was parsed from an integrity-UNVERIFIED file while
+    the docstrings pointed readers at a ``verify_chain`` call nobody made:
+    ONE well-formed hand-edited line could steer those verdicts. This wrapper
+    runs :func:`brutex.orchestrator.audit.verify_chain` (streaming, O(1)
+    memory) BEFORE the parse, so a tampered / truncated / rotated chain maps
+    to :class:`SweepVerifyError` — the launch resume gate then treats it
+    exactly like an unreadable audit (the sentinel-gated refusal/abstain
+    arm), and ``sweep-verify`` refuses with the corruption named.
+
+    Raises
+    ------
+    SweepVerifyError
+        If the chain is broken (:class:`~brutex.orchestrator.audit.
+        AuditChainCorruption` — tampering, truncation, rotation) or the file
+        is unreadable/malformed.
+    """
+    from brutex.orchestrator.audit import AuditError, verify_chain
+
+    try:
+        verify_chain(audit_path)
+    except AuditError as exc:  # AuditChainCorruption is an AuditError subclass
+        raise SweepVerifyError(
+            f"audit log at {audit_path} failed hash-chain verification: {exc}"
+        ) from exc
+    return _entries_from_audit(audit_path)
 
 
 def recorded_context_from_audit(audit_path: Path) -> RecordedContext | None:
@@ -349,6 +389,8 @@ def _schedules_from_entries(
     entries: list[AuditEntry], audit_path: Path
 ) -> dict[str, tuple[int, ...]]:
     """Derive the recorded schedules from already-read *entries* (one shared parse)."""
+    from brutex.data.futures_series import is_futures_series_symbol
+
     schedules: dict[str, tuple[int, ...]] = {}
     for entry in entries:
         if entry.action not in _CONTEXT_ACTIONS:
@@ -369,6 +411,26 @@ def _schedules_from_entries(
                 f"instrument={instrument!r} roll_schedule={raw!r}"
             )
         schedule = tuple(raw)
+        # The presence ⟺ alias law of the manifest twin
+        # `_roll_schedules_from_payload` (review round-8 finding 11): a
+        # roll_schedule may exist for (and only for) the NIFTY-futures series
+        # alias — the SweepRunConfig `__post_init__` invariant, so no
+        # production writer ever stamps one on a spot instrument. A
+        # hand-edited/tampered spot line previously slipped through to
+        # `_verify_store_rows`, where the invariant's ValueError demoted the
+        # store to a warn-grade `row_identity_underivable` EARLY-RETURN —
+        # skipping the row_run_id/label/top_k corruption checks entirely
+        # (ONE forged line laundered a genuinely corrupt spot store into a
+        # CLEAN Tier-2 verdict). Refuse at the parse boundary instead,
+        # exactly like the manifest twin.
+        if not is_futures_series_symbol(instrument):
+            raise SweepVerifyError(
+                f"malformed recorded roll_schedule in {audit_path} (seq {entry.seq}): "
+                f"instrument {instrument!r} is not the NIFTY-futures series alias — a "
+                "roll schedule may exist for (and only for) the futures alias "
+                "(presence ⟺ alias, the SweepRunConfig invariant); the audit line is "
+                "corrupt or tampered"
+            )
         # The SHAPE law of the manifest twin `_roll_schedules_from_payload`
         # (review round-5 finding 1): a recorded schedule must be a non-empty
         # strictly increasing tuple of non-negative day ordinals — a
@@ -445,7 +507,11 @@ def recorded_audit_facts(
     """
     if not audit_path.exists():
         return None, {}, ()
-    entries = _entries_from_audit(audit_path)
+    # Hash-chain-VERIFIED read (review round-8 finding 12): these facts gate
+    # the Tier-2 identity re-derivation, the F16 recorded schedules, and the
+    # Tier-3 context_match gate — verdict-grade outcomes must never derive
+    # from a tampered/truncated chain that still parses as JSONL.
+    entries = _verified_entries_from_audit(audit_path)
     pairs = _launch_context_pairs(entries, audit_path)
     if not pairs:
         return None, {}, ()
@@ -508,33 +574,41 @@ def _launch_context_pairs(
     return pairs
 
 
-def _matching_snapshot_entries(
-    entries: list[AuditEntry], fresh_snapshot: str, audit_path: Path
+def _matching_generation_entries(
+    entries: list[AuditEntry], fresh_context: RecordedContext, audit_path: Path
 ) -> tuple[list[AuditEntry], list[AuditEntry]]:
-    """Split context-bearing entries into (all, recorded-under-*fresh_snapshot*).
+    """Split context-bearing entries into (all, recorded-under-*fresh_context*).
 
     The resume gate's launch-generation scoping (review round-4 findings
     1/8/11): a multi-launch results root legitimately accretes SWEEP_START
-    entries under DIFFERENT snapshots — the sanctioned monthly grown-lake
+    entries under DIFFERENT contexts — the sanctioned monthly grown-lake
     re-launch appends a second context to the SAME ``resume=True`` audit — and
-    only rows minted under the SAME ``data_snapshot_hash`` can pair a
-    completion sentinel with this launch (the tuple digest folds the
-    snapshot, so a foreign-snapshot sentinel can never short-circuit this
-    grid's tuples). The parent's pre-dispatch ``SWEEP_LAUNCH`` line counts as
-    a matching-generation entry too (review round-7 finding 1 — on the
-    parallel driver it is the entry a launch-window crash durably leaves).
-    Whole-file consistency remains ``sweep-verify``'s separate diagnosis
-    contract (:func:`recorded_context_from_audit`).
+    only rows minted under the SAME FULL context triple
+    ``(data_snapshot_hash, indicator_version, code_commit_sha)`` can pair a
+    completion sentinel with this launch: the tuple digest folds ALL THREE
+    strings (``sweep_orchestrator`` folds the grid identity), so a
+    foreign-generation sentinel can never short-circuit this grid's tuples.
+    Snapshot-ONLY matching (review round-8 finding 10) picked up a prior
+    code-commit's entries after a sessionless schedule drift under a
+    byte-identical snapshot and permanently refused the sanctioned
+    code-upgrade re-launch — whose C1 sentinels re-address under C2 digests
+    and thus can never pair (the stated hazard was impossible). This mirrors
+    :func:`recorded_audit_facts`'s full-triple generation keying (review
+    round-7 finding 7). The parent's pre-dispatch ``SWEEP_LAUNCH`` line
+    counts as a matching-generation entry too (review round-7 finding 1 — on
+    the parallel driver it is the entry a launch-window crash durably
+    leaves). Whole-file consistency remains ``sweep-verify``'s separate
+    diagnosis contract (:func:`recorded_context_from_audit`).
 
     Raises
     ------
     SweepVerifyError
         If a context-bearing payload is missing a context key (a malformed
-        entry makes the recorded snapshot underivable — fail closed).
+        entry makes the recorded generation underivable — fail closed).
     """
     pairs = _launch_context_pairs(entries, audit_path)
     sweep_starts = [entry for entry, _ctx in pairs]
-    matching = [entry for entry, ctx in pairs if ctx.data_snapshot_hash == fresh_snapshot]
+    matching = [entry for entry, ctx in pairs if ctx == fresh_context]
     return sweep_starts, matching
 
 
@@ -599,6 +673,8 @@ def stale_roll_schedule_refusal(
     audit_path: Path,
     *,
     fresh_snapshot: str,
+    fresh_indicator_version: str,
+    fresh_code_commit_sha: str,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]],
     results_root: Path | None = None,
     fresh_sentinel_paths: Mapping[str, Sequence[Path]] | None = None,
@@ -627,6 +703,14 @@ def stale_roll_schedule_refusal(
         drift from).
     fresh_snapshot
         The launch's freshly computed ``data_snapshot_hash``.
+    fresh_indicator_version, fresh_code_commit_sha
+        The launch's other two context strings — a GENERATION is the FULL
+        triple (review round-8 finding 10, mirroring
+        :func:`recorded_audit_facts`'s round-7 keying): a code-upgrade
+        re-launch under a byte-identical snapshot records a NEW generation
+        whose prior-commit sentinels re-address (the tuple digest folds the
+        commit), so its recorded schedules must never be compared against
+        this launch's fresh ones.
     roll_schedule_by_instrument
         The launch's freshly resolved per-instrument schedules.
     results_root
@@ -661,16 +745,20 @@ def stale_roll_schedule_refusal(
     -------
     str | None
         A refusal message naming BOTH schedules when a ``SWEEP_START``
-        recorded under *fresh_snapshot* carries a schedule that differs from
-        the fresh one; ``None`` otherwise. The derivation is SCOPED to the
-        entries recorded under *fresh_snapshot* (review round-4 findings
-        1/8/11): a multi-launch root — the sanctioned monthly grown-lake
-        cadence appends a NEW context to the SAME audit on every
-        moved-snapshot re-launch — must never be condemned as inconsistent,
-        and a crash-resume of the LATEST launch compares only against its own
-        generation. A snapshot with NO matching recorded entries MOVED —
-        every tuple digest re-keys (the stores/sentinels re-address), so no
-        sentinel can pair stale rows with the fresh schedule — abstain,
+        recorded under this launch's FULL context triple carries a schedule
+        that differs from the fresh one; ``None`` otherwise. The derivation
+        is SCOPED to the entries recorded under the fresh
+        ``(data_snapshot_hash, indicator_version, code_commit_sha)`` triple
+        (review round-4 findings 1/8/11 + round-8 finding 10): a
+        multi-launch root — the sanctioned monthly grown-lake cadence
+        appends a NEW context to the SAME audit on every moved-snapshot
+        re-launch, and the sanctioned code-upgrade re-launch appends one
+        under a byte-identical snapshot — must never be condemned as
+        inconsistent, and a crash-resume of the LATEST launch compares only
+        against its own generation. A generation with NO matching recorded
+        entries MOVED (snapshot, indicator, or commit) — every tuple digest
+        re-keys (the stores/sentinels re-address), so no sentinel can pair
+        stale rows with the fresh schedule — abstain,
         UNLESS a sentinel already exists at one of THIS launch's expected
         *fresh_sentinel_paths* (review round-6 finding 4 — the round-5
         finding-11 sibling): a fresh-digest sentinel proves a
@@ -699,13 +787,19 @@ def stale_roll_schedule_refusal(
             roll_schedule_by_instrument=roll_schedule_by_instrument,
             reason="the audit log is ABSENT",
         )
+    fresh_context = RecordedContext(
+        data_snapshot_hash=fresh_snapshot,
+        indicator_version=fresh_indicator_version,
+        code_commit_sha=fresh_code_commit_sha,
+    )
     try:
         # ONE shared read for BOTH derivations (review round-3 finding 4 —
-        # previously the whole audit was parsed twice). Parse-only: the hash
-        # chain is NOT re-verified here (round-4 finding 4 — verify_chain
-        # under Tier-1 sweep-verify owns integrity).
-        entries = _entries_from_audit(audit_path)
-        sweep_starts, matching = _matching_snapshot_entries(entries, fresh_snapshot, audit_path)
+        # previously the whole audit was parsed twice), hash-chain-VERIFIED
+        # first (review round-8 finding 12 — the recorded schedule gates a
+        # verdict-grade launch decision, so a tampered/truncated chain must
+        # land in the unreadable arm below, never be trusted as fact).
+        entries = _verified_entries_from_audit(audit_path)
+        sweep_starts, matching = _matching_generation_entries(entries, fresh_context, audit_path)
         recorded = _schedules_from_entries(matching, audit_path)
     except SweepVerifyError:
         return _futures_sentinel_refusal(
@@ -727,9 +821,11 @@ def stale_roll_schedule_refusal(
     if not matching:
         # Review round-6 finding 4 (the round-5 finding-11 sibling): the audit
         # is readable and holds context entries — but NONE under THIS launch's
-        # snapshot generation. A legitimate moved snapshot abstains here (its
+        # FULL context generation (snapshot + indicator + commit — round-8
+        # finding 10). A legitimate moved generation abstains here (its
         # foreign-generation sentinels re-address, so none sits at a fresh
-        # expected path) — but an audit that LOST its fresh-generation tail at
+        # expected path — a code-upgrade re-launch lands here by design) —
+        # but an audit that LOST its fresh-generation tail at
         # a line boundary (or a pre-launch backup restore) looks identical
         # from the entries alone. Probe THIS launch's expected sentinel paths:
         # a fresh-digest sentinel can only exist after its generation's
@@ -747,7 +843,7 @@ def stale_roll_schedule_refusal(
                     f"results tree holds a completed futures tuple for {instrument!r} "
                     f"minted under THIS launch's exact identity (completion sentinel: "
                     f"{fresh_sentinel}) but the audit records NO SWEEP_START under this "
-                    f"snapshot generation at all ({audit_path}) — a tail-lossy/restored "
+                    f"launch's context generation at all ({audit_path}) — a tail-lossy/restored "
                     "audit: the roll_schedule those rows were minted under cannot be "
                     "verified, so a resume could pair them with a drifted schedule — "
                     "re-sweep into a fresh --results-root (or restore the tree's "

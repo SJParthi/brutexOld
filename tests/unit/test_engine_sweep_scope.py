@@ -78,7 +78,8 @@ class TestScopeReportMessages:
         assert "sweep REFUSED" in message
         assert "INDIAVIX" in message
         assert "RELIANCE" in message
-        assert "NSE/INDEX" in message
+        # The launch pair is operator-typed → repr-quoted (round-8 finding 2).
+        assert "'NSE'/'INDEX'" in message
         assert "CLAUDE.md §2 Rule 3" in message
         assert "ADR-0012" in message
         assert "--allow-out-of-scope" in message
@@ -113,6 +114,33 @@ class TestScopeReportMessages:
         assert repr(hostile) in warning
         assert "\x1b" not in warning
         assert "\n" not in warning  # the warning is one line — repr keeps it so
+
+    def test_hostile_exchange_and_segment_are_repr_quoted_never_raw(self) -> None:
+        # Round-8 finding 2: the round-4 fix repr-quoted the SYMBOL but left
+        # the operator-typed --exchange/--segment raw in the SAME messages —
+        # `--segment $'FNO\n[brutex] sweep OK'` forged a status line in
+        # CI-captured stderr. Both rendered surfaces now repr-quote the pair.
+        forged_segment = "FNO\n[brutex] sweep OK"
+        report = check_sweep_scope(
+            ["RELIANCE"],
+            exchange="NSE",
+            segment=forged_segment,
+            allow_out_of_scope=False,
+        )
+        message = report.refusal_message()
+        assert repr(forged_segment) in message  # escaped, quoted form
+        assert "\n[brutex] sweep OK" not in message  # no forged line
+        overridden = check_sweep_scope(
+            ["RELIANCE"],
+            exchange="NSE\x1b[31m",
+            segment=forged_segment,
+            allow_out_of_scope=True,
+        )
+        warning = overridden.override_warning()
+        assert repr(forged_segment) in warning
+        assert repr("NSE\x1b[31m") in warning
+        assert "\x1b" not in warning
+        assert "\n" not in warning  # one line — repr keeps it so
 
 
 class TestCorporateActionExtension:

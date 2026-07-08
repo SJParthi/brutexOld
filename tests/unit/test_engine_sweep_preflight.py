@@ -164,3 +164,32 @@ class TestFreshnessPreflight:
         report = preflight_derived_freshness({})
         assert report.ok is True
         assert report.checked == 0
+
+
+class TestOneDayTradeLawNote:
+    """`one_day_trade_law_note` — the honest 1day-grid launch label.
+
+    Review round-8 finding 1 (Golden Rule #10): under the intraday-only trade
+    law the 1day grid is structurally trade-less (midnight-IST stamps → the
+    next-bar fill lands on a later IST session date and the overnight-gap
+    rule drops it; no 1day bar reaches the 15:20 forced exit), so every mask
+    ranks nothing and MIN_TRADES gates all combos out. The launch is NOT
+    refused (bar_bits consumers are real — the D12 mask); it is NAMED.
+    """
+
+    def test_one_day_interval_yields_the_note(self) -> None:
+        from brutex.engine.sweep_preflight import one_day_trade_law_note
+
+        note = one_day_trade_law_note(["1minute", "1day"])
+        assert note is not None
+        assert "intraday-only trade law" in note
+        assert "overnight-gap rule" in note
+        assert "MIN_TRADES" in note
+        assert "DEC-FUTURES-LAUNCH-REVIEW-FIXES-008" in note  # the named follow-up
+        assert "\n" not in note  # one line — never a forged log shape
+
+    def test_intraday_only_launch_gets_no_note(self) -> None:
+        from brutex.engine.sweep_preflight import one_day_trade_law_note
+
+        assert one_day_trade_law_note(["1minute", "5minute", "15minute"]) is None
+        assert one_day_trade_law_note([]) is None

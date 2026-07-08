@@ -4657,7 +4657,7 @@ def cmd_sweep(
     # refuse an out-of-engine-scope launch BEFORE any lake I/O. Report-only
     # command, but an out-of-scope brute-force IS the violation.
     from brutex.engine.sweep_scope import check_sweep_scope
-    from brutex.feed.series_load import load_sweep_slice
+    from brutex.feed.series_load import load_sweep_slice, require_series_coordinates
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
 
@@ -4680,6 +4680,14 @@ def cmd_sweep(
             segment=segment,
         )
 
+    # Honest 1day-grid launch note (Golden Rule #10, review round-8 finding 1):
+    # the 1day axis builds bar_bits but can rank nothing under the
+    # intraday-only trade law — say so up front, never a silent empty report.
+    from brutex.engine.sweep_preflight import one_day_trade_law_note
+
+    one_day_note = one_day_trade_law_note([interval])
+    if one_day_note is not None:
+        print(f"[brutex] {one_day_note}")
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
@@ -4694,6 +4702,12 @@ def cmd_sweep(
     resolution: FuturesSeriesResolution | None = None
     try:
         if is_futures_series_symbol(symbol):
+            # Coordinate pin BEFORE the resolve (review round-8 finding 9):
+            # under --allow-out-of-scope with a foreign --exchange/--segment
+            # on a box with NO pinned tree, resolving first would name the
+            # wrong problem ("no NSE/FNO lake tree — run the pipeline pull")
+            # instead of the coordinate.
+            require_series_coordinates(symbol, exchange=exchange, segment=segment)
             resolution = resolve_futures_series(
                 resolved_lake,
                 start=start_dt.astimezone(IST).date(),
@@ -4954,6 +4968,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 file=sys.stderr,
             )
             return EXIT_USER_ERROR
+    # Honest 1day-grid launch note (Golden Rule #10, review round-8 finding 1):
+    # the 1day axis builds bar_bits but can rank nothing under the
+    # intraday-only trade law — say so up front, never a silent empty grid.
+    from brutex.engine.sweep_preflight import one_day_trade_law_note
+
+    one_day_note = one_day_trade_law_note(interval_list)
+    if one_day_note is not None:
+        print(f"[brutex] {one_day_note}")
     direction_list = [
         Side.BUY if d.strip().upper() == "BUY" else Side.SELL
         for d in directions.split(",")
@@ -5009,7 +5031,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         is_futures_series_symbol,
         resolve_futures_series,
     )
-    from brutex.feed.series_load import load_sweep_slice
+    from brutex.feed.series_load import load_sweep_slice, require_series_coordinates
 
     start_dt, end_dt = _parse_dt(start), _parse_dt(end)
     resolution: FuturesSeriesResolution | None = None
@@ -5017,6 +5039,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     futures_symbols = [s for s in symbol_list if is_futures_series_symbol(s)]
     try:
         if futures_symbols:
+            # Coordinate pin BEFORE the resolve (review round-8 finding 9) —
+            # names the coordinate, not a misleading "no NSE/FNO lake tree".
+            require_series_coordinates(futures_symbols[0], exchange=exchange, segment=segment)
             resolution = resolve_futures_series(
                 resolved_lake,
                 start=start_dt.astimezone(IST).date(),
@@ -5257,6 +5282,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         schedule_refusal = stale_roll_schedule_refusal(
             audit_path,
             fresh_snapshot=snapshot,
+            # Round-8 finding 10: a generation is the FULL context triple —
+            # a code-upgrade re-launch (same snapshot, new commit) re-keys
+            # every tuple digest, so the prior commit's recorded schedules
+            # must abstain here exactly like a moved snapshot.
+            fresh_indicator_version=grid.indicator_version,
+            fresh_code_commit_sha=grid.code_commit_sha,
             roll_schedule_by_instrument=roll_schedule_by_instrument,
             # Round-3 finding 8: an absent/rotated audit over a tree that DOES
             # hold futures completion sentinels refuses too (the recorded
@@ -6327,7 +6358,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             make_store_for,
             run_sweep_grid,
         )
-        from brutex.feed.series_load import load_sweep_slice
+        from brutex.feed.series_load import load_sweep_slice, require_series_coordinates
         from brutex.orchestrator.audit import AuditWriter
 
         catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
@@ -6345,6 +6376,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         slices: dict[tuple[str, str], list[Any]] = {}
         try:
             if recount_futures:
+                # Coordinate pin BEFORE the resolve (review round-8 finding 9).
+                require_series_coordinates(recount_futures[0], exchange=exchange, segment=segment)
                 resolution = resolve_futures_series(
                     resolved_lake,
                     start=start_dt.astimezone(IST).date(),

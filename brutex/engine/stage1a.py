@@ -870,6 +870,21 @@ def apply_1day_mask_for(instrument: str, tf_label: str) -> bool:
     volume, so bits 52/53 would otherwise fire each 1day bar against its own
     single-bar VWAP session (a live D12 violation). Spot is deliberately NOT
     flipped (named follow-up — DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
+
+    HONEST limit (Golden Rule #10, review round-8 finding 1): the ``1day``
+    grid this mask makes honest is structurally TRADE-less under the
+    intraday-only trade law — every derived ``1day`` bar is
+    midnight-IST-stamped, so the trade sim's next-bar fill always lands on a
+    LATER IST session date (dropped by the overnight-gap rule,
+    ``trade_sim.push``) and no ``1day`` bar ever reaches the 15:20
+    forced-exit window — so every mask on that grid yields zero trades and
+    ``MIN_TRADES`` gates every combo out. The mask therefore matters ONLY
+    for ``bar_bits`` consumers (Stage-1A matrices, suffix-independence
+    oracles, future non-trade analytics), never for ranked results; the
+    sweep mouths print :func:`brutex.engine.sweep_preflight.
+    one_day_trade_law_note` so a ``1day`` launch is loudly labelled. Real
+    ``1day`` trade semantics are a named follow-up
+    (DEC-FUTURES-LAUNCH-REVIEW-FIXES-008).
     """
     from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 

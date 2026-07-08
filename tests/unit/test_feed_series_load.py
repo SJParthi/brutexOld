@@ -39,6 +39,7 @@ from brutex.feed import series_load
 from brutex.feed.replay import ReplayFeed
 from brutex.feed.series_load import load_sweep_slice
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 pytest.importorskip("polars")
 pytest.importorskip("duckdb")
@@ -438,9 +439,26 @@ class TestFuturesRefusals:
                 )
         message = str(exc.value)
         assert "NSE/FNO" in message  # the pinned coordinate named
-        assert "NSE/INDEX" in message  # the wrong one named
+        # The wrong pair is operator-typed → repr-quoted (round-8 finding 2).
+        assert "'NSE'/'INDEX'" in message
         assert "EMPTY" not in message  # never the wrong re-pull remediation
         assert "re-pull" not in message
+
+    def test_require_series_coordinates_is_the_shared_up_front_pin(self) -> None:
+        # Round-8 finding 9: the CLI mouths call this BEFORE
+        # resolve_futures_series so a foreign coordinate on a box with no
+        # bars/NSE/FNO tree names the COORDINATE, not a misleading
+        # "no NSE/FNO lake tree — run the pipeline pull". Pure — no lake I/O.
+        from brutex.feed.series_load import require_series_coordinates
+
+        with pytest.raises(FuturesSeriesError, match="coordinate is wrong") as exc:
+            require_series_coordinates(_ALIAS, exchange="BSE", segment="FNO\nforged")
+        # Operator-typed exchange/segment repr-quoted (round-8 finding 2): an
+        # embedded newline must never forge a '[brutex]' stderr line.
+        assert "'BSE'/'FNO\\nforged'" in str(exc.value)
+        assert "\nforged" not in str(exc.value)
+        # The pinned pair passes silently (the alias mouths' happy path).
+        require_series_coordinates(_ALIAS, exchange="NSE", segment="FNO")
 
     def test_zero_bar_refusal_under_no_reconcile_names_the_reconcile_hint(
         self, lake: Path, tmp_path: Path
@@ -523,7 +541,7 @@ def _futures_lake_no_catalog(lake: Path) -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _skip_warns(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _skip_warns(logs: list[EventDict]) -> list[EventDict]:
     return [rec for rec in logs if rec["event"] == "series_load.boundary_segment_no_session"]
 
 
@@ -668,7 +686,7 @@ class TestBoundarySegmentSessionSkip:
                 )
 
     def test_1day_live_edge_morning_after_expiry_skips_not_refuses(
-        self, lake: Path, tmp_path: Path
+        self, lake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Review round-6 finding 3 (MAJOR): a bare-date `--end` the morning
         # after an expiry puts the successor contract's FIRST owned day into a
@@ -680,6 +698,9 @@ class TestBoundarySegmentSessionSkip:
         # the whole multi-interval futures launch every morning after every
         # expiry); now it SKIPS with one WARN like every other boundary
         # sliver — the intraday variant was already fixed in round 1.
+        # Round-8 finding 8 scoped the skip to the TRUE live edge, so the
+        # launch clock is pinned to that morning (close still in the future).
+        monkeypatch.setattr(series_load, "_now_utc", lambda: _ist(2025, 6, 27, 5, 35))
         with Catalog.open(tmp_path / "cat.duckdb") as cat:
             _futures_lake(lake, cat)  # 1minute only — no 1day partitions
             with capture_logs() as logs:
@@ -696,12 +717,37 @@ class TestBoundarySegmentSessionSkip:
         assert warned[0]["contract"] == _JUL
         assert warned[0]["interval"] == "1day"
 
-    def test_1day_window_ending_one_minute_before_the_close_skips(
-        self, lake: Path, tmp_path: Path
+    def test_1day_deep_history_missing_bar_refuses_not_skips(
+        self, lake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The close boundary's other side: seg_end 15:29 < close 15:30 — the
-        # session has NOT completed within the window, the bar cannot be
-        # demanded → skip, never a false refusal.
+        # Round-8 finding 8 (fails-before/passes-after): the SAME pre-close
+        # sliver in DEEP HISTORY — the session close passed long ago, the
+        # prebuild ran (or should have), and the READ window would serve the
+        # midnight-stamped 1day bar on a healthy lake. Pre-fix the round-6
+        # rule skipped it with the live-edge WARN, silently proceeding with a
+        # data_snapshot_hash that differs from the healthy-lake run (the
+        # module's own "loud EMPTY refusal stands for spans the calendar says
+        # should hold bars" claim violated). Now: the loud refusal stands.
+        monkeypatch.setattr(series_load, "_now_utc", lambda: _ist(2026, 1, 2, 10, 0))
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)  # 1minute only — no 1day partitions
+            with pytest.raises(FuturesSeriesError, match="'1day' is EMPTY"):
+                _load_alias(
+                    cat,
+                    lake,
+                    interval="1day",
+                    start=_ist(2025, 6, 27, 0, 0),
+                    end=_ist(2025, 6, 27, 5, 30),
+                )
+
+    def test_1day_window_ending_one_minute_before_the_close_skips(
+        self, lake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The close boundary's other side, ON the live edge: seg_end 15:29 <
+        # close 15:30 and the close is still in the wall-clock future — the
+        # session has NOT completed, the bar cannot be demanded → skip,
+        # never a false refusal.
+        monkeypatch.setattr(series_load, "_now_utc", lambda: _ist(2025, 6, 27, 15, 29))
         with Catalog.open(tmp_path / "cat.duckdb") as cat:
             _futures_lake(lake, cat)
             with capture_logs() as logs:

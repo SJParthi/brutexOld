@@ -22,7 +22,7 @@ import os
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import brutex.universe
 import pytest
@@ -40,6 +40,7 @@ from brutex.data.futures_series import (
     resolve_futures_series,
 )
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -65,7 +66,7 @@ def _mk_lake(tmp_path: Path, *names: str) -> Path:
     return root
 
 
-def _events(logs: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+def _events(logs: list[EventDict], event: str) -> list[EventDict]:
     """Filter captured structlog records down to one event name."""
     return [rec for rec in logs if rec["event"] == event]
 
@@ -211,6 +212,49 @@ class TestScanAndFilter:
             res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 7, 31))
         assert res.contract_symbols == (_JUN, _JUL)
         assert res.unparsed_dirs == ()  # it PARSED — not parse-failure evidence
+        warned = _events(logs, "futures_series.case_drift_dir")
+        assert len(warned) == 1
+        assert warned[0]["dir"] == repr(drifted)
+
+    @pytest.mark.parametrize(
+        "drifted",
+        [
+            "NSE-NIFTY-30sep25-FUT",  # lower-cased month token (%b is case-insensitive)
+            "NSE-NIFTY-30SEP25-FUT",  # upper-cased month token
+            "NSE-NIFTY-3Sep25-FUT",  # unpadded day (%d accepts it; strftime pads)
+        ],
+    )
+    def test_month_token_drift_is_warned_never_admitted(self, tmp_path: Path, drifted: str) -> None:
+        # Round-8 finding 3: `strptime`'s %b is case-INSENSITIVE (and %d
+        # accepts an unpadded day), so a hand-restored 'NSE-NIFTY-30sep25-FUT'
+        # PARSED to a valid expiry and passed the exact-match admit branch —
+        # a load-bearing owning segment with ZERO evidence, contradicting the
+        # scanner's own 'case-EXACT' claim. The admit branch now requires the
+        # canonical strftime round-trip; a non-canonical token rides the same
+        # case_drift_dir evidence WARN as a drifted exchange/underlying.
+        root = _mk_lake(tmp_path, _JUN, _JUL, drifted)
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 7, 31))
+        assert res.contract_symbols == (_JUN, _JUL)  # never admitted
+        assert res.unparsed_dirs == ()  # it PARSED — not parse-failure evidence
+        warned = _events(logs, "futures_series.case_drift_dir")
+        assert len(warned) == 1
+        assert warned[0]["dir"] == repr(drifted)
+
+    def test_lowercase_fut_suffix_drift_is_warned_never_admitted(self, tmp_path: Path) -> None:
+        # Round-8 finding 5: the '-FUT' suffix prefilter was case-EXACT, so a
+        # hand-restored 'NSE-NIFTY-30Sep25-fut' dir fell out of the scan with
+        # ZERO evidence — neither unparsed_dir nor case_drift_dir fired — the
+        # exact silent-exclusion class the round-7 WARN claims to close. The
+        # prefilter is now case-insensitive and a case-only suffix drift
+        # rides the same case_drift_dir evidence WARN (never admitted: lake
+        # keys are case-exact).
+        drifted = "NSE-NIFTY-30Sep25-fut"
+        root = _mk_lake(tmp_path, _JUN, _JUL, drifted)
+        with capture_logs() as logs:
+            res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 7, 31))
+        assert res.contract_symbols == (_JUN, _JUL)
+        assert res.unparsed_dirs == ()
         warned = _events(logs, "futures_series.case_drift_dir")
         assert len(warned) == 1
         assert warned[0]["dir"] == repr(drifted)

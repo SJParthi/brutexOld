@@ -5611,7 +5611,7 @@ def build_app(
         return _render_results_html()
 
     @app.post("/api/v1/cascade/run")
-    async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
+    async def api_cascade_run() -> JSONResponse:
         """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
 
         The dashboard "Run cascade" button (DEC-CASCADE-WIRE-001): reloads the

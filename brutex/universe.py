@@ -481,11 +481,13 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             allowed=False,
             tier="refused",
             reason=(
-                # {symbol!r} in every refusal reason: the name is operator-typed
-                # (may embed \n/ESC) and the reason is echoed to stderr + logs —
-                # never let it forge lines (#907/#919 repr-naming convention).
+                # {symbol!r} + {exchange!r}/{segment!r} in every refusal
+                # reason: all three are operator-typed (may embed \n/ESC) and
+                # the reason is echoed to stderr + logs — never let them
+                # forge lines (#907/#919 repr-naming convention; round-8
+                # finding 2 extended the round-4 symbol fix to the pair).
                 f"{symbol!r} is the NIFTY-futures series alias but "
-                f"{exchange}/{segment} is not its lake coordinate — expected "
+                f"{exchange!r}/{segment!r} is not its lake coordinate — expected "
                 f"{_NIFTY_FUTURES_EXCHANGE}/{_ENGINE_SWEEP_FNO_SEGMENT} (ADR-0012)"
             ),
         )
@@ -494,8 +496,8 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             allowed=False,
             tier="refused",
             reason=(
-                f"{symbol!r} is an engine index but {exchange}/{segment} is not its "
-                f"lake coordinate — expected {_expected_spot_coordinates(symbol)} "
+                f"{symbol!r} is an engine index but {exchange!r}/{segment!r} is not "
+                f"its lake coordinate — expected {_expected_spot_coordinates(symbol)} "
                 "(CLAUDE.md §2 Rule 3)"
             ),
         )

@@ -337,6 +337,28 @@ class TestRecordedRollSchedules:
         with pytest.raises(SweepVerifyError, match="unreadable audit log"):
             recorded_roll_schedules_from_audit(path)
 
+    def test_non_alias_instrument_with_schedule_refuses(self, tmp_path: Path) -> None:
+        """Round-8 finding 11 (fails-before/passes-after): presence ⟺ alias.
+
+        Pre-fix a well-formed hand-edited line stamping a roll_schedule on a
+        SPOT instrument was ACCEPTED here; downstream `_verify_store_rows`
+        then hit the SweepRunConfig invariant ValueError and demoted that
+        store to a warn-grade `row_identity_underivable` EARLY-RETURN —
+        skipping the row_run_id/label/top_k corruption checks, so ONE forged
+        line laundered a corrupt spot store into a CLEAN Tier-2 verdict. The
+        parse boundary now refuses exactly like its manifest twin
+        (`_roll_schedules_from_payload`).
+        """
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload=self._payload(instrument="NSE-NIFTY"),
+            )
+        with pytest.raises(SweepVerifyError, match="not the NIFTY-futures series alias"):
+            recorded_roll_schedules_from_audit(path)
+
 
 # ── recorded_audit_facts (review round-4 finding 5) ──────────────────────────
 
@@ -419,9 +441,29 @@ class TestRecordedAuditFacts:
         assert calls == [path]  # ONE parse for BOTH derivations
 
     def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        # Round-8 finding 12: the verdict-grade read is chain-verified FIRST,
+        # so a malformed line surfaces as a chain-verification failure.
         path = tmp_path / "a.jsonl"
         path.write_text("{not jsonl\n", encoding="utf-8")
-        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+        with pytest.raises(SweepVerifyError, match="failed hash-chain verification"):
+            recorded_audit_facts(path)
+
+    def test_tampered_chain_refuses_verdict_grade_facts(self, tmp_path: Path) -> None:
+        """Round-8 finding 12 (fails-before/passes-after): chain-verify FIRST.
+
+        Pre-fix `recorded_audit_facts` parsed the audit WITHOUT verifying the
+        hash chain while its docstrings pointed at a `verify_chain` call
+        nobody made — one well-formed hand-edited payload steered the Tier-2
+        context, the F16 schedules, and the Tier-3 context_match gate.
+        """
+        path = tmp_path / "a.jsonl"
+        self._write(path)
+        # Tamper ONE recorded fact, keeping well-formed JSONL: the entry_hash
+        # no longer matches, so the verified read must refuse.
+        text = path.read_text(encoding="utf-8")
+        assert "snap0001" in text
+        path.write_text(text.replace("snap0001", "snap0002"), encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="failed hash-chain verification"):
             recorded_audit_facts(path)
 
     # ── round-5 finding 6: ONE-generation scoping of the daemon-root audit ──
@@ -623,6 +665,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 tmp_path / "nope.jsonl",
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             )
             is None
@@ -634,6 +678,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             path,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
         )
         assert message is not None
@@ -651,6 +697,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 path,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             )
             is None
@@ -665,6 +713,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 path,
                 fresh_snapshot="snap0002",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             )
             is None
@@ -680,6 +730,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 path,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             )
             is None
@@ -693,6 +745,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 path,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             )
             is None
@@ -707,6 +761,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 path,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             )
             is None
@@ -731,6 +787,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             root / "audit" / "sweep-all.jsonl",
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
         )
@@ -748,6 +806,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
         )
@@ -763,6 +823,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 root / "audit" / "sweep-all.jsonl",
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
             )
@@ -777,6 +839,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 root / "audit" / "sweep-all.jsonl",
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
             )
@@ -810,6 +874,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0003",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S3},
                 results_root=root,
             )
@@ -827,6 +893,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0002",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
             )
@@ -845,6 +913,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             path,
             fresh_snapshot="snap0002",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
         )
         assert message is not None
@@ -865,6 +935,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
         )
@@ -883,6 +955,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
         )
@@ -900,6 +974,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
             )
@@ -922,6 +998,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
         )
@@ -955,6 +1033,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
             fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
@@ -982,6 +1062,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
                 fresh_sentinel_paths=mapping,
@@ -1004,6 +1086,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
                 fresh_sentinel_paths={"NSE-NIFTY-FUT": [missing]},
@@ -1031,13 +1115,15 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
             fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
         )
         assert message is not None
         assert str(sentinel) in message  # the evidence named
-        assert "NO SWEEP_START under this snapshot generation" in message
+        assert "NO SWEEP_START under this launch's context generation" in message
         assert "tail-lossy" in message
         assert "--results-root" in message  # the remediation
 
@@ -1058,6 +1144,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
                 fresh_sentinel_paths=mapping,
@@ -1081,6 +1169,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
                 fresh_sentinel_paths={"NSE-NIFTY-FUT": [missing]},
@@ -1130,6 +1220,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
                 fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
@@ -1149,6 +1241,8 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             audit,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
             results_root=root,
             fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
@@ -1170,6 +1264,8 @@ class TestStaleRollScheduleRefusal:
             stale_roll_schedule_refusal(
                 audit,
                 fresh_snapshot="snap0001",
+                fresh_indicator_version="ind-v1",
+                fresh_code_commit_sha="deadbeef",
                 roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
                 results_root=root,
                 fresh_sentinel_paths={"NSE-NIFTY-FUT": [sentinel]},
@@ -1200,10 +1296,86 @@ class TestStaleRollScheduleRefusal:
         message = stale_roll_schedule_refusal(
             path,
             fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
             roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
         )
         assert message is not None  # the drift verdict is unchanged
         assert calls == [path]  # ONE parse, not two
+
+    # ── round-8 finding 10: a GENERATION is the FULL context triple ──
+
+    @pytest.mark.parametrize(
+        ("fresh_indicator", "fresh_sha"),
+        [("ind-v1", "cafebabe"), ("ind-v2", "deadbeef")],
+    )
+    def test_code_upgrade_same_snapshot_generation_abstains(
+        self, tmp_path: Path, fresh_indicator: str, fresh_sha: str
+    ) -> None:
+        """Round-8 finding 10 (fails-before/passes-after): a sessionless
+        schedule drift under a byte-identical snapshot, then a code-upgrade
+        (or indicator-bump) re-launch into the SAME sanctioned root. Every
+        tuple digest folds `code_commit_sha`/`indicator_version`, so the C1
+        generation's sentinels re-address under the C2 digests and can never
+        pair with this launch — yet snapshot-ONLY matching picked up C1's
+        recorded schedule, compared it against the fresh one, and permanently
+        refused the root ('re-sweep into a fresh --results-root' for a hazard
+        that cannot occur). Full-triple matching abstains like any moved
+        generation."""
+        root = tmp_path / "results"
+        self._plant_sentinel(root)  # a C1 sentinel — NOT at any fresh C2 path
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0001", schedule=self._S1)  # the C1 generation
+        assert (
+            stale_roll_schedule_refusal(
+                audit,
+                fresh_snapshot="snap0001",  # byte-identical lake snapshot
+                fresh_indicator_version=fresh_indicator,
+                fresh_code_commit_sha=fresh_sha,
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+                results_root=root,
+                fresh_sentinel_paths={
+                    "NSE-NIFTY-FUT": [
+                        root / "NSE-NIFTY-FUT" / "1minute" / "fresh.parquet.complete.json"
+                    ]
+                },
+            )
+            is None
+        )
+
+    # ── round-8 finding 12: the launch gate chain-verifies the audit ──
+
+    def test_tampered_matching_schedule_cannot_sneak_past_the_gate(self, tmp_path: Path) -> None:
+        """Round-8 finding 12 (fails-before/passes-after): the gate's recorded
+        schedule is a verdict-grade fact, so the read is chain-verified. An
+        attacker (or a bad hand-restore) rewriting the RECORDED schedule to
+        match the fresh one — hiding a real drift — previously parsed clean
+        and returned None (gate bypassed); the broken chain now lands in the
+        UNREADABLE arm, refusing over a tree that holds futures sentinels."""
+        root = tmp_path / "results"
+        sentinel = self._plant_sentinel(root)
+        audit = root / "audit" / "sweep-all.jsonl"
+        audit.parent.mkdir(parents=True)
+        self._write_audit(audit, snapshot="snap0001", schedule=self._S1)  # the TRUE record
+        text = audit.read_text(encoding="utf-8")
+        forged = text.replace(
+            f'"roll_schedule":[{self._S1[0]}]',
+            f'"roll_schedule":[{self._S2[0]},{self._S2[1]}]',
+        )
+        assert forged != text  # the tamper actually landed
+        audit.write_text(forged, encoding="utf-8")
+        message = stale_roll_schedule_refusal(
+            audit,
+            fresh_snapshot="snap0001",
+            fresh_indicator_version="ind-v1",
+            fresh_code_commit_sha="deadbeef",
+            roll_schedule_by_instrument={"NSE-NIFTY-FUT": self._S2},
+            results_root=root,
+        )
+        assert message is not None
+        assert str(sentinel) in message  # the evidence named
+        assert "UNREADABLE/inconsistent" in message
 
 
 # ── Tier 1 — verify_structural ───────────────────────────────────────────────

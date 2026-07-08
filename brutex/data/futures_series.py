@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.data.errors import DataLakeError
-from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
+from brutex.data.fno_symbol import EXPIRY_DATE_FORMAT, FUTURE_TYPE, parse_fno_symbol
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -307,29 +307,44 @@ def _head_own_start(first_expiry: date) -> date | None:
     return prev_expiry + timedelta(days=1)
 
 
-def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]]:
-    """Scan ``bars/NSE/FNO`` for NIFTY ``-FUT`` dirs → (parsed, unparsed_evidence).
+def _scan_future_dirs(
+    fno_root: Path,
+) -> tuple[list[tuple[str, date]], list[str], list[tuple[str, date]]]:
+    """Scan ``bars/NSE/FNO`` for NIFTY ``-FUT`` dirs → (parsed, unparsed, drifted).
 
-    ONE ``os.scandir``; ``-FUT`` suffix prefilter, then the canonical
+    ONE ``os.scandir``; case-INSENSITIVE ``-FUT`` suffix prefilter (so a
+    case-only suffix drift like ``…-fut`` is surfaced as evidence instead of
+    silently dropped — review round-8 finding 5), then the canonical
     :func:`~brutex.data.fno_symbol.parse_fno_symbol` filter (exchange NSE +
-    underlying NIFTY + instrument_type FUT — case-EXACT, like every lake key).
-    Unparseable ``-FUT`` names are WARNed + returned as evidence, never
-    guessed — including a hand-created literal ``NSE-NIFTY-FUT`` poison dir,
-    which parses to ``None`` and is ignored (the alias never reaches a
-    path-building API). A dir that parses but misses the series ONLY by
-    letter case (``NSE-nifty-…``) is skipped with a
-    ``futures_series.case_drift_dir`` WARN (review round-7 finding 4) so the
-    drift is named as scan evidence; genuinely foreign parsed dirs stay
-    silent.
+    underlying NIFTY + instrument_type FUT) PLUS a canonical round-trip on
+    the expiry token (``expiry.strftime('%d%b%y')`` must reproduce the dir
+    name — review round-8 finding 3: ``strptime``'s ``%b`` is
+    case-insensitive, so ``NSE-NIFTY-30sep25-FUT`` PARSES yet is NOT the
+    name the vendor writer mints), keeping the ADMIT set genuinely
+    case-EXACT, like every lake key. Unparseable ``-FUT`` names are WARNed +
+    returned as evidence, never guessed — including a hand-created literal
+    ``NSE-NIFTY-FUT`` poison dir, which parses to ``None`` and is ignored
+    (the alias never reaches a path-building API). A dir that misses the
+    series ONLY by letter case / token padding — exchange or underlying
+    (``NSE-nifty-…``, review round-7 finding 4), a non-canonical expiry
+    token (``30sep25`` / ``3Sep25``), or a lowercased ``-fut`` suffix — is
+    skipped with a ``futures_series.case_drift_dir`` WARN so the drift is
+    named as scan evidence; genuinely foreign parsed dirs stay silent. A
+    month-token drift additionally returns its PARSED expiry (the third
+    tuple element) so the resolver's duplicate-expiry gate can still refuse
+    LOUDLY when the drifted dir collides with an admitted canonical
+    contract (the ambiguous-lake law the round-8 finding-3 fix preserves).
     """
     import os
 
     parsed: list[tuple[str, date]] = []
     unparsed: list[str] = []
+    drifted: list[tuple[str, date]] = []
+    suffix = f"-{FUTURE_TYPE}"
     with os.scandir(fno_root) as entries:
         for entry in entries:
             name = entry.name
-            if not name.endswith(f"-{FUTURE_TYPE}"):
+            if not name.upper().endswith(suffix):
                 continue
             if not entry.is_dir(follow_symlinks=False):
                 # A stray regular FILE — or a SYMLINK, even one pointing at a
@@ -340,6 +355,15 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
                 # guard exists to prevent; review round-3 finding 3). Skipped
                 # + WARNed, never guessed or followed.
                 _LOG.warning("futures_series.non_dir_entry", entry=repr(name))
+                continue
+            if not name.endswith(suffix):
+                # Case-only SUFFIX drift (review round-8 finding 5): a
+                # hand-restored ``…-fut`` dir previously fell out of the
+                # case-exact prefilter with ZERO evidence — neither
+                # unparsed_dir nor case_drift_dir fired — the exact silent-
+                # exclusion class the round-7 WARN claims to close. Never
+                # admitted (lake keys are case-exact); named as evidence.
+                _LOG.warning("futures_series.case_drift_dir", dir=repr(name))
                 continue
             parts = parse_fno_symbol(name)
             if parts is None:
@@ -354,7 +378,23 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
                 and parts.underlying == _SERIES_UNDERLYING
                 and parts.instrument_type == FUTURE_TYPE
             ):
-                parsed.append((name, parts.expiry))
+                # Canonical round-trip on the expiry token (review round-8
+                # finding 3): ``strptime``'s ``%b`` is case-insensitive and
+                # ``%d`` accepts an unpadded day, so ``NSE-NIFTY-30sep25-FUT``
+                # / ``…-3Sep25-…`` PARSE to a valid expiry yet are names the
+                # vendor writer never mints. Admit ONLY the exact name
+                # ``strftime`` reproduces; a non-canonical token is the same
+                # case/pad drift class as a drifted exchange/underlying —
+                # WARN as scan evidence, never a silent load-bearing admit.
+                canonical = (
+                    f"{SERIES_EXCHANGE}-{_SERIES_UNDERLYING}-"
+                    f"{parts.expiry.strftime(EXPIRY_DATE_FORMAT)}-{FUTURE_TYPE}"
+                )
+                if name == canonical:
+                    parsed.append((name, parts.expiry))
+                else:
+                    drifted.append((name, parts.expiry))
+                    _LOG.warning("futures_series.case_drift_dir", dir=repr(name))
             elif (
                 parts.instrument_type == FUTURE_TYPE
                 and parts.exchange.upper() == SERIES_EXCHANGE
@@ -371,7 +411,7 @@ def _scan_future_dirs(fno_root: Path) -> tuple[list[tuple[str, date]], list[str]
                 # foreign dirs (BANKNIFTY / a BSE-embedded exchange) stay
                 # silent — they are simply out of the series.
                 _LOG.warning("futures_series.case_drift_dir", dir=repr(name))
-    return parsed, sorted(unparsed)
+    return parsed, sorted(unparsed), drifted
 
 
 def resolve_futures_series(
@@ -419,7 +459,7 @@ def resolve_futures_series(
             "pipeline (the F&O phase pulls every contract + the prebuild derives "
             "its timeframes)"
         )
-    parsed, unparsed = _scan_future_dirs(fno_root)
+    parsed, unparsed, drifted = _scan_future_dirs(fno_root)
     if not parsed:
         raise FuturesSeriesError(
             f"zero NIFTY futures contract dirs under {fno_root} — pull the F&O "
@@ -428,8 +468,13 @@ def resolve_futures_series(
         )
 
     # Duplicate-expiry refusal (ambiguous lake — two dirs claim one contract).
+    # `parsed` holds only canonical strftime-round-trip names (review round-8
+    # finding 3), so two ADMITTED dirs can no longer share an expiry — but a
+    # WARN-dropped month-token DRIFT twin colliding with an admitted canonical
+    # dir is still the same ambiguity (two dirs claim one contract) and keeps
+    # the loud refusal it always had; a NON-colliding drift stays WARN-only.
     by_expiry: dict[date, str] = {}
-    for name, expiry in sorted(parsed, key=lambda item: (item[1], item[0])):
+    for name, expiry in sorted(parsed + drifted, key=lambda item: (item[1], item[0])):
         other = by_expiry.get(expiry)
         if other is not None:
             raise FuturesSeriesError(
@@ -438,7 +483,10 @@ def resolve_futures_series(
                 "launching"
             )
         by_expiry[expiry] = name
-    ordered = sorted(by_expiry.items())  # [(expiry, dir_name)] ascending
+    drifted_names = {name for name, _expiry in drifted}
+    ordered = sorted(
+        (expiry, name) for expiry, name in by_expiry.items() if name not in drifted_names
+    )  # [(expiry, dir_name)] ascending — canonical dirs only
 
     # Same-month poison gate (review round-5 finding 10; WIDENED to the FULL
     # scanned dir set by review round-7 findings 2/6): NIFTY futures are

@@ -1119,6 +1119,25 @@ class TestClassifyEngineSweepTarget:
         assert verdict.allowed is False
         assert "NSE/INDEX" in verdict.reason
 
+    def test_wrong_coordinate_reasons_repr_quote_the_operator_pair(self) -> None:
+        # Round-8 finding 2: --exchange/--segment are operator-typed and the
+        # reason is echoed verbatim to stderr by the sweep mouths — an
+        # embedded \n/ESC must never forge a '[brutex]' line (the #907/#919
+        # repr-naming convention the round-4 symbol fix already follows).
+        forged = "NSE\n[brutex] forged"
+        alias = classify_engine_sweep_target(
+            exchange=forged, segment="INDEX", symbol="NSE-NIFTY-FUT"
+        )
+        assert alias.allowed is False
+        assert repr(forged) in alias.reason
+        assert "\n" not in alias.reason
+        spot = classify_engine_sweep_target(
+            exchange="NSE\x1b[31m", segment="INDEX", symbol="SENSEX"
+        )
+        assert spot.allowed is False
+        assert repr("NSE\x1b[31m") in spot.reason
+        assert "\x1b" not in spot.reason
+
     def test_india_vix_refused_with_reference_only_reason(self) -> None:
         verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="INDIAVIX")
         assert verdict.allowed is False

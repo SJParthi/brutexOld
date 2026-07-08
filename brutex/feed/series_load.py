@@ -62,9 +62,49 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
 __all__ = [
     "load_sweep_slice",
+    "require_series_coordinates",
 ]
 
 _LOG = structlog.get_logger("brutex.feed.series_load")
+
+
+def _now_utc() -> datetime:
+    """The wall-clock seam for the 1day live-edge rule (monkeypatchable in tests)."""
+    return datetime.now(tz=UTC)
+
+
+def require_series_coordinates(symbol: str, *, exchange: str, segment: str) -> None:
+    """Refuse a foreign launch ``(exchange, segment)`` for the futures alias.
+
+    The ONE coordinate pin (review round-7 finding 3, hoisted to a shared
+    helper by review round-8 finding 9): the alias resolves against the
+    pinned ``bars/NSE/FNO`` tree while the per-contract reads use the
+    caller's coordinates verbatim — an override-admitted foreign coordinate
+    (``--allow-out-of-scope`` past the scope gate's NSE/FNO refusal) would
+    read every contract under the FOREIGN tree, find zero bars, and raise a
+    misleading "EMPTY — re-pull" (or, on a box with no pinned tree at all,
+    the resolver's "no NSE/FNO lake tree — run the pipeline pull")
+    remediation. Every alias mouth calls this BEFORE
+    :func:`~brutex.data.futures_series.resolve_futures_series` so the
+    refusal names the REAL problem (the coordinate) ahead of any resolution
+    or lake I/O; :func:`load_sweep_slice` re-checks as defence in depth.
+
+    Raises
+    ------
+    FuturesSeriesError
+        When ``(exchange, segment)`` differs from the pinned pair.
+    """
+    if (exchange, segment) != (SERIES_EXCHANGE, SERIES_SEGMENT):
+        # {exchange!r}/{segment!r}: operator-typed CLI input echoed to stderr —
+        # repr-quote so an embedded \n/ESC can never forge a '[brutex]' line
+        # (review round-8 finding 2; the #907/#919 repr-naming convention).
+        raise FuturesSeriesError(
+            f"the NIFTY-futures series alias {symbol!r} lives at the pinned "
+            f"{SERIES_EXCHANGE}/{SERIES_SEGMENT} lake coordinates, but this launch "
+            f"reads {exchange!r}/{segment!r} — the coordinate is wrong, not the "
+            f"stored data; re-launch with --exchange {SERIES_EXCHANGE} --segment "
+            f"{SERIES_SEGMENT} (DEC-FUTURES-ADDRESSING-PIN-001)"
+        )
 
 
 def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end: datetime) -> bool:
@@ -77,15 +117,23 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
     ``[session open, session close)`` (DEC-RESAMPLE-ANCHOR-002), while the
     derived FNO ``1day`` bar is stamped at its session date's midnight IST —
     but that bar SUMMARISES the whole session and is written by the
-    POST-session pipeline prebuild, so its midnight stamp counts as an
-    expectable instant only when the window ALSO reaches the day's session
-    CLOSE (``seg_end >= close``): a window ending before the close (the
-    morning-after-expiry pre-open sliver of a bare-date ``--end`` —
-    ``[00:00 → 05:30 IST]`` on the successor contract's FIRST owned day)
-    demands a bar the prebuild structurally cannot have derived yet, and the
-    "re-pull / run the prebuild" remediation would be impossible until the
-    session completes (review round-6 finding 3 — the 1day residual of the
-    round-1/round-3 boundary class). A window that holds NO such instant (a
+    POST-session pipeline prebuild, so an in-window midnight stamp
+    (``seg_start <= stamp <= seg_end`` — the READ window serves exactly that
+    bar on a healthy lake) counts as an expectable instant only when the bar
+    can already EXIST: the window reaches the day's session CLOSE
+    (``seg_end >= close``) OR the close has already PASSED on the wall clock
+    (``close <= now`` — deep history, where the prebuild ran long ago and an
+    empty read IS a data defect; review round-8 finding 8: the round-6 rule
+    skipped a genuinely missing HISTORICAL 1day bar the read window would
+    have served, silently shifting ``data_snapshot_hash`` vs a healthy
+    lake). Only the TRUE live edge — a window ending before a close that is
+    still in the future (the morning-after-expiry pre-open sliver of a
+    bare-date ``--end`` — ``[00:00 → 05:30 IST]`` on the successor
+    contract's FIRST owned day) — demands a bar the prebuild structurally
+    cannot have derived yet, where the "re-pull / run the prebuild"
+    remediation would be impossible until the session completes (review
+    round-6 finding 3 — the 1day residual of the round-1/round-3 boundary
+    class). A window that holds NO such instant (a
     pre-open / post-close boundary sliver, a weekend/holiday run, a
     sub-bucket fragment of a coarse TF — a 4hour day carries ONLY the 09:15 +
     13:15 labels, so a 13:30→midnight expiry-day fragment overlaps the
@@ -112,6 +160,12 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
             step = timedelta(minutes=trading_minutes_for_lake_interval(interval))
         except ValueError:
             return True  # unknown TF label → cannot model its grid → keep the loud refusal
+    # The 1day live-edge clock (review round-8 finding 8): read once per call;
+    # consulted only to distinguish deep history (close already passed → the
+    # prebuild owes the bar) from the true live edge. Never part of run
+    # identity — it only decides skip-vs-refuse for EMPTY reads, and a
+    # successful load never reaches this helper.
+    now = _now_utc()
     day = seg_start.astimezone(IST).date()
     last_day = seg_end.astimezone(IST).date()
     while day <= last_day:
@@ -123,13 +177,17 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
             if step is None:  # the derived FNO 1day bar — midnight-IST stamp
                 stamp = datetime.combine(day, time.min, tzinfo=IST)
                 close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
-                # Expectable only when the window holds the stamp AND reaches
-                # the session close the bar summarises (``stamp < close`` so
-                # ``seg_end >= close`` implies ``stamp <= seg_end``): a
-                # window ending pre-close cannot demand a 1day bar the
-                # post-session prebuild cannot yet have derived (round-6
-                # finding 3 — the live-edge morning-after-expiry sliver).
-                if seg_start <= stamp and seg_end >= close_dt:
+                # Expectable when the window holds the stamp (the READ window
+                # serves exactly that bar on a healthy lake — read and
+                # refusal must agree, round-8 finding 8) AND the bar can
+                # already exist: the window reaches the session close the
+                # bar summarises (``stamp < close`` so ``seg_end >= close``
+                # implies ``stamp <= seg_end``), OR the close has already
+                # passed on the wall clock (deep history — the post-session
+                # prebuild ran long ago, so an empty read is a REAL gap).
+                # Only the true live edge (close still in the future) skips
+                # (round-6 finding 3 — the morning-after-expiry sliver).
+                if seg_start <= stamp <= seg_end and (seg_end >= close_dt or close_dt <= now):
                     return True
             else:
                 open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
@@ -275,9 +333,12 @@ def load_sweep_slice(
         the requested interval is empty — distinct message from a missing
         contract; a bar-less boundary sliver — pre-open/post-close edges,
         a holiday/weekend run after an expiry, a degenerate intersection, a
-        sub-bucket coarse-TF fragment holding no grid label, a ``1day``
-        fragment ending before its only owned session's CLOSE (the bar the
-        post-session prebuild cannot yet have derived) — is SKIPPED with
+        sub-bucket coarse-TF fragment holding no grid label, a LIVE-EDGE
+        ``1day`` fragment ending before its only owned session's CLOSE
+        while that close is still in the wall-clock future (the bar the
+        post-session prebuild cannot yet have derived — a DEEP-HISTORY
+        pre-close fragment whose midnight stamp the read window serves
+        REFUSES instead, review round-8 finding 8) — is SKIPPED with
         one ``series_load.boundary_segment_no_session`` WARN instead of a
         false refusal), or a boundary monotonicity break (never silent).
     """
@@ -305,21 +366,11 @@ def load_sweep_slice(
             end=end,
         )
 
-    # Coordinate pin (review round-7 finding 3): the alias resolves against
-    # the pinned bars/NSE/FNO tree while the per-contract reads use the
-    # caller's coordinates verbatim — an override-admitted foreign coordinate
-    # (`--allow-out-of-scope` past the scope gate's NSE/FNO refusal) would
-    # read every contract under the FOREIGN tree, find zero bars, and raise
-    # the misleading "EMPTY — re-pull" remediation. Refuse up front naming
-    # the REAL problem (the coordinate), before any resolution or lake I/O.
-    if (exchange, segment) != (SERIES_EXCHANGE, SERIES_SEGMENT):
-        raise FuturesSeriesError(
-            f"the NIFTY-futures series alias {symbol!r} lives at the pinned "
-            f"{SERIES_EXCHANGE}/{SERIES_SEGMENT} lake coordinates, but this launch "
-            f"reads {exchange}/{segment} — the coordinate is wrong, not the stored "
-            f"data; re-launch with --exchange {SERIES_EXCHANGE} --segment "
-            f"{SERIES_SEGMENT} (DEC-FUTURES-ADDRESSING-PIN-001)"
-        )
+    # Coordinate pin (review round-7 finding 3): refuse a foreign coordinate
+    # up front, before any resolution or lake I/O — the ONE shared helper the
+    # CLI mouths ALSO call ahead of resolve_futures_series (review round-8
+    # finding 9), re-checked here as defence in depth.
+    require_series_coordinates(symbol, exchange=exchange, segment=segment)
 
     res = (
         resolution
@@ -375,18 +426,21 @@ def load_sweep_slice(
             ):
                 # The in-window slice of this segment's owned span holds NO
                 # expectable bar instant (a pre-open/post-close boundary
-                # sliver — e.g. a day-only `--end` the morning after an
-                # expiry — a holiday/weekend run right after a roll, a
+                # sliver, a holiday/weekend run right after a roll, a
                 # degenerate intersection, a sub-bucket coarse-TF fragment
-                # straddling no grid label, or a 1day fragment ending before
-                # its only owned session's close — the derived bar the
+                # straddling no grid label, or the TRUE 1day live edge — a
+                # day-only `--end` the morning after an expiry whose session
+                # close is still in the future, the derived bar the
                 # post-session prebuild cannot yet have written): an empty
                 # read is EXPECTED, not a data defect. Skip the boundary
                 # segment with ONE WARN instead of a false "re-pull"
                 # whole-sweep refusal (review round-1 findings 2/16/22 +
                 # round-3 finding 7 + round-6 finding 3); the loud refusal
                 # below stands for any span the calendar says SHOULD hold
-                # bars.
+                # bars — including a DEEP-HISTORY 1day span whose midnight
+                # stamp the read window serves (review round-8 finding 8:
+                # the session close has already passed, so the prebuild owes
+                # the bar and a silent skip would shift data_snapshot_hash).
                 _LOG.warning(
                     "series_load.boundary_segment_no_session",
                     contract=seg.contract_symbol,

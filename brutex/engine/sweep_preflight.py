@@ -187,3 +187,35 @@ def preflight_derived_freshness(verdicts: Mapping[tuple[str, str], str]) -> Fres
     """
     stale = tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
     return FreshnessReport(stale=stale, checked=len(verdicts))
+
+
+def one_day_trade_law_note(intervals: Sequence[str]) -> str | None:
+    """One honest launch note when a requested interval is the ``1day`` grid.
+
+    HONEST limit (Golden Rule #10, review round-8 finding 1): under the
+    intraday-only trade law the ``1day`` grid is structurally TRADE-less —
+    every derived ``1day`` bar is midnight-IST-stamped, so (a) the next-bar
+    entry fill always lands on a LATER IST session date and is dropped by the
+    trade sim's overnight-gap rule, and (b) no ``1day`` bar ever reaches the
+    15:20 forced-exit window — every mask yields zero trades by construction
+    and ``MIN_TRADES`` gates every combo out. The grid still builds real
+    Stage-1A ``bar_bits`` (the D12 ``apply_1day_mask`` consumers — see
+    :func:`brutex.engine.stage1a.apply_1day_mask_for`), so a ``1day`` launch
+    is not refused; it is NAMED so the operator never mistakes an empty
+    ``1day`` leaderboard for a data defect. Real ``1day`` trade semantics
+    are a named follow-up (DEC-FUTURES-LAUNCH-REVIEW-FIXES-008).
+
+    Returns the note when ``"1day"`` is among *intervals*, else ``None``.
+    Pure, O(#intervals).
+    """
+    if "1day" not in intervals:
+        return None
+    return (
+        "NOTE: interval '1day' ranks NOTHING under the intraday-only trade law — "
+        "every 1day bar is midnight-IST-stamped, so the next-bar fill lands on a "
+        "later IST session date (dropped by the overnight-gap rule) and no 1day "
+        "bar reaches the 15:20 forced exit: zero trades by construction, "
+        "MIN_TRADES gates every combo out. The 1day tuples still build bar_bits "
+        "(the D12 mask consumers); real 1day trade semantics are a named "
+        "follow-up (DEC-FUTURES-LAUNCH-REVIEW-FIXES-008)."
+    )

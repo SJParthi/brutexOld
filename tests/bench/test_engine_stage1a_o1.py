@@ -148,18 +148,27 @@ def test_stage1a_per_bar_cost_is_flat_with_roll_schedule() -> None:
     """The roll cursor + per-contract resets keep the per-bar cost flat.
 
     Same two-tier probe as the spot gate, with a ~monthly ``roll_schedule``
-    spanning each stream (the big tier crosses ~13 roll boundaries, the small
-    ~1) — per-bar work that grows with HISTORY (a reset that replays prior
-    bars, or any super-linear per-bar rescan) blows the ratio.
+    spanning each stream (the big tier crosses ~13 roll boundaries; the
+    small tier's 1-entry covering schedule crosses ZERO) — per-bar work that
+    grows with HISTORY (a reset that replays prior bars, or any super-linear
+    per-bar rescan) blows the ratio.
 
-    HONEST sensitivity envelope (review round-4 finding 6, Golden Rule #10):
-    with only ~14 schedule entries on the big tier, a hypothetical per-bar
-    LINEAR rescan of the schedule adds ~1e2 ns against the µs-scale Stage-1A
-    per-bar baseline (~1.05× ratio shift) — UNDER both ceiling tiers — so
-    this gate does NOT detect a constant-small per-bar schedule rescan. The
-    cursor's O(1)-amortised advance is owned by code review (stage1a.py's
-    monotone `_roll_cursor`) + the unit reset suite; this bench owns the
-    history-scaling regression class only.
+    HONEST sensitivity envelope (review round-4 finding 6 + round-8 finding
+    4, Golden Rule #10): with only ~14 schedule entries on the big tier, a
+    hypothetical per-bar LINEAR rescan of the schedule adds ~1e2 ns against
+    the µs-scale Stage-1A per-bar baseline (~1.05× ratio shift) — UNDER both
+    ceiling tiers — so this gate does NOT detect a constant-small per-bar
+    schedule rescan. Likewise a hypothetical BOUNDED per-roll replay of the
+    CURRENT contract's bars (~13 resets × ~7,500 bars ≈ +1× total bar work
+    on the big tier, +0 on the zero-boundary small tier → only a ~2× ratio
+    shift) clears the 5.0× GHA ceiling and is caught only on the strict
+    1.1× self-hosted tier. The cursor's O(1)-amortised advance AND the
+    reset's O(1)-per-roll shape (``_roll_to_new_contract`` never touches
+    prior bars) are owned by code review + the unit reset-equivalence suite
+    (post-roll state == fresh-builder state, bit-for-bit — a replay that
+    changes results fails THOSE oracles); this bench owns the
+    history-scaling regression class — on the GHA tier only for effects at
+    or above its 5.0× ceiling.
     """
     small = _make_bars(_N_SMALL)
     big = _make_bars(_N_BIG)
