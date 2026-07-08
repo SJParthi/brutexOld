@@ -1040,7 +1040,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/quirky-pascal-70oduy` (**DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561** — the Operator
+- **Active branch:** `claude/operator-page-real-rebuild` (**DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561** — the Operator
   page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and the v29 PREVIEW mockup is KILLED by a MECHANICAL
   sweep (every hardcoded ₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks, em-dashed, or
   deleted — the fabricated CHARGES table deleted outright, Track 1 is signal-only; a generic
@@ -2947,7 +2947,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/quirky-pascal-70oduy`
+- **Active feature branch:** `claude/operator-page-real-rebuild`
   (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
   wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
   DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)

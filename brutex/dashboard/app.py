@@ -5983,6 +5983,7 @@ def build_app(
         """
 
         def _resolve() -> dict[str, Any]:
+            """Build the oneclick runs payload off the event loop (revision-cached)."""
             root, fixture_root = _oneclick_roots()
             fixture_active = fixture_root is not None
             if root is None:
@@ -6019,6 +6020,7 @@ def build_app(
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
+            """Build the manifest payload off the event loop (stat-token cached)."""
             root, fixture_root = _oneclick_roots()
             fixture_active = fixture_root is not None
             if root is None:
@@ -6092,6 +6094,7 @@ def build_app(
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
+            """Build the top100 payload off the event loop (stat-token cached)."""
             root, fixture_root = _oneclick_roots()
             fixture_active = fixture_root is not None
             if root is None:
@@ -6143,6 +6146,7 @@ def build_app(
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
+            """Tail the events page off the event loop (byte-offset seek, O(page))."""
             root, fixture_root = _oneclick_roots()
             fixture_active = fixture_root is not None
             window_filtered = bool(kind or q)
@@ -6204,6 +6208,7 @@ def build_app(
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
+            """Build the trades payload off the event loop via the TradesReader seam."""
             try:
                 fixture_root = oneclick_artifacts.resolve_fixture_root()
             except oneclick_artifacts.OneclickConfigError as exc:
@@ -6240,6 +6245,7 @@ def build_app(
         rid = _oneclick_require_run_id(run_id)
 
         def _resolve() -> dict[str, Any]:
+            """Run the verify checks off the event loop (chain check on click only)."""
             root, fixture_root = _oneclick_roots()
             fixture_active = fixture_root is not None
             if root is None:
