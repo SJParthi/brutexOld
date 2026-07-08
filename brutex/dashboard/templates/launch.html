@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Run Sweep (INTERIM)</title>
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --red: #FF5C5C; --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF;
+    --r-sm: 8px; --r-md: 10px; --r-lg: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo { font-weight: 800; font-size: 18px; letter-spacing: .5px;
+    background: linear-gradient(90deg, var(--purple), var(--blue), var(--green));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .topnav { margin-left: 18px; display: flex; gap: 14px; font-size: 13px; }
+  .topnav a { color: var(--blue); text-decoration: none; }
+  .interim-banner {
+    margin: 16px 24px 0; padding: 10px 14px; border-radius: var(--r-md);
+    background: rgba(255, 183, 77, .12); border: 1px solid var(--yellow);
+    color: var(--yellow); font-size: 13px; font-weight: 700;
+  }
+  main { padding: 16px 24px 48px; max-width: 1200px; }
+  section { margin-top: 20px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; }
+  .pre-list { display: flex; flex-direction: column; gap: 6px; }
+  .pre-row {
+    display: flex; gap: 10px; align-items: baseline; padding: 8px 12px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
+    font-size: 13px;
+  }
+  .pre-ok { color: var(--green); font-weight: 700; min-width: 18px; }
+  .pre-bad { color: var(--red); font-weight: 700; min-width: 18px; }
+  .pre-name { font-weight: 700; min-width: 200px; }
+  .pre-detail { color: var(--muted); word-break: break-all; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--r-lg); padding: 16px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 15px; color: var(--text-bright); }
+  .card .coords { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .card .gridnote { font-size: 12px; color: var(--yellow); margin-bottom: 8px; }
+  .card pre {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 10px; font-size: 11px; white-space: pre-wrap; word-break: break-all;
+    color: var(--text); max-height: 180px; overflow: auto;
+  }
+  .card .reason { font-size: 12px; color: var(--red); min-height: 16px; margin: 6px 0; }
+  button.launch {
+    background: var(--green); color: #06251D; font-weight: 800; font-size: 14px;
+    border: 0; border-radius: var(--r-md); padding: 10px 18px; cursor: pointer;
+  }
+  button.launch:disabled { background: var(--surface-3); color: var(--muted); cursor: not-allowed; }
+  .status-box {
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--r-lg); padding: 16px; font-size: 13px;
+  }
+  .status-line { display: flex; gap: 8px; margin-bottom: 6px; }
+  .status-key { color: var(--muted); min-width: 110px; }
+  #statusState { font-weight: 800; }
+  #logTail {
+    background: #05070A; border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 10px; font-size: 11px; white-space: pre-wrap; word-break: break-all;
+    max-height: 320px; overflow: auto; color: var(--text);
+  }
+  #flash { margin: 12px 0; font-size: 13px; min-height: 18px; }
+  #pollNote { color: var(--muted); font-size: 11px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">BruteX</div>
+  <div class="sub">Run Sweep — INTERIM launch page</div>
+  <nav class="topnav">
+    <a href="/universe">Universe</a>
+    <a href="/results">Results</a>
+    <a href="/movers">Movers</a>
+    <a href="/db">DB</a>
+  </nav>
+</header>
+
+<div class="interim-banner">
+  INTERIM PAGE — one-night launch surface for tonight's locked NIFTY sweep. The canonical
+  selector button ships later from another workstream and supersedes this page.
+  Restart the dashboard BEFORE launching so the boot-time lake heal finishes first.
+</div>
+
+<main>
+  <section>
+    <h2>Preconditions (cheap probes — the launched CLI still enforces its own preflight)</h2>
+    <div class="pre-list" id="preList"></div>
+  </section>
+
+  <section>
+    <h2>Locked run cards</h2>
+    <div id="flash"></div>
+    <div class="cards" id="cards"></div>
+  </section>
+
+  <section>
+    <h2>Active launch</h2>
+    <div class="status-box">
+      <div class="status-line"><span class="status-key">state</span><span id="statusState">—</span></div>
+      <div class="status-line"><span class="status-key">pid</span><span id="statusPid">—</span></div>
+      <div class="status-line"><span class="status-key">card</span><span id="statusCard">—</span></div>
+      <div class="status-line"><span class="status-key">started (UTC)</span><span id="statusStarted">—</span></div>
+      <div class="status-line"><span class="status-key">results root</span><span id="statusRoot">—</span></div>
+      <div class="status-line"><span class="status-key">log</span><span id="statusLog">—</span></div>
+      <pre id="logTail"></pre>
+      <div id="pollNote"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var POLL_MS = 2500;
+  var failures = 0;
+  var lastState = null;
+  var launching = false;
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) { node.className = cls; }
+    if (text !== undefined) { node.textContent = text; }
+    return node;
+  }
+
+  function renderPreconditions(list) {
+    var host = document.getElementById("preList");
+    host.replaceChildren();
+    (list || []).forEach(function (c) {
+      var row = el("div", "pre-row");
+      row.appendChild(el("span", c.ok ? "pre-ok" : "pre-bad", c.ok ? "✓" : "✗"));
+      row.appendChild(el("span", "pre-name", c.name));
+      row.appendChild(el("span", "pre-detail", c.detail));
+      host.appendChild(row);
+    });
+  }
+
+  function flash(text, isError) {
+    var f = document.getElementById("flash");
+    f.textContent = text;
+    f.style.color = isError ? "var(--red)" : "var(--green)";
+  }
+
+  function launch(card) {
+    if (launching) { return; }
+    var msg = "Launch the " + card + " sweep now? This starts a MULTI-DAY detached run.";
+    if (!window.confirm(msg)) { return; }
+    launching = true;
+    fetch("/api/v1/launch/sweep?card=" + encodeURIComponent(card), { method: "POST" })
+      .then(function (resp) {
+        return resp.json().then(function (body) { return { status: resp.status, body: body }; });
+      })
+      .then(function (out) {
+        if (out.status === 200 && out.body && out.body.started) {
+          flash("Launched " + card + " sweep (pid " + out.body.active.pid + ").", false);
+        } else if (out.status === 409) {
+          flash("Not launched: a run is already active (single-flight).", true);
+        } else {
+          var detail = (out.body && (out.body.detail || out.body.reason)) || ("HTTP " + out.status);
+          flash("Not launched: " + detail, true);
+        }
+      })
+      .catch(function (err) { flash("Launch request failed: " + err, true); })
+      .then(function () { launching = false; poll(); });
+  }
+
+  function renderCards(state) {
+    var host = document.getElementById("cards");
+    host.replaceChildren();
+    var running = !!(state.active && state.active.running);
+    ["futures", "spot"].forEach(function (name) {
+      var c = state.cards[name];
+      if (!c) { return; }
+      var card = el("div", "card");
+      card.appendChild(el("h3", null, c.title));
+      card.appendChild(el("div", "coords",
+        c.symbol + " · " + c.exchange + "/" + c.segment +
+        " · 21 TFs · k≤6 · SL/TP none · top 20 · end " + state.end_day));
+      card.appendChild(el("div", "gridnote", state.grid_note));
+      var pre = el("pre", null, c.command_display);
+      card.appendChild(pre);
+      card.appendChild(el("div", "reason", c.enabled ? "" : c.reason));
+      var btn = el("button", "launch",
+        running ? "run active — launch disabled" : ("▶ Launch " + name + " sweep"));
+      btn.disabled = running || !c.enabled;
+      btn.addEventListener("click", function () { launch(name); });
+      card.appendChild(btn);
+      host.appendChild(card);
+    });
+  }
+
+  function renderActive(active) {
+    var stateEl = document.getElementById("statusState");
+    if (!active || !active.present) {
+      stateEl.textContent = "no launch recorded";
+      stateEl.style.color = "var(--muted)";
+    } else if (active.running) {
+      stateEl.textContent = "RUNNING";
+      stateEl.style.color = "var(--green)";
+    } else {
+      stateEl.textContent = "EXITED (check the log tail + results root)";
+      stateEl.style.color = "var(--yellow)";
+    }
+    document.getElementById("statusPid").textContent = (active && active.pid) || "—";
+    document.getElementById("statusCard").textContent = (active && active.card) || "—";
+    document.getElementById("statusStarted").textContent = (active && active.started_utc) || "—";
+    document.getElementById("statusRoot").textContent = (active && active.results_root) || "—";
+    document.getElementById("statusLog").textContent = (active && active.log_path) || "—";
+    document.getElementById("logTail").textContent = (active && active.log_tail) || "";
+  }
+
+  function render(state) {
+    lastState = state;
+    renderPreconditions(state.preconditions);
+    renderCards(state);
+    renderActive(state.active);
+  }
+
+  function poll() {
+    fetch("/api/v1/launch/state")
+      .then(function (resp) {
+        if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+        return resp.json();
+      })
+      .then(function (state) {
+        failures = 0;
+        document.getElementById("pollNote").textContent = "";
+        render(state);
+      })
+      .catch(function (err) {
+        failures += 1;
+        document.getElementById("pollNote").textContent =
+          "poll failed ×" + failures + " (" + err + ") — retrying; state may be STALE";
+      });
+  }
+
+  poll();
+  window.setInterval(function () { if (!document.hidden) { poll(); } }, POLL_MS);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) { poll(); } });
+})();
+</script>
+</body>
+</html>
