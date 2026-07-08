@@ -146,10 +146,11 @@ class TestProbeBuilder:
     def test_wired_store_probe_stats_the_ledger(self, store: InstrumentStore) -> None:
         probe = _lake_revision_probe_or_none(store)
         assert probe is not None
-        # No ledger + no deltas + no sweeps tree yet → the stable all-absent
-        # composite (the ledger component folds the deltas-dir stat since
-        # DEC-LEDGER-DELTA-FLUSH-001).
-        absent = f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        # No ledger + no deltas + no sweeps tree + no backfill marker yet → the
+        # stable all-absent composite (the ledger component folds the
+        # deltas-dir stat since DEC-LEDGER-DELTA-FLUSH-001; the Greeks-backfill
+        # marker component landed in DEC-GREEKS-BULK-REENRICH-001 fix round 2).
+        absent = f"{ABSENT_TOKEN}+{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
         assert probe() == absent
         # A checkpoint moves the token.
         lake_root = Path(store.path).parent
