@@ -156,6 +156,7 @@ from brutex.adapters.rate_common import (
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import EMPTY, FAILED, WindowLedger
 from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.observability.process_probe import read_rss_kib_current
 from brutex.orchestrator.audit import AuditWriter
 
 #: All stress tests carry the ``stress`` marker (registered in pyproject.toml) so
@@ -228,21 +229,22 @@ class _MemoryGrowth:
 
 
 def _read_rss_kib() -> int | None:
-    """Return current ``VmRSS`` in KiB from ``/proc/self/status``, or ``None``.
+    """Return the CURRENT process RSS in KiB — delegates to the ONE COMMON probe.
 
-    A CURRENT value (not the ``ru_maxrss`` process-lifetime peak), so deltas
-    across a region are meaningful. Unavailable off-Linux (e.g. the operator's
-    macOS reference machine, CLAUDE.md §8) — callers treat ``None`` as "skip
-    the backstop, keep the tracemalloc gates".
+    Thin alias for :func:`brutex.observability.process_probe.read_rss_kib_current`
+    (DEC-SOAK-REAL-TIER-001, Golden Rule #11 — one RSS source of truth). The
+    backstop below is a before/after growth DELTA, so this deliberately takes
+    the SLOPE-SAFE reader: Linux reads current ``VmRSS`` (a genuine slope);
+    off-Linux (the operator's macOS reference machine, CLAUDE.md §8) it returns
+    ``None`` and the backstop is SKIPPED — never a delta of the ``ru_maxrss``
+    process-lifetime PEAK, which process_probe's contract forbids using as a
+    slope (a large transient allocation raises the peak where current-RSS-
+    after-gc would not — the PR-#99 objection class this file's docstring
+    records). The macOS resource-ceiling signal lives in the soak tier's
+    ``SoakDriftMonitor`` RSS-CEILING rule instead. Callers here treat ``None``
+    as "skip the backstop, keep the tracemalloc gates".
     """
-    try:
-        text = Path("/proc/self/status").read_text(encoding="ascii")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if line.startswith("VmRSS:"):
-            return int(line.split()[1])
-    return None
+    return read_rss_kib_current()
 
 
 def _measure_growth(

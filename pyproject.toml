@@ -459,6 +459,7 @@ markers = [
     "network: requires outbound network (skipped by default)",
     "smoke: opt-in smoke tests that hit external services (gated by env var)",
     "stress: sustained-load stress tests (DEC-STRESS-001); run nightly via .github/workflows/stress-nightly.yml — NOT in default unit test run",
+    "soak: long multi-hour soak driver (DEC-SOAK-REAL-TIER-001); honors STRESS_DURATION_S, run ONLY on the self-hosted soak-selfhosted.yml tier — NOT nightly, NOT in default unit test run",
     "chaos: randomized-schedule + crash/restart + concurrent-reader chaos tests (DEC-CHAOS-RACE-001); run on every PR via the chaos-race CI job — NOT in default unit test run",
     "browser: headless-browser dashboard truth tests (Playwright + Chromium, DEC-DASHBOARD-BROWSER-TRUTH-001); opt-in via BRUTEX_BROWSER_TESTS=1 — run by the dedicated CI browser job, NOT the main test job",
 ]
