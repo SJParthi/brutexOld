@@ -17,7 +17,8 @@
  *   - req/sec  (achieved / allowed, with the 8 r/s ceiling);
  *   - req/min  (rolling-60s issue count, with the 500/min cap);
  *   - req/10min (MEASURED rolling-600s issue count — the new metric);
- *   - req/hour (MEASURED rolling-3600s count, with the older "obs" extrapolation beside it).
+ *   - req/hour (MEASURED rolling-3600s count; the wire also carries the older
+ *     req_per_hour_observed extrapolation, deliberately NOT rendered).
  *
  * HONEST achieved (DEC-RATE-WIDGET-FNO-HONEST-001, extended by
  * DEC-RATE-WIDGET-FNO-MEASURED-001): req/sec "achieved" is the MEASURED COMPLETED rate from
@@ -50,8 +51,10 @@
  * once a pull has ended, and the backend never labels a finished pull "stalled" (red is
  * reserved for an ACTIVE pull whose req/sec flatlined). req/sec, req/min, req/10min and the MEASURED req/hour are all REAL
  * counts of issues in their window (from the rate controller's per-second issue ring);
- * the older req/hour "obs" figure carries an "obs" tag because it is the current
- * minute-rate projected to an hour, not a measured count. During the first hour of a
+ * the older req_per_hour_observed figure (the current minute-rate projected to an hour,
+ * not a measured count) stays on the WIRE for back-compat but is deliberately NOT
+ * rendered by this widget (DEC-RATE-METER-LIFECYCLE-001, audit C4 — the previous claim
+ * of an inline extrapolation tag shown next to the measured figure was never true). During the first hour of a
  * pull the MEASURED req/hour is the honest partial-hour count SO FAR (it grows as the
  * window fills, never inflated). The 8/sec + 500/min are the configured limits the
  * backend returns.
@@ -138,8 +141,6 @@
       "#" + WIDGET_ID + " .bxrm-row .k{color:var(--muted,#787B86);}" +
       "#" + WIDGET_ID + " .bxrm-row .v{color:var(--text-bright,#FFF);font-weight:600;}" +
       "#" + WIDGET_ID + " .bxrm-row .lim{color:var(--muted,#787B86);font-weight:400;}" +
-      "#" + WIDGET_ID + " .bxrm-obs{color:var(--yellow,#FFB74D);font-size:9px;" +
-      "vertical-align:super;}" +
       // ── The large expanded overlay (DEC-RATE-MONITOR-EXPAND-001). Fixed-position +
       //    hidden by default → zero impact on the collapsed page layout. ──
       "#" + OVERLAY_ID + "{position:fixed;inset:0;z-index:9100;display:none;" +
