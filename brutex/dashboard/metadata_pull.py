@@ -701,12 +701,16 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
     # Register the metadata client's shared MEASURED-rate meter into the session controller
     # (DEC-RATE-WIDGET-FNO-MEASURED-001) so the observe-only RatePanelSampler surfaces the REAL
     # completed-rate during the metadata (get_expiries / get_contracts) phase too, not the
-    # admission average. Best-effort + observe-only — a dry-run / no-``session_rate`` pull, or
-    # an empty-chain client with no ``.meter``, is a silent no-op. Lazy import avoids any
-    # module-load ordering coupling with pull_controller.
+    # admission average. The dry-run GrowwClient DOES carry a real CallMeter
+    # (``client.py`` ``default_factory=CallMeter`` — the empty-chain SDK ticks it at unpaced
+    # speed), so honesty comes from the explicit ``dry_run=True`` gate, which DEREGISTERS
+    # (clears any stale prior-pull meter, never registers the synthetic one) — never from a
+    # meterless client (the pre-#1593 "no ``.meter`` silent no-op" claim here was factually
+    # FALSE; DEC-RATE-METER-LIFECYCLE-001). Best-effort + observe-only. Lazy import avoids
+    # any module-load ordering coupling with pull_controller.
     from brutex.dashboard.pull_controller import register_pull_meter
 
-    register_pull_meter(session_rate, client)
+    register_pull_meter(session_rate, client, dry_run=dry_run)
 
     grid, forms_by_key = _resolve_underlying_forms(instruments)
     all_cells = phase1_cells(grid, years)

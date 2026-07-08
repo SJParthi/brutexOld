@@ -261,6 +261,59 @@ def test_route_bridge_pull_active_true_zero_rate_reads_stalled(tmp_path: Path) -
     assert body["stalled"] is True
 
 
+def test_dead_cli_bridge_decays_to_idle_at_route(tmp_path: Path) -> None:
+    """DEC-RATE-METER-LIFECYCLE-001 (audit C3): a DEAD CLI's stuck ``pull_active=True``
+    file decays to an honest idle at the REAL route — never a PERMANENT red.
+
+    A SIGKILLed ``brutex fetch`` leaves its last per-window ``pull_active=True`` stamp
+    on disk forever (the in-process ``finally`` that flips it False never ran). On a
+    freshly-restarted never-pulled dashboard (panel age = inf) any finite bridge age
+    used to win the freshness pick FOREVER → a permanent site-wide red "stalled". The
+    ``BRIDGE_MAX_AGE_S`` TTL treats the 2-day-old file as DEAD EVIDENCE ≡ absent.
+
+    MUTANT KILLED: the TTL bypassed at the route/merged-projection boundary.
+    """
+    publish_rate_snapshot(
+        tmp_path,
+        effective_rps=4.8,
+        current_rps=5.0,
+        recent_minute=290,
+        recent_429=0,
+        ceiling_per_min=500,
+        wall_time=time.time() - 172_800.0,  # the CLI died 2 days ago
+        monotonic=time.monotonic(),
+        pull_active=True,  # the stuck stamp
+    )
+    state = DashboardState()  # never-ticked panel (freshly-restarted dashboard)
+    with _client(state, _FakeStore(tmp_path)) as c:
+        body = c.get("/api/v1/pull/rate").json()
+    assert body["flow_state"] == "idle"
+    assert body["stalled"] is False
+    assert body["active"] is False
+
+
+def test_recently_dead_cli_bridge_still_reads_stalled_at_route(tmp_path: Path) -> None:
+    """The 12 s < age ≤ 900 s ALERT WINDOW is preserved end to end: a CLI that died
+    60 s ago (within the TTL) still reads the honest red "stalled" — the pull died
+    mid-run and the operator should see it."""
+    publish_rate_snapshot(
+        tmp_path,
+        effective_rps=4.8,
+        current_rps=5.0,
+        recent_minute=290,
+        recent_429=0,
+        ceiling_per_min=500,
+        wall_time=time.time() - 60.0,  # died a minute ago — inside the alert window
+        monotonic=time.monotonic(),
+        pull_active=True,
+    )
+    state = DashboardState()
+    with _client(state, _FakeStore(tmp_path)) as c:
+        body = c.get("/api/v1/pull/rate").json()
+    assert body["flow_state"] == "stalled"
+    assert body["stalled"] is True
+
+
 def _bridge_snap(*, wall_time: float, effective_rps: float = 4.8) -> RateBridgeSnapshot:
     """A schema-v3 snapshot for injected readers (values mirror ``_publish_now``)."""
     return RateBridgeSnapshot(

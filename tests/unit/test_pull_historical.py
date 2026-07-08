@@ -1435,6 +1435,73 @@ def test_pull_contract_candles_live_derives_pool(registry: RegistryStore, tmp_la
     assert report.contracts_completed == 3
 
 
+# ── the register_pull_meter WIRING at the F&O historical build site ────────────
+# (DEC-RATE-METER-LIFECYCLE-001, audit C1/C2: the severed call site left the
+#  feature's whole named suite green — these drive the REAL pull_contract_candles)
+
+
+def test_contract_pull_registers_exact_pool_meter(registry: RegistryStore, tmp_lake: Path) -> None:
+    """MUTANT KILLED: ``register_pull_meter(session_rate, client, ...)`` at the
+    F&O historical build site severed to ``pass`` → ``peek_meter()`` stays ``None``."""
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    client = _client(sdk)
+    holder = SessionRateController()
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: (client, sink),
+        now=_NOW,
+        session_rate=holder,
+    )
+    assert report.contracts_completed == 3
+    assert holder.peek_meter() is client.meter, (
+        "the F&O build site must register the EXACT pool/client CallMeter"
+    )
+
+
+def test_dry_run_contract_pull_clears_and_never_registers(registry: RegistryStore) -> None:
+    """The D1 pin (FAILS on pre-#1593 HEAD): the F&O DRY-RUN never registers.
+
+    The real default ``_build_dry_run_client`` returns a ``GrowwClient`` whose
+    ``CallMeter`` is REAL (``client.py`` ``default_factory=CallMeter`` — the
+    pre-#1593 "empty-candle client with no ``.meter``" claim here was FALSE), so
+    without the gate the dry-run would register its own synthetic meter AND
+    overwrite a prior real pull's. MUTANT KILLED: the ``dry_run=dry_run`` kwarg
+    dropped at the site / the dry-run branch severed → ``peek_meter()`` non-None.
+    """
+    from brutex.adapters.call_meter import CallMeter
+    from brutex.dashboard.pull_controller import SessionRateController
+
+    holder = SessionRateController()
+    stale = CallMeter()
+    holder.register_meter(stale)  # an earlier real pull's meter in a warm process
+    selected = registry.list_contracts(underlying="NIFTY")
+    report = pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,  # NO client_factory: the REAL offline _build_dry_run_client
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        now=_NOW,
+        session_rate=holder,
+    )
+    assert report.dry_run is True
+    assert holder.peek_meter() is None, (
+        "a dry-run must DEREGISTER — never its own synthetic meter, never the stale one"
+    )
+
+
 def test_contract_market_split() -> None:
     """A FUT row maps to the future market; CE/PE map to the option market."""
     fetched = datetime(2026, 1, 1, tzinfo=UTC)
