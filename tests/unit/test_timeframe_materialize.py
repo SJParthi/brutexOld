@@ -427,6 +427,101 @@ def test_last_ist_date_naive_timestamp_treated_as_utc() -> None:
     assert _last_ist_date(frame) == "2021-01-04"
 
 
+# ── _last_ist_datetime (DEC-DAILY-CUTOFF-GROUNDED-001: one extraction, two
+#    consumers — the grounded cutoff takes the full instant, the stamp its date)
+
+
+def test_last_ist_datetime_returns_full_ist_instant() -> None:
+    pl = pytest.importorskip("polars")
+    from datetime import UTC, datetime
+
+    from brutex.calendars.nse import IST
+    from brutex.data.timeframe_materialize import _last_ist_date, _last_ist_datetime
+
+    # 09:59 UTC == 15:29 IST — the full instant survives (a date-only
+    # extraction could never ground the close edge).
+    frame = pl.DataFrame(
+        {
+            "ts_utc": [
+                datetime(2021, 1, 4, 3, 45, tzinfo=UTC),
+                datetime(2021, 1, 4, 9, 59, tzinfo=UTC),
+            ]
+        }
+    )
+    last = _last_ist_datetime(frame)
+    assert last == datetime(2021, 1, 4, 15, 29, tzinfo=IST)
+    # The date wrapper delegates — one extraction, one convention.
+    assert _last_ist_date(frame) == "2021-01-04"
+
+
+def test_last_ist_datetime_empty_and_non_datetime_are_none() -> None:
+    pl = pytest.importorskip("polars")
+    from brutex.data.timeframe_materialize import _last_ist_datetime
+
+    empty = pl.DataFrame({"ts_utc": pl.Series([], dtype=pl.Datetime(time_zone="UTC"))})
+    assert _last_ist_datetime(empty) is None
+    assert _last_ist_datetime(pl.DataFrame({"ts_utc": [1, 2]})) is None
+
+
+def test_last_ist_datetime_naive_timestamp_treated_as_utc() -> None:
+    pl = pytest.importorskip("polars")
+    from datetime import datetime
+
+    from brutex.calendars.nse import IST
+    from brutex.data.timeframe_materialize import _last_ist_datetime
+
+    frame = pl.DataFrame({"ts_utc": [datetime(2021, 1, 4, 3, 45)]})
+    assert _last_ist_datetime(frame) == datetime(2021, 1, 4, 9, 15, tzinfo=IST)
+
+
+# ── daily_cutoff_grounding_enabled (the BRUTEX_DAILY_CUTOFF_GROUNDED gate) ───
+
+
+class TestDailyCutoffGroundingEnabled:
+    """Default-ON env gate — the exact BRUTEX_PREBUILD_INCREMENTAL idiom over
+    the SHARED derive_stamp.DISABLED_ENV_VALUES off-value set."""
+
+    def test_default_on(self) -> None:
+        from brutex.data.timeframe_materialize import daily_cutoff_grounding_enabled
+
+        assert daily_cutoff_grounding_enabled(env={}) is True
+
+    @pytest.mark.parametrize("value", ["0", "off", "OFF", "False", "no", " 0 "])
+    def test_off_values_disable(self, value: str) -> None:
+        from brutex.data.timeframe_materialize import (
+            DAILY_CUTOFF_GROUNDED_ENV,
+            daily_cutoff_grounding_enabled,
+        )
+
+        assert daily_cutoff_grounding_enabled(env={DAILY_CUTOFF_GROUNDED_ENV: value}) is False
+
+    @pytest.mark.parametrize("value", ["1", "on", "yes", "banana", ""])
+    def test_other_values_stay_on(self, value: str) -> None:
+        from brutex.data.timeframe_materialize import (
+            DAILY_CUTOFF_GROUNDED_ENV,
+            daily_cutoff_grounding_enabled,
+        )
+
+        assert daily_cutoff_grounding_enabled(env={DAILY_CUTOFF_GROUNDED_ENV: value}) is True
+
+    def test_reads_process_env_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data.timeframe_materialize import (
+            DAILY_CUTOFF_GROUNDED_ENV,
+            daily_cutoff_grounding_enabled,
+        )
+
+        monkeypatch.setenv(DAILY_CUTOFF_GROUNDED_ENV, "off")
+        assert daily_cutoff_grounding_enabled() is False
+        monkeypatch.delenv(DAILY_CUTOFF_GROUNDED_ENV)
+        assert daily_cutoff_grounding_enabled() is True
+
+    def test_shares_the_common_off_value_set(self) -> None:
+        # CLAUDE.md §11 COMMON: one off-value spelling for both escape hatches.
+        from brutex.data.derive_stamp import DISABLED_ENV_VALUES
+
+        assert frozenset({"0", "off", "false", "no"}) == DISABLED_ENV_VALUES
+
+
 # ── _derived_dirs_present (the incremental skip's existence guard) ───────────
 
 

@@ -95,19 +95,9 @@
     color:#1A1300; background:linear-gradient(90deg,var(--yellow),#FFD089);
     padding:4px 10px; border-radius:20px; box-shadow:0 0 18px rgba(255,183,77,.5);
     animation: pulse 2.4s ease-in-out infinite; display:none; }
-  /* Daily API-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001). Shown ONLY for a vendor
-     that genuinely caps calls/day. The live vendor (Groww) has NO daily quota
-     (DEC-GROWW-RATE-PERMIN-001) so the route returns the -1 sentinel and this stays
-     hidden — never a fabricated budget. Green < 80%, amber ≥ 80%, red ≥ 95%. */
-  .quota-gauge { display:flex; align-items:center; gap:8px; font-size:11px;
-    color:var(--muted); margin-left:auto; }
-  .quota-gauge .qg-num { color:var(--text); font-variant-numeric:tabular-nums; }
-  .quota-gauge .qg-bar { width:96px; height:7px; border-radius:4px;
-    background:var(--surface-3); overflow:hidden; }
-  .quota-gauge .qg-bar div { height:100%; width:0; background:var(--green); transition:width .3s; }
-  .quota-gauge.warn .qg-bar div { background:var(--yellow); }
-  .quota-gauge.crit .qg-bar div { background:var(--red); }
-  .quota-gauge.crit .qg-num { color:var(--red); font-weight:700; }
+  /* The daily API-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001) is DELETED
+     (DEC-QUOTA-VERDICT-MOOT-001): the live vendor (Groww) has NO daily quota,
+     nothing ever injected a tracker, so the gauge was permanently hidden. */
   .badge.on { display:inline-block; }
 
   /* ── Zone 1: filter + KPI band ── */
@@ -499,13 +489,6 @@
       <a href="/reports">Reports</a>
     </nav>
     <div class="badge" id="previewBadge">● PREVIEW · synthetic data</div>
-    <div class="quota-gauge" id="quotaGauge" style="display:none"
-         title="Daily API quota — shown only for a vendor that caps calls/day; the live vendor (Groww) has no daily quota, so this stays hidden (DEC-GROWW-RATE-PERMIN-001)">
-      <span>Daily quota</span>
-      <span class="qg-num"><b id="qgUsed">-</b> / <span id="qgLimit">-</span></span>
-      <div class="qg-bar"><div id="qgFill"></div></div>
-      <span><span id="qgRem">-</span> left · <span id="qgPct">-</span>%</span>
-    </div>
   </header>
 
   <div class="band" id="tabs"></div>
@@ -1024,11 +1007,13 @@ function spotSeg(label, dim) {
   return '<span class="seg"><span class="k">' + label + '</span> <span class="' + cls + '">'
     + span + " " + flag + "</span></span>";
 }
-/* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
-   "open subst N/M" — N of the symbol's M stored 1-minute sessions have their FIRST
-   present minute after the 09:15 IST canonical open, so those sessions' DERIVED
-   1-day open is the earliest-present-minute substitute, not the canonical open
-   price. INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
+/* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001,
+   predicate aligned by DEC-DAILY-OPEN-PREDICATE-ALIGN-001): "open subst N/M" —
+   N of the symbol's M stored 1-minute sessions are NON-Muhurat with a FIRST
+   present minute NOT exactly at the 09:15 IST canonical open, so those sessions'
+   DERIVED 1-day open is the earliest-present-minute substitute, not the canonical
+   open price (same rule as the prebuild headline; the census counts ALL stored
+   sessions). INFORMATIONAL only — the verdict is never downgraded; muted "—" when 0.
    Both operands are coerced via Number() BEFORE interpolation so the fragment can
    only ever carry digits/NaN, never markup (XSS guard). */
 function openSubSeg(dim) {
@@ -2428,40 +2413,14 @@ refreshVerdict();  // show any prior pull's verdict banner on load (DEC-VERDICT-
    load-instruments POST fires at most ONCE here (maybeAutoLoad) and only when
    the universe is empty — normal renders, tab switches and searches never POST
    (DEC-UNDERLYING-ECONOMICS-001). */
-// Groww daily-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001 +
-// DEC-DASHBOARD-QUOTA-PERSISTED-001). Polls /api/v1/quota — the read-only,
-// IST-midnight DailyQuotaTracker — so it shows today's PERSISTED usage on
-// page-load, BEFORE any pull this session (and stays current mid-pull, same
-// file-backed counter). quota_limit <= 0 ⇒ tracker unavailable ⇒ stay hidden
-// (never show a fake 0). Green < 80%, amber ≥ 80%, red ≥ 95%.
-async function pollQuota() {
-  const g = document.getElementById('quotaGauge');
-  try {
-    const r = await fetch('/api/v1/quota');
-    if (!r.ok) return;
-    const s = await r.json();
-    const limit = s.quota_limit || 0;
-    if (limit <= 0) { g.style.display = 'none'; return; }
-    const used = s.quota_used || 0;
-    const rem = (s.quota_remaining != null) ? s.quota_remaining : Math.max(0, limit - used);
-    const pct = Math.min(100, used / limit * 100);
-    document.getElementById('qgUsed').textContent = used.toLocaleString();
-    document.getElementById('qgLimit').textContent = limit.toLocaleString();
-    document.getElementById('qgRem').textContent = rem.toLocaleString();
-    document.getElementById('qgPct').textContent = pct.toFixed(1);
-    document.getElementById('qgFill').style.width = pct + '%';
-    g.classList.toggle('warn', pct >= 80 && pct < 95);
-    g.classList.toggle('crit', pct >= 95);
-    g.style.display = '';
-  } catch (e) { /* transient — keep the last shown value */ }
-}
+// The daily-quota gauge poller is DELETED with its endpoint
+// (DEC-QUOTA-VERDICT-MOOT-001): Groww has no daily quota and nothing ever
+// injected a tracker, so the poll only ever received the hidden sentinel.
 
 async function bootstrap() {
   const summary = await loadSummary();
   await loadInstruments();
   await maybeAutoLoad(summary || {index_count: 0, stock_count: 0});
-  pollQuota();
-  setInterval(pollQuota, 3000);
   // Per-symbol completeness strip (DEC-COMPLETENESS-UNIVERSE-001): load now + keep it
   // live so the "has the entire 2020→today set?" answer updates as pulls land.
   loadCompleteness();

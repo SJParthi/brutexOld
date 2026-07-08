@@ -59,6 +59,7 @@ from brutex.adapters.groww.constants import (
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
+from brutex.calendars.nse import MUHURAT_SESSIONS
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
 # ``test_db_view_no_lake_revision_import``): lake_revision lazily imports
@@ -420,12 +421,44 @@ _SESSION_OPEN_IST: Final[time] = time(9, 15)
 #: The canonical session open as minutes-past-midnight-IST (555), DERIVED from the
 #: ONE COMMON :data:`brutex.data.session.SESSION_OPEN` constant — never a fourth
 #: hardcoded 09:15 literal (CLAUDE.md §11 COMMON). The per-session coverage
-#: aggregate (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001) counts a session as
-#: *open-substituted* when its FIRST present 1-minute bar is STRICTLY later than
-#: ``ist_date + this many minutes`` — i.e. the derived 1-day open for that session
-#: is the earliest PRESENT minute's open (``tf_resampler`` ``.first()``), not the
-#: canonical 09:15 IST open price.
+#: aggregate (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, aligned by
+#: DEC-DAILY-OPEN-PREDICATE-ALIGN-001) counts a session as *open-substituted*
+#: when its FIRST present 1-minute bar is NOT exactly ``ist_date + this many
+#: minutes`` — i.e. the derived 1-day open for that session is the earliest
+#: PRESENT minute's open (``tf_resampler`` ``.first()``), not the canonical
+#: 09:15 IST open price. Muhurat sessions are EXCLUDED
+#: (:data:`_MUHURAT_EXCLUSION_SQL`) — their open is off-09:15 BY DESIGN.
 _SESSION_OPEN_MINUTES: Final[int] = SESSION_OPEN.hour * 60 + SESSION_OPEN.minute
+
+
+def _muhurat_exclusion_sql(muhurat_dates: Iterable[date]) -> str:
+    """The per-session CTE's Muhurat-abstention SQL fragment — pure, deterministic.
+
+    DEC-DAILY-OPEN-PREDICATE-ALIGN-001: the /completeness open-substitution
+    counter shares ONE predicate with the prebuild detector
+    (:func:`brutex.data.spot_daily_resample.classify_daily_open` — this CTE
+    is its mirror-pinned SQL twin), and that predicate ABSTAINS on a Muhurat
+    session: its open is off-09:15 BY DESIGN (evening 18:00/18:15 for
+    2020-2024, afternoon 13:45 for 2025), so counting it as a substituted
+    daily open would be a false positive on a perfectly healthy lake.
+
+    Renders ``" AND ist_date NOT IN (DATE '…', …)"`` from the STATIC calendar
+    constant :data:`brutex.calendars.nse.MUHURAT_SESSIONS` (the ONE source of
+    truth both surfaces key off — a future notified Muhurat date lands in both
+    with zero edits here), sorted for a deterministic SQL string. An empty
+    date set renders ``""`` (SQL ``NOT IN ()`` is invalid — the defensive
+    empty-calendar branch). The dates are hardcoded :class:`datetime.date`
+    calendar constants rendered via ``isoformat()`` — never user input, so
+    the interpolation is injection-safe (the same S608 posture as the CTE's
+    other static fragments).
+    """
+    rendered = ", ".join(f"DATE '{d.isoformat()}'" for d in sorted(muhurat_dates))
+    return f" AND ist_date NOT IN ({rendered})" if rendered else ""
+
+
+#: The Muhurat abstention baked once at import from the calendar constant —
+#: see :func:`_muhurat_exclusion_sql` (DEC-DAILY-OPEN-PREDICATE-ALIGN-001).
+_MUHURAT_EXCLUSION_SQL: Final[str] = _muhurat_exclusion_sql(MUHURAT_SESSIONS)
 
 #: The two server-computed derived columns appended to every spot candle page
 #: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
@@ -1476,14 +1509,20 @@ def summarize_spot_datasets(
     * ``first_date`` / ``last_date`` = ``MIN`` / ``MAX`` of the per-session IST
       dates (equal to the IST date of the ``MIN`` / ``MAX`` timestamp — the
       fixed +05:30 offset is monotone);
-    * ``open_substituted_days`` = how many sessions' FIRST present minute
-      (``MIN`` of :data:`_IST_TS_EXPR`) is STRICTLY later than the canonical
+    * ``open_substituted_days`` = how many NON-Muhurat sessions' FIRST present
+      minute (``MIN`` of :data:`_IST_TS_EXPR`) is NOT exactly the canonical
       09:15 IST session open (:data:`_SESSION_OPEN_MINUTES`, derived from the
       COMMON :data:`brutex.data.session.SESSION_OPEN`) — exactly the sessions
       whose DERIVED 1-day open is the earliest-present-minute substitute
       (``tf_resampler`` aggregates a bucket's open with ``.first()``), not the
       canonical 09:15 price. A session opening exactly at 09:15:00 is NOT
-      counted (strict ``>``). INFORMATIONAL only — no verdict downgrade;
+      counted; a stray PRE-09:15 first bar (should not survive the ingest
+      session filter) IS (``<>``, never silently trusted); a Muhurat session
+      ABSTAINS (its open is off-09:15 BY DESIGN —
+      :func:`_muhurat_exclusion_sql`). The rule is the ALIGNED predicate of
+      DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the mirror-pinned SQL twin of
+      :func:`brutex.data.spot_daily_resample.classify_daily_open`.
+      INFORMATIONAL only — no verdict downgrade;
     * ``session_days`` = the number of distinct IST session dates stored.
 
     Every NON-``1minute`` dataset (the derived ``1day`` + intraday TFs) AND
@@ -1506,15 +1545,23 @@ def summarize_spot_datasets(
     The PER-WINDOW trading-day gap audit and the options-side range audit
     remain explicit follow-ups, not claimed.
     ``open_substituted_days`` is a SUBSTITUTION signal, not exclusively "vendor
-    lost data": a genuine late/special open (Muhurat), a sparse reference
+    lost data": a genuine late/special NON-Muhurat open, a sparse reference
     symbol, and a vendor gap all count — each honestly means the derived daily
-    open is not the canonical 09:15 price. The ``.first()``-parity claim
-    assumes NO bar earlier than the canonical session open is stored for a
-    session (guaranteed by the pre-open exclusion — CLAUDE.md §7, spot bars
-    tick from 09:15:00 IST): a hypothetical BEFORE-open first bar would still
-    be the resampler's ``.first()`` substitute yet is NOT counted by the strict
-    ``>`` (an under-count) — out of contract, deliberately not detected
-    (hostile-review honesty note).
+    open is not the canonical 09:15 price. A Muhurat session no longer counts
+    (DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — its off-09:15 open is BY DESIGN, so
+    counting it flagged a healthy lake every year; the prebuild detector
+    already abstained, and the two surfaces now share the ONE predicate). The
+    former strict-``>`` under-count of a stray BEFORE-open first bar is also
+    closed by the aligned ``<>``: a pre-09:15 first bar (out of the CLAUDE.md
+    §7 pre-open-exclusion contract, yet still the resampler's ``.first()``
+    substitute) now COUNTS, never silently trusted. The ONE remaining
+    deliberate divergence from the prebuild detector is SCOPE/CUTOFF: this
+    census counts ALL stored sessions of the scored datasets (no
+    forming-session cutoff), while the detector applies the ``ist_date <
+    before`` cutoff over the SPOT prebuild targets — so the two surfaces can
+    differ only on a not-yet-derived forming session (or a dataset outside
+    the prebuild target set), NEVER on the predicate itself (pinned by
+    ``test_predicate_alignment_pin_vs_honesty_counter_1267``).
 
     Parameters
     ----------
@@ -1613,8 +1660,8 @@ def summarize_spot_datasets(
                 f"{distinct_count_sql(('timestamp',))} AS n "
                 "FROM read_parquet(?, union_by_name=true) GROUP BY ist_date) "
                 "SELECT SUM(n), MIN(ist_date), MAX(ist_date), "
-                "COUNT(*) FILTER (WHERE first_ist > ist_date "
-                f"+ INTERVAL '{_SESSION_OPEN_MINUTES} minutes'), "
+                "COUNT(*) FILTER (WHERE first_ist <> ist_date "
+                f"+ INTERVAL '{_SESSION_OPEN_MINUTES} minutes'{_MUHURAT_EXCLUSION_SQL}), "
                 f"COUNT(*){session_expr} FROM per_session"
             )
         else:

@@ -23,12 +23,18 @@ suite covers the OBSERVE-ONLY flag over that behavior:
 Special-weekend sessions (e.g. the 2026-02-01 Budget Sunday) open at regular
 09:15 hours and need no abstention — deliberately not special-cased.
 
-DRIFT PIN (review fold): main's read-side /completeness counter
-(DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267) counts the SAME
-named concept with deliberately DIFFERENT rules (Muhurat counted there,
-abstained here; strict ``>`` there, ``!=`` here) — the expected disagreement
-is ENCODED by ``test_muhurat_divergence_pin_vs_honesty_counter_1267`` so a
-future silent "reconciliation" of either side fails loudly.
+ALIGNMENT PIN (DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up the
+former drift pin deferred to): the read-side /completeness counter
+(DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267) and this
+detector now share the ONE per-session predicate
+:func:`brutex.data.spot_daily_resample.classify_daily_open` (Muhurat abstains
+on BOTH; ``!=`` 09:15 on BOTH, pre-09:15 counts on BOTH). The agreement is
+ENCODED by ``test_predicate_alignment_pin_vs_honesty_counter_1267`` +
+``test_sql_cte_equivalent_to_classifier_over_one_lake`` so a future silent
+predicate edit on EITHER side fails loudly; the ONE remaining deliberate
+POPULATION difference (the detector's forming-session cutoff vs the census's
+all-stored-sessions scope) is pinned by
+``test_population_cutoff_divergence_pin``.
 """
 
 from __future__ import annotations
@@ -40,9 +46,11 @@ from pathlib import Path
 import polars as pl
 import pytest
 from brutex.calendars.nse import MUHURAT_SESSIONS
+from brutex.data.models import CandleBar
 from brutex.data.spot_daily_resample import (
     MAX_OPEN_SUBSTITUTION_WARNS,
     DailyOpenSubstitutionScan,
+    classify_daily_open,
     detect_daily_open_substitutions,
     emit_daily_open_substitutions,
     observe_daily_open_substitutions,
@@ -83,6 +91,41 @@ def _session_1m(
 
 def _concat(*frames: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(list(frames)).sort("ts_utc")
+
+
+# --------------------------------------------------------------------------- #
+# classify_daily_open — the ONE COMMON per-session predicate
+# (DEC-DAILY-OPEN-PREDICATE-ALIGN-001)
+# --------------------------------------------------------------------------- #
+
+
+class TestClassifyDailyOpen:
+    def test_exact_0915_is_ok(self) -> None:
+        assert classify_daily_open(date(2024, 1, 2), time(9, 15)) == "ok"
+
+    def test_late_first_minute_is_substituted(self) -> None:
+        assert classify_daily_open(date(2024, 1, 2), time(9, 16)) == "substituted"
+
+    def test_pre_0915_first_minute_is_substituted(self) -> None:
+        # The `!=` rule: a stray pre-09:15 first bar COUNTS (never silently
+        # trusted) — the aligned rule both surfaces now share.
+        assert classify_daily_open(date(2024, 1, 2), time(9, 14)) == "substituted"
+
+    def test_muhurat_abstains_evening_and_afternoon(self) -> None:
+        assert date(2024, 11, 1) in MUHURAT_SESSIONS
+        assert date(2025, 10, 21) in MUHURAT_SESSIONS
+        assert classify_daily_open(date(2024, 11, 1), time(18, 0)) == "muhurat_abstained"
+        assert classify_daily_open(date(2025, 10, 21), time(13, 45)) == "muhurat_abstained"
+
+    def test_muhurat_precedes_the_0915_check(self) -> None:
+        # Predicate ORDER pin: a Muhurat session abstains even at an exact
+        # 09:15 first minute — Muhurat membership is judged first.
+        assert classify_daily_open(date(2025, 10, 21), time(9, 15)) == "muhurat_abstained"
+
+    def test_seconds_precision_is_substituted(self) -> None:
+        # 09:15:30 is NOT the canonical 09:15:00 — the exact-instant rule,
+        # mirroring the SQL `first_ist <> ist_date + 555 minutes` comparison.
+        assert classify_daily_open(date(2024, 1, 2), time(9, 15, 30)) == "substituted"
 
 
 # --------------------------------------------------------------------------- #
@@ -378,36 +421,70 @@ def test_emit_boundary_around_zero(n: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# DRIFT PIN vs DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 (MIGRATION.md #1267)
+# ALIGNMENT PIN vs DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001 (MIGRATION.md #1267)
+# — DEC-DAILY-OPEN-PREDICATE-ALIGN-001
 # --------------------------------------------------------------------------- #
 
 
-def test_muhurat_divergence_pin_vs_honesty_counter_1267(tmp_path: Path) -> None:
-    """The DELIBERATE divergence between the two open-substitution surfaces.
+def _lake_bars(session_date: date, first_minute: time, n: int = 3) -> list[CandleBar]:
+    """*n* real :class:`CandleBar`\\ s starting at *first_minute* IST — lake fixtures."""
+    open_ist = datetime.combine(session_date, first_minute)
+    base_utc = (open_ist - _IST_OFFSET).replace(tzinfo=UTC)
+    return [
+        CandleBar(
+            timestamp=base_utc + timedelta(minutes=i),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=10,
+            open_interest=None,
+        )
+        for i in range(n)
+    ]
 
-    main ships a read-side daily-open substitution counter
-    (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, MIGRATION.md #1267 — the
-    per-session CTE in ``db_view.summarize_spot_datasets``, surfaced as the
-    /completeness "Open substituted N/M" column), and this PR ships the
-    prebuild detector — SAME named concept, CONSCIOUSLY different rules (see
-    the ``detect_daily_open_substitutions`` docstring): #1267 COUNTS a
-    Muhurat session (strict ``>`` — any off-canonical open honestly means
-    "the derived daily open is not the 09:15 price"), while this detector
-    ABSTAINS on it (operator mandate — a Muhurat open is off-09:15 BY
-    DESIGN, so a pipeline WARN would be a false positive).
+
+def _write_nifty_minutes(lake_root: Path, bars: list[CandleBar]) -> str:
+    """Write one NSE/INDEX/NIFTY ``1minute`` lake; return its parquet glob.
+
+    The writer requires single-``(year, month)`` batches (its partition
+    contract), so the bars are grouped per UTC month before writing.
+    """
+    from brutex.data.parquet_writer import ParquetWriter
+
+    writer = ParquetWriter(lake_root=lake_root)
+    by_month: dict[tuple[int, int], list[CandleBar]] = {}
+    for bar in bars:
+        by_month.setdefault((bar.timestamp.year, bar.timestamp.month), []).append(bar)
+    for batch in by_month.values():
+        writer.write(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=batch
+        )
+    base = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute"
+    return base.as_posix() + "/**/*.parquet"
+
+
+def test_predicate_alignment_pin_vs_honesty_counter_1267(tmp_path: Path) -> None:
+    """The two open-substitution surfaces now AGREE on the same lake.
+
+    DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up decision the
+    former ``test_muhurat_divergence_pin_vs_honesty_counter_1267`` drift pin
+    deferred to (this test CONSCIOUSLY rewrites that pin): the read-side
+    /completeness counter (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001, #1267 —
+    the per-session CTE in ``db_view.summarize_spot_datasets``) and the
+    prebuild detector now share the ONE per-session predicate
+    ``classify_daily_open`` — Muhurat abstains on BOTH surfaces (the operator
+    mandate: a Muhurat open is off-09:15 BY DESIGN, so counting it flagged a
+    healthy lake every year).
 
     Over ONE lake holding a 09:16-start non-Muhurat session PLUS the
-    calendar-verified 2025-10-21 afternoon Muhurat (13:45 IST), the two
-    surfaces therefore DISAGREE: /completeness reads 2, the prebuild
-    headline reads 1 (+1 ``muhurat_abstained``). This pin ENCODES that
-    expected disagreement so a future silent "reconciliation" of either side
-    fails loudly — actually aligning the predicates is a named follow-up
-    decision, never a drive-by edit (CLAUDE.md Rule 11 COMMON honesty).
+    calendar-verified 2025-10-21 afternoon Muhurat (13:45 IST) — the exact
+    fixture the old drift pin encoded a DISAGREEMENT (2 vs 1) over — both
+    surfaces now read 1. A future silent predicate edit on EITHER side fails
+    this pin loudly (CLAUDE.md Rule 11 COMMON honesty).
     """
     import duckdb
     from brutex.dashboard.db_view import summarize_spot_datasets
-    from brutex.data.models import CandleBar
-    from brutex.data.parquet_writer import ParquetWriter
 
     regular = date(2025, 10, 20)
     muhurat = date(2025, 10, 21)
@@ -416,44 +493,139 @@ def test_muhurat_divergence_pin_vs_honesty_counter_1267(tmp_path: Path) -> None:
     assert regular not in MUHURAT_SESSIONS
     assert muhurat in MUHURAT_SESSIONS
 
-    def _bars(session_date: date, first_minute: time) -> list[CandleBar]:
-        open_ist = datetime.combine(session_date, first_minute)
-        base_utc = (open_ist - _IST_OFFSET).replace(tzinfo=UTC)
-        return [
-            CandleBar(
-                timestamp=base_utc + timedelta(minutes=i),
-                open=Decimal("100"),
-                high=Decimal("101"),
-                low=Decimal("99"),
-                close=Decimal("100.5"),
-                volume=10,
-                open_interest=None,
-            )
-            for i in range(3)
-        ]
-
-    ParquetWriter(lake_root=tmp_path).write(
-        exchange="NSE",
-        segment="INDEX",
-        symbol="NIFTY",
-        interval="1minute",
-        bars=[*_bars(regular, time(9, 16)), *_bars(muhurat, time(13, 45))],
+    _write_nifty_minutes(
+        tmp_path,
+        [*_lake_bars(regular, time(9, 16)), *_lake_bars(muhurat, time(13, 45))],
     )
 
     # Surface 1 — the #1267 read-side counter over the REAL lake: the Muhurat
-    # session COUNTS (strict `>` 09:15), so both sessions are substituted.
+    # session now ABSTAINS in SQL too, so ONLY the 09:16 session is counted.
     rows = summarize_spot_datasets(duckdb.connect(), tmp_path)
     row = next(r for r in rows if r["segment"] == "INDEX" and r["interval"] == "1minute")
-    assert row["open_substituted_days"] == 2
+    assert row["open_substituted_days"] == 1
     assert row["session_days"] == 2
 
-    # Surface 2 — THIS PR's prebuild detector over the same sessions: the
-    # Muhurat session ABSTAINS, so only the 09:16 non-Muhurat session flags.
+    # Surface 2 — the prebuild detector over the same sessions: identical
+    # verdicts (the Muhurat session abstains, counted separately).
     frame = _concat(
         _session_1m(regular, first_minute=time(9, 16), n=3),
         _session_1m(muhurat, first_minute=time(13, 45), n=3),
     )
     scan = detect_daily_open_substitutions(frame, before=_FAR_BEFORE)
     assert scan.substituted == ((regular, time(9, 16)),)
-    assert scan.count == 1
+    assert scan.count == 1 == row["open_substituted_days"]
+    assert scan.sessions == 2 == row["session_days"]
     assert scan.muhurat_abstained == 1
+
+
+def test_sql_cte_equivalent_to_classifier_over_one_lake(tmp_path: Path) -> None:
+    """EQUIVALENCE PROOF: same lake ⇒ same per-session verdicts, both engines.
+
+    DEC-DAILY-OPEN-PREDICATE-ALIGN-001: the census's SQL predicate
+    (``first_ist <> ist_date + 555 minutes`` + the ``_MUHURAT_EXCLUSION_SQL``
+    date exclusion) must be provably equivalent to the ONE COMMON
+    ``classify_daily_open`` policy. Over one REAL lake exercising EVERY case
+    class — exact-09:15 (ok) · normal-late 09:16 (substituted) · stray
+    pre-09:15 09:14 (substituted) · afternoon Muhurat 13:45 (abstained) ·
+    evening Muhurat 18:00 (abstained) — this test (a) recomputes each
+    session's SQL verdict with the PRODUCTION fragments (`_IST_DATE_EXPR` /
+    `_IST_TS_EXPR` / `_SESSION_OPEN_MINUTES` / `_MUHURAT_EXCLUSION_SQL` —
+    imported, never re-derived) and asserts it equals the classifier's
+    verdict per session, and (b) asserts the production
+    ``summarize_spot_datasets`` total equals the detector's count.
+    """
+    import duckdb
+    from brutex.dashboard.db_view import (
+        _IST_DATE_EXPR,
+        _IST_TS_EXPR,
+        _MUHURAT_EXCLUSION_SQL,
+        _SESSION_OPEN_MINUTES,
+        summarize_spot_datasets,
+    )
+
+    evening_muhurat = date(2024, 11, 1)
+    afternoon_muhurat = date(2025, 10, 21)
+    assert evening_muhurat in MUHURAT_SESSIONS
+    assert afternoon_muhurat in MUHURAT_SESSIONS
+    sessions: dict[date, time] = {
+        date(2025, 10, 14): time(9, 14),  # stray pre-09:15 first bar
+        date(2025, 10, 15): time(9, 15),  # exact canonical open
+        date(2025, 10, 20): time(9, 16),  # normal late open
+        afternoon_muhurat: time(13, 45),  # afternoon Muhurat
+        evening_muhurat: time(18, 0),  # evening Muhurat
+    }
+    glob = _write_nifty_minutes(
+        tmp_path,
+        [bar for d, first in sessions.items() for bar in _lake_bars(d, first)],
+    )
+
+    # (a) per-session verdict parity — the EXACT production SQL fragments.
+    conn = duckdb.connect()
+    sql = (
+        "WITH per_session AS ("  # noqa: S608  # nosec B608 - static fragments from hardcoded production constants; path bound
+        f"SELECT {_IST_DATE_EXPR} AS ist_date, "
+        f"MIN({_IST_TS_EXPR}) AS first_ist "
+        "FROM read_parquet(?, union_by_name=true) GROUP BY ist_date) "
+        "SELECT ist_date, first_ist, (first_ist <> ist_date "
+        f"+ INTERVAL '{_SESSION_OPEN_MINUTES} minutes'{_MUHURAT_EXCLUSION_SQL}) "
+        "FROM per_session ORDER BY ist_date"
+    )
+    sql_rows = conn.execute(sql, [glob]).fetchall()
+    assert len(sql_rows) == len(sessions)
+    for ist_date, first_ist, sql_counted in sql_rows:
+        verdict = classify_daily_open(ist_date, first_ist.time())
+        assert first_ist.time() == sessions[ist_date]  # fixture integrity
+        assert bool(sql_counted) == (verdict == "substituted"), (
+            f"SQL/classifier drift on {ist_date}: sql={sql_counted} verdict={verdict}"
+        )
+
+    # (b) production totals parity — census vs detector over the same lake.
+    rows = summarize_spot_datasets(duckdb.connect(), tmp_path)
+    row = next(r for r in rows if r["segment"] == "INDEX" and r["interval"] == "1minute")
+    frame = _concat(*(_session_1m(d, first_minute=first, n=3) for d, first in sessions.items()))
+    scan = detect_daily_open_substitutions(frame, before=_FAR_BEFORE)
+    assert row["open_substituted_days"] == scan.count == 2
+    assert row["session_days"] == scan.sessions == 5
+    assert scan.muhurat_abstained == 2
+    assert scan.substituted == (
+        (date(2025, 10, 14), time(9, 14)),
+        (date(2025, 10, 20), time(9, 16)),
+    )
+
+
+def test_population_cutoff_divergence_pin(tmp_path: Path) -> None:
+    """The ONE remaining deliberate divergence is POPULATION, not predicate.
+
+    DEC-DAILY-OPEN-PREDICATE-ALIGN-001 honesty pin: the census counts ALL
+    stored sessions (no forming-session cutoff), while the detector applies
+    the ``ist_date < before`` cutoff (a still-forming session was never
+    written as a final daily bar, so the prebuild headline must not flag
+    it). Over one lake holding a COMPLETE late-open session plus a FORMING
+    late-open session (on the ``before`` date), the census reads 2 and the
+    detector reads 1 — they differ ONLY on the forming session, never on a
+    session both examined.
+    """
+    import duckdb
+    from brutex.dashboard.db_view import summarize_spot_datasets
+
+    complete = date(2025, 10, 20)
+    forming = date(2025, 10, 22)
+    assert complete not in MUHURAT_SESSIONS
+    assert forming not in MUHURAT_SESSIONS
+
+    _write_nifty_minutes(
+        tmp_path,
+        [*_lake_bars(complete, time(9, 16)), *_lake_bars(forming, time(9, 16))],
+    )
+    rows = summarize_spot_datasets(duckdb.connect(), tmp_path)
+    row = next(r for r in rows if r["segment"] == "INDEX" and r["interval"] == "1minute")
+    assert row["open_substituted_days"] == 2  # census: ALL stored sessions
+
+    frame = _concat(
+        _session_1m(complete, first_minute=time(9, 16), n=3),
+        _session_1m(forming, first_minute=time(9, 16), n=3),
+    )
+    scan = detect_daily_open_substitutions(frame, before=forming)
+    assert scan.substituted == ((complete, time(9, 16)),)  # the forming session is cut off
+    assert scan.count == 1
+    assert scan.sessions == 1

@@ -30,7 +30,7 @@ so demotions survive). This suite pins:
 * a hypothesis parity oracle: random upsert sequences across base + N deltas →
   SQL fold ≡ the reference Python dict fold, record-for-record;
 * drift pins: ``_WINDOW_KEY_COLUMNS == window_ledger_store._COLUMNS[:5]`` and
-  ``append_ledger_delta`` writing the full 14-column schema (the base-less
+  ``append_ledger_delta`` writing the full 16-column schema (the base-less
   probe-skip's safety precondition).
 
 Tests MAY import ``window_ledger_store`` (the module itself must not — the
@@ -91,7 +91,12 @@ def _row(
     bars: int = 0,
     attempts: int = 1,
 ) -> tuple[Any, ...]:
-    """One 14-field ledger row tuple (the exact ``_COLUMNS`` shape)."""
+    """One 16-field ledger row tuple (the exact ``_COLUMNS`` shape).
+
+    The trailing ``empty_retries``/``transient_retries`` pair is ``None`` — the
+    honest-unknown optional-column default (DEC-RETRY-COUNTER-SPLIT-001,
+    MIGRATION.md #1585), exactly what a pre-split ledger row loads as.
+    """
     return (
         "groww",
         security_id,
@@ -107,11 +112,13 @@ def _row(
         0,
         0 if status == "PLANNED" else 1,
         None,
+        None,
+        None,
     )
 
 
 def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
-    """Write a REAL 14-column base ledger Parquet directly (full status control)."""
+    """Write a REAL 16-column base ledger Parquet directly (full status control)."""
     import pyarrow.parquet as pq
 
     path = wls.ledger_path(lake)
@@ -120,7 +127,7 @@ def _write_base(lake: Path, rows: Sequence[tuple[Any, ...]]) -> None:
 
 
 def _write_delta(lake: Path, rows: Sequence[tuple[Any, ...]]) -> Path:
-    """Append one REAL 14-column delta Parquet via the store's own name minting."""
+    """Append one REAL 16-column delta Parquet via the store's own name minting."""
     import pyarrow.parquet as pq
 
     directory = wls.deltas_dir(lake)

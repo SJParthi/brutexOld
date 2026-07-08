@@ -367,3 +367,144 @@ class TestOhlcClampWarnPerWindow:
         with pull_id_scope("pullcccc0003"), capture_logs() as logs:
             parser.parse_candle_rows(payload)
         assert self._clamp_warns(logs)[0]["pull_id"] == "pullcccc0003"
+
+
+class TestEpochTimestampVerdictPerWindow:
+    """The deterministic epoch-interpretation VERDICT rides every epoch payload.
+
+    DEC-GROWW-EPOCH-VERDICT-001 (the epoch-timestamp-verdict follow-up of
+    DEC-INGEST-BOUNDARY-INTEGRITY-001 (b)): a payload carrying NUMERIC
+    timestamps emits ONE ``groww.parse.epoch_timestamp_verdict`` WARNING per
+    parsed window (the ohlc_clamped per-payload precedent) with the
+    session-plausibility cross-check of the UNVERIFIED Unix-UTC assumption.
+    OBSERVE-ONLY — parsed bars byte-identical; string payloads emit nothing.
+
+    Sample epochs are computed against the REAL 2024-06-19 regular session
+    (see ``tests/unit/test_groww_epoch_verdict.py`` for the derivations).
+    """
+
+    #: Unix-UTC reading = 10:30 IST in-session; IST-naive reading = 05:00 out.
+    EPOCH_UNIX_UTC_1030 = datetime(2024, 6, 19, 5, 0, tzinfo=UTC).timestamp()
+    #: Unix-UTC reading = 10:31 IST in-session (one bar later).
+    EPOCH_UNIX_UTC_1031 = datetime(2024, 6, 19, 5, 1, tzinfo=UTC).timestamp()
+    #: IST-naive reading = 10:30 IST in-session; Unix-UTC reading = 16:00 out.
+    EPOCH_IST_NAIVE_1030 = datetime(2024, 6, 19, 10, 30, tzinfo=UTC).timestamp()
+
+    @pytest.fixture(autouse=True)
+    def _reset_guard(self) -> Iterator[None]:
+        parser.reset_epoch_timestamp_warnings()
+        yield
+        parser.reset_epoch_timestamp_warnings()
+
+    @staticmethod
+    def _verdicts(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        return [e for e in logs if e["event"] == "groww.parse.epoch_timestamp_verdict"]
+
+    def test_epoch_payload_emits_one_verdict_with_counts(self) -> None:
+        payload = {
+            "candles": [
+                [self.EPOCH_UNIX_UTC_1030, 100.0, 110.0, 90.0, 105.0, 10, 1],
+                [self.EPOCH_UNIX_UTC_1031, 101.0, 111.0, 91.0, 106.0, 11, 2],
+            ]
+        }
+        with pull_id_scope("pulleeee0005"), capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        assert len(bars) == 2
+        verdicts = self._verdicts(logs)
+        assert len(verdicts) == 1
+        v = verdicts[0]
+        assert v["pull_id"] == "pulleeee0005"
+        assert v["verdict"] == "unix_utc_consistent"
+        assert v["supports_unix_utc"] == 2
+        assert v["supports_ist_naive"] == 0
+        assert v["epoch_rows"] == 2
+        assert v["sampled"] == 2
+        assert v["assumed"] == "unix-utc-seconds"
+        assert v["runbook"] == "docs/runbooks/groww-epoch-timestamp-probe.md"
+
+    def test_ist_naive_payload_reads_against_the_assumption(self) -> None:
+        # The failure mode the verdict exists for: an IST-naive mis-send is a
+        # DIRECTIONAL loud verdict, never a silent pass.
+        payload = {"candles": [[self.EPOCH_IST_NAIVE_1030, 100.0, 110.0, 90.0, 105.0, 10, 1]]}
+        with capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+        verdicts = self._verdicts(logs)
+        assert len(verdicts) == 1
+        assert verdicts[0]["verdict"] == "ist_naive_consistent"
+        assert verdicts[0]["supports_ist_naive"] == 1
+
+    def test_string_payload_emits_no_verdict(self) -> None:
+        # Byte-identity pin for the production path: the documented
+        # string-timestamp payload adds ZERO new log events.
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows({"candles": [_row(), _row("2025-09-24T10:31:00")]})
+        assert len(bars) == 2
+        assert self._verdicts(logs) == []
+
+    def test_epoch_bars_byte_identical_to_unwired_parse(self) -> None:
+        # OBSERVE-ONLY pin: the verdict wiring never touches the parsed bar —
+        # ts/OHLC are exactly what parse_timestamp_ist + assemble_candle
+        # produced before this change.
+        payload = {"candles": [[self.EPOCH_UNIX_UTC_1030, 100.0, 110.0, 90.0, 105.0, 10, 7]]}
+        with capture_logs():
+            bars = parser.parse_candle_rows(payload)
+        assert bars[0].timestamp == datetime.fromtimestamp(self.EPOCH_UNIX_UTC_1030, tz=UTC)
+        assert bars[0].open == Decimal("100.0")
+        assert bars[0].high == Decimal("110.0")
+        assert bars[0].low == Decimal("90.0")
+        assert bars[0].close == Decimal("105.0")
+        assert bars[0].volume == 10
+        assert bars[0].open_interest == 7
+
+    def test_all_no_trade_epoch_payload_still_emits_verdict(self) -> None:
+        # Row-level collection: the timestamps are evidence even when every
+        # bar is a no-trade skip (assemble_candle never parses their ts, so
+        # the once-per-pull branch WARN cannot fire — the verdict still does).
+        payload = {"candles": [[self.EPOCH_UNIX_UTC_1030, 0, 0, 0, 0, 0, None]]}
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        assert bars == []
+        verdicts = self._verdicts(logs)
+        assert len(verdicts) == 1
+        assert verdicts[0]["verdict"] == "unix_utc_consistent"
+
+    def test_six_element_epoch_rows_feed_the_verdict(self) -> None:
+        # The current-session no-OI row shape (DEC-GROWW-FORMING-BAR-PARSE-001)
+        # is collected too.
+        payload = {"candles": [[self.EPOCH_UNIX_UTC_1030, 100.0, 110.0, 90.0, 105.0, 10]]}
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        assert len(bars) == 1
+        assert len(self._verdicts(logs)) == 1
+
+    def test_bool_timestamp_is_not_collected_and_still_rejects(self) -> None:
+        # bool is an int subclass — excluded from collection; the row then
+        # fails loudly in parse_timestamp_ist as before (behavior unchanged),
+        # and the propagating error means no verdict is emitted.
+        payload = {"candles": [[True, 100.0, 110.0, 90.0, 105.0, 10, 1]]}
+        with capture_logs() as logs, pytest.raises(CandleParseError, match="must not be bool"):
+            parser.parse_candle_rows(payload)
+        assert self._verdicts(logs) == []
+
+    def test_two_windows_emit_independent_verdicts(self) -> None:
+        # Per-payload, never deduped away (mirrors ohlc_clamped) — each
+        # fetched window carries its own evidence.
+        payload = {"candles": [[self.EPOCH_UNIX_UTC_1030, 100.0, 110.0, 90.0, 105.0, 10, 1]]}
+        with capture_logs() as logs:
+            parser.parse_candle_rows(payload)
+            parser.parse_candle_rows(payload)
+        assert len(self._verdicts(logs)) == 2
+
+    def test_mixed_string_and_epoch_rows_count_only_epochs(self) -> None:
+        payload = {
+            "candles": [
+                _row(),
+                [self.EPOCH_UNIX_UTC_1030, 100.0, 110.0, 90.0, 105.0, 10, 1],
+            ]
+        }
+        with capture_logs() as logs:
+            bars = parser.parse_candle_rows(payload)
+        assert len(bars) == 2
+        verdicts = self._verdicts(logs)
+        assert len(verdicts) == 1
+        assert verdicts[0]["epoch_rows"] == 1

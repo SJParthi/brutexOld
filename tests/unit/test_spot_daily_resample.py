@@ -287,6 +287,10 @@ def test_reconcile_fills_records_success_with_zero_fetches() -> None:
     assert filled.bars == 1
     assert filled.empty_streak == 0  # SUCCESS resets the streak — never re-promoted
     assert filled.in_pull_fetches == 0  # a resample made ZERO vendor calls
+    # ... so its retry split is a KNOWN zero on both halves, never a fabricated
+    # unknown (DEC-RETRY-COUNTER-SPLIT-001 — mirrors the in_pull_fetches=0 fact).
+    assert filled.empty_retries == 0
+    assert filled.transient_retries == 0
 
 
 def test_reconcile_no_minute_leaves_window_empty() -> None:

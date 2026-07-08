@@ -518,3 +518,137 @@ def test_default_account_key_resolver_maps_credentials_error_to_none(
 
     monkeypatch.setattr(credentials_mod, "resolve_groww_aws_credentials", _boom)
     assert _default_account_key_resolver() is None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Cross-host pull LEASE wiring (DEC-ACCOUNT-LEASE-CROSSHOST-001)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_lease_taken_last_released_first(tmp_path: Path) -> None:
+    """ORDER pin: account → lake → lease on enter; lease → lake → account on release."""
+    order: list[str] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _OrderedGuard("lake", order),
+        account_singleflight_factory=lambda _key: _OrderedGuard("account", order),
+        account_key_resolver=lambda: "key-A",
+        lease_factory=lambda _root: _OrderedGuard("lease", order),
+    )
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert job.snapshot().state == STATE_DONE
+    assert order == [
+        "enter:account",
+        "enter:lake",
+        "enter:lease",
+        "exit:lease",
+        "exit:lake",
+        "exit:account",
+    ]
+
+
+def test_lease_contention_rolls_back_both_flocks(tmp_path: Path) -> None:
+    """A fresh FOREIGN-host lease refuses the pull and rolls BOTH flocks back (LIFO)."""
+    order: list[str] = []
+    spawned: list[Callable[[], None]] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=spawned.append,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _OrderedGuard("lake", order),
+        account_singleflight_factory=lambda _key: _OrderedGuard("account", order),
+        account_key_resolver=lambda: "key-A",
+        lease_factory=lambda _root: _OrderedGuard("lease", order, raise_on_enter=True),
+    )
+    assert job.start(lambda _h: None, total=1) is False
+    assert spawned == []  # never doubles the account rate
+    assert order == ["enter:account", "enter:lake", "exit:lake", "exit:account"]
+    assert job.running is False  # in-process flag rolled back
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR
+    assert "PullAlreadyRunningError" in snap.detail
+
+
+def test_default_lease_factory_refuses_a_fresh_foreign_lease(tmp_path: Path) -> None:
+    """END-TO-END with the REAL default lease guard: a foreign lease refuses start."""
+    import json
+    import time
+
+    from brutex.adapters.groww.pull_singleflight import pull_lease_path
+
+    lease_path = pull_lease_path(tmp_path)
+    lease_path.parent.mkdir(parents=True)
+    lease_path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "token": "peer-token",
+                "host": "definitely-not-this-host",
+                "pid": 1,
+                "started_wall": time.time(),
+                "wall_time": time.time(),  # FRESH heartbeat
+            }
+        )
+    )
+    spawned: list[Callable[[], None]] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=spawned.append,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _SpyGuard(),
+        account_singleflight_factory=lambda _key: _SpyGuard(),
+        account_key_resolver=lambda: "key-A",
+        # lease_factory NOT injected — the production default pull_lease_guard runs.
+    )
+    assert job.start(lambda _h: None, total=1) is False
+    assert spawned == []
+    snap = job.snapshot()
+    assert snap.state == STATE_ERROR
+    assert "another host" in snap.detail
+
+
+def test_default_lease_factory_writes_and_clears_the_lease(tmp_path: Path) -> None:
+    """END-TO-END clean run with the REAL default lease guard: lease held then cleared."""
+    from brutex.adapters.groww.pull_singleflight import pull_lease_path, read_pull_lease
+
+    seen: dict[str, bool] = {}
+
+    def work(_on_progress: ProgressHook) -> None:
+        seen["lease_during_run"] = pull_lease_path(tmp_path).exists()
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _SpyGuard(),
+        account_singleflight_factory=lambda _key: _SpyGuard(),
+        account_key_resolver=lambda: "key-A",
+    )
+    assert job.start(work, total=1) is True
+    assert seen["lease_during_run"] is True  # our lease was on disk during the run
+    assert read_pull_lease(tmp_path) is None  # cleared on the clean finish
+
+
+def test_lease_release_is_best_effort_and_swallows_errors(tmp_path: Path) -> None:
+    """A raising lease-guard __exit__ never crashes the worker; the run completes."""
+
+    class _BadExitGuard(AbstractContextManager[None]):
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            raise OSError("lease close failed")
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: _SpyGuard(),
+        account_singleflight_factory=lambda _key: _SpyGuard(),
+        account_key_resolver=lambda: "key-A",
+        lease_factory=lambda _root: _BadExitGuard(),
+    )
+    assert job.start(lambda on_progress: on_progress("X", 1, False, False), total=1) is True
+    assert job.snapshot().state == STATE_DONE
