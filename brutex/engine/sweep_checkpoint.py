@@ -311,6 +311,22 @@ class SweepCheckpointStore:
         self._last_index = checkpoint.last_completed_index
         return checkpoint
 
+    def discard_adoption(self) -> None:
+        """Reset the in-memory high-water mark to "nothing completed" (``-1``).
+
+        Un-adopts a checkpoint a prior :meth:`load` adopted, WITHOUT touching
+        the on-disk file: a consumer holding OUT-OF-BAND evidence that the
+        on-disk resume point is stale (DEC-GREEKS-BULK-REENRICH-001 fix round
+        10 — an intervening Greeks-overlay writer signal newer than the
+        checkpoint's ``updated_at``) restarts its enumeration from index 0
+        while keeping this store's ``sweep_id``/``total_combos`` identity.
+        The caller decides what happens to the stale FILE (the backfill
+        deletes it); subsequent :meth:`record` calls advance monotonically
+        from ``-1`` again, and the first advancing record atomically
+        overwrites whatever is on disk. O(1), in-memory only — never raises.
+        """
+        self._last_index = -1
+
     def record(self, completed_index: int) -> bool:
         """Advance + persist the high-water mark to *completed_index*.
 

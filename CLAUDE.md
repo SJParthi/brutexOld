@@ -100,7 +100,8 @@ of the loaded CSV curve), so a crashed FORCE run's surviving checkpoint
 self-ignores across a rate-value change instead of exempting the recorded
 prefix from the driver's value-checked gate (false-clean green run; a
 SPOT-heal inside the crash window stays a DOCUMENTED residue — delete the
-checkpoint after a heal); a concurrent dry-run backfill's O(files) scan can
+checkpoint after a heal) [COMPLETED by FIX ROUND 10 below for the rate
+A→B→A round-trip / intervening-writer class the fingerprint cannot see]; a concurrent dry-run backfill's O(files) scan can
 no longer mask a genuinely-WEDGED pull's HUNG→CRITICAL→WEDGED chain — SHIPPED
 as main's DEC-PULL-BEAT-PERRUN-001 (#1537) pull-id-keyed channels after the
 merge-reconcile superseded the interim `bind_progress_beat_scope` design
@@ -183,7 +184,35 @@ visibilitychange catch-up; and `gbAttachIfRunning()` re-attaches on page
 load AND on a started:false refusal — the previously-FALSE "re-open the
 page" remedy now works); this file's + #1558's rounds-3/4 progress-beat
 mechanism claims reconciled to the shipped #1537 keyed-channel design (see
-the supersession notes). ENGINE
+the supersession notes).
+FIX ROUND 10 folded (refuter-majority-confirmed, MIGRATION.md #1558):
+checkpoint ADOPTION is freshness-gated (the round-4 fingerprint attests
+plan-vs-checkpoint rate EQUALITY only — it cannot see an INTERVENING overlay
+writer): a rate A→B→A round trip (a crashed force run under A, a rate-B force
+run whose errored first batch FREEZES the id-A checkpoint while genuinely
+rewriting the recorded prefix under rate B, then the natural revert to A —
+or, with NO second crash, an intervening `brutex enrich-greeks` / pull-tail
+enrich pass under the changed rate env) reproduced id-A exactly and ADOPTED
+the stale checkpoint, skipping the rate-B residue into a false-clean ✅
+`errored=0` exit with the wrong-rate Greeks stamped CURRENT forever; a loaded
+checkpoint now self-ignores LOUDLY — and the stale file is DELETED — when the
+shared overlay freshness marker was last touched by a FOREIGN writer at/after
+the checkpoint's `updated_at` (own-plan touches identity-exempt, so a
+legitimate same-plan resume still adopts) or the window ledger moved at/after
+it (`_checkpoint_superseded_reason` + the additive engine
+`SweepCheckpointStore.discard_adoption()`; every ambiguity biases to the
+fresh correct-by-stamps start; NEW documented residue: a mid-pass-crashed
+intervening writer leaves no signal — delete the checkpoint, the spot-heal
+remediation); and the round-9 `universe.html` gb-poller gains the TWO
+sibling-parity pieces round 9 omitted — every gb fetch (poll, start POST,
+attach probe) rides ONE `gbFetchJson` helper arming the sibling's
+FEED_FETCH_TIMEOUT_MS hung-fetch abort bound through the BODY read (a
+headers-then-stalled-body response previously threw nothing: catch/backoff
+unreachable, nothing scheduled, panel wedged at "running · …" with the Run
+button disabled until a tab flip/reload) plus the `gbPollGen` re-entrancy
+guard (a visibilitychange catch-up SUPERSEDES an in-flight chain instead of
+forking it; a stale late response never overwrites a newer status line).
+ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
 `greeks_backfill.py`/`greeks_enrich.py`/`greeks_enrich_pass.py`/
 `greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py`
@@ -1286,8 +1315,9 @@ hostile-review pass._
   DEC-PULL-BEAT-PERRUN-001 #1537 pull-id-keyed channels — see the #1558 supersession note); a stray file at
   `.greeks_backfill` reads `absent` instead of muting the whole `lake_revision` composite. FIX ROUND 4 folded
   (refuter-majority-confirmed, #1558): the `backfill_id` binds a rate-source VALUE fingerprint — a crashed force run's
-  checkpoint self-ignores across a rate-value change, so the recorded prefix is always re-routed through the driver's
-  value-checked gate (spot-heal-in-crash-window = documented residue); a concurrent backfill scan no longer masks a
+  checkpoint self-ignores across a rate-value change, so the recorded prefix is re-routed through the driver's
+  value-checked gate (spot-heal-in-crash-window = documented residue) [COMPLETED by FIX ROUND 10 for the A→B→A
+  round-trip / intervening-writer class the fingerprint cannot see]; a concurrent backfill scan no longer masks a
   wedged pull's HUNG→WEDGED chain (shipped as #1537's keyed channels after the merge-reconcile superseded the interim
   `bind_progress_beat_scope` design — `BackgroundPullJob._run` runs inside `pull_id_scope` with its beat keyed on its
   own run id; the round-3 broadcast's "WEDGED dual-signal backstop" honesty claim stays retracted as vacuous); NEW
@@ -1326,7 +1356,21 @@ hostile-review pass._
   the DEC-PULL-UI-STALENESS-001 posture; non-ok/malformed polls never settle; hidden tab fires zero fetches +
   visibilitychange catch-up; `gbAttachIfRunning()` re-attaches on page load and on a started:false refusal — the
   button re-enables only on an observed terminal state); the rounds-3/4 progress-beat mechanism claims reconciled to
-  the shipped #1537 keyed-channel design (supersession notes in #1558). ENGINE
+  the shipped #1537 keyed-channel design (supersession notes in #1558). FIX ROUND 10 folded
+  (refuter-majority-confirmed, #1558): checkpoint ADOPTION is freshness-gated — the round-4 fingerprint attests
+  plan-vs-checkpoint rate EQUALITY only, so a rate A→B→A round trip (a rate-B force run's errored first batch froze
+  the id-A checkpoint while genuinely rewriting the recorded prefix under rate B; the revert to A reproduced id-A and
+  ADOPTED the stale checkpoint — a false-clean ✅ `errored=0` skip of the residue, stamped current forever; same
+  vector crash-free via an intervening enrich pass under a changed rate env) now self-ignores LOUDLY + deletes the
+  stale file when the shared overlay marker's LAST writer is foreign at/after the checkpoint's `updated_at` (own-plan
+  touches identity-exempt — legitimate same-plan resumes still adopt) or the window ledger moved at/after it
+  (`_checkpoint_superseded_reason` + the additive engine `SweepCheckpointStore.discard_adoption()`; ambiguity biases
+  to the fresh correct-by-stamps start; NEW residue documented: a mid-pass-crashed intervening writer leaves no
+  signal — delete the checkpoint, the spot-heal remediation); and the gb-poller gains the sibling-parity pieces
+  round 9 omitted: ONE `gbFetchJson` helper arming the FEED_FETCH_TIMEOUT_MS hung-fetch abort bound through the BODY
+  read on all three gb call sites (a stalled body previously wedged the panel forever on a visible tab — nothing
+  thrown, nothing scheduled) + the `gbPollGen` re-entrancy guard (catch-ups supersede in-flight chains; stale late
+  responses never repaint). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; `greeks_backfill.py`/`greeks_enrich.py`/
   `greeks_enrich_pass.py`/`greeks_revision.py`/`sweep_alerts.py`/`sweep_checkpoint.py` ALL 100% line+branch;
   ruff/ruff-format/`mypy --strict`/pyright clean).

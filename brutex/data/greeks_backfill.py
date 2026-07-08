@@ -60,8 +60,28 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   operator revised the fixed rate / the ``BRUTEX_RISK_FREE_CSV`` values, would
   otherwise ADOPT the old checkpoint and exempt the recorded prefix from the
   driver's value-checked gate — the exact drift class ``force`` exists to
-  catch — ending in a false-clean green run), so ANY rate-value change re-keys
-  the plan and the stale checkpoint self-ignores.
+  catch — ending in a false-clean green run), so a rate-value change re-keys
+  the plan and the stale checkpoint self-ignores. THE INTERVENING-WRITER
+  EXCEPTION (fix round 10, refuter-confirmed — the round-4 fingerprint is
+  plan-vs-checkpoint only, structurally blind to the LAKE's state): a rate
+  A→B→A ROUND TRIP — a force run crashed under rate A, a second force run
+  under revised rate B whose errored first batch FREEZES the id-A checkpoint
+  (round 3) while genuinely REWRITING the recorded prefix under rate B
+  through the driver's value gate, then the natural revert to A — reproduces
+  the id-A plan exactly, and the same vector needs NO second crash when the
+  intervening writer is a ``brutex enrich-greeks`` / pull-tail enrich pass
+  under the changed rate env (it never touches the backfill checkpoint).
+  Blind adoption would SKIP the rate-B-rewritten prefix into a false-clean ✅
+  ``errored=0`` exit with the residue stamped CURRENT forever (the stamp
+  carries no rate value). ADOPTION is therefore freshness-gated
+  (:func:`_checkpoint_superseded_reason`): a loaded checkpoint self-ignores
+  LOUDLY — and the stale file is deleted — when the SHARED overlay freshness
+  marker was last touched by a FOREIGN writer at/after the checkpoint's
+  ``updated_at`` (this plan's OWN batch touches are identity-exempt, so a
+  legitimate same-plan resume still adopts), or when the window ledger moved
+  at/after it (a pull's tail re-enriches under the CURRENT rate env). A
+  fresh start is always correct-by-stamps; in force mode it restates cheaply
+  through the driver's value-checked gate.
 * BLIND SPOT, stated everywhere: the stamp prefilter cannot see a rate/spot
   VALUE drift under an unchanged ``(rate_source_id, RISK_FREE_SOURCE_VERSION)``
   — ``force=True`` routes every contract through the driver's VALUE-checked
@@ -71,7 +91,11 @@ NEVER fabricated and the driver logic is never duplicated (CLAUDE.md §11 COMMON
   the ``backfill_id`` (no cheap spot-content token exists), so the resumed
   prefix would not be re-gated against the healed spot — delete
   ``<lake>/.greeks_backfill/checkpoint.json`` (or let the force run complete
-  afresh) after a heal in that window to guarantee full coverage.
+  afresh) after a heal in that window to guarantee full coverage. A SECOND
+  residue with the SAME remediation (fix round 10): an intervening overlay
+  writer that crashed MID-pass — after partition writes but before its
+  batch/pass-end marker touch, with no ledger movement (a mid-crash CLI
+  enrich pass) — leaves no freshness signal for the adoption gate to see.
 * A STALE-stamped bar the driver CANNOT act on is classified
   ``stale_unfixable``: counted + logged + surfaced on the report/Telegram
   honesty heads, NEVER targeted, so the census converges instead of re-feeding
@@ -135,6 +159,7 @@ written.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import time
@@ -164,7 +189,12 @@ from brutex.data.greeks_revision import (
     touch_greeks_revision_marker,
 )
 from brutex.data.lake_read import dedup_bars_frame
-from brutex.engine.sweep_checkpoint import SweepCheckpointError, SweepCheckpointStore
+from brutex.data.window_ledger_store import deltas_dir, ledger_path
+from brutex.engine.sweep_checkpoint import (
+    MAX_CHECKPOINT_BYTES,
+    SweepCheckpointError,
+    SweepCheckpointStore,
+)
 from brutex.observability.progress_beat import emit_progress_beat
 from brutex.options.risk_free import (
     RISK_FREE_SOURCE_VERSION,
@@ -176,6 +206,7 @@ if TYPE_CHECKING:
     import polars as pl
 
     from brutex.data.fno_symbol import FnoSymbolParts
+    from brutex.engine.sweep_checkpoint import SweepCheckpoint
     from brutex.options.risk_free import RiskFreeSource
 
 _LOG = structlog.get_logger("brutex.data.greeks_backfill")
@@ -460,6 +491,115 @@ def _touch_revision_marker(lake_root: Path, *, backfill_id: str, bars_written: i
         fields={"backfill_id": backfill_id, "bars_written": bars_written},
         failure_event="greeks_backfill.revision_marker_failed",
     )
+
+
+def _marker_last_writer(marker: Path, *, size: int) -> str:
+    """Best-effort LAST-writer identity of the overlay freshness marker.
+
+    The marker payload carries its writer's identity (the backfill stamps
+    ``backfill_id``; the DEC-CLI-GREEKS-ENRICH-001 enrich pass stamps
+    ``writer`` — see :func:`_touch_revision_marker` /
+    :func:`brutex.data.greeks_revision.touch_greeks_revision_marker`), and the
+    file is replaced whole (atomic ``os.replace``), so the payload always
+    names the LAST writer. Anything unreadable — oversized (the checkpoint's
+    own :data:`~brutex.engine.sweep_checkpoint.MAX_CHECKPOINT_BYTES` small-JSON
+    sanity cap, reused), unparseable (a nesting bomb's ``RecursionError``
+    included — the round-2 checkpoint precedent), non-object, or missing/
+    non-string identity — reads the CONSERVATIVE ``"unknown"``: an unknown
+    writer is treated as FOREIGN by :func:`_checkpoint_superseded_reason`,
+    costing at worst a fresh (correct-by-stamps) start, never a wrongly
+    adopted checkpoint. O(1) — one bounded read of a ~200-byte sidecar.
+    """
+    if size > MAX_CHECKPOINT_BYTES:
+        return "unknown"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return "unknown"
+    if not isinstance(payload, dict):
+        return "unknown"
+    writer = payload.get("backfill_id") or payload.get("writer")
+    return writer if isinstance(writer, str) and writer else "unknown"
+
+
+def _checkpoint_superseded_reason(
+    lake_root: Path, *, backfill_id: str, recorded_at: float
+) -> str | None:
+    """Why a surviving checkpoint must self-ignore — or ``None`` to adopt it.
+
+    Fix round 10 (refuter-confirmed MAJOR): the round-4 rate-VALUE fingerprint
+    in the ``backfill_id`` attests only that THIS plan's rate equals the
+    CHECKPOINT's rate — it structurally cannot see an INTERVENING overlay
+    writer between the checkpoint's ``record`` and this resume (the rate
+    A→B→A round trip: a second force run under a revised rate whose errored
+    first batch FREEZES the old checkpoint while genuinely rewriting the
+    recorded prefix, or a ``brutex enrich-greeks`` / pull-tail enrich pass
+    under the changed rate env — either leaves rate-B Greeks on prefix
+    contracts whose stamps read CURRENT, and the reverted-rate plan reproduces
+    the old id exactly, adopting the stale checkpoint into a false-clean ✅
+    ``errored=0`` run). Adoption is therefore gated on the lake's own
+    overlay-write freshness signals, both cheap O(1) stats:
+
+    * the SHARED Greeks-overlay freshness marker
+      (:func:`revision_marker_path` — every sanctioned ledger-less overlay
+      writer touches it after a bar-writing batch/pass, fix rounds 2+8): a
+      marker whose mtime is at/after *recorded_at* AND whose last-writer
+      identity is NOT this plan's ``backfill_id`` is a foreign overlay write
+      (this run's OWN batch touches — which always land after their batch's
+      ``record`` — are identity-exempt, so a legitimate same-plan resume
+      still adopts);
+    * the window ledger (base Parquet + deltas dir): the backfill never
+      touches it and wet runs hold the lake-root single-flight, so ANY
+      movement at/after *recorded_at* means a pull ran in between — and a
+      pull's post-pull tail re-enriches the overlay under the CURRENT rate
+      env (its ledger writes land BEFORE the tail, so even a tail that
+      crashed mid-pass is signalled).
+
+    ``>=`` (not ``>``) on both comparisons and ``unknown``-writer-as-foreign
+    bias every ambiguity toward the FRESH start — correct-by-stamps and, in
+    force mode, a cheap value-gated restatement — never toward adopting a
+    possibly-poisoned resume point (Golden Rule #1). A signal path that
+    cannot be statted at all (a non-ENOENT ``OSError``) is likewise a refusal
+    reason, never a silent adopt. HONEST residue (stated in the module
+    docstring): an intervening writer that crashed mid-pass — after partition
+    writes but BEFORE its batch/pass-end marker touch, with no ledger
+    movement — leaves no signal; the remediation is deleting the checkpoint,
+    exactly like the spot-heal residue.
+    """
+    marker = revision_marker_path(lake_root)
+    try:
+        marker_stat = os.stat(marker)
+    except FileNotFoundError:
+        marker_stat = None
+    except OSError as exc:
+        return f"cannot stat the overlay freshness marker {marker}: {exc}"
+    if marker_stat is not None and marker_stat.st_mtime >= recorded_at:
+        writer = _marker_last_writer(marker, size=marker_stat.st_size)
+        if writer != backfill_id:
+            return (
+                f"the Greeks-overlay freshness marker was touched by writer {writer!r} "
+                f"at/after this checkpoint was recorded (marker mtime "
+                f"{marker_stat.st_mtime:.3f} >= checkpoint updated_at {recorded_at:.3f}) "
+                "— an intervening overlay writer may have rewritten the recorded "
+                "prefix under different inputs"
+            )
+    newest_ledger: float | None = None
+    for target in (ledger_path(lake_root), deltas_dir(lake_root)):
+        try:
+            mtime = os.stat(target).st_mtime
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"cannot stat the window ledger at {target}: {exc}"
+        newest_ledger = mtime if newest_ledger is None else max(newest_ledger, mtime)
+    if newest_ledger is not None and newest_ledger >= recorded_at:
+        return (
+            f"the window ledger moved at/after this checkpoint was recorded (ledger "
+            f"mtime {newest_ledger:.3f} >= checkpoint updated_at {recorded_at:.3f}) — a "
+            "pull (whose post-pull tail re-enriches the overlay under the CURRENT rate "
+            "env) ran between the crash and this resume"
+        )
+    return None
 
 
 def resolve_backfill_batch_size(env: Mapping[str, str] | None = None) -> int:
@@ -1484,7 +1624,13 @@ def run_greeks_backfill(
     freezing at the last clean boundary re-feeds every errored contract on
     resume, at the cost of cheaply restating any clean batch redone alongside.
     A corrupt / foreign-``backfill_id``
-    checkpoint is ignored LOUDLY (fresh start — correct via the stamps); a
+    checkpoint is ignored LOUDLY (fresh start — correct via the stamps), and
+    so is a SAME-id checkpoint older than the lake's overlay-write freshness
+    signals — a foreign-writer marker touch or any window-ledger movement
+    at/after its ``updated_at`` (fix round 10, the rate A→B→A round-trip /
+    intervening-enrich-pass class; :func:`_checkpoint_superseded_reason` —
+    the stale FILE is deleted at the trip so a later frozen-then-crashed run
+    can never resurrect it); a
     FAILING ``record`` logs + continues (checkpoint loss ≠ halt — a deliberate,
     documented deviation from the lake writers' ``atomic_write_via`` rule: the
     sidecar is advisory, while a REAL lake ENOSPC still halts through the
@@ -1563,8 +1709,9 @@ def run_greeks_backfill(
         if checkpoint_store is None
         else checkpoint_store
     )
+    loaded: SweepCheckpoint | None = None
     try:
-        store.load()
+        loaded = store.load()
     except SweepCheckpointError as exc:
         _LOG.warning(
             "greeks_backfill.checkpoint_ignored",
@@ -1572,6 +1719,39 @@ def run_greeks_backfill(
             error=str(exc),
             action="fresh start (correct via the stamps)",
         )
+    if loaded is not None:
+        # Adoption freshness gate (fix round 10, refuter-confirmed MAJOR): the
+        # rate-value fingerprint in the id cannot see an INTERVENING overlay
+        # writer (the rate A→B→A round trip / an enrich pass under a changed
+        # rate env), so a checkpoint older than the lake's own overlay-write
+        # signals self-ignores LOUDLY — see _checkpoint_superseded_reason.
+        reason = _checkpoint_superseded_reason(
+            lake_root, backfill_id=plan.backfill_id, recorded_at=loaded.updated_at
+        )
+        if reason is not None:
+            store.discard_adoption()
+            # Delete the stale FILE too (best-effort): leaving it on disk
+            # re-opens a side door — if THIS fresh run's first batches freeze
+            # on an errored contract (round 3) while writing bars (an OWN-id
+            # marker touch), the NEXT resume would read the marker as
+            # identity-exempt and adopt the STALE checkpoint after all,
+            # skipping an errored/rewritten prefix. A failing unlink logs and
+            # continues (the sidecar is advisory); the first advancing
+            # ``record`` overwrites the file atomically anyway.
+            try:
+                store.path.unlink(missing_ok=True)
+            except OSError as exc:
+                _LOG.warning(
+                    "greeks_backfill.checkpoint_cleanup_failed",
+                    path=str(store.path),
+                    error=str(exc),
+                )
+            _LOG.warning(
+                "greeks_backfill.checkpoint_ignored",
+                path=str(store.path),
+                error=reason,
+                action="fresh start (correct via the stamps)",
+            )
     resumed_from = store.next_index
     total = len(plan.targets)
     tallies = _RunTallies()

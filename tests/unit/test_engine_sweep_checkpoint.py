@@ -335,6 +335,33 @@ def test_record_advances_and_is_monotonic(tmp_path: Path) -> None:
     assert s.last_completed_index == 2
 
 
+def test_discard_adoption_unadopts_in_memory_only(tmp_path: Path) -> None:
+    """``discard_adoption`` resets to "nothing completed" WITHOUT touching disk.
+
+    DEC-GREEKS-BULK-REENRICH-001 fix round 10: the backfill runner un-adopts a
+    loaded checkpoint when an out-of-band overlay-write freshness signal says
+    the on-disk resume point is stale; the caller owns the file's fate, and
+    the monotonic advance restarts from ``-1`` so the first advancing record
+    atomically overwrites whatever is on disk.
+    """
+    _store(tmp_path).record(4)
+    s = _store(tmp_path)
+    assert s.load() is not None
+    assert s.next_index == 5
+    on_disk = (tmp_path / "ckpt.json").read_bytes()
+    s.discard_adoption()
+    assert s.next_index == 0
+    assert s.last_completed_index == -1
+    assert (tmp_path / "ckpt.json").read_bytes() == on_disk  # in-memory only
+    # The monotonic advance restarts: index 0 records again (it would have
+    # been a stale no-op against the adopted mark) and overwrites the file.
+    assert s.record(0) is True
+    reread = _store(tmp_path)
+    loaded = reread.load()
+    assert loaded is not None
+    assert loaded.last_completed_index == 0
+
+
 # ── save ────────────────────────────────────────────────────────────────────
 
 

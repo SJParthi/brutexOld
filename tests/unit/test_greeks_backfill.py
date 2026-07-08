@@ -20,6 +20,8 @@ round-trips in ``tests/integration/test_greeks_bulk_reenrich.py``.
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -39,7 +41,9 @@ from brutex.data.greeks_backfill import (
     DEFAULT_BACKFILL_BATCH_SIZE,
     BackfillPlan,
     BackfillScan,
+    _checkpoint_superseded_reason,
     _contract_window,
+    _marker_last_writer,
     _month_files,
     _rate_source_value_fingerprint,
     _suspicious_file_verdict,
@@ -60,6 +64,7 @@ from brutex.data.greeks_enrich import (
     GreeksEnrichTarget,
     pack_greeks_provenance,
 )
+from brutex.data.greeks_revision import touch_greeks_revision_marker
 from brutex.engine.sweep_checkpoint import (
     SweepCheckpointError,
     SweepCheckpointStore,
@@ -1995,6 +2000,318 @@ class TestRunner:
             "dry_run",
             "note",
         }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Runner — checkpoint-adoption freshness gate (fix round 10)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAdoptionFreshnessGate:
+    """Fix round 10 (refuter-confirmed MAJOR): adoption self-ignores a
+    checkpoint older than the lake's overlay-write freshness signals.
+
+    The round-4 rate-VALUE fingerprint attests only that THIS plan's rate
+    equals the CHECKPOINT's rate — it cannot see an INTERVENING overlay
+    writer, so a rate A→B→A round trip (or an enrich pass under a changed
+    rate env) resumed over rate-B residue and reported a false-clean ✅
+    ``errored=0`` run with the wrong-rate Greeks stamped CURRENT forever.
+    """
+
+    def test_force_resume_across_a_rate_round_trip_refeeds_the_rewritten_prefix(
+        self, lake: Path
+    ) -> None:
+        """The A→B→A round trip: run 3 must re-feed the rate-B-rewritten prefix.
+
+        (1) A force run under rate A records a clean prefix then crashes;
+        (2) a force run under revised rate B self-ignores the foreign-id
+        checkpoint, genuinely REWRITES the prefix under rate B (its errored
+        first batch FREEZES the id-A checkpoint byte-identical — round 3),
+        then crashes; (3) the natural revert to rate A reproduces id-A
+        exactly. Blind adoption resumed at index 2, skipping the rate-B
+        residue under a green ``errored=0`` exit; the freshness gate sees the
+        foreign (id-B) marker touch at/after the checkpoint and starts fresh.
+        """
+        from structlog.testing import capture_logs
+
+        targets = _targets(6)
+        rate_a = FixedRateSource(rate=0.065)
+        plan_a = _plan_of(targets, rate_source=rate_a, force=True)
+        crashing = _SpyEnrich(raise_on_call=2, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(
+                lake, plan=plan_a, rate_source=rate_a, batch_size=2, enrich=crashing
+            )
+        assert checkpoint_path(lake).exists()  # batch 1's clean record survived
+        before = checkpoint_path(lake).read_bytes()
+        # Run 2 — rate B: the id-A checkpoint is foreign (round 4), so it is
+        # ignored; the FIRST batch errors (cumulative freeze — record never
+        # fires, the id-A file survives byte-identical) while genuinely
+        # writing rate-B bars over the recorded prefix (marker → id-B).
+        rate_b = FixedRateSource(rate=0.10)
+        plan_b = _plan_of(targets, rate_source=rate_b, force=True)
+        assert plan_b.backfill_id != plan_a.backfill_id
+        spy_b = _SpyEnrich(
+            reports=[_enrich_report(enriched=1, errored=1, bars_written=10)],
+            raise_on_call=2,
+            raise_exc=LakeWriteHalt("disk_full"),
+        )
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan_b, rate_source=rate_b, batch_size=2, enrich=spy_b)
+        assert checkpoint_path(lake).read_bytes() == before  # id-A survived the freeze
+        # Run 3 — the revert to rate A (the natural remediation) reproduces
+        # the id-A plan exactly: the stale checkpoint must self-ignore.
+        plan_a2 = _plan_of(targets, rate_source=rate_a, force=True)
+        assert plan_a2.backfill_id == plan_a.backfill_id
+        resumed = _SpyEnrich()
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan_a2, rate_source=rate_a, batch_size=2, enrich=resumed
+            )
+        assert report.resumed_from == 0
+        # The rate-B-rewritten prefix IS re-fed through the driver's
+        # value-checked gate — never skipped into a false-clean run.
+        assert resumed.calls[0] == list(targets[0:2])
+        ignored = [r for r in logs if r["event"] == "greeks_backfill.checkpoint_ignored"]
+        assert ignored and "overlay" in str(ignored[0]["error"])
+
+    def test_intervening_enrich_pass_self_ignores_the_checkpoint(self, lake: Path) -> None:
+        """The no-second-crash variant: a ``brutex enrich-greeks`` / pull-tail
+        enrich pass under a changed rate env touches the SHARED marker (fix
+        round 8) but never the backfill checkpoint — the id-A file survives
+        and blind adoption would skip its prefix.
+        """
+        from structlog.testing import capture_logs
+
+        plan = _plan_of(_targets(4), force=True)
+        crashing = _SpyEnrich(raise_on_call=2, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=crashing)
+        # The REAL enrich-pass touch (greeks_enrich_pass.py stamps `writer`).
+        touch_greeks_revision_marker(
+            lake,
+            fields={"writer": "greeks_enrich_pass", "bars_written": 7},
+            failure_event="test.marker_failed",
+        )
+        resumed = _SpyEnrich()
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=resumed
+            )
+        assert report.resumed_from == 0
+        assert resumed.calls[0] == list(plan.targets[0:2])
+        assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+
+    def test_intervening_pull_ledger_movement_self_ignores_the_checkpoint(self, lake: Path) -> None:
+        """A pull between crash and resume moves the window ledger — trip.
+
+        Run 1's own bar-writing batch touched the marker with THIS plan's id
+        (identity-exempt — the marker signal alone would ADOPT), so this also
+        pins that an own-id marker falls THROUGH to the ledger check instead
+        of short-circuiting the whole gate.
+        """
+        from structlog.testing import capture_logs
+
+        plan = _plan_of(_targets(4), force=True)
+        crashing = _SpyEnrich(raise_on_call=2, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=crashing)
+        assert revision_marker_path(lake).exists()  # own-id touch from batch 1
+        from brutex.data.window_ledger_store import ledger_path
+
+        target = ledger_path(lake)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"pull ledger flush")
+        resumed = _SpyEnrich()
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=resumed
+            )
+        assert report.resumed_from == 0
+        ignored = [r for r in logs if r["event"] == "greeks_backfill.checkpoint_ignored"]
+        assert ignored and "window ledger moved" in str(ignored[0]["error"])
+
+    def test_resume_with_no_overlay_signal_adopts_the_checkpoint(self, lake: Path) -> None:
+        """No marker, no ledger → nothing supersedes the checkpoint: adopt."""
+        plan = _plan_of(_targets(4), force=True)
+        spy = _SpyEnrich(
+            reports=[_enrich_report(enriched=2, bars_written=0, bars_solved=0)],
+            raise_on_call=2,
+            raise_exc=LakeWriteHalt("disk_full"),
+        )
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=spy)
+        assert not revision_marker_path(lake).exists()  # zero-write batch: no touch
+        resumed = _SpyEnrich()
+        report = run_greeks_backfill(
+            lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=resumed
+        )
+        assert report.resumed_from == 2
+        assert resumed.calls == [list(plan.targets[2:4])]
+
+    def test_foreign_but_older_signals_still_adopt(self, lake: Path) -> None:
+        """A foreign marker / ledger OLDER than the checkpoint never trips.
+
+        A pre-run enrich pass (or pull) is exactly what the recorded prefix
+        was already validated against — self-ignoring here would break every
+        legitimate resume on a lake with any overlay history.
+        """
+        from brutex.data.window_ledger_store import deltas_dir, ledger_path
+
+        past = time.time() - 3_600.0
+        touch_greeks_revision_marker(
+            lake,
+            fields={"writer": "greeks_enrich_pass", "bars_written": 3},
+            failure_event="test.marker_failed",
+        )
+        os.utime(revision_marker_path(lake), (past, past))
+        ledger = ledger_path(lake)
+        ledger.parent.mkdir(parents=True)
+        ledger.write_bytes(b"old flush")
+        deltas = deltas_dir(lake)
+        deltas.mkdir(parents=True)
+        os.utime(ledger, (past, past))
+        os.utime(deltas, (past, past))
+        plan = _plan_of(_targets(4), force=True)
+        spy = _SpyEnrich(
+            reports=[_enrich_report(enriched=2, bars_written=0, bars_solved=0)],
+            raise_on_call=2,
+            raise_exc=LakeWriteHalt("disk_full"),
+        )
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=spy)
+        resumed = _SpyEnrich()
+        report = run_greeks_backfill(
+            lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=resumed
+        )
+        assert report.resumed_from == 2
+        assert resumed.calls == [list(plan.targets[2:4])]
+
+    def test_trip_deletes_the_stale_checkpoint_file_before_any_batch(self, lake: Path) -> None:
+        """The stale FILE is deleted AT the trip — closing the resurrection door.
+
+        If it survived, a fresh run whose first batches freeze on an errored
+        contract (round 3) while touching the marker with its OWN id would
+        let the NEXT resume adopt the stale checkpoint after all.
+        """
+        plan = _plan_of(_targets(4), force=True)
+        crashing = _SpyEnrich(raise_on_call=2, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=crashing)
+        touch_greeks_revision_marker(
+            lake,
+            fields={"writer": "greeks_enrich_pass", "bars_written": 7},
+            failure_event="test.marker_failed",
+        )
+        # The resumed run crashes on its FIRST batch — record never fires, so
+        # only the trip-time unlink can have removed the stale file.
+        crashing2 = _SpyEnrich(raise_on_call=1, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=2, enrich=crashing2)
+        assert not checkpoint_path(lake).exists()
+
+    def test_trip_unlink_failure_logs_and_continues_fresh(
+        self, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing trip-time unlink logs + continues — the sidecar is advisory."""
+        from structlog.testing import capture_logs
+
+        plan = _plan_of(_targets(2), force=True)
+        crashing = _SpyEnrich(raise_on_call=2, raise_exc=LakeWriteHalt("disk_full"))
+        with pytest.raises(LakeWriteHalt):
+            run_greeks_backfill(lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=crashing)
+        touch_greeks_revision_marker(
+            lake,
+            fields={"writer": "greeks_enrich_pass", "bars_written": 7},
+            failure_event="test.marker_failed",
+        )
+
+        real_unlink = Path.unlink
+
+        def _boom(self: Path, *args: Any, **kwargs: Any) -> None:
+            if self == checkpoint_path(lake):
+                raise OSError("unlink refused")
+            real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _boom)
+        resumed = _SpyEnrich()
+        with capture_logs() as logs:
+            report = run_greeks_backfill(
+                lake, plan=plan, rate_source=_RATE, batch_size=1, enrich=resumed
+            )
+        assert report.resumed_from == 0  # the adoption is discarded regardless
+        assert any(r["event"] == "greeks_backfill.checkpoint_ignored" for r in logs)
+        assert any(r["event"] == "greeks_backfill.checkpoint_cleanup_failed" for r in logs)
+
+
+class TestCheckpointSupersededReason:
+    """Direct branch coverage of :func:`_checkpoint_superseded_reason` /
+    :func:`_marker_last_writer` (the arms the runner tests cannot reach
+    deterministically)."""
+
+    def test_unstattable_marker_is_a_refusal_reason(self, lake: Path) -> None:
+        """A non-ENOENT stat error (stray FILE at the sidecar dir → ENOTDIR)
+        refuses adoption — never a silent adopt on an unknown signal."""
+        (lake / CHECKPOINT_DIR_NAME).write_text("not a directory", encoding="utf-8")
+        reason = _checkpoint_superseded_reason(lake, backfill_id="x", recorded_at=time.time())
+        assert reason is not None and "cannot stat the overlay freshness marker" in reason
+
+    def test_unstattable_ledger_is_a_refusal_reason(self, lake: Path) -> None:
+        """The ledger twin: a stray FILE at ``window_ledger`` → ENOTDIR → refuse."""
+        (lake / "window_ledger").write_text("not a directory", encoding="utf-8")
+        reason = _checkpoint_superseded_reason(lake, backfill_id="x", recorded_at=time.time())
+        assert reason is not None and "cannot stat the window ledger" in reason
+
+    def test_no_signals_at_all_adopts(self, lake: Path) -> None:
+        assert _checkpoint_superseded_reason(lake, backfill_id="x", recorded_at=0.0) is None
+
+    def test_own_id_marker_alone_never_trips(self, lake: Path) -> None:
+        touch_greeks_revision_marker(
+            lake, fields={"backfill_id": "mine", "bars_written": 1}, failure_event="t"
+        )
+        assert _checkpoint_superseded_reason(lake, backfill_id="mine", recorded_at=0.0) is None
+
+    def test_foreign_marker_at_or_after_the_checkpoint_trips(self, lake: Path) -> None:
+        touch_greeks_revision_marker(
+            lake, fields={"backfill_id": "theirs", "bars_written": 1}, failure_event="t"
+        )
+        reason = _checkpoint_superseded_reason(lake, backfill_id="mine", recorded_at=0.0)
+        assert reason is not None and "'theirs'" in reason
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (json.dumps({"backfill_id": "abc123", "bars_written": 1}), "abc123"),
+            (json.dumps({"writer": "greeks_enrich_pass", "bars_written": 7}), "greeks_enrich_pass"),
+            (json.dumps({"backfill_id": "", "writer": "fallback"}), "fallback"),
+            (json.dumps({"backfill_id": 42}), "unknown"),  # non-string identity
+            (json.dumps({"writer": ""}), "unknown"),  # empty identity is no identity
+            (json.dumps({}), "unknown"),
+            ("[]", "unknown"),  # valid JSON, non-object
+            ("{not json", "unknown"),
+        ],
+    )
+    def test_marker_last_writer_identity_matrix(
+        self, lake: Path, payload: str, expected: str
+    ) -> None:
+        marker = revision_marker_path(lake)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(payload, encoding="utf-8")
+        assert _marker_last_writer(marker, size=marker.stat().st_size) == expected
+
+    def test_oversized_marker_reads_unknown_without_a_read(self, lake: Path) -> None:
+        """Beyond the small-JSON sanity cap the payload is never even read —
+        the conservative 'unknown' (foreign) identity, so a tampered giant
+        marker can only force a fresh start, never an adoption."""
+        marker = revision_marker_path(lake)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps({"backfill_id": "mine"}), encoding="utf-8")
+        assert _marker_last_writer(marker, size=(1 << 20) + 1) == "unknown"
+
+    def test_unreadable_marker_reads_unknown(self, lake: Path) -> None:
+        """A marker that vanishes between stat and read (OSError) is 'unknown'."""
+        marker = revision_marker_path(lake)  # never created — read raises
+        assert _marker_last_writer(marker, size=10) == "unknown"
 
 
 class TestDryRunReport:

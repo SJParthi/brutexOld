@@ -2205,7 +2205,15 @@ async function refreshVerdict() {
    COUNTS as a failure and can never settle the panel; a hidden tab fires
    ZERO fetches (document.hidden skip + visibilitychange catch-up); on page
    load gbAttachIfRunning() re-attaches to a live job with ONE probe, so a
-   re-opened page resumes the feed instead of a blank panel. textContent
+   re-opened page resumes the feed instead of a blank panel. Every gb fetch
+   (poll, start POST, attach probe) rides ONE gbFetchJson helper carrying the
+   sibling's FEED_FETCH_TIMEOUT_MS hung-fetch abort bound armed through the
+   BODY read, and the poll chain is generation-guarded (gbPollGen) so a
+   visibilitychange catch-up SUPERSEDES an in-flight chain instead of forking
+   it (fix round 10, refuter-confirmed: round 9 omitted both — a
+   headers-then-stalled-body response threw nothing, so the catch/backoff was
+   unreachable, nothing was scheduled, and the panel wedged at "running · …"
+   with the Run button disabled until a tab flip or a reload). textContent
    ONLY — never innerHTML (CodeQL XSS guard). */
 const GB_MS = 600;
 const GB_MAX_FEED_RETRIES = 5;   // quick-retry budget in FRONT of the backoff — NOT a give-up bound
@@ -2215,6 +2223,39 @@ const GB_HIDDEN_MS = 5000;       // hidden-tab re-check cadence (zero fetches wh
 let gbTimer = null;
 let gbFeedRetries = 0;
 let gbWatchActive = false;
+let gbPollGen = 0;               // re-entrancy generation: a superseded/stale response never repaints
+/* Hung-fetch abort bound for EVERY gb fetch (fix round 10, refuter-confirmed —
+   the sibling pollProgress's own refuter-confirmed bound, omitted by the
+   round-9 rewrite): browsers have NO body-read timeout, so a
+   headers-then-stalled-body response (or a half-open connection dying
+   silently mid-response) would wedge BOTH awaits forever with nothing
+   scheduled — the catch/backoff machinery unreachable, gbStatus frozen at
+   'running · …' and the Run button disabled until a tab flip or a reload.
+   The killer stays ARMED through the BODY read — cleared only in the
+   finally, after r.json() settles — so a stalled response becomes a counted
+   failure within FEED_FETCH_TIMEOUT_MS. ONE helper for all three gb call
+   sites (CLAUDE.md §11 COMMON — no third hand-rolled copy of the controller
+   boilerplate). Returns {ok, status, body}; a non-ok body is parsed
+   best-effort (null when unparseable) so the caller can surface the refusal
+   detail; a malformed OK body still THROWS to the caller — a malformed poll
+   must COUNT as a failure, never settle the panel. */
+async function gbFetchJson(url, opts) {
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;
+  const o = opts || {};
+  if (ctrl) o.signal = ctrl.signal;
+  try {
+    const r = await fetch(url, o);
+    if (!r.ok) {
+      let detail = null;
+      try { detail = await r.json(); } catch (e) { detail = null; }
+      return {ok: false, status: r.status, body: detail};
+    }
+    return {ok: true, status: r.status, body: await r.json()};
+  } finally {
+    if (killer) clearTimeout(killer);   // cleared only AFTER the body read settled — a stalled body aborts too
+  }
+}
 function gbStatus(text) {
   const el = document.getElementById('gbstatus');
   if (el) el.textContent = text;
@@ -2234,6 +2275,7 @@ function gbBeginWatch() {
 function gbFinish() {
   gbWatchActive = false;
   gbFeedRetries = 0;
+  gbPollGen += 1;   // invalidate any in-flight poll straggler (a settled panel never repaints stale)
   if (gbTimer) { clearTimeout(gbTimer); gbTimer = null; }
   const btn = document.getElementById('greeksBackfillBtn');
   if (btn) btn.disabled = false;
@@ -2244,11 +2286,13 @@ async function startGreeksBackfill() {
   if (btn) btn.disabled = true;
   gbStatus('Starting Greeks backfill…');
   try {
-    const r = await fetch('/api/v1/universe/greeks-backfill' + (dry ? '?dry_run=true' : ''),
-                          {method: 'POST'});
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
-    if (!body.started) {
+    // gbFetchJson (fix round 10): a wedged POST previously left 'Starting
+    // Greeks backfill…' + a disabled button forever — no exception, no timer.
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill' + (dry ? '?dry_run=true' : ''),
+                                  {method: 'POST'});
+    const body = res.body;
+    if (!res.ok) throw new Error((body && body.detail) || ('HTTP ' + res.status));
+    if (!body || !body.started) {
       // Refused (single-flight): the running writer may be THIS panel's own
       // backfill (a second click / another tab) — attach to its live feed
       // instead of a dead-end message; only a foreign lake writer (a pull
@@ -2268,6 +2312,10 @@ async function startGreeksBackfill() {
   }
 }
 async function pollGreeksBackfill() {
+  const gen = ++gbPollGen;   // every invocation claims the chain (re-entrancy guard, fix round 10):
+                             // a visibilitychange catch-up during an in-flight fetch SUPERSEDES the
+                             // old chain instead of forking a parallel one, and the superseded
+                             // chain's late response can never overwrite a newer status line.
   if (gbTimer) { clearTimeout(gbTimer); gbTimer = null; }
   if (!gbWatchActive) return;
   if (document.hidden) {
@@ -2277,9 +2325,10 @@ async function pollGreeksBackfill() {
     return;
   }
   try {
-    const r = await fetch('/api/v1/universe/greeks-backfill-progress');
-    if (!r.ok) throw new Error('HTTP ' + r.status);   // a non-ok poll never settles the panel
-    const s = await r.json();
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill-progress');
+    if (gen !== gbPollGen) return;                        // superseded — drop the stale response
+    if (!res.ok) throw new Error('HTTP ' + res.status);   // a non-ok poll never settles the panel
+    const s = res.body;
     if (!s || typeof s.state !== 'string') throw new Error('malformed progress payload');
     gbFeedRetries = 0;
     if (s.state === 'running') {
@@ -2296,6 +2345,7 @@ async function pollGreeksBackfill() {
     gbStatus((s.state === 'error' ? '✕ ' : '✓ ') + (s.detail || s.state));
     gbFinish();
   } catch (e) {
+    if (gen !== gbPollGen) return;   // superseded — a stale failure never repaints or reschedules
     // NEVER give up while the job may still be running: count the failure,
     // say so honestly, and keep retrying under the capped backoff.
     gbFeedRetries += 1;
@@ -2310,9 +2360,11 @@ async function pollGreeksBackfill() {
    page open or by a Run-click refusal attach). */
 async function gbAttachIfRunning() {
   try {
-    const r = await fetch('/api/v1/universe/greeks-backfill-progress');
-    if (!r.ok) return false;
-    const s = await r.json();
+    // gbFetchJson (fix round 10): a wedged probe is aborted + lands in the
+    // best-effort catch instead of hanging the attach path forever.
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill-progress');
+    if (!res.ok) return false;
+    const s = res.body;
     if (!s || s.state !== 'running') return false;
     gbStatus('running · attaching to the live progress feed…');
     gbBeginWatch();

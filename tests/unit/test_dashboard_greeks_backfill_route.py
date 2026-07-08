@@ -518,8 +518,10 @@ class TestFrontend:
         assert "gbTimer = setTimeout(pollGreeksBackfill, gbRetryDelayMs());" in block
         assert "— retrying" in block
         # Every failure mode counts (the DEC-PULL-UI-STALENESS-001 rule): a
-        # non-ok or malformed-body poll can never settle the panel as done.
-        assert "throw new Error('HTTP ' + r.status);" in block
+        # non-ok or malformed-body poll can never settle the panel as done
+        # (round 10 moved the fetch behind gbFetchJson — the poll now throws
+        # off the helper's {ok, status} envelope, same teeth).
+        assert "throw new Error('HTTP ' + res.status);" in block
         assert "malformed progress payload" in block
         # The button comes back ONLY on an observed terminal state (gbFinish).
         assert "function gbFinish()" in block
@@ -548,3 +550,64 @@ class TestFrontend:
         assert "gbTimer = setTimeout(pollGreeksBackfill, GB_HIDDEN_MS);" in block
         assert "document.addEventListener('visibilitychange'" in block
         assert "if (!document.hidden && gbWatchActive) pollGreeksBackfill();" in block
+
+    def test_backfill_fetches_carry_the_hung_fetch_abort_bound(self) -> None:
+        """REGRESSION (fix round 10, refuter-confirmed): the round-9 rewrite
+        omitted the sibling pollProgress's own refuter-confirmed hung-fetch
+        abort bound — a headers-then-stalled-body response (browsers have NO
+        body-read timeout) threw nothing, so the catch/backoff machinery was
+        UNREACHABLE, nothing was scheduled, gbStatus froze at 'running · …'
+        and the Run button stayed disabled until a tab flip or a reload — the
+        exact no-exception wedge the sibling's bound closed. Every gb fetch
+        (poll, start POST, attach probe) now rides ONE gbFetchJson helper
+        arming FEED_FETCH_TIMEOUT_MS through the BODY read (killer cleared
+        only in the finally, after r.json() settles). Substring-presence pins
+        (no headless JS runner), mirroring the sibling's pins.
+        """
+        block = self._gb_block()
+        helper = block[block.index("async function gbFetchJson") : block.index("function gbStatus")]
+        # The abort bound — controller, killer, and the signal wire (the teeth).
+        assert (
+            "const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;"
+            in helper
+        )
+        assert (
+            "const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;"
+            in helper
+        )
+        assert "if (ctrl) o.signal = ctrl.signal;" in helper
+        # The killer is cleared ONLY in the finally — after the body read
+        # settles — so a stalled BODY aborts too; exactly ONE clear site.
+        assert "} finally {" in helper
+        assert helper.count("clearTimeout(killer)") == 1
+        assert helper.index("await r.json()") < helper.index("} finally {")
+        # A malformed OK body still THROWS to the caller — it must COUNT as a
+        # failure on the backoff path, never settle the panel.
+        assert "return {ok: true, status: r.status, body: await r.json()};" in helper
+        # NO gb call site fetches bare any more: the ONE raw fetch lives in
+        # the helper — poll, start POST, and attach probe all ride it.
+        assert block.count("await fetch(") == 1
+        assert "await fetch('/api/v1/universe/greeks-backfill-progress')" not in block
+        assert "await fetch('/api/v1/universe/greeks-backfill'" not in block
+        assert block.count("await gbFetchJson(") == 3  # poll + start POST + attach probe
+
+    def test_backfill_poll_generation_guard_supersedes_stale_chains(self) -> None:
+        """REGRESSION (fix round 10): the gb poll chain is generation-guarded.
+
+        Without it every visibilitychange catch-up during an in-flight fetch
+        FORKED a parallel 600 ms poll chain (N tab flips → N+1 concurrent
+        chains until terminal) and a stale chain's late response could
+        overwrite a newer status line — the exact class the sibling's
+        ``pollGen`` drops. gbFinish invalidates in-flight stragglers (the
+        finishLive pattern) so a settled panel never repaints stale.
+        """
+        block = self._gb_block()
+        assert "let gbPollGen = 0;" in block
+        assert "const gen = ++gbPollGen;" in block
+        # Both drop sites: the success path AND the catch (a superseded
+        # failure must neither repaint nor reschedule).
+        assert block.count("if (gen !== gbPollGen) return;") == 2
+        fin = block[
+            block.index("function gbFinish()") : block.index("async function startGreeksBackfill")
+        ]
+        assert "gbPollGen += 1;" in fin
