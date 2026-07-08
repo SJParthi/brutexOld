@@ -734,7 +734,10 @@ def test_wedged_registry_in_phase_a_defers_candle_phase_never_crashes(
         proxy.gate.set()
     # RE-ATTEMPT ON THE NEXT PULL: the volume heals (the zombie's idempotent write
     # completes, the wedge latch self-clears) and the SAME selection runs WHOLE —
-    # metadata re-pulled, candles pulled.
+    # metadata re-pulled, candles pulled. Restore the generous default deadline
+    # first — the 0.2 s wedge deadline was for pull 1 ONLY; a loaded CI runner
+    # must never spuriously defer the healed re-pull.
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
     deadline_at = time.monotonic() + 10.0
     while registry._write_guard.wedged:
         if time.monotonic() > deadline_at:  # pragma: no cover - only on a real hang

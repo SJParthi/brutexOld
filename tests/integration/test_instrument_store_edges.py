@@ -1145,6 +1145,10 @@ class TestCoverageWriteDeadline:
             # store resumes — prior row intact, deferred row present, reads work
             # (incl. the store-wide wrapper check self-healing off the latch).
             _wait_until_healed(s)
+            # Restore the generous default deadline — the 0.2 s wedge deadline was
+            # for the breach ONLY; a loaded CI runner must never spuriously defer
+            # the post-heal write.
+            monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
             assert s.get_meta("schema_version") == str(SCHEMA_VERSION)
             assert s.schema_version == SCHEMA_VERSION
             # The split read view self-heals off the same latch (fix round 4).

@@ -1757,7 +1757,10 @@ def test_phase1_expiry_write_defer_completes_pull_and_defers_cell(
     finally:
         proxy.gate.set()
     # RE-ATTEMPT ON THE NEXT PULL (the #999 recovery pin): the volume heals, the
-    # failed cell is re-pulled, and everything lands + settles.
+    # failed cell is re-pulled, and everything lands + settles. Restore the
+    # generous default deadline first — the 0.2 s wedge deadline was for pull 1
+    # ONLY; a loaded CI runner must never spuriously defer the healed re-pull.
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
     _wait_registry_healed(registry)
     report2 = pull_expiries_contracts(
         [_instrument("NIFTY")],
@@ -1828,6 +1831,9 @@ def test_phase2_contract_write_defer_fails_job_latches_sibling_and_repulls(
         proxy.gate.set()
     # RE-ATTEMPT: the healed registry re-pulls the un-persisted job (the breached
     # job's zombie batch landed late + idempotently — harmless by construction).
+    # Restore the generous default deadline first — the 0.2 s wedge deadline was
+    # for pull 1 ONLY; a loaded CI runner must never spuriously defer the re-pull.
+    monkeypatch.setenv("BRUTEX_REGISTRY_WRITE_DEADLINE_S", "90")
     _wait_registry_healed(registry)
     report2 = pull_expiries_contracts(
         [_instrument("NIFTY")],
