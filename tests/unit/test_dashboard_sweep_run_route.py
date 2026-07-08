@@ -263,8 +263,30 @@ def test_second_click_while_running_is_a_noop(
 # ── page wiring ───────────────────────────────────────────────────────────────
 
 
-def test_reports_page_carries_sweep_button(client: TestClient) -> None:
+def test_reports_page_no_longer_carries_sweep_controls(client: TestClient) -> None:
+    """R1/R25: the light sweep control was RETIRED from /reports, replace-not-add.
+
+    reports.html reverts to the pre-open report ONLY — no Run Sweep, no
+    cascade button, no stale "52-condition" copy (the DEC-INSTITUTIONAL-
+    ONECLICK-001 R1 requirement; see test_dashboard_reports_sweep_removed.py
+    for the full regression suite).
+    """
     resp = client.get("/reports")
+    assert resp.status_code == 200
+    assert 'id="run-sweep"' not in resp.text
+    assert 'id="run-cascade"' not in resp.text
+    assert 'id="swSymbols"' not in resp.text
+    assert "/api/v1/sweep/run?" not in resp.text
+    assert "52-condition" not in resp.text
+
+
+def test_operator_page_carries_the_one_canonical_sweep_button(client: TestClient) -> None:
+    """R1/R25: the ONE canonical "Run Sweep" button now lives on the Operator page (/).
+
+    Launches through the SAME existing ``POST /api/v1/sweep/run`` this whole
+    test module exercises — only its home moved.
+    """
+    resp = client.get("/")
     assert resp.status_code == 200
     assert "/api/v1/sweep/run" in resp.text
     assert 'id="run-sweep"' in resp.text

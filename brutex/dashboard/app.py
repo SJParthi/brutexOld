@@ -166,6 +166,14 @@ from brutex.dashboard.movers_warm import (
     warm_coordinate_label,
     warm_movers_snapshots,
 )
+from brutex.dashboard.oneclick_artifacts import (
+    iter_timeline,
+    list_runs,
+    preflight_estimate,
+    read_estimator_calibration,
+    read_run_status,
+    read_top100,
+)
 from brutex.dashboard.pipeline_prebuild import (
     PrebuildOutcome,
     PrebuildTarget,
@@ -5890,6 +5898,171 @@ def build_app(
             )
 
         return JSONResponse(await run_in_threadpool(_resolve))
+
+    # ── One-click institutional sweep — P4 adapter routes ─────────────────
+    # DEC-INSTITUTIONAL-ONECLICK-001 (prompt #30). Every route below is a
+    # THIN closure over exactly one brutex.dashboard.oneclick_artifacts
+    # reader — NO artifact I/O happens here (sweep-parallel-integration-
+    # contracts: P4's ZONE is display, the ONE adapter module owns reads).
+    # READ-ONLY: none of these routes ever raise on "no run has ever
+    # launched" / "P1-P2-P3 backend not yet merged" — every reader returns
+    # an honest ``awaiting_artifact`` (or ``artifact_error`` for a present-
+    # but-corrupt file) envelope instead (the ADAPTER ROOT RESOLUTION LAW),
+    # so these routes only ever raise HTTP 400 for a malformed ``run_id``
+    # (path-traversal defence — ``validate_run_id``) or the standard 503
+    # "no store wired" from ``_require_store``. Existing sweep/run,
+    # sweep-progress, cascade/run, and leaderboard routes above are
+    # UNTOUCHED (hard zone boundary — Ruling 10 / sweep_results_view.py
+    # stays P3-exclusive).
+
+    def _oneclick_lake_root() -> Path:
+        """Resolve the lake root the one-click adapter reads beneath.
+
+        Mirrors the ``GET /api/v1/db/candles`` pattern (``store.path.parent``
+        — the adapter appends ``sweep_runs`` itself, Ruling 4). These are
+        READ-ONLY routes: when no lake is wired yet, a sentinel nonexistent
+        path is returned (never a 400) so every adapter reader degrades to
+        its own honest ``awaiting_artifact`` state — mirroring
+        ``/api/v1/sweep/leaderboard``'s "no lake root wired" honest-empty
+        behaviour above. ``$BRUTEX_ONECLICK_FIXTURE_ROOT`` (test/dev
+        override) bypasses this path entirely inside the adapter's own
+        ``sweep_runs_root()``.
+        """
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if isinstance(store_path, Path):
+            return store_path.parent
+        return Path("/nonexistent-lake-oneclick")
+
+    @app.get("/api/v1/sweep/runs")
+    async def api_sweep_runs(
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/runs — newest-first run picker + run-history (O-o).
+
+        Thin wrapper over :func:`~brutex.dashboard.oneclick_artifacts.list_runs`.
+        Explicitly NOT on any poll timer (the caller is the Operator page's
+        run-picker refresh only) — honestly O(number of run directories)
+        capped by *limit*, never claimed O(1).
+        """
+        lake_root = _oneclick_lake_root()
+        payload = await run_in_threadpool(list_runs, lake_root, limit=limit)
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/run-status")
+    async def api_sweep_run_status(
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/run-status — the ONE bundled live-progress poll target.
+
+        Chain-map + exit-status + manifest/funnel for *run_id* (defaulting to
+        the most recent run) in a single fetch — backs the R41 chain map, the
+        R43 run-identity strip, the R28 funnel table, and the R39/R42 suspect
+        banner. Thin wrapper over
+        :func:`~brutex.dashboard.oneclick_artifacts.read_run_status`. A
+        malformed *run_id* (path-traversal attempt) is HTTP 400, never a 500.
+        """
+        lake_root = _oneclick_lake_root()
+        try:
+            payload = await run_in_threadpool(read_run_status, lake_root, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/preflight-estimate")
+    async def api_sweep_preflight_estimate(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: int | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/preflight-estimate — the R20/R4 proceed-dialog preview.
+
+        "This selection = X trials, est. Y, Z GB — proceed?" — thin wrapper
+        over :func:`~brutex.dashboard.oneclick_artifacts.preflight_estimate`.
+        Comma-separated *symbols*/*intervals*/*directions* are normalised into
+        the coarse-match selection dict the fixture matcher reads; honestly
+        ``awaiting_artifact`` in production (P1's estimator has not merged) —
+        NEVER a fabricated number.
+        """
+        lake_root = _oneclick_lake_root()
+        selection: dict[str, Any] = {}
+        if symbols:
+            selection["symbols"] = [s.strip() for s in symbols.split(",") if s.strip()]
+        if intervals:
+            selection["intervals"] = [s.strip() for s in intervals.split(",") if s.strip()]
+        if directions:
+            selection["directions"] = [s.strip() for s in directions.split(",") if s.strip()]
+        if k is not None:
+            selection["k"] = k
+        payload = await run_in_threadpool(preflight_estimate, lake_root, selection)
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/estimator-calibration")
+    async def api_sweep_estimator_calibration() -> JSONResponse:
+        """GET /api/v1/sweep/estimator-calibration — the PROVISIONAL-vs-calibrated badge (R23).
+
+        Thin wrapper over
+        :func:`~brutex.dashboard.oneclick_artifacts.read_estimator_calibration`.
+        """
+        lake_root = _oneclick_lake_root()
+        payload = await run_in_threadpool(read_estimator_calibration, lake_root)
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/timeline")
+    async def api_sweep_timeline(
+        run_id: str | None = Query(default=None),
+        after_seq: int = Query(default=0, ge=0),
+        kind: str | None = Query(default=None),
+        q: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=2000),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/timeline — the scrolling, searchable RUN TIMELINE (R41).
+
+        Thin wrapper over
+        :func:`~brutex.dashboard.oneclick_artifacts.iter_timeline`: a cheap
+        bounded cursor tail by default (*after_seq*/*kind*), or a documented
+        bounded-not-O(1) text search when *q* is supplied — the UI is
+        required to invoke *q* only from an explicit search action, never
+        the auto-refresh poll timer (the response's ``bounded_scan`` flag
+        makes the distinction visible). A malformed *run_id* is HTTP 400.
+        """
+        lake_root = _oneclick_lake_root()
+        try:
+            payload = await run_in_threadpool(
+                iter_timeline,
+                lake_root,
+                run_id,
+                after_seq=after_seq,
+                kind=kind,
+                q=q,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/sweep/top100")
+    async def api_sweep_top100(
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/sweep/top100 — the global cross-bucket Best-of-Best leaderboard (R21/R26).
+
+        Family-deduped + fully decoded (dual Simple/Pro sentences attached
+        server-side via :mod:`brutex.dashboard.combo_decoder`, reused
+        verbatim). Thin wrapper over
+        :func:`~brutex.dashboard.oneclick_artifacts.read_top100`. Distinct
+        from — and never touches — the P3-exclusive
+        ``GET /api/v1/sweep/leaderboard`` above (Ruling 10): this route reads
+        the P3 ``top100.json`` artifact via the P4 adapter, not
+        ``sweep_results_view.py``. A malformed *run_id* is HTTP 400.
+        """
+        lake_root = _oneclick_lake_root()
+        try:
+            payload = await run_in_threadpool(read_top100, lake_root, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
 
     @app.get("/api/v1/logs")
     async def api_logs(

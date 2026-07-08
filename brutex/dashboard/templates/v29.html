@@ -2207,6 +2207,94 @@
      back in. The hidden-tab pause rides BXUI.initVisibilityPause()'s
      .bx-paused rule in bx-design.css. */
   .bx-anim-off, .bx-anim-off *, .bx-anim-off *::before, .bx-anim-off *::after { animation-play-state: paused !important; }
+
+  /* ══ RUN CONTROL + LIVE CHAIN MAP + RUN TIMELINE (DEC-INSTITUTIONAL-ONECLICK-001, P4 stage 2) ══
+     R1/R25: the canonical "Run Sweep" button lives HERE now (retired from
+     /reports). Reuses the .bx-card / .bx-btn / .bx-chip tokens from
+     bx-design.css so this reads as ONE system with the heartbeat strip
+     above, not a bolted-on widget. */
+  #runControlSection, #runStatusSection, #timelineSection, #milestonesSection {
+    display: block; margin: 14px var(--gutter) 0;
+  }
+  .rc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .rc-head h2 { margin: 0; font-size: 15px; color: var(--text-bright); display: flex; align-items: center; gap: 8px; }
+  .rc-lede { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin: 4px 0 14px; }
+  .rc-note { font-weight: 400; color: var(--muted); font-size: 11px; }
+  .rc-row { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+  .rc-row label { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .rc-row input[type=text], .rc-row input[type=date] {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: var(--r-md); padding: 8px 11px; font-size: 13px; min-width: 160px;
+  }
+  #rsRunPicker {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: var(--r-md); padding: 6px 10px; font-size: 12px; max-width: 340px;
+  }
+  .rc-banner {
+    display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 9px 13px;
+    border-radius: var(--r-sm); font-size: 12px; line-height: 1.5;
+  }
+  .rc-banner-amber { border: 1px solid rgba(255,183,77,.35); background: linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03)); color: var(--text); }
+  .rc-banner-red { border: 1px solid rgba(255,92,92,.4); background: linear-gradient(90deg, rgba(255,92,92,.14), rgba(255,92,92,.04)); color: var(--text); font-weight: 600; }
+  .rc-banner-red::before { content: "⚠ SUSPECT — "; color: var(--red); font-weight: 800; }
+  .rc-banner a { color: var(--blue); }
+  #rc-msg { font-size: 12.5px; color: var(--yellow); margin-top: 10px; min-height: 16px; }
+  .rc-progress-bar { margin-top: 10px; height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+  .rc-progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--green), var(--blue)); transition: width .4s var(--ease); }
+
+  /* Proceed dialog (R20) — the "X trials, est Y, Z GB — proceed?" gate. */
+  .rc-dialog { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; background: rgba(6,8,12,.62); backdrop-filter: blur(3px); }
+  .rc-dialog-inner { width: min(560px, calc(100vw - 40px)); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-lg); padding: 22px 24px; box-shadow: var(--elev-2); }
+  .rc-dialog-inner h3 { margin: 0 0 12px; color: var(--text-bright); font-size: 15px; }
+  .rc-dialog-body-line { font-size: 13px; color: var(--text); margin: 5px 0; display: flex; justify-content: space-between; gap: 10px; }
+  .rc-dialog-body-line span:last-child { color: var(--text-bright); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rc-refusal { border: 1px solid rgba(255,92,92,.4); background: rgba(255,92,92,.08); border-radius: var(--r-sm); padding: 8px 11px; margin-top: 8px; font-size: 12px; }
+  .rc-refusal .head { color: var(--red); font-weight: 700; }
+  .rc-clamp { border: 1px solid rgba(255,183,77,.35); background: rgba(255,183,77,.08); border-radius: var(--r-sm); padding: 7px 10px; margin-top: 6px; font-size: 12px; color: var(--text); }
+  .rc-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
+  /* Chain map links + funnel table + run-identity line. */
+  .rc-idline { font-size: 11.5px; color: var(--muted); font-family: ui-monospace, monospace; margin: 4px 0 12px; }
+  .cm-links { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .cm-link { display: flex; flex-direction: column; gap: 3px; min-width: 108px; }
+  .cm-link .cm-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; }
+  .cm-funnel { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  .cm-funnel th, .cm-funnel td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+  .cm-funnel th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
+  .cm-funnel td { color: var(--text); font-variant-numeric: tabular-nums; }
+  .cm-funnel td.dim { color: var(--muted); font-style: italic; }
+  .cm-section-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 16px 0 6px; font-weight: 700; }
+  .rc-topcombos { margin-top: 14px; }
+  .rc-topcombo-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .rc-topcombo-row .rank { color: var(--purple); font-weight: 800; min-width: 28px; }
+  .rc-topcombo-row .sentence { color: var(--text); flex: 1; }
+  .rc-topcombo-row .meta { color: var(--muted); font-size: 11px; }
+  .rc-empty { color: var(--muted); font-size: 12.5px; padding: 10px 0; }
+
+  /* Run timeline. */
+  .tl-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tl-controls input[type=text] {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong);
+    border-radius: var(--r-md); padding: 7px 11px; font-size: 12.5px; min-width: 220px;
+  }
+  .tl-list { margin-top: 12px; max-height: 340px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-sm); }
+  .tl-row { display: flex; gap: 10px; padding: 6px 12px; font-size: 11.5px; border-bottom: 1px solid var(--border); align-items: baseline; }
+  .tl-row:last-child { border-bottom: none; }
+  .tl-row .ts { color: var(--muted); font-family: ui-monospace, monospace; flex: 0 0 150px; }
+  .tl-row .kind { flex: 0 0 120px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; font-size: 10.5px; }
+  .tl-row .kind.k-tuple { color: var(--blue); }
+  .tl-row .kind.k-stage { color: var(--purple); }
+  .tl-row .kind.k-milestone { color: var(--green); }
+  .tl-row .kind.k-tripwire, .tl-row .kind.k-suspect, .tl-row .kind.k-quarantine, .tl-row .kind.k-refusal { color: var(--red); }
+  .tl-row .kind.k-unreadable { color: var(--yellow); }
+  .tl-row .payload { flex: 1; color: var(--text); word-break: break-word; }
+
+  /* Telegram-milestone mirror (display-only; no real Telegram call is made). */
+  .ms-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .ms-row { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12.5px; }
+  .ms-row .ico { font-size: 14px; flex: 0 0 auto; }
+  .ms-row .ts { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; flex: 0 0 150px; }
+  .ms-row .text { color: var(--text); flex: 1; }
 </style>
 <!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, skeleton
      shimmer, honest .bx-state states, .bx-live-dot, .bx-wrap fluid layout.
@@ -2350,6 +2438,90 @@
   <span class="pr-mark">PREVIEW</span>
   <span class="pr-text">The report below shows mockup numbers until Phase-3 wires update_sweep_funnel() — only the sweep-funnel fields (data-bind) and the sweep-progress strip are live. Real pipeline state is in the heartbeat above.</span>
 </div>
+
+<!-- ══ RUN CONTROL (R1/R2/R25) — the ONE canonical Run Sweep button ══
+     Retired from /reports (R1). Launches through the EXISTING, unchanged
+     POST /api/v1/sweep/run + GET /api/v1/sweep-progress; the R20 proceed
+     dialog reads the NEW GET /api/v1/sweep/preflight-estimate +
+     /estimator-calibration routes (DEC-INSTITUTIONAL-ONECLICK-001, P4). -->
+<section class="bx-card rc-card show-operator-only" id="runControlSection" aria-label="Run control">
+  <div class="rc-head">
+    <h2>🚀 Run Sweep</h2>
+    <span class="bx-chip muted" id="rcEstimateBasisBadge" hidden></span>
+  </div>
+  <p class="rc-lede">
+    The one-click institutional brute-force sweep — replaces the retired <code>/reports</code>
+    light control. Leave the boxes blank for the sensible defaults
+    (<code>NIFTY,BANKNIFTY</code> · <code>1minute,5minute,15minute</code> · 2020-01-01 → today).
+    SENSEX is BSE-listed — run it separately with exchange <code>BSE</code>.
+  </p>
+  <div class="rc-row">
+    <label>SYMBOLS<input id="swSymbols" type="text" placeholder="NIFTY,BANKNIFTY"></label>
+    <label>TIMEFRAMES<input id="swIntervals" type="text" placeholder="1minute,5minute,15minute"></label>
+    <label>FROM<input id="swStart" type="date" value="2020-01-01"></label>
+    <label>TO<input id="swEnd" type="date"></label>
+    <button class="bx-btn bx-btn-primary" id="run-sweep">🚀 Run Sweep</button>
+    <button class="bx-btn" id="rcCascadeBtn" title="Re-runs the nine-filter statistical cascade on the most recent sweep's winners — the /reports 🪜 button, moved here.">🪜 Re-run cascade only</button>
+  </div>
+  <div class="rc-banner rc-banner-amber" role="note">
+    ⚠ <span>No live data-coverage preflight gate is active yet — P1's estimator/preflight backend has not
+    merged (sweep-parallel-integration-contracts). This launch runs straight through the existing sweep
+    engine with <b>no hard R4 refusal check</b>. Verify data coverage on <a href="/coverage">Coverage</a>
+    before a long run.</span>
+  </div>
+  <div id="rc-msg"></div>
+  <div class="rc-progress-bar" id="rcBar" hidden><div class="rc-progress-fill" id="rcBarFill"></div></div>
+
+  <!-- R20 proceed dialog: "X trials, est Y, Z GB — proceed?" -->
+  <div class="rc-dialog" id="rcProceedDialog" hidden role="dialog" aria-modal="true" aria-label="Confirm sweep launch">
+    <div class="rc-dialog-inner">
+      <h3 id="rcProceedTitle">Confirm sweep launch</h3>
+      <div id="rcProceedBody"></div>
+      <div class="rc-dialog-actions">
+        <button class="bx-btn" id="rcProceedCancel">Cancel</button>
+        <button class="bx-btn bx-btn-primary" id="rcProceedGo">Proceed</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ LIVE RUN STATUS (R28/R39/R41/R42/R43) — chain map + funnel + suspect banner ══
+     ONE bundled poll (GET /api/v1/sweep/run-status) — chain-map + exit-status
+     + manifest in a single fetch, per the O(1) minimal-poll bias. -->
+<section class="bx-card show-operator-only" id="runStatusSection" aria-label="Live run status">
+  <div class="rc-head">
+    <h2>Run status</h2>
+    <select id="rsRunPicker" aria-label="Pick a run"><option value="">(latest)</option></select>
+  </div>
+  <div class="rc-idline" id="rsIdLine">no sweep run has ever launched</div>
+  <div class="rc-banner rc-banner-red" id="rsSuspectBanner" hidden></div>
+  <div class="cm-links" id="cmLinks"></div>
+  <div class="cm-section-label" id="cmFunnelLabel" hidden>Funnel · per-stage counts</div>
+  <table class="cm-funnel" id="cmFunnelTable" hidden><tbody></tbody></table>
+  <div class="cm-section-label" id="cmDoorsLabel" hidden>Per-door kills</div>
+  <table class="cm-funnel" id="cmDoorsTable" hidden><tbody></tbody></table>
+  <div class="cm-section-label" id="rcTopCombosLabel" hidden>Top combos so far (live)</div>
+  <div class="rc-topcombos" id="rcTopCombos"></div>
+</section>
+
+<!-- ══ RUN TIMELINE (R41) — scrolling, searchable flight-recorder tail ══ -->
+<section class="bx-card show-operator-only" id="timelineSection" aria-label="Run timeline">
+  <div class="rc-head">
+    <h2>Run timeline</h2>
+    <div class="tl-controls">
+      <input id="tlSearch" type="text" placeholder="search timeline…" aria-label="Search timeline">
+      <button class="bx-btn" id="tlSearchBtn">Search</button>
+      <button class="bx-btn ghost" id="tlLiveBtn">⏱ back to live tail</button>
+    </div>
+  </div>
+  <div class="tl-list" id="tlList"></div>
+</section>
+
+<!-- ══ TELEGRAM-MILESTONE MIRROR (R41) — display-only, no real Telegram call ══ -->
+<section class="bx-card show-operator-only" id="milestonesSection" aria-label="Milestones">
+  <h2>📣 Milestones <span class="rc-note">(mirrors what a Telegram alert would say — this page never sends one)</span></h2>
+  <ul class="ms-list" id="milestoneList"></ul>
+</section>
 
 <header>
   <div class="picker">
@@ -4385,6 +4557,688 @@
       });
     }
   });
+</script>
+
+<script>
+// ══ RUN CONTROL + LIVE CHAIN MAP + RUN TIMELINE + MILESTONE MIRROR ══
+// (DEC-INSTITUTIONAL-ONECLICK-001, P4 stage 2). Reads the NEW adapter-backed
+// GET /api/v1/sweep/{runs,run-status,preflight-estimate,estimator-calibration,
+// timeline,top100} routes; launches through the EXISTING, UNCHANGED
+// POST /api/v1/sweep/run + POST /api/v1/cascade/run + GET /api/v1/sweep-progress.
+// XSS hard rule: every server-derived string below reaches the DOM via
+// textContent / createElement ONLY — never innerHTML (see
+// tests/unit/test_dashboard_v29_oneclick_xss.py).
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---------- shared formatting helpers ----------
+  function fmtInt(n) {
+    if (n === null || n === undefined) return '—';
+    var num = Number(n);
+    return isFinite(num) ? num.toLocaleString('en-IN') : '—';
+  }
+  function fmtEstSeconds(s) {
+    if (s === null || s === undefined) return '—';
+    var n = Math.max(0, Math.round(s));
+    if (n < 60) return n + 's';
+    if (n < 3600) return Math.floor(n / 60) + 'm ' + (n % 60) + 's';
+    return (n / 3600).toFixed(1) + 'h';
+  }
+  function fmtBytes(n) {
+    if (n === null || n === undefined) return '—';
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+  function doorLabel(key) {
+    return String(key).split('_').map(function (w) {
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    }).join(' ');
+  }
+  function safeJson(v) {
+    try { return JSON.stringify(v); } catch (e) { return String(v); }
+  }
+  function clearChildren(el) {
+    if (!el) return;
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  // ---------- run-scoped state ----------
+  var currentRunId = null;   // null = "(latest)" — follows the newest run
+  var tlCursor = 0;
+  var tlSearchMode = false;
+  var msCursor = 0;
+
+  function resetRunScopedCursors() {
+    tlCursor = 0;
+    msCursor = 0;
+    tlSearchMode = false;
+    clearChildren($('tlList'));
+    clearChildren($('milestoneList'));
+    var tlSearchInput = $('tlSearch');
+    if (tlSearchInput) tlSearchInput.value = '';
+  }
+
+  // ── Run picker (O-o keep-old-runs) — its OWN refresh only, never the
+  // steady chain-map/exit-status poll loop (list_runs is honestly
+  // O(number of run directories), not O(1)). ──
+  async function loadRunPicker() {
+    var sel = $('rsRunPicker');
+    if (!sel) return;
+    try {
+      var r = await fetch('/api/v1/sweep/runs?limit=50');
+      if (!r.ok) return;
+      var j = await r.json();
+      var prev = sel.value;
+      clearChildren(sel);
+      var latestOpt = document.createElement('option');
+      latestOpt.value = '';
+      latestOpt.textContent = '(latest)';
+      sel.appendChild(latestOpt);
+      (j.runs || []).forEach(function (run) {
+        var opt = document.createElement('option');
+        opt.value = String(run.run_id);
+        opt.textContent = String(run.run_id) + ' — ' + String(run.state || 'unknown') +
+          (run.is_demo ? ' [DEMO]' : '') + (run.suspect ? ' ⚠SUSPECT' : '');
+        sel.appendChild(opt);
+      });
+      var stillPresent = Array.prototype.some.call(sel.options, function (o) { return o.value === prev; });
+      if (stillPresent) sel.value = prev;
+    } catch (e) { /* network blip; next refresh retries */ }
+  }
+  var rsRunPickerEl = $('rsRunPicker');
+  if (rsRunPickerEl) {
+    rsRunPickerEl.onchange = function () {
+      currentRunId = rsRunPickerEl.value || null;
+      resetRunScopedCursors();
+      pollRunStatus();
+      loadTopCombosPreview();
+      loadTimelinePage(true);
+      loadMilestonesPage(true);
+    };
+  }
+
+  // ── Chain map + funnel + suspect banner + run-identity strip ──
+  var CM_LINK_ORDER = ['preflight', 'sweep', 'stage3', 'cascade', 'artifacts'];
+  var CM_STATE_CLASS = { pending: 'muted', running: 'info', green: 'ok', amber: 'warn', red: 'bad' };
+
+  function renderChainLinks(links) {
+    var wrap = $('cmLinks');
+    if (!wrap) return;
+    clearChildren(wrap);
+    CM_LINK_ORDER.forEach(function (key) {
+      var entry = (links && links[key]) || null;
+      var state = entry ? String(entry.state || 'pending') : 'pending';
+      var detail = entry ? String(entry.detail || '') : 'not started';
+      var col = document.createElement('div');
+      col.className = 'cm-link';
+      var lab = document.createElement('span');
+      lab.className = 'cm-label';
+      lab.textContent = key;
+      var chip = document.createElement('span');
+      chip.className = 'bx-chip ' + (CM_STATE_CLASS[state] || 'muted');
+      chip.textContent = state;
+      chip.title = detail;
+      col.appendChild(lab);
+      col.appendChild(chip);
+      wrap.appendChild(col);
+    });
+  }
+
+  function renderFunnelTable(manifest) {
+    var table = $('cmFunnelTable');
+    var label = $('cmFunnelLabel');
+    if (!table || !label) return;
+    var body = table.querySelector('tbody');
+    clearChildren(body);
+    var funnel = (manifest && manifest.actual && Array.isArray(manifest.actual.funnel))
+      ? manifest.actual.funnel : [];
+    if (funnel.length === 0) { table.hidden = true; label.hidden = true; return; }
+    label.hidden = false; table.hidden = false;
+    var head = document.createElement('tr');
+    ['Stage', 'Count'].forEach(function (h) {
+      var th = document.createElement('th');
+      th.textContent = h;
+      head.appendChild(th);
+    });
+    body.appendChild(head);
+    funnel.forEach(function (row) {
+      var tr = document.createElement('tr');
+      var tdStage = document.createElement('td');
+      tdStage.textContent = String((row && row.stage) || '');
+      var tdCount = document.createElement('td');
+      tdCount.textContent = fmtInt(row && row.count);
+      tr.appendChild(tdStage);
+      tr.appendChild(tdCount);
+      body.appendChild(tr);
+    });
+  }
+
+  function renderDoorsTable(manifest) {
+    var table = $('cmDoorsTable');
+    var label = $('cmDoorsLabel');
+    if (!table || !label) return;
+    var body = table.querySelector('tbody');
+    clearChildren(body);
+    var doors = (manifest && manifest.per_door_kills_by_name) || null;
+    var keys = doors ? Object.keys(doors) : [];
+    if (keys.length === 0) { table.hidden = true; label.hidden = true; return; }
+    label.hidden = false; table.hidden = false;
+    var head = document.createElement('tr');
+    ['Door', 'Killed'].forEach(function (h) {
+      var th = document.createElement('th');
+      th.textContent = h;
+      head.appendChild(th);
+    });
+    body.appendChild(head);
+    keys.forEach(function (key) {
+      var d = doors[key];
+      var tr = document.createElement('tr');
+      var tdName = document.createElement('td');
+      tdName.textContent = doorLabel(key);
+      var tdKilled = document.createElement('td');
+      if (d && d.observed) {
+        tdKilled.textContent = fmtInt(d.killed);
+      } else {
+        tdKilled.textContent = 'not yet observed';
+        tdKilled.className = 'dim';
+      }
+      tr.appendChild(tdName);
+      tr.appendChild(tdKilled);
+      body.appendChild(tr);
+    });
+  }
+
+  function renderSuspectBanner(chainMap, exitStatus, manifest) {
+    var el = $('rsSuspectBanner');
+    if (!el) return;
+    var suspect = !!((chainMap && chainMap.suspect) || (exitStatus && exitStatus.suspect) ||
+      (manifest && manifest.suspect));
+    if (!suspect) { el.hidden = true; clearChildren(el); return; }
+    el.hidden = false;
+    clearChildren(el);
+    var reasons = (manifest && Array.isArray(manifest.suspect_reasons) && manifest.suspect_reasons.length)
+      ? manifest.suspect_reasons.map(String).join('; ')
+      : 'a live tripwire fired during this run — review before trusting its results';
+    el.textContent = reasons;
+  }
+
+  function renderIdLine(runId, exitStatus) {
+    var el = $('rsIdLine');
+    if (!el) return;
+    if (!runId) { el.textContent = 'no sweep run has ever launched'; return; }
+    var ok = exitStatus && exitStatus.state === 'ok';
+    var runState = ok ? String(exitStatus.run_state || 'unknown') : 'awaiting real artifact';
+    var started = ok && exitStatus.wall_started_utc ? String(exitStatus.wall_started_utc) : '—';
+    var ended = ok && exitStatus.wall_ended_utc ? String(exitStatus.wall_ended_utc)
+      : (ok && runState === 'running' ? 'running…' : '—');
+    el.textContent = 'RUN ' + String(runId) + ' · ' + runState + ' · started ' + started + ' · ended ' + ended;
+  }
+
+  async function pollRunStatus() {
+    if (document.hidden) return;
+    try {
+      var params = new URLSearchParams();
+      if (currentRunId) params.set('run_id', currentRunId);
+      var qs = params.toString();
+      var r = await fetch('/api/v1/sweep/run-status' + (qs ? '?' + qs : ''));
+      if (!r.ok) return;
+      var j = await r.json();
+      renderIdLine(j.run_id, j.exit_status);
+      var chainMap = j.chain_map;
+      renderChainLinks(chainMap && chainMap.state === 'ok' ? chainMap.links : null);
+      var manifestOk = j.manifest && j.manifest.state === 'ok' ? j.manifest : null;
+      renderFunnelTable(manifestOk);
+      renderDoorsTable(manifestOk);
+      renderSuspectBanner(chainMap, j.exit_status, j.manifest);
+    } catch (e) { /* network blip; next tick retries */ }
+  }
+
+  // ── Top combos so far (live) — R8/R21 preview strip over the NEW
+  // GET /api/v1/sweep/top100 (family-deduped + fully decoded server-side). ──
+  async function loadTopCombosPreview() {
+    var wrap = $('rcTopCombos');
+    var label = $('rcTopCombosLabel');
+    if (!wrap || !label) return;
+    try {
+      var params = new URLSearchParams();
+      if (currentRunId) params.set('run_id', currentRunId);
+      var qs = params.toString();
+      var r = await fetch('/api/v1/sweep/top100' + (qs ? '?' + qs : ''));
+      if (!r.ok) return;
+      var j = await r.json();
+      clearChildren(wrap);
+      if (j.state !== 'ok' || !Array.isArray(j.rows) || j.rows.length === 0) {
+        label.hidden = true;
+        var empty = document.createElement('div');
+        empty.className = 'rc-empty';
+        empty.textContent = j.state === 'awaiting_artifact'
+          ? 'awaiting real artifact — no top-100 leaderboard written for this run yet (P3 backend not yet merged)'
+          : j.state === 'artifact_error'
+            ? ('top-100 artifact present but unreadable: ' + (j.reason || 'unknown error'))
+            : 'no top combos yet';
+        wrap.appendChild(empty);
+        return;
+      }
+      label.hidden = false;
+      j.rows.slice(0, 8).forEach(function (row) {
+        var line = document.createElement('div');
+        line.className = 'rc-topcombo-row';
+        var rank = document.createElement('span');
+        rank.className = 'rank';
+        rank.textContent = '#' + String(row.rank);
+        var sentence = document.createElement('span');
+        sentence.className = 'sentence';
+        sentence.textContent = String(row.simple_sentence || row.pro_sentence || '');
+        var meta = document.createElement('span');
+        meta.className = 'meta';
+        meta.textContent = String(row.instrument || '—') + ' · ' + String(row.tf || '') + ' · ' +
+          String(row.direction || '') + (row.join_key_inferred ? ' · legacy row, some links unavailable' : '');
+        line.appendChild(rank);
+        line.appendChild(sentence);
+        line.appendChild(meta);
+        wrap.appendChild(line);
+      });
+    } catch (e) { /* network blip; next tick retries */ }
+  }
+
+  // ── Run timeline (R41) — cheap bounded cursor tail by default; an
+  // explicit search click ADDITIONALLY does the honestly-bounded-not-O(1)
+  // text scan (bounded_scan=true in the response — never wired to the
+  // auto-refresh timer, per the contracts file). ──
+  var TL_KIND_CLASS = {
+    TUPLE_DONE: 'k-tuple', STAGE_START: 'k-stage', STAGE_END: 'k-stage', RUN_START: 'k-stage',
+    RUN_END: 'k-stage', MILESTONE: 'k-milestone', TRIPWIRE: 'k-tripwire', SUSPECT: 'k-suspect',
+    QUARANTINE: 'k-quarantine', RUN_REFUSED: 'k-refusal', CHECKPOINT: 'k-stage',
+    _unreadable_line: 'k-unreadable'
+  };
+
+  function appendTimelineRow(list, rec) {
+    var row = document.createElement('div');
+    row.className = 'tl-row';
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = rec.ts_utc ? String(rec.ts_utc) : '—';
+    var kind = document.createElement('span');
+    kind.className = 'kind ' + (TL_KIND_CLASS[rec.kind] || '');
+    kind.textContent = String(rec.kind || '?');
+    var payload = document.createElement('span');
+    payload.className = 'payload';
+    payload.textContent = safeJson(rec.payload);
+    row.appendChild(ts);
+    row.appendChild(kind);
+    row.appendChild(payload);
+    list.appendChild(row);
+  }
+
+  async function loadTimelinePage(reset) {
+    if (tlSearchMode) return; // an explicit search result is on screen — don't clobber it
+    var list = $('tlList');
+    if (!list) return;
+    if (reset) { tlCursor = 0; clearChildren(list); }
+    try {
+      var params = new URLSearchParams({ after_seq: String(tlCursor), limit: '100' });
+      if (currentRunId) params.set('run_id', currentRunId);
+      var r = await fetch('/api/v1/sweep/timeline?' + params.toString());
+      if (!r.ok) return;
+      var j = await r.json();
+      if (j.state !== 'ok') {
+        if (!list.firstChild) {
+          var empty = document.createElement('div');
+          empty.className = 'rc-empty';
+          empty.textContent = j.reason || 'awaiting real artifact — the flight recorder has not been written for this run yet';
+          list.appendChild(empty);
+        }
+        return;
+      }
+      (j.records || []).forEach(function (rec) { appendTimelineRow(list, rec); });
+      if (j.next_after_seq !== null && j.next_after_seq !== undefined) tlCursor = j.next_after_seq;
+      if ((j.records || []).length) list.scrollTop = list.scrollHeight;
+    } catch (e) { /* network blip; next tick retries */ }
+  }
+
+  async function runTimelineSearch(q) {
+    var list = $('tlList');
+    if (!list) return;
+    try {
+      var params = new URLSearchParams({ q: q, limit: '200' });
+      if (currentRunId) params.set('run_id', currentRunId);
+      var r = await fetch('/api/v1/sweep/timeline?' + params.toString());
+      if (!r.ok) return;
+      var j = await r.json();
+      clearChildren(list);
+      if (j.state !== 'ok' || !(j.records || []).length) {
+        var empty = document.createElement('div');
+        empty.className = 'rc-empty';
+        empty.textContent = (j.state === 'ok') ? 'no matching timeline records' : (j.reason || 'search unavailable');
+        list.appendChild(empty);
+        return;
+      }
+      j.records.forEach(function (rec) { appendTimelineRow(list, rec); });
+    } catch (e) { /* network blip */ }
+  }
+
+  var tlSearchBtn = $('tlSearchBtn');
+  var tlSearchInput = $('tlSearch');
+  var tlLiveBtn = $('tlLiveBtn');
+  if (tlSearchBtn && tlSearchInput) {
+    tlSearchBtn.onclick = function () {
+      var q = tlSearchInput.value.trim();
+      if (!q) return;
+      tlSearchMode = true;
+      runTimelineSearch(q);
+    };
+    tlSearchInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') tlSearchBtn.click();
+    });
+  }
+  if (tlLiveBtn) {
+    tlLiveBtn.onclick = function () {
+      tlSearchMode = false;
+      if (tlSearchInput) tlSearchInput.value = '';
+      loadTimelinePage(true);
+    };
+  }
+
+  // ── Telegram-milestone mirror (R41) — display-only: renders MILESTONE-kind
+  // flight-recorder records already written by the run core. NO real
+  // Telegram call is made anywhere on this page. Its own cursor (kind=
+  // MILESTONE) so it never re-scans the general timeline stream. ──
+  async function loadMilestonesPage(reset) {
+    var list = $('milestoneList');
+    if (!list) return;
+    if (reset) { msCursor = 0; clearChildren(list); }
+    try {
+      var params = new URLSearchParams({ after_seq: String(msCursor), kind: 'MILESTONE', limit: '50' });
+      if (currentRunId) params.set('run_id', currentRunId);
+      var r = await fetch('/api/v1/sweep/timeline?' + params.toString());
+      if (!r.ok) return;
+      var j = await r.json();
+      if (j.state !== 'ok') {
+        if (!list.firstChild) {
+          var empty = document.createElement('li');
+          empty.className = 'rc-empty';
+          empty.textContent = j.reason || 'no milestones recorded yet';
+          list.appendChild(empty);
+        }
+        return;
+      }
+      (j.records || []).forEach(function (rec) {
+        var li = document.createElement('li');
+        li.className = 'ms-row';
+        var ico = document.createElement('span');
+        ico.className = 'ico';
+        ico.textContent = '📣';
+        var ts = document.createElement('span');
+        ts.className = 'ts';
+        ts.textContent = rec.ts_utc ? String(rec.ts_utc) : '—';
+        var text = document.createElement('span');
+        text.className = 'text';
+        text.textContent = safeJson(rec.payload);
+        li.appendChild(ico);
+        li.appendChild(ts);
+        li.appendChild(text);
+        list.insertBefore(li, list.firstChild); // newest on top
+      });
+      if (j.next_after_seq !== null && j.next_after_seq !== undefined) msCursor = j.next_after_seq;
+    } catch (e) { /* network blip; next tick retries */ }
+  }
+
+  // ── PROVISIONAL / CALIBRATED badge (R23) — the estimator's own
+  // self-correction store, independent of any single proceed-dialog verdict. ──
+  async function refreshEstimateBasisBadge() {
+    var badge = $('rcEstimateBasisBadge');
+    if (!badge) return;
+    try {
+      var r = await fetch('/api/v1/sweep/estimator-calibration');
+      var j = await r.json();
+      badge.hidden = false;
+      if (j.state === 'ok') {
+        badge.className = 'bx-chip ' + (j.calibrated ? 'ok' : 'warn');
+        badge.textContent = j.calibrated ? 'CALIBRATED' : 'PROVISIONAL';
+        badge.title = j.calibrated
+          ? ('trials/s=' + fmtInt(j.trials_per_second) + ' · last calibrated ' + (j.updated_utc || '—'))
+          : 'no calibration recorded yet — every ETA on this page is provisional';
+      } else {
+        badge.className = 'bx-chip warn';
+        badge.textContent = 'PROVISIONAL';
+        badge.title = 'estimator calibration store not available yet';
+      }
+    } catch (e) { badge.hidden = true; }
+  }
+
+  // ── R20 proceed dialog — "X trials, est Y, Z GB — proceed?" — reads the
+  // NEW GET /api/v1/sweep/preflight-estimate; R4 refusals render LOUD, naming
+  // symbols + missing spans + reason; PROVISIONAL/calibrated badge from
+  // verdict.estimate_basis (the primary discriminator, per Ruling 14). ──
+  function currentSelection() {
+    var symsEl = $('swSymbols'), ivEl = $('swIntervals'), stEl = $('swStart'), enEl = $('swEnd');
+    return {
+      symbols: symsEl ? symsEl.value.trim() : '',
+      intervals: ivEl ? ivEl.value.trim() : '',
+      start: stEl ? stEl.value.trim() : '',
+      end: enEl ? enEl.value.trim() : ''
+    };
+  }
+
+  function addDialogLine(body, k, v) {
+    var line = document.createElement('div');
+    line.className = 'rc-dialog-body-line';
+    var kEl = document.createElement('span');
+    kEl.textContent = k;
+    var vEl = document.createElement('span');
+    vEl.textContent = v;
+    line.appendChild(kEl);
+    line.appendChild(vEl);
+    body.appendChild(line);
+  }
+
+  function renderProceedDialog(verdict) {
+    var body = $('rcProceedBody');
+    if (!body) return true;
+    clearChildren(body);
+    if (!verdict || verdict.state === 'awaiting_artifact') {
+      var p = document.createElement('p');
+      p.textContent = 'No live preflight/estimator is available yet (' +
+        ((verdict && verdict.reason) || 'P1 backend not merged') +
+        '). Proceeding launches through the existing sweep engine with NO estimate and ' +
+        'NO hard data-coverage refusal check — verify coverage on /coverage yourself first.';
+      body.appendChild(p);
+      return true; // no gate exists to enforce yet — see open-risk note
+    }
+    if (verdict.state === 'artifact_error') {
+      var pe = document.createElement('p');
+      pe.textContent = 'Preflight estimate present but unreadable: ' + (verdict.reason || 'unknown error') +
+        '. Proceeding launches through the existing sweep engine with NO estimate.';
+      body.appendChild(pe);
+      return true;
+    }
+    var basisLine = document.createElement('div');
+    basisLine.style.marginBottom = '10px';
+    var basisChip = document.createElement('span');
+    basisChip.className = 'bx-chip ' + (verdict.estimate_basis === 'calibrated' ? 'ok' : 'warn');
+    basisChip.textContent = String(verdict.estimate_basis || 'provisional').toUpperCase();
+    basisLine.appendChild(basisChip);
+    body.appendChild(basisLine);
+
+    var est = verdict.estimator || {};
+    addDialogLine(body, 'Trials', fmtInt(est.trials));
+    addDialogLine(body, 'Est. time', fmtEstSeconds(est.est_seconds_provisional));
+    addDialogLine(body, 'Est. size', fmtBytes(est.est_bytes));
+
+    (verdict.clamps || []).forEach(function (clamp) {
+      var div = document.createElement('div');
+      div.className = 'rc-clamp';
+      div.textContent = String((clamp && (clamp.detail || clamp.kind)) || safeJson(clamp));
+      body.appendChild(div);
+    });
+
+    var refusals = verdict.refusals || [];
+    if (verdict.ok === false && refusals.length) {
+      refusals.forEach(function (ref) {
+        var div = document.createElement('div');
+        div.className = 'rc-refusal';
+        var head = document.createElement('div');
+        head.className = 'head';
+        head.textContent = 'REFUSED — ' + String((ref && ref.symbol) || '?') + ' ' + String((ref && ref.tf) || '');
+        var spans = document.createElement('div');
+        spans.textContent = 'missing: ' + (ref && Array.isArray(ref.missing_spans) ? ref.missing_spans.join(', ') : '—');
+        var reason = document.createElement('div');
+        reason.textContent = String((ref && ref.reason) || '');
+        div.appendChild(head);
+        div.appendChild(spans);
+        div.appendChild(reason);
+        body.appendChild(div);
+      });
+      var note = document.createElement('p');
+      note.textContent = 'Pull the missing data on /universe first, then relaunch.';
+      body.appendChild(note);
+      return false; // loud refusal — proceed disabled
+    }
+    return true;
+  }
+
+  var runSweepBtn = $('run-sweep');
+  var rcMsg = $('rc-msg');
+  var rcBar = $('rcBar');
+  var rcBarFill = $('rcBarFill');
+  var rcDialog = $('rcProceedDialog');
+  var rcProceedGo = $('rcProceedGo');
+  var rcProceedCancel = $('rcProceedCancel');
+  var sweepLaunchPoll = null;
+
+  function renderLaunchProgress(p) {
+    if (!rcBar || !rcBarFill || !rcMsg) return;
+    var pct = Math.max(0, Math.min(100, p.percent || 0));
+    rcBar.hidden = false;
+    rcBarFill.style.width = pct.toFixed(1) + '%';
+    var rate = p.combos_per_sec ? Math.round(p.combos_per_sec).toLocaleString('en-IN') : '0';
+    rcMsg.textContent = String(p.state) + ' · ' + pct.toFixed(1) + '% · enumerated=' + (p.enumerated || 0) +
+      ' · evaluated=' + (p.evaluated || 0) + ' · survivors=' + (p.survivors || 0) + ' · ' + rate + ' tuples/s';
+  }
+
+  async function pollLaunchedSweep() {
+    try {
+      var r = await fetch('/api/v1/sweep-progress');
+      var p = await r.json();
+      renderLaunchProgress(p);
+      if (!p.running && p.state !== 'idle') {
+        clearInterval(sweepLaunchPoll);
+        sweepLaunchPoll = null;
+        if (runSweepBtn) runSweepBtn.disabled = false;
+        rcMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) + ' survivor(s).';
+        loadRunPicker();
+      }
+    } catch (e) {
+      if (rcMsg) rcMsg.textContent = 'Could not read sweep progress: ' + e;
+    }
+  }
+
+  async function launchSweep() {
+    if (!runSweepBtn || !rcMsg) return;
+    runSweepBtn.disabled = true;
+    rcMsg.textContent = 'Starting the brute-force sweep…';
+    var sel = currentSelection();
+    var q = new URLSearchParams();
+    if (sel.symbols) q.set('symbols', sel.symbols);
+    if (sel.intervals) q.set('intervals', sel.intervals);
+    if (sel.start) q.set('start', sel.start);
+    if (sel.end) q.set('end', sel.end);
+    try {
+      var r = await fetch('/api/v1/sweep/run?' + q.toString(), { method: 'POST' });
+      var j = await r.json();
+      if (r.status === 400) {
+        rcMsg.textContent = 'Sweep error: ' + (j.detail || ('HTTP ' + r.status));
+        runSweepBtn.disabled = false;
+        return;
+      }
+      if (!j.started) {
+        rcMsg.textContent = 'A pull or sweep is already running — wait for it to finish.';
+        runSweepBtn.disabled = false;
+        return;
+      }
+      rcMsg.textContent = 'Sweep started — ' + j.symbols + ' · ' + j.intervals + ' · ' +
+        j.start + ' → ' + j.end + '. Watching progress…';
+      if (sweepLaunchPoll) clearInterval(sweepLaunchPoll);
+      sweepLaunchPoll = setInterval(pollLaunchedSweep, 1200);
+      pollLaunchedSweep();
+    } catch (e) {
+      rcMsg.textContent = 'Sweep request failed: ' + e;
+      runSweepBtn.disabled = false;
+    }
+  }
+
+  if (runSweepBtn && rcDialog && rcProceedGo && rcProceedCancel) {
+    runSweepBtn.onclick = async function () {
+      var sel = currentSelection();
+      var params = new URLSearchParams();
+      if (sel.symbols) params.set('symbols', sel.symbols);
+      if (sel.intervals) params.set('intervals', sel.intervals);
+      var verdict;
+      try {
+        var r = await fetch('/api/v1/sweep/preflight-estimate?' + params.toString());
+        verdict = await r.json();
+      } catch (e) {
+        verdict = { state: 'awaiting_artifact', reason: 'preflight-estimate request failed: ' + e };
+      }
+      var canProceed = renderProceedDialog(verdict);
+      rcProceedGo.disabled = !canProceed;
+      rcDialog.hidden = false;
+      rcProceedGo.onclick = function () { rcDialog.hidden = true; launchSweep(); };
+      rcProceedCancel.onclick = function () { rcDialog.hidden = true; };
+    };
+    rcDialog.addEventListener('click', function (e) {
+      if (e.target === rcDialog) rcDialog.hidden = true;
+    });
+  }
+
+  var rcCascadeBtn = $('rcCascadeBtn');
+  if (rcCascadeBtn && rcMsg) {
+    rcCascadeBtn.onclick = async function () {
+      rcCascadeBtn.disabled = true;
+      rcMsg.textContent = 'Running the nine-filter cascade…';
+      try {
+        var r = await fetch('/api/v1/cascade/run', { method: 'POST' });
+        var j = await r.json();
+        if (j.ok) {
+          rcMsg.textContent = 'Cascade done — sweep ' + String(j.sweep_id || '').slice(0, 16) +
+            ' · pools=' + j.pools + ' · candidates=' + j.candidates + ' · survivors=' + j.survivors;
+        } else {
+          rcMsg.textContent = 'Cascade error: ' + (j.error || ('HTTP ' + r.status));
+        }
+      } catch (e) {
+        rcMsg.textContent = 'Cascade request failed: ' + e;
+      } finally {
+        rcCascadeBtn.disabled = false;
+      }
+    };
+  }
+
+  // ---------- bootstrap ----------
+  if (window.location.protocol !== 'file:') {
+    loadRunPicker();
+    refreshEstimateBasisBadge();
+    pollRunStatus();
+    loadTopCombosPreview();
+    loadTimelinePage(true);
+    loadMilestonesPage(true);
+    setInterval(loadRunPicker, 15000);
+    setInterval(refreshEstimateBasisBadge, 30000);
+    setInterval(pollRunStatus, 4000);
+    setInterval(loadTopCombosPreview, 20000);
+    setInterval(function () { loadTimelinePage(false); }, 4000);
+    setInterval(function () { loadMilestonesPage(false); }, 6000);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) return;
+      pollRunStatus();
+      loadTopCombosPreview();
+      loadTimelinePage(false);
+      loadMilestonesPage(false);
+    });
+  }
+})();
 </script>
 
 </body>

@@ -107,7 +107,21 @@ def test_reports_date_pickers_prefilled_with_canonical_default() -> None:
     assert "__BRUTEX_DATE_" not in html
 
 
-def test_sweep_start_picker_prefilled_with_backend_default() -> None:
+def test_reports_page_carries_no_sweep_start_picker() -> None:
+    """R1/R25: the ``swStart`` sweep-launch picker was RETIRED from /reports.
+
+    Superseded by ``test_operator_page_sweep_start_picker_prefilled_with_backend_default``
+    below — the picker (and the whole Run Sweep control) moved to the
+    Operator page (DEC-INSTITUTIONAL-ONECLICK-001, R1/R25); /reports is
+    pre-open-report-only now.
+    """
+    from brutex.dashboard.app import _render_reports_html
+
+    html = _render_reports_html()
+    assert 'id="swStart"' not in html
+
+
+def test_operator_page_sweep_start_picker_prefilled_with_backend_default() -> None:
     """DEC-SWEEP-DEFAULT-2020-001 render-side drift guard (hostile-review fold).
 
     The ``swStart`` date-picker POSTs its value, so the browser-submitted date
@@ -115,12 +129,13 @@ def test_sweep_start_picker_prefilled_with_backend_default() -> None:
     backend-only default. Pinning the rendered template value to
     ``sweep_runner.DEFAULT_START`` (itself pinned to ``GROWW_HISTORY_FLOOR``
     by ``test_default_start_matches_pull_floor``) means a future floor move
-    cannot leave the template stale.
+    cannot leave the template stale. Relocated from /reports to the Operator
+    page's new Run Control picker (R1/R25, DEC-INSTITUTIONAL-ONECLICK-001).
     """
-    from brutex.dashboard.app import _render_reports_html
+    from brutex.dashboard.app import _render_index_html
     from brutex.dashboard.sweep_runner import DEFAULT_START
 
-    html = _render_reports_html()
+    html = _render_index_html()
     assert f'<input id="swStart" type="date" value="{DEFAULT_START}">' in html
 
 
