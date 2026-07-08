@@ -2045,13 +2045,30 @@ def query_candles(
     partition glob ``<lake>/bars/<exch>/<seg>/<symbol>/<interval>/**/*.parquet``
     — no data duplication, the lake stays the single source of truth.
     The glob is scoped to ONE ``(symbol, interval)`` (its whole-year/month
-    files only), and the page is ``LIMIT``-bounded — so a click never
-    materialises more than ``limit`` rows in Python regardless of how many
-    years are stored (DuckDB additionally skips row-groups via min/max stats;
-    this is engine cost, not directory pruning). *start* / *end* are inclusive
-    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date.
-    Returns an empty
-    page (never raises) when the partition set has no Parquet files yet.
+    files only). *start* / *end* are inclusive ISO ``YYYY-MM-DD`` bounds
+    matched against the bar's UTC calendar date. Returns an empty page (never
+    raises) when the partition set has no Parquet files yet.
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in partition
+    depth; DEC-DB-OPAGE-HONESTY-001): the page DATA query performs a FULL
+    columnar scan of every matched partition row before it slices the page.
+    The read-side keep-FIRST dedup ``QUALIFY row_number() OVER (PARTITION BY
+    timestamp …) = 1`` window hash-partitions the whole matched set and the
+    ``ORDER BY "timestamp"`` sorts it, and only THEN do ``LIMIT``/``OFFSET``
+    take the slice — so the DuckDB engine cost is **O(total matched partition
+    rows)** (plus one Parquet footer open per file; DuckDB min/max row-group
+    stats prune only the WHERE date range, never the window/sort). ``LIMIT``
+    bounds ONLY how many rows materialise in Python — the FIRST page is not
+    cheaper than the whole scan — and a deep ``OFFSET`` is O(row-groups up to
+    the offset) on top. The page ``total`` is a ``COUNT(DISTINCT timestamp)``,
+    itself **O(rows)** on the first computation per write-generation and O(1)
+    on a cached repeat (see *count_cache*). This mirrors the
+    :func:`brutex.data.lake_read.dedup_qualify_sql` /
+    :func:`~brutex.data.lake_read.dedup_qualify_latest_sql` honest envelope; a
+    write-time page manifest (true O(page) reads) stays the named future work
+    (#867 / #1025). A prev/next paging click therefore RE-SCANS the partition
+    — flat only in that the count + F&O stored-life span are cached, never in
+    the row-scan term.
 
     Parameters
     ----------
@@ -2181,7 +2198,16 @@ def query_candles(
     # timestamps. The PAGE query collapses them keep-FIRST in the same single
     # scan (QUALIFY over filename + file_row_number order — deterministic), and
     # the TOTAL counts DISTINCT timestamps so it equals what the deduped pages
-    # actually serve. A clean partition is byte-identical.
+    # actually serve. A clean partition is byte-identical. HONEST complexity
+    # (DEC-DB-OPAGE-HONESTY-001, see the docstring): this QUALIFY window +
+    # ``ORDER BY`` is an O(total matched rows) columnar scan per click — the
+    # LIMIT/OFFSET below bound only the Python materialisation, NOT the scan.
+    # The QUALIFY is NOT skipped on a "clean" partition: no reliable O(1) /
+    # footer-only clean signal exists (the only detector is COUNT(*) ==
+    # COUNT(DISTINCT ts), itself an O(rows) scan), and skipping the window
+    # would be a constant-factor win, not a complexity change — so the dedup
+    # correctness guard stays on (deferred follow-up, never a correctness risk
+    # for a perf win).
     page_source = DEDUP_PARQUET_SOURCE_SQL
     qualify_sql = dedup_qualify_sql(("timestamp",))
 
@@ -3216,8 +3242,21 @@ def query_option_candles(
     data duplication, the lake stays the single source of truth. *series* is the
     filesystem-safe segment from :func:`list_option_datasets` and is validated
     against :func:`_validate_option_segment` (NO free user text in the glob,
-    same path/SQL-injection guard as the spot reader). The page is
-    ``LIMIT``-bounded so a click never materialises more than *limit* rows.
+    same path/SQL-injection guard as the spot reader).
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in series depth;
+    DEC-DB-OPAGE-HONESTY-001): identical envelope to :func:`query_candles`. The
+    page DATA query performs a FULL columnar scan of every matched series row —
+    the keep-FIRST dedup ``QUALIFY row_number() OVER (PARTITION BY (side,
+    timestamp) …) = 1`` window hash-partitions the whole matched set and the
+    ``ORDER BY "timestamp"`` sorts it — BEFORE ``LIMIT``/``OFFSET`` slice the
+    page. So the engine cost is **O(total matched series rows)** (plus one
+    Parquet footer open per file); ``LIMIT`` bounds ONLY the Python
+    materialisation and a deep ``OFFSET`` is O(row-groups up to the offset) on
+    top. The page ``total`` is a ``COUNT(DISTINCT (side, timestamp))``, itself
+    **O(rows)** on the first computation per write-generation and O(1) on a
+    cached repeat (see *count_cache*). A write-time page manifest (true O(page)
+    reads) stays the named future work (#867 / #1025).
 
     Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
