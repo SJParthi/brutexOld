@@ -35,7 +35,7 @@ no shard ever created; review round 2). Two layers:
   least once on the registered self-hosted M4-Pro tier: actions run
   28888100079 (2026-07-07, the first real M4-Pro run) ran this gate GREEN —
   the measured median overhead is printed in that run's log (see the
-  CALIBRATION bracket in MIGRATION.md #1561). An earlier revision of this
+  CALIBRATION bracket in MIGRATION.md #1543). An earlier revision of this
   docstring claimed the runner was "DORMANT ... no measured overhead figure
   is claimed anywhere" — stale-false after that run, reconciled here.
 """
@@ -225,7 +225,7 @@ class TestBenchWorkflowWiring:
     of execution lives outside the repo: actions run 28888100079 (2026-07-07,
     the first real M4-Pro run) executed both wired benches — this file's A/B
     merge-budget gate GREEN, the paging gate's strict ceiling recalibrated
-    1.1x -> 3.0x off its measured 1.53x (MIGRATION.md #1561 CALIBRATION
+    1.1x -> 3.0x off its measured 1.53x (MIGRATION.md #1543 CALIBRATION
     bracket). ENDGAME round 1 dropped this docstring's stale "runner is
     dormant / cannot prove an execution happened" wording.
     """
@@ -272,5 +272,5 @@ class TestBenchWorkflowWiring:
             assert stale not in text, (
                 f"bench-m4pro.yml resurrected the stale paging-gate claim {stale!r} — "
                 "the /db O(page) gate enforces METADATA_SWEEP_STRICT_CEILING (3.0x), "
-                "not the decreed 1.1x (MIGRATION.md #1561 CALIBRATION)"
+                "not the decreed 1.1x (MIGRATION.md #1543 CALIBRATION)"
             )

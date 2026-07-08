@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1561 —
+_Last updated: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
 dataset at `<lake_root>/.manifest/stats/…` — per-file DISTINCT-identity-key
@@ -53,7 +53,7 @@ probe-first hooks · bounded 16 MiB shard read · FIFO-shard hang fix · the
 EXECUTED m4pro run 28888100079 A/B gate + 3.0× paging strict-tier
 recalibration · the wired-and-executed zero-survivor mutation gate); the
 per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
-#1561 — this header deliberately stopped narrating rounds after freezing at
+#1595 — this header deliberately stopped narrating rounds after freezing at
 round 2 once (endgame round 2); a same-`(mtime_ns,size)` in-place
 overwrite stays the documented stat-token residual. Results-safe — never in run identity / partition bytes /
 `data_snapshot_hash`; rendered Parquet bytes byte-identical (ON/OFF
@@ -995,7 +995,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1561** — the
+- **Active branch:** `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
   O(page) needs a write-time lake manifest"): NEW leaf `brutex/data/lake_stats_manifest.py` (stdlib + `atomic_io` +
@@ -1077,7 +1077,7 @@ hostile-review pass._
   landed (a served click's os.stat/os.scandir counts + touched files EXACTLY equal on a bare vs
   48-dataset-padded lake — deterministic op-count teeth, no wall-clock flake); the seed-skip `missing` list
   capped at the now-public `FALLBACK_REL_LOG_CAP` + true count; the kill-switch docstrings' "byte-identical"
-  overclaim softened; the #1561 GATES counts refreshed.
+  overclaim softened; the #1595 GATES counts refreshed.
   ROUND 3: the OverflowError timestamp class + plain-ValueError/UnicodeDecodeError shard-byte escapes fail
   closed; the option-writer distinct-key merge baseline. ROUND 4: a star-projection column name carrying `"`
   (an out-of-band parquet) now joins the fail-closed degrade ladder — legacy rerun + one `star_columns`
@@ -1106,7 +1106,7 @@ hostile-review pass._
   pin. Round 2 — the killable-mutant pragma purge above; §2 Rule 5's stale "strict tier DORMANT until the
   operator registers the runner" claim reconciled to the LIVE runner (+ the metadata-sweep allowance now named
   beside the cache-tier one); the frozen `_Last updated:` header's per-round narration replaced with a
-  stale-proof pointer to this blurb + MIGRATION.md #1561; bench-m4pro.yml's paging-gate comments repointed
+  stale-proof pointer to this blurb + MIGRATION.md #1595; bench-m4pro.yml's paging-gate comments repointed
   from the stale "ratio_ceiling() 1.1× tier" to the real `metadata_sweep_ceiling` 3.0× — each with a
   deterministic doc-pin regression (`test_claude_md_branch_consistency.py` + `TestBenchWorkflowWiring`).
   Results-safe — never in run identity (blake3) / partition bytes / `data_snapshot_hash`; rendered
@@ -2981,8 +2981,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/dazzling-pasteur-jf8s3w`
-  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1561 — the write-time
+  (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1595 — the write-time
   PER-FILE lake STATS manifest; matches §1's Active branch line)
+  Earlier: `claude/stoic-davinci-7c7xp0`
   Earlier: `claude/peaceful-wright-r7l8l9`
   (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
   retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
