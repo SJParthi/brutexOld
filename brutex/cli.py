@@ -1673,18 +1673,13 @@ def cmd_lake_audit_unique(
             f"{'foreign':>9}{'overlap':>9}{'drift-dirs':>12}"
         )
         for row in census.segments:
-            if row.segment == OPTIONS_SEGMENT:
-                # Foreign/overlap are REAL for the options tree since
-                # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 (closed the DEC-LAKE-HEAL-001
-                # named follow-up); drift stays "-" — honestly N/A, no
-                # legacy-key-drift concept exists for series dirs.
-                foreign = str(row.foreign_files)
-                overlap = str(row.overlap_files)
-                drift = "-"
-            else:
-                foreign = str(row.foreign_files)
-                overlap = str(row.overlap_files)
-                drift = str(row.drift_dirs)
+            # Foreign/overlap are REAL for the options tree since
+            # DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 (closed the DEC-LAKE-HEAL-001
+            # named follow-up); drift stays "-" — honestly N/A, no
+            # legacy-key-drift concept exists for series dirs.
+            foreign = str(row.foreign_files)
+            overlap = str(row.overlap_files)
+            drift = "-" if row.segment == OPTIONS_SEGMENT else str(row.drift_dirs)
             print(
                 f"{row.segment:<9}{row.files:>7}{row.clean:>7}{row.dup_files:>6}"
                 f"{foreign:>9}{overlap:>9}{drift:>12}"
