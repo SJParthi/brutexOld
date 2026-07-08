@@ -686,6 +686,184 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def backup_failed(self, *, reason: str, detail: str = "") -> bool:
+        """Alert that the off-box backup run FAILED (CRITICAL; deduped by *reason*).
+
+        DEC-BACKUP-OFFBOX-001: fired by ``brutex backup run`` on any failure
+        that leaves the lake WITHOUT a fresh verified off-box snapshot
+        (config / preflight / restic / state-write / partial-streak). Rides
+        ``PHASE_BLOCKED`` (0.0 s window) — the durable cross-run bound lives
+        in the checker's ``deadman.json``, not the per-process dedupe cache.
+
+        The ``partial_streak`` reason gets its OWN body (round-4 NIT): on that
+        arm the snapshot succeeded and success WAS stamped before this fires
+        (run.py step 9 precedes the streak escalation), so the dead-man reads
+        FRESH and will NOT re-alert — the generic "keep re-alerting while
+        stale" claim would be false and steer the operator toward an hourly
+        escalation that never comes.
+
+        Parameters
+        ----------
+        reason
+            Short, non-secret cause token (e.g. ``"restic_missing"``).
+        detail
+            Optional appended context (non-secret).
+        """
+        extra = f" {detail}" if detail else ""
+        if reason == "partial_streak":
+            message = escape_markdown_v2(
+                f"🛑 Off-box BACKUP FAILED: {reason}.{extra} The snapshot itself SUCCEEDED "
+                "and was stamped (the dead-man stays quiet), but restic could not read some "
+                "source files for consecutive nights — those files are NOT in the snapshots. "
+                "Investigate reader permissions via the backup log, then re-run "
+                "`brutex backup run`."
+            )
+        else:
+            message = escape_markdown_v2(
+                f"🛑 Off-box BACKUP FAILED: {reason}.{extra} The lake/results are NOT freshly "
+                "backed up; the dead-man will keep re-alerting while stale. Run "
+                "`brutex backup status`, then check the backup log and re-run "
+                "`brutex backup run`."
+            )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"backup-failed:{reason}",
+        )
+
+    def backup_degraded(self, *, aspect: str, detail: str) -> bool:
+        """Alert that the backup DEGRADED without losing data protection (WARN).
+
+        DEC-BACKUP-OFFBOX-001: the snapshot itself succeeded and the data IS
+        off-box — a maintenance (``forget``/prune) failure or a partial rc-3
+        read, never a data-protection loss (F8/F23). Deduped by *aspect*.
+        The ``drill_skipped`` aspect (round 6) carries its OWN body: no
+        snapshot ran at all there — the monthly restore drill was skipped on
+        single-flight contention, so the generic "the snapshot itself
+        succeeded" wording would be false for it (the partial_streak split
+        precedent, one method over).
+
+        Parameters
+        ----------
+        aspect
+            The degraded aspect token (``"partial"`` / ``"maintenance"`` /
+            ``"drill_skipped"``).
+        detail
+            Non-secret one-line context.
+        """
+        if aspect == "drill_skipped":
+            message = escape_markdown_v2(
+                f"⚠️ Off-box backup restore DRILL SKIPPED: {detail}. The monthly "
+                "byte-verification did NOT run this month (launchd one-shots never "
+                "retry) — the nightly backups themselves are unaffected. Re-run "
+                "`brutex backup restore-drill` manually."
+            )
+        else:
+            message = escape_markdown_v2(
+                f"⚠️ Off-box backup DEGRADED ({aspect}): {detail}. The snapshot itself "
+                "succeeded and the data IS off-box — this is a maintenance/partial-read "
+                "warning, not a data-protection loss. See `brutex backup status`."
+            )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.WARN,
+            message=message,
+            dedupe_key=f"backup-degraded:{aspect}",
+        )
+
+    def backup_overdue(
+        self,
+        *,
+        reason: str,
+        hours_since_success: float | None,
+        threshold_hours: float,
+    ) -> bool:
+        """Dead-man breach: no fresh verified off-box backup (CRITICAL; deduped by *reason*).
+
+        DEC-BACKUP-OFFBOX-001: fired by the hourly ``brutex backup check`` on
+        any alarm verdict (overdue / never_succeeded / state_corrupt /
+        clock_skew / hung / remote divergence). The caller stamps its durable
+        re-alert throttle IFF this returns ``True`` (only-stamp-on-success).
+
+        Parameters
+        ----------
+        reason
+            The alarm verdict token.
+        hours_since_success
+            Hours since the last stamped success (``None`` = never).
+        threshold_hours
+            The freshness threshold the verdict was judged against.
+        """
+        age_display = "never" if hours_since_success is None else f"{hours_since_success:.1f} h ago"
+        message = escape_markdown_v2(
+            f"🛑 BACKUP DEAD-MAN ({reason}): last successful off-box backup {age_display} "
+            f"(threshold {threshold_hours:.0f} h). Sweeps + hash-chained audit logs are NOT "
+            "re-pullable — their loss window is growing. Investigate now: "
+            "`brutex backup status`, then `brutex backup run`."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"backup-overdue:{reason}",
+        )
+
+    def backup_repo_corrupt(self, *, detail: str, source: str = "verify") -> bool:
+        """The backup repo failed verification / the restore drill found a byte mismatch (CRITICAL).
+
+        DEC-BACKUP-OFFBOX-001 (F11/F20): remediation is HUMAN — an automated
+        "repair" of a corrupt repo can destroy the last good copy, so the
+        alert points at the runbook instead. The escalation promise is
+        SPLIT per arm (round-5 NIT): the nightly-``verify`` arm stamps NO
+        success, so the dead-man goes OVERDUE and keeps escalating; the
+        monthly-``drill`` arm does NOT stop nightly successes (the rotating
+        read-data subset can take ~56 nights to reach the affected pack and
+        the deep check id-matches), so the dead-man stays QUIET — that page
+        is the only automated signal.
+
+        Cause-honesty is ALSO split per arm (round-8 MINOR): the ``verify``
+        arm rides ``restic check`` rc alone, and restic exits rc=1 for an
+        UNREACHABLE repo exactly as for genuine corruption (probed on
+        0.16.4) — a WAN/S3 drop during the ~hours-long read-data tail must
+        not send the operator into a multi-day re-seed, so the verify body
+        names the co-equal causes and points at ``backup.check.failed``
+        ``stderr_tail`` first. The ``drill`` arm's byte mismatch is a
+        byte-VERIFIED finding — no such caveat.
+
+        Parameters
+        ----------
+        detail
+            Non-secret description of the corruption finding.
+        source
+            ``"verify"`` (nightly ``restic check`` — the default) or
+            ``"drill"`` (monthly restore-drill byte mismatch).
+        """
+        if source == "drill":
+            tail = (
+                "Nightly backups may KEEP stamping success (the rotating read-data subset "
+                "can take ~56 nights to reach the affected pack), so the dead-man stays "
+                "QUIET — this page is your ONLY automated signal; act on it now, do not "
+                "wait for escalation."
+            )
+        else:
+            tail = (
+                "restic's rc cannot distinguish corruption from a remote outage mid-check "
+                "— confirm via the backup.check.failed stderr_tail before acting on "
+                "restore-from-older / re-seed (a transient outage self-heals next night). "
+                "The dead-man keeps escalating until a VERIFIED backup succeeds."
+            )
+        message = escape_markdown_v2(
+            f"🛑 BACKUP REPO CORRUPT: {detail}. Do NOT run automated repair — follow "
+            f"docs/runbooks/backup-offbox.md (restore-from-older / re-seed). {tail}"
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="backup-repo-corrupt",
+        )
+
     def lake_heal_report(
         self,
         *,
@@ -1104,6 +1282,33 @@ def emit_run_suspect_alert(*, run_id: str, tripwire: str, detail: str) -> bool:
             "run_suspect_alert_failed"
         )
         return False
+
+
+def emit_backup_failed_alert(reason: str, detail: str = "") -> None:
+    """Best-effort CRITICAL backup-failure push; NEVER raises into the caller.
+
+    DEC-BACKUP-OFFBOX-001 — the backup twin of :func:`emit_pull_halt_alert`
+    (same blanket-guard structure): the fire-and-forget contract is
+    STRUCTURAL, so even a future import-time or construction failure here is
+    swallowed + logged and can never replace the exit code the caller
+    returns. When Telegram is disabled (the default), the publish is a
+    silent no-op.
+
+    Parameters
+    ----------
+    reason
+        Short, non-secret cause token (mirrors :meth:`SweepAlerter.backup_failed`).
+    detail
+        Optional appended context (non-secret).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().backup_failed(reason=reason, detail=detail)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the exit
+        structlog.get_logger("brutex.notifications.sweep_alerts").warning(
+            "backup_failed_alert_failed", reason=reason
+        )
 
 
 #: Env var naming the pull-level max-close-delta (rupees) at/above which ONE
