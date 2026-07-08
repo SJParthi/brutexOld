@@ -1677,6 +1677,20 @@ def lake_content_token(lake_root: Path) -> str:
     Hashes the sorted ``relpath|size|mtime_ns`` lines — an O(files) stat walk
     with NO file reads. Any add / remove / rewrite (a pull, a derive, a heal, a
     manual copy) moves the token, so the sentinel comparison re-arms the sweep.
+
+    Each entry is ``lstat``-ed under a per-entry guard (hostile-review
+    round-11 fold, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): pre-fix ``path.stat()``
+    FOLLOWED a dangling ``*.parquet`` symlink and raised — and a file deleted
+    between the glob and its stat (a concurrent pull/heal) raced the same way
+    — so ONE such entry crashed this walk before any scan, and the guarded
+    ``StartupSweeper.run_sync`` degraded to ``lake_heal.sweep_failed`` on
+    EVERY boot (the L3 sweep permanently inert: loud, never healing).
+    ``lstat`` never follows a link, so a dangling symlink contributes its OWN
+    link metadata deterministically (the scanner skips symlinked files anyway
+    — nothing healable hides behind one); a raced-away entry is skipped
+    LOUDLY (``lake_heal.token_stat_skipped``, path repr()'d — an options
+    entry embeds the vendor-influenceable series dir name, the rounds-8/9
+    convention), keeping the token deterministic for identical lake content.
     """
     lines: list[str] = []
     for tree in (BAR_DIR_NAME, OPTIONS_DIR_NAME):
@@ -1684,7 +1698,13 @@ def lake_content_token(lake_root: Path) -> str:
         if not base.is_dir():
             continue
         for path in base.rglob("*.parquet"):
-            stat = path.stat()
+            try:
+                stat = path.lstat()
+            except OSError as exc:
+                # Deleted between glob and stat — the same lake content minus
+                # the vanished entry hashes identically (deterministic skip).
+                _LOG.warning("lake_heal.token_stat_skipped", path=repr(str(path)), error=str(exc))
+                continue
             lines.append(
                 f"{path.relative_to(lake_root).as_posix()}|{stat.st_size}|{stat.st_mtime_ns}"
             )

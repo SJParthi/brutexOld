@@ -3370,6 +3370,54 @@ class TestLakeContentToken:
     def test_token_of_an_empty_root_is_stable(self, tmp_path: Path) -> None:
         assert lake_content_token(tmp_path) == lake_content_token(tmp_path)
 
+    def test_dangling_symlink_never_crashes_token(self, tmp_path: Path) -> None:
+        """Round-11 fold: a dangling ``*.parquet`` symlink (bars AND options)
+        no longer crashes the walk — pre-fix ``path.stat()`` followed the link
+        and raised ``FileNotFoundError``, leaving the guarded L3 startup sweep
+        permanently inert (``lake_heal.sweep_failed`` every boot). ``lstat``
+        never follows: the dangling link contributes its OWN link metadata
+        deterministically."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        OptionParquetWriter(lake_root=lake).write(
+            partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+            coordinate=_OPT_COORD,
+            bars=[_option_bar()],
+        )
+        (_dest(lake).parent / "07.parquet").symlink_to(lake / "vanished-bars.parquet")
+        (_opt_series_dir(lake) / "2099-01.parquet").symlink_to(lake / "vanished-opt.parquet")
+        token = lake_content_token(lake)  # pre-fix: FileNotFoundError right here
+        assert len(token) == 64
+        assert token == lake_content_token(lake)  # deterministic over identical content
+
+    def test_racing_deletion_mid_walk_skipped_deterministically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-11 fold: a file deleted between the glob and its stat (the
+        race twin of the dangling symlink) is skipped LOUDLY, and the token
+        equals the one an actually-absent file yields (deterministic)."""
+        import os
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        _write_spot(lake, [_bar(_ts(0, month=7, day=1))])
+        june = _dest(lake)
+        real_lstat = Path.lstat
+
+        def _racing_lstat(self: Path) -> os.stat_result:
+            if self == june:
+                raise FileNotFoundError(2, "raced away", str(self))
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", _racing_lstat)
+        with capture_logs() as logs:
+            skipped_token = lake_content_token(lake)  # pre-fix: raises
+        (skip,) = _events(logs, "lake_heal.token_stat_skipped")
+        assert skip["path"] == repr(str(june))
+        monkeypatch.undo()
+        june.unlink()
+        assert lake_content_token(lake) == skipped_token
+
 
 class TestRunStartupSweep:
     def test_startup_sweep_runs_once_then_skips(
@@ -3441,6 +3489,26 @@ class TestRunStartupSweep:
         assert load_last_sweep(lake) is not None  # stamped — genuinely complete
         again = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert again.ran is False  # token match over the healed tree
+
+    def test_sweep_proceeds_past_dangling_symlinks_and_heals(self, tmp_path: Path) -> None:
+        """Round-11 fold: pre-fix ONE dangling ``*.parquet`` symlink crashed
+        ``lake_content_token`` before the scan even started — the guarded
+        ``StartupSweeper.run_sync`` logged ``lake_heal.sweep_failed`` on EVERY
+        boot and never healed anything (permanently inert, loud but dead).
+        Post-fix the sweep proceeds and heals the sibling poison."""
+        lake = tmp_path / "lake"
+        dest = _poison_option_lake(lake)  # a real healable (side, ts) dup
+        (dest.parent / "2099-01.parquet").symlink_to(lake / "vanished-opt.parquet")
+        (lake / "bars").mkdir(parents=True, exist_ok=True)
+        (lake / "bars" / "dangling.parquet").symlink_to(lake / "vanished-bars.parquet")
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.ran is True
+        assert result.report is not None
+        assert result.report.healed == 1  # the dup healed — no longer inert
+        assert result.report.errors == 0
+        # And the production guarded wrapper no longer degrades to None.
+        sweeper_result = StartupSweeper(lake).run_sync()
+        assert sweeper_result is not None
 
 
 class TestSentinelStampGate:
