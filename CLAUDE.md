@@ -18,7 +18,72 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
+_Last updated: 2026-07-07 (DEC-SOAK-REAL-TIER-001, MIGRATION.md #1580 —
+the REAL multi-hour soak tier + the honest reclassification of the ubuntu
+nightly: `stress-nightly.yml` is a **~5-min ubuntu-24.04 REGRESSION GATE**
+whose guard step now REFUSES a soak-scale dispatch (`STRESS_EVENTS >
+200000`) — the retracted "24h soak via workflow_dispatch
+`STRESS_EVENTS=10_000_000`" #208 claim was FALSE per Golden Rule #10 (the
+60-min job timeout hard-kills a 10M run at ~1/17th done; #208 corrected in
+place, strikethrough + CORRECTED notes). The real multi-hour soak is a
+SEPARATE tier — NEW `.github/workflows/soak-selfhosted.yml` on the
+self-hosted M4-Pro (§8): weekly cron (default 6 h) + `workflow_dispatch
+(soak_minutes)` fenced 1..1200 (20 h — the self-hosted `GITHUB_TOKEN`
+expires at 24 h, so a longer run's failure watchdog could never authenticate
+to file its issue, SEC9-1), with a duration-DERIVED `timeout-minutes`
+(`soak_minutes + 30 + soak_minutes/6` — fixed install slack +
+duration-linear teardown, SOAK-R7-4) so the job can never outrun its own
+clock, driving NEW `tests/stress/test_soak_sustained.py` (the NEW `soak`
+pytest marker — excluded from the per-PR ci.yml stress step AND
+stress-nightly via `-m 'not soak'`; the previously-dead `STRESS_DURATION_S`
+knob is now actually honored) under TWO NEW pure observability modules:
+`brutex/observability/process_probe.py` (the ONE COMMON cross-platform
+RSS+fd source of truth — Linux `/proc/self/status` VmRSS primary,
+`ru_maxrss` PEAK fallback documented as an absolute-CEILING backstop for the
+macOS tier, `/dev/fd` fd fallback; `None` = honest abstain, never a
+fabricated 0; `test_memory_growth._read_rss_kib` delegates to it) +
+`brutex/observability/soak_drift.py` (`SoakDriftMonitor` — RSS-ceiling /
+fd-growth / p99-latency-drift rules modelled on the in-repo
+`pull_health.py`, routed to a NEW real-time `SweepAlerter.soak_drift`
+Telegram alert). Ledger provenance: renumbered
+#1512→#1534→#1535→#1536→#1537→#1540→#1541→#1552→#1566→#1580 across
+eight-plus main collisions (#1580 chosen clear of live-main max #1560 AND the
+in-flight PR #1264/#1244 wave holding #1558–#1567, the PR #1236 high-jump
+precedent — the validator allows gaps); ships via the replacement-PR remedy
+(the PR #1095→#1097 / #1220→#1235 precedent) on
+`claude/soak-real-tier-rebuild` after commit 2757d005's `fix(test+docs):`
+scope (`+` illegal in a conventional-commit scope, no override, history
+rewrite forbidden) made the original `claude/serene-maxwell-0irkzn` (PR
+#1231) permanently unmergeable. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no Groww scope/vocab/rate change; CI + observability + tests + docs only;
+touched modules 100% line+branch.
+Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
+Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
 the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
 trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
 executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
@@ -928,8 +993,8 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1557** (renumbered
-  from #1538 at the 2026-07-08 origin/main merge — main's #1538 is DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001) — Phase-3
+- **Active branch:** `claude/elegant-johnson-cgufi7` (**DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1581** (renumbered
+  #1538→#1557→#1581 across the 2026-07-08 origin/main merges — main's #1538 is DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, main's #1557 is DEC-DASHBOARD-BROWSER-TRUTH-001) — Phase-3
   "results depth" for the one-click institutional sweep, delivered as ONE fenced RUN-END post-hoc pass
   (`brutex/engine/results_depth_pass.py`) that re-simulates ONLY the persisted finalists on the pure-Python oracle
   (per-combo PARITY TOOTH vs the stored row — a mismatch is counted + excluded, never a silently wrong trade list),
@@ -962,10 +1027,10 @@ hostile-review pass._
   junk env, fence). HONEST: the pass is O(persisted finalists) oracle re-sims at run-end, NOT free and NOT on the
   ~33B-trial hot path (which receives ZERO diffs — the frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` pins pass
   UNMODIFIED); trade pages are O(page) with a disclosed O(row-groups-up-to-offset) deep-offset scan (the db_view
-  envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1557); the
+  envelope); the parallel WP3 session shipped nothing, so WP3 was repaired inside WP6 (ledgered #1581); the
   contracts memory-file additive-key update (`trade_seq`/`path_1m_status`/`mae_granularity` + the top100 object
   root) is a coordinator obligation. RULINGS-CONFORMANCE AMENDMENT (2026-07-08, same branch — the gap-register
-  coordinator rulings folded in pre-merge, ledgered in #1557): Ruling 4 — every run-end artifact relocated to the
+  coordinator rulings folded in pre-merge, ledgered in #1581): Ruling 4 — every run-end artifact relocated to the
   `sweep_runs/` SIBLING root via the ONE `sweep_run_dir` seam (the `<sweeps>/results-depth/` + `<sweeps>/runs/`
   layouts SUPERSEDED; branch-introduced goldens regenerated, origin/main goldens untouched); Ruling 18 —
   `lots`/`costs_paisa` NULL-BY-DESIGN `None` until P5's futures translation sidecar (the fabricated `1`/`0`
@@ -986,6 +1051,30 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; every
   new/touched module 100% line+branch; ruff/ruff-format clean, `mypy --strict` clean + pyright 0 new errors vs the
   origin/main baseline).
+  Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
   Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
   the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
   twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
@@ -2822,12 +2911,18 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/elegant-johnson-cgufi7`
-  (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1557 — renumbered from #1538
-  at the 2026-07-08 origin/main merge)
+  (DEC-SWEEP-RESULTS-DEPTH-001, MIGRATION.md #1581 — renumbered
+  #1538→#1557→#1581 across the 2026-07-08 origin/main merges)
+  Earlier: `claude/peaceful-wright-r7l8l9`
+  (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
+  retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
+  fields replace the wrong bearish alias; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/stoic-davinci-7c7xp0`
   (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
   DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
-  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556)
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556 — the doc/spec/ops
+  debt reconciliation pack; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
@@ -3018,7 +3113,7 @@ bruteX/
 │   ├── property/                   ← hypothesis + proptest (24 invariants)
 │   ├── golden/                     ← byte-equality fixtures
 │   ├── bench/                      ← O(1) ratio tests
-│   ├── stress/                     ← 24h sustained
+│   ├── stress/                     ← nightly ~5-min gate + weekly soak (#1580)
 │   ├── smoke/                      ← <30s pre-push
 │   └── fakes/                      ← test doubles
 └── .github/workflows/

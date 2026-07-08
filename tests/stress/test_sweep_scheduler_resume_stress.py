@@ -26,6 +26,7 @@ from __future__ import annotations
 import itertools
 import os
 
+import pytest
 from brutex.engine.sweep_scheduler import (
     CheckpointView,
     ResumeKind,
@@ -33,6 +34,11 @@ from brutex.engine.sweep_scheduler import (
     decide_resume,
     plan_cycle,
 )
+
+# Marker discipline (tests/stress/__init__.py): the nightly (`-m stress`) and
+# self-hosted soak (`-m 'stress or soak'`) tiers select BY MARKER — an unmarked
+# stress test silently drops out of both tiers (SOAK-R7-1).
+pytestmark = pytest.mark.stress
 
 _CYCLES = int(os.environ.get("STRESS_SCHED_CYCLES", "20000"))
 
