@@ -395,6 +395,38 @@ class TestManifestFirstDiscovery:
         assert stale[0]["post_walk_token"] is None
 
 
+class TestWalkLiveness:
+    """The manifest-miss O(files) walk feeds the pull stall watchdog.
+
+    Refuter-confirmed (DEC-GREEKS-BULK-REENRICH-001 fix round 2): the Greeks
+    backfill scan's enumeration fully materialises ``list_fno_candle_datasets``
+    BEFORE its first per-contract beat, and on an absent/stale manifest that
+    enumeration is THIS walk — measured 29.7 minutes on the production
+    2.36M-file lake, ~3× the 600 s watchdog timeout, with ZERO beats — so a
+    healthy deep-lake backfill false-tripped a CRITICAL "pull halted" alert.
+    The walk now beats once per walked symbol directory.
+    """
+
+    def test_walk_fallback_beats_the_stall_watchdog_per_symbol(self, tmp_path: Path) -> None:
+        from brutex.observability.progress_beat import (
+            register_progress_beat,
+            unregister_progress_beat,
+        )
+
+        _seed_lake(tmp_path)
+        assert lm.load_manifest_datasets(tmp_path) is None  # manifest absent → forced walk
+        beats: list[None] = []
+        register_progress_beat(lambda: beats.append(None))
+        try:
+            listed = db_view.list_candle_datasets(tmp_path)
+        finally:
+            unregister_progress_beat()
+        symbols = {d["symbol"] for d in listed}
+        assert symbols  # the walk really ran and found datasets
+        # ≥ one beat per walked (valid-coordinate) symbol directory.
+        assert len(beats) >= len(symbols)
+
+
 def test_manifest_rows_with_invalid_coordinates_are_screened(tmp_path: Path) -> None:
     """Manifest rows failing the walk's dir-level validity screens are dropped.
 

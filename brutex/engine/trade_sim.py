@@ -173,13 +173,63 @@ DEFAULT_FILL_POLICY: Final[FillPolicy] = FillPolicy()
 
 
 class _ExitReason(Enum):
-    """Why a position closed (internal — for structlog only; not on ``ClosedTrade``)."""
+    """Why a position closed (structlog + the optional :class:`TradeDetail` sink).
+
+    The enum stays module-private (no caller constructs one), but its **string
+    values are the public exit-reason vocabulary** carried on
+    :class:`TradeDetail.exit_reason` and pinned by the P3→P4 trade-row wire
+    contract (DEC-SWEEP-RESULTS-DEPTH-001) — see :data:`EXIT_REASONS`. The
+    strings are UNCHANGED from their original structlog-only life.
+    """
 
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
     FORCED = "forced_1520"
     SIGNAL = "signal"
     END_OF_DATA = "end_of_data"
+
+
+#: The public exit-reason string vocabulary, in enum-definition order
+#: (DEC-SWEEP-RESULTS-DEPTH-001): ``("stop_loss", "take_profit", "forced_1520",
+#: "signal", "end_of_data")``. Downstream persistence (``brutex.engine.trade_store``)
+#: validates against THIS tuple — imported, never copied (CLAUDE.md §11 COMMON).
+EXIT_REASONS: Final[tuple[str, ...]] = tuple(reason.value for reason in _ExitReason)
+
+
+@dataclass(frozen=True, slots=True)
+class TradeDetail:
+    """One closed trade's exit detail — the additive capture-sink record.
+
+    Emitted by :class:`TradeSimWalker` into an optional ``detail_sink`` list
+    (DEC-SWEEP-RESULTS-DEPTH-001 WP1): the walker already KNOWS each trade's
+    exit reason and exact fill prices at the single ``_close`` seam but
+    historically discarded them (the reason was structlog-only; the fills were
+    a "tracked follow-up" per ``sweep_run.ranked_combo_to_result_row``). The
+    sink surfaces them WITHOUT touching :class:`~brutex.metrics.types.ClosedTrade`
+    or the Rust ``TradeRecord`` tuple — a pure additive annotation, so every
+    existing caller (and the frozen sweep goldens) is byte-identical.
+
+    Parameters
+    ----------
+    trade
+        The :class:`~brutex.metrics.types.ClosedTrade` this detail annotates —
+        the SAME object the walker returned, positionally aligned with the
+        walker's output (detail ``i`` annotates trade ``i``).
+    exit_reason
+        Why the position closed — one of :data:`EXIT_REASONS`.
+    entry_fill_paisa
+        The exact entry fill price (int64 paisa) — the entry bar's OPEN.
+    exit_fill_paisa
+        The exact exit fill price (int64 paisa) — the level / open / close the
+        trade actually filled at. Invariant (by :meth:`TradeSimWalker._close`'s
+        P&L arithmetic): ``pnl_paisa == exit − entry`` for BUY and
+        ``entry − exit`` for SELL.
+    """
+
+    trade: ClosedTrade
+    exit_reason: str
+    entry_fill_paisa: int
+    exit_fill_paisa: int
 
 
 @dataclass(slots=True)
@@ -254,6 +304,14 @@ class TradeSimWalker:
         (never a fabricated value) and the stamper warns; the engine output is
         otherwise byte-identical with or without the stamper, so it is a pure
         downstream-analysis annotation.
+    detail_sink
+        Optional caller-owned list the walker appends one :class:`TradeDetail`
+        to per closed trade (positionally aligned with the returned trades) —
+        the exit reason + exact fill prices the ``_close`` seam already knew
+        (DEC-SWEEP-RESULTS-DEPTH-001 WP1). ``None`` (the default) skips the
+        append entirely: the walker's returned trades are byte-identical with
+        or without a sink (regression-pinned), so every existing caller and
+        the frozen sweep goldens are untouched.
 
     Raises
     ------
@@ -271,6 +329,7 @@ class TradeSimWalker:
         take_profit_paisa: int | None = None,
         policy: FillPolicy = DEFAULT_FILL_POLICY,
         reference_stamper: TradeReferenceStamper | None = None,
+        detail_sink: list[TradeDetail] | None = None,
     ) -> None:
         if direction is Side.HOLD:
             raise ValueError("TradeSimWalker.direction must be BUY or SELL, not HOLD")
@@ -290,6 +349,7 @@ class TradeSimWalker:
         self._tp_paisa = take_profit_paisa
         self._policy = policy
         self._reference_stamper = reference_stamper
+        self._detail_sink = detail_sink
         self._position: _OpenPosition | None = None
         self._pending_entry = False
         # The IST session date the pending entry ARMED on (``None`` while no
@@ -712,6 +772,19 @@ class TradeSimWalker:
             vix_at_entry=vix_at_entry,
             vix_at_exit=vix_at_exit,
         )
+        # Additive capture sink (DEC-SWEEP-RESULTS-DEPTH-001 WP1): surface the
+        # reason + exact fills this seam already computed. ``None`` (the
+        # default) is a pure skip — the returned trade is byte-identical either
+        # way, so the frozen goldens never move.
+        if self._detail_sink is not None:
+            self._detail_sink.append(
+                TradeDetail(
+                    trade=trade,
+                    exit_reason=reason.value,
+                    entry_fill_paisa=pos.entry_price_paisa,
+                    exit_fill_paisa=exit_price_paisa,
+                )
+            )
         self._position = None
         self._last_exit_idx = exit_idx
         _LOG.debug(
@@ -735,6 +808,7 @@ def simulate_trades(
     exit_signals: Sequence[bool] | None = None,
     policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
+    detail_sink: list[TradeDetail] | None = None,
 ) -> list[ClosedTrade]:
     """Walk a feed into closed trades — the one-call batch wrapper over :class:`TradeSimWalker`.
 
@@ -762,6 +836,11 @@ def simulate_trades(
         :class:`~brutex.engine.reference_series.TradeReferenceStamper` — stamps
         ``vix_at_entry`` / ``vix_at_exit`` on every trade (REFERENCE ONLY,
         DEC-VIX-TRADE-STAMP-001). ``None`` leaves both VIX fields ``None``.
+    detail_sink
+        Optional caller-owned list receiving one :class:`TradeDetail` per
+        closed trade (exit reason + exact fills, positionally aligned with the
+        returned trades — DEC-SWEEP-RESULTS-DEPTH-001 WP1). ``None`` (the
+        default) is byte-identical to the pre-seam behaviour.
 
     Returns
     -------
@@ -775,6 +854,7 @@ def simulate_trades(
         take_profit_paisa=take_profit_paisa,
         policy=policy,
         reference_stamper=reference_stamper,
+        detail_sink=detail_sink,
     )
     return walker.run(bars, entry_signals, exit_signals)
 
@@ -790,6 +870,7 @@ def simulate_trades_with_exit_indices(
     exit_signals: Sequence[bool] | None = None,
     policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
+    detail_sink: list[TradeDetail] | None = None,
 ) -> tuple[list[ClosedTrade], list[int] | None]:
     """Walk a feed into closed trades PLUS their certified exit bar indices.
 
@@ -822,6 +903,7 @@ def simulate_trades_with_exit_indices(
         take_profit_paisa=take_profit_paisa,
         policy=policy,
         reference_stamper=reference_stamper,
+        detail_sink=detail_sink,
     )
     trades, exit_indices = walker.run_with_exit_indices(bars, entry_signals, exit_signals)
     return trades, exit_indices if certified else None
@@ -829,9 +911,11 @@ def simulate_trades_with_exit_indices(
 
 __all__ = [
     "DEFAULT_FILL_POLICY",
+    "EXIT_REASONS",
     "FillPolicy",
     "LevelFill",
     "SameBarTie",
+    "TradeDetail",
     "TradeSimWalker",
     "simulate_trades",
     "simulate_trades_with_exit_indices",
