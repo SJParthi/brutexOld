@@ -477,6 +477,65 @@ def test_restore_requires_yes_then_restores(
     assert "RESTORE_DONE" in audit_text
 
 
+def test_restore_preserves_live_nightly_audit_chain_on_disk(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression (review round 5 MAJOR, reproduced end-to-end pre-fix): a
+    snapshot taken while the cross-run nightly audit chain already existed
+    used to CONTAIN that chain; restore then os.replace'd the writer's open
+    inode, so RESTORE_START/RESTORE_DONE were written to a dead inode and the
+    on-disk chain rolled back to snapshot time (Golden Rule #8 violation)."""
+    from brutex.engine.sweep_audit import verify_chain
+    from brutex.nightly.report import open_nightly_audit
+
+    lake, results = _mini_lake(tmp_path)
+    audit_path = results / "nightly" / "audit" / "nightly.jsonl"
+    with open_nightly_audit(results) as audit:
+        audit.append(action="SNAPSHOT_ERA", subject="nightly:pre", payload={})
+    snapshot = _seal_snapshot(tmp_path, lake, results)
+    # The chain moves on AFTER the snapshot — restore must not roll it back.
+    with open_nightly_audit(results) as audit:
+        audit.append(action="POST_SNAPSHOT", subject="nightly:post", payload={})
+
+    rc = cli.main(
+        ["nightly", "restore", "--snapshot", str(snapshot), "--lake-root", str(lake), "--yes"]
+    )
+    assert rc == 0
+    capsys.readouterr()
+    text = audit_path.read_text(encoding="utf-8")
+    assert "SNAPSHOT_ERA" in text
+    assert "POST_SNAPSHOT" in text  # NOT rolled back to snapshot time
+    assert "RESTORE_START" in text  # durable ON DISK, not on a dead inode
+    assert "RESTORE_DONE" in text
+    assert verify_chain(audit_path) == 4  # the hash chain is still green
+
+
+def test_restore_legacy_snapshot_skips_live_audit_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A LEGACY snapshot (sealed pre-round-5, audit chain in-manifest) restores
+    everything EXCEPT the live audit chain, and the plan says so loudly."""
+    from tests.fakes.nightly_snapshot import inject_legacy_audit_entry
+
+    lake, results = _mini_lake(tmp_path)
+    snapshot = _seal_snapshot(tmp_path, lake, results)
+    key = inject_legacy_audit_entry(snapshot)
+    live_audit = results / "nightly" / "audit" / "nightly.jsonl"
+    live_audit.parent.mkdir(parents=True)
+
+    rc = cli.main(
+        ["nightly", "restore", "--snapshot", str(snapshot), "--lake-root", str(lake), "--yes"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"SKIP {key}" in out
+    assert "never overwritten by restore" in out
+    text = live_audit.read_text(encoding="utf-8")
+    assert "SNAPSHOT-ERA-CHAIN" not in text  # the snapshot copy never landed
+    assert "RESTORE_START" in text
+    assert "RESTORE_DONE" in text
+
+
 def test_restore_refusals_and_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

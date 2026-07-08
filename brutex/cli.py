@@ -4972,6 +4972,11 @@ def cmd_nightly_restore(
     print(f"[brutex] restore plan for {snapshot.name}: {len(plan.items)} file(s), in order:")
     for entry in plan.items:
         print(f"[brutex]   {entry.restore_order} {entry.namespace}/{entry.relpath}")
+    for key in plan.skipped_live_audit:
+        print(
+            f"[brutex]   SKIP {key} (live cross-run nightly audit chain — "
+            "never overwritten by restore; legacy snapshot)"
+        )
 
     if dry_run:
         verification = verify_snapshot(snapshot)

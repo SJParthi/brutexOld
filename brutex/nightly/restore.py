@@ -49,6 +49,7 @@ import structlog
 from brutex.models import BruteXError
 from brutex.nightly.backup import (
     MANIFEST_NAME,
+    NIGHTLY_AUDIT_REL_PARTS,
     PARTIAL_SUFFIX,
     BackupEntry,
     BackupManifest,
@@ -165,18 +166,51 @@ class RestorePlan:
     items: tuple[BackupEntry, ...]  # sorted (restore_order, namespace, relpath) — ledger LAST
     lake_root: Path
     results_root: Path
+    skipped_live_audit: tuple[str, ...] = ()  # legacy-manifest nightly/audit/ entries, NEVER copied
+
+
+def _is_live_audit_entry(entry: BackupEntry) -> bool:
+    """True for a ``results`` entry under the shared live ``nightly/audit/`` chain."""
+    parts = tuple(entry.relpath.split("/"))
+    return (
+        entry.namespace == "results"
+        and parts[: len(NIGHTLY_AUDIT_REL_PARTS)] == NIGHTLY_AUDIT_REL_PARTS
+    )
 
 
 def plan_restore(snapshot_dir: Path, *, lake_root: Path, results_root: Path) -> RestorePlan:
-    """Build the deterministic restore plan (no verification, no writes)."""
+    """Build the deterministic restore plan (no verification, no writes).
+
+    A LEGACY snapshot (sealed before the ``nightly/audit/`` scope exclusion)
+    may carry the shared cross-run nightly audit chain; those entries are
+    SKIPPED here — restore itself appends RESTORE_START/RESTORE_DONE to that
+    very chain, and copying the snapshot copy over it would ``os.replace``
+    the writer's open inode, silently rolling the forensic chain back to
+    snapshot time and losing the restore's own audit records (Golden Rule #8).
+    """
     manifest = _load_manifest(snapshot_dir)
-    items = tuple(sorted(manifest.entries, key=lambda e: (e.restore_order, e.namespace, e.relpath)))
+    live_audit = tuple(
+        f"{e.namespace}/{e.relpath}" for e in manifest.entries if _is_live_audit_entry(e)
+    )
+    if live_audit:
+        logger.warning(
+            "nightly.restore.live_audit_skipped",
+            snapshot=str(snapshot_dir),
+            skipped=list(live_audit),
+        )
+    items = tuple(
+        sorted(
+            (e for e in manifest.entries if not _is_live_audit_entry(e)),
+            key=lambda e: (e.restore_order, e.namespace, e.relpath),
+        )
+    )
     return RestorePlan(
         snapshot=snapshot_dir,
         manifest=manifest,
         items=items,
         lake_root=lake_root,
         results_root=results_root,
+        skipped_live_audit=live_audit,
     )
 
 

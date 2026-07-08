@@ -5,8 +5,10 @@ Verify-ALL-before-write (a byte flip → RestoreVerifyError naming the relpath
 with the destination tree UNTOUCHED), the deltas-clear law (manifest-
 extraneous destination deltas removed; manifest deltas copied; count
 returned), ledger-LAST + deltas-before-ledger ordering (recording copy_file),
-partial-snapshot + junk-manifest refusals, post-copy re-hash failure, and
-idempotent re-runs after a mid-restore copy failure.
+partial-snapshot + junk-manifest refusals, post-copy re-hash failure,
+idempotent re-runs after a mid-restore copy failure, and the legacy
+live-audit-chain skip belt (a pre-round-5 snapshot's nightly/audit/ entry is
+never copied back over the writer's open inode).
 """
 
 from __future__ import annotations
@@ -324,3 +326,34 @@ def test_restore_deltas_clear_with_missing_dest_dir(tmp_path: Path) -> None:
     outcome = restore_snapshot(plan)
     assert outcome.deltas_cleared == 0
     assert (lake / "window_ledger" / "ledger.parquet").read_bytes() == b"LEDGER-BASE"
+
+
+def test_restore_skips_legacy_live_audit_chain_entry(tmp_path: Path) -> None:
+    """Regression (review round 5 MAJOR): a LEGACY snapshot carrying the shared
+    cross-run ``results/nightly/audit/nightly.jsonl`` must NEVER copy it back —
+    restore appends RESTORE_START/RESTORE_DONE to that very chain, and an
+    ``os.replace`` over the writer's open inode would silently roll the
+    forensic chain back to snapshot time and lose both records (Golden
+    Rule #8)."""
+    import structlog.testing
+
+    from tests.fakes.nightly_snapshot import inject_legacy_audit_entry
+
+    lake, results, snapshot = _fixture(tmp_path)
+    key = inject_legacy_audit_entry(snapshot)
+    # The DESTINATION live chain — post-snapshot state that must survive.
+    live_audit = results / "nightly" / "audit" / "nightly.jsonl"
+    live_audit.parent.mkdir(parents=True)
+    live_audit.write_bytes(b"LIVE-CHAIN-WITH-POST-SNAPSHOT-ENTRIES\n")
+
+    with structlog.testing.capture_logs() as logs:
+        plan = plan_restore(snapshot, lake_root=lake, results_root=results)
+    assert plan.skipped_live_audit == (key,)
+    assert all(f"{e.namespace}/{e.relpath}" != key for e in plan.items)
+    assert any(log["event"] == "nightly.restore.live_audit_skipped" for log in logs)
+
+    outcome = restore_snapshot(plan)
+    assert outcome.restored == len(plan.items) == 6  # the audit entry never copied
+    # The live chain is byte-untouched (Phase C skipped it; Phase D never
+    # re-hashed it against the snapshot copy).
+    assert live_audit.read_bytes() == b"LIVE-CHAIN-WITH-POST-SNAPSHOT-ENTRIES\n"

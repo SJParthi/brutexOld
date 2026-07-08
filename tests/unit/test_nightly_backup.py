@@ -2,7 +2,8 @@
 """Tests for `brutex.nightly.backup` (DEC-SWEEP-NIGHTLY-AUTOMATION-001, R50 write side).
 
 Inventory inclusion/exclusion law (bars/.locks/.rate/.quarantine/progress/
-current-nightly OUT; dedup-cache + prior nightly dirs IN; lake/results
+current-nightly + the LIVE cross-run nightly/audit/ chain OUT; dedup-cache +
+prior nightly dirs IN; lake/results
 namespacing incl. a results root OUTSIDE the lake), absent-member notes,
 manifest round-trip (hypothesis) + golden + junk→BackupManifestError,
 hash-of-DESTINATION-bytes correctness, `.partial`-never-sealed on ANY injected
@@ -23,6 +24,7 @@ import structlog.testing
 from brutex.nightly.backup import (
     BACKUP_SCHEMA_VERSION,
     MANIFEST_NAME,
+    NIGHTLY_AUDIT_REL_PARTS,
     NIGHTLY_BACKUP_KEEP_ENV,
     NIGHTLY_BACKUP_ROOT_ENV,
     NIGHTLY_BACKUP_VERIFY_ENV,
@@ -88,6 +90,10 @@ def _make_lake(tmp_path: Path) -> tuple[Path, Path]:
     (results / "nightly" / "nightly-OLD" / "report.json").write_bytes(b"{}")
     (results / "nightly" / "nightly-CUR").mkdir(parents=True)
     (results / "nightly" / "nightly-CUR" / "report.json").write_bytes(b"{}")
+    # The SHARED cross-run nightly audit chain — LIVE-APPENDED by the very
+    # command taking the snapshot; ALWAYS excluded (review round 5 MAJOR).
+    (results / "nightly" / "audit").mkdir(parents=True)
+    (results / "nightly" / "audit" / "nightly.jsonl").write_bytes(b"AUDIT-CHAIN")
     (results / "progress").mkdir()
     (results / "progress" / "sweep-progress.json").write_bytes(b"{}")
     (results / ".locks").mkdir()
@@ -173,6 +179,26 @@ def test_inventory_without_exclude_id_keeps_all_nightly_dirs(tmp_path: Path) -> 
     keys = {f"{i.namespace}/{i.relpath}" for i in items}
     assert "results/nightly/nightly-CUR/report.json" in keys
     assert "results/nightly/nightly-OLD/report.json" in keys
+    # The live audit chain stays out even when NO current id is excluded.
+    assert "results/nightly/audit/nightly.jsonl" not in keys
+
+
+def test_inventory_always_excludes_live_nightly_audit_chain(tmp_path: Path) -> None:
+    """Regression (review round 5 MAJOR): the shared, actively-appended
+    ``results/nightly/audit/nightly.jsonl`` must NEVER enter the backup scope
+    — a restored copy would ``os.replace`` the open writer's inode and lose
+    RESTORE_START/RESTORE_DONE while rolling the forensic chain back to
+    snapshot time (Golden Rule #8)."""
+    lake, results = _make_lake(tmp_path)
+    for exclude_id in ("nightly-CUR", None):
+        items, _ = backup_inventory(lake, results, exclude_nightly_id=exclude_id)
+        keys = {f"{i.namespace}/{i.relpath}" for i in items}
+        assert not any(k.startswith("results/nightly/audit/") for k in keys)
+    # The exclusion parts mirror the ONE audit-path law in report.py.
+    from brutex.nightly.report import nightly_audit_path
+
+    rel = nightly_audit_path(results).relative_to(results)
+    assert rel.parts[: len(NIGHTLY_AUDIT_REL_PARTS)] == NIGHTLY_AUDIT_REL_PARTS
 
 
 def test_inventory_absent_members_are_honest_notes(tmp_path: Path) -> None:
@@ -388,9 +414,13 @@ def test_create_snapshot_seals_and_hashes_verifiably(tmp_path: Path) -> None:
     assert not any("nightly-CUR" in p for p in copied)
     assert not any(p.startswith("results/progress/") for p in copied)
     assert not any("bars/" in p for p in copied)
+    assert not any(p.startswith("results/nightly/audit/") for p in copied)
     # Exclusion reasons recorded.
     assert "bars/ (re-pullable)" in manifest.excluded_by_law
     assert "results nightly/nightly-CUR/ (live nightly dir)" in manifest.excluded_by_law
+    assert "results nightly/audit/ (live cross-run nightly audit chain)" in (
+        manifest.excluded_by_law
+    )
 
 
 def test_create_snapshot_hashes_destination_bytes_not_source(tmp_path: Path) -> None:

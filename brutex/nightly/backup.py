@@ -8,9 +8,16 @@ namespace ``results`` (rooted at the results root — default ``<lake>/sweeps``,
 correctly covered even when the operator points ``--results-root`` OUTSIDE the
 lake) covers the whole sweeps tree EXCEPT ``progress/`` (transient, rewritten
 every publish — restoring a stale "running" snapshot would false-positive the
-liveness probe), ``.locks/`` (kernel-released flocks) and the CURRENT
-``nightly/<id>/`` dir (actively appended during this run; PRIOR nightly dirs
-are included). ``bars/`` is EXCLUDED BY LAW — re-pullable; full-lake
+liveness probe), ``.locks/`` (kernel-released flocks), the SHARED cross-run
+``nightly/audit/`` chain (LIVE-APPENDED by the very command that snapshots —
+``nightly run`` writes it between links, and ``nightly restore`` appends
+RESTORE_START/RESTORE_DONE to it while restoring: an in-scope copy would
+``os.replace`` the writer's open inode, silently rolling the forensic chain
+back to snapshot time and losing the restore's own audit records to a dead
+inode — Golden Rule #8; each run's tail is captured durably in its PRIOR
+``nightly/<id>/bundle/``) and the CURRENT ``nightly/<id>/`` dir (actively
+appended during this run; PRIOR nightly dirs are included). ``bars/`` is
+EXCLUDED BY LAW — re-pullable; full-lake
 protection stays the manual rsync/Time-Machine guidance in
 ``docs/runbooks/lake-backup-restore.md``.
 
@@ -60,6 +67,7 @@ __all__ = [
     "DELTAS_REL_PREFIX",
     "LEDGER_REL",
     "MANIFEST_NAME",
+    "NIGHTLY_AUDIT_REL_PARTS",
     "NIGHTLY_BACKUP_KEEP_ENV",
     "NIGHTLY_BACKUP_ROOT_ENV",
     "NIGHTLY_BACKUP_VERIFY_ENV",
@@ -113,6 +121,16 @@ _LAKE_MEMBERS: Final[tuple[str, ...]] = (
 
 #: Results-namespace top-level dirs excluded from the walk.
 _RESULTS_EXCLUDED_TOPLEVEL: Final[frozenset[str]] = frozenset({"progress", ".locks"})
+
+#: Leading ``results``-relative path parts of the SHARED cross-run nightly
+#: audit chain (``<results_root>/nightly/audit/`` — the
+#: :func:`brutex.nightly.report.nightly_audit_path` law, mirror-pinned by
+#: test). ALWAYS excluded from the backup scope AND skipped by restore
+#: (:func:`brutex.nightly.restore.plan_restore` — the belt for legacy
+#: snapshots sealed before this exclusion): the chain is live-appended by
+#: the very command doing the snapshot/restore, so copying it back would
+#: clobber the writer's open inode and lose RESTORE_START/RESTORE_DONE.
+NIGHTLY_AUDIT_REL_PARTS: Final[tuple[str, ...]] = ("nightly", "audit")
 
 _HASH_CHUNK: Final[int] = 1024 * 1024
 
@@ -365,6 +383,8 @@ def backup_inventory(
             parts = rel.parts
             if parts[0] in _RESULTS_EXCLUDED_TOPLEVEL:
                 continue
+            if parts[: len(NIGHTLY_AUDIT_REL_PARTS)] == NIGHTLY_AUDIT_REL_PARTS:
+                continue  # the LIVE cross-run nightly audit chain — never in scope
             if (
                 exclude_nightly_id is not None
                 and len(parts) >= _NIGHTLY_PARTS_MIN
@@ -393,6 +413,7 @@ def _excluded_by_law(exclude_nightly_id: str | None) -> tuple[str, ...]:
         ".rate/ (transient)",
         ".quarantine/ (heal forensics)",
         "results progress/ (transient)",
+        "results nightly/audit/ (live cross-run nightly audit chain)",
     ]
     if exclude_nightly_id is not None:
         excluded.append(f"results nightly/{exclude_nightly_id}/ (live nightly dir)")

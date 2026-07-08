@@ -108,7 +108,7 @@ Scope (fixed inventory, `brutex/nightly/backup.py::backup_inventory`):
 | In | Out (by law, reason recorded in the manifest) |
 |---|---|
 | `window_ledger/` (ledger.parquet + deltas), `registry.duckdb`, `instruments.duckdb`, `catalog.duckdb`, lake `audit/` | `bars/` — re-pullable; full-lake protection stays the manual path (`lake-backup-restore.md`) |
-| the whole `sweeps/` tree: tuple parquets, `.complete.json` sentinels, trial stats, `audit/*.jsonl`, `checkpoint/`, `dedup-cache/` LMDB, `cascade/`, PRIOR `nightly/<id>/` dirs | `.locks/` (kernel-released flocks), `.rate/` (transient), `.quarantine/` (heal forensics), `sweeps/progress/` (transient — restoring a stale "running" would false-positive the liveness probe), the CURRENT `nightly/<id>/` |
+| the whole `sweeps/` tree: tuple parquets, `.complete.json` sentinels, trial stats, `audit/*.jsonl`, `checkpoint/`, `dedup-cache/` LMDB, `cascade/`, PRIOR `nightly/<id>/` dirs | `.locks/` (kernel-released flocks), `.rate/` (transient), `.quarantine/` (heal forensics), `sweeps/progress/` (transient — restoring a stale "running" would false-positive the liveness probe), the CURRENT `nightly/<id>/`, the SHARED cross-run `nightly/audit/` chain (live-appended by the very command that snapshots/restores — a restored copy would `os.replace` the writer's open inode, rolling the forensic chain back to snapshot time and losing RESTORE_START/RESTORE_DONE to a dead inode; each run's audit tail is durably captured in its prior `nightly/<id>/bundle/`) |
 
 Consistency: everything in scope is quiescent — the nightly holds the pull
 locks (no ledger/registry/audit writer can run) and the liveness probe
@@ -142,7 +142,11 @@ copies in `restore_order` with the destination `window_ledger/deltas/`
 CLEARED of manifest-extraneous `*.parquet` first (a leftover post-snapshot
 delta would fold latest-wins OVER the restored base — the #1533 QUALIFY law)
 and `ledger.parquet` STRICTLY LAST (its stat token is every dashboard cache's
-cross-process refresh signal); Phase D re-hashes the destination.
+cross-process refresh signal); Phase D re-hashes the destination. A LEGACY
+snapshot whose manifest still carries the shared `nightly/audit/` chain has
+those entries SKIPPED (named `SKIP …` in the printed plan) — restore appends
+RESTORE_START/RESTORE_DONE to that very chain and must never copy the
+snapshot's stale copy over the writer's open inode.
 
 | Refusal | Exit |
 |---|---|
