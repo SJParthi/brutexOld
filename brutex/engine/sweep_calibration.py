@@ -457,27 +457,34 @@ class _EstimateLike(Protocol):
     module cycle CodeQL ``py/cyclic-import`` flags (``sweep_estimate`` imports
     THIS module for :class:`CalibrationSnapshot`, the one allowed direction —
     the ``cascade_wire._RefinedCellLike`` precedent).
+
+    Stub bodies use ``raise NotImplementedError`` (the typing-spec protocol
+    placeholder) instead of the docstring+``...`` stub: CodeQL
+    ``py/ineffectual-statement`` flags an ellipsis ExprStmt AFTER a docstring
+    (alerts #858-#861 here; the ``tests/browser/conftest.py``
+    ``NewPageFactory`` precedent, alert #688) and pyright rejects a
+    docstring-only body (reportReturnType).
     """
 
     @property
     def trials(self) -> int:
         """Estimated trial count (the ``bloom_capacity_hint`` twin)."""
-        ...  # pragma: no cover — Protocol stub, never executed
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def est_seconds(self) -> float:
         """The DISPLAYED time-model estimate, in seconds."""
-        ...  # pragma: no cover — Protocol stub, never executed
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def est_result_bytes(self) -> int:
         """The disk-gate NEED basis, in bytes."""
-        ...  # pragma: no cover — Protocol stub, never executed
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
     def time_model(self) -> str:
         """``"calibrated_trials"`` | ``"per_tuple_sla_fallback"``."""
-        ...  # pragma: no cover — Protocol stub, never executed
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def record_run_calibration(
