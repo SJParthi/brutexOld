@@ -24,8 +24,16 @@ In BOTH cases the same PDH/PDL range is the anchor — only the
 
 ## What we compute
 
-For each trading day we compute **17 unique anchor price levels**:
-- 7 retracement levels INSIDE the PDH-PDL range (same in both conventions)
+For each trading day we compute **21 anchor price levels**:
+- 7 bearish-convention retracement levels INSIDE the PDH-PDL range
+  (PDH-anchored: ``pdh - ratio * range``)
+- 4 bullish-convention retracement levels INSIDE the PDH-PDL range
+  (PDL-anchored: ``pdl + ratio * range`` — DEC-FIB-BULLISH-RETRACE-001;
+  the bullish 0%/50%/100% share the PDL / midpoint / PDH fields, and the
+  bullish ladder is NOT a relabeling of the bearish one because the Fib
+  ratios are asymmetric: 0.236 + 0.786 = 1.022 != 1.000. The 38/62 pair
+  coincides numerically only because 0.382 + 0.618 = 1.000 exactly in
+  IEEE — an observation, never relied on.)
 - 5 bullish extension levels ABOVE PDH (price targets when trending up)
 - 5 bearish extension levels BELOW PDL (price targets when trending down)
 
@@ -35,7 +43,12 @@ Vocabulary conditions like:
 - `close > fib_ext_127_up` — above bullish extension
 - `close < fib_ext_127_down` — below bearish extension
 
-## Verified bit-exact against 3 screenshots (2026-05-16)
+(The 52->60-condition evaluator reads only the BEARISH retracements +
+extensions; the bullish retracement fields are not in any vocabulary bit.)
+
+## Verification status (Golden Rule #10 — honest envelope)
+
+Chart-verified bit-exact against operator screenshots (2026-05-16):
 
 1. BANKNIFTY 13-May-2026 (BEARISH):
    PDH=54,000  PDL=53,594.40  range=405.60
@@ -49,7 +62,14 @@ Vocabulary conditions like:
 3. NIFTY 07-May-2026 (BULLISH):
    PDH=24,313  PDL=24,056  range=257
    200% UP extension = 24,570.00 ✓ (matches chart)
-   78% retracement = 24,258 ✓ (matches chart)
+   BULLISH 78% retracement = 24,258.00 ✓ (matches chart —
+   ``pdl + 0.786 * range`` exactly; the pre-fix bearish-alias mapping
+   returned 24,252.35, a 565-paisa error)
+
+NOT screenshot-verified: the bullish 23/38/62 retracements are
+formula-derived (``pdl + ratio * range``, kernel-frozen goldens in
+``tests/unit/test_fib_levels.py``) — no operator chart shows those three
+rungs, so they carry formula provenance only.
 
 ## Money representation
 
@@ -132,10 +152,12 @@ class FibLevels:
     pdl_paisa: int  # Previous Day's Low
     range_paisa: int  # PDH - PDL
 
-    # ───── Retracement levels (inside PDH-PDL range) ─────
-    # These 7 levels are SAME regardless of direction convention.
-    # Labels differ: bearish reads top-down (0=PDH..100=PDL),
-    # bullish reads bottom-up (0=PDL..100=PDH).
+    # ───── BEARISH retracement levels (inside PDH-PDL range) ─────
+    # PDH-anchored, top-down: round_half_even(pdh - ratio * range).
+    # Only the 0/50/100 anchors are shared with the bullish convention
+    # (PDL / exact midpoint / PDH); the 23/38/62/78 rungs are NOT — the
+    # bullish ladder has its own retrace_bull_* fields below
+    # (DEC-FIB-BULLISH-RETRACE-001).
     retrace_level_at_pdh_paisa: int  # = PDH (top)
     retrace_23_paisa: int  # 23.6% from PDH downward
     retrace_38_paisa: int  # 38.2% from PDH downward
@@ -143,6 +165,15 @@ class FibLevels:
     retrace_62_paisa: int  # 61.8% from PDH downward
     retrace_78_paisa: int  # 78.6% from PDH downward
     retrace_level_at_pdl_paisa: int  # = PDL (bottom)
+
+    # ───── BULLISH retracement levels (PDL-anchored, DEC-FIB-BULLISH-RETRACE-001) ─────
+    # round_half_even(pdl + ratio * range) — a REAL bottom-up ladder, NOT the
+    # reversed bearish one (0.236 + 0.786 = 1.022 != 1.000). The bullish
+    # 0%/50%/100% share retrace_level_at_pdl / retrace_50 / retrace_level_at_pdh.
+    retrace_bull_23_paisa: int  # 23.6% up from PDL
+    retrace_bull_38_paisa: int  # 38.2% up from PDL
+    retrace_bull_62_paisa: int  # 61.8% up from PDL
+    retrace_bull_78_paisa: int  # 78.6% up from PDL
 
     # ───── Bullish extensions ABOVE PDH ─────
     # Price targets when the day is trending up (gap-up open).
@@ -186,21 +217,25 @@ class FibLevels:
         """Lookup level by BULLISH convention label.
 
         Bullish: 0% = PDL (bottom), 100% = PDH (top), extensions go UP.
-        Example: NIFTY 07-May-2026 chart.
+        Example: NIFTY 07-May-2026 chart (bullish 78% = 24,258.00,
+        chart-verified).
 
-        Note: retracement labels are REVERSED relative to bearish convention.
-        Bullish 23% = bearish 77% (~78% — same numerical price).
-        We map bullish-labeled 23/38/62/78 to the closest bearish-equivalent
-        physical level for label consistency with the AmiBroker indicator
-        as the operator sees it.
+        The retracement rungs are the dedicated PDL-anchored
+        ``retrace_bull_*`` fields (``pdl + ratio * range``), NEVER the
+        reversed bearish fields: the Fib ratios are asymmetric
+        (0.236 + 0.786 = 1.022 != 1.000), so the old alias mapping was
+        wrong by 0.022 x range on the 23/78 rungs
+        (DEC-FIB-BULLISH-RETRACE-001). The 50% midpoint is the shared
+        ``retrace_50_paisa`` (exact integer-sum midpoint in both
+        conventions).
         """
         bullish_map = {
             "0": self.retrace_level_at_pdl_paisa,  # PDL is the bottom (0% in bullish)
-            "23": self.retrace_78_paisa,  # 23% up from PDL = 78% down from PDH
-            "38": self.retrace_62_paisa,  # 38% up = 62% down
-            "50": self.retrace_50_paisa,  # midpoint (same)
-            "62": self.retrace_38_paisa,  # 62% up = 38% down
-            "78": self.retrace_23_paisa,  # 78% up = 23% down
+            "23": self.retrace_bull_23_paisa,  # pdl + 0.236 × range
+            "38": self.retrace_bull_38_paisa,  # pdl + 0.382 × range
+            "50": self.retrace_50_paisa,  # midpoint (same in both conventions)
+            "62": self.retrace_bull_62_paisa,  # pdl + 0.618 × range
+            "78": self.retrace_bull_78_paisa,  # pdl + 0.786 × range
             "100": self.retrace_level_at_pdh_paisa,  # PDH is the top (100% in bullish)
             "127": self.ext_up_127_paisa,
             "162": self.ext_up_162_paisa,
@@ -222,14 +257,16 @@ def compute_fib_levels(
     pdh_paisa: int,
     pdl_paisa: int,
 ) -> FibLevels:
-    """Compute all 17 static daily Fibonacci anchor levels.
+    """Compute all 21 static daily Fibonacci anchor levels.
 
     The arithmetic is delegated to the shared Rust ``trading_core`` crate
     (``DEC-SHARED-CORE-001``, ``docs/MIGRATION.md`` #441) — the **single source
     of truth** for the Fib math. This wrapper keeps the data-corruption
     validation and packs the result into the :class:`FibLevels` dataclass
     (``retrace@pdh = pdh``, ``retrace@pdl = pdl``, ``range = pdh - pdl`` are
-    derived here; the 15 computed levels come from Rust).
+    derived here; the 19 computed levels come from Rust — the original 15
+    plus the four PDL-anchored bullish retracements appended last,
+    DEC-FIB-BULLISH-RETRACE-001).
 
     Args:
         trading_day: The trading day these levels apply to (today).
@@ -237,15 +274,18 @@ def compute_fib_levels(
         pdl_paisa: Previous Day's Low in int64 paisa.
 
     Returns:
-        FibLevels with 7 retracements + 5 bullish extensions + 5 bearish
-        extensions, all in int64 paisa.
+        FibLevels with 7 bearish-convention retracements + 4 bullish-convention
+        retracements + 5 bullish extensions + 5 bearish extensions, all in
+        int64 paisa.
 
-    Verified against three operator screenshots (2026-05-16):
+    Chart-verified against three operator screenshots (2026-05-16):
     - BANKNIFTY 13-May-2026 (BEARISH): PDH=54000 PDL=53594.40 -> 23%=53904.28
     - BANKNIFTY 30-Apr-2026 (BEARISH): PDH=56502 PDL=55650.00 -> 38%=56176.54
                                                               -> 200%down=54798.00
     - NIFTY 07-May-2026 (BULLISH): PDH=24313 PDL=24056 -> 200%up=24570.00
-                                                       -> 78%retrace=24258
+                                                       -> bullish 78%=24258.00
+    (Bullish 23/38/62 are formula-derived, kernel-frozen — NOT
+    screenshot-verified; see the module docstring.)
 
     Raises:
         ValueError: if pdh < pdl (data corruption indicator).
@@ -257,8 +297,11 @@ def compute_fib_levels(
 
     range_paisa = pdh_paisa - pdl_paisa
 
-    # Shared Rust core returns the 15 computed levels in order:
-    # [retrace_23,38,50,62,78, ext_up_127,162,200,262,424, ext_down_127,162,200,262,424].
+    # Shared Rust core returns the 19 computed levels in order:
+    # [retrace_23,38,50,62,78, ext_up_127,162,200,262,424,
+    #  ext_down_127,162,200,262,424, retrace_bull_23,38,62,78]
+    # — the original 15 order untouched, the bullish retracements appended
+    # last (DEC-FIB-BULLISH-RETRACE-001).
     (
         retrace_23,
         retrace_38,
@@ -275,6 +318,10 @@ def compute_fib_levels(
         ext_down_200,
         ext_down_262,
         ext_down_424,
+        retrace_bull_23,
+        retrace_bull_38,
+        retrace_bull_62,
+        retrace_bull_78,
     ) = trading_core.compute_fib_levels(pdh_paisa, pdl_paisa)
 
     return FibLevels(
@@ -289,6 +336,10 @@ def compute_fib_levels(
         retrace_62_paisa=retrace_62,
         retrace_78_paisa=retrace_78,
         retrace_level_at_pdl_paisa=pdl_paisa,
+        retrace_bull_23_paisa=retrace_bull_23,
+        retrace_bull_38_paisa=retrace_bull_38,
+        retrace_bull_62_paisa=retrace_bull_62,
+        retrace_bull_78_paisa=retrace_bull_78,
         ext_up_127_paisa=ext_up_127,
         ext_up_162_paisa=ext_up_162,
         ext_up_200_paisa=ext_up_200,

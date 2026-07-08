@@ -6,7 +6,9 @@ Fibonacci anchor. The existing prev-day anchor lives in
 other two ANCHOR computations. Each yields a ``(high, low)`` pair the caller feeds
 into the SAME ``compute_fib_levels(today, high, low)`` — so there are NO new Fib
 bits (the anchor is a swept STRATEGY parameter, ADR-0012 D4), only two new
-producers of the existing 15-level ``FibLevels`` struct.
+producers of the existing 21-level ``FibLevels`` struct (19 kernel-computed;
+the 4 bullish retracements added by DEC-FIB-BULLISH-RETRACE-001 are
+evaluator-unread).
 
 * **rolling-weekly** — anchor = max-High / min-Low over the **trailing 5 completed
   sessions** (strictly before today), recomputed each session.
