@@ -692,3 +692,150 @@ def test_walk_forward_schedule_hash_rejects_nan_param() -> None:
     )
     with pytest.raises(ValueError, match="[Oo]ut of range float"):
         _walk_forward_schedule_hash((fold,), cast(int, float("nan")), 1, 1, 4, 8)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Muhurat-safe prev-day anchor (DEC-SWEEP-DATA-EDGE-GUARDS-001, D-MAJ-1)
+# ────────────────────────────────────────────────────────────────────────
+#
+# A Diwali *Muhurat* session is a ~1-hour special session, NOT a regular
+# trading day. Its distorted 1-hour OHLC must never become the NEXT regular
+# day's pivot / PDH-PDL / Fib / day-type anchor. These tests pin that the
+# stage1a roll seam carries the prior REGULAR session forward across a Muhurat
+# boundary, byte-identical to ``lookup_prev_day_ohlc``.
+
+from datetime import date as _date  # noqa: E402
+
+from brutex.calendars.nse import MUHURAT_SESSIONS  # noqa: E402
+from brutex.engine.stage1a import _MUHURAT_ANCHOR_SKIP_EVENT  # noqa: E402
+from brutex.indicators.pivots import compute_pivot_levels  # noqa: E402
+from brutex.indicators.prev_day_ohlc import DailyCandle, lookup_prev_day_ohlc  # noqa: E402
+
+# (prev regular session, muhurat session, next regular session) — the six real
+# NSE Diwali Muhurat boundaries 2020-2025, verified against the calendar.
+_MUHURAT_BOUNDARIES: tuple[tuple[_date, _date, _date], ...] = (
+    (_date(2020, 11, 13), _date(2020, 11, 14), _date(2020, 11, 17)),
+    (_date(2021, 11, 3), _date(2021, 11, 4), _date(2021, 11, 8)),
+    (_date(2022, 10, 21), _date(2022, 10, 24), _date(2022, 10, 25)),
+    (_date(2023, 11, 10), _date(2023, 11, 12), _date(2023, 11, 13)),
+    (_date(2024, 10, 31), _date(2024, 11, 1), _date(2024, 11, 4)),
+    (_date(2025, 10, 20), _date(2025, 10, 21), _date(2025, 10, 23)),
+)
+
+
+def _day_bar(d: _date, o: str, h: str, low: str, c: str) -> CandleBar:
+    """One bar at 09:15 IST on IST date *d* (the guard keys on the date only)."""
+    ts = datetime(d.year, d.month, d.day, _OPEN_UTC_H, _OPEN_UTC_M, tzinfo=UTC)
+    return _bar(ts, o, h, low, c)
+
+
+def test_muhurat_boundaries_cover_all_six_calendar_sessions() -> None:
+    # Guard against calendar drift: the fixture's middle dates ARE exactly the
+    # six MUHURAT_SESSIONS keys.
+    assert {m for _, m, _ in _MUHURAT_BOUNDARIES} == set(MUHURAT_SESSIONS)
+
+
+@pytest.mark.parametrize(("prev_reg", "muhurat", "next_reg"), _MUHURAT_BOUNDARIES)
+def test_muhurat_prev_day_anchor_carries_prior_regular_session(
+    prev_reg: _date, muhurat: _date, next_reg: _date
+) -> None:
+    # Regular session with a WIDE range (PDH 110 / PDL 90 / PDC 105); the
+    # Muhurat 1-hour session with a NARROW range near its close (104.x). If the
+    # roll poisoned the anchor, the next regular day's prev-day OHLC would be
+    # the narrow Muhurat bar, not the wide regular one.
+    builder = Stage1AMatrixBuilder()
+    builder.build(
+        [
+            _day_bar(prev_reg, "100.00", "110.00", "90.00", "105.00"),
+            _day_bar(muhurat, "104.00", "104.50", "103.50", "104.20"),
+            _day_bar(next_reg, "104.00", "104.00", "104.00", "104.00"),
+        ]
+    )
+
+    prev = builder._prev_day_ohlc
+    assert prev is not None
+    # The prior-REGULAR session (PDH 11000 / PDL 9000 / PDC 10500 in paisa)
+    # carried through — NOT the Muhurat bar (10450 / 10350 / 10420).
+    assert (prev.high_paisa, prev.low_paisa, prev.close_paisa) == (11000, 9000, 10500)
+
+    # Parity pin: stage1a's anchor equals lookup_prev_day_ohlc's answer across
+    # the same Muhurat boundary (both skip the Muhurat session).
+    candles = {
+        prev_reg: DailyCandle(prev_reg, 10000, 11000, 9000, 10500),
+        muhurat: DailyCandle(muhurat, 10400, 10450, 10350, 10420),
+    }
+    looked = lookup_prev_day_ohlc(next_reg, candles)
+    assert looked is not None
+    assert (looked.pdh_paisa, looked.pdl_paisa, looked.pdc_paisa) == (11000, 9000, 10500)
+
+    # The next regular day's pivots are the ones computed FROM the regular
+    # session (fixed), never from the poisoning Muhurat bar (buggy).
+    fixed = compute_pivot_levels(next_reg, pdh_paisa=11000, pdl_paisa=9000, pdc_paisa=10500)
+    buggy = compute_pivot_levels(next_reg, pdh_paisa=10450, pdl_paisa=10350, pdc_paisa=10420)
+    assert builder._anchors is not None
+    assert builder._anchors.pivots.p_paisa == fixed.p_paisa
+    assert fixed.p_paisa != buggy.p_paisa  # the poison would have moved P
+
+
+def test_muhurat_roll_emits_one_warn_naming_the_skipped_date() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        Stage1AMatrixBuilder().build(
+            [
+                _day_bar(_date(2020, 11, 13), "100.00", "110.00", "90.00", "105.00"),
+                _day_bar(_date(2020, 11, 14), "104.00", "104.50", "103.50", "104.20"),
+                _day_bar(_date(2020, 11, 17), "104.00", "104.00", "104.00", "104.00"),
+            ]
+        )
+    skips = [entry for entry in logs if entry.get("event") == _MUHURAT_ANCHOR_SKIP_EVENT]
+    assert len(skips) == 1
+    assert skips[0]["completed_day"] == "2020-11-14"
+    assert skips[0]["new_day"] == "2020-11-17"
+
+
+def test_regular_day_rollover_still_rolls_prev_day_and_emits_no_muhurat_warn() -> None:
+    # The non-Muhurat (else) arm: a plain regular→regular rollover overwrites
+    # _prev_day_ohlc as before and emits NO Muhurat warn (byte-identical path).
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        builder = Stage1AMatrixBuilder()
+        builder.build(
+            [
+                _day_bar(_date(2024, 1, 2), "100.00", "110.00", "90.00", "105.00"),
+                _day_bar(_date(2024, 1, 3), "200.00", "210.00", "190.00", "205.00"),
+            ]
+        )
+    assert not [e for e in logs if e.get("event") == _MUHURAT_ANCHOR_SKIP_EVENT]
+    prev = builder._prev_day_ohlc
+    assert prev is not None
+    # Day 1 (the completed prior REGULAR day) rolled through normally when day 2
+    # started — 110 / 90 / 105 rupees → 11000 / 9000 / 10500 paisa. (Day 2 is
+    # still the accumulating _today_ohlc; it rolls only on the NEXT day.)
+    assert (prev.high_paisa, prev.low_paisa, prev.close_paisa) == (11000, 9000, 10500)
+
+
+def test_muhurat_day_excluded_from_rolling_weekly_daily_history() -> None:
+    # For a NON-prev-day Fib anchor, a completed Muhurat session must ALSO be
+    # excluded from the multi-day rolling history (mirroring the weekly-anchor
+    # Muhurat skip) — the muhurat branch takes no _daily_history write. We drive
+    # the roll seam directly (not build(), which would compute the Muhurat day's
+    # OWN weekly anchor — a separate, pre-existing non-trading-`today` refusal in
+    # the weekly-anchor resolver, outside this fix's scope): patch out the
+    # anchor recompute so we can observe the roll's history bookkeeping alone.
+    from brutex.strategies.fib_definitions import FibAnchorKind
+
+    builder = Stage1AMatrixBuilder(fib_anchor=FibAnchorKind.ROLLING_WEEKLY)
+    builder._compute_anchors = lambda *a, **k: None  # type: ignore[method-assign]
+    # Seed + complete a regular day (D-1) by rolling into the Muhurat day M.
+    builder._roll_to_new_day(_date(2020, 11, 13), 10000, 11000, 9000, 10500)
+    builder._roll_to_new_day(_date(2020, 11, 14), 10400, 10450, 10350, 10420)
+    assert _date(2020, 11, 13) in builder._daily_history
+    # Complete the Muhurat day M by rolling into the next regular day D+1.
+    builder._roll_to_new_day(_date(2020, 11, 17), 10400, 10400, 10400, 10400)
+    assert _date(2020, 11, 14) not in builder._daily_history
+    # And the prior REGULAR session's anchor carried through the Muhurat day.
+    prev = builder._prev_day_ohlc
+    assert prev is not None
+    assert (prev.high_paisa, prev.low_paisa, prev.close_paisa) == (11000, 9000, 10500)
