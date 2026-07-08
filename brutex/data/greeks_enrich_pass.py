@@ -55,6 +55,7 @@ import structlog
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import OPTION_TYPES, parse_fno_symbol
+from brutex.data.greeks_revision import touch_greeks_revision_marker
 from brutex.data.partition import (
     BAR_DIR_NAME,
     MAX_PARTITION_YEAR,
@@ -170,12 +171,19 @@ def run_greeks_enrich_pass(
     :class:`BaseException` — NOT fenced, they propagate raw (deliberate).
 
     On success the pass logs one ``fno.greeks_enrich.done`` carrying the
-    driver report's 13 counters verbatim. Per-contract errors are quarantined
-    INSIDE the driver (``report.errored`` → :attr:`GreeksEnrichOutcome.
-    errored_targets`), so one bad contract never sinks the pass. The
-    authoritative 1-minute candles are already durable in the lake; the Greeks
-    overlay is a re-derivable convenience layer the next pass re-attempts
-    (stamp-driven, idempotent — Golden Rule #7/#10).
+    driver report's 13 counters verbatim, and — when the driver WROTE overlay
+    bars — touches the SHARED cross-process Greeks-overlay freshness marker
+    (:func:`~brutex.data.greeks_revision.touch_greeks_revision_marker`,
+    best-effort) so a concurrently-running dashboard's ``lake_revision``-probed
+    generation caches serve the new iv/delta on the next poll instead of the
+    pre-enrich values until an unrelated pull or a restart (the pass moves no
+    ``lake_revision`` component of its own — DEC-GREEKS-BULK-REENRICH-001 fix
+    round 8, the round-2 backfill fix's sibling surface). Per-contract errors
+    are quarantined INSIDE the driver (``report.errored`` →
+    :attr:`GreeksEnrichOutcome.errored_targets`), so one bad contract never
+    sinks the pass. The authoritative 1-minute candles are already durable in
+    the lake; the Greeks overlay is a re-derivable convenience layer the next
+    pass re-attempts (stamp-driven, idempotent — Golden Rule #7/#10).
 
     Parameters
     ----------
@@ -236,6 +244,23 @@ def run_greeks_enrich_pass(
             spot_hits=report.spot_hits,
             bars_skipped=report.bars_skipped,
         )
+        if report.bars_written > 0:
+            # The pass rewrote option iv/delta overlay partitions yet moves
+            # NEITHER the window ledger NOR any other lake_revision component
+            # — on the standalone `brutex enrich-greeks` path (and the `brutex
+            # fetch` tail, which runs AFTER the final end_pull_ledger save) a
+            # running dashboard's generation-keyed caches kept serving the
+            # PRE-enrich Greeks indefinitely, the exact cross-process
+            # staleness class the backfill's fix round 2 closed. Touch the
+            # SHARED Greeks-overlay freshness marker (best-effort — the
+            # helper fences OSError into one WARN) so the dashboard's
+            # revision probe sees the write on its next poll
+            # (DEC-GREEKS-BULK-REENRICH-001 fix round 8, refuter-confirmed).
+            touch_greeks_revision_marker(
+                lake_root,
+                fields={"writer": "greeks_enrich_pass", "bars_written": report.bars_written},
+                failure_event="fno.greeks_enrich.revision_marker_failed",
+            )
         return GreeksEnrichOutcome(ok=True, error=None, errored_targets=report.errored)
     except (LakeWriteHalt, GreeksEnrichPoolBroken):
         # A pull-wide HOST condition (disk full / OOM / a dead pool worker) —
