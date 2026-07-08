@@ -2275,10 +2275,17 @@ jobs:
           fi
       - name: pytest stress tests (bounded)
         # DEC-GROWW-CATALOG-DRIVER-001: wire tests/stress into CI (bounded N;
-        # soak via BRUTEX_STRESS_YEARS / STRESS_EVENTS on workflow_dispatch).
+        # the real multi-hour soak runs on soak-selfhosted.yml — soak-scale
+        # STRESS_EVENTS dispatches are REFUSED by stress-nightly.yml's fence
+        # (> 200000), DEC-SOAK-REAL-TIER-001 #1580; BRUTEX_STRESS_YEARS stays
+        # the fetch-sustained scale knob).
         run: |
           if [ -d tests/stress ]; then
-            pytest tests/stress -q
+            # SOAK-1: honor the deliberately-isolated @soak marker — the
+            # full-budget soak runs ONLY on soak-selfhosted.yml, NEVER in the
+            # per-PR gate (pyproject.toml soak-marker contract + tests/stress/
+            # __init__.py). Matches stress-nightly.yml's exclusion.
+            pytest tests/stress -m 'not soak' -q
           else
             echo "⏸  tests/stress does not exist yet — skipping"
           fi
