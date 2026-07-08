@@ -157,7 +157,7 @@ output: results.parquet — must be byte-identical (SHA256 equal) to
 
 ```
 input:  1 day of NIFTY 1m bars, 50 brute-force combos, mode A and B
-action: 
+action:
   - Run via naive pure-Python reference engine (slow, obviously correct,
     ~50 lines of code, no optimisations, hand-readable)
   - Run via Rust engine (production hot path)
