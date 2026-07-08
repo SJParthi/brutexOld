@@ -89,6 +89,7 @@ from brutex.data.errors import (
     LakeWriteHalt,
     PartitionLockTimeout,
     WriterError,
+    datetime_out_of_range_escape_errors,
     parquet_read_skip_errors,
 )
 from brutex.data.fno_daily_resample import resample_1m_to_fno_daily_positional
@@ -369,11 +370,36 @@ class HealReport:
 #: Per-finding isolated failure set (the reconcile/movers narrow-skip
 #: discipline): a vanished/corrupt file, a lock timeout, or a writer refusal
 #: skips THAT finding; :class:`LakeWriteHalt` (not a member) propagates.
+#: :func:`~brutex.data.errors.datetime_out_of_range_escape_errors` joins the set
+#: (round-18 MAJOR fold): a stored out-of-``datetime``-range timestamp faults
+#: every Python-side conversion — ``OverflowError`` from ``min``/``max`` and
+#: the **BaseException** ``pyo3_runtime.PanicException`` from ``to_list``,
+#: which escapes even the L3 ``except Exception`` daemon guard (killing the
+#: healer thread past the "boot never crashes" contract). The gate
+#: (:func:`~brutex.data.lake_invariants.option_key_dtype_error` value probe)
+#: refuses such a file FIRST at the consistent read + the writer's keyed
+#: re-read; this membership is the defense-in-depth rail so any residual
+#: conversion fault is ONE counted error, never a whole-batch abort.
 _PER_FINDING_HEAL_ERRORS: Final[tuple[type[BaseException], ...]] = (
     WriterError,
     OptionWriterError,
     PartitionLockTimeout,
     *parquet_read_skip_errors(),
+    *datetime_out_of_range_escape_errors(),
+)
+
+#: The L3 boot blanket (``StartupSweeper.run_sync``): ``Exception`` PLUS the
+#: conversion-fault types that ESCAPE it — round-18 fold: polars' out-of-range
+#: datetime conversion PANICS as ``pyo3_runtime.PanicException``, a
+#: BaseException that sailed past the ``except Exception`` guard and killed
+#: the sweep daemon thread (the "boot never crashes" contract). The scan gate
+#: + ``_PER_FINDING_HEAL_ERRORS`` stop it upstream; this is the last-line rail
+#: (OverflowError is already an ``Exception`` — the fold only ADDS the panic).
+#: A named constant because mypy --strict rejects a starred-unpack tuple
+#: DISPLAY in an ``except`` clause while accepting a tuple-typed expression.
+_SWEEP_GUARD_ERRORS: Final[tuple[type[BaseException], ...]] = (
+    Exception,
+    *datetime_out_of_range_escape_errors(),
 )
 
 
@@ -709,7 +735,11 @@ def _heal_foreign(finding: ForeignMonthRows, state: _BatchState) -> bool:
         partition=coords.relpath(),
         moved=len(foreign),
         added=moved,
-        months=[f"{y:04d}-{m:02d}" for y, m in sorted(months)],
+        # option_partition_stem — the §11 COMMON YYYY-MM formatter (round-18
+        # NIT: the round-16 collapse covered the OPTION healer's months list
+        # only; these three bars sites kept inline copies of the identical
+        # f-string). Byte-identical output.
+        months=[option_partition_stem(y, m) for y, m in sorted(months)],
         conflicts=conflicts,
     )
     state.actions.append(
@@ -732,7 +762,7 @@ def _heal_foreign(finding: ForeignMonthRows, state: _BatchState) -> bool:
         payload={
             "moved": len(foreign),
             "added": moved,
-            "months": [f"{y:04d}-{m:02d}" for y, m in sorted(months)],
+            "months": [option_partition_stem(y, m) for y, m in sorted(months)],
             "conflicts": conflicts,
             "kept": result.kept,
             "dropped_duplicates": result.dropped_duplicates,
@@ -970,6 +1000,16 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     vendor-drift detection is the writer's own deferred follow-up — no
     ``BarConflict`` twin exists). STRICTLY row-removing/row-reassigning —
     moved rows keep their stored column values verbatim.
+
+    HONEST envelope (round-18 NIT, deliberately not mechanised): a
+    hand-planted NAIVE-timestamp source whose reassignment target month
+    already holds a TZ-AWARE canonical sibling never converges — the
+    copy-forward concat refuses the dtype mismatch (a ``PolarsError`` →
+    isolated counted error, nothing mutated, no loss), so the finding
+    re-appears every sweep (a permanent per-boot re-attempt, loud each time).
+    Casting the naive group to the sibling's zone would EDIT stored values —
+    against this module's row-moving-only law — so the loud isolated refusal
+    is the accepted behaviour for that hand-planted shape.
     """
     src = finding.path
     if not src.exists():
@@ -1264,7 +1304,8 @@ def _run_recall(state: _BatchState, *, before: date) -> RecallReport:
         _LOG.info(
             "lake_heal.recall_daily",
             symbol=symbol,
-            months=[f"{y:04d}-{m:02d}" for y, m in sorted(months)],
+            # §11 COMMON YYYY-MM formatter (round-18 NIT — see rows_reassigned).
+            months=[option_partition_stem(y, m) for y, m in sorted(months)],
             bars=report.bars,
             errored=report.errored,
         )
@@ -2124,7 +2165,8 @@ class StartupSweeper:
                 finally:
                     if catalog is not None:
                         catalog.close()
-        except Exception as exc:  # pylint: disable=broad-exception-caught — boot never crashes
+        except _SWEEP_GUARD_ERRORS as exc:  # pylint: disable=broad-exception-caught
+            # — boot never crashes (the ONE blanket guard; see the constant).
             _LOG.warning("lake_heal.sweep_failed", error=str(exc))
             return None
 

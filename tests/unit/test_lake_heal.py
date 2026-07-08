@@ -2189,6 +2189,107 @@ class TestOptionForeignHeal:
         assert july.read_bytes() == july_before  # nothing merged/imported home
         assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
 
+    def test_option_out_of_range_swap_isolated_batch_continues(self, tmp_path: Path) -> None:
+        """Round-18 fold (refuter-confirmed MAJOR): a scan→heal swap to a
+        sound-DTYPE file whose timestamp VALUE is out of Python's ``datetime``
+        range is the ISOLATED refusal, never a batch abort.
+
+        Pre-fix the rounds-12/14 gate passed the frame (the dtype IS
+        ``Datetime``) and ``_option_foreign_frame``'s ``to_list()`` PANICKED
+        as ``pyo3_runtime.PanicException`` — a BaseException in neither
+        ``_PER_FINDING_HEAL_ERRORS`` nor any ``except Exception`` guard, so it
+        escaped the per-finding isolation AND killed the L3 daemon thread
+        past the "boot never crashes" contract. The gate's min/max value
+        probe now verdicts it at the consistent read."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        _poison_option_lake(lake)  # a healable dup in the CALL series
+        june, july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        # Swap the flagged source to an out-of-range-timestamp file AFTER the
+        # scan (2**62 µs ≈ year 146,000 — in-dtype, un-convertible).
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE"], type=pa.string()),
+                    "timestamp": pa.array([2**62], type=pa.int64()).cast(
+                        pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            june,
+        )
+        swapped = june.read_bytes()
+        july_before = july.read_bytes()
+        reports: list[HealReport] = []
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                on_report=reports.append,
+                now=_now,
+            )
+        assert report.errors == 1  # pre-fix: PanicException aborts the batch here
+        assert report.healed == 1  # the CALL-series dup sibling still heals
+        assert reports == [report]  # the alert seam still fires post-batch
+        (error,) = _events(logs, "lake_heal.partition_error")
+        assert error["finding"] == "OptionForeignMonthRows"
+        assert "out of datetime range" in str(error["error"])
+        assert june.read_bytes() == swapped  # refused byte-untouched
+        assert july.read_bytes() == july_before  # nothing merged/imported home
+        assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
+
+    @pytest.mark.parametrize("exc_kind", ["overflow", "panic"])
+    def test_residual_conversion_fault_isolated_batch_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_kind: str
+    ) -> None:
+        """Pins BOTH ``datetime_out_of_range_escape_errors`` members of
+        ``_PER_FINDING_HEAL_ERRORS`` (round-18 defense in depth): a residual
+        conversion fault raised PAST the gate — ``OverflowError`` AND the
+        BaseException ``PanicException`` — is ONE counted isolated error; the
+        later same-batch finding still heals and the alert seam fires.
+        Dropping either member from the tuple fails its arm."""
+        import polars as pl
+
+        lake = tmp_path / "lake"
+        _poison_option_lake(lake)  # a healable dup in the CALL series (heals LATER)
+        june, _july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        exc: BaseException = (
+            OverflowError("date value out of range")
+            if exc_kind == "overflow"
+            else pl.exceptions.PanicException("residual conversion panic")
+        )
+
+        def _boom(*_args: Any, **_kwargs: Any) -> Any:
+            raise exc
+
+        monkeypatch.setattr(lake_heal, "_option_foreign_frame", _boom)
+        reports: list[HealReport] = []
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                on_report=reports.append,
+                now=_now,
+            )
+        assert report.errors == 1  # pre-fix: the fault aborted the whole batch
+        assert report.healed == 1  # the CALL-series dup — a LATER finding — still heals
+        assert reports == [report]
+        (error,) = _events(logs, "lake_heal.partition_error")
+        assert error["finding"] == "OptionForeignMonthRows"
+        assert june.exists()  # the flagged source is untouched by the faulted heal
+
     def test_lake_write_halt_propagates_from_option_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3904,6 +4005,45 @@ class TestRunStartupSweep:
         again = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
         assert again.ran is False  # token match over the healed tree
 
+    def test_startup_sweep_completes_and_stamps_over_out_of_range_option_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-18 fold (refuter-confirmed MAJOR, the L3 blast radius): ONE
+        hand-planted options file whose sound Datetime column holds an
+        out-of-``datetime``-range i64 (2**62 µs) crashed
+        ``scan_lake_invariants`` from inside ``run_startup_sweep`` — the
+        sentinel never stamped, so EVERY boot re-ran the full O(files) scan
+        and re-crashed: lake-wide healing (bars AND options) permanently
+        inert. Now the file is skipped loudly, the sweep completes, and the
+        sentinel stamps."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0))])
+        bad = lake / "options" / "SERIES_OOR" / "2024-06.parquet"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE"], type=pa.string()),
+                    "timestamp": pa.array([2**62], type=pa.int64()).cast(
+                        pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            bad,
+        )
+        result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        # pre-fix: OverflowError propagated out of the call above
+        assert result.ran is True
+        assert result.scan is not None
+        assert result.scan.option_files_skipped == 1
+        assert result.scan.findings == ()
+        assert load_last_sweep(lake) is not None  # stamped — no per-boot re-crash loop
+        again = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert again.ran is False  # token match — the boot loop is closed
+
     def test_startup_sweep_mass_rail_counts_option_files_in_denominator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4135,6 +4275,26 @@ class TestStartupSweeper:
         failures = _events(logs, "lake_heal.sweep_failed")
         assert len(failures) == 1
         assert failures[0]["log_level"] == "warning"
+
+    def test_run_sync_survives_panic_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-18 fold: ``pyo3_runtime.PanicException`` is a BaseException —
+        pre-fix it sailed PAST the blanket ``except Exception`` boot guard and
+        killed the sweep daemon thread (the "boot never crashes" contract);
+        the guard now also catches the
+        ``datetime_out_of_range_escape_errors`` members."""
+        import polars as pl
+
+        def _panic(*_args: Any, **_kwargs: Any) -> Any:
+            raise pl.exceptions.PanicException("simulated conversion panic")
+
+        monkeypatch.setattr(lake_heal, "run_startup_sweep", _panic)
+        with capture_logs() as logs:
+            result = StartupSweeper(tmp_path).run_sync()  # pre-fix: raises out
+        assert result is None
+        (failure,) = _events(logs, "lake_heal.sweep_failed")
+        assert "panic" in str(failure["error"])
 
     def test_startup_sweeper_spawn_seam(self, tmp_path: Path) -> None:
         """The injectable spawn runs the body synchronously — no real thread

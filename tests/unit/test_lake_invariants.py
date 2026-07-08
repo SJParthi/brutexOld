@@ -184,6 +184,47 @@ def _plant_option_nested_side(
     pq.write_table(table, dest)
 
 
+def _plant_option_out_of_range(dest: Path) -> None:
+    """A RAW options file whose SOUND ``Datetime`` column holds an i64 value
+    no Python ``datetime`` can represent (``2**62`` µs ≈ year 146,000).
+
+    The round-18 crash class: the dtype gate alone passed it, then
+    ``min()``/``max()`` raised ``OverflowError`` and ``to_list()`` panicked as
+    the BaseException ``pyo3_runtime.PanicException``.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "side": pa.array(["CE"], type=pa.string()),
+            "timestamp": pa.array([2**62], type=pa.int64()).cast(pa.timestamp("us", tz="UTC")),
+        }
+    )
+    pq.write_table(table, dest)
+
+
+def _plant_bars_out_of_range(dest: Path) -> None:
+    """The bars twin of :func:`_plant_option_out_of_range` (full 7-column schema)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "timestamp": pa.array([2**62], type=pa.int64()).cast(pa.timestamp("us", tz="UTC")),
+            "open": pa.array([100.0], type=pa.float64()),
+            "high": pa.array([100.0], type=pa.float64()),
+            "low": pa.array([100.0], type=pa.float64()),
+            "close": pa.array([100.0], type=pa.float64()),
+            "volume": pa.array([10], type=pa.int64()),
+            "open_interest": pa.array([None], type=pa.int64()),
+        }
+    )
+    pq.write_table(table, dest)
+
+
 def _option_key_frame(rows: Sequence[tuple[str | None, datetime | None]]) -> pl.DataFrame:
     """A 2-column ``(side, timestamp)`` key frame for the pure classifier."""
     return pl.DataFrame(
@@ -1526,6 +1567,134 @@ class TestOptionKeyDtypeGate:
         neither_error = option_key_dtype_error(neither)
         assert neither_error is not None
         assert "side" in neither_error  # side checked first — deterministic verdict
+
+
+class TestOutOfRangeTimestampGate:
+    """Round-18 MAJOR (refuter-confirmed): an out-of-``datetime``-range VALUE
+    inside a sound ``Datetime`` column crashed the WHOLE scan/heal.
+
+    The rounds-12/13/14 gate validated only the DTYPE: a hand-planted
+    ``2**62``-µs stamp passed it, then ``_count_foreign_rows``'s ``min()``
+    raised ``OverflowError`` from OUTSIDE the per-file read try/except —
+    propagating out of ``scan_lake_invariants`` entirely (L3 boot sweep
+    permanently inert — the sentinel never stamps, every boot re-crashes —
+    plus a 500 on every ``/universe`` lake-uniqueness cache miss and a dead
+    L2 options census) — and the heal-side ``to_list()`` panicked as the
+    BaseException ``pyo3_runtime.PanicException``, escaping every ``except
+    Exception`` guard. The gate now value-probes ``min()``/``max()`` (months
+    are contiguous — a convertible min + max bounds every value) and the
+    bars loop classifies under the COMMON
+    ``datetime_out_of_range_errors`` fault set.
+    """
+
+    def test_option_out_of_range_file_skipped_scan_survives(self, tmp_path: Path) -> None:
+        bad = tmp_path / "options" / "SERIES_BAD" / "2024-06.parquet"
+        _plant_option_out_of_range(bad)
+        good = tmp_path / "options" / "SERIES_GOOD" / "2024-06.parquet"
+        _plant_option_raw(good, [("CE", _ts(1)), ("CE", _ts(1))])
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)  # pre-fix: OverflowError right here
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 1
+        (finding,) = report.findings  # the sibling series' dup is still found
+        assert isinstance(finding, OptionIntraFileDup)
+        assert finding.path == good
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == repr(str(bad))  # vendor-influenceable series dir name
+        error = skip["error"]
+        assert isinstance(error, str)
+        assert "out of datetime range" in error
+
+    def test_option_out_of_range_canonical_sibling_abstains(self, tmp_path: Path) -> None:
+        # The targeted overlap read hits an out-of-range canonical sibling:
+        # honest overlap_rows=None abstain — the nested-dtype-sibling twin.
+        june = tmp_path / "options" / "SERIES" / "2024-06.parquet"
+        _plant_option_raw(june, [("CE", _ts(1)), ("CE", _ts(2, month=7, day=1))])
+        july = tmp_path / "options" / "SERIES" / "2024-07.parquet"
+        _plant_option_out_of_range(july)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        (finding,) = report.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.path == june
+        assert finding.overlap_rows is None  # honest abstain
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 1
+        skips = _events(logs, "lake.invariant.scan_skip")
+        # one from the main glob loop, one from the targeted sibling read
+        assert [s["path"] for s in skips] == [repr(str(july)), repr(str(july))]
+
+    def test_bars_out_of_range_file_skipped_scan_survives(self, tmp_path: Path) -> None:
+        # The bars twin: no dtype gate runs on the bars loop, so the
+        # classification itself is guarded under the COMMON fault set —
+        # pre-fix `classify_bar_keys` → `min()` raised OverflowError out of
+        # the whole scan (the identical DoS one tree over).
+        _write_bars(tmp_path, [_bar(_ts(1)), _bar(_ts(2))])  # clean June, real writer
+        bad = _dest(tmp_path, month=7)
+        _plant_bars_out_of_range(bad)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path, include_options=False)
+        assert report.files_scanned == 1  # the clean sibling still scans
+        assert report.files_skipped == 1
+        assert report.findings == ()
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == str(bad)  # bars path stays raw (catalogued coords)
+        assert "date value out of range" in str(skip["error"])
+
+    def test_bars_out_of_range_canonical_sibling_abstains(self, tmp_path: Path) -> None:
+        # June carries an in-range July foreign row; the July CANONICAL file
+        # holds the out-of-range stamp, so `_canonical_timestamps`' `to_list()`
+        # PANICS (pyo3 PanicException, a BaseException) — pre-fix the whole
+        # scan died there; now the overlap honestly abstains.
+        june = _dest(tmp_path)
+        _plant_raw(june, [_ts(1), _ts(2, month=7, day=1)])
+        july = _dest(tmp_path, month=7)
+        _plant_bars_out_of_range(july)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path, include_options=False)
+        (finding,) = report.findings
+        assert isinstance(finding, ForeignMonthRows)
+        assert finding.path == june
+        assert finding.overlap_rows is None  # honest abstain
+        assert report.files_scanned == 1
+        assert report.files_skipped == 1  # the July file itself (main loop)
+        skips = _events(logs, "lake.invariant.scan_skip")
+        # one from the main loop's July classification, one from the
+        # targeted canonical-sibling read
+        assert [s["path"] for s in skips] == [str(july), str(july)]
+
+    @pytest.mark.parametrize("tz", ["UTC", None])
+    def test_option_key_dtype_error_out_of_range_verdict(self, tz: str | None) -> None:
+        frame = pl.DataFrame(
+            {
+                "side": pl.Series("side", ["CE"], dtype=pl.Utf8),
+                "timestamp": pl.Series("timestamp", [2**62]).cast(pl.Datetime("us", tz)),
+            }
+        )
+        verdict = option_key_dtype_error(frame)  # pre-fix: None (the dtype IS sound)
+        assert verdict is not None
+        assert "out of datetime range" in verdict
+
+    def test_option_residual_conversion_fault_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Defense in depth: a RESIDUAL conversion fault the gate probe cannot
+        # foresee is a loud per-FILE skip, never a whole-scan abort.
+        dest = tmp_path / "options" / "SERIES" / "2024-06.parquet"
+        _plant_option_raw(dest, [("CE", _ts(1))])
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise OverflowError("residual conversion fault")
+
+        monkeypatch.setattr(li, "classify_option_keys", _boom)
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+        assert report.option_files_scanned == 0
+        assert report.option_files_skipped == 1
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == repr(str(dest))
+        assert "residual conversion fault" in str(skip["error"])
 
 
 class TestScanIncludeBars:

@@ -330,13 +330,49 @@ stay raw); the claimed `token_stat_skipped` third site was REFUTED
 (CPython OSError.__str__ reprs its filename) but joins the convention
 as belt-and-braces. NIT: the L2 seam test comment's "never even read"
 overclaim reworded to its honest bytes+mtime envelope.
+ROUND 18 (refuter-confirmed MAJOR): an OUT-OF-RANGE (in-dtype) Datetime
+VALUE in an options partition crashed the WHOLE scan/heal — the
+rounds-12/13/14 gate validated only the DTYPE, so a hand-planted
+`2**62`-µs stamp passed it and `_count_foreign_rows`'s `min()` raised
+`OverflowError` OUTSIDE the per-file read try/except, propagating out of
+`scan_lake_invariants` entirely (reproduced end-to-end): the L3 boot
+sweep crashed with the sentinel NEVER stamped (every boot re-scanned and
+re-crashed — lake-wide healing permanently inert), the `/universe`
+lake-uniqueness route 500'd per census cache miss, the L2 options census
+died, and a scan→heal swap made the heal-side `to_list()` PANIC as
+`pyo3_runtime.PanicException` — a BaseException escaping BOTH the
+per-finding isolation set AND the L3 `except Exception` blanket (daemon
+killed past "boot never crashes"). Fault matrix probe-verified (polars
+1.42.1): aware-positive → OverflowError, naive/negative → ValueError,
+to_list → the panic always. FIXED at the COMMON chokepoints: the gate
+VALUE-probes min/max (contiguous months — a convertible min+max bounds
+every value; two vectorized O(rows) scans, not O(1)) → loud counted scan
+skip + isolated `OptionWriterError` heal/writer refusal + sibling
+overlap-None abstain; NEW `errors.datetime_out_of_range_errors()` (the
+FULL probe set incl. ValueError, consumption law documented) +
+`datetime_out_of_range_escape_errors()` (ValueError deliberately
+EXCLUDED from broad guards — the genuine-code-bug class keeps
+propagating); the BARS twin closed too (bars loop classification
+guarded, `_canonical_timestamps` abstains, the catalog reconcile's
+per-file skip widened — one planted file crashed every sweep-load
+reconcile); defense-in-depth: options residual guard,
+`_PER_FINDING_HEAL_ERRORS` += escape set, L3 blanket →
+`_SWEEP_GUARD_ERRORS = (Exception, *escape)`. 14 regression tests (16
+parametrized cases) across 5 suites, all verified failing pre-fix. NITs: the three bars `YYYY-MM`
+months-list f-string copies collapsed onto `option_partition_stem`
+(byte-identical); `_engine_offender`'s option arms documented as
+production-unreachable totality arms; the naive-source-vs-aware-
+canonical never-converging heal shape documented as the honest envelope
+(loud isolated refusal each sweep, no loss — a tz cast would EDIT stored
+values, deliberately not mechanised).
 HONEST: no production
 pull currently WRITES `options/` (legacy table; L2 opt-in is opportunistic,
 L3 + census are the always-on cover); cross-file value drift resolved
 deterministically (canonical/path-ordered-first wins, originals in
 quarantine); rows move VERBATIM, never validated. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; `lake_invariants.py`/`option_parquet_writer.py`/
-`lake_heal.py`/`partition.py` ALL 100% line+branch; ruff/ruff-format clean,
+`lake_heal.py`/`partition.py`/`errors.py`/`catalog_reconcile.py` ALL 100%
+line+branch; ruff/ruff-format clean,
 mypy `--strict` + pyright at the pre-change baseline).
 Earlier: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
 DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
@@ -1900,14 +1936,49 @@ hostile-review pass._
   escaped error payload at both sites) verified failing pre-fix. NIT: the L2 seam integration-test comment
   overclaimed "never even read" for assertions pinning only bytes+mtime — reworded to the honest envelope
   (bytes+mtime prove never WRITTEN; the never-read claim rides the pure-filename months bound, pinned by the
-  census call-shape spy + the read-spy scanner units).
+  census call-shape spy + the read-spy scanner units). HOSTILE-REVIEW FOLDS (round 18, refuter-confirmed MAJOR —
+  reproduced end-to-end pre-fix; every regression verified failing pre-fix): an OUT-OF-RANGE (in-dtype) `Datetime`
+  VALUE in an options partition crashed the WHOLE scan/heal — the rounds-12/13/14 gate validated only the DTYPE, so a
+  hand-planted `2**62`-µs stamp (≈ year 146,000) passed it and the shared `_count_foreign_rows` `min()` raised
+  `OverflowError` from OUTSIDE the per-file read try/except, propagating out of `scan_lake_invariants` entirely: the
+  L3 boot sweep crashed with the sentinel NEVER stamped (every boot re-ran the full O(files) scan and re-crashed —
+  lake-wide healing, bars AND options, permanently inert), the `/universe` lake-uniqueness route 500'd on every census
+  cache miss, the L2 F&O post-pull options census died, and via a scan→heal TOCTOU swap the heal-side `to_list()`
+  PANICKED as `pyo3_runtime.PanicException` — a BaseException escaping BOTH `_PER_FINDING_HEAL_ERRORS` AND the L3
+  `except Exception` blanket, killing the sweep daemon past the "boot never crashes" contract. Empirical fault matrix
+  (polars 1.42.1, probe-verified): tz-aware positive overflow → `OverflowError` from `min`/`max`; tz-naive and/or
+  NEGATIVE overflow → `ValueError`; `to_list` → the panic in EVERY shape. FIXED at the COMMON chokepoints:
+  `option_key_dtype_error` VALUE-probes `min()`/`max()` (months are contiguous — a convertible min + max bounds every
+  value between them; two vectorized O(rows) scans, honestly NOT O(1)) and verdicts "timestamp value out of datetime
+  range" — loud counted scan skip, isolated `OptionWriterError` refusal at the healer's consistent read AND the
+  writer's keyed re-read, canonical-sibling `overlap_rows=None` abstain; NEW COMMON
+  `errors.datetime_out_of_range_errors()` (the FULL probe set incl. `ValueError`, with the documented consumption law
+  — only around code whose sole Python-side failure mode is the stored-timestamp conversion) +
+  `datetime_out_of_range_escape_errors()` (`ValueError` deliberately EXCLUDED from broad guards — around arbitrary
+  heal/sweep code it is the genuine-code-bug class and keeps propagating, Golden Rule #1); the BARS twin closed in the
+  same stroke (the bars scan loop's classification runs under the probe set — the identical whole-scan DoS one tree
+  over, pre-fix-verified; `_canonical_timestamps` abstains on a panicking sibling; `reconcile_catalog_from_lake`'s
+  GAP-#9 per-file skip widened — ONE planted bars file crashed the reconcile that runs at the start of EVERY sweep
+  load); defense-in-depth: an options-loop residual conversion-fault guard, `_PER_FINDING_HEAL_ERRORS` += the escape
+  set, and the L3 blanket is now `_SWEEP_GUARD_ERRORS = (Exception, *escape)` so the panic can never kill the daemon
+  again. 14 new regression tests (16 parametrized cases) across 5 suites (options + bars scan survival & sibling abstains ·
+  gate verdict aware AND naive · the out-of-range scan→heal swap isolated with the later same-batch dup still healing · BOTH escape-set
+  members pinned by parametrized residual faults · `run_sync` panic survival · the L3 end-to-end sentinel-stamps pin ·
+  the writer keyed re-read refusal · the reconcile skip pin · two error-set unit pins). Round-18 NITs: the three bars
+  `YYYY-MM` months-list f-string copies in `lake_heal` collapsed onto the round-15 `partition.option_partition_stem`
+  COMMON helper (byte-identical output); `_engine_offender`'s option arms documented as production-unreachable
+  TOTALITY arms (the `_engine_relevant` filter excludes option findings; pinned by direct unit calls); the
+  hand-planted naive-timestamp source with a tz-aware canonical sibling documented as the honest never-converging
+  envelope in `_heal_option_foreign` (loud isolated `PolarsError` refusal each sweep, nothing mutated, no loss — a tz
+  cast would EDIT stored values against the row-moving-only law, deliberately not mechanised).
   The #1175
   CLI-`brutex fetch` L2 seam follow-up has since LANDED on main for the BARS tree (DEC-CLI-LAKE-HEAL-L2-001 #1493 —
   `cmd_fetch` reuses `pull_controller._heal_after_pull` verbatim); that shared glue does NOT pass `include_options`,
   so the CLI seam stays bars-only (the CLI pull is spot-only; the options tree keeps its L3 + census cover) — wiring
   `include_options` through the shared glue is the remaining named follow-up. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O
-  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (472/166) + `option_parquet_writer.py`
-  (165/34) + `lake_heal.py` (611/174) + `partition.py` (83/24) ALL 100% line+branch; ruff/ruff-format clean, mypy
+  lake REFERENCE_ONLY; no scope/vocab/rate change; `lake_invariants.py` (515/176) + `option_parquet_writer.py`
+  (165/34) + `lake_heal.py` (621/180) + `catalog_reconcile.py` (75/20) + `errors.py` (50/0) + `partition.py` (83/24)
+  ALL 100% line+branch; ruff/ruff-format clean, mypy
   `--strict` + pyright at the pre-change baseline).
   Earlier: `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
   DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·

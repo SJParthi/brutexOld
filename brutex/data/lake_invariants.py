@@ -58,7 +58,11 @@ from typing import Any, Final, cast
 import polars as pl
 import structlog
 
-from brutex.data.errors import PartitionError, parquet_read_skip_errors
+from brutex.data.errors import (
+    PartitionError,
+    datetime_out_of_range_errors,
+    parquet_read_skip_errors,
+)
 from brutex.data.lake_keys import spot_key_candidates
 from brutex.data.partition import (
     BAR_DIR_NAME,
@@ -661,9 +665,19 @@ def _canonical_timestamps(
         _pause(per_file_pause)
         return None
     _pause(per_file_pause)
-    return {
-        utc_aware(ts) for ts in frame.get_column("timestamp").to_list() if isinstance(ts, datetime)
-    }
+    try:
+        return {
+            utc_aware(ts)
+            for ts in frame.get_column("timestamp").to_list()
+            if isinstance(ts, datetime)
+        }
+    except datetime_out_of_range_errors() as exc:
+        # Round-18 MAJOR fold (bars twin): an out-of-``datetime``-range stored
+        # value makes ``to_list()`` PANIC (``pyo3_runtime.PanicException``, a
+        # BaseException) — honest abstain like an unreadable sibling instead
+        # of crashing the whole scan; overlap stays ``None``.
+        _LOG.warning("lake.invariant.scan_skip", path=str(canonical), error=str(exc))
+        return None
 
 
 # ── options-tree classification (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001) ──────────
@@ -743,6 +757,18 @@ def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
     for the healer's + writer's reuse (§11 COMMON — the
     :func:`is_foreign_timestamp` precedent).
 
+    VALUE-range probe (round-18 MAJOR fold): a sound ``Datetime`` DTYPE can
+    still hold an i64 value outside Python's ``datetime`` range, and every
+    downstream Python-side conversion then faults (``OverflowError`` from
+    ``min``/``max``, the BaseException ``pyo3_runtime.PanicException`` from
+    ``to_list`` — empirically verified, polars 1.42.1) — the SAME whole-scan /
+    whole-batch DoS the dtype arms exist to stop. The gate therefore also
+    probes ``min()``/``max()`` under
+    :func:`~brutex.data.errors.datetime_out_of_range_errors` and verdicts
+    "timestamp value out of datetime range" — months are contiguous, so a
+    convertible min AND max bound every value between them (two vectorized
+    O(rows) scans, honestly NOT O(1)).
+
     TOTAL over its input shapes (round-14 fold): an ABSENT key column is the
     same "unclassifiable" verdict, never a raise — the healer's
     consistent-read site is the ONE consumer fed a FULL
@@ -766,6 +792,27 @@ def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
         return "option timestamp column missing — unclassifiable"
     if not (isinstance(ts_dtype, pl.Datetime) or ts_dtype == pl.Null):
         return f"option timestamp column dtype {ts_dtype} is not Datetime/Null — unclassifiable"
+    if isinstance(ts_dtype, pl.Datetime):
+        # Round-18 MAJOR fold: the dtype alone is NOT enough — a hand-planted
+        # Datetime column can hold an in-dtype i64 VALUE no Python ``datetime``
+        # represents (e.g. ``2**62`` µs ≈ year 146,000), and every downstream
+        # conversion then faults: ``min()``/``max()`` raise ``OverflowError``
+        # ("date value out of range") and ``to_list()`` PANICS as the
+        # BaseException ``pyo3_runtime.PanicException`` — neither is a
+        # ``parquet_read_skip_errors`` member nor in the healer's per-finding
+        # isolation set, so pre-fix ONE such file crashed the WHOLE scan
+        # (L3 boot sweep permanently inert — the sentinel never stamps — plus
+        # a 500 on every ``/universe`` lake-uniqueness cache miss and a dead
+        # L2 options census) and, swapped in scan→heal, escaped the batch
+        # isolation. Months are contiguous, so if min AND max convert every
+        # value between them does — two vectorized O(rows) scans bound the
+        # whole column (the ``_count_foreign_rows`` shorthand; NOT O(1)).
+        column = frame.get_column("timestamp")
+        try:
+            column.min()
+            column.max()
+        except datetime_out_of_range_errors():
+            return "option timestamp value out of datetime range — unclassifiable"
     return None
 
 
@@ -1063,31 +1110,47 @@ def scan_lake_invariants(
                     _pause(per_file_pause)
                     continue
                 _pause(per_file_pause)
+                timestamps = frame.get_column("timestamp")
+                try:
+                    # Round-18 MAJOR fold (the bars twin of the options gate):
+                    # a hand-planted Datetime column holding an out-of-
+                    # ``datetime``-range i64 value (e.g. ``2**62`` µs) makes
+                    # ``_count_foreign_rows``'s ``min()`` raise
+                    # ``OverflowError`` and ``_foreign_timestamps``'s
+                    # ``to_list()`` PANIC (``pyo3_runtime.PanicException``, a
+                    # BaseException) — pre-fix that ONE file crashed the WHOLE
+                    # scan from OUTSIDE the read try/except above. Classified
+                    # under the COMMON fault set → the file is skipped LOUDLY
+                    # + counted like an unreadable one (bars path stays raw —
+                    # catalogued coordinates, the established convention).
+                    dup, foreign = classify_bar_keys(coords, timestamps)
+                    foreign_ts: set[datetime] = (
+                        set()
+                        if foreign is None
+                        else _foreign_timestamps((coords.year, coords.month), timestamps)
+                    )
+                    # Price-sanity census (DEC-STORED-DATA-VALIDATION-001): rides
+                    # the SAME per-file read (BAR_SCAN_COLUMNS carries the OHLC
+                    # columns), one vectorized pass. OBSERVE-ONLY — the healer
+                    # never consumes it.
+                    bad_rows = count_price_violations(frame)
+                except datetime_out_of_range_errors() as exc:
+                    _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
+                    files_skipped += 1
+                    continue
                 files_scanned += 1
                 scanned_in_series += 1
                 files_by_segment[coords.segment] = files_by_segment.get(coords.segment, 0) + 1
                 if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
                     engine_files += 1
-                timestamps = frame.get_column("timestamp")
-                dup, foreign = classify_bar_keys(coords, timestamps)
                 if dup is not None:
                     dup = replace(dup, path=path)
                     log_lake_finding(dup)
                     findings.append(dup)
                 if foreign is not None:
                     foreign = replace(foreign, path=path)
-                    pending_overlap.append(
-                        (
-                            len(findings),
-                            coords,
-                            _foreign_timestamps((coords.year, coords.month), timestamps),
-                        )
-                    )
+                    pending_overlap.append((len(findings), coords, foreign_ts))
                     findings.append(foreign)
-                # Price-sanity census (DEC-STORED-DATA-VALIDATION-001): rides the
-                # SAME per-file read (BAR_SCAN_COLUMNS carries the OHLC columns),
-                # one vectorized pass. OBSERVE-ONLY — the healer never consumes it.
-                bad_rows = count_price_violations(frame)
                 if bad_rows:
                     price_finding = PriceSanityRows(path=path, coords=coords, bad_rows=bad_rows)
                     log_lake_finding(price_finding)
@@ -1205,18 +1268,40 @@ def scan_lake_invariants(
                         )
                         option_files_skipped += 1
                         continue
+                    try:
+                        # Round-18 residual guard: the gate's min/max probe
+                        # above already verdicts an out-of-``datetime``-range
+                        # column (months are contiguous — a convertible min +
+                        # max bounds every value), so this arm is defense in
+                        # depth for any RESIDUAL Python-conversion fault the
+                        # probe cannot foresee — isolated per FILE (loud skip,
+                        # counted) instead of aborting the whole scan (the
+                        # rounds-3/5/12/13 isolation-escape class).
+                        option_dup, option_foreign = classify_option_keys(
+                            path, series_dir.name, home, frame
+                        )
+                        option_keys: set[tuple[str | None, datetime]] = (
+                            set()
+                            if option_foreign is None
+                            else _option_foreign_keys(
+                                (option_foreign.year, option_foreign.month), frame
+                            )
+                        )
+                    except datetime_out_of_range_errors() as exc:
+                        # repr() on the path — the round-8 log-injection
+                        # convention; repr() on the error (round-17: a raised
+                        # message may embed the raw vendor path).
+                        _LOG.warning(
+                            "lake.invariant.scan_skip", path=repr(str(path)), error=repr(str(exc))
+                        )
+                        option_files_skipped += 1
+                        continue
                     option_files_scanned += 1
-                    option_dup, option_foreign = classify_option_keys(
-                        path, series_dir.name, home, frame
-                    )
                     if option_dup is not None:
                         log_lake_finding(option_dup)
                         findings.append(option_dup)
                     if option_foreign is not None:
-                        keys = _option_foreign_keys(
-                            (option_foreign.year, option_foreign.month), frame
-                        )
-                        pending_option_overlap.append((len(findings), keys))
+                        pending_option_overlap.append((len(findings), option_keys))
                         findings.append(option_foreign)
                 for idx, keys in pending_option_overlap:
                     found = cast(OptionForeignMonthRows, findings[idx])
@@ -1303,7 +1388,17 @@ def _engine_relevant(finding: LakeFinding) -> bool:
 
 
 def _engine_offender(finding: LakeFinding) -> str:
-    """A short human token naming one engine-series offender."""
+    """A short human token naming one engine-series offender.
+
+    HONEST (round-18 NIT): the two option-finding arms are TOTALITY arms only
+    — production-unreachable, because the sole caller feeds
+    ``engine_findings`` filtered by :func:`_engine_relevant`, which returns
+    ``False`` for BOTH option kinds (the options tree carries no engine
+    series). They exist so this function stays total over the
+    :data:`LakeFinding` union (a future caller can never fall through to a
+    mislabelled token) and are pinned by direct unit calls, not an
+    end-to-end census path.
+    """
     if isinstance(finding, LegacyKeyDrift):
         return f"drift {finding.drifted_symbol!r}->{finding.canonical_symbol!r}"
     if isinstance(finding, IntraFileDup):

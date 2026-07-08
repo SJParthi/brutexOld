@@ -762,6 +762,42 @@ class TestHealPartitionRemoveKeys:
         assert dest.read_bytes() == before  # refused byte-untouched
         assert not quarantine_to.exists()  # refusal precedes any quarantine copy
 
+    def test_heal_remove_keys_refuses_out_of_range_timestamp(self, tmp_path: Path) -> None:
+        """Round-18 fold (refuter-confirmed MAJOR): heal_partition's keyed
+        re-read gate also VALUE-probes the timestamp column.
+
+        A sound-DTYPE file whose stamp is out of Python's ``datetime`` range
+        (``2**62`` µs) passed the rounds-12/13 dtype-only gate, then the
+        removal mask's ``to_list()`` PANICKED as the BaseException
+        ``pyo3_runtime.PanicException`` — escaping the healer's per-finding
+        isolation set entirely. Now the documented ``OptionWriterError``
+        refusal, file byte-untouched, no quarantine copy."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dest = tmp_path / "options" / "SERIES" / "2021-01.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE"], type=pa.string()),
+                    "timestamp": pa.array([2**62], type=pa.int64()).cast(
+                        pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            dest,
+        )
+        before = dest.read_bytes()
+        quarantine_to = tmp_path / ".quarantine" / "ts" / dest.relative_to(tmp_path)
+        ts0 = datetime(2021, 1, 4, 4, 0, tzinfo=UTC)
+        with pytest.raises(OptionWriterError, match="out of datetime range"):
+            _writer(tmp_path).heal_partition(
+                dest, remove_keys={("CE", ts0)}, quarantine_to=quarantine_to
+            )
+        assert dest.read_bytes() == before  # refused byte-untouched
+        assert not quarantine_to.exists()  # refusal precedes any quarantine copy
+
     def test_heal_remove_keys_oom_maps_to_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
