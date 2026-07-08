@@ -36,7 +36,15 @@ different mass-event signature:
    :data:`ALLFILTERED_BREAKER_FRACTION` over ≥
    :data:`ALLFILTERED_BREAKER_MIN_OBSERVATIONS` observed windows across ≥
    :data:`ALLFILTERED_BREAKER_FRACTION_MIN_SERIES` distinct series: the
-   timestamps-shifted-wholesale shape. The 3-series floor is DELIBERATE — the
+   timestamps-shifted-wholesale shape. Evaluated after EVERY observation on
+   the RUNNING per-window-deduped counters — a PREFIX criterion, deliberately
+   (mid-pull early detection): a population whose whole-pull FINAL fraction
+   sits below the floor can still trip when its all-filtered windows complete
+   EARLY (the symbol-ordered fan-out can finish a few pathological series
+   before the healthy bulk; protective direction — settles are suppressed,
+   windows stay ``FAILED`` + re-pullable), while the SAME population observed
+   clean-bulk-first never trips (BOTH orderings test-pinned — this is NOT a
+   whole-pull population floor). The 3-series floor is DELIBERATE — the
    ENGINE's own spot pull is exactly 3 series (3 indexes × ``1minute``,
    CLAUDE.md §3) and MUST be trippable in its BACKFILL shape (≥
    :data:`ALLFILTERED_BREAKER_MIN_OBSERVATIONS` eligible windows — the daily
@@ -99,10 +107,15 @@ round 2 widened this list to the REAL envelope):
   "engine pull trippable" claim above holds for the BACKFILL shape only
   (test-pinned). Lowering the observation floor trades this hole for
   small-sample false trips — a conscious operator env call, not the default;
-* a LATE mass event spanning 3-9 series inside a LARGE pull whose whole-pull
-  all-filtered fraction stays below :data:`ALLFILTERED_BREAKER_FRACTION`
-  escapes both rules (the fraction is whole-pull over UNIQUE windows, never
-  windowed) — broader than the ≤ 2-series hole above (test-pinned);
+* a LATE mass event spanning 3-9 series inside a LARGE pull whose all-filtered
+  fraction stays below :data:`ALLFILTERED_BREAKER_FRACTION` on EVERY observed
+  prefix escapes both rules — the criterion is a RUNNING-prefix test over the
+  unique-window counters (rule 2 above), so the escape is specifically the
+  LATE/diluted ORDERING: the clean bulk observed first holds every later
+  prefix's fraction below the floor. The SAME below-final-floor population
+  concentrated EARLY trips at its prefix (deliberate early detection,
+  protective direction) — broader than the ≤ 2-series hole above (BOTH
+  orderings test-pinned);
 * evidence never pools ACROSS the pipeline's SPOT and F&O phases (each phase
   resolves its own pull-scoped breaker — deliberate, no cross-phase plumbing),
   so a vendor-day event split e.g. 5 spot series + 5 F&O underlyings trips

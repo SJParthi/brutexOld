@@ -290,6 +290,15 @@ class TestPerWindowDedup:
         # attempt counting read (160, 90, 3) after pass 3 — 90/160 = 0.5625
         # TRIPPED at an effective ~0.25 unique-window floor and the alarm
         # reported "90 of 160 windows" for a 30-of-100 event.
+        #
+        # ORDERING NOTE (endgame reconcile): this pins the CLEAN-BULK-FIRST
+        # (diluted) ordering — the 70 clean windows observe first, so every
+        # later prefix's fraction stays below the floor and this population
+        # never trips. The FRACTION criterion is a RUNNING-prefix test, NOT a
+        # whole-pull population floor: the SAME population observed
+        # all-filtered-FIRST trips at its prefix — the deliberate
+        # early-detection twin pinned by
+        # test_af_first_prefix_ordering_trips_fraction_at_the_prefix below.
         b = _breaker()  # the documented defaults
         for i in range(70):
             assert b.observe(f"CLEAN{i}:1minute", all_filtered=False) is False
@@ -302,6 +311,32 @@ class TestPerWindowDedup:
         assert not b.tripped
         assert b.allow_settle()
         assert b.counts() == (100, 30, 3)  # the unique-window truth, all passes
+
+    def test_af_first_prefix_ordering_trips_fraction_at_the_prefix(self) -> None:
+        # THE ordering twin (endgame reconcile): the IDENTICAL below-final-
+        # floor population — 30 all-filtered of 100 unique across 3 series at
+        # the production defaults — observed ALL-FILTERED-FIRST trips FRACTION
+        # at exactly the 20th observation (prefix 20/20 = 1.0 >= 0.5 over
+        # min_obs 20 across 3 series). This is the INTENDED running-prefix
+        # semantics — deliberate mid-pull early detection when the
+        # symbol-ordered fan-out completes a few pathological series before
+        # the healthy bulk (protective direction: settles suppressed, windows
+        # stay FAILED + re-pullable) — pinned so the criterion can never be
+        # mistaken for a whole-pull population floor (Golden Rule #10).
+        b = _breaker()  # the documented defaults
+        for i in range(30):
+            transitioned = b.observe(f"BAD{i % 3}:1minute", all_filtered=True, window_start=f"w{i}")
+            # The latch transition fires ON the 20th observation, exactly once.
+            assert transitioned is (i == 19)
+        assert b.tripped
+        assert not b.allow_settle()
+        snap = b.trip_snapshot()
+        assert snap is not None and snap.trip_rule == "fraction"
+        for i in range(70):  # the late clean bulk: telemetry only, latch holds
+            assert b.observe(f"CLEAN{i}:1minute", all_filtered=False) is False
+        assert b.tripped
+        assert not b.allow_settle()
+        assert b.counts() == (100, 30, 3)  # same unique-window truth, tripped
 
     def test_same_window_reobservation_is_a_counter_noop(self) -> None:
         b = _breaker(spread=100, min_obs=1000)
