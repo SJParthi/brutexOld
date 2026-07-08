@@ -412,6 +412,36 @@ class TestFuturesRefusals:
         assert "pipeline prebuild" in message
         assert "sweep-all" not in message  # the reconcile=True variant has no hint
 
+    def test_alias_under_foreign_coordinates_refused_naming_the_coordinate(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        # Round-7 finding 3: the CLI-only research override
+        # (`--allow-out-of-scope`) can admit the alias under a foreign
+        # coordinate (e.g. --segment INDEX) past the scope gate's NSE/FNO
+        # refusal; the resolver then resolves against the pinned bars/NSE/FNO
+        # tree while every contract READ goes to the foreign tree, finds zero
+        # bars, and raised the misleading "EMPTY … re-pull" remediation —
+        # blaming the data when the COORDINATE is wrong. Now: an up-front
+        # refusal naming the coordinate mismatch, before any lake read.
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            _futures_lake(lake, cat)
+            with pytest.raises(FuturesSeriesError, match="coordinate is wrong") as exc:
+                load_sweep_slice(
+                    cat=cat,
+                    lake_root=lake,
+                    exchange="NSE",
+                    segment="INDEX",  # the override-admitted foreign coordinate
+                    symbol=_ALIAS,
+                    interval="1minute",
+                    start=_ist(2025, 6, 25, 0, 0),
+                    end=_ist(2025, 7, 2, 23, 59),
+                )
+        message = str(exc.value)
+        assert "NSE/FNO" in message  # the pinned coordinate named
+        assert "NSE/INDEX" in message  # the wrong one named
+        assert "EMPTY" not in message  # never the wrong re-pull remediation
+        assert "re-pull" not in message
+
     def test_zero_bar_refusal_under_no_reconcile_names_the_reconcile_hint(
         self, lake: Path, tmp_path: Path
     ) -> None:

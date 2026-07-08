@@ -43,6 +43,8 @@ import structlog
 
 from brutex.calendars.nse import IST
 from brutex.data.futures_series import (
+    SERIES_EXCHANGE,
+    SERIES_SEGMENT,
     FuturesSeriesError,
     FuturesSeriesResolution,
     is_futures_series_symbol,
@@ -230,9 +232,14 @@ def load_sweep_slice(
     lake_root
         The lake root directory.
     exchange, segment
-        The launch coordinates (the alias requires ``NSE``/``FNO`` — enforced
-        upstream by the scope gate; this loader reads the coordinates
-        verbatim).
+        The launch coordinates. A verbatim symbol reads them as-is; the alias
+        REQUIRES the pinned ``NSE``/``FNO`` pair and refuses any other up
+        front (review round-7 finding 3): the scope gate already refuses a
+        foreign coordinate, but its CLI-only ``--allow-out-of-scope``
+        research override can admit one — the resolver would then resolve
+        against the pinned ``bars/NSE/FNO`` tree while every contract READ
+        went to the foreign tree, found zero bars, and mis-remediated as
+        "EMPTY — re-pull" (the wrong problem named).
     symbol
         A verbatim lake dir symbol, or the NIFTY-futures series alias
         (:func:`~brutex.data.futures_series.is_futures_series_symbol`).
@@ -260,7 +267,9 @@ def load_sweep_slice(
     Raises
     ------
     FuturesSeriesError
-        Futures alias only: resolution refusals (interior hole etc.), a
+        Futures alias only: a launch coordinate other than the pinned
+        ``NSE``/``FNO`` (named as a COORDINATE error, never a data one),
+        resolution refusals (interior hole etc.), a
         per-``(contract, interval)`` ZERO-BAR owned window whose in-window
         span holds at least one expectable session instant (dir exists but
         the requested interval is empty — distinct message from a missing
@@ -294,6 +303,22 @@ def load_sweep_slice(
             interval=interval,
             start=start,
             end=end,
+        )
+
+    # Coordinate pin (review round-7 finding 3): the alias resolves against
+    # the pinned bars/NSE/FNO tree while the per-contract reads use the
+    # caller's coordinates verbatim — an override-admitted foreign coordinate
+    # (`--allow-out-of-scope` past the scope gate's NSE/FNO refusal) would
+    # read every contract under the FOREIGN tree, find zero bars, and raise
+    # the misleading "EMPTY — re-pull" remediation. Refuse up front naming
+    # the REAL problem (the coordinate), before any resolution or lake I/O.
+    if (exchange, segment) != (SERIES_EXCHANGE, SERIES_SEGMENT):
+        raise FuturesSeriesError(
+            f"the NIFTY-futures series alias {symbol!r} lives at the pinned "
+            f"{SERIES_EXCHANGE}/{SERIES_SEGMENT} lake coordinates, but this launch "
+            f"reads {exchange}/{segment} — the coordinate is wrong, not the stored "
+            f"data; re-launch with --exchange {SERIES_EXCHANGE} --segment "
+            f"{SERIES_SEGMENT} (DEC-FUTURES-ADDRESSING-PIN-001)"
         )
 
     res = (
