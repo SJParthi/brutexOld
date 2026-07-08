@@ -953,14 +953,15 @@ def verify_events_chain(
 # ── Fixture root resolution (fail-loud) ─────────────────────────────────
 
 _FIXTURE_ROOT_LOG_LOCK: Final[threading.Lock] = threading.Lock()
-_fixture_root_logged: bool = False
+# Once-per-process log latch — a dict cell (not a module global) so no
+# ``global`` rebinding is needed anywhere (CodeQL py/unused-global-variable).
+_FIXTURE_ROOT_LOG_STATE: Final[dict[str, bool]] = {"logged": False}
 
 
 def _reset_fixture_root_logged() -> None:
     """Test seam: re-arm the once-per-process ``oneclick.fixture_root_active`` log."""
-    global _fixture_root_logged  # noqa: PLW0603 — once-per-process log guard w/ reset seam
     with _FIXTURE_ROOT_LOG_LOCK:
-        _fixture_root_logged = False
+        _FIXTURE_ROOT_LOG_STATE["logged"] = False
 
 
 def resolve_fixture_root() -> Path | None:
@@ -989,11 +990,10 @@ def resolve_fixture_root() -> Path | None:
             f"{FIXTURE_ROOT_ENV}={raw!r} is not an existing directory — "
             "unset it or point it at a fixture tree"
         )
-    global _fixture_root_logged  # noqa: PLW0603 — once-per-process log guard w/ reset seam
     with _FIXTURE_ROOT_LOG_LOCK:
-        if not _fixture_root_logged:
+        if not _FIXTURE_ROOT_LOG_STATE["logged"]:
             _LOG.info("oneclick.fixture_root_active", root=str(root))
-            _fixture_root_logged = True
+            _FIXTURE_ROOT_LOG_STATE["logged"] = True
     return root
 
 
@@ -1005,7 +1005,6 @@ class TradesReader(Protocol):
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
         """Return one page of trade rows for (*run_id*, *rank*)."""
-        ...  # pragma: no cover — Protocol signature only
 
 
 class AwaitingTradesReader:
