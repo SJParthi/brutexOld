@@ -22,7 +22,8 @@
 # UNVIABLE figure below is unaffected by the growth.
 #
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10; the fno-math twin
-# toml sets the disclosure standard; counts measured 2026-07-07 via
+# toml sets the disclosure standard; counts re-measured 2026-07-08 on the
+# race-7 merged HEAD via
 # `cargo mutants --list --no-config -f <file> --features python,serde`):
 #   greeks/mod.rs — 266 mutants; the Black-76 kernel behind the STORED F&O
 #                   Greeks enrichment (lake REFERENCE_ONLY surface, not the
@@ -30,8 +31,10 @@
 #                   enrichment suites incl. the independent stdlib Black-76
 #                   cross-check (DEC-GREEKS-CORRECTNESS-AUDIT-001, MIGRATION.md
 #                   #1188); gating it is a NAMED follow-up (MIGRATION.md #1597).
-#   indicators/*  — 281 mutants (ema 70 / fib 59 / pivots 49 / market_structure
-#                   47 / vwap 28 / metadata 25 / mod 3); the evaluate-time math
+#   indicators/*  — 297 mutants (ema 70 / fib 75 / pivots 49 / market_structure
+#                   47 / vwap 28 / metadata 25 / mod 3; fib.rs +16 from main's
+#                   DEC-FIB-BULLISH-RETRACE-001, PR #1225, folded by the race-7
+#                   merge); the evaluate-time math
 #                   behind vocabulary bits 52-59. Covered today by the frozen
 #                   400-case golden answer-key + the property ordering/
 #                   determinism suites (the DEC-TRADING-CORE-PROPTEST-MUTANTS-001
