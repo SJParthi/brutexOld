@@ -117,6 +117,30 @@ class TestClampWindowEnd:
         ist = datetime(2026, 6, 12, 16, 0, tzinfo=UTC)  # after 15:30
         assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
 
+    # ── the exact at-close instant (DEC-SESSION-CLOSE-BOUNDARY-PIN-001) ──
+    # The previously-untested boundary: exactly 15:30:00.000000 counts as
+    # CLOSED here (`>=`) — the request-side verdict, deliberately opposite to
+    # daily_derive_cutoff's finalize-side strict `>` (see the cross-module
+    # drift-pin in tests/unit/test_session_close_boundary_pin.py).
+
+    def test_intraday_exactly_at_close_allows_today_plus_one(self) -> None:
+        ist = datetime(2026, 6, 12, 15, 30, 0, 0, tzinfo=UTC)
+        assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
+
+    def test_daily_exactly_at_close_still_clamps_to_today(self) -> None:
+        # The daily arm is close-blind: today's 1day candle publishes only the
+        # NEXT day, so even the at-close instant keeps the today clamp.
+        ist = datetime(2026, 6, 12, 15, 30, 0, 0, tzinfo=UTC)
+        assert clamp_window_end("1day", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 12)
+
+    def test_intraday_one_second_before_close_clamps_to_today(self) -> None:
+        ist = datetime(2026, 6, 12, 15, 29, 59, tzinfo=UTC)
+        assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 12)
+
+    def test_intraday_one_second_after_close_allows_today_plus_one(self) -> None:
+        ist = datetime(2026, 6, 12, 15, 30, 1, tzinfo=UTC)
+        assert clamp_window_end("1minute", date(2026, 6, 30), now_ist=ist) == date(2026, 6, 13)
+
 
 class TestDropBarsAfter:
     """DEC-CANDLE-DROP-FUTURE-BAR-001: drop a vendor bar timestamped STRICTLY AFTER the

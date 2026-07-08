@@ -10,20 +10,32 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
+import socket
 import stat
+import threading
+import time
 from pathlib import Path
 
 import pytest
+from brutex.adapters.groww import pull_singleflight
 from brutex.adapters.groww.pull_singleflight import (
     ACCOUNT_LOCK_FILE_PREFIX,
     PULL_SINGLEFLIGHT_LOCK_NAME,
+    ForeignPullActiveError,
     PullAlreadyRunningError,
+    PullLease,
     account_pull_singleflight_lock,
     account_singleflight_lock_path,
     default_account_lock_dir,
+    foreign_pull_lease,
+    pull_lease_enabled,
+    pull_lease_guard,
+    pull_lease_path,
     pull_singleflight_lock,
     pull_singleflight_lock_path,
+    read_pull_lease,
 )
 from brutex.data.errors import LakeWriteHalt
 
@@ -221,3 +233,656 @@ def test_account_lock_enospc_maps_to_lake_write_halt(
     ):
         pass  # pragma: no cover — open raises before the body runs
     assert excinfo.value.reason == "disk_full"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Cross-host foreign-pull LEASE (DEC-ACCOUNT-LEASE-CROSSHOST-001)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def _write_lease(
+    lake_root: Path,
+    *,
+    host: str = "other-host",
+    token: str = "tok-1",  # noqa: S107 — a random lease identity, not a password
+    pid: int = 4242,
+    started_wall: float = 1_000.0,
+    wall_time: float = 1_000.0,
+    schema: int = pull_singleflight.PULL_LEASE_SCHEMA,
+) -> Path:
+    """Hand-write a lease file (the on-disk JSON shape) for read/verdict tests."""
+    path = pull_lease_path(lake_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": schema,
+        "token": token,
+        "host": host,
+        "pid": pid,
+        "started_wall": started_wall,
+        "wall_time": wall_time,
+    }
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_lease_path_is_stable_sidecar_under_lake_root(tmp_path: Path) -> None:
+    path = pull_lease_path(tmp_path)
+    assert path == tmp_path / ".locks" / "pull_lease.json"
+    assert not path.exists()  # computed only — never created by the path helper
+
+
+def test_lease_enabled_default_on_and_off_values() -> None:
+    assert pull_lease_enabled({}) is True
+    assert pull_lease_enabled({"BRUTEX_PULL_LEASE": "1"}) is True
+    assert pull_lease_enabled({"BRUTEX_PULL_LEASE": "anything"}) is True
+    for off in ("0", "off", "false", "no", " OFF "):
+        assert pull_lease_enabled({"BRUTEX_PULL_LEASE": off}) is False
+
+
+def test_lease_enabled_env_none_reads_process_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRUTEX_PULL_LEASE", "off")
+    assert pull_lease_enabled() is False
+    monkeypatch.delenv("BRUTEX_PULL_LEASE")
+    assert pull_lease_enabled() is True
+
+
+def test_read_lease_absent_is_none(tmp_path: Path) -> None:
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_read_lease_corrupt_json_is_none(tmp_path: Path) -> None:
+    path = pull_lease_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"{not json")
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_read_lease_non_object_is_none(tmp_path: Path) -> None:
+    path = pull_lease_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("[1, 2, 3]")
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_read_lease_unrecognised_schema_is_none(tmp_path: Path) -> None:
+    _write_lease(tmp_path, schema=99)
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_read_lease_missing_field_is_none(tmp_path: Path) -> None:
+    path = pull_lease_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"schema": pull_singleflight.PULL_LEASE_SCHEMA, "host": "h"}))
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_read_lease_wrong_typed_field_is_none(tmp_path: Path) -> None:
+    path = pull_lease_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": pull_singleflight.PULL_LEASE_SCHEMA,
+                "token": "t",
+                "host": "h",
+                "pid": "not-an-int",
+                "started_wall": 1.0,
+                "wall_time": 1.0,
+            }
+        )
+    )
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_read_lease_happy_roundtrip(tmp_path: Path) -> None:
+    _write_lease(tmp_path, host="peer", token="tok-9", pid=7, started_wall=5.0, wall_time=6.0)
+    lease = read_pull_lease(tmp_path)
+    assert lease == PullLease(
+        schema=pull_singleflight.PULL_LEASE_SCHEMA,
+        token="tok-9",
+        host="peer",
+        pid=7,
+        started_wall=5.0,
+        wall_time=6.0,
+    )
+
+
+def test_foreign_verdict_none_without_lease(tmp_path: Path) -> None:
+    assert foreign_pull_lease(tmp_path, host="me", now_wall=100.0) is None
+
+
+def test_foreign_verdict_ignores_same_host(tmp_path: Path) -> None:
+    # SOUND because the caller holds both flocks: no live same-host pull can exist,
+    # so a same-host lease — however fresh — is a crashed/finished pull's residue.
+    _write_lease(tmp_path, host="me", wall_time=100.0)
+    assert foreign_pull_lease(tmp_path, host="me", now_wall=100.0) is None
+
+
+def test_foreign_verdict_ignores_stale_foreign(tmp_path: Path) -> None:
+    _write_lease(tmp_path, host="peer", wall_time=100.0)
+    assert (
+        foreign_pull_lease(tmp_path, host="me", now_wall=100.0 + 180.0 + 1.0, stale_after_s=180.0)
+        is None
+    )
+
+
+def test_foreign_verdict_flags_fresh_foreign_with_age(tmp_path: Path) -> None:
+    _write_lease(tmp_path, host="peer", wall_time=100.0)
+    verdict = foreign_pull_lease(tmp_path, host="me", now_wall=160.0, stale_after_s=180.0)
+    assert verdict is not None
+    lease, age_s = verdict
+    assert lease.host == "peer"
+    assert age_s == 60.0
+
+
+def test_foreign_verdict_future_heartbeat_reads_fresh(tmp_path: Path) -> None:
+    # A skewed-AHEAD writer clock (negative age) reads FRESH — the conservative
+    # refusal; it self-heals once TTL + skew elapse (documented envelope).
+    _write_lease(tmp_path, host="peer", wall_time=500.0)
+    assert foreign_pull_lease(tmp_path, host="me", now_wall=100.0) is not None
+
+
+def test_foreign_pull_error_message_and_compat(tmp_path: Path) -> None:
+    lease = PullLease(
+        schema=pull_singleflight.PULL_LEASE_SCHEMA,
+        token="t",
+        host="peer-host",
+        pid=99,
+        started_wall=1.0,
+        wall_time=2.0,
+    )
+    err = ForeignPullActiveError(pull_lease_path(tmp_path), lease, 42.0)
+    # Subclass compat: every existing PullAlreadyRunningError refusal path handles it.
+    assert isinstance(err, PullAlreadyRunningError)
+    assert err.lease is lease
+    assert err.lock_path == pull_lease_path(tmp_path)
+    message = str(err)
+    assert "another host" in message
+    assert "'peer-host'" in message
+    assert "pid 99" in message
+    assert "42s old" in message
+    assert "goes stale by itself" in message  # honest self-heal note, never "kill it"
+
+
+def test_keeper_refresh_writes_owner_only_lease(tmp_path: Path) -> None:
+    clock = iter([10.0, 20.0, 30.0])
+    keeper = pull_singleflight._PullLeaseKeeper(  # pyright: ignore[reportPrivateUsage]
+        pull_lease_path(tmp_path), host="me", now_fn=lambda: next(clock)
+    )
+    keeper.refresh()
+    path = pull_lease_path(tmp_path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    lease = read_pull_lease(tmp_path)
+    assert lease is not None
+    assert lease.host == "me"
+    assert lease.pid == os.getpid()
+    assert lease.started_wall == 10.0  # stamped at keeper construction
+    assert lease.wall_time == 20.0  # the first refresh tick
+    assert lease.token == keeper.token
+    keeper.refresh()
+    refreshed = read_pull_lease(tmp_path)
+    assert refreshed is not None
+    assert refreshed.wall_time == 30.0  # heartbeat moved
+    assert refreshed.token == keeper.token  # identity stable across refreshes
+
+
+def test_keeper_refresh_failure_warns_once_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keeper = pull_singleflight._PullLeaseKeeper(  # pyright: ignore[reportPrivateUsage]
+        pull_lease_path(tmp_path), host="me", now_fn=lambda: 1.0
+    )
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise OSError("disk unhappy")
+
+    monkeypatch.setattr(pull_singleflight, "atomic_write_simple", _boom)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+        "warning",
+        lambda event, **_kw: warned.append(event),
+    )
+    keeper.refresh()  # must NOT raise — the pull is unaffected
+    keeper.refresh()  # second failure: the warn-once flag suppresses a repeat
+    assert warned == ["pull_lease.write_failed"]
+
+
+def test_keeper_clear_removes_only_its_own_lease(tmp_path: Path) -> None:
+    keeper = pull_singleflight._PullLeaseKeeper(  # pyright: ignore[reportPrivateUsage]
+        pull_lease_path(tmp_path), host="me", now_fn=lambda: 1.0
+    )
+    keeper.refresh()
+    assert pull_lease_path(tmp_path).exists()
+    keeper.clear()
+    assert not pull_lease_path(tmp_path).exists()  # ours → removed
+
+
+def test_keeper_clear_leaves_a_racing_peers_lease(tmp_path: Path) -> None:
+    keeper = pull_singleflight._PullLeaseKeeper(  # pyright: ignore[reportPrivateUsage]
+        pull_lease_path(tmp_path), host="me", now_fn=lambda: 1.0
+    )
+    keeper.refresh()
+    # A racing peer (inside the documented no-mutex envelope) overwrote our lease.
+    _write_lease(tmp_path, host="peer", token="peer-token")
+    keeper.clear()
+    lease = read_pull_lease(tmp_path)
+    assert lease is not None and lease.token == "peer-token"  # never deleted from under it
+
+
+def test_keeper_clear_noop_when_lease_unreadable(tmp_path: Path) -> None:
+    keeper = pull_singleflight._PullLeaseKeeper(  # pyright: ignore[reportPrivateUsage]
+        pull_lease_path(tmp_path), host="me", now_fn=lambda: 1.0
+    )
+    keeper.clear()  # no lease on disk — nothing to do, never raises
+
+
+def test_keeper_clear_unlink_failure_warns_and_swallows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keeper = pull_singleflight._PullLeaseKeeper(  # pyright: ignore[reportPrivateUsage]
+        pull_lease_path(tmp_path), host="me", now_fn=lambda: 1.0
+    )
+    keeper.refresh()
+
+    def _boom(_self: Path, *a: object, **k: object) -> None:
+        raise OSError("busy")
+
+    monkeypatch.setattr(Path, "unlink", _boom)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+        "warning",
+        lambda event, **_kw: warned.append(event),
+    )
+    keeper.clear()  # must NOT raise — a leftover lease goes stale by itself
+    assert warned == ["pull_lease.clear_failed"]
+
+
+def test_heartbeat_loop_exits_without_refresh_when_pre_stopped() -> None:
+    stop = threading.Event()
+    stop.set()
+    calls: list[bool] = []
+    pull_singleflight._lease_heartbeat_loop(  # pyright: ignore[reportPrivateUsage]
+        stop, 0.001, lambda: calls.append(True)
+    )
+    assert calls == []
+
+
+def test_heartbeat_loop_refreshes_until_stopped() -> None:
+    stop = threading.Event()
+    calls: list[bool] = []
+
+    def refresh() -> None:
+        calls.append(True)
+        stop.set()  # one tick, then stop — deterministic exit
+
+    pull_singleflight._lease_heartbeat_loop(  # pyright: ignore[reportPrivateUsage]
+        stop, 0.001, refresh
+    )
+    assert calls == [True]
+
+
+def test_lease_guard_disabled_is_a_pure_noop(tmp_path: Path) -> None:
+    # A pre-existing FRESH foreign lease would refuse — but the kill switch is off.
+    _write_lease(tmp_path, host="peer", wall_time=time.time())
+    with pull_lease_guard(tmp_path, host="me", env={"BRUTEX_PULL_LEASE": "0"}):
+        # No lease of OURS written; the foreign one untouched.
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None and lease.host == "peer"
+    lease_after = read_pull_lease(tmp_path)
+    assert lease_after is not None and lease_after.host == "peer"  # never cleared
+
+
+def test_lease_guard_happy_writes_then_clears(tmp_path: Path) -> None:
+    with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None
+        assert lease.host == "me"
+        assert lease.pid == os.getpid()
+    assert read_pull_lease(tmp_path) is None  # cleared at exit
+
+
+def test_lease_guard_default_host_is_gethostname(tmp_path: Path) -> None:
+    with pull_lease_guard(tmp_path, env={}, heartbeat_interval_s=3600.0):
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None
+        assert lease.host == socket.gethostname()
+
+
+def test_lease_guard_refuses_fresh_foreign_lease(tmp_path: Path) -> None:
+    _write_lease(tmp_path, host="peer", token="peer-token", wall_time=1_000.0)
+    with (
+        pytest.raises(ForeignPullActiveError) as excinfo,
+        pull_lease_guard(tmp_path, host="me", env={}, now_fn=lambda: 1_010.0),
+    ):
+        pass  # pragma: no cover — enter raises first
+    assert "another host" in str(excinfo.value)
+    # The foreign lease was NOT overwritten by the refused starter.
+    lease = read_pull_lease(tmp_path)
+    assert lease is not None and lease.token == "peer-token"
+
+
+def test_lease_guard_overwrites_stale_foreign_lease(tmp_path: Path) -> None:
+    _write_lease(tmp_path, host="peer", wall_time=1_000.0)
+    now = 1_000.0 + pull_singleflight.PULL_LEASE_STALE_AFTER_S + 1.0
+    with pull_lease_guard(
+        tmp_path, host="me", env={}, now_fn=lambda: now, heartbeat_interval_s=3600.0
+    ):
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None and lease.host == "me"  # stale peer lease superseded
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_lease_guard_proceeds_over_same_host_lease(tmp_path: Path) -> None:
+    # The guard is entered AFTER both flocks, so a same-host lease is provably a
+    # crashed/finished pull's residue — proceed and supersede it.
+    _write_lease(tmp_path, host="me", token="crashed", wall_time=time.time())
+    with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None and lease.token != "crashed"
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_lease_guard_clears_lease_on_error_inside_block(tmp_path: Path) -> None:
+    class _Boom(Exception):
+        pass
+
+    # Nested (not combined) so pytest.raises is the SOLE outer manager: the
+    # combined form hid the exception-swallow from static reachability analysis
+    # (CodeQL py/unreachable-statement on the assert below).
+    with pytest.raises(_Boom):  # noqa: SIM117 — the guard must wrap the raise
+        with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+            raise _Boom
+    assert read_pull_lease(tmp_path) is None  # finally cleared
+
+
+def test_lease_guard_heartbeat_actually_refreshes(tmp_path: Path) -> None:
+    # A REAL daemon heartbeat at a tiny interval moves wall_time within the deadline.
+    with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=0.01):
+        first = read_pull_lease(tmp_path)
+        assert first is not None
+        deadline = time.monotonic() + 5.0
+        moved = False
+        while time.monotonic() < deadline:
+            current = read_pull_lease(tmp_path)
+            if current is not None and current.wall_time > first.wall_time:
+                moved = True
+                break
+            time.sleep(0.01)
+        assert moved, "heartbeat never refreshed the lease within 5s"
+    assert read_pull_lease(tmp_path) is None
+
+
+def test_lease_guard_heartbeat_spawn_failure_degrades_gracefully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_start = threading.Thread.start
+
+    def _no_heartbeat_thread(self: threading.Thread) -> None:
+        # Surgical: fail ONLY the heartbeat daemon's spawn — the deadline
+        # guard's own workers (thread name "brutex-pull-lease-<action>",
+        # the round-1 review bounded-I/O fold) must keep running so the
+        # lease write itself still happens.
+        if self.name == "brutex-pull-lease":
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _no_heartbeat_thread)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+        "warning",
+        lambda event, **_kw: warned.append(event),
+    )
+    with pull_lease_guard(tmp_path, host="me", env={}):
+        lease = read_pull_lease(tmp_path)
+        assert lease is not None and lease.host == "me"  # lease still written
+    assert read_pull_lease(tmp_path) is None  # still cleared at exit
+    assert warned == ["pull_lease.heartbeat_spawn_failed"]
+
+
+# ── deadline-bounded lease I/O (round-1 review MAJOR fix) ───────────────────
+
+
+class TestLeaseIoDeadline:
+    """The guard's synchronous lease I/O is BOUNDED — a wedged volume can never
+    hold the single-flight flocks forever (the round-1 review MAJOR: the exit
+    ``clear()`` ran unbounded BEFORE the flock releases at both production
+    sites, so a wedged non-raising volume refused every future pull until
+    process restart)."""
+
+    @staticmethod
+    def _wedge_read(
+        monkeypatch: pytest.MonkeyPatch, hang_when: threading.Event, release: threading.Event
+    ) -> None:
+        """Make the module-level lease-file read HANG (non-raising) while armed."""
+        real = pull_singleflight._read_lease_file  # pyright: ignore[reportPrivateUsage]
+
+        def _wedged(path: Path) -> object:
+            if hang_when.is_set():
+                release.wait(20.0)  # a wedged volume: blocks, never raises
+            return real(path)
+
+        monkeypatch.setattr(pull_singleflight, "_read_lease_file", _wedged)
+
+    def test_wedged_clear_does_not_block_guard_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FAILS BEFORE the fix: the exit hung ~20 s on the wedged read inside
+        # keeper.clear(); bounded now, the guard exits within the deadline and
+        # the flocks (held around this guard in production) release promptly.
+        monkeypatch.setenv("BRUTEX_PULL_LEASE_IO_DEADLINE_S", "0.2")
+        hang = threading.Event()
+        release = threading.Event()
+        self._wedge_read(monkeypatch, hang, release)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        try:
+            started = time.monotonic()
+            with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+                hang.set()  # the volume wedges AFTER a clean enter
+            exit_elapsed = time.monotonic() - started
+            assert exit_elapsed < 5.0, f"guard exit blocked {exit_elapsed:.1f}s on a wedged clear"
+            events = [(e, kw) for e, kw in warned if e == "pull_lease.io_wedged"]
+            assert len(events) == 1
+            assert events[0][1]["action"] == "clear"
+            assert events[0][1]["error_type"] == "DeadlineExceeded"
+            # The lease is left behind (abandoned clear) — the documented
+            # degrade: it self-heals by going stale within the TTL.
+            hang.clear()
+            lease = read_pull_lease(tmp_path)
+            assert lease is not None and lease.host == "me"
+        finally:
+            release.set()  # let the abandoned daemon die
+
+    def test_wedged_enter_read_degrades_and_pull_proceeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A wedged ENTER read (while both flocks are already held in
+        # production) degrades to "no cross-host detection" — never a hang,
+        # never a refusal of the pull itself.
+        monkeypatch.setenv("BRUTEX_PULL_LEASE_IO_DEADLINE_S", "0.2")
+        hang = threading.Event()
+        release = threading.Event()
+        hang.set()  # wedged from the very first read
+        self._wedge_read(monkeypatch, hang, release)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        try:
+            started = time.monotonic()
+            with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+                pass  # the pull runs — a wedged lease read never blocks it
+            assert time.monotonic() - started < 5.0
+            actions = [kw["action"] for e, kw in warned if e == "pull_lease.io_wedged"]
+            # Enter read wedged + exit clear wedged (same wedged volume).
+            assert actions == ["read", "clear"]
+        finally:
+            release.set()
+
+    def test_wedged_first_refresh_degrades_and_guard_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A wedged (non-raising) lease WRITE at enter is abandoned with one
+        # WARN — the pull proceeds without a lease (detection degraded).
+        monkeypatch.setenv("BRUTEX_PULL_LEASE_IO_DEADLINE_S", "0.2")
+        release = threading.Event()
+
+        def _wedged_write(*_a: object, **_kw: object) -> None:
+            release.wait(20.0)  # a wedged fsync: blocks, never raises
+
+        monkeypatch.setattr(pull_singleflight, "atomic_write_simple", _wedged_write)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        try:
+            started = time.monotonic()
+            with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+                pass
+            assert time.monotonic() - started < 5.0
+            actions = [kw["action"] for e, kw in warned if e == "pull_lease.io_wedged"]
+            # The refresh wedged; the exit clear reads a missing lease (the
+            # write never landed) and completes cleanly.
+            assert actions == ["refresh"]
+            assert read_pull_lease(tmp_path) is None
+        finally:
+            release.set()
+
+    def test_io_deadline_env_invalid_falls_back_to_default(self) -> None:
+        # The COMMON resolve_env_seconds contract: a bad value can never
+        # DISABLE the bound.
+        from brutex.config.deadline import resolve_env_seconds
+
+        assert (
+            resolve_env_seconds(
+                pull_singleflight.PULL_LEASE_IO_DEADLINE_ENV,
+                pull_singleflight.PULL_LEASE_IO_DEADLINE_S,
+                raw="not-a-number",
+            )
+            == pull_singleflight.PULL_LEASE_IO_DEADLINE_S
+        )
+
+    def test_fn_raised_runtime_error_propagates_never_mislabelled_io_wedged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``RuntimeError`` raised by the WRAPPED op is a genuine code bug.
+
+        Hostile-review round-4 MINOR regression pin — FAILS BEFORE the fix:
+        ``_bounded_lease_io``'s ``except (DeadlineExceeded, RuntimeError)``
+        swallowed it, returned the fallback, and emitted a MISLEADING
+        ``pull_lease.io_wedged`` "wedged volume" WARN masking the real cause
+        (contradicting its own "a genuine code bug still propagates"
+        docstring). Now only the guard's OWN failure modes (expiry + the typed
+        spawn failure) degrade — fn's errors propagate verbatim.
+        """
+        warned: list[str] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append(event),
+        )
+
+        def _bug() -> None:
+            raise RuntimeError("genuine code bug in the wrapped op")
+
+        with pytest.raises(RuntimeError, match="genuine code bug"):
+            pull_singleflight._bounded_lease_io(  # pyright: ignore[reportPrivateUsage]
+                _bug,
+                fallback=None,
+                deadline_s=5.0,
+                action="read",
+                lease_path=pull_lease_path(tmp_path),
+            )
+        assert "pull_lease.io_wedged" not in warned  # never a wedged-volume claim
+
+    def test_guard_spawn_failure_degrades_with_io_wedged_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DEADLINE guard's own ``Thread.start`` exhaustion still degrades.
+
+        The narrowed catch keeps the sanctioned arm: a spawn failure is the
+        guard's OWN failure mode (the typed
+        :class:`~brutex.config.deadline.DeadlineSpawnError`), so the op is
+        abandoned with ONE ``pull_lease.io_wedged`` WARN and the fallback is
+        served — the pull and the lock releases stay unaffected.
+        """
+        real_start = threading.Thread.start
+
+        def _no_spawn(self: threading.Thread) -> None:
+            # Surgical: fail ONLY the bounded-I/O guard's worker threads
+            # ("brutex-pull-lease-<action>"), never pytest's own machinery.
+            if self.name.startswith("brutex-pull-lease-"):
+                raise RuntimeError("can't start new thread")
+            real_start(self)
+
+        monkeypatch.setattr(threading.Thread, "start", _no_spawn)
+        warned: list[tuple[str, dict[str, object]]] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append((event, kw)),
+        )
+        out = pull_singleflight._bounded_lease_io(  # pyright: ignore[reportPrivateUsage]
+            lambda: "never-runs",
+            fallback="fallback-served",
+            deadline_s=5.0,
+            action="read",
+            lease_path=pull_lease_path(tmp_path),
+        )
+        assert out == "fallback-served"
+        events = [(e, kw) for e, kw in warned if e == "pull_lease.io_wedged"]
+        assert len(events) == 1
+        assert events[0][1]["error_type"] == "DeadlineSpawnError"
+        assert events[0][1]["action"] == "read"
+
+
+class TestHostileLeaseFileFailSoft:
+    """A damaged/hostile lease file can never break (or falsely block) a pull."""
+
+    def test_deep_nested_lease_json_reads_as_honest_unknown(self, tmp_path: Path) -> None:
+        """``json.loads`` RecursionError on a degenerately nested lease → None.
+
+        Hostile-review round-4 MINOR regression pin — FAILS BEFORE the fix:
+        ``_read_lease_file`` caught only ``(JSONDecodeError, ValueError)``, so
+        the ``RecursionError`` (a ``RuntimeError`` subclass) escaped the
+        decode; in production it then hit ``_bounded_lease_io``'s broad
+        ``RuntimeError`` catch and was mislabelled a wedged-volume event. It is
+        corrupt-file territory: the honest unknown, per the module's
+        "a damaged lease can never break a pull start" pledge.
+        """
+        path = pull_lease_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        depth = 100_000  # far beyond any recursion limit the parser tolerates
+        path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        assert read_pull_lease(tmp_path) is None
+
+    def test_guard_enters_cleanly_over_a_hostile_lease_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: the hostile file neither refuses the pull nor WARNs io_wedged."""
+        path = pull_lease_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        depth = 100_000
+        path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        warned: list[str] = []
+        monkeypatch.setattr(
+            pull_singleflight._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warned.append(event),
+        )
+        with pull_lease_guard(tmp_path, host="me", env={}, heartbeat_interval_s=3600.0):
+            lease = read_pull_lease(tmp_path)
+            assert lease is not None and lease.host == "me"  # ours overwrote the junk
+        assert read_pull_lease(tmp_path) is None  # cleared at exit
+        assert "pull_lease.io_wedged" not in warned  # never a wedged-volume claim

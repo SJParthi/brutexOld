@@ -222,11 +222,24 @@ write no real data and pace no real account requests).
 > credential) — so the SAME account pointed at **two different
 > `BRUTEX_LAKE_ROOT`s** now contends on ONE file and the second pull is refused.
 > **Honest envelope:** the lock dir is per-OS-user and an `flock` is per-host — two OS
-> users or two HOSTS pulling one account are still NOT covered (named follow-ups, as is
-> keying on the vendor feed-token). A credentials-less run (dry-run / no AWS) skips the
-> account lock gracefully — it makes zero vendor calls. **Operator rule unchanged for
-> multi-host setups: never run two pulls on one Groww account at the same time across
-> machines.**
+> users pulling one account are still NOT covered (a named follow-up, as is keying on
+> the vendor feed-token). A credentials-less run (dry-run / no AWS) skips the account
+> lock gracefully — it makes zero vendor calls.
+
+> **Cross-host arm (DEC-ACCOUNT-LEASE-CROSSHOST-001) — advisory lease, NOT a lock.**
+> Every pull additionally keeps a heartbeat **lease** on the shared lake storage itself
+> (`<lake_root>/.locks/pull_lease.json`, refreshed every ~30 s, removed at exit): a
+> starting pull that finds a FRESH lease (heartbeat younger than 180 s) from a
+> DIFFERENT hostname is refused with
+> `a pull for this lake appears to be running on another host …` — so two HOSTS
+> mounting ONE shared lake (NFS/SMB) are now best-effort detected. **No pretend mutual
+> exclusion:** this is detection over shared storage + wall clocks — racing starts
+> within a few seconds both proceed, cross-host clock skew can mask/extend a verdict,
+> identically-named hosts read as one, non-shared lake roots see nothing, and a crashed
+> pull's lease self-heals (goes stale) within ~3 minutes. Kill switch:
+> `BRUTEX_PULL_LEASE=off`. **Operator rule therefore unchanged for multi-host setups:
+> never DELIBERATELY run two pulls on one Groww account at the same time across
+> machines — the lease is a safety net, not a scheduler.**
 
 ---
 
@@ -257,7 +270,7 @@ locally-built `trading_core` / `fno_math` wheels (`PYTHONPATH=<repo root>`):
 ## 8. Decision trail
 
 - **Network/creds blocker + unblock path:** this runbook + DEC-SESSION-HOOK-LIVESTATE-001 (MIGRATION #298).
-- **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`). **Account-keyed second lock (single-host residual closed):** DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 (MIGRATION #1285).
+- **Cross-process pull single-flight (per lake) + CLI wiring + two-lake-root residual:** DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION #996); `brutex/adapters/groww/pull_singleflight.py`, `brutex/cli.py` (`_enter_pull_singleflight`). **Account-keyed second lock (single-host residual closed):** DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 (MIGRATION #1285). **Cross-host advisory pull lease (detection, not exclusion):** DEC-ACCOUNT-LEASE-CROSSHOST-001 (`pull_lease_guard`; kill switch `BRUTEX_PULL_LEASE=off`).
 - **Wedged-volume write-health breaker:** DEC-WRITE-HEALTH-BREAKER-001 (MIGRATION #1281, incl. the fix-round fold — the F&O health key groups by UNDERLYING so the shipped 2-consecutive / 3-distinct defaults can trip on both spines; a pull whose defers span fewer than 3 distinct health keys keeps per-window defers); `brutex/data/write_breaker.py`; kill switch `BRUTEX_WRITE_BREAKER=off`.
 - **Index symbols + scope:** Golden Rule #3; `brutex/universe.py:118` (`BRUTE_FORCE_INDICES`).
 - **Rate-limit + chunk windows:** CLAUDE.md §2 Rule 6 + §6 (8 r/s ceiling, 500 req/min governor, NO daily quota).

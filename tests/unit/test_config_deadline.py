@@ -24,7 +24,12 @@ import threading
 import time
 
 import pytest
-from brutex.config.deadline import DeadlineExceeded, resolve_env_seconds, run_with_deadline
+from brutex.config.deadline import (
+    DeadlineExceeded,
+    DeadlineSpawnError,
+    resolve_env_seconds,
+    run_with_deadline,
+)
 
 _ENV = "BRUTEX_TEST_DEADLINE_SECONDS"
 
@@ -111,6 +116,50 @@ class TestRunWithDeadline:
             run_with_deadline(_boom, 5.0)
         assert excinfo.value is marker
         assert not isinstance(excinfo.value, DeadlineExceeded)
+
+    def test_spawn_failure_raises_typed_deadline_spawn_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``Thread.start()`` exhaustion surfaces as the TYPED spawn signal.
+
+        Hostile-review round-4 MINOR (``pull_singleflight._bounded_lease_io``):
+        a caller degrading on the guard's OWN failure modes needs a type that
+        is NOT every ``RuntimeError`` — otherwise an fn-raised ``RuntimeError``
+        (a genuine code bug) is silently reclassified as a guard failure. The
+        spawn failure is now :class:`DeadlineSpawnError` — a ``RuntimeError``
+        subclass (pre-existing broad catchers unaffected) carrying the original
+        error on ``__cause__``.
+        """
+        original = RuntimeError("can't start new thread")
+
+        def _no_spawn(self: threading.Thread) -> None:
+            raise original
+
+        monkeypatch.setattr(threading.Thread, "start", _no_spawn)
+        with pytest.raises(
+            DeadlineSpawnError, match=r"lease read guard thread spawn failed"
+        ) as excinfo:
+            run_with_deadline(lambda: 1, 5.0, what="lease read")
+        assert isinstance(excinfo.value, RuntimeError)  # broad catchers still catch it
+        assert excinfo.value.__cause__ is original
+
+    def test_fn_raised_runtime_error_is_not_retyped_to_spawn_error(self) -> None:
+        """A ``RuntimeError`` raised by *fn* ITSELF propagates UNCHANGED.
+
+        The distinction :class:`DeadlineSpawnError` exists for: a caller
+        matching the spawn signal must NEVER see an fn-raised ``RuntimeError``
+        there (e.g. a ``RecursionError`` out of a wrapped parse) — that is a
+        genuine code bug, re-raised verbatim on the caller thread.
+        """
+        marker = RuntimeError("fn's own genuine bug")
+
+        def _boom() -> int:
+            raise marker
+
+        with pytest.raises(RuntimeError) as excinfo:
+            run_with_deadline(_boom, 5.0)
+        assert excinfo.value is marker
+        assert not isinstance(excinfo.value, DeadlineSpawnError)
 
     def test_daemon_storm_drains_to_baseline(self) -> None:
         """N timed-out calls leave N daemons; releasing them drains the count.

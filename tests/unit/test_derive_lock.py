@@ -24,6 +24,7 @@ import pytest
 from brutex.data.derive_lock import (
     DERIVE_LOCK_FILENAME,
     derive_in_progress,
+    derive_lock_held_by_this_process,
     derive_lock_path,
     derive_write_lock,
 )
@@ -232,3 +233,47 @@ def test_outer_exit_with_live_nested_holder_keeps_registry_balanced(tmp_path: Pa
     # Registry drained — a fresh writer takes a real flock and works.
     with derive_write_lock(tmp_path, timeout_seconds=0.05):
         assert derive_in_progress(tmp_path) is True
+
+
+# ── same-process holder predicate (round-1 review attribution fold) ─────────
+
+
+def test_held_by_this_process_false_when_idle_and_never_writes(tmp_path: Path) -> None:
+    """Idle lake → ``False`` — a pure registry read, zero filesystem I/O."""
+    assert derive_lock_held_by_this_process(tmp_path) is False
+    assert not (tmp_path / ".locks").exists()  # the probe never touches disk
+
+
+def test_held_by_this_process_true_inside_write_lock_incl_nested(tmp_path: Path) -> None:
+    """The registry answers True for the outer AND a nested same-process hold."""
+    with derive_write_lock(tmp_path, timeout_seconds=0.05):
+        assert derive_lock_held_by_this_process(tmp_path) is True
+        with derive_write_lock(tmp_path, timeout_seconds=0.05):
+            assert derive_lock_held_by_this_process(tmp_path) is True
+        assert derive_lock_held_by_this_process(tmp_path) is True
+    assert derive_lock_held_by_this_process(tmp_path) is False
+
+
+def test_held_by_this_process_false_for_foreign_style_raw_flock(tmp_path: Path) -> None:
+    """The attribution split the movers gate rides (round-1 review fold): a raw
+    exclusive flock taken WITHOUT the registry — indistinguishable from a
+    SEPARATE process's holder — reads ``derive_in_progress() == True`` yet
+    ``derive_lock_held_by_this_process() == False``."""
+    lock_path = derive_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert derive_in_progress(tmp_path) is True
+        assert derive_lock_held_by_this_process(tmp_path) is False
+    finally:
+        os.close(fd)
+
+
+def test_held_by_this_process_is_per_lake_root(tmp_path: Path) -> None:
+    """Holding lake A's derive lock says nothing about lake B (per-path keying)."""
+    lake_a = tmp_path / "a"
+    lake_b = tmp_path / "b"
+    with derive_write_lock(lake_a, timeout_seconds=0.05):
+        assert derive_lock_held_by_this_process(lake_a) is True
+        assert derive_lock_held_by_this_process(lake_b) is False
