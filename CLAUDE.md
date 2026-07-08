@@ -112,9 +112,65 @@ greeks-backfill` CLI + the dashboard backfill panel) composed with ZERO overlap 
 pack's breaker/ledger/overlay surfaces (the shared `cli.py`/`app.py`/`db_view.py`/
 `sweep_alerts.py` hunks auto-merged); CLAUDE.md-only conflicts resolved per convention;
 MIGRATION.md auto-merged clean (#1512–#1514 keep their numbers — no collision), ledger
-validator green). ENGINE
+validator green; sync round 12: origin/main a03ead80e MERGED in — PR #1311 (the interim
+run-sweep launch page, single-flight detached launch) — no CLAUDE.md/MIGRATION.md conflict
+(that PR touched neither file's conflicting regions); sync round 13: origin/main 859382ab0
+MERGED in — #1561 DEC-OPERATOR-PAGE-REAL-001 (PR #1280, the Operator page (/) wired to the
+sweep-oneclick artifact contracts + NEW /screener + /strategy + the
+`/api/v1/oneclick/*` routes) composed with ZERO overlap against this pack's
+breaker/ledger/overlay surfaces (the shared `dashboard/app.py` hunks auto-merged — main's
+oneclick wiring beside this pack's edits); CLAUDE.md-only conflicts resolved per
+convention; MIGRATION.md auto-merged clean (main's #1561 appended — #1512–#1514 keep
+their numbers, no collision), ledger validator green). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched modules 100%
 line+branch).
+Earlier: 2026-07-07 (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 —
+the Operator page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and
+the v29 PREVIEW mockup is KILLED by a MECHANICAL sweep (every hardcoded
+₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks,
+em-dashed, or deleted — the fabricated CHARGES table deleted outright,
+Track 1 is signal-only; a generic zero-₹-outside-allowlist pin guards the
+class): real funnel/badges/rank-1 card fed from
+`<lake>/sweeps/runs/<run_id>/` {manifest.json, top100.json, events.jsonl}
+through ONE clearly-marked integration adapter
+(`brutex/dashboard/oneclick_artifacts.py` + the pure `oneclick_view.py`
+builders) — LOUD "awaiting real run artifact" states, named
+corrupt/partial/EMPTY degrades, NEVER a 500 or fabricated counts; trades via
+a typed `TradesReader` seam whose PRODUCTION default is the honest
+`AwaitingTradesReader` (the file-reading fixture reader activates ONLY under
+the fail-loud `BRUTEX_ONECLICK_FIXTURE_ROOT` with a loud badge + visible
+`source` chip; ResultsStore rebind at merge-integration; fixtures live in
+tests/, production shows awaiting states). NEW
+`/api/v1/oneclick/{runs,manifest,top100,events,trades,verify}` — stat-token
+`MoversSnapshotCache` reads, all bench-pinned (`test_oneclick_o1.py`, 6 pin
+groups measured 0.98×–1.00× flat + deterministic teeth). HONEST O-envelope:
+the cached hit is O(1) vs run count/history/sibling tree/trades total and the
+events tail is O(page) (byte-offset seek, 1 MiB window, EOF stat-token
+short-circuit) — but the FIRST read per artifact revision parses the
+O(artifact) file, the manifest fresh compute adds one O(page) events tail
+for the chain map, and the timeline search is WINDOW-scoped (5,000-record
+client ring), never O(1)-total. The Run button MOVES to the Operator page
+(EXISTING `POST /api/v1/sweep/run`; the condition-subset selector ships
+DISABLED "lands at merge-integration (P1)"; the preflight strip is STATIC
+honest text — no route serves the estimator yet) and /reports returns to
+pre-open ONLY; NEW /screener (client filter/sort over top100,
+createElement-only rows; R26 virtual-scroll deviation LEDGERED — a ≤100-row
+artifact renders directly, no in-CI ms measured — the #1557 Playwright
+browser-truth job does not drive /screener) +
+/strategy (createElementNS candles off the EXISTING /api/v1/db/candles,
+trade-centered window, arrows dropped LOUDLY when out-of-window, trades
+inline at load, equity = client int-paisa cumsum labeled "per-trade close");
+R44 VERIFY-ME panel: 7 checks, 5-state truth (operator-judged cap at READY;
+the chain check permanently reads "algorithm assumed until P2 merges" — its
+golden proves generator↔verifier SELF-consistency only; `check=chain` =
+O(file) on click only). The events chain law / events path /
+per_door_kills+funnel shapes / interim trades layout are registered contract
+PROPOSALS behind named seams. XSS: textContent-only, payloads stringified
+into ONE text node, hostile-twin route-driven. NAMED out-of-PR: the
+bx-rate-monitor/bx-liveproof→bx-poll refactor; regime/family display (P3).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; display zone ONLY — zero
+engine/orchestrator/results-storage/preflight edits; both new modules 100%
+line+branch standalone + two new static ci.yml gates).
 Earlier: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 —
 the bulk Greeks v1→v2 re-enrichment BACKFILL closing the #1188 named follow-up:
 NEW `brutex/data/greeks_backfill.py` — a stamp-driven target-DISCOVERY +
@@ -1750,7 +1806,16 @@ hostile-review pass._
   with ZERO overlap against this pack's breaker/ledger/overlay surfaces (the shared
   `cli.py`/`app.py`/`db_view.py`/`sweep_alerts.py` hunks auto-merged); CLAUDE.md-only
   conflicts resolved per convention; MIGRATION.md auto-merged clean (#1512–#1514 keep their
-  numbers — no collision), ledger validator green).
+  numbers — no collision), ledger validator green;
+  sync round 12: origin/main a03ead80e MERGED in — PR #1311 (the interim run-sweep launch
+  page, single-flight detached launch) — no CLAUDE.md/MIGRATION.md conflict;
+  sync round 13: origin/main 859382ab0 MERGED in — #1561 DEC-OPERATOR-PAGE-REAL-001
+  (PR #1280, the Operator page (/) wired to the sweep-oneclick artifact contracts + NEW
+  /screener + /strategy + the `/api/v1/oneclick/*` routes) composed with ZERO overlap
+  against this pack's breaker/ledger/overlay surfaces (the shared `dashboard/app.py`
+  hunks auto-merged); CLAUDE.md-only conflicts resolved per convention; MIGRATION.md
+  auto-merged clean (main's #1561 appended — #1512–#1514 keep their numbers, no
+  collision), ledger validator green).
   ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
   ruff/ruff-format clean, mypy `--strict` clean, pyright at the exact post-merge origin/main
@@ -1759,6 +1824,54 @@ hostile-review pass._
   supersedes the d2cd283ad 0/496 and pre-merge 83baab8df 37/433 figures; the earlier-recorded
   "1 error" was a measurement artifact that does not reproduce venv-resolved),
   0 new).
+  Earlier: `claude/operator-page-real-rebuild` (**DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561** — the Operator
+  page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and the v29 PREVIEW mockup is KILLED by a MECHANICAL
+  sweep (every hardcoded ₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks, em-dashed, or
+  deleted — the fabricated CHARGES table deleted outright, Track 1 is signal-only; a generic
+  zero-₹-outside-allowlist pin guards the class). Real funnel/badges/rank-1 card fed from
+  `<lake>/sweeps/runs/<run_id>/` {manifest.json, top100.json, events.jsonl} through ONE clearly-marked integration
+  adapter (`brutex/dashboard/oneclick_artifacts.py` + the pure `oneclick_view.py` payload builders) — LOUD
+  "awaiting real run artifact" states, named corrupt/partial/EMPTY degrades (a valid-but-empty top100 is status ok,
+  `row_count` = `len(rows)` never an assumed 100), NEVER a 500 or a fabricated count; trades ride a typed
+  `TradesReader` seam whose PRODUCTION default is the honest `AwaitingTradesReader` — the file-reading
+  `FixtureTradesReader` activates ONLY under the fail-loud `BRUTEX_ONECLICK_FIXTURE_ROOT` (loud badge + a visible
+  per-table `source` chip; ResultsStore paged-API rebind at merge-integration; fixtures live in tests/, a
+  production lake with no artifacts shows awaiting states — the HONEST fixture-vs-real boundary). NEW
+  `/api/v1/oneclick/{runs,manifest,top100,events,trades,verify}` — stat-token-keyed `MoversSnapshotCache` reads,
+  bench-pinned (`tests/bench/test_oneclick_o1.py`, 6 pin groups measured 2026-07-07 at 0.98×–1.00× flat +
+  deterministic no-recompute/no-reparse teeth). HONEST O-envelope (Golden Rule #10): the cached hit is O(1) vs run
+  count / run-history depth / sibling-tree size / trades total, the events tail is O(page) (byte-offset seek +
+  1 MiB window; EOF repeat polls short-circuit on the stat token) — but the FIRST read per artifact revision
+  parses the O(artifact) file, the manifest fresh compute additionally pays one run-dir probe + one O(page) events
+  tail for the chain map, every repeat poll pays O(1) `os.stat` token syscalls, and the timeline search is
+  WINDOW-scoped over a capped 5,000-record client ring — never O(1)-total. The Run button MOVES to the Operator
+  page (wired to the EXISTING `POST /api/v1/sweep/run` + `/api/v1/cascade/run`; the condition-subset multi-select
+  ships DISABLED "lands at merge-integration (P1)" — shown, never faked live; the preflight/estimator strip is
+  STATIC honest text — the fixture adapter exists but no route serves it yet) and `/reports` returns to pre-open
+  ONLY. NEW `/screener` (client filter/sort over top100, createElement-only rows, full-precision BigInt/string
+  comparator with the rank-ascending tie-break, null-VIX rows excluded-but-COUNTED under a band filter; the R26
+  virtual-scroll deviation is LEDGERED — a fixed ≤100-row artifact renders directly in one pass with a
+  RENDER_CAP=200 guard, NO in-CI ms measurement claimed — the #1557 Playwright browser-truth job, which landed
+  on main mid-flight, does not drive /screener) + `/strategy` (chart-first:
+  createElementNS SVG candles off the EXISTING `/api/v1/db/candles`, trade-centered window, an out-of-window trade
+  DROPS its arrow with a loud note, trades inline at load — ≤2-click law; equity = client int-paisa cumsum LABELED
+  "per-trade close equity — minute-path equity lands with P3"; vix_band on the story card; ONE shared Beginner/Pro
+  mechanism). R44 VERIFY-ME panel: 7 checks under a 5-state truth table (pass/fail/READY/awaiting/not_wired —
+  operator-judged checks cap at READY server-side; not-wired capabilities never read green; `check=chain` runs the
+  O(file) hash-chain verify on CLICK only, cached per events revision, and every chain verdict permanently carries
+  "algorithm assumed until P2 merges" — the golden proves generator↔verifier SELF-consistency only). The events
+  chain law + `runs/<id>/events.jsonl` path + `per_door_kills`/`actual.funnel` shapes + the interim fixture-only
+  trades layout are registered contract PROPOSALS isolated behind named seams — never drifted unilaterally. XSS:
+  every artifact-derived string DOM-bound via textContent/createElement(NS) only, event payloads JSON.stringify'd
+  into ONE text node, the hostile fixture twin driven through the routes; one-shot fetch failures → errorCard +
+  Retry, never a blank grid. Display copy: stale "52-condition" → 60, "u64" → u128 (display surfaces only). NAMED
+  OUT-OF-PR: the bx-rate-monitor.js/bx-liveproof.js refactor onto the shared bx-poll.js core; regime/family
+  display (P3); the real trades rebind + P2 chain confirmation + the preflight render (merge-integration). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no scope/vocab/rate change; DISPLAY zone only —
+  zero engine/orchestrator/ranking/results-storage/preflight edits, sweep/cascade POST endpoints byte-unchanged;
+  `oneclick_artifacts.py` (359/94) + `oneclick_view.py` (165/72) BOTH 100% line+branch STANDALONE + two NEW static
+  ci.yml per-module gates; ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline
+  (0 new); node-executed JS goldens + `node --check` clean on all five new JS files).
   Earlier: `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558** — the bulk
   Greeks v1→v2 re-enrichment BACKFILL closing the two #1188 named gaps: EXPIRED option contracts frozen at formula v1 +
   CLI-`brutex fetch`-only lakes that never enriched. NEW `brutex/data/greeks_backfill.py` — a stamp-driven
@@ -3958,9 +4071,15 @@ hostile-review pass._
   DEC-SEED-OBSERVED-OVERLAY-001, MIGRATION.md #1512–#1514 — the three #1294
   ingest-boundary leftovers as ONE pack; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/operator-page-real-rebuild`
+  (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
+  wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
+  DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/peaceful-newton-fehcc3`
   (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks v1→v2
-  re-enrichment backfill; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  re-enrichment backfill for expired option contracts + CLI-only lakes;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active-branch chain
+  for the full blurb)
   Earlier: `claude/sweep-stall-oom-guards`
   (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
   gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
