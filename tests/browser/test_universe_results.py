@@ -23,10 +23,17 @@ Four real-Chromium proofs (DEC-DASHBOARD-BROWSER-TRUTH-001):
   ``failing``→stalled/``done``→idle/``idle``), each poll cycle advanced
   deterministically via ``page.clock``.
 
-Honest envelope (Golden Rule #10): NO dedicated client staleness badge exists
-anywhere in the dashboard — the flow-state light above IS the real existing
-staleness surface, and these tests assert ONLY what the shipped JS does
-(``#bxrmDot`` / ``#bxrmState`` classes + text; no invented "dimming").
+Honest envelope (Golden Rule #10): NO dedicated client staleness badge existed
+anywhere in the dashboard when this suite was authored, so the flow-state light
+above was the real existing staleness surface and these tests assert ONLY what
+that shipped JS does (``#bxrmDot`` / ``#bxrmState`` classes + text; no invented
+"dimming"). A REAL dedicated staleness surface has since landed CONCURRENTLY on
+main (DEC-PULL-UI-STALENESS-001, MIGRATION.md #1529, PR #1241 — the
+client-clock "updated Xs ago" ``#bxrmAge`` pill with amber→RED-STALE
+escalation in ``bx-rate-monitor.js`` + the /universe ``#feedage`` chip, merged
+into this branch); a browser-truth pin for that NEW surface is the NAMED
+follow-up of MIGRATION.md #1557, deliberately NOT added in this PR (scope
+lock — merge the truth layer first, then pin the new surface).
 """
 
 # pyright: reportPrivateUsage=none
