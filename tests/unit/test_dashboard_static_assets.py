@@ -39,6 +39,40 @@ def test_component_carries_the_drill_picker() -> None:
     assert "MutationObserver" in js  # dynamic inputs (e.g. /db) enhanced too
 
 
+# ── One-click frontend cores (DEC-OPERATOR-PAGE-REAL-001) ───────────────────
+
+#: The five stage-2/3 JS files: poll core · chart math · screener math ·
+#: explain lines · the operator widget layer.
+_ONECLICK_JS = (
+    "bx-poll.js",
+    "bx-chart.js",
+    "bx-screener.js",
+    "bx-explain.js",
+    "bx-oneclick.js",
+)
+
+
+def test_oneclick_js_files_are_served() -> None:
+    """Each one-click JS file serves 200 with the right type + real content."""
+    client = TestClient(build_app(DashboardState(), instrument_store=None))
+    for name in _ONECLICK_JS:
+        resp = client.get(f"/static/{name}")
+        assert resp.status_code == 200, f"{name} did not serve"
+        assert "javascript" in resp.headers["content-type"], f"{name} wrong content-type"
+        assert len(resp.content) > 500, f"{name} suspiciously small"
+
+
+def test_oneclick_js_files_have_zero_dom_injection_sinks() -> None:
+    """CodeQL guard: the one-click JS builds DOM via createElement(NS) +
+    textContent ONLY — no artifact-derived string can ever parse as markup
+    (F-M2 rendering contract)."""
+    client = TestClient(build_app(DashboardState(), instrument_store=None))
+    for name in _ONECLICK_JS:
+        js = client.get(f"/static/{name}").text
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert sink not in js, f"forbidden DOM sink {sink!r} in {name}"
+
+
 # ── Shared design system (DEC-DASHBOARD-UX-ANIMATE-001) ─────────────────────
 
 
