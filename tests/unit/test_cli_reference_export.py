@@ -42,6 +42,8 @@ def _lake_deps() -> None:
 def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear both fetch-seam env gates so the ambient shell can never flip a test."""
     monkeypatch.delenv("BRUTEX_REFERENCE_EXPORT", raising=False)
+    monkeypatch.delenv("BRUTEX_REFERENCE_EXPORT_BUCKET", raising=False)
+    monkeypatch.delenv("BRUTEX_REFERENCE_EXPORT_REGION", raising=False)
     monkeypatch.delenv("BRUTEX_CLI_GREEKS_ENRICH", raising=False)
     monkeypatch.delenv("BRUTEX_RISK_FREE_CSV", raising=False)
 
@@ -131,6 +133,73 @@ def test_dispatch_export_reference_threads_lake_and_date(
     assert rc == cli.EXIT_OK
     assert seen["lake_root"] == tmp_path
     assert seen["date_str"] == "2026-07-07"
+
+
+def test_seam_b_boto3_absent_is_fenced_pull_stays_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing boto3 (``build_real_s3_uploader`` raises) NEVER fails the pull.
+
+    Regression for the fence gap (hostile-review MAJOR): the real S3 client build
+    sits OUTSIDE ``run_reference_export_seam``'s fence, so a boto3-absent box would
+    have raised ``ReferenceExportConfigError`` straight out of ``cmd_fetch`` Seam B
+    AFTER a fully-persisted pull — a red exit + traceback on a green pull. Drives
+    the REAL ``_run_cli_reference_export`` guarded path (deliberately NOT spy-mocked
+    so the boto3-absent branch is genuinely covered) and asserts the completed pull
+    still returns ``EXIT_OK`` with ONE ``reference_export.failed`` WARN + ONE
+    best-effort alert.
+    """
+    import structlog
+    from brutex.export.reference_export import ReferenceExportConfigError
+
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT", "1")
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT_BUCKET", "tickvault-reference")
+    _wire_live_fakes(monkeypatch)
+
+    def _raise_boto3_missing(*, bucket: str, region: str | None = None) -> Any:
+        raise ReferenceExportConfigError("boto3 is required to export the reference lake to S3")
+
+    monkeypatch.setattr(
+        "brutex.export.reference_export.build_real_s3_uploader", _raise_boto3_missing
+    )
+    alerts: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "brutex.notifications.sweep_alerts.emit_reference_export_failed_alert",
+        lambda **kwargs: alerts.append(kwargs),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        rc = _fetch(tmp_path)
+
+    assert rc == cli.EXIT_OK  # the fence holds — the completed pull never fails
+    assert len(alerts) == 1
+    assert alerts[0]["export_date"] == date(2024, 1, 3)
+    assert "ReferenceExportConfigError" in alerts[0]["reason"]
+    assert any(entry.get("event") == "reference_export.failed" for entry in logs)
+
+
+def test_seam_b_unset_bucket_skips_without_failing_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enabled but no bucket → the shim WARN-skips (no alert) and the pull is OK.
+
+    Covers the ``resolve_export_bucket`` config-error branch of the real
+    ``_run_cli_reference_export`` shim (an unset bucket is a benign
+    not-configured skip — distinct from the boto3-absent failure, which alerts).
+    """
+    monkeypatch.setenv("BRUTEX_REFERENCE_EXPORT", "1")
+    monkeypatch.delenv("BRUTEX_REFERENCE_EXPORT_BUCKET", raising=False)
+    _wire_live_fakes(monkeypatch)
+    alerts: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "brutex.notifications.sweep_alerts.emit_reference_export_failed_alert",
+        lambda **kwargs: alerts.append(kwargs),
+    )
+
+    rc = _fetch(tmp_path)
+
+    assert rc == cli.EXIT_OK
+    assert alerts == []  # an unset bucket is a benign not-configured skip — no alert
 
 
 def test_dispatch_export_reference_default_date_none(

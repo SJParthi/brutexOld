@@ -3032,6 +3032,69 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
     return resolved
 
 
+class _TransientCliFloorStore:
+    """Per-OPERATION transient vendor-floor sidecar over the lake's instrument master.
+
+    The CLI twin of the dashboard routes' ``floor_store=instrument_store`` seam
+    (DEC-VENDOR-FLOOR-LAZY-PROBE-001 / DEC-CLI-DEPTH-FLOORS-001), structurally
+    satisfying :class:`~brutex.adapters.groww.vendor_floor.VendorFloorMetaStore`
+    — the generic ``schema_meta`` key/value sidecar carries the
+    ``groww.vendor_floor.<symbol>`` rows, so a floor learned by either
+    entrypoint clamps both.
+
+    WHY transient (the round-1 review MAJOR fix): the previous helper opened
+    ONE read-write :class:`~brutex.data.instrument_store.InstrumentStore` and
+    held it on the fetch's ExitStack for the WHOLE (often multi-hour) pull. A
+    DuckDB read-write connection takes an EXCLUSIVE cross-process file lock, so
+    (a) ``brutex serve`` booted mid-fetch failed at its own
+    ``InstrumentStore.open`` with ``CatalogError`` — a regression (pre-branch,
+    ``cmd_fetch`` opened this file only transiently inside
+    ``_resolve_brute_force_instruments``), and (b) with a dashboard already
+    running, the CLI's whole-pull open ALWAYS failed, silently disabling depth
+    floors for every concurrent run — the "either entrypoint clamps BOTH"
+    claim held only serially. Every :meth:`get_meta` / :meth:`set_meta` now
+    opens the store, performs the ONE operation, and closes it (milliseconds;
+    O(symbols) reads once at pull start via ``load_vendor_floors`` + at most
+    one write per learned floor per pull) — the DuckDB file is never held
+    across the fetch.
+
+    BEST-EFFORT by the CALLERS' contract: a per-op open/read/write failure
+    raises the store's own error surface, and both consumers
+    (``load_vendor_floors`` + ``VendorFloorLearner._persist``) already swallow
+    + WARN and degrade — the fetch itself is never blocked (the un-clamped
+    pull is always correct, just slower). HONEST residual: while a dashboard
+    PROCESS holds ``instruments.duckdb`` open read-write, each transient op
+    still fails (DuckDB's rw lock excludes every peer connection) — but the
+    degrade is now PER-OP and self-heals the moment the dashboard releases the
+    file, instead of one boot-time failure disabling the feature for the whole
+    pull; the true concurrent-share fix (routing floors through the dashboard
+    process) stays out of scope.
+    """
+
+    def __init__(self, lake_root: Path) -> None:
+        self._path = lake_root / "instruments.duckdb"
+
+    @property
+    def path(self) -> Path:
+        """The sidecar's DuckDB path (diagnostics + tests) — never held open."""
+        return self._path
+
+    def get_meta(self, key: str) -> str | None:
+        """Read one ``schema_meta`` value through a transient open→read→close."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(self._path) as store:
+            value: str | None = store.get_meta(key)
+        return value
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Persist one ``schema_meta`` value through a transient open→write→close."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(self._path) as store:
+            store.set_meta(key, value)
+
+
 def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK + network
     lake_root: Path, catalog: Any = None
 ) -> tuple[Any, Any]:
@@ -3277,7 +3340,9 @@ def _emit_pull_halt_alert(exc: Exception) -> None:
     emit_pull_halt_alert(exc)
 
 
-def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: Any = None) -> bool:
+def _enter_pull_singleflight(
+    stack: Any, lake_root: Path, account_key_resolver: Any = None, lease_factory: Any = None
+) -> bool:
     """Take the cross-process account single-flight lock for the CLI pull; report contention.
 
     DEC-PULL-HARDENING-FOLLOWUP-001 (MIGRATION.md #996) — the cross-process pull lock
@@ -3313,14 +3378,29 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
     against ``pull_jobs.start()``'s identical order. *account_key_resolver* is the
     injectable ``() -> str | None`` key seam (tests); ``None`` (production) resolves via
     the AWS-only source.
+
+    **Cross-host lease, taken LAST (DEC-ACCOUNT-LEASE-CROSSHOST-001):** after both
+    flocks this enters the advisory
+    :func:`~brutex.adapters.groww.pull_singleflight.pull_lease_guard` — a heartbeat
+    lease on the SHARED lake storage, so a pull apparently running on ANOTHER host
+    against the same lake is refused too. Honest envelope: best-effort DETECTION over
+    shared storage + wall clocks, NOT cross-host mutual exclusion (see the guard's
+    module docstring). Entered strictly AFTER the flocks (holding them is what makes
+    ignoring a same-host lease sound); the ExitStack releases LIFO, matching
+    ``pull_jobs``' order. *lease_factory* is the injectable ``(Path) -> CM`` seam
+    (tests); ``None`` (production) uses the live guard.
     """
     import structlog
 
     from brutex.adapters.groww.pull_singleflight import (
         PullAlreadyRunningError,
         account_pull_singleflight_lock,
+        pull_lease_guard,
         pull_singleflight_lock,
     )
+
+    if lease_factory is None:
+        lease_factory = pull_lease_guard
 
     if account_key_resolver is not None:
         account_key: str | None = account_key_resolver()
@@ -3356,6 +3436,16 @@ def _enter_pull_singleflight(stack: Any, lake_root: Path, account_key_resolver: 
             f"[brutex] {exc} — refusing to start a second concurrent pull on this lake. "
             "Wait for the running pull to finish (or stop it) before re-running "
             "`brutex fetch`.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        stack.enter_context(lease_factory(lake_root))
+    except PullAlreadyRunningError as exc:
+        print(
+            f"[brutex] {exc} — refusing to start a concurrent pull: another HOST appears "
+            "to be pulling into this shared lake. Wait for it to finish (the lease goes "
+            "stale by itself if that pull is dead) before re-running `brutex fetch`.",
             file=sys.stderr,
         )
         return False
@@ -3656,21 +3746,27 @@ def _run_cli_greeks_enrich(
     return outcome
 
 
-def _run_cli_reference_export(  # pragma: no cover — real boto3 S3 client + AWS composition
-    *, lake_root: Path, export_date: date
-) -> None:
+def _run_cli_reference_export(*, lake_root: Path, export_date: date) -> None:
     """Build the real S3 uploader + run the FENCED reference-export seam (Seam B).
 
     The pull-path composition shim for DEC-REFERENCE-EXPORT-S3-001: resolves the
     destination bucket (``$BRUTEX_REFERENCE_EXPORT_BUCKET``) + region, builds the
     real boto3 S3 client (credentials from the ambient AWS chain — instance role
     / SSM profile, NEVER a hardcoded key), and delegates to the 100%-tested
-    :func:`~brutex.export.reference_export.run_reference_export_seam`, which is
-    FENCED (never raises — a config/transport failure is one WARN + a best-effort
-    Telegram alert). Marked ``# pragma: no cover`` (the AWS-composition-shim
-    convention, e.g. ``_build_live_groww_spot``): the seam + uploader logic are
-    covered by ``tests/unit/test_reference_export.py`` via an injected in-memory
-    fake, and this shim only wires the real client.
+    :func:`~brutex.export.reference_export.run_reference_export_seam`.
+
+    Fence hardening: the shim itself NEVER raises. Both config gaps —
+    an unset/misconfigured bucket AND a failed ``build_real_s3_uploader`` (raised
+    when the ``boto3`` extra is not installed, the documented-required config) —
+    are caught HERE, because that build sits OUTSIDE the seam's own fence. A
+    boto3-absent box would otherwise have raised straight out of ``cmd_fetch``
+    Seam B AFTER a fully-persisted pull (a red exit + traceback on a green pull —
+    fatal in an automated cron pull); the export is an OBSERVER of the lake and
+    must NEVER fail an already-completed pull. Only the boto3-dependent success
+    tail (the real client + the seam call over it) keeps the AWS-composition-shim
+    ``# pragma: no cover``; the guarded config branches are covered by
+    ``tests/unit/test_cli_reference_export.py`` via an injected raising fake, and
+    the seam + uploader logic by ``tests/unit/test_reference_export.py``.
     """
     from brutex.export.reference_export import (
         REFERENCE_EXPORT_PREFIX,
@@ -3684,19 +3780,43 @@ def _run_cli_reference_export(  # pragma: no cover — real boto3 S3 client + AW
     try:
         bucket = resolve_export_bucket()
     except ReferenceExportConfigError as exc:
-        # A misconfigured bucket is the operator's setup gap, not a pull failure:
-        # WARN + skip (the export is opt-in, and the pull already completed).
+        # An unset/misconfigured bucket is the operator's setup gap, not a pull
+        # failure: WARN + skip (the export is opt-in, and the pull already
+        # completed). No alert — an unset bucket is a benign not-configured state.
         print(f"[brutex] reference export skipped — {exc}", file=sys.stderr)
         return
     region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
-    uploader = build_real_s3_uploader(bucket=bucket, region=region)
-    print(
+    try:
+        uploader = build_real_s3_uploader(bucket=bucket, region=region)
+    except ReferenceExportConfigError as exc:
+        # build_real_s3_uploader raises on a missing boto3 extra / client-build
+        # failure — OUTSIDE run_reference_export_seam's fence. FENCE it here
+        # exactly like the seam (one loud WARN + a best-effort Telegram alert +
+        # return): an export dependency gap NEVER fails the completed pull.
+        import structlog
+
+        from brutex.notifications.sweep_alerts import emit_reference_export_failed_alert
+
+        structlog.get_logger("brutex.cli").warning(
+            "reference_export.failed",
+            export_date=export_date.isoformat(),
+            bucket=bucket,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        emit_reference_export_failed_alert(
+            export_date=export_date, reason=f"{type(exc).__name__}: {exc}"
+        )
+        return
+    print(  # pragma: no cover — real boto3 seam wiring (fake-covered in tests)
         f"[brutex] reference export — publishing {export_date.isoformat()} to "
         f"s3://{bucket}/{REFERENCE_EXPORT_PREFIX}/",
         file=sys.stderr,
     )
-    report = run_reference_export_seam(lake_root, export_date, uploader=uploader, bucket=bucket)
-    if report is not None:
+    report = run_reference_export_seam(  # pragma: no cover — real boto3 seam wiring
+        lake_root, export_date, uploader=uploader, bucket=bucket
+    )
+    if report is not None:  # pragma: no cover — real boto3 seam wiring
         print(
             f"[brutex] reference export done — instruments={report.instrument_count} "
             f"manifest=s3://{bucket}/{report.manifest_key}"
@@ -3746,13 +3866,16 @@ def cmd_export_reference(  # pragma: no cover — real boto3 S3 client + AWS com
             )
             return EXIT_USER_ERROR
         export_date = latest
+    region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
     try:
         bucket = resolve_export_bucket()
+        # build_real_s3_uploader raises ReferenceExportConfigError on a missing
+        # boto3 extra — a config gap, not an internal error: keep it INSIDE the
+        # guard so the subcommand exits EXIT_USER_ERROR (never a traceback).
+        uploader = build_real_s3_uploader(bucket=bucket, region=region)
     except ReferenceExportConfigError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
-    region = os.environ.get(REFERENCE_EXPORT_REGION_ENV) or None
-    uploader = build_real_s3_uploader(bucket=bucket, region=region)
     print(
         f"[brutex] export-reference — {export_date.isoformat()} → "
         f"s3://{bucket}/{REFERENCE_EXPORT_PREFIX}/{export_date.isoformat()}/",
@@ -3911,7 +4034,15 @@ def cmd_fetch(
         drain_write_consumer,
         reconcile_pairs_with_pipeline,
     )
-    from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+    from brutex.adapters.groww.run_ingest import (
+        run_groww_spot_ingest_with_retry,
+        with_paced_client,
+    )
+    from brutex.adapters.groww.vendor_floor import (
+        floor_symbol_windows,
+        load_vendor_floors,
+        make_vendor_floor_learner,
+    )
     from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.dashboard.pull_controller import GROWW_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
@@ -4183,6 +4314,48 @@ def cmd_fetch(
         # so neither touches the real ledger: `_no_persist` passes `dry_run=True`,
         # so the ledger is None (no skip, no disk touch).
         _no_persist = dry_run or inspect
+        # Lazy vendor-depth-floor learning on the CLI path (DEC-CLI-DEPTH-FLOORS-001,
+        # closing DEC-VENDOR-FLOOR-LAZY-PROBE-001's named follow-up "the CLI
+        # `brutex fetch` path stays UNWIRED — no floor_store seam there"). Mirrors
+        # the dashboard build sites exactly: (a) the per-pull learner is built over
+        # the PACED replica of THIS pull's adapter (`with_paced_client(adapter,
+        # pace)` — the live client carries a no-op pace until the spine binds the
+        # controller, so a learner over the raw adapter would probe OUTSIDE the
+        # 8 r/s ceiling + 500/min governor; DEC-RATE-SINGLE-ADMISSION-001), and
+        # (b) a symbol with a PERSISTED learned floor plans + fetches its 1-minute
+        # windows from `max(GROWW_HISTORY_FLOOR, learned floor)` via the EXISTING
+        # per-symbol `symbol_windows` seam — the DAILY interval stays exempt inside
+        # plan_windows / reconcile / `_resolve_spot_window` (a 1-minute-probed
+        # floor never clamps the 1-day series), so one map serves the CLI's
+        # mixed-interval plan honestly. The sidecar is the SAME instrument-master
+        # `schema_meta` the dashboard writes (`groww.vendor_floor.<symbol>`), so a
+        # floor learned by either entrypoint clamps BOTH (CLAUDE.md §11 COMMON).
+        # Armed ONLY for the genuine persisting live pull: `--dry-run` /
+        # `--inspect` open no store, build no learner, and resolve
+        # `floor_windows=None` — byte-identical planning (the same `_no_persist`
+        # gating every other persistence surface here uses). The store handle is
+        # TRANSIENT — opened per get/set and closed immediately, NEVER held for
+        # the multi-hour pull (the round-1 review MAJOR: a whole-pull rw DuckDB
+        # hold blocked `brutex serve` boot and always-failed under a running
+        # dashboard — see _TransientCliFloorStore).
+        floor_store = None if _no_persist else _TransientCliFloorStore(resolved)
+        floor_learner = (
+            None
+            if _no_persist
+            else make_vendor_floor_learner(
+                with_paced_client(adapter, pace),
+                history_floor=GROWW_HISTORY_FLOOR,
+                today=end_dt.date(),
+                store=floor_store,
+            )
+        )
+        floor_symbols = [inst.symbol_name for inst in fetch_instruments]
+        floor_windows = floor_symbol_windows(
+            floor_symbols,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            floors=load_vendor_floors(floor_store, floor_symbols),
+        )
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
         if ledger is not None:
             # Seed the durable ledger in the SAME (market, tile-width) namespace the
@@ -4203,6 +4376,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                symbol_windows=floor_windows,
             )
             reconcile_ledger_with_lake(
                 ledger,
@@ -4213,6 +4387,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                symbol_windows=floor_windows,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
@@ -4342,6 +4517,13 @@ def cmd_fetch(
                     detect_completeness_gaps=not dry_run,
                     observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
+                    # Learned-floor clamp + in-pull depth learner
+                    # (DEC-CLI-DEPTH-FLOORS-001): the SAME `floor_windows` the
+                    # plan above tiled (planned keys == fetched keys) + the
+                    # per-pull learner over the paced adapter; both `None` for
+                    # `--dry-run` / `--inspect` — byte-identical.
+                    symbol_windows=floor_windows,
+                    floor_learner=floor_learner,
                 )
             except _pull_halt_errors as exc:
                 # A pull-wide global stop (disk-full/OOM LakeWriteHalt, a quota stop, or
