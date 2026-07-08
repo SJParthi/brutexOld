@@ -961,28 +961,31 @@ def test_reconcile_round1_success_then_round2_transient_stays_failing() -> None:
         pipeline.drain()
 
 
-def test_market_pull_order_sorts_unknown_market_last() -> None:
-    """The order key sorts the two known markets futures-first, an unknown market LAST.
+def test_bucket_sort_key_sorts_unknown_market_last() -> None:
+    """The bucket key sorts the four known steps 3→4→5→6, an unknown market LAST.
 
-    Covers the ``.get(..., 99)`` deterministic tie-break: an unrecognised market namespace
-    sorts after both known ones, and equal-rank markets fall back to a stable name sort.
+    DEC-PULL-SIX-STEP-ORDER-001 — supersedes the 2-key ``_MARKET_PULL_ORDER``
+    futures-first sort: the ``(ledger-market, is_index)`` buckets rank by their
+    :class:`PullStep` (INDICES-FUTURES → STOCKS-FUTURES → INDICES-OPTIONS →
+    STOCKS-OPTIONS); an unrecognised market namespace sorts after all four with
+    a stable ``(market, index-first)`` tie-break.
     """
-    buckets = {
-        GROWW_OPTION_COVERAGE_MARKET: 1,
-        "zzz-unknown-market": 2,
-        GROWW_FUTURE_COVERAGE_MARKET: 0,
-    }
-    ordered = [
-        market
-        for market, _rank in sorted(
-            buckets.items(),
-            key=lambda kv: (hp._MARKET_PULL_ORDER.get(kv[0], 99), kv[0]),
-        )
+    buckets = [
+        (GROWW_OPTION_COVERAGE_MARKET, False),
+        ("zzz-unknown-market", False),
+        (GROWW_FUTURE_COVERAGE_MARKET, False),
+        ("zzz-unknown-market", True),
+        (GROWW_OPTION_COVERAGE_MARKET, True),
+        (GROWW_FUTURE_COVERAGE_MARKET, True),
     ]
+    ordered = sorted(buckets, key=hp._bucket_sort_key)
     assert ordered == [
-        GROWW_FUTURE_COVERAGE_MARKET,
-        GROWW_OPTION_COVERAGE_MARKET,
-        "zzz-unknown-market",
+        (GROWW_FUTURE_COVERAGE_MARKET, True),  # 3 indices-futures
+        (GROWW_FUTURE_COVERAGE_MARKET, False),  # 4 stocks-futures
+        (GROWW_OPTION_COVERAGE_MARKET, True),  # 5 indices-options
+        (GROWW_OPTION_COVERAGE_MARKET, False),  # 6 stocks-options
+        ("zzz-unknown-market", True),  # unknowns LAST, index-first tie-break
+        ("zzz-unknown-market", False),
     ]
 
 

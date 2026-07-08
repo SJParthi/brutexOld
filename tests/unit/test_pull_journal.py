@@ -205,3 +205,44 @@ class TestPullControllerWiring:
         run = pj.last_run(events)
         assert run is not None
         assert run.interrupted is False
+
+
+class TestPipelinePostFinishHeartbeatShape:
+    """HONEST-ENVELOPE PIN (DEC-PULL-BEAT-PERRUN-001 fix round): under the one-run-id
+    pipeline grouping, ``record_pull_start``/``record_pull_finish`` bracket ONLY the
+    SPOT phase while later phases (metadata / F&O / prebuild / greeks) keep
+    heartbeating under the SAME run id — so a run's journal can legitimately read
+    "finished at T, heartbeats after T". This pins the shape so it is a stated fact,
+    not a surprise; relocating start/finish to the run level is a named follow-up."""
+
+    def test_post_finish_heartbeats_group_into_the_finished_run(self, tmp_path: Path) -> None:
+        pj.record_pull_start(tmp_path, pull_id="p1", dry_run=False, now_utc=_T0, monotonic_s=100.0)
+        pj.record_pull_heartbeat(
+            tmp_path, pull_id="p1", now_utc=_T0 + timedelta(seconds=60), monotonic_s=160.0
+        )
+        # The SPOT phase finishes …
+        pj.record_pull_finish(
+            tmp_path,
+            pull_id="p1",
+            verdict="clean",
+            now_utc=_T0 + timedelta(seconds=120),
+            monotonic_s=220.0,
+        )
+        # … and a LATER pipeline phase (prebuild/greeks) heartbeats under the SAME id.
+        pj.record_pull_heartbeat(
+            tmp_path, pull_id="p1", now_utc=_T0 + timedelta(seconds=300), monotonic_s=400.0
+        )
+        run = pj.last_run(pj.read_journal(tmp_path))
+        assert run is not None
+        assert run.finished is not None  # the run reads FINISHED …
+        assert len(run.heartbeats) == 2  # … yet carries the post-finish heartbeat too
+        assert run.interrupted is False  # died_mid_run stays False for post-spot phases
+        # events() orders (started, *heartbeats, finished?) — the finished record sorts
+        # LAST even though the second heartbeat is wall-LATER: the non-chronological
+        # finished-then-heartbeats shape, deliberately tolerated.
+        events = run.events
+        assert events[-1].event == pj.EVENT_FINISHED
+        assert events[-2].wall_utc > events[-1].wall_utc  # the reversed pair, pinned
+        # sleep_gaps tolerates the one reversed pair (a negative wall-delta pair can
+        # never read as a suspend window).
+        assert pj.sleep_gaps(run) == []

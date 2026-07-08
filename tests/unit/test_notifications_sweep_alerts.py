@@ -314,6 +314,34 @@ class TestAlerts:
         assert escape_markdown_v2("VENDOR 429-gated") in ev.message
         assert "OUR pipeline" not in ev.message
 
+    def test_soak_drift(self) -> None:
+        """soak_drift: CRITICAL, PHASE_BLOCKED, deduped per rule, carries the detail."""
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).soak_drift(
+            rule="soak.rss_ceiling",
+            observed=5000.0,
+            threshold=4096.0,
+            detail="native leak — check the soak drift artifact",
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "soak-drift:soak.rss_ceiling"  # rule-scoped dedupe (RAW)
+        assert escape_markdown_v2("soak.rss_ceiling") in ev.message
+        assert escape_markdown_v2("native leak") in ev.message
+
+    def test_soak_drift_disabled_sink_is_silent_noop(self) -> None:
+        """A disabled notifier (resolver → None) makes soak_drift a silent no-op.
+
+        A Telegram outage mid-soak must never mask a real drift nor crash the
+        hours-long run (DEC-SOAK-REAL-TIER-001 graft G4).
+        """
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert (
+            alerter.soak_drift(rule="soak.p99_drift", observed=3.0, threshold=2.0, detail="drift")
+            is False
+        )
+
     def test_sweep_complete(self) -> None:
         fake = FakeNotifier()
         summary = FakeSummary(

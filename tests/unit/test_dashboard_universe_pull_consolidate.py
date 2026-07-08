@@ -218,9 +218,14 @@ def test_transient_poll_blip_is_retried_not_a_failure() -> None:
     html = _render_universe_html()
     assert "POLL_MAX_FEED_RETRIES" in html, "the bounded retry budget is missing"
     assert "pollFeedRetries" in html, "the retry counter is missing"
-    # When the budget is exhausted, an HONEST "feed dropped" note (not "Failed to
-    # fetch"), and the operator is pointed at the verdict refresh.
-    assert "live progress feed dropped" in html, "the honest feed-dropped note is missing"
+    # When the quick budget is exhausted the poll backs off and KEEPS retrying
+    # (DEC-PULL-UI-STALENESS-001 removed the give-up tail that once pointed the
+    # operator at the verdict refresh); the honest "feed dropped" wording survives
+    # as EXECUTABLE text inside the never-give-up #feedage stale chip — pinned as
+    # the full JS string literal so a comment mention can never satisfy it.
+    assert "'live progress feed dropped — retrying'" in html, (
+        "the honest feed-dropped note is missing"
+    )
 
 
 def test_pipeline_button_runs_final_prebuild_stage() -> None:

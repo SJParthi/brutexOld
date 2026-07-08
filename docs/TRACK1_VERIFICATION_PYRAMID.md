@@ -30,11 +30,11 @@ the pyramid.** No single point of failure.
 | Layer | Tool | CI gate | Run time |
 |---|---|---|---|
 | 1 — Unit | pytest + cargo test | line 100% / branch 100% Python; line 100% / branch 95% Rust | <90s/PR |
-| 2 — Property | hypothesis + proptest | 500 examples × 24 invariants | <5 min/PR |
+| 2 — Property | hypothesis + proptest | per-test budgets (10–200 examples) × 24 invariants, derandomised via the `ci` profile | <5 min/PR |
 | 3 — Golden | byte-equality SHA256 | hardcoded fixtures match | <60s/PR |
 | 4 — Integration | pytest tests/integration | all pass | <5 min/PR |
 | 5 — Benchmark | pytest-benchmark + criterion | O(1) ratio ≤ 1.1 at N=1K..1M | <8 min/PR |
-| 6 — Stress | macOS leaks + heaptrack | 24h, RSS ±5% | nightly |
+| 6 — Stress | macOS leaks + heaptrack | ~~24h, RSS ±5%~~ RSS/fd/p99 drift flat **(CORRECTED — DEC-SOAK-REAL-TIER-001 #1580: no tier delivers a 24h single run; the nightly is a ~5-min regression gate and the self-hosted soak is ≤ 20 h per dispatch — SEC9-1 GITHUB_TOKEN bound)** | nightly ~5-min gate (`stress-nightly.yml`) + weekly self-hosted multi-hour soak (`soak-selfhosted.yml`) |
 | 7 — Smoke | pytest -m smoke | 10-bar/2-combo sanity | <30s pre-push |
 | 8 — Fuzz | cargo fuzz + atheris | 10 min/target, no panics | nightly |
 | 9 — Mutation | mutmut + cargo-mutants | ≥85% | weekly |
@@ -43,8 +43,29 @@ the pyramid.** No single point of failure.
 
 ## 3. The 24 Property Invariants
 
-Each invariant runs with 500 random examples (hypothesis derandomised
-via `HYPOTHESIS_SEED` env var for CI replay).
+Each invariant runs with its per-test `max_examples` budget (typically
+10–200; hypothesis default 100). CI loads the repo-registered `ci`
+hypothesis profile (`derandomize=True, print_blob=True, deadline=None,
+database=None, suppress_health_check=(too_slow,)` — fully explicit, so
+environment-invariant: a local `HYPOTHESIS_PROFILE=ci` run is
+field-identical to CI; registered in `tests/conftest.py` and selected
+via the `HYPOTHESIS_PROFILE` env var), so example generation is a pure
+function of each test and a CI failure reproduces on every re-run.
+Honesty (DEC-TEST-APPARATUS-DEBTS-001(b), round-2 reconcile): the old
+"500 examples / `HYPOTHESIS_SEED`" claim here was false (that env var
+never existed) — but GHA property runs were nonetheless ALREADY
+implicitly derandomized, because hypothesis ≥6.113 auto-loads its own
+built-in `ci` profile whenever a CI env var (`CI`/`GITHUB_ACTIONS`) is
+set. The pack's real deltas are therefore: the EXPLICIT env-selectable
+in-repo profile (upstream-drift-independent, pinned by
+`tests/unit/test_hypothesis_ci_profile.py` incl. a CI-env-stripped
+subprocess selection pin) + `HYPOTHESIS_PROFILE=ci` coverage on
+verify-m4pro/mutation — NOT first-time PR-path determinism. The
+sanctioned behavior change is the REVERSE flip: a CI-env run that does
+not set `HYPOTHESIS_PROFILE` (stress-nightly and the other scheduled
+arms) now loads the random `default` profile, OVERRIDING hypothesis's
+auto-load — deliberate exploration off the PR path (currently vacuous:
+no `@given` tests live in those suites today).
 
 | # | Invariant | Where | Proves |
 |---|---|---|---|
@@ -57,9 +78,9 @@ via `HYPOTHESIS_SEED` env var for CI replay).
 | P-07 | Entry fill price ≥ bar.high (BUY) or ≤ bar.low (SELL) — pessimistic mode (held in reserve for Phase 2) | simulator | G4 |
 | P-08 | Resample (1m→Tm) is associative: `resample(resample(x,2),3) ≡ resample(x,6)` when 09:15 anchor aligns | resampler | G4 |
 | P-09 | Forced-exit invariant: no trade survives 15:20 IST | simulator | G4 |
-| P-10 | STT applied only on SELL leg (Phase 2 — currently asserts no STT in Track 1) | costs | G4 |
+| P-10 | STT applied only on SELL leg | costs | G4 |
 | P-11 | Bitwise mask AND on u64 vocabulary is commutative & associative | signal | G6 |
-| P-12 | Brokerage formula (Phase 2): `min(₹20, 0.03% notional)` is monotone non-decreasing in notional until floor, then flat | costs | G4 |
+| P-12 | Brokerage is flat ₹20 per executed order (₹40 round-trip), invariant in notional/lots — the degenerate flat case of "monotone non-decreasing until floor, then flat" (the old `min(₹20, 0.03% notional)` wording here was the stale equity-delivery formula; the verified F&O law is flat per order — `docs/track2/CALCULATOR_SPEC.md` §4 Step 4, `docs/track2/COSTS_VERIFIED.md` §8.1-8.2) | costs | G4 |
 | P-13 | EMA(α, x) is a contraction: `‖EMA(α,x)−EMA(α,y)‖∞ ≤ ‖x−y‖∞` | indicators | G4 |
 | P-14 | Pivot/Fib levels are pure functions of (PDH, PDL, PDC) — no intraday state leak | indicators | G3 |
 | P-15 | Continuous-futures back-adjustment (held in reserve for Phase 2) is multiplicative & invertible: round-trip ratio == 1.0 ± 1 tick | data | G4 |
@@ -136,7 +157,7 @@ output: results.parquet — must be byte-identical (SHA256 equal) to
 
 ```
 input:  1 day of NIFTY 1m bars, 50 brute-force combos, mode A and B
-action: 
+action:
   - Run via naive pure-Python reference engine (slow, obviously correct,
     ~50 lines of code, no optimisations, hand-readable)
   - Run via Rust engine (production hot path)
@@ -166,13 +187,13 @@ individual atomic condition.
 
 | Guarantee | Unit (L1) | Property (L2) | Golden (L3) | Integration (L4) | Benchmark (L5) | Stress (L6) | Fuzz (L8) | Mutation (L9) |
 |---|---|---|---|---|---|---|---|---|
-| **G1 O(1)** | indicator+bar accessors | P-11, P-24 | — | smoke combo | ALL 6 hotpath ratios | 24h sustained latency p99 flat | — | mask + lookup mutants |
-| **G2 Reproducibility** | Parquet writer unit | P-19, P-20 | corpora #1, #9 SHA256 frozen | **replay_audit_log** | — | nightly two-machine identity | Parquet reader fuzz | writer mutants |
+| **G1 O(1)** | indicator+bar accessors | P-11, P-24 | — | smoke combo | ALL 6 hotpath ratios | multi-hour sustained latency p99 flat (weekly soak, ≤ 20 h/dispatch — #1580) | — | mask + lookup mutants |
+| **G2 Reproducibility** | Parquet writer unit | P-19, P-20 | corpora #1, #9 SHA256 frozen | **replay_audit_log** | — | two-machine identity (nightly gate + weekly soak tier — #1580) | Parquet reader fuzz | writer mutants |
 | **G3 No look-ahead** | bar iterator unit | P-06 instrumented accessor | — | reference strategies trace test | — | — | — | iterator mutants |
 | **G4 Correct PnL** | costs.py 100% branch | P-03, P-04, P-08, P-09, P-13, P-14, P-21 | corpus #8 (12-fill paisa) | **python_rust_parity** | — | — | — | costs.py mutants |
-| **G5 33B/2-4 days** | per-trial cost unit (criterion micro-bench) | — | — | 100K micro-sweep correctness | bench_full_sweep_extrapolation projection | 24h sustained throughput | — | mutation on cost-counter helpers |
+| **G5 33B/2-4 days** | per-trial cost unit (criterion micro-bench) | — | — | 100K micro-sweep correctness | bench_full_sweep_extrapolation projection | multi-hour sustained throughput (weekly soak — #1580) | — | mutation on cost-counter helpers |
 | **G6 Dedup uniqueness** | hash function unit | P-01, P-02, P-05, P-11, P-24 | corpus #9 | resume_from_kill | LMDB O(1) | — | LMDB key fuzz | hash mutants |
-| **G7 Audit chain** | audit.py 100% branch | P-16, P-17 | — | **replay_audit_log** | — | 24h log size + verify | JSONL reader fuzz | audit mutants |
+| **G7 Audit chain** | audit.py 100% branch | P-16, P-17 | — | **replay_audit_log** | — | multi-hour log size + verify (weekly soak — #1580) | JSONL reader fuzz | audit mutants |
 | **G8 Microstructure** | calendar + session unit | P-22, P-23, P-18 | corpora #1-5 | calendar integration | — | — | calendar TOML fuzz | calendar mutants |
 | **G9 52-condition vocab** | each atom unit | P-11 + per-condition determinism | **condition truth table** (corpus #7) | python_rust_parity | — | — | DSL fuzz | strategy crate mutants |
 
@@ -204,7 +225,9 @@ Coverage gates raised from current `fail_under = 90` to `fail_under =
 2. **`tests/integration/test_replay_audit_log.py`** green
 3. **`tests/integration/test_python_rust_parity.py`** green
 4. **`tests/bench/test_hotpath_o1.py`** with all 6 ratios < 1.1 at 1M
-5. **Property test count ≥ 24** with seeds derandomised in CI
+5. **Property test count ≥ 24**, derandomised in CI via the `ci`
+   hypothesis profile (`HYPOTHESIS_PROFILE=ci` → `derandomize=True`,
+   registered in `tests/conftest.py`)
 6. **`cargo fuzz` corpora** for all 7 fuzz targets, seeded from real Groww responses
 7. **Coverage gates raised** in `pyproject.toml` to `fail_under = 100`
 8. **Mutation 85% gates** wired in `.github/workflows/mutation.yml`

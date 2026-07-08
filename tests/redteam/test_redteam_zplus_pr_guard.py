@@ -196,10 +196,27 @@ class TestBotExemption:
         assert result.returncode == 1
 
     def test_arbitrary_bot_author_blocks(self) -> None:
-        """Only renovate[bot] / dependabot[bot] are allowed — not custom bots."""
+        """Only the pinned bot authors are allowed — not custom bots."""
         result = _run(
             "Custom bot body.",
             pr_author="evil-bot[bot]",
             pr_has_security_label=True,
         )
         assert result.returncode == 1
+
+    def test_github_actions_bot_exempt(self, override_log_path: Path) -> None:
+        """DEC-BENCH-ABS-BASELINE-001: the bless-baseline bot PR carries no
+        Z+ matrices — github-actions[bot] is author-exempt (audit-logged)."""
+        result = _run(
+            "Bless-baseline bot PR body (measured candidate, no Z+ markers).",
+            pr_author="github-actions[bot]",
+            log_path=override_log_path,
+        )
+        assert result.returncode == 0
+        lines = override_log_path.read_text().splitlines()
+        assert any("EXEMPT=bot" in line and "github-actions[bot]" in line for line in lines)
+
+    def test_github_actions_lookalike_blocks(self) -> None:
+        """The exemption is EXACT — a lookalike author stays fail-closed."""
+        assert _run("Lookalike body.", pr_author="github-actions").returncode == 1
+        assert _run("Lookalike body.", pr_author="my-github-actions[bot]").returncode == 1

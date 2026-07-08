@@ -12,11 +12,12 @@ here so every downstream caller imports from exactly one place
   ``avg_mfe_paisa``, ``avg_mae_paisa`` are all int64 paisa).
 
   This is the first home for a per-trade closed-trade record: the
-  execution simulator (:mod:`brutex.execution`) emits :class:`Fill`
-  objects and an :class:`EquityPoint` curve, but no round-trip
-  aggregation existed yet. Per Golden Rule #11 the metrics consumer is
-  the canonical owner; a future trade-builder in the execution layer
-  must import this type rather than redefine it.
+  execution-types surface (:mod:`brutex.execution.types`) defines
+  :class:`Fill` objects and an :class:`EquityPoint` curve, but no
+  round-trip aggregation existed there. Per Golden Rule #11 the
+  metrics consumer is the canonical owner; the live trade-builder
+  (:mod:`brutex.engine.trade_sim`) imports this type rather than
+  redefine it.
 
 * The equity curve. We reuse :class:`brutex.execution.types.EquityPoint`
   for the rich curve, but the metrics only need the scalar equity

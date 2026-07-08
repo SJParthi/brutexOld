@@ -144,6 +144,7 @@ from brutex.data.session import ALL_FILTERED, filter_to_trading_session, observe
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
+    LakeSpanIndex,
     SeedCandidate,
     index_lake_spans,
     seed_enclosed_windows,
@@ -1709,6 +1710,7 @@ def reconcile_fno_ledger_windows(
     now: datetime | None = None,
     now_ist: Callable[[], datetime] | None = None,
     observed: AbstractSet[date] = frozenset(),
+    span_index: LakeSpanIndex | None = None,
 ) -> int:
     """Seed ``SUCCESS`` (only-if-absent) for every F&O window the lake already ENCLOSES — **pure** cold-start.
 
@@ -1750,10 +1752,18 @@ def reconcile_fno_ledger_windows(
     seed's interior-gap continuity gate never fires on this path and a non-empty
     overlay is byte-identical (test-pinned). The pre-wiring exists so a future
     F&O density-gate enablement cannot silently diverge from the spot seed.
+
+    *span_index* (round-2 review polish, DEC-PULL-SIX-STEP-ORDER-001): an OPTIONAL
+    pre-built :func:`~brutex.data.window_ledger_store.index_lake_spans` index over the
+    SAME *spans*, so a caller reconciling several buckets of one phase (the step-major
+    4-bucket loop in :mod:`brutex.dashboard.historical_pull`) builds the O(spans) index
+    ONCE instead of once per bucket. ``None`` (the default — every other caller) builds
+    it here, byte-identically.
     """
     stamp = now if now is not None else datetime.now(UTC)
     now_for_clamp = (now_ist or _now_ist)()
-    span_index = index_lake_spans(spans)
+    if span_index is None:
+        span_index = index_lake_spans(spans)
     candidates = _fno_reconcile_candidates(
         contracts=contracts,
         intervals=intervals,
