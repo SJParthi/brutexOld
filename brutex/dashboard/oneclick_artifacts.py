@@ -820,9 +820,23 @@ def _decorate_top100_row(raw: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         mode = "—"
         join_key_inferred = True
 
-    mask_hex = raw.get("mask_hex") or "0"
-    direction = raw.get("direction") or "long"
-    tf = raw.get("tf") or ""
+    mask_hex = raw.get("mask_hex")
+    if not mask_hex:
+        mask_hex = "0"
+        join_key_inferred = True
+    direction = raw.get("direction")
+    if not direction:
+        # Honest-absence discipline (module docstring): "long" is a
+        # concrete, potentially opposite-of-real trading direction, so a
+        # fabricated default here MUST flip the same inferred signal the
+        # instrument/mode/combo_id/sweep_run_id back-fill uses below —
+        # never render a guess as though it were the real value.
+        direction = "long"
+        join_key_inferred = True
+    tf = raw.get("tf")
+    if not tf:
+        tf = ""
+        join_key_inferred = True
 
     combo_id = raw.get("combo_id")
     if combo_id is None:
@@ -871,6 +885,13 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
     (reused verbatim) plus honest join-key back-fill for legacy rows lacking
     ``instrument``/``mode``/``combo_id``/``sweep_run_id`` (gap-register
     finding #17) — such rows carry ``join_key_inferred=True``.
+
+    The on-disk root accepts EITHER a bare JSON array of rows (legacy/fixture
+    shape) OR the P3 SHIPPED object root (sweep-parallel-integration-
+    contracts.md §3, DEC-SWEEP-RESULTS-DEPTH-001 / PR #1275) —
+    ``{schema_version, run_id, preset, source{...}, baselines{...}, entries:
+    [...]}`` — in which case ``entries`` is unwrapped transparently before
+    dedupe/decoration.
     """
     resolved = _resolve_run_id(lake_root, run_id)
     if resolved is None:
@@ -891,10 +912,22 @@ def read_top100(lake_root: Path, run_id: str | None = None) -> dict[str, Any]:
         )
     if state == "corrupt":
         return _artifact_error(resolved, f"top100.json present but unreadable: {err}", rows=[])
-    if not isinstance(data, list):
-        return _artifact_error(resolved, "top100.json is not a JSON array", rows=[])
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict) and isinstance(data.get("entries"), list):
+        # P3 SHIPPED shape (sweep-parallel-integration-contracts.md §3,
+        # DEC-SWEEP-RESULTS-DEPTH-001 / PR #1275): the on-disk root is an
+        # OBJECT wrapping {schema_version, run_id, preset, source{...},
+        # baselines{...}, entries: [...]}, not a bare list — unwrap it here.
+        entries = data["entries"]
+    else:
+        return _artifact_error(
+            resolved,
+            "top100.json is not a JSON array or an object with an 'entries' list",
+            rows=[],
+        )
 
-    raw_dicts = [r for r in data if isinstance(r, dict)]
+    raw_dicts = [r for r in entries if isinstance(r, dict)]
     deduped = dedupe_family_representatives(raw_dicts)
     family_groups = _family_members_map(raw_dicts)
     rows: list[dict[str, Any]] = []

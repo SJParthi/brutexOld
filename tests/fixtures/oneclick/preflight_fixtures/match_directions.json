@@ -1,0 +1,16 @@
+{
+  "match": {
+    "directions": [
+      "short"
+    ]
+  },
+  "ok": true,
+  "refusals": [],
+  "clamps": [],
+  "estimator": {
+    "trials": 222,
+    "est_seconds_provisional": 20,
+    "est_bytes": 200
+  },
+  "estimate_basis": "provisional"
+}

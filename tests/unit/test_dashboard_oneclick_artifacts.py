@@ -1034,6 +1034,66 @@ class TestReadTop100:
         result = oa.read_top100(tmp_path, "run_top100_wrong_shape")
         assert result["state"] == "artifact_error"
 
+    def test_object_root_with_entries_key_is_unwrapped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P3 SHIPPED shape (contracts §3): object root wrapping ``entries``.
+
+        The reader must transparently unwrap ``entries`` rather than
+        rejecting the whole artifact as ``artifact_error`` just because the
+        JSON root is an object instead of a bare array.
+        """
+        monkeypatch.setenv(oa.FIXTURE_ROOT_ENV, str(tmp_path))
+        run_dir = tmp_path / "run_top100_object_root"
+        run_dir.mkdir()
+        (run_dir / "top100.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": "run_top100_object_root",
+                    "preset": "min_dd_first",
+                    "source": {"stores": 1, "pool": 1},
+                    "baselines": {"NIFTY": "baseline-NIFTY.json"},
+                    "entries": [
+                        {
+                            "rank": 1,
+                            "mask_hex": "1",
+                            "conditions": [],
+                            "tf": "5m",
+                            "direction": "long",
+                            "arm": "sl_tp",
+                            "metrics": {},
+                            "regime": {},
+                            "vix_band": {},
+                            "family_id": None,
+                            "instrument": "NIFTY",
+                            "mode": "options",
+                            "combo_id": "combo-1",
+                            "sweep_run_id": "run_top100_object_root",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = oa.read_top100(tmp_path, "run_top100_object_root")
+        assert result["state"] == "ok"
+        assert len(result["rows"]) == 1
+        assert result["rows"][0]["rank"] == 1
+        assert result["rows"][0]["join_key_inferred"] is False
+
+    def test_object_root_missing_entries_key_is_artifact_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(oa.FIXTURE_ROOT_ENV, str(tmp_path))
+        run_dir = tmp_path / "run_top100_object_no_entries"
+        run_dir.mkdir()
+        (run_dir / "top100.json").write_text(
+            json.dumps({"schema_version": 1, "run_id": "x"}), encoding="utf-8"
+        )
+        result = oa.read_top100(tmp_path, "run_top100_object_no_entries")
+        assert result["state"] == "artifact_error"
+
     def test_no_run_ever_launched(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(oa.FIXTURE_ROOT_ENV, str(tmp_path / "nothing"))
         result = oa.read_top100(tmp_path)
@@ -1100,6 +1160,51 @@ class TestReadTop100:
         result = oa.read_top100(tmp_path, "run_no_family")
         assert result["rows"][0]["family_size"] == 1
         assert result["rows"][0]["family_members"] == []
+
+    def test_missing_direction_is_honestly_flagged_join_key_inferred(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fabricated ``direction="long"`` default must never look real.
+
+        Unlike the instrument/mode/combo_id/sweep_run_id back-fill, the
+        ``direction``/``mask_hex``/``tf`` fallbacks used to substitute
+        silently. A missing/falsy ``direction`` is a specific, potentially
+        opposite-of-real trading direction, so it must set
+        ``join_key_inferred=True`` just like the other honest-absence
+        signals on the same row.
+        """
+        monkeypatch.setenv(oa.FIXTURE_ROOT_ENV, str(tmp_path))
+        run_dir = tmp_path / "run_missing_direction"
+        run_dir.mkdir()
+        (run_dir / "top100.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "rank": 1,
+                        "mask_hex": None,
+                        "conditions": [],
+                        "tf": None,
+                        "direction": None,
+                        "arm": "sl_tp",
+                        "metrics": {},
+                        "regime": {},
+                        "vix_band": {},
+                        "family_id": None,
+                        "instrument": "NIFTY",
+                        "mode": "options",
+                        "combo_id": "combo-1",
+                        "sweep_run_id": "run_missing_direction",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = oa.read_top100(tmp_path, "run_missing_direction")
+        row = result["rows"][0]
+        assert row["direction"] == "long"
+        assert row["mask_hex"] == "0"
+        assert row["tf"] == ""
+        assert row["join_key_inferred"] is True
 
     def test_decode_combo_reused_matches_direct_call(self, fixture_env: Path) -> None:
         from brutex.dashboard.combo_decoder import decode_combo
@@ -1213,11 +1318,19 @@ class TestReadTradesPage:
         with pytest.raises(ValueError):
             oa.read_trades_page(fixture_env, "../../etc/passwd", 1)
 
-    def test_demo_trades_carry_real_lots_and_costs(self, fixture_env: Path) -> None:
+    def test_demo_trades_honor_ruling_18_null_by_design(self, fixture_env: Path) -> None:
+        """gap-register #18: ``lots``/``costs_paisa`` stay honestly ``None``.
+
+        The flagship demo fixture must not fabricate concrete values for a
+        field that is NULL-by-design until P5's futures translation sidecar
+        lands (Ruling 18) — matching the sibling
+        ``run_2026-07-07T210000Z_nifty_smoke_complete`` fixture and every
+        other trade row in the tree.
+        """
         result = oa.read_trades_page(fixture_env, RUN_DEMO, 1)
         assert result["state"] == "ok"
-        assert result["rows"][0]["lots"] == 1
-        assert result["rows"][0]["costs_paisa"] == 4200
+        assert all(row["lots"] is None for row in result["rows"])
+        assert all(row["costs_paisa"] is None for row in result["rows"])
 
     def test_non_object_json_trades_file_is_artifact_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

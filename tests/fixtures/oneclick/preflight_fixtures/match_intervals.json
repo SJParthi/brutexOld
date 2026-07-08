@@ -1,0 +1,16 @@
+{
+  "match": {
+    "intervals": [
+      "15m"
+    ]
+  },
+  "ok": true,
+  "refusals": [],
+  "clamps": [],
+  "estimator": {
+    "trials": 111,
+    "est_seconds_provisional": 10,
+    "est_bytes": 100
+  },
+  "estimate_basis": "provisional"
+}

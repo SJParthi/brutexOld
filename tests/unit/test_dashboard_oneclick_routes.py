@@ -203,6 +203,38 @@ def test_preflight_estimate_refusal_fixture_by_symbol_match(fixture_client: Test
     assert body["refusals"][0]["reason"]
 
 
+def test_preflight_estimate_intervals_param_selects_matching_fixture(
+    fixture_client: TestClient,
+) -> None:
+    """Exercises the ``intervals=`` query-param -> ``selection["intervals"]`` wiring."""
+    resp = fixture_client.get("/api/v1/sweep/preflight-estimate", params={"intervals": "15m"})
+    assert resp.status_code == 200
+    assert resp.json()["estimator"]["trials"] == 111
+
+
+def test_preflight_estimate_intervals_param_splits_on_comma(fixture_client: TestClient) -> None:
+    """A multi-value comma list must still overlap-match a single-value fixture."""
+    resp = fixture_client.get("/api/v1/sweep/preflight-estimate", params={"intervals": "5m,15m"})
+    assert resp.status_code == 200
+    assert resp.json()["estimator"]["trials"] == 111
+
+
+def test_preflight_estimate_directions_param_selects_matching_fixture(
+    fixture_client: TestClient,
+) -> None:
+    """Exercises the ``directions=`` query-param -> ``selection["directions"]`` wiring."""
+    resp = fixture_client.get("/api/v1/sweep/preflight-estimate", params={"directions": "short"})
+    assert resp.status_code == 200
+    assert resp.json()["estimator"]["trials"] == 222
+
+
+def test_preflight_estimate_k_param_selects_matching_fixture(fixture_client: TestClient) -> None:
+    """Exercises the ``k=`` query-param -> ``selection["k"]`` wiring (int coercion)."""
+    resp = fixture_client.get("/api/v1/sweep/preflight-estimate", params={"k": 7})
+    assert resp.status_code == 200
+    assert resp.json()["estimator"]["trials"] == 333
+
+
 # ── /api/v1/sweep/estimator-calibration ─────────────────────────────────────
 
 

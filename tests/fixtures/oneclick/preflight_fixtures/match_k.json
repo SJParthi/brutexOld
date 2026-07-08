@@ -1,0 +1,14 @@
+{
+  "match": {
+    "k": 7
+  },
+  "ok": true,
+  "refusals": [],
+  "clamps": [],
+  "estimator": {
+    "trials": 333,
+    "est_seconds_provisional": 30,
+    "est_bytes": 300
+  },
+  "estimate_basis": "provisional"
+}
