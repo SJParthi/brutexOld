@@ -302,6 +302,47 @@ def test_g04_heal_refuses_slow_but_live_stale_heartbeat_run(tmp_path: Path) -> N
     assert _cmd_heal(lake, plan) == EXIT_HEAL_REFUSED
 
 
+def test_c6_heal_refuses_resuming_run_via_fresh_exit_status(tmp_path: Path) -> None:
+    """Round-4: the resume-startup window — the progress file LAGS with a dead/
+    terminal pid, but the fresh ``exit-status.json`` (``state=running`` + a LIVE
+    pid, written FIRST at run-core enter under the G6 flock, before the progress
+    reset) marks the resuming run live, so the heal must REFUSE.
+
+    Before this fix ``progress_verdict`` alone read NOT_RUNNING from the lagging
+    progress file and a concurrent ``--execute`` heal could quarantine the
+    resuming run's stores/checkpoint.
+    """
+    from brutex.cli import EXIT_HEAL_REFUSED
+    from brutex.engine.sweep_exit_status import RunState, write_exit_status
+
+    lake = tmp_path / "lake"
+    out = lake / "sweeps"
+    plan = _empty_plan(out)
+    run_id = "a" * 64
+    progress_path = out / "progress" / "sweep-progress.json"
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    # The progress file LAGS the resuming run: it still reads not-live (the prior
+    # attempt's terminal/dead payload) — progress_verdict → NOT_RUNNING.
+    payload = _live_progress_payload()
+    payload["run_id"] = run_id
+    payload["running"] = False
+    progress_path.write_text(json.dumps(payload), encoding="utf-8")
+    from brutex.engine.sweep_liveness import RunVerdict, progress_verdict
+
+    assert progress_verdict(payload, now_wall=time.time()) is RunVerdict.NOT_RUNNING
+    # But the fresh exit-status says the run is RUNNING under our LIVE pid.
+    write_exit_status(
+        out,
+        run_id=run_id,
+        state=RunState.RUNNING,
+        exit_code=None,
+        error_type=None,
+        attempt=2,
+        pid=os.getpid(),
+    )
+    assert _cmd_heal(lake, plan) == EXIT_HEAL_REFUSED
+
+
 def test_g04_heal_refuses_legacy_payload_fail_closed(tmp_path: Path) -> None:
     from brutex.cli import EXIT_HEAL_REFUSED
 

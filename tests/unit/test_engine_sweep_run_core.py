@@ -1171,6 +1171,13 @@ def test_g12_crash_loop_across_two_enters_fires_alert(tmp_path: Path) -> None:
     through TWO SEPARATE enters (a buggy writer re-emitting garbage each relaunch)
     and assert the ``checkpoint_crash_loop`` alert fires on the 2nd enter, never
     the 1st.
+
+    Round-4: a genuine crash-loop is a run that does NOT successfully complete
+    between corruptions (the successful-completion reset closes the false-alert
+    case — see ``test_g12_two_corruptions_separated_by_success_no_alert``). Each
+    enter here RAISES inside the block (the buggy relaunch dies before
+    completing), so ``_finalize`` takes the FAILED path and does NOT reset the
+    durable counter — the 2nd corruption legitimately reaches the edge.
     """
     grid = _grid()
     ckpt_path = tmp_path / "checkpoint" / "sweep-all.json"
@@ -1183,15 +1190,55 @@ def test_g12_crash_loop_across_two_enters_fires_alert(tmp_path: Path) -> None:
             total_combos=count_sweep_tuples(grid),
         )
 
-    ckpt_path.write_text("{garbage-1", encoding="utf-8")  # 1st relaunch
-    with _core(tmp_path, grid, checkpoint_store=_store()) as (_c1, spy1):
+    class _Boom(RuntimeError):
         pass
+
+    ckpt_path.write_text("{garbage-1", encoding="utf-8")  # 1st relaunch
+    with pytest.raises(_Boom), _core(tmp_path, grid, checkpoint_store=_store()) as (_c1, spy1):
+        raise _Boom  # the relaunch dies before completing (no reset)
     assert not any(t == "checkpoint_crash_loop" for _r, t, _d in spy1.suspects)
 
     ckpt_path.write_text("{garbage-2", encoding="utf-8")  # 2nd relaunch — same garbage class
+    with pytest.raises(_Boom), _core(tmp_path, grid, checkpoint_store=_store()) as (_c2, spy2):
+        raise _Boom
+    assert any(t == "checkpoint_crash_loop" for _r, t, _d in spy2.suspects)
+
+
+def test_g12_two_corruptions_separated_by_success_no_alert(tmp_path: Path) -> None:
+    """Round-4 fix: two corruptions with a SUCCESSFUL run between them are NOT a loop.
+
+    The consecutive-corruption counter is DURABLE (``run_id`` is timestamp-free),
+    so a single crash-recovery — this run's OWN load was the corrupt one, it
+    quarantined, started fresh, and COMPLETED — otherwise left the count sticky
+    at 1 with no reset hook, and a LATER independent corruption would escalate
+    ``1 -> 2 == threshold`` and fire a FALSE CRITICAL ``checkpoint_crash_loop``
+    page. The successful-completion reset (``reset_checkpoint_corruption`` in
+    ``_finalize``) clears the durable counter so the two independent incidents
+    never chain. First enter: corrupt → quarantine → COMPLETE (reset). Second
+    enter (a much-later independent corruption): corrupt → count 1, NOT the edge.
+    """
+    grid = _grid()
+    ckpt_path = tmp_path / "checkpoint" / "sweep-all.json"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _store() -> SweepCheckpointStore:
+        return SweepCheckpointStore(
+            path=ckpt_path,
+            sweep_id=grid_identity(grid),
+            total_combos=count_sweep_tuples(grid),
+        )
+
+    ckpt_path.write_text("{garbage-1", encoding="utf-8")  # 1st corruption
+    with _core(tmp_path, grid, checkpoint_store=_store()) as (_c1, spy1):
+        pass  # recovers + COMPLETES → durable counter reset
+    assert not any(t == "checkpoint_crash_loop" for _r, t, _d in spy1.suspects)
+
+    ckpt_path.write_text("{garbage-2", encoding="utf-8")  # 2nd, INDEPENDENT corruption
     with _core(tmp_path, grid, checkpoint_store=_store()) as (_c2, spy2):
         pass
-    assert any(t == "checkpoint_crash_loop" for _r, t, _d in spy2.suspects)
+    # NOT a consecutive loop — the successful run in between reset the count, so
+    # this stands at 1, below the threshold: no false CRITICAL page.
+    assert not any(t == "checkpoint_crash_loop" for _r, t, _d in spy2.suspects)
 
 
 def test_checkpoint_with_progress_records_resume(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from brutex.engine.sweep_liveness import (
     DEFAULT_FRESH_SECONDS,
     RunVerdict,
     default_pid_alive,
+    exit_status_running,
     progress_verdict,
 )
 from brutex.engine.sweep_progress import SweepProgress
@@ -195,3 +196,47 @@ def test_g4_default_pid_alive_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_g4_default_pid_alive_self_is_alive() -> None:
     """The genuine (unpatched) probe confirms our own pid alive."""
     assert default_pid_alive(os.getpid()) is True
+
+
+# ── C6 resume-startup residual: exit_status_running (round-4 hostile-review) ──
+
+
+def test_c6_exit_status_running_live_pid_true() -> None:
+    """state=running + alive pid ⇒ the run is live (closes the resume window)."""
+    payload = {"run_id": "r", "exit_status": {"state": "running", "pid": 4321}}
+    assert exit_status_running(payload, pid_alive=lambda _pid: True) is True
+
+
+def test_c6_exit_status_running_dead_pid_false() -> None:
+    """state=running but a DEAD pid ⇒ not live (fall back to progress verdict)."""
+    payload = {"exit_status": {"state": "running", "pid": 4321}}
+    assert exit_status_running(payload, pid_alive=lambda _pid: False) is False
+
+
+def test_c6_exit_status_running_terminal_state_false() -> None:
+    """A terminal (non-running) exit-status is never a live run."""
+    payload = {"exit_status": {"state": "complete", "pid": 4321}}
+    assert exit_status_running(payload, pid_alive=lambda _pid: True) is False
+
+
+def test_c6_exit_status_running_missing_or_none_false() -> None:
+    """No ``exit_status`` (or an explicit ``None``) ⇒ False (no run to protect)."""
+    assert exit_status_running({}, pid_alive=lambda _pid: True) is False
+    assert exit_status_running({"exit_status": None}, pid_alive=lambda _pid: True) is False
+
+
+@pytest.mark.parametrize("bad_pid", [None, "4321", True, 0, -1])
+def test_c6_exit_status_running_invalid_pid_false(bad_pid: Any) -> None:
+    """A missing / non-int / bool / non-positive pid ⇒ False (never probes)."""
+    payload = {"exit_status": {"state": "running", "pid": bad_pid}}
+
+    def _must_not_probe(_pid: int) -> bool:  # pragma: no cover - asserted never called
+        raise AssertionError("pid_alive must not be probed for an invalid pid")
+
+    assert exit_status_running(payload, pid_alive=_must_not_probe) is False
+
+
+def test_c6_exit_status_running_default_probe_self_alive() -> None:
+    """The default probe (unpatched) confirms our own live pid as running."""
+    payload = {"exit_status": {"state": "running", "pid": os.getpid()}}
+    assert exit_status_running(payload) is True

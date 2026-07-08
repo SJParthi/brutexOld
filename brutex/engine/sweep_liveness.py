@@ -31,12 +31,20 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import Final
 
+from brutex.engine.sweep_exit_status import RunState
+
 __all__ = [
     "DEFAULT_FRESH_SECONDS",
     "RunVerdict",
     "default_pid_alive",
+    "exit_status_running",
     "progress_verdict",
 ]
+
+#: The exit-status wire string for a live run — single-sourced from the
+#: exit-status state machine (``RunState.RUNNING``) so this liveness reader can
+#: never drift from the writer (COMMON; imported as a value, not re-minted).
+_EXIT_STATUS_RUNNING: Final[str] = RunState.RUNNING.value
 
 #: Default freshness window (seconds) for the ``wall_time_utc`` heartbeat. A
 #: healthy supervised sweep publishes progress at least once per tuple; 600 s
@@ -151,3 +159,54 @@ def progress_verdict(
     if now_wall - float(wall) > fresh_seconds:
         return RunVerdict.STALE
     return RunVerdict.RUNNING
+
+
+def exit_status_running(
+    progress: Mapping[str, object],
+    *,
+    pid_alive: Callable[[int], bool] = default_pid_alive,
+) -> bool:
+    """Return ``True`` iff the enriched *progress* payload names a LIVE running run.
+
+    Reads the ``exit_status`` sub-dict that
+    :func:`brutex.engine.sweep_exit_status.enrich_progress_payload` merges into
+    a ``read_progress`` payload: the run is LIVE when that artifact reads
+    ``state == "running"`` AND its ``pid`` is alive.
+
+    The C6 resume-startup residual (round-4 hostile-review fix): on a
+    crash-RESUME the on-disk *progress* file still carries the PRIOR attempt's
+    DEAD pid until ``_reset_progress_at_launch`` rewrites it — which happens
+    AFTER the checkpoint preload — so :func:`progress_verdict` alone reads
+    :attr:`RunVerdict.NOT_RUNNING` during that window and a concurrent
+    ``sweep-heal --execute`` could quarantine the resuming run's
+    stores/checkpoint. The ``exit-status.json`` artifact, by contrast, is
+    written FIRST at run-core enter (``state=running`` + the LIVE pid, under
+    the G6 results-root flock, before the preload), so it does NOT lag the
+    resuming run — it is the signal that closes the startup window. Any other
+    shape (no ``exit_status``, a non-running state, a missing/non-int/``bool``/
+    non-positive pid, or a dead pid) → ``False``, so the heal caller falls back
+    to the progress-file verdict. Pure O(1) (one ``os.kill(pid, 0)`` in the
+    default probe); NO file I/O of its own — the enrichment already read the
+    artifact.
+
+    Parameters
+    ----------
+    progress
+        The enriched progress payload (as returned by ``read_progress``).
+    pid_alive
+        Injected pid probe (defaults to :func:`default_pid_alive`).
+
+    Returns
+    -------
+    bool
+        ``True`` when the exit-status artifact reports a live running run.
+    """
+    status = progress.get("exit_status")
+    if not isinstance(status, Mapping):
+        return False
+    if status.get("state") != _EXIT_STATUS_RUNNING:
+        return False
+    pid = status.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    return pid_alive(pid)

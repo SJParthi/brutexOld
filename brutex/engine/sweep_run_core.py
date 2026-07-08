@@ -98,6 +98,7 @@ from brutex.engine.sweep_quarantine import (
     CheckpointCorruptionTracker,
     load_checkpoint_resilient,
     quarantine_tuple_trio,
+    reset_checkpoint_corruption,
 )
 from brutex.engine.sweep_singleflight import sweep_run_lock
 from brutex.engine.tuple_complete import (
@@ -1314,6 +1315,17 @@ def _finalize(
         )
         if verdicts is not None:
             core._link_stamps["artifacts"] = StampVerdict.OK
+        if checkpoint_store is not None:
+            # G12 (round-4 hostile-review fix): a SUCCESSFUL run boundary breaks
+            # the crash-loop chain. Reset the DURABLE consecutive-corruption
+            # counter so a single crash-recovery (this run's own load was the
+            # corrupt one → quarantine → fresh start → COMPLETE, which never
+            # calls record_clean) cannot leave a sticky count that a LATER,
+            # INDEPENDENT corruption escalates to a false CRITICAL 'crash loop'.
+            core._guarded(
+                "checkpoint_corruption.reset",
+                lambda: reset_checkpoint_corruption(run_dir(core._results_root, core.run_id)),
+            )
     core._guarded("manifest.exit_code", lambda: core.manifest.set_exit_code(exit_code))
     core._guarded(
         "manifest.recorder_degraded",

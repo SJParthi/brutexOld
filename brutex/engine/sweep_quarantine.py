@@ -213,6 +213,39 @@ class CheckpointCorruptionTracker:
         self._persist()
 
 
+def reset_checkpoint_corruption(run_dir: Path) -> None:
+    """Clear the durable G12 crash-loop counter at a SUCCESSFUL run boundary.
+
+    The consecutive-corruption counter (:class:`CheckpointCorruptionTracker`)
+    is otherwise reset ONLY on a clean checkpoint LOAD (:meth:`record_clean`,
+    called from :func:`load_checkpoint_resilient`). A run whose OWN load was
+    the corrupt one — it quarantined the checkpoint, started fresh, and then
+    COMPLETED successfully — never calls ``record_clean`` (its own load was the
+    corrupt path, and completion had no reset hook), so a single crash-recovery
+    left the count sticky at 1 DURABLY (``run_id`` is timestamp-free, so the
+    counter file survives the grid's whole lifetime). A LATER, INDEPENDENT
+    corruption (e.g. the valid checkpoint bit-rots weeks later) would then take
+    the count ``1 -> 2 == threshold`` and fire a FALSE CRITICAL
+    ``checkpoint_crash_loop`` alert — for two corruptions that are NOT a
+    consecutive loop but are separated by a fully successful run (round-4
+    hostile-review fix). Clearing the counter file at a terminal COMPLETE /
+    SUSPECT_COMPLETE boundary makes ``consecutive`` mean "corruptions with no
+    successful run in between", matching the crash-loop intent. Fail-soft
+    (I-3): a state glitch is suppressed — the worst case is an under-count on a
+    genuine loop, never a fabricated edge; a run with no checkpoint counter file
+    is a no-op (``missing_ok=True``).
+
+    Parameters
+    ----------
+    run_dir
+        The run's artifact directory (``runs/<run_id>/``); the counter file
+        lives directly under it.
+    """
+    state_path = run_dir / CHECKPOINT_CORRUPTION_STATE_FILENAME
+    with contextlib.suppress(OSError):
+        state_path.unlink(missing_ok=True)
+
+
 def _next_ordinal(parent: Path, *, prefix: str = "", suffix: str = "") -> int:
     """Return the next monotonic ordinal for ``<prefix><n><suffix>`` entries under *parent*.
 

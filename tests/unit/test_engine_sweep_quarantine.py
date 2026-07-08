@@ -357,6 +357,34 @@ def test_g12_tracker_clean_load_clears_persisted_count(tmp_path: Path) -> None:
     assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0
 
 
+def test_g12_reset_clears_durable_counter_after_success(tmp_path: Path) -> None:
+    """Round-4: ``reset_checkpoint_corruption`` clears the sticky count on success.
+
+    A single crash-recovery (corrupt load → quarantine → fresh start → COMPLETE)
+    otherwise leaves ``consecutive == 1`` DURABLY, and a LATER independent
+    corruption escalates ``1 -> 2 == threshold`` into a false CRITICAL. Resetting
+    at the successful run boundary makes the next relaunch start the streak fresh.
+    """
+    from brutex.engine.sweep_quarantine import reset_checkpoint_corruption
+
+    CheckpointCorruptionTracker.load(tmp_path).record_corruption()
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 1
+    reset_checkpoint_corruption(tmp_path)
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0
+
+
+def test_g12_reset_is_noop_and_fail_soft(tmp_path: Path) -> None:
+    """Reset with no counter file is a no-op; an OSError is swallowed (I-3)."""
+    from brutex.engine.sweep_quarantine import reset_checkpoint_corruption
+
+    reset_checkpoint_corruption(tmp_path)  # no file yet — missing_ok, no raise
+    assert CheckpointCorruptionTracker.load(tmp_path).consecutive == 0
+    # A path whose parent is a FILE makes unlink raise OSError → suppressed.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a dir", encoding="utf-8")
+    reset_checkpoint_corruption(blocker)  # unlink(blocker/<file>) raises → swallowed
+
+
 def test_g12_tracker_load_tolerates_missing_and_malformed_state(tmp_path: Path) -> None:
     """A missing / malformed / out-of-range state file loads a clean 0 (fail-soft)."""
     from brutex.engine.sweep_quarantine import CHECKPOINT_CORRUPTION_STATE_FILENAME

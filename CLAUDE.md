@@ -68,7 +68,21 @@ routes `run_sweep_from_request` → `cmd_sweep_all` (since #1120, on main too) �
 `with sweep_run_core(...)` block, so keep_awake + single-flight flock + G12 corrupt-checkpoint
 quarantine + Row-15 forensics mirror + flight recorder ALL cover the button; only `--detach`
 (survival past process death) is CLI-only, which is the disclosed honest envelope (an in-process
-dashboard job cannot outlive the uvicorn worker). ENGINE
+dashboard job cannot outlive the uvicorn worker). HOSTILE-REVIEW ROUND 4 (#1594): two MINOR
+observability defects closed — (1) the G12 durable crash-loop counter now RESETS at a successful
+run boundary (`reset_checkpoint_corruption` in `_finalize` on COMPLETE/SUSPECT_COMPLETE) so two
+corruptions SEPARATED by a fully successful recovery no longer chain `1→2` into a FALSE CRITICAL
+`checkpoint_crash_loop` page (`consecutive` now means "corruptions with no successful run
+between"); (2) the C6 heal guard closes the resume-startup window — a RESUMING run's progress file
+lags with the prior attempt's DEAD pid until the post-preload reset, so `cmd_sweep_heal` now ALSO
+treats the run live when the fresh `exit-status.json` (state=running + LIVE pid, written first at
+enter under the G6 flock, already enriched into `read_progress`) says so via the NEW pure
+`sweep_liveness.exit_status_running` — no concurrent `--execute` heal can quarantine a resuming
+run's stores. Row 19 VERIFIED (dashboard job is keep_awake-covered via the cmd_sweep_all
+delegation); Row 21 HONEST (the `sweep_run_core(log_file=)` plumbing stays UNWIRED at cmd_sweep_all
+— a run-scoped raw log needs file-routed logging at PROCESS START, out of scope; the material
+events are already a run_id-scoped log on the INTERNAL DISK via the mirrored `flight-recorder.jsonl`
+— follow-up DEC-SWEEP-RUN-LOG-FILE-001). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
 Earlier: 2026-07-08 (DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616 —
 two surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the
@@ -1362,7 +1376,17 @@ hostile-review pass._
   re-parsing `sys.argv` strings; `mark_suspect`'s mid-run exit-status write preserves `wall_started_utc`; and the
   stale RUNCORE-DASHBOARD-COVERAGE finding REJECTED — the dashboard button already routes
   `run_sweep_from_request` → `cmd_sweep_all` → `sweep_run_core`, so keep_awake + single-flight + G12 + forensics
-  cover it; only `--detach` is CLI-only, the disclosed honest envelope).
+  cover it; only `--detach` is CLI-only, the disclosed honest envelope). HOSTILE-REVIEW ROUND 4
+  (#1594): the G12 durable crash-loop counter RESETS at a successful run boundary
+  (`reset_checkpoint_corruption` in `_finalize`) so two corruptions separated by a fully successful
+  recovery no longer fire a FALSE CRITICAL `checkpoint_crash_loop`; the C6 heal guard closes the
+  resume-startup window via the NEW pure `sweep_liveness.exit_status_running` (the fresh
+  `exit-status.json` state=running + LIVE pid, written first at enter under the G6 flock, marks a
+  RESUMING run live before the progress file catches up, so a concurrent `--execute` heal cannot
+  quarantine it); Row 19 verified keep_awake-covered on the dashboard job path; Row 21 honest —
+  the `log_file=` plumbing stays unwired at cmd_sweep_all (process-start file-routing needed; the
+  material events are already a run_id log on the internal disk via the mirrored flight recorder;
+  follow-up DEC-SWEEP-RUN-LOG-FILE-001).
   Earlier: `claude/data-edge-guards` (**DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616** — two
   surgical engine data-edge guards for sweep-result CORRECTNESS (lens-D of the one-click-sweep gap register):
   (1) a Muhurat-safe prev-day anchor at the Stage-1A roll seam (`brutex/engine/stage1a.py::_roll_to_new_day`

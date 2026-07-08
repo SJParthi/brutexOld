@@ -7001,7 +7001,11 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
     # stores/checkpoint/dedup is the exact corruption the C6 guard exists to
     # prevent ("a LIVE run is never quarantinable"), so STALE joins the refuse
     # set — heal-able is reserved for NOT_RUNNING (dead pid / clean terminal).
-    from brutex.engine.sweep_liveness import RunVerdict, progress_verdict
+    from brutex.engine.sweep_liveness import (
+        RunVerdict,
+        exit_status_running,
+        progress_verdict,
+    )
 
     progress_path = out_root / "progress" / "sweep-progress.json"
     progress = read_progress(progress_path)
@@ -7010,6 +7014,17 @@ def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tes
         sweep_running = verdict in (RunVerdict.RUNNING, RunVerdict.UNKNOWN, RunVerdict.STALE)
     else:
         sweep_running = False
+    # C6 resume-startup residual (round-4 hostile-review fix): the progress
+    # file LAGS a resuming run — on a crash-resume it still shows the PRIOR
+    # attempt's DEAD pid until `_reset_progress_at_launch` rewrites it, which
+    # runs AFTER the checkpoint preload. So a `progress_verdict`-only guard
+    # reads NOT_RUNNING in the enter→preload→reset window and a concurrent
+    # `--execute` heal could quarantine the resuming run's stores/checkpoint.
+    # The fresh `exit-status.json` (state=running + LIVE pid, written FIRST at
+    # run-core enter under the G6 flock, and already enriched into `progress`
+    # by `read_progress`) does NOT lag — treat the run as live when it says so.
+    if not sweep_running and exit_status_running(progress):
+        sweep_running = True
 
     try:
         assessment = assess_heal(
