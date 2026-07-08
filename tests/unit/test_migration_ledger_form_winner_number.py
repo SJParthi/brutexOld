@@ -1,18 +1,19 @@
-"""DEC-FORM-WINNER-PERSIST-001 — eleventh-renumber ledger/citation consistency pin.
+"""DEC-FORM-WINNER-PERSIST-001 — twelfth-renumber ledger/citation consistency pin.
 
 Regression net for the recurring review-finding class that has forced ELEVEN
 renumbers of this branch's ledger entry (DEC-LEDGER-RENUMBER-001): live main
 mints a new MIGRATION.md number while the branch is in flight, and merging
 as-is would file TWO different decisions under ONE number — most recently
-live main took #1557 for DEC-DASHBOARD-BROWSER-TRUTH-001 (PR #1233) while
-this branch was in flight, so DEC-FORM-WINNER-PERSIST-001 moved #1557 → #1558
-(the next free number above live-main max #1557; after the tenth move
-#1543 → #1557 when main took #1543 for DEC-FUTURES-EXEC-TRANSLATION-001,
-PR #1255). Three permanent pins:
+live main advanced to #1560 (DEC-FIB-BULLISH-RETRACE-001, PR #1225) while
+this branch was in flight, so DEC-FORM-WINNER-PERSIST-001 moved #1558 → #1581
+at the 2026-07-08 wave-resync (a disjoint per-PR block clear of the in-flight
+PR #1264/#1244 wave holding #1558–#1567; after the eleventh move
+#1557 → #1558 when main took #1557 for DEC-DASHBOARD-BROWSER-TRUTH-001,
+PR #1233). Three permanent pins:
 
-1. the entry carries exactly #1558 (fails-before on the pre-fix colliding
-   #1557, and on any future silent drift of the merged number);
-2. the entry's provenance trail RECORDS the tenth AND eleventh renumbers
+1. the entry carries exactly #1581 (fails-before on the pre-fix colliding
+   #1558, and on any future silent drift of the merged number);
+2. the entry's provenance trail RECORDS the tenth, eleventh AND twelfth renumbers
    naming each colliding decision, so the ledger stays the auditable single
    source of truth for its own numbering history;
 3. every numbered CLAUDE.md citation of the DEC-ID cites the SAME number as
@@ -33,9 +34,10 @@ CLAUDE_MD_PATH = REPO_ROOT / "CLAUDE.md"
 #: The decision whose number keeps colliding with live main's fresh mints.
 DEC_ID = "DEC-FORM-WINNER-PERSIST-001"
 
-#: The post-renumber number — re-grepped free above live-main max #1557
-#: (DEC-DASHBOARD-BROWSER-TRUTH-001) inside the round-11 merge-of-main commit.
-EXPECTED_NUMBER = 1558
+#: The post-renumber number — the 2026-07-08 wave-resync disjoint block,
+#: chosen clear of live-main max #1560 (DEC-FIB-BULLISH-RETRACE-001) and the
+#: in-flight PR #1264/#1244 wave holding #1558–#1567.
+EXPECTED_NUMBER = 1581
 
 #: The decision live main filed under the tenth-round colliding number #1543.
 TENTH_COLLIDING_DEC_ID = "DEC-FUTURES-EXEC-TRANSLATION-001"
@@ -65,18 +67,19 @@ def _form_winner_entry() -> tuple[int, str]:
     return matches[0]
 
 
-def test_entry_is_numbered_1558() -> None:
-    """The entry carries #1558 — the next number free on live main.
+def test_entry_is_numbered_1581() -> None:
+    """The entry carries #1581 — the wave-resync disjoint-block number.
 
-    Fails-before/passes-after: pre-fix the entry was #1557, which live main
-    had ALREADY taken for DEC-DASHBOARD-BROWSER-TRUTH-001 (PR #1233) while
-    this branch was in flight — merging as-is would have filed two different
-    decisions under one number.
+    Fails-before/passes-after: pre-fix the entry was #1558, which the
+    in-flight PR #1264/#1244 wave also claims (and which #1244 carries for
+    DEC-GREEKS-BULK-REENRICH-001) — merging as-is would have risked filing
+    two different decisions under one number on main.
     """
     number, _ = _form_winner_entry()
     assert number == EXPECTED_NUMBER, (
         f"{DEC_ID} is numbered #{number}, expected #{EXPECTED_NUMBER} "
-        f"(#1557 is taken on live main by {ELEVENTH_COLLIDING_DEC_ID})"
+        f"(#1557 is taken on live main by {ELEVENTH_COLLIDING_DEC_ID}; "
+        f"#1558 is claimed by the in-flight PR #1264/#1244 wave)"
     )
 
 
@@ -98,6 +101,9 @@ def test_provenance_trail_records_tenth_and_eleventh_renumbers() -> None:
     )
     assert ELEVENTH_COLLIDING_DEC_ID in line, (
         f"the ledger trail does not name the colliding decision {ELEVENTH_COLLIDING_DEC_ID}"
+    )
+    assert "renumbered a TWELFTH time #1558 → #1581" in line, (
+        "the twelfth-renumber provenance note is missing from the entry's ledger trail"
     )
 
 
