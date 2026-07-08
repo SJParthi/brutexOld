@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1557 / ADR-0019 —
+_Last updated: 2026-07-08 (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1594 / ADR-0019 —
 the UNKILLABLE sweep run core (Phase 2 of the one-click sweep program): all 15 hunt gaps
 G1–G15 + R28/R38–R43/R45 built around a byte-untouched engine — 16 NEW 100%-line+branch
 modules (flight recorder on the COMMON orchestrator `AuditWriter` SHA-256 chain at
@@ -45,7 +45,293 @@ projection+trade-sim+drawdown, NOT the 60 indicators; D-19 mutation floors are r
 below 85% (74–79% measured, raise = named follow-up); the G10 "peer pull" refusal wording
 is pinned debt — follow-up DEC-SWEEP-LOCK-WORDING-001. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+Earlier: 2026-07-07 (the 11-item POLISH PACK, MIGRATION.md #1582–#1592 —
+DEC-SESSION-CLOSE-BOUNDARY-PIN-001 + DEC-DAILY-CUTOFF-GROUNDED-001 +
+DEC-NTM-REVALIDATE-CROSSPROC-001 + DEC-RETRY-COUNTER-SPLIT-001 +
+DEC-GROWW-EPOCH-VERDICT-001 + DEC-CLI-DEPTH-FLOORS-001 +
+DEC-ACCOUNT-LEASE-CROSSHOST-001 + DEC-DERIVE-LOCK-VISIBILITY-001 +
+DEC-RESUME-BANNER-AUTOCLEAR-001 + DEC-QUOTA-VERDICT-MOOT-001 +
+DEC-DAILY-OPEN-PREDICATE-ALIGN-001: (1) the
+at-close 15:30:00 boundary divergence (`daily_derive_cutoff` strict `>` vs
+`clamp_window_end` `>=`) is ruled DELIBERATE and drift-PINNED cross-module
+(the boundary tightening refused, the #1267 pattern; clamp byte-untouched;
+NOT the daily-OPEN predicate item — that is item (11), closed by
+IMPLEMENTATION, never wontfix); (2) the prebuild's
+session-close daily cutoff is REPAIRED (the #1401 M1 regression had left
+DEC-PREBUILD-SESSION-CLOSE-CUTOFF-001 production-dead — route/parallel
+orchestrator/heal recall all now ride ONE law via NEW `nse.now_ist` threaded
+as `daily_cutoff_now`) and gains the data-grounded DEFER-only variant (NEW
+`session_last_bar_complete` + `daily_derive_cutoff_grounded`, result ≤ clock
+always, abstains on every unknown, DENSE-index-gated per #1031, kill switch
+`BRUTEX_DAILY_CUTOFF_GROUNDED`; a post-close pipeline run now derives the run
+day's 1day bar SAME-RUN, an incomplete dense session DEFERS — never a partial
+daily bar; complete sessions byte-identical grounded-vs-clock, pinned); (3)
+the NTM SWR background refresh gains a CROSS-PROCESS single-flight (advisory
+flock sidecar `.ntm_revalidate.lock` + double-checked freshness under the ONE
+COMMON `_ntm_cache_is_fresh`; unavailable lock fails OPEN to the pre-fix
+refresh — never worse; closes the #1287 follow-up); (4) the conflated
+`in_pull_fetches` ledger counter is SPLIT into persisted `empty_retries` vs
+`transient_retries` (default `None` = honest unknown on old rows, the
+optional-column template's third use; spine invariant pinned `empty +
+transient + (1 if bars) == in_pull_fetches`; ACCEPTS the follow-up #924 +
+#1355 twice declined as display-only relabels — the in-CALL 6× ladder still
+NOT persisted, the #924 caveat stands); (5) the defensive epoch-timestamp
+branch gains a deterministic session-plausibility VERDICT (NEW
+`epoch_verdict.py`, unix-utc vs ist-naive against the real NSE calendar, ONE
+`groww.parse.epoch_timestamp_verdict` WARN per epoch payload; round-1 review
+fold: out-of-coverage dates abstain SILENTLY via the non-warning
+`is_holiday_data_available` pre-check — the strict-calendar routing would
+have stormed up to 2,048 `calendar.holiday_data_unavailable` WARNs per
+out-of-coverage payload per window) + a live-probe
+runbook — parsing byte-unchanged, the Unix-UTC assumption stays honestly
+UNVERIFIED; (6) the CLI `brutex fetch` gains the vendor-depth-floor learner +
+learned-floor planning clamp (`max(GROWW_HISTORY_FLOOR, learned floor)` via
+the existing `symbol_windows` seam, SAME schema_meta sidecar as the dashboard
+— either entrypoint's learned floor clamps both SERIALLY; dry-run
+byte-identical; round-1 review MAJOR fold: the sidecar is a TRANSIENT
+open→op→close per get/set (`_TransientCliFloorStore`) — the original
+whole-pull rw DuckDB hold blocked a `brutex serve` boot mid-fetch and
+always-failed under a running dashboard; while a dashboard process holds
+`instruments.duckdb` the per-op degrade WARNs and self-heals, never a
+blocked fetch); (7)
+the account pull single-flight gains its CROSS-HOST arm — an advisory
+heartbeat lease on shared lake storage (`.locks/pull_lease.json`, 30 s
+refresh, 180 s self-heal, kill switch `BRUTEX_PULL_LEASE=off`) refuses a
+start on a FRESH foreign-host lease; honestly DETECTION, NOT mutual
+exclusion (TOCTOU/clock-skew/hostname-collision limits stated); every
+synchronous lease lake-I/O op (enter read + first refresh, exit clear —
+they run while BOTH flocks are held, and the exit clear runs BEFORE the
+flock releases) is deadline-BOUNDED under the COMMON `run_with_deadline`
+guard (`BRUTEX_PULL_LEASE_IO_DEADLINE_S`, default 5 s; round-1 review
+MAJOR fold — a wedged volume previously hung `clear()` forever and refused
+every future pull until restart; wedged op = one `pull_lease.io_wedged`
+WARN + stale-TTL self-heal, at most one zombie daemon per op); (8) the
+movers `PrebuildGate` honors the derive lock with HONEST attribution — a
+CLI-process derive yields the `gated:true` payload with
+`source="cross_process"`, and (round-1 review fold) the dashboard's OWN
+out-of-pipeline derive (the lake-heal L2/L3 recall — flock contends across
+open file descriptions, so the flock probe alone could not tell it apart)
+reads `source="local_derive"` via the zero-I/O
+`derive_lock_held_by_this_process` registry probe consulted FIRST, never a
+fabricated "another process" claim (probe OSError fails OPEN, one WARN per
+outage; closes the #1288 follow-up); (9) the intent-resume `ResumeBanner` auto-clears
+on the next REAL pull launch that actually STARTS (it had NO production clear
+path — a stale CRITICAL banner survived its own remediation; round-3 review
+fold: the clear is STARTED-gated via the NEW `clear_banner_after_start` AFTER
+`BackgroundPullJob.start` — a REFUSED start (contention / foreign-host lease)
+launches nothing and clears nothing); (10) the #889 verdict-driven
+quota phone-alert follow-up is CLOSED AS MOOT (Groww backtesting has NO
+daily quota + ZERO production `DailyQuotaTracker` constructions,
+AST-pinned) and the doubly-dead informational quota surface is DELETED
+(`GET /api/v1/quota` + panel fields + `/universe` gauge — all only ever
+served the constant sentinel), the vendor-neutral enforcement seam kept
+dormant logic-byte-identical; (11) the TWO daily-open-substitution surfaces
+now share ONE per-session predicate (MIGRATION.md #1592,
+DEC-DAILY-OPEN-PREDICATE-ALIGN-001 — the named follow-up the #1267/#1232
+drift pin deferred to): NEW pure `spot_daily_resample.classify_daily_open`
+(substituted iff a NON-Muhurat session's first present 1-minute bar is NOT
+exactly 09:15 IST) drives the prebuild detector directly AND the
+/completeness · /universe · /coverage census's DuckDB CTE as its
+mirror-pinned SQL twin (strict `>` → `<>` + a `_muhurat_exclusion_sql`
+NOT-IN baked from `MUHURAT_SESSIONS`) — a Muhurat session no longer counts
+read-side (was a yearly false positive on a healthy lake), a stray
+pre-09:15 first bar now counts on both (the strict-`>` under-count closed);
+same-lake same-verdict equivalence proven + pinned, the old divergence pin
+consciously rewritten to an alignment pin; the ONE remaining deliberate
+divergence is POPULATION not predicate (census = ALL stored sessions,
+detector = the forming-session cutoff), documented + pinned; also corrects
+#1582's earlier misattribution (this item was never closed-wontfix — it is
+closed by IMPLEMENTATION). ALL ELEVEN: ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; fetch
+PACING/RATE byte-identical everywhere, with exactly THREE SANCTIONED
+behavior changes (each honestly scoped in its own ledger entry): the
+same-run post-close 1day derive (#1583 — previously deferred to the
+next run), the learned-floor-clamped CLI planning (#1587 — a persisted
+learned floor plans FEWER 1-minute windows by design; dry-run
+byte-identical), and the fresh-foreign-lease pull REFUSAL (#1588);
+every other item's fetch behaviour is byte-identical (the counter
+split #1585 explicitly so); touched modules 100% line+branch).
+Earlier: 2026-07-06 (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 —
+the #1056 pull-rate CallMeter gains an explicit LIFECYCLE: registered by the
+pull build sites at pull start, cleared by (a) `register_pull_meter`'s NEW
+`dry_run=` gate (a dry-run DEREGISTERS — the dry-run GrowwClients carry a REAL
+unpaced CallMeter, so the old "no `.meter` no-op" claims were FALSE), (b)
+`BackgroundPullJob(on_run_end=SessionRateController.clear_meter)` in the job's
+identity-gated finally, and (c) the OFF-job `pull_candles` spine's OWN paired,
+identity-gated clear (round 4 — `clear_meter(expected=)` compare-and-clear via
+`_pull_meter_scope`; supersedes round 2's route-level unconditional `finally`
+clear, which a round-4 reviewer proved evicted a concurrent JOB pull's LIVE
+meter whenever the direct route 400'd before registering — a malformed date;
+the route's dry-run arm still passes NO holder) — so "no in-process pull
+running ⇒ no meter registered" is a process invariant covering every
+registration path, a raise-before-register clears nothing, and a concurrent
+pull's later registration is never evicted (the 96-agent audit's C0 cross-pull
+leak + the dry-run fabricated "flowing" closed; the dry-run gate's clear stays
+unconditional with its concurrent-off-job-live-pull blast radius now honestly
+DISCLOSED, not denied — round-4 MINOR x2). Plus: per-spine mutant-killing wiring tests (all four
+register sites — the audit's C1/C2 surviving-mutant gap); a kind-aware
+`/api/v1/pull/rate` probe (`BackgroundPullJob.start(job_kind=)` — a 2-4-day
+dashboard SWEEP reads honest idle, never a site-wide red "stalled"; the
+`_pull_live` duty-degrade probe DELIBERATELY stays sweep-inclusive, #920); a
+900 s `BRIDGE_MAX_AGE_S` TTL in the merged projection (a SIGKILLed CLI's stuck
+`pull_active=True` bridge file decays to idle instead of a permanent red; the
+12 s-900 s died-mid-run alert window preserved); the false bx-rate-monitor.js
+"obs rendered" claim + dead CSS removed; six stale pre-#1056 doc passages
+reconciled + (round 3) the scoped "no in-process pull running ⇒ no meter
+registered" wording swept across every remaining claim site and locked by a
+grep doc-pin test. Observe-only — ZERO pacing change, fetch byte-identical; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch;
+ruff/ruff-format/mypy --strict/pyright clean).
+Earlier: 2026-07-06 (DEC-FORM-WINNER-PERSIST-001, MIGRATION.md #1581 —
+the `&`-underlying (%26) form-winner is now DURABLE across pulls and processes:
+one `schema_meta` row per underlying (`groww.form_winner.<key>` → the KEY-level
+winning form STRING — the winner's ROLE applied to the key's own
+`underlying_symbol_forms` tuple (moved into `symbol_form_preference.py`,
+re-exported from `contracts.py`), so a candle-phase win and a metadata win
+share ONE value space — review-fixed from the raw phase-local string) written
+through the NEW `PersistentSymbolFormPreference`
+(write-on-change, read-once-per-preference-instance single-flight — one
+instance per pull run, MULTI-form keys only on
+BOTH paths — the ~750 plain underlyings pay ZERO store I/O on order AND record
+(review-fixed: the ungated persist wrote ~212 junk rows per pull process); the
+seed `get_meta` runs OUTSIDE the map lock, bounded by the COMMON
+`run_with_deadline` (2 s, `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged
+sidecar read can never stall the fan-out (review-fixed: it ran INSIDE the map
+lock), and the persist `set_meta` is bounded by the same guard (5 s,
+`BRUTEX_FORM_WINNER_WRITE_DEADLINE_S` — round-2 review fix: a non-raising
+wedged write would have hung the recording fetch worker forever and queued
+every later persist behind the persist lock); store errors WARN-only —
+a pull is never crashed; `BRUTEX_FORM_WINNER_PERSIST=off` is the write-side
+kill switch; SUPERSEDES the "cross-pull persistence is a NAMED follow-up"
+clause of DEC-SYMBOL-FORM-PREFERENCE-001), keyed by the PRIMARY F&O underlying
+in EVERY phase (`resolve_expiries`/`resolve_contracts` gain the
+`preference_key` normalization `candles.py` already had; the metadata pull
+passes the CELL key, never the queried spelling form) and wired at every
+production pull seam (ONE instance per `/pull-pipeline` run shared by the
+metadata + historical phases; the standalone metadata/composite routes AND the
+`/pull-historical` direct-selection grammar — the latter MISSED in round 1 and
+wired by the round-2 review fix; ALL FOUR seams route-pinned as of round 5
+(pipeline identity-sharing + dry-run store=None + metadata/composite
+real-store persist — previously only the direct-selection seam was);
+`run_groww_option_ingest`'s fresh-per-pass default stands down — also fixing
+the within-one-pull amnesia across market buckets/until-clean rounds; a
+dry-run threads store=None, byte-identical to the process-local base). The
+two structurally identical set_meta/get_meta Protocols consolidate into ONE
+`brutex/data/meta_kv.py` `MetaKV` (Golden Rule #11 COMMON;
+`VendorFloorMetaStore` is now a back-compat alias). PLUS the live `&`-family
+probe TOOLING: `brutex doctor --live --ampersand-probe` (stage 14, ≤64-call
+budget) probes BOTH symbol forms of every master-DERIVED `&`-underlying
+against BOTH F&O APIs through the kit's read-only client, writes the
+`ampersand_verdict.json` evidence sidecar + per-call transcript lines, SEEDS
+the durable map per-underlying through the ONE COMMON `record_winner` write
+path (the `seeded` count READ-BACK-VERIFIED — a kill-switched/failed write is
+never claimed, `amp.seed_shortfall` names the cause), and — iff DECISIVE —
+writes the machine-readable
+`groww.form_probe.verdict` stamp, whose ONLY writer in the repo is that stage
+(test-pinned; `form_probe_status()` reads it back — missing/corrupt =
+honestly UNVERIFIED, "verified" is DATA not prose; a data-beside-a-RAISED-
+sibling name reads `*_UNCONFIRMED` — it seeds its winner but NEVER counts
+CLEAR/decisive, so throttle-contaminated evidence cannot stamp). HONEST
+(Golden Rule
+#1/#10): the probe was NOT run for this change — no Groww credentials in the
+build environment — so ZERO transcript exists, ZERO stamp was written, and
+the #898 `%26`-encoding hypothesis stays vendor-UNVERIFIED byte-INTACT until
+a decisive operator-run probe lands its transcript; the map itself needs no
+probe (production pulls self-learn from ordinary fallback wins). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; touched
+modules 100% line+branch).
+Earlier: 2026-07-07 (DEC-SOAK-REAL-TIER-001, MIGRATION.md #1580 —
+the REAL multi-hour soak tier + the honest reclassification of the ubuntu
+nightly: `stress-nightly.yml` is a **~5-min ubuntu-24.04 REGRESSION GATE**
+whose guard step now REFUSES a soak-scale dispatch (`STRESS_EVENTS >
+200000`) — the retracted "24h soak via workflow_dispatch
+`STRESS_EVENTS=10_000_000`" #208 claim was FALSE per Golden Rule #10 (the
+60-min job timeout hard-kills a 10M run at ~1/17th done; #208 corrected in
+place, strikethrough + CORRECTED notes). The real multi-hour soak is a
+SEPARATE tier — NEW `.github/workflows/soak-selfhosted.yml` on the
+self-hosted M4-Pro (§8): weekly cron (default 6 h) + `workflow_dispatch
+(soak_minutes)` fenced 1..1200 (20 h — the self-hosted `GITHUB_TOKEN`
+expires at 24 h, so a longer run's failure watchdog could never authenticate
+to file its issue, SEC9-1), with a duration-DERIVED `timeout-minutes`
+(`soak_minutes + 30 + soak_minutes/6` — fixed install slack +
+duration-linear teardown, SOAK-R7-4) so the job can never outrun its own
+clock, driving NEW `tests/stress/test_soak_sustained.py` (the NEW `soak`
+pytest marker — excluded from the per-PR ci.yml stress step AND
+stress-nightly via `-m 'not soak'`; the previously-dead `STRESS_DURATION_S`
+knob is now actually honored) under TWO NEW pure observability modules:
+`brutex/observability/process_probe.py` (the ONE COMMON cross-platform
+RSS+fd source of truth — Linux `/proc/self/status` VmRSS primary,
+`ru_maxrss` PEAK fallback documented as an absolute-CEILING backstop for the
+macOS tier, `/dev/fd` fd fallback; `None` = honest abstain, never a
+fabricated 0; `test_memory_growth._read_rss_kib` delegates to it) +
+`brutex/observability/soak_drift.py` (`SoakDriftMonitor` — RSS-ceiling /
+fd-growth / p99-latency-drift rules modelled on the in-repo
+`pull_health.py`, routed to a NEW real-time `SweepAlerter.soak_drift`
+Telegram alert). Ledger provenance: renumbered
+#1512→#1534→#1535→#1536→#1537→#1540→#1541→#1552→#1566→#1580 across
+eight-plus main collisions (#1580 chosen clear of live-main max #1560 AND the
+in-flight PR #1264/#1244 wave holding #1558–#1567, the PR #1236 high-jump
+precedent — the validator allows gaps); ships via the replacement-PR remedy
+(the PR #1095→#1097 / #1220→#1235 precedent) on
+`claude/soak-real-tier-rebuild` after commit 2757d005's `fix(test+docs):`
+scope (`+` illegal in a conventional-commit scope, no override, history
+rewrite forbidden) made the original `claude/serene-maxwell-0irkzn` (PR
+#1231) permanently unmergeable. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no Groww scope/vocab/rate change; CI + observability + tests + docs only;
+touched modules 100% line+branch.
+Earlier: 2026-07-07 (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 —
+the bullish Fibonacci retracement labels get their OWN PDL-anchored kernel
+fields: `FibLevels.get_by_bullish_label` had aliased bullish 23/38/62/78 onto
+the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric
+(0.236 + 0.786 = 1.022 ≠ 1.000) — the 23/78 rungs were wrong by 0.022×range
+(565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 pair coincides
+only as an IEEE observation, never relied on). The shared `rust/trading-core`
+kernel (DEC-SHARED-CORE-001 — Python grows NO math copy) adds
+`retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl + ratio·range)` (NO
+bull_50 — the bullish midpoint IS the shared exact-integer `retrace_50`); the
+`compute_fib_levels` FFI projection grows 15→19 (NEW `FIB_COMPUTE_LIST_LEN`,
+bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 — the FROZEN
+`evaluate_with_levels` evaluator ABI (the two were an accidental 15-tuple
+pun, now documented distinct constants; the evaluator zeroes + never reads
+the bull fields). The catching test's unconditional `pytest.skip` is REMOVED
+(bullish 78% chart-exact 24,258.00 = 2_425_800 paisa; frozen kernel goldens
+[2_411_665, 2_415_417, 2_421_483, 2_425_800]) and the module docstring's
+FALSE "verified bit-exact" bullish claim corrected honestly: 78 IS
+chart-verified, 23/38/62 are formula-derived kernel-frozen NOT
+screenshot-verified (Golden Rule #10). Byte-identity + NO indicator_version
+bump — the recorded decision: `get_by_bullish_label`/`FibDirection` have
+ZERO production consumers (census: tests only), the `near_fib_236/786`
+vocabulary bits read the untouched bearish fields, and tests/golden incl.
+the frozen 400-case vocab_golden_vectors.json pass with the fixture
+byte-untouched. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch).
+Earlier: 2026-07-07 (DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543 —
+the futures translation executor (Phase 5, R13/R14/R15) — an INDEX winner's
+trades re-priced on the FRONT-MONTH-AT-TRADE-TIME futures contract, the options
+executor's futures twin: NEW `brutex/futures/` (executor with the PINNED reject
+order lot_size → cost_regime → no_contract → no_data → stale_bar[opt-in] and
+the two pure date gates BEFORE any I/O; registry-calendar front-month
+resolution via the SHARED `select_near_month` — never a last-Thursday formula,
+lake-discovery fallback; exact-minute lake source with keep-FIRST dedup +
+corrupt-partition quarantine-skip; R4 disk-verified preflight naming missing
+months, no Phase-1 file edited; R45 independent Decimal-pipeline reference sim
++ per-run differential; R13 annotation-never-reranks projection + R42
+content-hash-stamped atomic sidecar) + `brutex/costs/futures_costs.py`
+(VERIFIED-rates-only: Groww min(₹20, 0.03%) futures brokerage + futures STT
+0.02%@2024-10-01/0.05%@2026-04-01 encoded; futures ETC/NSE-IPFT/stamp + the
+pre-2024-10-01 futures STT are explicit REFUSAL windows — the
+DEC-ETC-REGIME-HISTORY-001 precedent, no runtime escape hatch; INDEX futures
+COST-FREE per DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001, net == gross). R15
+OPTIMISTIC=PRECISE fill only (open ± one tick adverse; volume-0 printed bars
+FILL by default; gap-opens fill at the REAL open; the worst leg is DEFERRED,
+structurally absent); STOCK winners gracefully DEFERRED naming the future
+scope decree; a missing minute bar is a counted NO_DATA — never a nearest-bar
+substitute. HONEST: not yet wired into cmd_sweep_all/the dashboard (the seams
+are exposed; binding is the orchestrator's later step); R47 margin-ROI not
+built (no in-repo SPAN history). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+options path untouched (R12); 197 tests, all 8 new modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 + DEC-PHASE1-SIGNOFF-RECONCILE-001,
 MIGRATION.md #1552–#1556 — the doc/spec/ops debt reconciliation pack, DOCS-first:
 (1) the Track-2 costs spec's short-side slippage contradiction RESOLVED to the §8
 ADVERSE rule end-to-end — spec §4 Step 1 rewritten, "# CHECK SIGN" deleted, the
@@ -161,7 +447,7 @@ registered M4 Pro runner (in-PR reconcile: the first real run failed on the
 missing polars [data] extra, fixed a54c9a0a; re-run fully green, run
 28851211762 — step measured 20 s vs the generous 25-min timeout; VERDICT:
 KEEP CAP=8). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-scope/vocab/rate change; apparatus/CI/docs only.
+scope/vocab/rate change; apparatus/CI/docs only).
 Earlier: 2026-07-07 (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001,
 MIGRATION.md #1539 — the /movers prev-close calendar-contiguity honesty guard:
 a previous-day close/OI baseline that provably skipped a nearer NSE session (a
@@ -517,8 +803,7 @@ UNVERIFIED — the lake_keys pledge stands); read-time recovery ONLY —
 NAMED follow-up DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 (until it lands a drifted
 stock lake shows recovered Greeks but `/db` moneyness UNKNOWN). ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; `lake_keys.py`/`spot_drift.py`/
-`greeks_enrich.py` ALL 100% line+branch).
-Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
+`greeks_enrich.py` ALL 100% line+branch).Earlier: 2026-07-05 (DEC-STORED-DATA-VALIDATION-001 + DEC-MUTATION-ALERT-CANCELLED-001,
 MIGRATION.md #1510–#1511 — the stored-data validation pack, the round-2
 adversarial audit's confirmed defects fixed as ONE change set: (a) price
 POSITIVITY is enforced at the ENGINE READ BOUNDARY
@@ -929,7 +1214,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/magical-pasteur-y6gmr8` (**DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1557 /
+- **Active branch:** `claude/magical-pasteur-y6gmr8` (**DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1594 /
   ADR-0019** — the UNKILLABLE sweep run core, Phase 2 of the operator's one-click sweep program: all 15
   hunt gaps G1–G15 + the run-observability requirements R28/R38/R39/R40/R41/R42/R43/R45 delivered around
   a byte-untouched engine. SIXTEEN new 100%-line+branch modules —
@@ -967,7 +1252,7 @@ hostile-review pass._
   PROVEN ENGINE UNCHANGED: A/B byte-identity (run-core ON vs OFF — per-tuple store SHA-256 maps
   identical; chains content-equal modulo timestamps + the ONE additive line) + the frozen
   `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` reproduced with EVERY Phase-2 default ON incl. diffcheck.
-  HONEST envelope (#1557 carries the full list): dashboard-launched sweeps stay IN-PROCESS until the
+  HONEST envelope (#1594 carries the full list): dashboard-launched sweeps stay IN-PROCESS until the
   1-line detach adapter lands at merge-integration (the CLI/nightly path is detached-capable TODAY);
   the 5 hard-gate per-door kill counts are ABSENT manifest keys (absent ≠ zero, contract-pinned;
   P3-owned follow-up); TUPLE_DONE decimation (`ceil(total/10_000)`) is LOSSLESS — cumulative counters,
@@ -982,6 +1267,167 @@ hostile-review pass._
   SUSPECT + alert, never auto-kill; the watchdog detects, never kills (#999 stance); flock is weaker on
   NFS. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; ruff/ruff-format clean;
   `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/blissful-curie-gp94rk` (**the 11-item POLISH PACK, MIGRATION.md #1582–#1592** —
+  DEC-SESSION-CLOSE-BOUNDARY-PIN-001 (the at-close `>` vs `>=` divergence ruled deliberate + drift-pinned) ·
+  DEC-DAILY-CUTOFF-GROUNDED-001 (the #1401 M1 session-close-cutoff regression repaired + the data-grounded
+  DEFER-only daily cutoff, `BRUTEX_DAILY_CUTOFF_GROUNDED`) · DEC-NTM-REVALIDATE-CROSSPROC-001 (cross-process
+  flock single-flight for the NTM SWR refresh) · DEC-RETRY-COUNTER-SPLIT-001 (`in_pull_fetches` split into
+  persisted `empty_retries`/`transient_retries`, old rows load `None`; accepts the #924/#1355 twice-declined
+  follow-up) · DEC-GROWW-EPOCH-VERDICT-001 (deterministic epoch-interpretation verdict WARN + live-probe
+  runbook; parsing byte-unchanged, Unix-UTC stays UNVERIFIED) · DEC-CLI-DEPTH-FLOORS-001 (CLI fetch wires the
+  vendor-depth-floor learner + learned-floor planning clamp, shared schema_meta sidecar with the dashboard) ·
+  DEC-ACCOUNT-LEASE-CROSSHOST-001 (advisory cross-host heartbeat pull lease on shared lake storage — detection,
+  NOT mutual exclusion; `BRUTEX_PULL_LEASE=off`) · DEC-DERIVE-LOCK-VISIBILITY-001 (movers PrebuildGate honors
+  the cross-process derive lock, `source="cross_process"`) · DEC-RESUME-BANNER-AUTOCLEAR-001 (the resume red
+  banner auto-clears on the next real pull launch that actually STARTS — started-gated
+  `clear_banner_after_start`, a refused start clears nothing) · DEC-QUOTA-VERDICT-MOOT-001 (the quota phone-alert
+  follow-up closed as MOOT + the dead informational quota surface deleted, enforcement seam kept dormant) ·
+  DEC-DAILY-OPEN-PREDICATE-ALIGN-001 (#1592 — the two daily-open-substitution surfaces share the ONE
+  per-session predicate `spot_daily_resample.classify_daily_open`: Muhurat abstains on BOTH, `!=` 09:15 on
+  BOTH — the /completeness census's strict-`>` flips to `<>` + a `MUHURAT_SESSIONS` NOT-IN exclusion, its SQL
+  CTE mirror-pinned equivalent to the classifier; the remaining divergence is POPULATION (forming-session
+  cutoff) not predicate, documented + pinned; closes the #1267/#1232 named follow-up BY IMPLEMENTATION and
+  corrects #1582's wontfix misattribution).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch;
+  ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
+  Earlier: `claude/upbeat-tesla-mfrovq` (**DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593** — the #1056
+  pull-rate CallMeter LIFECYCLE + rate-widget truth pack, the 96-agent hostile-audit fixes as ONE observe-only change
+  set (ZERO pacing change, fetch behavior byte-identical): (a) C0 — NEW `SessionRateController.clear_meter` fired by
+  `BackgroundPullJob(on_run_end=…)` inside the identity-gated finally (after `on_finally`, own try/except, before the
+  single-flight release; job-lock → controller-lock order pinned), PLUS the OFF-job `pull_candles` spine pairing its
+  own build-site registration with an identity-gated clear (round 4 — `clear_meter(expected=)` compare-and-clear via
+  `_pull_meter_scope`, success AND raise; supersedes round 2's route-level unconditional `finally` clear on
+  `POST /api/v1/universe/pull`, which a round-4 reviewer REPRODUCED evicting a concurrent JOB pull's LIVE meter
+  whenever the route 400'd before `pull_candles` ever registered — registration is once per phase START, so the
+  job's F&O phase ran meterless and an issued-but-all-failing pull read FLOWING again) so "no in-process pull
+  running ⇒ no meter registered" is a process invariant covering every registration path — a dead pull's meter is
+  unreadable in every later process state, a raise-before-register clears nothing, and a concurrent pull's later
+  registration is never evicted; the intra-pull
+  `register_meter(None)`-keeps-prior guard byte-unchanged + re-pinned. (b) the dry-run finding —
+  `register_pull_meter(…, dry_run=)` clears-and-never-registers at ALL FOUR build sites (the metadata/F&O dry-run
+  GrowwClients carry a REAL unpaced CallMeter, `client.py` `default_factory=CallMeter`, so the #1056 "no `.meter`
+  silent no-op" in-code/ledger claims were FALSE and are rewritten); a warm-process dry-run reads the same honest
+  `meter_present=False` as a cold one, never a fabricated MEASURED "flowing"; round 2 — the direct route's dry-run
+  arm passes `session_rate=None`, so an operator's concurrent `?dry_run=true` on the off-job route can never evict a
+  LIVE pull's registered meter; round 4 — the gate's clear stays UNCONDITIONAL (no handle to compare) and its
+  reverse blast radius is now honestly DISCLOSED, not denied: a JOB dry-run started while a direct off-job REAL pull
+  is in flight evicts that pull's meter for its remainder (degrades to `meter_present=False`, never fabricates — the
+  false "no live pull can be concurrent with it in-process" premise rewritten, round-4 MINOR x2). (c) C1/C2 — per-spine mutant-killing
+  wiring tests drive the REAL `pull_all_spot`/`pull_candles`/`pull_expiries_contracts`/`pull_contract_candles` and
+  assert `peek_meter() is` the exact injected CallMeter + dry-run eviction twins (every severed site / dropped kwarg
+  now fails a named test; each mutant re-applied + captured failing). (d) C5 — `BackgroundPullJob.start(job_kind=)`
+  (`JOB_KIND_PULL`/`JOB_KIND_SWEEP`) + the atomic `running_job_kind` property; the `/api/v1/pull/rate` probe is
+  kind-aware so a 2-4-day dashboard sweep reads honest idle, never a site-wide red "stalled";
+  `_pull_active_probe`/`_pull_live` DELIBERATELY stay sweep-INCLUSIVE (the #920 duty-degrade floors still engage —
+  comment-pinned + regression-tested). (e) C3 — `BRIDGE_MAX_AGE_S=900.0` in `build_pull_rate_view_merged`: a bridge
+  older than 15 min (or non-finite-aged) is DEAD EVIDENCE ≡ absent, so a SIGKILLed CLI's stuck `pull_active=True`
+  stamp can't fabricate a permanent red on an idle dashboard; `<=` keeps the 12 s-900 s died-mid-run alert window;
+  fresh-bridge projection pinned field-for-field byte-identical. (f) C4 — bx-rate-monitor.js's false "obs rendered
+  beside it" claim rewritten (`req_per_hour_observed` is wire-only back-compat, deliberately NOT rendered) + the dead
+  `.bxrm-obs` CSS deleted. (g) C6 — six stale pre-#1056 doc passages + `register_pull_meter`'s "silent NO-OP"
+  docstring rewritten to registered-meter-lifecycle semantics; `build_app` gains an injectable `session_rate` test
+  seam (default byte-identical, pinned); round 3 — the falsified "no job running ⇒ no meter registered" over-claim
+  swept from its three remaining committed sites (`rate_sampler` ×2 + `pull_jobs`' `on_run_end` doc) to the scoped
+  "no in-process pull running" law + a grep doc-pin (`TestMeterLifecycleInvariantDocPin`) over every
+  `brutex/dashboard/*.py` so it can never re-drift. HONEST: the sampler stays contractually observe-only; a dry-run <60 s after
+  a real pull can still read the decaying `recent_minute` as "flowing" ≤60 s (admission fallback — documented, not
+  mechanised); the job-finish clear can lose to at most ONE final ≤2 s sampler snapshot (pull_active flips False in
+  the same path); a wedged-but-alive CLI beyond 900 s also decays to idle (Telegram pull-health + the pull journal
+  remain the persistent alarm); the CLI bridge still carries no `failed_rps` (#1211 named follow-up). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch; ruff/ruff-format/`mypy --strict`/`pyright`
+  clean).
+  Earlier: `claude/sleepy-hawking-l87497` (**DEC-FORM-WINNER-PERSIST-001,
+  MIGRATION.md #1581** — the durable `&`-form winner map: `schema_meta` rows
+  (`groww.form_winner.<key>` → the KEY-level winning form STRING — the winner's
+  ROLE applied to the key's own `underlying_symbol_forms` tuple, so the metadata
+  and candle phases share ONE value space; `underlying_symbol_forms` moved into
+  `symbol_form_preference.py`, `contracts.py` re-exports byte-compatibly) via the
+  NEW `PersistentSymbolFormPreference` over the shared `brutex/data/meta_kv.py`
+  `MetaKV` Protocol (the `vendor_floor` durable-learned-value pattern;
+  `VendorFloorMetaStore` aliased); MULTI-form keys only on BOTH paths (the ~750
+  plain underlyings pay ZERO store I/O — order AND record); the seed `get_meta`
+  runs OUTSIDE the map lock under the COMMON `run_with_deadline` bound (2 s,
+  `BRUTEX_FORM_WINNER_READ_DEADLINE_S`) so a wedged sidecar read can never stall
+  the fan-out; the `preference_key` PRIMARY-underlying normalization on
+  `resolve_expiries`/`resolve_contracts`; ONE shared instance wired per pipeline run
+  across the metadata + historical phases (the spine's fresh-per-pass default stands
+  down); the `brutex doctor --live --ampersand-probe` stage-14 probe TOOLING whose
+  decisive run is the ONLY writer of the `groww.form_probe.verdict` stamp — the
+  stage's `seeded` count is READ-BACK-VERIFIED (a kill-switched or failed winner
+  write is never claimed; `amp.seed_shortfall` names the cause) and a
+  data-beside-a-RAISED-sibling name reads `*_UNCONFIRMED` (seeds its winner, never
+  counts CLEAR/decisive — a throttled side is not a refuted side). HONEST:
+  the live probe was NOT run here (no creds in the build environment) — the #898
+  `%26` UNVERIFIED wording stands byte-intact; the stamp flips it only with a real
+  transcript. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change;
+  touched modules 100% line+branch; ruff/ruff-format clean, mypy `--strict` clean,
+  pyright at the pre-change baseline).
+  Earlier: `claude/peaceful-wright-r7l8l9` (**DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560** — the
+  bullish Fibonacci retracement fix: `FibLevels.get_by_bullish_label` had aliased the bullish 23/38/62/78 labels onto
+  the REVERSED bearish (PDH-anchored) fields, but Fib ratios are asymmetric (0.236 + 0.786 = 1.022 ≠ 1.000) — bullish
+  23/78 were wrong by 0.022×range (565 paisa on the NIFTY 07-May-2026 golden anchor; the 38/62 numeric coincidence
+  `0.382 + 0.618 = 1.000` is an IEEE observation, never relied on). The shared `rust/trading-core` kernel
+  (DEC-SHARED-CORE-001 — Python grows NO math copy) gains `retrace_bull_{23,38,62,78}_paisa = round_half_even(pdl +
+  ratio·range)` token-mirrored to the bearish lines (NO bull_50 — the bullish midpoint IS the shared exact-integer
+  `retrace_50`; 0%/100% = pdl/pdh; extensions stay `ext_up_*`); the `compute_fib_levels` FFI projection grows 15→19
+  (NEW `FIB_COMPUTE_LIST_LEN`, original 15 order untouched, bull tail APPENDED last) while `FIB_LEVELS_LEN` stays 15 —
+  the FROZEN `evaluate_with_levels` evaluator ABI (an accidental 15-tuple pun, now two documented distinct constants;
+  the evaluator zeroes + never reads the bull fields). The catching test's unconditional `pytest.skip` REMOVED
+  (bullish 78% chart-exact 2_425_800 paisa; frozen kernel goldens raw[15:] == [2_411_665, 2_415_417, 2_421_483,
+  2_425_800]); the module docstring's FALSE "verified bit-exact" bullish claim corrected honestly (78 chart-verified;
+  23/38/62 formula-derived kernel-frozen, NOT screenshot-verified — Golden Rule #10); NEW Rust proptest
+  `bullish_retracements_are_not_bearish_aliases` (the asymmetry teeth killing a revert-to-alias mutant) + the bull
+  ladder ordering pin; post-round-1-review TWO native `fib.rs` exact-value unit pins added
+  (`bullish_retracement_exact_values_nifty_anchor` + `bullish_bearish_asymmetry_gap_exact_banknifty_anchor`) plus the
+  15/17→21 stale level-count docstring reconciles (`indicators/__init__.py`, `weekly_anchors.py`,
+  `fib_definitions.py`). Byte-identity + NO indicator_version bump — the recorded decision:
+  `get_by_bullish_label`/`FibDirection` have ZERO production consumers (census: tests only), the `near_fib_236/786`
+  bits read the untouched bearish fields, tests/golden incl. the frozen 400-case vocab_golden_vectors.json pass with
+  the fixture byte-untouched (`git diff origin/main -- tests/golden/fixtures/` EMPTY). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `fib_levels.py` 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright at the pre-change baseline).
+  Earlier: `claude/wonderful-wright-17gyqj` (**DEC-FUTURES-EXEC-TRANSLATION-001, MIGRATION.md #1543** —
+  the futures translation executor, Phase 5 of the one-click sweep law (R13/R14/R15) — the options executor's futures
+  twin, a NEW POST-sweep translation layer: an INDEX winner's trades are re-priced on the FRONT-MONTH-AT-TRADE-TIME
+  futures contract (nearest UNEXPIRED monthly as of each trade's ENTRY date, resolved from the REAL `registry.duckdb`
+  calendar via the SHARED `movers_futures.select_near_month` — NEVER a computed last-Thursday formula; graceful
+  lake-partition-discovery fallback; expiry-day trades stay on the EXPIRING contract, post-expiry tail → M+1, M/M+1
+  co-trading = deterministic earliest-expiry-≥-entry, never liquidity-picked). NEW `brutex/futures/` (executor ·
+  contract_resolver · lake_source · preflight · reference_sim · leaderboard) + `brutex/costs/futures_costs.py`. R15
+  fills are OPTIMISTIC = PRECISE ONLY — minute-bar OPEN ± one tick ADVERSE per side (the LONG arm golden-pinned
+  byte-equal to `calculator._apply_slippage(...,"long")`; the SHORT arm computed adverse-both-sides, NOT inheriting
+  the documented `# CHECK SIGN` ambiguity), gap-opens fill at the REAL open (never an SL/TP fantasy), volume-0
+  PRINTED bars are REAL + TRADABLE (STALE_BAR strictly opt-in), a missing entry/exit minute is a counted NO_DATA
+  (never a nearest-bar substitute), the pessimistic/worst leg is DEFERRED — structurally absent. PINNED reject order
+  lot_size → cost_regime → no_contract → no_data → stale_bar with both pure DATE gates before any registry/lake I/O
+  (never-called-seam pinned); count-dict tally projected 1:1 onto `n_rejected_*` (no catch-all). COSTS are
+  VERIFIED-rates-only (the DEC-ETC-REGIME-HISTORY-001 refusal precedent, NO runtime escape hatch): Groww futures
+  brokerage min(₹20, 0.03%×turnover) (PLAN_FINALIZATION §8.1 row 2) + futures STT 0.02% eff. 2024-10-01 / 0.05% eff.
+  2026-04-01 (TAX_HANDLING §8.1 + DEC-COST-003) are encoded; EVERY futures-ETC window + NSE futures IPFT + futures
+  stamp + pre-2024-10-01 futures STT ship as rate-less REFUSAL rows (figures live in source TEXT only — the §14
+  proposal block is not a verification) ⇒ a cost-bearing stock future counts COST_REGIME_UNVERIFIED (exercised via
+  the SYNTHETIC cited-regime/lot test fixture — no NATURAL input reaches the gate today: index futures are cost-free
+  and skip it, a natural stock future trips LOT_SIZE_UNKNOWN first; the designed forward path, naturally reachable
+  only once a cost-bearing stock-futures scope decree + cited RegimeRows land); INDEX futures
+  are COST-FREE (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 — net == gross; the ±tick is R15 fill realism, not a statutory
+  cost). Lots via the ONE date-keyed derivative-lot history (2020-dated / stock signals ⇒ counted LOT_SIZE_UNKNOWN,
+  never invented). STOCK winners → ExecutionKind.STOCK_SPOT_DEFERRED with an honest note NAMING the future scope
+  decree (R11); routing lives ABOVE the instrument-agnostic executor. R22 MAE/MFE from the contract's OWN minute
+  path; R31 VIX passthrough (missing = honest None, counted); R45 differential vs an independent naive
+  Decimal-pipeline reference (AST-pinned to share only the primitive readers; run_id-seeded deterministic sample;
+  mismatch ⇒ SUSPECT + loud); R42 content-hash-stamped atomic sidecar (an UNKEYED sha256 integrity checksum —
+  corrupted/torn fails its stamp, rebuilt byte-identical; NOT tamper-evidence: no secret key, a rewriter could
+  restamp); R4 preflight disk-verifies each trade month's front-month partition(s) across the roll seam and
+  refuses naming exact months — no Phase-1 file edited (the pure helper is exposed for the shim). ROLL-9
+  suffix-independence property-gated (fills+MAE/MFE bit-identical under absent/mutated/extreme post-exit suffixes);
+  R13/R30 rank-independence property-gated (annotation additive-only under ONE `futures_exec` key). O(1) honest
+  (R29): per-trade resolve+fill flat vs signal AND contract count (bench-pinned at the `_o1_tiers` ceiling); first
+  loads O(contracts)/O(bars-in-contract) + MAE/MFE O(bars-in-trade) STATED, never hidden. HONEST: NOT yet wired into
+  `cmd_sweep_all`/the dashboard (deliberate no-existing-file-edit boundary — the orchestrator binds later); R47
+  margin-ROI not built (no in-repo date-keyed SPAN history — nothing rendered, nothing invented). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; options path untouched (R12); F&O lake REFERENCE_ONLY; no scope/vocab/rate change; 197
+  tests (unit/integration/property/golden/bench/chaos), all 8 new modules 100.00% line+branch (760/194);
+  ruff/ruff-format clean; `mypy --strict` clean; pyright at the 38-error pre-change baseline, 0 new).
   Earlier: `claude/stoic-davinci-7c7xp0` (**DEC-TRACK2-COSTS-SPEC-RECONCILE-001 +
   DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 + DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
   DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556** — the doc/spec/ops debt reconciliation
@@ -1357,8 +1803,7 @@ hostile-review pass._
   DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — until it lands a drifted stock lake shows recovered Greeks but a `/db`
   moneyness UNKNOWN (honest split-brain). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no
   scope/vocab/rate change; `lake_keys.py` (75/44) + `spot_drift.py` (143/42, NEW) + `greeks_enrich.py` (539/130) ALL
-  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).
-  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
+  100% line+branch; ruff/ruff-format clean, `mypy --strict` + `pyright` at the pre-change baseline).  Earlier: `claude/stored-data-validation` (**DEC-STORED-DATA-VALIDATION-001 +
   DEC-MUTATION-ALERT-CANCELLED-001, MIGRATION.md #1510–#1511** — the stored-data validation pack: price POSITIVITY at
   the ENGINE READ BOUNDARY (`arrow_table_to_bars`, partition-naming corrupt-bar errors) — NOT the general bar
   constructor, which stays permissive for the Greeks BAD_INPUT / executor-guard / trade-sim-fallback classifiers; the NEW COMMON
@@ -2776,14 +3221,30 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/magical-pasteur-y6gmr8`
+  Earlier: `claude/blissful-curie-gp94rk`
+  Earlier: `claude/upbeat-tesla-mfrovq`
+  (DEC-RATE-METER-LIFECYCLE-001, MIGRATION.md #1593 — the #1056 pull-rate
+  CallMeter lifecycle + rate-widget truth pack; see §1 Active branch for the
+  full blurb)
+  Earlier: `claude/sleepy-hawking-l87497`
+  Earlier: `claude/peaceful-wright-r7l8l9`
+  (DEC-FIB-BULLISH-RETRACE-001, MIGRATION.md #1560 — the bullish Fibonacci
+  retracement fix: PDL-anchored `retrace_bull_{23,38,62,78}_paisa` kernel
+  fields replace the wrong bearish alias; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/stoic-davinci-7c7xp0`
+  (DEC-TRACK2-COSTS-SPEC-RECONCILE-001 + DEC-BROKER-DOCS-AWSONLY-RECONCILE-001 +
+  DEC-GPU-GATE-RECONCILE-001 + DEC-CLOUD-AUTOFIX-RETIRE-001 +
+  DEC-PHASE1-SIGNOFF-RECONCILE-001, MIGRATION.md #1552–#1556 — the doc/spec/ops
+  debt reconciliation pack; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/zen-meitner-8780fo`
   (DEC-RUN-IDENTITY-GUARD-PARITY-001 + DEC-OPTION-DEDUP-BLOOM-VERIFY-PIN-001 +
   DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 + DEC-TRADE-SIM-U128-KERNEL-001 +
   DEC-EXECUTION-TRIO-DELETE-001, MIGRATION.md #1546–#1550)
-  Earlier: `claude/ecstatic-cannon-o3zbbe`
-  (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541 — the test-apparatus
-  debt pack: nine long-ledgered apparatus gaps closed as ONE change set;
-  apparatus/CI/docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/ecstatic-cannon-o3zbbe` (DEC-TEST-APPARATUS-DEBTS-001,
+  MIGRATION.md #1541 — the test-apparatus debt pack: nine long-ledgered
+  apparatus gaps closed as ONE change set; apparatus/CI/docs only; see §1
+  Active branch chain for the full blurb)
   Earlier: `claude/eloquent-shannon-bdjnuv` (carrying BOTH movers fixes)
   (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001, MIGRATION.md #1539 — the `/movers`
   prev-close/OI baselines gain an honest calendar-contiguity verdict: a
@@ -2799,15 +3260,16 @@ hostile-review pass._
   futures/options session value; READ-ONLY dashboard ranking, ENGINE UNCHANGED
   NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/intelligent-euler-dwf2ab`
-  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch` pull
-  path runs the SAME fenced Greeks-enrichment pass the dashboard runs + the NEW
-  `brutex enrich-greeks` bulk re-enrich subcommand; ENGINE UNCHANGED),
-  `claude/movers-asof-default-latest-minute`
+  (DEC-CLI-GREEKS-ENRICH-001, MIGRATION.md #1536 — the CLI `brutex fetch`
+  pull path now runs the SAME fenced Greeks-enrichment pass the dashboard
+  runs + the NEW `brutex enrich-greeks` bulk re-enrich; see §1 Active
+  branch chain for the full blurb)
+  Earlier: `claude/movers-asof-default-latest-minute`
   (DEC-MOVERS-ASOF-LATEST-DEFAULT-001, MIGRATION.md #1535 — the `/movers` Spot
   default as-of TIME resolves to the SAME latest available minute across EVERY
   timeframe, so 1m ↔ 2m ↔ 3m ↔ 3hour ↔ 1day always show the identical latest
-  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX),
-  `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
+  close; READ-ONLY dashboard, ENGINE UNCHANGED NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/happy-allen-y29nc6` (DEC-BENCH-ABS-BASELINE-001, MIGRATION.md
   #1534), `claude/peaceful-planck-dnsjg9` (DEC-LEDGER-DELTA-O-PAGE-001,
   MIGRATION.md #1533) and `claude/amazing-darwin-hb4caw`
   (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 + DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001 /
@@ -2966,7 +3428,7 @@ bruteX/
 │   ├── property/                   ← hypothesis + proptest (24 invariants)
 │   ├── golden/                     ← byte-equality fixtures
 │   ├── bench/                      ← O(1) ratio tests
-│   ├── stress/                     ← 24h sustained
+│   ├── stress/                     ← nightly ~5-min gate + weekly soak (#1580)
 │   ├── smoke/                      ← <30s pre-push
 │   └── fakes/                      ← test doubles
 └── .github/workflows/
@@ -3009,7 +3471,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:327-368`; `groww/constants.py:177`; `dashboard/pull_controller.py:978`; `cli.py:3969-3970` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:327-368`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4063-4064` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

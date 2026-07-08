@@ -95,6 +95,21 @@ from brutex.observability.pull_health import STALLED_RPS_FLOOR
 #: — so an ended pull never lingers as a fake "live" reading (Golden Rule #1).
 STALE_AFTER_S: Final[float] = 12.0
 
+#: Maximum CLI-bridge snapshot age (seconds) the merged projection will still TRUST
+#: (DEC-RATE-METER-LIFECYCLE-001, audit C3). The CLI publishes per processed window
+#: (~1 s cadence under load); its worst LEGITIMATE silent gap is bounded by one
+#: fetch+write cycle — a 2-3-chunk window at the 1 r/s AIMD deep floor, plus the
+#: retryable-error ladders, plus the 90 s ``GROWW_WRITE_DEADLINE_S`` hung-write bound,
+#: plus a token reauth — comfortably under 900 s (= 75 × :data:`STALE_AFTER_S`). Beyond
+#: it the bridge file is DEAD EVIDENCE (a SIGKILLed CLI's stuck ``pull_active=True``
+#: stamp — the in-process ``finally`` that flips it False never ran) and is treated as
+#: ABSENT, so a dead CLI can no longer fabricate a PERMANENT site-wide red "stalled" on
+#: an idle dashboard. Within the bound (12 s < age ≤ 900 s) the red alert window is
+#: PRESERVED — a CLI that died mid-run still reads honestly stalled for 15 minutes.
+#: A POLICY heuristic derived from the cadence arithmetic above, NOT a vendor fact
+#: (Golden Rule #10) — operator-revisable in this one Final; the literal is test-pinned.
+BRIDGE_MAX_AGE_S: Final[float] = 900.0
+
 #: Achieved-r/s floor at/below which an ACTIVELY-ticking pull reads STALLED. Reuses the
 #: pull-health monitor's :data:`~brutex.observability.pull_health.STALLED_RPS_FLOOR`
 #: (0.5 r/s) so the widget's red light and the monitor's ``pull.stalled`` Telegram alert
@@ -191,9 +206,12 @@ class PullRateView:
     req_per_min_rate
         The controller's ADMISSION-derived per-minute average expressed as an r/s figure
         (``recent_minute / 60``) — DEC-RATE-WIDGET-FNO-HONEST-001. This is the HONEST
-        companion to :attr:`req_per_sec_achieved` for the phases (metadata + F&O) where the
-        transport :class:`~brutex.adapters.call_meter.CallMeter` (the source of the MEASURED
-        completed-rate) is unreachable: it is a per-minute ADMISSION average — calls the
+        companion to :attr:`req_per_sec_achieved` for the ticks where NO transport
+        :class:`~brutex.adapters.call_meter.CallMeter` is registered — the
+        pre-registration window at pull start, a dry-run (which explicitly DEREGISTERS)
+        or after the job-finish clear (DEC-RATE-METER-LIFECYCLE-001; every real pull's
+        metadata + F&O phases are meter-FED since DEC-RATE-WIDGET-FNO-MEASURED-001's
+        build-site registrations): it is a per-minute ADMISSION average — calls the
         controller ISSUED ÷ 60 — NOT a measured completed throughput, so it is surfaced in its
         OWN field + labelled "req/min rate" in the widget, never poured into the "achieved"
         (measured completed) slot (the over-report + fake-alive bug this decision fixes). Zeroed
@@ -302,14 +320,18 @@ def build_pull_rate_view(
     meter_present
         Whether the panel's ``effective_rps`` is a REAL measured completed-rate from the
         transport :class:`~brutex.adapters.call_meter.CallMeter` (DEC-RATE-WIDGET-FNO-HONEST-001).
-        ``True`` (the default — the spot phase, where the meter is wired) ⇒ the ``stalled``
-        verdict reads the MEASURED ``effective_rps`` (an issued-but-all-failing pull reads
-        STALLED because its completed-rate is at/below the floor — the fake-alive case). ``False``
-        (the metadata + F&O phases, whose meter is unreachable from the sampler seam) ⇒ there is
-        NO completed-rate measurement, so the verdict falls back to the controller's ADMISSION
-        signal (``recent_minute == 0`` ⇒ stalled / idle) and ``req_per_sec_achieved`` stays a
-        HONEST ``0`` (no fabricated completed-rate), the per-minute admission average being
-        carried separately in :attr:`~PullRateView.req_per_min_rate`.
+        ``True`` (the default — any tick fed by the REGISTERED pool meter's real snapshot:
+        the spot per-window observe AND, since DEC-RATE-WIDGET-FNO-MEASURED-001, the
+        sampler's metadata/F&O ticks) ⇒ the ``stalled`` verdict reads the MEASURED
+        ``effective_rps`` (an issued-but-all-failing pull reads STALLED because its
+        completed-rate is at/below the floor — the fake-alive case). ``False`` means
+        exactly "no meter registered" — the pre-registration window at pull start, a
+        dry-run (which explicitly DEREGISTERS) or after the job-finish clear
+        (DEC-RATE-METER-LIFECYCLE-001) ⇒ there is NO completed-rate measurement, so the
+        verdict falls back to the controller's ADMISSION signal (``recent_minute == 0`` ⇒
+        stalled / idle) and ``req_per_sec_achieved`` stays a HONEST ``0`` (no fabricated
+        completed-rate), the per-minute admission average being carried separately in
+        :attr:`~PullRateView.req_per_min_rate`.
     failed_rps
         The transport meter's MEASURED rolling failed-calls rate (the meter snapshot's
         ``failed_rps`` — DEC-PULL-TELEMETRY-TRIAD-001, closing the #1022 flagged
@@ -441,8 +463,11 @@ def build_pull_rate_view(
         achieved = effective_rps
         measured_failed_rps = failed_rps
     else:
-        # The metadata + F&O phases: the meter is unreachable from the sampler seam, so there is
-        # NO measured completed-rate. Fall back to the controller's ADMISSION signal — a pull with
+        # NO meter is registered (DEC-RATE-METER-LIFECYCLE-001 — the pre-registration
+        # window at pull start, a dry-run [which explicitly deregisters], or after the
+        # job-finish clear; the metadata + F&O phases of a REAL pull are meter-FED since
+        # DEC-RATE-WIDGET-FNO-MEASURED-001), so there is NO measured completed-rate.
+        # Fall back to the controller's ADMISSION signal — a pull with
         # ZERO admissions in the trailing minute is idle/stalled; any admissions ⇒ flowing — and
         # keep ``achieved`` an HONEST 0 (never the fabricated ``recent_minute / 60`` the old
         # sampler poured into this slot, which both over-reported AND blinded the stall verdict).
@@ -506,6 +531,7 @@ def build_pull_rate_view_merged(
     bridge_pull_active: bool | None = None,
     stale_after_s: float = STALE_AFTER_S,
     stall_rps_floor: float = STALL_RPS_FLOOR,
+    bridge_max_age_s: float = BRIDGE_MAX_AGE_S,
 ) -> PullRateView:
     """Project the FRESHER of the in-memory dashboard panel and the cross-process bridge.
 
@@ -539,8 +565,10 @@ def build_pull_rate_view_merged(
         (DEC-RATE-MONITOR-EXPAND-001) — req/sec·10min·hour evidence. Default ``0``.
     panel_meter_present
         Whether the in-memory panel's ``effective_rps`` is a REAL measured completed-rate
-        (the spot phase) or absent (the metadata + F&O phases fed by the admission-only
-        sampler) — DEC-RATE-WIDGET-FNO-HONEST-001. Threaded into
+        (a tick fed by the REGISTERED pool meter's real snapshot) or honestly absent
+        (``False`` — no meter registered: the pre-registration window, a dry-run [which
+        deregisters] or after the job-finish clear, DEC-RATE-METER-LIFECYCLE-001) —
+        DEC-RATE-WIDGET-FNO-HONEST-001. Threaded into
         :func:`build_pull_rate_view` so the ``stalled`` verdict reads the measured rate when
         present and the admission signal otherwise. Default ``True`` (the meter-fed contract).
     panel_failed_rps
@@ -585,6 +613,14 @@ def build_pull_rate_view_merged(
         Idle threshold (default :data:`STALE_AFTER_S`).
     stall_rps_floor
         Achieved-r/s stall floor (default :data:`STALL_RPS_FLOOR`).
+    bridge_max_age_s
+        Maximum bridge age (seconds) still trusted by the freshness pick (default
+        :data:`BRIDGE_MAX_AGE_S` — DEC-RATE-METER-LIFECYCLE-001, audit C3). A bridge
+        OLDER than this (or with a non-finite age) is DEAD EVIDENCE and treated as
+        ABSENT (panel-only projection), so a SIGKILLed CLI's stuck ``pull_active=True``
+        file can no longer out-fresh a never-ticked panel FOREVER. ``<=`` keeps the
+        bridge trusted AT the bound — a CLI that died mid-run keeps its full red alert
+        window (12 s < age ≤ 900 s still reads stalled).
 
     Returns
     -------
@@ -593,9 +629,14 @@ def build_pull_rate_view_merged(
     """
     # No bridge file (or it had no usable age) → project the panel alone, byte-identical to
     # the pre-bridge behaviour (the no-CLI-file in-memory fallback). The ``is not None`` test
-    # narrows ``bridge_seconds_since_update`` to ``float`` for the ``build_pull_rate_view`` call.
+    # narrows ``bridge_seconds_since_update`` to ``float`` for the ``build_pull_rate_view``
+    # call. An over-TTL or non-finite age is DEAD EVIDENCE ≡ absent (audit C3): the
+    # ``math.isfinite`` conjunct makes the NaN/inf behaviour a CONTRACT (panel path),
+    # not an accident of float comparison ordering.
     if (
         bridge_seconds_since_update is not None
+        and math.isfinite(bridge_seconds_since_update)
+        and bridge_seconds_since_update <= bridge_max_age_s
         and bridge_seconds_since_update < panel_seconds_since_update
     ):
         # The bridge fields are written together by the publisher, so a present age implies
@@ -640,6 +681,7 @@ def build_pull_rate_view_merged(
 
 
 __all__ = [
+    "BRIDGE_MAX_AGE_S",
     "CEILING_PER_MIN_LIMIT",
     "CEILING_RPS_LIMIT",
     "FLOW_DONE",

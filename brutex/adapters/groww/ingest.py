@@ -293,6 +293,16 @@ class _RawWindow:
     raw_bars: list[CandleBar]
     fetch_count: int
     settle_empty: bool
+    #: Clean 0-bar vendor responses the producer's fetch ladder observed for this
+    #: window (DEC-RETRY-COUNTER-SPLIT-001) — the EMPTY half of the
+    #: ``in_pull_fetches`` split the tail threads into ``ledger.record``. The
+    #: TRANSIENT half is structurally ZERO on this spot payload: a retryable
+    #: transient short-circuits on the producer (records FAILED + returns a
+    #: transient outcome — it never builds a ``_RawWindow``), so by construction
+    #: ``fetch_count == empty_fetches + (1 if raw_bars else 0)`` here. Defaulted 0
+    #: (the structural floor of a first-try win) so the field rides the frozen
+    #: payload additively; the producer always passes the real count.
+    empty_fetches: int = 0
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
@@ -888,6 +898,12 @@ def _fetch_window_raw(
     # EMPTY window WITHOUT calling the vendor (the out-of-box guard; the production default
     # is 3, never < 1). This also keeps ``in_pull_fetches`` honest (≥1 for any recorded
     # outcome, 0 only for a never-fetched PLANNED row).
+    # SPLIT counter (DEC-RETRY-COUNTER-SPLIT-001): clean 0-bar responses observed —
+    # the EMPTY half of ``in_pull_fetches`` persisted as ``empty_retries``. The
+    # TRANSIENT half needs no loop counter on this spine: a retryable transient
+    # short-circuits below (record + return), so it is exactly 1 at that record
+    # site and 0 everywhere the tail records.
+    empty_fetches = 0
     for empty_attempt in range(max(1, empty_retry_attempts)):
         if pace is not None:
             pace()
@@ -937,6 +953,14 @@ def _fetch_window_raw(
                         bars_net_new=0,  # the failed fetch stored nothing (a known 0)
                         now=datetime.now(UTC),
                         in_pull_fetches=fetch_count,
+                        # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): every prior
+                        # ladder fetch was a clean empty (the loop re-iterates
+                        # only on one) and THIS fetch is the one transient — the
+                        # spot ladder short-circuits on the first transient, so
+                        # ``empty_fetches + 1 == fetch_count`` here by
+                        # construction (test-pinned).
+                        empty_retries=empty_fetches,
+                        transient_retries=1,
                     )
                 # Vendor-down error-storm breaker + dead-credential StillStale escalation
                 # (DEC-VENDOR-DOWN-BREAKER-001): this window's whole bounded retry ladder
@@ -976,6 +1000,7 @@ def _fetch_window_raw(
             raise
         if raw_bars:
             break  # bars on this attempt — the (possibly glitched) empty is recovered
+        empty_fetches += 1  # one more clean 0-bar response (DEC-RETRY-COUNTER-SPLIT-001)
         if empty_attempt + 1 < empty_retry_attempts:
             # Still empty + a retry remains: pause briefly and re-fetch (the glitch may clear).
             _LOG.debug(
@@ -1056,6 +1081,7 @@ def _fetch_window_raw(
             raw_bars=raw_bars,
             fetch_count=fetch_count,
             settle_empty=settle_empty,
+            empty_fetches=empty_fetches,
         ),
     )
 
@@ -1219,6 +1245,12 @@ def _process_window_tail(
                 bars_net_new=0,  # the deferred write stored nothing (a known 0)
                 now=datetime.now(UTC),
                 in_pull_fetches=fetch_count,
+                # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): the fetch ladder's own
+                # facts — the defer is a WRITE-side stall, not a vendor transient,
+                # so the transient half is the payload's structural 0 (see
+                # ``_RawWindow.empty_fetches``).
+                empty_retries=raw.empty_fetches,
+                transient_retries=0,
             )
         # Cross-window write-health accounting (DEC-WRITE-HEALTH-BREAKER-001): AFTER the
         # ledger row is durably FAILED (so the deferred window is never lost even if the
@@ -1385,6 +1417,11 @@ def _process_window_tail(
             bars_net_new=result.bars_net_new,
             now=datetime.now(UTC),
             in_pull_fetches=fetch_count,
+            # The SPLIT (DEC-RETRY-COUNTER-SPLIT-001): a clean tail's transient
+            # half is the payload's structural 0 (a retryable transient
+            # short-circuited on the producer and never built a ``_RawWindow``).
+            empty_retries=raw.empty_fetches,
+            transient_retries=0,
             settle_empty=settle_empty,
             degraded=degraded,
             degraded_reason=degraded_reason,

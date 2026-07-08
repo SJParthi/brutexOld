@@ -27,7 +27,9 @@ from __future__ import annotations
 # module-private names by design (DEC-P0-017 convention).
 # pyright: reportPrivateUsage=false
 import json
+import os
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -1335,6 +1337,125 @@ class TestNtmStaleWhileRevalidate:
         done = threading.Event()
         il._default_revalidate_runner(done.set)
         assert done.wait(timeout=30.0)
+
+
+class TestNtmRevalidateCrossproc:
+    """DEC-NTM-REVALIDATE-CROSSPROC-001 — cross-process single-flight in the worker.
+
+    The #1287 named follow-up: the in-flight flag is PROCESS-local, so multiple
+    uvicorn workers could each spawn one refresh. The worker now takes the
+    non-blocking ``ntm_cache.revalidate_lock`` flock — a peer already refreshing
+    means SKIP; a genuinely-acquired lock re-checks freshness (double-checked);
+    an unavailable lock fails OPEN to the pre-fix unguarded refresh.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_single_flight(self) -> Iterator[None]:
+        il._NTM_REVALIDATE_STATE["in_flight"] = False
+        yield
+        il._NTM_REVALIDATE_STATE["in_flight"] = False
+
+    @staticmethod
+    def _capture_spawn(opener: Callable[[str], str], *, cache_dir: Path) -> Callable[[], None]:
+        """Spawn one revalidation with a capturing runner; return the captured job."""
+        captured: list[Callable[[], None]] = []
+        assert (
+            il._spawn_ntm_revalidation(opener, cache_dir=cache_dir, runner=captured.append) is True
+        )
+        assert len(captured) == 1
+        return captured[0]
+
+    def test_worker_skips_fetch_when_peer_process_holds_the_lock(self, tmp_path: Path) -> None:
+        """Peer holds the flock → the worker never fetches; the flag still clears."""
+        import fcntl
+
+        from brutex.dashboard.ntm_cache import REVALIDATE_LOCK_FILENAME
+
+        cache_dir = tmp_path / "cache"
+        stale = _constituents_csv([("OLDCO", "INE111A01011")])
+        assert save_constituent_csv(stale, cache_dir=cache_dir) is True
+        calls: list[str] = []
+
+        def _tracking_opener(url: str) -> str:
+            calls.append(url)
+            return _constituents_csv([("NEWCO", "INE222A01012")])
+
+        job = self._capture_spawn(_tracking_opener, cache_dir=cache_dir)
+        # Simulate the PEER process mid-refresh: hold the sidecar flock on our own fd.
+        peer_fd = os.open(cache_dir / REVALIDATE_LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(peer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with capture_logs() as logs:
+                job()
+        finally:
+            os.close(peer_fd)
+        assert calls == []  # the slow host was NOT hit a second time
+        assert _events(logs, "ntm.revalidate_skipped_crossproc")
+        assert not _events(logs, "ntm.revalidate_done")
+        assert load_cached_constituent_csv(cache_dir=cache_dir) == stale  # untouched
+        assert il._NTM_REVALIDATE_STATE["in_flight"] is False  # can revalidate later
+
+    def test_worker_recheck_under_lock_skips_when_peer_just_refreshed(self, tmp_path: Path) -> None:
+        """Double-checked freshness: a peer refresh between spawn and lock → skip."""
+        cache_dir = tmp_path / "cache"
+        old = _constituents_csv([("OLDCO", "INE111A01011")])
+        assert save_constituent_csv(old, cache_dir=cache_dir) is True
+        cache_file = cache_dir / "ntm_constituents.csv"
+        eight_days_ago = time.time() - 8 * 24 * 60 * 60
+        os.utime(cache_file, (eight_days_ago, eight_days_ago))  # stale vs the 7d TTL
+        calls: list[str] = []
+
+        def _tracking_opener(url: str) -> str:
+            calls.append(url)
+            return _constituents_csv([("NEWCO", "INE222A01012")])
+
+        job = self._capture_spawn(_tracking_opener, cache_dir=cache_dir)
+        # The PEER finished its refresh before our worker got the lock: the cache
+        # is now FRESH (a brand-new mtime).
+        fresh = _constituents_csv([("PEERCO", "INE333A01013")])
+        assert save_constituent_csv(fresh, cache_dir=cache_dir) is True
+        with capture_logs() as logs:
+            job()
+        assert calls == []  # no fetch — the peer's result serves everyone
+        assert _events(logs, "ntm.revalidate_skipped_fresh")
+        assert not _events(logs, "ntm.revalidate_done")
+        assert load_cached_constituent_csv(cache_dir=cache_dir) == fresh
+        assert il._NTM_REVALIDATE_STATE["in_flight"] is False
+
+    def test_worker_refreshes_when_cache_vanished_under_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cache deleted between spawn and lock → honest refresh (no fabricated skip)."""
+        monkeypatch.setenv("BRUTEX_NTM_CACHE_TTL_SECONDS", "0")
+        cache_dir = tmp_path / "cache"
+        stale = _constituents_csv([("OLDCO", "INE111A01011")])
+        assert save_constituent_csv(stale, cache_dir=cache_dir) is True
+        fresh = _constituents_csv([("NEWCO", "INE222A01012")])
+        job = self._capture_spawn(lambda _url: fresh, cache_dir=cache_dir)
+        (cache_dir / "ntm_constituents.csv").unlink()  # vanished mid-cycle
+        with capture_logs() as logs:
+            job()
+        assert _events(logs, "ntm.revalidate_done")
+        assert load_cached_constituent_csv(cache_dir=cache_dir) == fresh  # re-seeded
+        assert il._NTM_REVALIDATE_STATE["in_flight"] is False
+
+    def test_worker_fails_open_when_lock_unavailable(self, tmp_path: Path) -> None:
+        """An uncreatable sidecar (cache_dir is a FILE) → WARN + unguarded refresh."""
+        blocker = tmp_path / "cache"
+        blocker.write_text("not a directory", encoding="utf-8")
+        calls: list[str] = []
+
+        def _tracking_opener(url: str) -> str:
+            calls.append(url)
+            return _constituents_csv([("NEWCO", "INE222A01012")])
+
+        job = self._capture_spawn(_tracking_opener, cache_dir=blocker)
+        with capture_logs() as logs:
+            job()
+        assert len(calls) == 1  # the refresh itself (the actual purpose) still ran
+        assert _events(logs, "ntm.revalidate_lock_unavailable")
+        assert _events(logs, "ntm.revalidate_done")  # save is best-effort False here
+        assert il._NTM_REVALIDATE_STATE["in_flight"] is False
 
 
 # ── OPT-vs-REF bridge primitives (DEC-FNO-INDEX-ALIAS-001) ────────────────────

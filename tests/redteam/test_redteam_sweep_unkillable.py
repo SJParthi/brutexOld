@@ -24,13 +24,23 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+
+# The nightly red-team harness (redteam-nightly.yml) runs a PYTHON-ONLY editable
+# install and never builds the Rust kernels, so the ``brutex`` imports below —
+# which transitively import ``brutex.engine``/``brutex.orchestrator`` → ``fno_math``
+# + ``trading_core`` — would abort collection of the WHOLE tests/redteam/ dir with
+# ``ModuleNotFoundError``. Guard the kernel FIRST (before any ``brutex`` import) so
+# a kernel-less collector SKIPS this one module cleanly; the sweep-rehearsal /
+# local / full-CI jobs that DO build the wheels still run every test here.
+pytest.importorskip("fno_math")
+pytest.importorskip("trading_core")
+pytest.importorskip("polars")
+pytest.importorskip("lmdb")
+
 from brutex.audit_verify import auto_verify
 from brutex.data.models import CandleBar
 from brutex.orchestrator.audit import AuditChainCorruption
 from brutex.strategies.types import Side
-
-pytest.importorskip("polars")
-pytest.importorskip("lmdb")
 
 #: D-6 traceability — test name → requirement/gap tokens.
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {

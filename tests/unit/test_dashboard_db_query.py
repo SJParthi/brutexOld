@@ -21,6 +21,7 @@ import pytest
 from brutex.dashboard.db_view import (
     _IST_DATE_EXPR,
     _IST_TS_EXPR,
+    _MUHURAT_EXCLUSION_SQL,
     _SESSION_OPEN_MINUTES,
     ALLOWED_OPERATORS,
     CANDLE_COLUMNS,
@@ -41,6 +42,7 @@ from brutex.dashboard.db_view import (
     _intraday_prev_close_by_page_date,
     _iso_date,
     _ist_date,
+    _muhurat_exclusion_sql,
     _page_ist_dates,
     _prev_trading_close,
     _quote_ident,
@@ -2158,9 +2160,10 @@ def _index_minute_row(store: InstrumentStore, lake_root: Path) -> dict[str, Any]
 def test_open_substitution_zero_when_first_minute_exactly_0915_boundary(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
-    # BOUNDARY pin (strict `>`): a session whose FIRST present minute is EXACTLY the
-    # canonical 09:15:00 IST open is NOT counted — its derived 1-day open IS the
-    # canonical open price, no substitution happened.
+    # BOUNDARY pin (the aligned `<>`, DEC-DAILY-OPEN-PREDICATE-ALIGN-001): a session
+    # whose FIRST present minute is EXACTLY the canonical 09:15:00 IST open is NOT
+    # counted — its derived 1-day open IS the canonical open price, no substitution
+    # happened (byte-identical to the pre-alignment strict-`>` verdict here).
     _write_index_minutes(
         tmp_path,
         [
@@ -2254,9 +2257,11 @@ def test_open_substitution_none_for_derived_1day_but_counted_for_1minute(
     assert cash_minute["open_substituted_days"] == 1
     assert cash_minute["session_days"] == 1
     # INDEX 1minute: 14:45-first ×2 counted; the 02:00-IST-first rolled-over session
-    # opens BEFORE 09:15 → NOT counted (the under-boundary side of the strict `>`).
+    # opens BEFORE 09:15 and NOW COUNTS too (DEC-DAILY-OPEN-PREDICATE-ALIGN-001: the
+    # aligned `<>` closed the strict-`>` under-count — a pre-09:15 first bar is still
+    # the resampler's `.first()` substitute, never silently trusted).
     index_minute = by_key[("INDEX", "1minute")]
-    assert index_minute["open_substituted_days"] == 2
+    assert index_minute["open_substituted_days"] == 3
     assert index_minute["session_days"] == 3
 
 
@@ -2407,6 +2412,75 @@ def test_resample_math_unchanged_daily_open_substitution_oracle(
                 low="200.5",
                 close="201.5",
             ),
+        ],
+    )
+    row = _index_minute_row(store, tmp_path)
+    assert row["open_substituted_days"] == 1
+    assert row["session_days"] == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Aligned predicate + Muhurat SQL exclusion (DEC-DAILY-OPEN-PREDICATE-ALIGN-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_muhurat_exclusion_sql_renders_sorted_dates() -> None:
+    # Pure fragment builder: unsorted input renders a DETERMINISTIC sorted
+    # `NOT IN (DATE '…', …)` list — never user input, calendar constants only.
+    fragment = _muhurat_exclusion_sql([date(2025, 10, 21), date(2020, 11, 14)])
+    assert fragment == " AND ist_date NOT IN (DATE '2020-11-14', DATE '2025-10-21')"
+
+
+def test_muhurat_exclusion_sql_empty_calendar_renders_nothing() -> None:
+    # The defensive empty-calendar branch: SQL `NOT IN ()` is invalid, so an
+    # empty date set renders the no-op empty fragment.
+    assert _muhurat_exclusion_sql([]) == ""
+
+
+def test_muhurat_exclusion_constant_covers_full_calendar() -> None:
+    # The import-time constant bakes EVERY calendar Muhurat date — a future
+    # notified date added to MUHURAT_SESSIONS lands in the census with zero
+    # edits in db_view (the ONE-source-of-truth pin, CLAUDE.md §11 COMMON).
+    from brutex.calendars.nse import MUHURAT_SESSIONS
+
+    assert MUHURAT_SESSIONS  # calendar ground truth — non-empty
+    for d in MUHURAT_SESSIONS:
+        assert f"DATE '{d.isoformat()}'" in _MUHURAT_EXCLUSION_SQL
+    assert _muhurat_exclusion_sql(MUHURAT_SESSIONS) == _MUHURAT_EXCLUSION_SQL
+
+
+def test_muhurat_session_abstains_in_sql_census(store: InstrumentStore, tmp_path: Path) -> None:
+    # FAILS-BEFORE / PASSES-AFTER (DEC-DAILY-OPEN-PREDICATE-ALIGN-001): the
+    # census previously COUNTED a Muhurat session (its 13:45/18:00 open is >
+    # 09:15) — flagging a perfectly healthy lake every year. Aligned with the
+    # prebuild detector, the Muhurat date is EXCLUDED: an exact-09:15 regular
+    # session + the calendar-verified 2025-10-21 afternoon Muhurat read 0/2.
+    from brutex.calendars.nse import MUHURAT_SESSIONS
+
+    muhurat = date(2025, 10, 21)
+    assert muhurat in MUHURAT_SESSIONS  # calendar ground truth, not fabricated
+    _write_index_minutes(
+        tmp_path,
+        [
+            _bar(datetime(2025, 10, 20, 3, 45, tzinfo=UTC), "100.4"),  # 09:15 IST exactly
+            _bar(datetime(2025, 10, 21, 8, 15, tzinfo=UTC), "100.6"),  # 13:45 IST Muhurat open
+        ],
+    )
+    row = _index_minute_row(store, tmp_path)
+    assert row["open_substituted_days"] == 0
+    assert row["session_days"] == 2  # the Muhurat session still counts as a stored session
+
+
+def test_pre_0915_first_bar_counts_in_sql_census(store: InstrumentStore, tmp_path: Path) -> None:
+    # FAILS-BEFORE / PASSES-AFTER (DEC-DAILY-OPEN-PREDICATE-ALIGN-001): under
+    # the former strict `>` a stray PRE-09:15 first bar (out of the CLAUDE.md
+    # §7 pre-open-exclusion contract, yet still the resampler's `.first()`
+    # substitute) was silently NOT counted; the aligned `<>` counts it.
+    _write_index_minutes(
+        tmp_path,
+        [
+            _bar(datetime(2024, 3, 1, 3, 44, tzinfo=UTC), "100.4"),  # 09:14 IST — pre-open
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), "100.5"),  # 09:15 IST
         ],
     )
     row = _index_minute_row(store, tmp_path)

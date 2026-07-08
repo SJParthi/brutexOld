@@ -1,6 +1,6 @@
 # ADR-0019 — Unkillable sweep run core (Phase 2 of the one-click sweep build)
 
-**Decision ID:** `DEC-SWEEP-UNKILLABLE-CORE-001` (MIGRATION.md entry #1557)
+**Decision ID:** `DEC-SWEEP-UNKILLABLE-CORE-001` (MIGRATION.md entry #1594)
 **Date:** 2026-07-08
 **Status:** **ACCEPTED** — shipped as one PR on `claude/magical-pasteur-y6gmr8`
 (WP-1..7, parallel fan-out per the operator's 2026-07-07 parallel-build
@@ -88,7 +88,7 @@ constraint **ENGINE UNCHANGED** (invariant I-1: `_GOLDEN_CONTENT_HASH` +
   `{done_cum, skipped_cum, failed_cum}`; the R39 count reconciliation reads
   `SweepProgress` counters EXACTLY, never recorder record counts;
   stage/milestone/failure records are never decimated. (The honesty note on
-  R41's "one record per event" wording is ledgered in #1557.)
+  R41's "one record per event" wording is ledgered in #1594.)
 - **D-10 · rehearsal CI** = dedicated `sweep-rehearsal` job in ci.yml wired
   into `ci-ok.needs` (not a new branch-protection context); the fault matrix
   rides the REQUIRED `chaos-race` job; diffcheck exercises at
@@ -182,7 +182,7 @@ Verbatim from the binding design §10:
 - flock semantics are weaker on network volumes (NFS) — same envelope as
   `partition_lock` (POSIX local/external SSD; Windows out of scope).
 
-Ship-time additions (measured/discovered during WP-6, ledgered in #1557):
+Ship-time additions (measured/discovered during WP-6, ledgered in #1594):
 
 - **D-19 mutation floors are RATCHETS below the 85% target** (measured,
   mutmut 2.5.1): sweep_liveness 78.9% · stage_stamp 74.4% · run_manifest
@@ -209,7 +209,7 @@ fraction 0 disables the memory arm).
 
 ## 6. References
 
-- `docs/MIGRATION.md` entry #1557 (`DEC-SWEEP-UNKILLABLE-CORE-001`).
+- `docs/MIGRATION.md` entry #1594 (`DEC-SWEEP-UNKILLABLE-CORE-001`).
 - `docs/runbooks/sweep-unkillable.md` — operator runbook (resume, quarantine
   forensics, SUSPECT triage, failure matrix, decimation policy, traceability
   human table).
