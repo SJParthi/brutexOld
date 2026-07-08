@@ -2090,9 +2090,11 @@ def query_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-DB-CANDLE-COUNT-CACHE-001) + the current write-generation it is keyed
-        by. When supplied, the O(files) Parquet-footer ``COUNT(*)`` is memoised per
-        ``(coords, start, end)`` so a prev/next paging click within one dataset is
-        an O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        by. When supplied, the ``COUNT(DISTINCT timestamp)`` total — O(rows) on the
+        first computation per write-generation, O(1) on a cached repeat — is
+        memoised per ``(coords, start, end)`` so a prev/next paging click within one
+        dataset is an O(1) hit; a pull bumps *generation* → recompute (never a stale
+        total).
         The SAME cache also memoises the F&O default-range STORED-LIFE span under
         :func:`candle_span_key` (coords-only — the span is bound/paging-invariant),
         so the applied-range chip (DEC-DB-UX-PACK-001 Feature 2) never re-runs its
@@ -2218,10 +2220,12 @@ def query_candles(
     if columns is not None and any(c in FNO_GREEKS_COLUMN_TYPES for c in columns):
         select = _greeks_tolerant_select(conn, base, columns, source=skip_source)
 
-    # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
-    # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
-    # deep multi-year partition it re-reads every monthly file's footer on EVERY
-    # paging click (~8 ms at 6 years, growing as the lake deepens). The total is
+    # The page total is a `COUNT(DISTINCT timestamp)` over `read_parquet(glob)` —
+    # the deduped row count the keep-FIRST pages serve, NOT a footer `COUNT(*)`. So
+    # it is O(rows), NOT O(1): DuckDB scans the whole matched row set to count the
+    # distinct timestamps, so on a deep multi-year partition the first computation
+    # per write-generation grows with the stored rows on EVERY uncached paging
+    # click. The total is
     # invariant across paging / sort / column subsetting of the same
     # (coords, start, end), so the dashboard injects a generation-stamped cache
     # (DEC-DB-CANDLE-COUNT-CACHE-001): a prev/next click within one dataset is an
@@ -3287,9 +3291,11 @@ def query_option_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-LAKE-READ-O1-AUDIT-001) + the current write-generation it is keyed
-        on. When supplied, the ``COUNT(*)`` over the whole series glob is memoised
-        per ``(series, start, end)`` (paging-invariant) so a prev/next click is an
-        O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        on. When supplied, the ``COUNT(DISTINCT (side, timestamp))`` total over the
+        whole series glob — O(rows) on the first computation per write-generation,
+        O(1) on a cached repeat — is memoised per ``(series, start, end)``
+        (paging-invariant) so a prev/next click is an O(1) hit; a pull bumps
+        *generation* → recompute (never a stale total).
         The SAME cache also memoises the default-range STORED-LIFE span under
         :func:`option_candle_span_key` (series-only key), so the applied-range chip
         (DEC-DB-UX-PACK-001 Feature 2) never re-runs its MIN/MAX scan on a paging
@@ -3366,7 +3372,9 @@ def query_option_candles(
     qualify_sql = dedup_qualify_sql(("side", "timestamp"))
 
     def _count_total() -> int:
-        """Run the O(files) deduped-total footer-scan over the whole series glob.
+        """Run the O(rows) ``COUNT(DISTINCT (side, timestamp))`` deduped-total scan
+        over the whole series glob (the deduped composite-key count the keep-FIRST
+        pages serve, NOT a footer ``COUNT(*)``; O(1) on a cached repeat).
 
         Routed through the COMMON :func:`_execute_parquet_resilient` (the series
         dir is FLAT, so its recursive ``**/*.parquet`` glob reads the identical

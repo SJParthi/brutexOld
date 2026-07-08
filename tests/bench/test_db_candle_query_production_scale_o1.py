@@ -46,6 +46,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -124,7 +125,7 @@ def _build_partition(root: Path, rows: int) -> int:
     return written
 
 
-def _query(conn: object, root: Path, offset: int) -> dict[str, object]:
+def _query(conn: object, root: Path, offset: int) -> dict[str, Any]:
     return query_candles(
         conn,
         root,
@@ -151,10 +152,29 @@ def _time_page(root: Path, offset: int) -> float:
         conn.close()
 
 
+@pytest.fixture(scope="module")
+def big_partition(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, int]:
+    """Build the ≥500k-row production-scale partition ONCE, shared READ-ONLY by
+    both candle latency tests below.
+
+    Each build is ~500k ``CandleBar`` + ``Decimal`` constructions and the
+    partition is never mutated (every test only READS it via ``query_candles``),
+    so a single deterministic build — the byte-identical writer output regardless
+    of who builds it — halves the fixture cost of this heaviest bench (previously
+    each of the two tests rebuilt its own 520k partition). Returns
+    ``(root, rows)`` so a caller reads the exact deduped row count without a
+    second walk."""
+    root = tmp_path_factory.mktemp("big_partition")
+    rows = _build_partition(root, _BIG_ROWS)
+    return root, rows
+
+
 class TestProductionScalePageLatencyIsHonestlyOTotalRows:
     """``query_candles`` page latency GROWS with stored rows — NOT O(page)."""
 
-    def test_first_page_scales_with_row_count_not_flat(self, tmp_path: Path) -> None:
+    def test_first_page_scales_with_row_count_not_flat(
+        self, tmp_path: Path, big_partition: tuple[Path, int]
+    ) -> None:
         """MAJOR-11 anti-O(page) teeth: the FIRST page (offset 0) at a ≥500k-row
         partition is meaningfully slower than at a 20k-row partition, because the
         page query pays a full O(total matched rows) columnar scan BEFORE the
@@ -164,19 +184,19 @@ class TestProductionScalePageLatencyIsHonestlyOTotalRows:
         ABSOLUTE ceiling (<8 s) both carry generous slack so shared CI stays
         non-flaky while a false-flat regression fails."""
         small_rows = _build_partition(tmp_path / "small", _SMALL_ROWS)
-        big_rows = _build_partition(tmp_path / "big", _BIG_ROWS)
+        big_root, big_rows = big_partition
         assert big_rows >= 500_000
 
         # The total is the honest deduped row count — proves we really stored
         # a production-scale partition (not a footer illusion).
         conn = duckdb.connect()
-        big_page = _query(conn, tmp_path / "big", 0)
+        big_page = _query(conn, big_root, 0)
         conn.close()
         assert big_page["total"] == big_rows
         assert len(big_page["rows"]) == _LIMIT  # one real page materialised
 
         t_small = _time_page(tmp_path / "small", 0)
-        t_big = _time_page(tmp_path / "big", 0)
+        t_big = _time_page(big_root, 0)
         ratio = t_big / max(t_small, 1.0)
 
         assert t_big / 1e9 < _ABS_CEILING_S, (
@@ -199,7 +219,7 @@ class TestProductionScalePageLatencyIsHonestlyOTotalRows:
             f"t_small={t_small / 1e6:.1f}ms, t_big={t_big / 1e6:.1f}ms."
         )
 
-    def test_deep_offset_not_cheaper_than_first_page(self, tmp_path: Path) -> None:
+    def test_deep_offset_not_cheaper_than_first_page(self, big_partition: tuple[Path, int]) -> None:
         """The honest LIMIT/OFFSET envelope: a DEEP ``OFFSET`` at a ≥500k-row
         partition is NOT cheaper than the FIRST page — both pay the full
         O(total rows) scan+sort, and the deep offset adds an
@@ -209,18 +229,18 @@ class TestProductionScalePageLatencyIsHonestlyOTotalRows:
         2026-07-08 (sandbox): first page 140.2 ms vs deep last page 195.7 ms →
         1.40×. The band [0.5×, 8×] documents "same order, both scan-bound" with
         generous slack."""
-        big_rows = _build_partition(tmp_path / "big", _BIG_ROWS)
+        big_root, big_rows = big_partition
         assert big_rows >= 500_000
         deep_offset = big_rows - _LIMIT  # the last ascending page
 
         conn = duckdb.connect()
-        deep_page = _query(conn, tmp_path / "big", deep_offset)
+        deep_page = _query(conn, big_root, deep_offset)
         conn.close()
         assert deep_page["total"] == big_rows
         assert len(deep_page["rows"]) == _LIMIT  # a full last page
 
-        t_first = _time_page(tmp_path / "big", 0)
-        t_deep = _time_page(tmp_path / "big", deep_offset)
+        t_first = _time_page(big_root, 0)
+        t_deep = _time_page(big_root, deep_offset)
         premium = t_deep / max(t_first, 1.0)
 
         assert t_deep / 1e9 < _ABS_CEILING_S, (
