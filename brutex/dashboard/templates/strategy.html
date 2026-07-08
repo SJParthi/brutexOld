@@ -156,7 +156,7 @@
        tab-gated reveal. -->
   <section aria-label="List of trades" id="stTradesSection">
     <h3>📜 List of trades <span class="oc-source-badge" id="ocTradesSource">source: none</span></h3>
-    <div class="note" id="stTradesNote">awaiting real run artifact — trades land at merge-integration (ResultsStore paged API)</div>
+    <div class="note" id="stTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</div>
     <div id="stTradesError"></div>
     <div class="tablewrap">
       <table>
@@ -364,12 +364,14 @@
       tr.appendChild(td(String(r.entry_px), null));
       tr.appendChild(td(String(r.exit_ts), null));
       tr.appendChild(td(String(r.exit_px), null));
-      tr.appendChild(td(String(r.lots), null));
+      tr.appendChild(td(r.lots === null || r.lots === undefined ? '—' : String(r.lots), null));
       tr.appendChild(td(String(r.exit_reason), null));
       tr.appendChild(td(pnl === null ? '—' : money(pnl), pnl !== null && pnl < 0 ? 'neg' : 'pos'));
       tr.appendChild(td(r.costs_paisa === undefined ? '—' : money(r.costs_paisa), null));
-      tr.appendChild(td(String(r.mae), null));
-      tr.appendChild(td(String(r.mfe), null));
+      /* Additive #1275 honesty flag: mae/mfe carry their granularity ("1m"|"tf"). */
+      var gran = typeof r.mae_granularity === 'string' ? ' (' + r.mae_granularity + ')' : '';
+      tr.appendChild(td(String(r.mae) + gran, null));
+      tr.appendChild(td(String(r.mfe) + gran, null));
       tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? 'null' : String(r.vix_entry), null));
       tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? 'null' : String(r.vix_exit), null));
       var chartTd = document.createElement('td');

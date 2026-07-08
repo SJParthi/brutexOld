@@ -1,2 +1,0 @@
-{"hash":"e02b361b4cd2fd23ad93391373c96d370d29d4b21d6962faac1f81c2aa2c4a6d","kind":"<script>alert(1)</script>","payload":{"note":"<svg onload=alert(1)>"},"run_id":"r-hostile01","ts_utc":"2026-07-07T05:00:00Z"}
-{"hash":"1201d539bfffd43165f306a77d276edaa1920dceafd637c41a5ae2ca69bbddd1","kind":"sweep.start","payload":{"attr":"x\" onerror=\"alert(1)"},"run_id":"r-hostile01","ts_utc":"2026-07-07T05:00:01Z"}
