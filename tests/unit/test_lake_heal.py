@@ -1955,6 +1955,57 @@ class TestOptionForeignHeal:
         assert "\n" not in partition
         assert "\x1b" not in partition
 
+    def test_option_nested_dtype_swap_isolated_batch_continues(self, tmp_path: Path) -> None:
+        """Round-12 fold: a scan→heal swap to a nested-key-dtype file is an
+        ISOLATED :class:`OptionWriterError` refusal, never a batch abort.
+
+        Pre-fix, the flagged source swapped to a ``List(Utf8)``-side file made
+        the removal-key build (``frozenset(zip(sides, stamps))``) raise
+        ``TypeError: unhashable type`` — NOT in the per-finding isolation set,
+        so the WHOLE heal batch aborted (later findings unhealed, no
+        report/stats/alert — the round-3/round-5 isolation-escape class)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        lake = tmp_path / "lake"
+        _poison_option_lake(lake)  # a healable dup in the CALL series
+        june, july = _poison_option_foreign(lake, partition_key="NSE_FNO|13|WEEK|0|ATM|PUT")
+        scan = scan_lake_invariants(lake)
+        assert len(scan.findings) == 2
+        # Swap the flagged source to a nested-side-dtype file AFTER the scan.
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array([["CE"], ["CE"]], type=pa.list_(pa.string())),
+                    "timestamp": pa.array(
+                        [_ts(1), _ts(1, month=7, day=1)], type=pa.timestamp("us", tz="UTC")
+                    ),
+                }
+            ),
+            june,
+        )
+        swapped = june.read_bytes()
+        july_before = july.read_bytes()
+        reports: list[HealReport] = []
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.option_files_scanned,
+                mode="auto",
+                recall=False,
+                on_report=reports.append,
+                now=_now,
+            )
+        assert report.errors == 1  # pre-fix: TypeError aborts the batch here
+        assert report.healed == 1  # the CALL-series dup sibling still heals
+        assert reports == [report]  # the alert seam still fires post-batch
+        (error,) = _events(logs, "lake_heal.partition_error")
+        assert error["finding"] == "OptionForeignMonthRows"
+        assert june.read_bytes() == swapped  # refused byte-untouched
+        assert july.read_bytes() == july_before  # nothing merged/imported home
+        assert not (lake / ".quarantine" / _QUARANTINE_TS / june.relative_to(lake)).exists()
+
     def test_lake_write_halt_propagates_from_option_merge(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

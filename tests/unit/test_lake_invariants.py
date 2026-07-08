@@ -45,6 +45,7 @@ from brutex.data.lake_invariants import (
     classify_bar_keys,
     classify_option_keys,
     detect_legacy_drift,
+    option_key_dtype_error,
     scan_lake_invariants,
     utc_aware,
 )
@@ -151,6 +152,33 @@ def _plant_option_raw(dest: Path, rows: Sequence[tuple[str | None, datetime | No
         {
             "side": pa.array([side for side, _ in rows], type=pa.string()),
             "timestamp": pa.array([ts for _, ts in rows], type=pa.timestamp("us", tz="UTC")),
+        }
+    )
+    pq.write_table(table, dest)
+
+
+def _plant_option_nested_side(
+    dest: Path, timestamps: Sequence[datetime], *, side_kind: str = "list"
+) -> None:
+    """A RAW options file whose ``side`` column carries a NESTED dtype.
+
+    ``side_kind="list"`` writes ``List(Utf8)`` (values read back as Python
+    lists), ``"struct"`` writes ``Struct`` (dicts) — both UNHASHABLE, the
+    round-12 crash class the dtype gate exists for.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = len(timestamps)
+    if side_kind == "list":
+        side = pa.array([["CE"]] * n, type=pa.list_(pa.string()))
+    else:
+        side = pa.array([{"v": "CE"}] * n, type=pa.struct([("v", pa.string())]))
+    table = pa.table(
+        {
+            "side": side,
+            "timestamp": pa.array(list(timestamps), type=pa.timestamp("us", tz="UTC")),
         }
     )
     pq.write_table(table, dest)
@@ -1198,6 +1226,138 @@ class TestOptionForeignScan:
         sym = _events(logs, "lake.invariant.symlink_skipped")
         assert [e["path"] for e in sym] == [repr(str(june))] * 2
         assert all("\x1b" not in str(e["path"]) for e in [*sym, *skips])
+
+
+class TestOptionKeyDtypeGate:
+    """Round-12 fold: non-hashable option key dtypes are gated BEFORE classification.
+
+    Pre-fix, ONE hand-planted ``options/`` file whose ``side`` column dtype is
+    ``List(Utf8)`` / ``Struct`` crashed the WHOLE scan with ``TypeError:
+    unhashable type`` (the key-set builds hash the raw Python values) — ALL
+    healing inert (L3 boot sweep, L2 batches, the census surfaces). The gate
+    (:func:`option_key_dtype_error`) skips such a file LOUDLY instead —
+    counted, repr()-logged (the rounds-8/9 convention), never classified.
+    """
+
+    def test_list_side_file_skipped_scan_survives_sibling_found(self, tmp_path: Path) -> None:
+        bad = tmp_path / "options" / "SERIES_BAD" / "2024-06.parquet"
+        _plant_option_nested_side(bad, [_ts(1), _ts(2, month=7, day=1)])  # foreign shape too
+        good = tmp_path / "options" / "SERIES_GOOD" / "2024-06.parquet"
+        _plant_option_raw(good, [("CE", _ts(1)), ("CE", _ts(1))])
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)  # pre-fix: TypeError crash right here
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 1
+        (finding,) = report.findings  # the sibling series' dup is still found
+        assert isinstance(finding, OptionIntraFileDup)
+        assert finding.path == good
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == repr(str(bad))  # vendor-influenceable series dir name
+        error = skip["error"]
+        assert isinstance(error, str)
+        assert "side" in error
+
+    def test_struct_side_file_skipped(self, tmp_path: Path) -> None:
+        bad = tmp_path / "options" / "SERIES_STRUCT" / "2024-06.parquet"
+        _plant_option_nested_side(bad, [_ts(1), _ts(2, month=7, day=1)], side_kind="struct")
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+        assert report.option_files_scanned == 0
+        assert report.option_files_skipped == 1
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == repr(str(bad))
+
+    def test_non_datetime_timestamp_dtype_skipped(self, tmp_path: Path) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        bad = tmp_path / "options" / "SERIES_INT_TS" / "2024-06.parquet"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "side": pa.array(["CE", "CE"], type=pa.string()),
+                    "timestamp": pa.array([1, 2], type=pa.int64()),
+                }
+            ),
+            bad,
+        )
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        assert report.findings == ()
+        assert report.option_files_scanned == 0
+        assert report.option_files_skipped == 1
+        (skip,) = _events(logs, "lake.invariant.scan_skip")
+        error = skip["error"]
+        assert isinstance(error, str)
+        assert "timestamp" in error
+
+    def test_null_dtype_key_columns_pass_the_gate(self, tmp_path: Path) -> None:
+        # An all-null hand-planted file typed pl.Null on BOTH key columns is
+        # hashable (None) — it stays classifiable (here: a (None, None) dup).
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        dest = tmp_path / "options" / "SERIES_NULL" / "2024-06.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({"side": pa.nulls(2), "timestamp": pa.nulls(2)}), dest)
+        report = scan_lake_invariants(tmp_path)
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 0
+        (finding,) = report.findings
+        assert isinstance(finding, OptionIntraFileDup)
+        assert finding.physical_rows == 2
+        assert finding.unique_keys == 1
+
+    def test_unclassifiable_canonical_sibling_abstains(self, tmp_path: Path) -> None:
+        # The targeted overlap read hits a nested-dtype canonical sibling: the
+        # finding stays honestly unclassified (overlap_rows=None), never a
+        # crash — the unreadable-sibling abstain twin.
+        june = tmp_path / "options" / "SERIES" / "2024-06.parquet"
+        _plant_option_raw(june, [("CE", _ts(1)), ("CE", _ts(2, month=7, day=1))])
+        july = tmp_path / "options" / "SERIES" / "2024-07.parquet"
+        _plant_option_nested_side(july, [_ts(2, month=7, day=1)])
+        with capture_logs() as logs:
+            report = scan_lake_invariants(tmp_path)
+        (finding,) = report.findings
+        assert isinstance(finding, OptionForeignMonthRows)
+        assert finding.path == june
+        assert finding.overlap_rows is None  # honest abstain
+        assert report.option_files_scanned == 1
+        assert report.option_files_skipped == 1
+        skips = _events(logs, "lake.invariant.scan_skip")
+        # one from the main glob loop, one from the targeted sibling read
+        assert [s["path"] for s in skips] == [repr(str(july)), repr(str(july))]
+
+    def test_option_key_dtype_error_pure(self) -> None:
+        good = _option_key_frame([("CE", _ts(1))])
+        assert option_key_dtype_error(good) is None
+        nulls = pl.DataFrame(
+            {
+                "side": pl.Series("side", [None], dtype=pl.Null),
+                "timestamp": pl.Series("timestamp", [None], dtype=pl.Null),
+            }
+        )
+        assert option_key_dtype_error(nulls) is None
+        bad_side = pl.DataFrame(
+            {
+                "side": pl.Series("side", [["CE"]], dtype=pl.List(pl.Utf8)),
+                "timestamp": pl.Series("timestamp", [_ts(1)], dtype=pl.Datetime("us", "UTC")),
+            }
+        )
+        side_error = option_key_dtype_error(bad_side)
+        assert side_error is not None
+        assert "side" in side_error
+        bad_ts = pl.DataFrame(
+            {
+                "side": pl.Series("side", ["CE"], dtype=pl.Utf8),
+                "timestamp": pl.Series("timestamp", [1], dtype=pl.Int64),
+            }
+        )
+        ts_error = option_key_dtype_error(bad_ts)
+        assert ts_error is not None
+        assert "timestamp" in ts_error
 
 
 class TestScanIncludeBars:

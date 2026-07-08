@@ -637,6 +637,40 @@ def _option_file_month(path: Path) -> tuple[int, int] | None:
     return year, month
 
 
+def option_key_dtype_error(frame: pl.DataFrame) -> str | None:
+    """Why *frame*'s option key columns are UNCLASSIFIABLE, or ``None`` when sound.
+
+    The dtype gate run BEFORE any ``(side, timestamp)`` classification
+    (hostile-review round-12 fold, DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): a
+    hand-planted file whose ``side`` column carries a NESTED dtype
+    (``List`` / ``Struct``) reads back as UNHASHABLE Python values, so every
+    key-set build — :func:`_option_foreign_keys`,
+    :func:`_canonical_option_keys`, the healer's removal-key ``frozenset`` —
+    raises ``TypeError``, which is neither a ``parquet_read_skip_errors``
+    member nor in the healer's per-finding isolation set: pre-fix ONE crafted
+    file crashed the WHOLE scan (ALL healing inert — the L3 boot sweep, every
+    L2 batch, the census surfaces) and, planted in the scan→heal window,
+    aborted the WHOLE heal batch. ``side`` must be ``String`` (the writer's
+    own rendered dtype) or ``Null`` (an all-null hand-planted column — the
+    null side rides verbatim as key payload); ``timestamp`` must be
+    ``Datetime`` (naive OR aware — naive routes as-if-UTC via
+    :func:`utc_aware`) or ``Null`` (abstains from routing). Anything else:
+    the file is skipped LOUDLY at scan (``lake.invariant.scan_skip``, path
+    repr()'d — the rounds-8/9 log-injection convention) and refused as an
+    isolated ``OptionWriterError`` at heal
+    (``lake_heal._heal_option_foreign``) — never classified, never healed,
+    never a crash. PUBLIC + in ``__all__`` for the healer's reuse (§11
+    COMMON — the :func:`is_foreign_timestamp` precedent).
+    """
+    side_dtype = frame.schema["side"]
+    if not (isinstance(side_dtype, pl.String) or side_dtype == pl.Null):
+        return f"option side column dtype {side_dtype} is not String/Null — unclassifiable"
+    ts_dtype = frame.schema["timestamp"]
+    if not (isinstance(ts_dtype, pl.Datetime) or ts_dtype == pl.Null):
+        return f"option timestamp column dtype {ts_dtype} is not Datetime/Null — unclassifiable"
+    return None
+
+
 def _option_foreign_keys(
     home: tuple[int, int], frame: pl.DataFrame
 ) -> set[tuple[str | None, datetime]]:
@@ -692,6 +726,13 @@ def _canonical_option_keys(
         _pause(per_file_pause)
         return None
     _pause(per_file_pause)
+    dtype_error = option_key_dtype_error(frame)
+    if dtype_error is not None:
+        # Round-12 fold: a nested-key-dtype canonical sibling would make the
+        # key-set build below raise TypeError (unhashable values) and crash
+        # the whole scan — honest abstain instead, like an unreadable sibling.
+        _LOG.warning("lake.invariant.scan_skip", path=repr(str(canonical)), error=dtype_error)
+        return None
     sides = frame.get_column("side").to_list()
     stamps = frame.get_column("timestamp").to_list()
     return set(zip(sides, stamps, strict=True))
@@ -1020,6 +1061,18 @@ def scan_lake_invariants(
                         _pause(per_file_pause)
                         continue
                     _pause(per_file_pause)
+                    dtype_error = option_key_dtype_error(frame)
+                    if dtype_error is not None:
+                        # Round-12 fold: a nested (List/Struct) key dtype reads
+                        # back unhashable Python values — classifying it would
+                        # TypeError-crash the WHOLE scan. Skipped loudly like
+                        # an unreadable file; repr() on the path (round-8
+                        # log-injection convention).
+                        _LOG.warning(
+                            "lake.invariant.scan_skip", path=repr(str(path)), error=dtype_error
+                        )
+                        option_files_skipped += 1
+                        continue
                     option_files_scanned += 1
                     option_dup, option_foreign = classify_option_keys(
                         path, series_dir.name, home, frame
@@ -1294,6 +1347,7 @@ __all__ = [
     "detect_legacy_drift",
     "is_foreign_timestamp",
     "log_lake_finding",
+    "option_key_dtype_error",
     "scan_lake_invariants",
     "utc_aware",
 ]

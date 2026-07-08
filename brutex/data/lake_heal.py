@@ -94,6 +94,7 @@ from brutex.data.lake_invariants import (
     OptionForeignMonthRows,
     OptionIntraFileDup,
     is_foreign_timestamp,
+    option_key_dtype_error,
     scan_lake_invariants,
     utc_aware,
 )
@@ -954,6 +955,15 @@ def _heal_option_foreign(finding: OptionForeignMonthRows, state: _BatchState) ->
     if not src.exists():
         return False  # consumed earlier / vanished — skipped
     frame = state.option_writer.read_partition_frame(src)  # OptionWriterError → isolated
+    dtype_error = option_key_dtype_error(frame)
+    if dtype_error is not None:
+        # Round-12 fold: a scan→heal swap to a nested-key-dtype (List/Struct)
+        # file must be the documented ISOLATED refusal — the removal-key
+        # ``frozenset`` below hashes raw side/timestamp values, so an ungated
+        # frame raised ``TypeError`` (NOT in ``_PER_FINDING_HEAL_ERRORS``) and
+        # aborted the WHOLE batch (the round-3/round-5 isolation-escape
+        # class). Same gate as the scanner (§11 COMMON).
+        raise OptionWriterError(f"unclassifiable option partition {src}: {dtype_error}")
     home = (finding.year, finding.month)
     foreign = _option_foreign_frame(home, frame)  # keep-first unique foreign rows, all cols
     if foreign.height == 0:
