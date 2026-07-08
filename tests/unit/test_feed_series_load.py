@@ -39,6 +39,7 @@ from brutex.feed import series_load
 from brutex.feed.replay import ReplayFeed
 from brutex.feed.series_load import load_sweep_slice
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 pytest.importorskip("polars")
 pytest.importorskip("duckdb")
@@ -523,7 +524,7 @@ def _futures_lake_no_catalog(lake: Path) -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _skip_warns(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _skip_warns(logs: list[EventDict]) -> list[EventDict]:
     return [rec for rec in logs if rec["event"] == "series_load.boundary_segment_no_session"]
 
 

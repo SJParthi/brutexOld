@@ -148,7 +148,7 @@ class TestValidateCandidate:
         # bars. Spy on BOTH composed Stage-1A builds (validation's OOS build
         # AND robustness's CPCV build) and prove the schedule reaches each.
         import brutex.engine.robustness as robustness_mod
-        import brutex.engine.validation as validation_mod
+        from brutex.engine import validation as validation_mod
         from brutex.engine.stage1a import build_bar_bits as real_build
 
         bars = _multiday(4, bars_per_day=5)
@@ -177,7 +177,7 @@ class TestValidateCandidate:
 
     def test_default_call_stays_the_spot_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import brutex.engine.robustness as robustness_mod
-        import brutex.engine.validation as validation_mod
+        from brutex.engine import validation as validation_mod
         from brutex.engine.stage1a import build_bar_bits as real_build
 
         bars = _multiday(4, bars_per_day=5)

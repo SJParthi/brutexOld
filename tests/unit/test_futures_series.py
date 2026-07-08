@@ -22,7 +22,7 @@ import os
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import brutex.universe
 import pytest
@@ -40,6 +40,7 @@ from brutex.data.futures_series import (
     resolve_futures_series,
 )
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -65,7 +66,7 @@ def _mk_lake(tmp_path: Path, *names: str) -> Path:
     return root
 
 
-def _events(logs: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+def _events(logs: list[EventDict], event: str) -> list[EventDict]:
     """Filter captured structlog records down to one event name."""
     return [rec for rec in logs if rec["event"] == event]
 
