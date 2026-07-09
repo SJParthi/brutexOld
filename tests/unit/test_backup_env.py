@@ -2,7 +2,8 @@
 
 The config leaf: every default, every override, the loud malformed-numeric
 fallback, the ambiguous-password normalisation (F6), the derived timeout, the
-prune-weekday range guard, the extra-excludes split, and the hypothesis
+prune-weekday range guard, the retention keep guards
+(DEC-BACKUP-RETENTION-KNOB-GUARD-001), the extra-excludes split, and the hypothesis
 totality property (the resolver NEVER raises — check/status must resolve with
 an arbitrarily broken backup env).
 """
@@ -254,6 +255,59 @@ class TestNumericFallback:
         with structlog.testing.capture_logs() as logs:
             cfg = resolve_backup_env({BACKUP_DRILL_SAMPLE_ENV: "1"}, home=tmp_path)
         assert cfg.drill_sample == 1
+        assert logs == []
+
+
+class TestRetentionKeepGuards:
+    """Round-10 MINOR regression pins (DEC-BACKUP-RETENTION-KNOB-GUARD-001):
+    a 0/negative ``BRUTEX_BACKUP_KEEP_*`` parses as a VALID int — the
+    malformed-numeric loud-fallback never fires — yet it flows verbatim into
+    ``restic forget --keep-daily/--keep-weekly/--keep-monthly``, where restic
+    treats 0 as "keep NONE for this bucket": retention silently DISABLED with
+    rc=0 and no WARN, on the one data-destroying verb (``forget --prune``).
+    Same law as the prune_weekday / drill_sample guards: <1 falls back to the
+    default LOUDLY, naming the env var."""
+
+    @pytest.mark.parametrize("bad", ["0", "-14"])
+    def test_keep_daily_below_one_default_plus_warn(self, tmp_path: Path, bad: str) -> None:
+        """keep_daily 0/negative → default 14 + ONE keep_daily_out_of_range WARN."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_KEEP_DAILY_ENV: bad}, home=tmp_path)
+        assert cfg.keep_daily == 14
+        assert [entry["event"] for entry in logs] == ["backup.config.keep_daily_out_of_range"]
+        assert logs[0]["env_var"] == BACKUP_KEEP_DAILY_ENV
+
+    @pytest.mark.parametrize("bad", ["0", "-8"])
+    def test_keep_weekly_below_one_default_plus_warn(self, tmp_path: Path, bad: str) -> None:
+        """keep_weekly 0/negative → default 8 + ONE keep_weekly_out_of_range WARN."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_KEEP_WEEKLY_ENV: bad}, home=tmp_path)
+        assert cfg.keep_weekly == 8
+        assert [entry["event"] for entry in logs] == ["backup.config.keep_weekly_out_of_range"]
+        assert logs[0]["env_var"] == BACKUP_KEEP_WEEKLY_ENV
+
+    @pytest.mark.parametrize("bad", ["0", "-12"])
+    def test_keep_monthly_below_one_default_plus_warn(self, tmp_path: Path, bad: str) -> None:
+        """keep_monthly 0/negative → default 12 + ONE keep_monthly_out_of_range WARN."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env({BACKUP_KEEP_MONTHLY_ENV: bad}, home=tmp_path)
+        assert cfg.keep_monthly == 12
+        assert [entry["event"] for entry in logs] == ["backup.config.keep_monthly_out_of_range"]
+        assert logs[0]["env_var"] == BACKUP_KEEP_MONTHLY_ENV
+
+    def test_keep_of_one_is_respected_no_warn(self, tmp_path: Path) -> None:
+        """The floor is <1 — a deliberate keep=1 on every knob stays as-is,
+        and valid overrides (already pinned in TestOverrides) never warn."""
+        with structlog.testing.capture_logs() as logs:
+            cfg = resolve_backup_env(
+                {
+                    BACKUP_KEEP_DAILY_ENV: "1",
+                    BACKUP_KEEP_WEEKLY_ENV: "1",
+                    BACKUP_KEEP_MONTHLY_ENV: "1",
+                },
+                home=tmp_path,
+            )
+        assert (cfg.keep_daily, cfg.keep_weekly, cfg.keep_monthly) == (1, 1, 1)
         assert logs == []
 
 

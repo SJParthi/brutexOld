@@ -469,6 +469,35 @@ def test_no_selection_is_honest_400(
     assert "no cached contracts matched" in resp.json()["detail"]
 
 
+def test_concurrent_registry_open_race_is_503_not_500(
+    client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A racing ``RegistryStore.open`` surfaces as a retryable 503, never a 500.
+
+    DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 review fold: offloading the
+    direct-arm resolution WIDENED the concurrency window on
+    ``RegistryStore.open`` (write-on-open — schema DDL + a ``schema_meta``
+    stamp), so two simultaneous launch clicks can now race a DuckDB
+    Transaction/Constraint exception → ``RegistryError``, which pre-guard
+    escaped ``run_in_threadpool`` uncaught → HTTP 500. The route maps it to an
+    honest 503 "registry busy — retry" (nothing launched, nothing corrupted;
+    fails-before verified by removing the guard: this reads 500).
+    """
+    from brutex.data.registry_store import RegistryError
+
+    _pin_creds_present(monkeypatch)
+
+    def _racing_open(*_a: object, **_k: object) -> object:
+        raise RegistryError("TransactionException: write-write conflict on schema_meta")
+
+    monkeypatch.setattr(app_module.RegistryStore, "open", _racing_open)
+    resp = client.post(
+        "/api/v1/universe/pull-historical", params={"contract": "NSE-NIFTY-01Jan20-100-CE"}
+    )
+    assert resp.status_code == 503
+    assert "registry busy" in resp.json()["detail"]
+
+
 # ── 400 arms (bad interval / expiry) ──────────────────────────────────────────
 
 

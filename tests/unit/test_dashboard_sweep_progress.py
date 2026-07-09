@@ -157,3 +157,87 @@ class TestSweepProgressRoute:
             resp = client.get("/api/v1/sweep-progress")
             assert resp.status_code == 200
             assert resp.json()["state"] == "idle"
+
+
+class TestSweepProgressViewFileReadSeam:
+    """The ``file_read`` seam (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001).
+
+    The route injects :meth:`SweepProgressCache.read` here so the file arm is
+    memoised + deadline-bounded; these pins fix the seam's contract — a dict
+    is served as the file arm, ``None`` falls through to the in-process /
+    idle arms exactly like the direct ``exists()`` check.
+    """
+
+    def test_file_read_payload_is_served(self, tmp_path: Path) -> None:
+        state = DashboardState()
+        state.update_sweep_progress(_running_snapshot())
+        state.sweep_progress_path = tmp_path / "sweep-progress.json"
+        view = state.sweep_progress_view(file_read=lambda path: {"state": "from-cache"})
+        assert view == {"state": "from-cache"}
+
+    def test_file_read_none_falls_back_to_in_process(self, tmp_path: Path) -> None:
+        state = DashboardState()
+        state.update_sweep_progress(_running_snapshot())
+        state.sweep_progress_path = tmp_path / "sweep-progress.json"
+        view = state.sweep_progress_view(file_read=lambda path: None)
+        assert view["state"] == "running"
+        assert view["enumerated"] == 100
+
+    def test_file_read_none_and_no_push_is_idle(self, tmp_path: Path) -> None:
+        state = DashboardState()
+        state.sweep_progress_path = tmp_path / "sweep-progress.json"
+        view = state.sweep_progress_view(file_read=lambda path: None)
+        assert view["state"] == "idle"
+
+    def test_no_path_never_calls_file_read(self) -> None:
+        state = DashboardState()
+
+        def _must_not_call(path: Path) -> dict[str, object]:
+            raise AssertionError("file_read must not run without a configured path")
+
+        assert state.sweep_progress_view(file_read=_must_not_call)["state"] == "idle"
+
+    def test_file_read_stale_running_payload_decays(self, tmp_path: Path) -> None:
+        """The DEC-JOB-COOPERATIVE-CANCEL-001 staleness law covers the cached arm too.
+
+        A ``running=True`` payload served through the ``file_read`` seam whose
+        ``wall_time`` stamp is older than ``SWEEP_PROGRESS_MAX_AGE_S`` is DEAD
+        EVIDENCE ≡ absent — the view falls through to idle, exactly like the
+        direct-read arm (merge fold: #1640 cache seam × the staleness law).
+        """
+        from brutex.engine.sweep_supervisor import SWEEP_PROGRESS_MAX_AGE_S
+
+        state = DashboardState()
+        state.sweep_progress_path = tmp_path / "sweep-progress.json"
+        stale = _running_snapshot()
+        stale["wall_time"] = time.time() - SWEEP_PROGRESS_MAX_AGE_S - 60.0
+        view = state.sweep_progress_view(file_read=lambda path: stale)
+        assert view["state"] == "idle"
+        assert view["running"] is False
+
+    def test_route_serves_cache_backed_file_bridge(self, tmp_path: Path) -> None:
+        """End-to-end: the route's injected cache serves the file payload, stamped."""
+        pytest.importorskip("fastapi")
+        from brutex.dashboard.app import build_app
+        from brutex.dashboard.sweep_progress_cache import SweepProgressCache
+        from fastapi.testclient import TestClient
+
+        state = DashboardState()
+        progress_file = tmp_path / "sweep-progress.json"
+        on_disk = _running_snapshot()
+        on_disk["enumerated"] = 999
+        # A FRESH wall_time stamp, as publish_progress writes it — a running
+        # claim without one is DEAD EVIDENCE under progress_bridge_stale
+        # (DEC-JOB-COOPERATIVE-CANCEL-001), on the cached arm too.
+        on_disk["wall_time"] = time.time()
+        progress_file.write_text(json.dumps(on_disk), encoding="utf-8")
+        state.sweep_progress_path = progress_file
+        app = build_app(state, sweep_progress_cache=SweepProgressCache(ttl_s=0.0))
+        with TestClient(app) as client:
+            resp = client.get("/api/v1/sweep-progress")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["enumerated"] == 999
+            # The honest additive provenance keys (never a stale-as-fresh illusion).
+            assert body["progress_source"] == "live"
+            assert body["progress_probe_age_s"] == 0.0
