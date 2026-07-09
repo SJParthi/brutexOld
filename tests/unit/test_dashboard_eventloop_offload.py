@@ -50,6 +50,7 @@ import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -263,6 +264,75 @@ def test_lake_uniqueness_scan_runs_off_the_event_loop(
     assert payload["present"] is True
     assert payload["findings_total"] == 0
     assert payload["files_scanned"] == 0
+
+
+# ── DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the /universe backend + generation probe ──
+
+
+def test_universe_summary_read_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``/universe/summary`` cache read must not wedge the loop.
+
+    ``GET /api/v1/universe/summary`` now offloads ``UniverseSnapshotCache.summary``
+    (its revision probe is a sync DuckDB ``COUNT`` + ``MAX``, plus the three base
+    reads on a miss) via ``run_in_threadpool``. Blocking the cache's revision probe
+    proves the read runs on a worker: a concurrent ``/api/v1/state`` still answers.
+    On the pre-fix code the probe ran in the ``async def`` body and wedged the loop.
+    """
+    stub = _BlockingStub(result=(0, ""))
+    monkeypatch.setattr("brutex.dashboard.universe_cache.master_revision", stub)
+
+    status, payload = _assert_loop_free_while_blocked(client, stub, "/api/v1/universe/summary")
+    assert status == 200
+    assert payload == {"index_count": 0, "stock_count": 0, "total": 0}
+
+
+def test_universe_index_constituents_reads_run_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, store: InstrumentStore
+) -> None:
+    """The ``/universe/index-constituents`` store reads must not wedge the loop.
+
+    The three master reads + the COMMON classifier now run in a ``_held_universe``
+    threadpool closure. Blocking the first store read proves they run on a worker:
+    a concurrent ``/api/v1/state`` still answers. The best-effort NSE resolve is
+    stubbed so the test exercises the store-read offload, not the network path.
+    """
+    monkeypatch.setattr(
+        "brutex.dashboard.constituents_cache.resolve_constituents",
+        lambda *_a, **_k: SimpleNamespace(rows=[], source="unavailable", as_of=None),
+    )
+    stub = _BlockingStub(result=frozenset())
+    monkeypatch.setattr(store, "fno_eligible_underlyings", stub)
+
+    status, payload = _assert_loop_free_while_blocked(
+        client, stub, "/api/v1/universe/index-constituents?symbol=NIFTY"
+    )
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["source"] == "unavailable"
+    assert payload["members"] == []
+
+
+def test_fno_cascade_generation_probe_runs_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-generation probe must not wedge the loop (the MAJOR-6 class).
+
+    ``_summary_cache.generation`` stats the window ledger + digests the sweeps tree
+    (an O(dirs) read via ``lake_revision``). The cascade/movers/preopen/db-datasets
+    routes now read it INSIDE their offloaded closure, so blocking ``lake_revision``
+    blocks a worker — a concurrent ``/api/v1/state`` still answers. On the pre-fix
+    code ``gen = _summary_cache.generation`` ran on the event loop and wedged it.
+    """
+    stub = _BlockingStub(result="rev-blocking-token")
+    monkeypatch.setattr("brutex.dashboard.app.lake_revision", stub)
+
+    status, payload = _assert_loop_free_while_blocked(client, stub, "/api/v1/db/fno/underlyings")
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["underlyings"] == []
+    assert payload["unparsed"] == []
 
 
 #: The six sweep-oneclick artifact routes (DEC-OPERATOR-PAGE-REAL-001) — the
