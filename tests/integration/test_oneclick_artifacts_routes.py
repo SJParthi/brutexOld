@@ -203,7 +203,11 @@ class TestTop100Route:
         assert len(payload["rows"]) == 100
         assert payload["empty_note"] is None
         assert payload["rows"][0]["rank"] == 1
-        assert payload["rows"][0]["metrics"]["sharpe"] == 3.2  # passthrough, untouched
+        # The fixture carries the ENGINE metric name (sharpe_ratio); the wire
+        # row carries BOTH it and the reader's display alias, full precision.
+        assert payload["rows"][0]["metrics"]["sharpe"] == 3.2
+        assert payload["rows"][0]["metrics"]["sharpe_ratio"] == 3.2
+        assert payload["preset"] == "min_dd_first"  # the sort-basis label source
 
     def test_valid_empty_artifact_is_ok_with_note(self, tmp_path: Path) -> None:
         client = _client(_lake_with_corpus(tmp_path))
@@ -620,9 +624,10 @@ _TUPLE_REF = "NSE-NIFTY/5m/long_k3_deadbeef"
 def _rebind_lake(tmp_path: Path, *, n_trades: int) -> Path:
     """A tmp lake whose run carries REAL writer-built results-depth sidecars.
 
-    The top100.json is the CONTRACT wire shape (what the adapter validates);
-    the sidecar trio + stamp are built via trade_store's OWN public writer —
-    internal formats are never hand-forged.
+    The top100.json is the CONTRACT wire shape — the writer's OBJECT root
+    (DEC-ONECLICK-TOP100-OBJECT-ROOT-001) — and the sidecar trio + stamp are
+    built via trade_store's OWN public writer; internal formats are never
+    hand-forged.
     """
     pytest.importorskip("polars")
     from datetime import UTC, datetime
@@ -650,7 +655,15 @@ def _rebind_lake(tmp_path: Path, *, n_trades: int) -> Path:
         "equity_ref": {"tuple": _TUPLE_REF, "sidecar": "equity"},
     }
     run_dir.mkdir(parents=True)
-    (run_dir / oc.TOP100_FILENAME).write_text(json.dumps([row]), encoding="utf-8")
+    doc = {
+        "schema_version": oc.TOP100_SCHEMA_VERSION,
+        "run_id": RUN_ID,
+        "preset": "min_dd_first",
+        "source": {"pool": 1},
+        "baselines": {},
+        "entries": [row],
+    }
+    (run_dir / oc.TOP100_FILENAME).write_text(json.dumps(doc), encoding="utf-8")
 
     statuses = [PathStatus.OK, PathStatus.PARTIAL, PathStatus.NO_1M_DATA]
     trades = []

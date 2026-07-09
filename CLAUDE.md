@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1631 —
+_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632 —
 the `/movers` stored-read FRESHNESS GUARD: a prebuilt stored TF / `1day` day
 slice is now VERIFIED against a fresh re-derive of the raw 1-minute base
 before it is served (the CUT stored frame — the exact served bytes — judged
@@ -83,6 +83,55 @@ NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
 `movers_snapshot.py` + `movers_stored_read.py` + `tf_autoderive.py` +
 `sweep_preflight.py` + `movers_warm.py` ALL 100% line+branch;
 ruff/ruff-format/`mypy --strict`/pyright clean on the touched modules.)
+Earlier: 2026-07-09 (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 —
+the one-click `top100.json` READER-ADOPTS-WRITER fix for the 3/3
+refuter-confirmed BLOCKER: the SHIPPED engine writer
+(`top100_artifact.write_top100`, default-ON in `cmd_sweep_all`) emits an
+OBJECT root `{schema_version, run_id, preset, source, baselines, entries}`
+while the display reader (`oneclick_artifacts.load_top100`) demanded a bare
+ARRAY — every REAL sweep read "corrupt · 0 strategies" on /operator ·
+/screener · /strategy while CI stayed green on hand-written bare-array
+fixtures (the fixture-only blindspot). The reader now parses the writer's
+object root (unknown FUTURE schema_version → NAMED corrupt, never a crash;
+the retired pre-#1621 bare-array form → NAMED corrupt — deliberately NO dual
+shape), adds per-row SUB-KEY shape validation (named partial degrades), and
+applies the ONE additive reader-boundary metric map `TOP100_METRIC_KEY_MAP`
+(`max_drawdown_paisa`→`max_dd_paisa` · `sharpe_ratio`→`sharpe` ·
+`deflated_sharpe`→`dsr` · `total_trades`→`trades`; the writer-absent
+`cpcv_pass_pct` stays ABSENT → honest "—", never a fabricated 0 — the
+screener-band-filter drops-every-row blast radius node-pinned); `preset` is
+surfaced for the pages' sort-basis labels. Fixture corpus REGENERATED from
+the writer shape (object root + engine metric names; SHAs refreshed
+deliberately); NEW writer→reader golden drives the ACTUAL `build_top100` →
+`write_top100` → `load_top100` → routes chain. Fold [11]: visible sort-basis
+labels on /results AND the one-click surfaces (labels only, neither sort
+changed; the preset tie-break divergence itself is RULED design-sanctioned —
+inert axes wire-disclosed per #1617 Ruling 10, the /results UI sends no
+`?preset=`, negative-pinned). Folds [W2-4]/[W2-5]: Ruling-18
+`costs_paisa:null` no longer folds into the non-integer bucket (equity +
+R44 arithmetic count null costs at ₹0 with the honest "gross of those
+costs" caveat — 3 real rows previously read an EMPTY curve / "0 trades");
+the /screener count line's numerator is the RENDERED count, naming the
+render cap. Coordinator ruling folded: the /operator v24.4 "LIVE"
+hook-banner ticker (16 hardcoded fabricated trade ticks) is DELETED
+outright — the honest `#bxTickerStrip` (real runs payload) is the one
+ticker kept, killed-token-pinned. Fold [12]: `runs_revision` folds per-run
+manifest stat tokens so an in-place `suspect` rewrite moves the cached
+runs-listing key (O(run dirs) stats per poll, stated). Wave-3 fold: [W3-R1]
+the /strategy candle chart was DEAD (mapper read `idx.ts`; the real
+/api/v1/db/candles column is `timestamp`) — fixed via the ONE route-shape
+mapper `bxCandleRowsFromDbPayload` + TZ-safe `bxParseTsIst` (naive API
+strings pinned to +05:30 IST; arrow placement node-proven TZ-invariant under
+TZ=America/New_York) with a REAL-route integration golden; [W3-R4] a
+null-VIX writer band no longer renders "between null–null" on any of the
+three band sites — ONE shared builder pair reads the honest "VIX band not
+stamped for this run" / partial-bound copy; [W3-R3] the /strategy arm
+"[object Object]" repro is VERIFIED dead (covered by the f1d271d4 reader
+bridge; route-level proof added). DISPLAY zone only —
+ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine writer byte-untouched;
+both oneclick modules 100% line+branch standalone; ruff/ruff-format/`mypy
+--strict`/pyright clean. Any per-round record lives ONLY in the §1 Active-branch blurb
++ the MIGRATION.md entry — this header carries pointers, never round narration.)
 Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
@@ -1752,7 +1801,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1631** — the
+- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632** — the
   `/movers` stored-read FRESHNESS GUARD: every prebuilt stored TF / `1day` day slice is verified against a fresh
   re-derive of the raw 1-minute base before it is served (the NEW pure `stored_day_frame_is_stale` delegating to the
   ONE existing `compare_derived_freshness`; the 1day branch value-plane-compares against the canonical
@@ -1789,6 +1838,37 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `movers_snapshot.py` + `movers_stored_read.py` +
   `tf_autoderive.py` + `sweep_preflight.py` + `movers_warm.py` ALL 100%
   line+branch; ruff/ruff-format/`mypy --strict`/pyright clean on the touched modules.)
+  Earlier: `claude/oneclick-top100-object-root` (**DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631** —
+  the one-click `top100.json` READER-ADOPTS-WRITER blocker fix: the display reader
+  (`oneclick_artifacts.load_top100`) now parses the SHIPPED engine writer's OBJECT root
+  (`{schema_version, run_id, preset, source, baselines, entries}` — `write_top100`, default-ON in
+  `cmd_sweep_all`) instead of demanding a bare ARRAY, so a REAL sweep no longer reads
+  "corrupt · 0 strategies" on /operator · /screener · /strategy (the fixture-only blindspot — CI was
+  green on hand-written bare arrays no production writer ever emitted). Unknown future schema_version /
+  missing entries / the retired bare-array form → NAMED corrupt (never a crash, never a dual shape);
+  per-row SUB-KEY shape validation with named partial degrades; the ONE additive metric-key map
+  `TOP100_METRIC_KEY_MAP` (`max_drawdown_paisa`→`max_dd_paisa`, `sharpe_ratio`→`sharpe`,
+  `deflated_sharpe`→`dsr`, `total_trades`→`trades`; absent `cpcv_pass_pct` stays absent → honest "—",
+  never a fabricated 0); fixtures REGENERATED from the writer shape; NEW writer→reader golden
+  (engine `build_top100`→`write_top100` → display `load_top100` → routes). Folds: [11] visible
+  sort-basis labels on /results + the one-click surfaces (labels only — the preset tie-break
+  divergence is RULED design-sanctioned per #1617 Ruling 10, `?preset=` UI exposure negative-pinned);
+  [W2-4] — Ruling-18 null costs count at ₹0 with the honest gross-curve caveat instead of excluding
+  every real trade; [W2-5] — the /screener count line names the render cap; the fabricated v24.4
+  "LIVE" hook-banner ticker is DELETED by coordinator ruling (the honest #bxTickerStrip stays); [12] —
+  `runs_revision` folds per-run manifest stat tokens (an in-place `suspect` rewrite moves the cached
+  runs-listing key). Wave-3 fold: [W3-R1] the /strategy candle chart was DEAD ON ARRIVAL — the inline
+  mapper indexed `idx.ts` while the real /api/v1/db/candles column is `timestamp`; ONE route-shape mapper
+  `bx-chart.js::bxCandleRowsFromDbPayload` + the TZ-safe `bxParseTsIst`/`bxIstDateOfEpoch` (naive API
+  strings = IST wall-clock pinned to +05:30 — never browser-local Date parsing; offset-carrying trade
+  timestamps pass through) prove candle mapping AND arrow placement TZ-invariant via node goldens under
+  TZ=America/New_York + the NEW real-route integration golden (test_strategy_chart_route_shape.py);
+  [W3-R4] the null-VIX writer band (`{lo:null, hi:null}`) rendered "works when VIX between null–null" —
+  ONE shared builder pair (`bxVixBandText`/`bxVixBandCellText` on BXOneclick) now reads the honest
+  "VIX band not stamped for this run" (partial bands name the missing bound) across the operator card,
+  /strategy story card and /screener band column; [W3-R3] the finder's /strategy arm "[object Object]"
+  repro predates f1d271d4 — VERIFIED dead at this head (the reader-boundary bridge feeds every consumer;
+  route-level wire proof + template pin added, no second arm source exists.)
   Earlier: `claude/dazzling-pasteur-jf8s3w` (**DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614** — the
   write-time PER-FILE lake STATS manifest, the per-file stats/paging EXTENSION of the shipped
   DEC-LAKE-MANIFEST-O1-001 (#1480) dataset-discovery manifest — claiming the #867/#1025 named future work ("true
@@ -4190,7 +4270,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/movers-stored-freshness-guard`
-  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1631 — the `/movers`
+  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1632 — the `/movers`
   stored-read freshness guard: a stale prebuilt TF / `1day` day slice is
   detected against the raw 1-minute base and falls back to the 1-minute
   derive, warned + counted — reachability audited to exactly the CLI
@@ -4203,6 +4283,17 @@ hostile-review pass._
   Earlier: `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
   PER-FILE lake STATS manifest; matches §1's Earlier chain entry)
+  Earlier: `claude/oneclick-top100-object-root`
+  (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, MIGRATION.md #1631 — the one-click
+  `top100.json` reader-adopts-writer blocker fix: object root + the ONE
+  reader-boundary metric-key map + writer→reader golden + fixture corpus
+  regenerated from the writer shape; folds [11] sort-basis labels,
+  [W2-4] null-cost gross-equity honesty, [W2-5] screener render-cap count,
+  [12] runs-listing manifest-token cache key, [W3-R1] the /strategy candle
+  chart timestamp-key + TZ-safe arrow placement, [W3-R4] honest null
+  VIX-band copy on all three band sites ([W3-R3] arm repro verified dead);
+  DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  see §1 Active branch for the full blurb)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
