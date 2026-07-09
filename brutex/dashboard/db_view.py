@@ -36,6 +36,7 @@ import hashlib
 import math
 import os
 import re
+import threading
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -1369,6 +1370,67 @@ def _execute_parquet_resilient(
             return []
 
 
+#: The readable-subset verdict memo (DEC-WINDOWS-STAT-GUARD-LATCH-001, the
+#: C-r2-4 latch): while a corrupt/alien file persists in a partition, EVERY
+#: paging click takes the degraded path — pre-latch that re-probed EVERY file
+#: (a readability query + the real-sql schema probe per file) per click,
+#: O(files) probe queries each time. The memo keys on
+#: ``(directory, sha256(sql))`` and stores ``(file-set stat token, readable
+#: subset, omitted)`` — the ``_stats_fingerprint`` precedent: any file
+#: change (mtime/size/add/remove) moves the token → re-probe; an unchanged
+#: set is served with ZERO probe queries. Capped FIFO — the verdict is cheap
+#: to recompute, staleness is impossible (stat-token keyed).
+_READABLE_SUBSET_CACHE: dict[tuple[str, str], tuple[str, tuple[str, ...], bool]] = {}
+_READABLE_SUBSET_CACHE_CAP: Final[int] = 64
+_READABLE_SUBSET_LOCK = threading.Lock()
+
+
+def _reset_readable_subset_cache() -> None:
+    """Test seam — drop every memoised readable-subset verdict."""
+    with _READABLE_SUBSET_LOCK:
+        _READABLE_SUBSET_CACHE.clear()
+
+
+def _fileset_stat_token(files: Sequence[Path]) -> str:
+    """Digest the file set's ``(path, mtime_ns, size)`` triples — O(files) stats.
+
+    The latch's freshness token (the ``_stats_fingerprint`` idiom): a repeat
+    degraded click pays these stat syscalls but ZERO probe queries; any
+    changed/added/removed/vanished file moves the digest → full re-probe.
+    """
+    parts: list[str] = []
+    for file in files:
+        try:
+            st = file.stat()
+        except OSError:
+            parts.append(f"{file}:gone")
+        else:
+            parts.append(f"{file}:{st.st_mtime_ns}:{st.st_size}")
+    return hashlib.sha256(";".join(parts).encode("utf-8")).hexdigest()
+
+
+def _probe_parquet_file(
+    conn: Any, sql: str, candidate: str, extra_params: list[Any]
+) -> tuple[str, str] | None:
+    """Probe ONE file: ``None`` = passes both stages, else ``(reason, error)``.
+
+    Stage 1 readability (``SELECT 1 ... LIMIT 1`` — the corrupt class), stage
+    2 the caller's REAL *sql* over this one file (the alien-schema class,
+    DEC-ALIEN-SCHEMA-READ-HEAL-001). The ONE per-file probe seam — the latch
+    tests spy call counts through it.
+    """
+    skip_errors = movers_read_skip_errors()
+    try:
+        conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
+    except skip_errors as skip_reason:
+        return ("unreadable", str(skip_reason))
+    try:
+        conn.execute(sql, [[candidate], *extra_params]).fetchall()
+    except skip_errors as skip_reason:
+        return ("alien_schema", str(skip_reason))
+    return None
+
+
 def _readable_parquet_subset(
     conn: Any,
     directory: Path,
@@ -1406,40 +1468,53 @@ def _readable_parquet_subset(
     true predecessor day's bar may have lived in the dropped file), so they must emit a
     BLANK %-change rather than bridge to a non-adjacent earlier day — never a fabricated
     number (Golden Rule #1).
+
+    LATCHED per file-set state (DEC-WINDOWS-STAT-GUARD-LATCH-001, the C-r2-4
+    fix): while a corrupt/alien file persists, EVERY paging click lands here —
+    pre-latch each click re-probed EVERY file (O(files) probe queries per
+    click). The verdict is now memoised in :data:`_READABLE_SUBSET_CACHE`
+    keyed ``(directory, sha256(sql))`` under the file set's
+    :func:`_fileset_stat_token`: a repeat click within one file-set state pays
+    O(files) ``stat`` syscalls + ZERO probe queries (spy-pinned); any file
+    change moves the token → full re-probe. HONEST O (Golden Rule #10): the
+    FIRST degraded click per file-set state stays O(files) probes (stage 2
+    reads each file's rows — about one whole-partition scan), and the memo
+    never makes the fast path cheaper — it bounds only the persistent-corrupt
+    repeat-click storm. The all-unreadable ERROR is re-logged per degraded
+    request (each empty serve stays loud), from the memo hit too.
     """
-    skip_errors = movers_read_skip_errors()
-    readable: list[str] = []
+    files = sorted(directory.rglob("*.parquet"))
+    token = _fileset_stat_token(files)
+    cache_key = (directory.as_posix(), hashlib.sha256(sql.encode("utf-8")).hexdigest())
+    with _READABLE_SUBSET_LOCK:
+        hit = _READABLE_SUBSET_CACHE.get(cache_key)
+    if hit is not None and hit[0] == token:
+        readable = list(hit[1])
+        omitted = hit[2]
+        if not readable:
+            _LOG.error(unreadable_event, source=source, error=str(whole_glob_error))
+        return readable, omitted
+    readable = []
     omitted = False
-    for path in sorted(directory.rglob("*.parquet")):
+    for path in files:
         candidate = path.as_posix()
-        try:
-            conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
-        except skip_errors as skip_reason:
-            _LOG.warning(
-                skip_event,
-                source=source,
-                path=candidate,
-                reason="unreadable",
-                error=str(skip_reason),
-            )
-            omitted = True
-            continue
-        try:
-            conn.execute(sql, [[candidate], *extra_params]).fetchall()
-        except skip_errors as skip_reason:
-            _LOG.warning(
-                skip_event,
-                source=source,
-                path=candidate,
-                reason="alien_schema",
-                error=str(skip_reason),
-            )
-            omitted = True
-        else:
+        verdict = _probe_parquet_file(conn, sql, candidate, extra_params)
+        if verdict is None:
             readable.append(candidate)
+        else:
+            reason, error = verdict
+            _LOG.warning(skip_event, source=source, path=candidate, reason=reason, error=error)
+            omitted = True
     if not readable:
         _LOG.error(unreadable_event, source=source, error=str(whole_glob_error))
         omitted = True
+    with _READABLE_SUBSET_LOCK:
+        if cache_key not in _READABLE_SUBSET_CACHE and (
+            len(_READABLE_SUBSET_CACHE) >= _READABLE_SUBSET_CACHE_CAP
+        ):
+            # FIFO eviction — insertion-ordered dict, oldest verdict first.
+            _READABLE_SUBSET_CACHE.pop(next(iter(_READABLE_SUBSET_CACHE)))
+        _READABLE_SUBSET_CACHE[cache_key] = (token, tuple(readable), omitted)
     return readable, omitted
 
 
@@ -5014,10 +5089,63 @@ def _ledger_delta_files(ledger_file: Path) -> tuple[Path, ...]:
     (one shared parent; the zero-padded ``time_ns-pid`` names carry no case),
     while skipping ``Path.__lt__``'s per-comparison part-normalisation — the
     measured hot term of a warm poll at a multi-hour pull's hundreds of pending
-    deltas.
+    deltas. A listing OSError (a wedged volume — EIO and friends) degrades to
+    ``()`` after the latched stat-outage WARN
+    (DEC-WINDOWS-STAT-GUARD-LATCH-001), never a raise → 500.
     """
     directory = ledger_file.parent / _LEDGER_DELTAS_DIRNAME
-    return tuple(sorted(directory.glob("*.parquet"), key=lambda f: f.name))
+    try:
+        return tuple(sorted(directory.glob("*.parquet"), key=lambda f: f.name))
+    except OSError as exc:
+        _note_ledger_stat_outcome(degraded=True, path=directory, error=str(exc))
+        return ()
+
+
+#: One-per-outage-flip latch for the ledger stat-degrade WARN
+#: (DEC-WINDOWS-STAT-GUARD-LATCH-001): the ledger surfaces poll every ~4 s,
+#: so an unlatched WARN per stat attempt would storm the log for the whole
+#: outage. Plain module bool — a rare race costs at most one duplicate log
+#: line, never a wrong verdict.
+_LEDGER_STAT_DEGRADED: bool = False
+
+
+def _note_ledger_stat_outcome(*, degraded: bool, path: Path, error: str | None = None) -> None:
+    """Flip the stat-outage latch, logging ONCE per flip (never per poll)."""
+    global _LEDGER_STAT_DEGRADED  # noqa: PLW0603 — the documented outage latch
+    if degraded and not _LEDGER_STAT_DEGRADED:
+        _LEDGER_STAT_DEGRADED = True
+        _LOG.warning("db.ledger_stat_degraded", path=path.as_posix(), error=error)
+    elif not degraded and _LEDGER_STAT_DEGRADED:
+        _LEDGER_STAT_DEGRADED = False
+        _LOG.info("db.ledger_stat_recovered", path=path.as_posix())
+
+
+def _ledger_base_stat(ledger_file: Path) -> tuple[int, bool | None]:
+    """One guarded ``stat`` of the ledger base → ``(mtime_ns, present)``.
+
+    DEC-WINDOWS-STAT-GUARD-LATCH-001 — the OSError-classed replacement for the
+    bare ``Path.is_file()`` / ``FileNotFoundError``-only stats that made a
+    transient EBADF/ELOOP render a SILENT empty grid (pathlib swallows those
+    errnos into ``False`` with zero logs) and an EIO raise a route 500.
+    ``present`` is a three-state verdict: ``True`` (regular stat succeeded),
+    ``False`` (DEFINITIVELY absent — ``FileNotFoundError``/
+    ``NotADirectoryError``), or ``None`` (a stat OUTAGE — any other
+    ``OSError``: EIO/EBADF/ELOOP/…, logged through the one-per-outage-flip
+    :func:`_note_ledger_stat_outcome` latch, NAMED never silent). Both
+    non-``True`` arms stamp ``mtime_ns=0`` (the established absent-base
+    token), so a healthy↔outage flip moves the cache generation and the next
+    healthy poll recomputes — never a latched stale entry.
+    """
+    try:
+        st = ledger_file.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        _note_ledger_stat_outcome(degraded=False, path=ledger_file)
+        return (0, False)
+    except OSError as exc:
+        _note_ledger_stat_outcome(degraded=True, path=ledger_file, error=str(exc))
+        return (0, None)
+    _note_ledger_stat_outcome(degraded=False, path=ledger_file)
+    return (st.st_mtime_ns, True)
 
 
 def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
@@ -5026,12 +5154,12 @@ def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
     ``(base mtime_ns, delta filenames)``: a full save moves the base mtime; a
     delta append/prune changes the (immutable-once-written) delta name set — so
     any flush shape invalidates. A missing base (a first pull's mid-flight
-    delta-only checkpoint) stamps ``0``, never raises.
+    delta-only checkpoint) stamps ``0``, never raises; a stat OUTAGE
+    (EIO/EBADF/ELOOP — previously an unguarded raise → 500 through
+    ``_ledger_records_stamped``) ALSO stamps ``0`` after the latched WARN
+    (:func:`_ledger_base_stat`, DEC-WINDOWS-STAT-GUARD-LATCH-001).
     """
-    try:
-        base_mtime = ledger_file.stat().st_mtime_ns
-    except FileNotFoundError:
-        base_mtime = 0
+    base_mtime, _present = _ledger_base_stat(ledger_file)
     return (base_mtime, tuple(f.name for f in _ledger_delta_files(ledger_file)))
 
 
@@ -5104,12 +5232,15 @@ def _ledger_scan_source(ledger_file: Path) -> _LedgerScanSource:
     the deltas order among themselves (one code path, live-verified).
     """
     deltas = _ledger_delta_files(ledger_file)  # the ONE listing this call performs
-    try:
-        base_mtime = ledger_file.stat().st_mtime_ns
-        base_present = True
-    except FileNotFoundError:
-        base_mtime = 0
-        base_present = False
+    # OSError-classed stat (DEC-WINDOWS-STAT-GUARD-LATCH-001): a definite
+    # absence (False) excludes the base from the fold list as before; a stat
+    # OUTAGE (None — EIO/EBADF/ELOOP) keeps the base IN the list — excluding a
+    # file that exists would present a delta-only view as truth (a fabricated
+    # partial ledger), while including it lets the READ decide: an unreadable
+    # base surfaces as a duckdb error into the existing retry/legacy-fold
+    # degrade ladders, never a silent wrong grid.
+    base_mtime, present = _ledger_base_stat(ledger_file)
+    base_present = present is not False
     token = _stamp_token_text(base_mtime, tuple(f.name for f in deltas))
     base = ledger_file.as_posix()
     if not deltas:
@@ -5220,17 +5351,36 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     from brutex.data.window_ledger_store import ledger_path
 
     path = ledger_path(lake_root)
-    if not path.is_file() and not _ledger_delta_files(path):
+    # OSError-classed presence gate (DEC-WINDOWS-STAT-GUARD-LATCH-001): the
+    # prior bare ``path.is_file()`` swallowed a transient EBADF/ELOOP into
+    # ``False`` — a lake that HAS a ledger rendered a SILENT empty grid
+    # (total=0, zero logs) — and RAISED on EIO → a route 500. Now: a
+    # DEFINITIVELY absent base (+ no deltas) keeps the honest empty grid; a
+    # stat OUTAGE proceeds to the read attempt (the stat glitch may be
+    # transient while the read works), NAMED by the latched
+    # ``db.ledger_stat_degraded`` WARN — never silent.
+    _mtime, present = _ledger_base_stat(path)
+    if present is False and not _ledger_delta_files(path):
         return ()
-    # The records read runs FIRST (O(1) on a hit) so the projection is stamped
-    # with the generation the records were ACTUALLY served at — the compute
-    # closes over that exact snapshot, never re-reading under a fresher stamp.
-    generation, records = _ledger_records_stamped(lake_root)
-    return _LEDGER_READ_CACHE.get_or_compute(
-        f"ledger-rows|{path.as_posix()}",
-        generation=generation,
-        compute=lambda: tuple(ledger_record_row(r) for r in records),
-    )
+    try:
+        # The records read runs FIRST (O(1) on a hit) so the projection is
+        # stamped with the generation the records were ACTUALLY served at —
+        # the compute closes over that exact snapshot, never re-reading under
+        # a fresher stamp.
+        generation, records = _ledger_records_stamped(lake_root)
+        return _LEDGER_READ_CACHE.get_or_compute(
+            f"ledger-rows|{path.as_posix()}",
+            generation=generation,
+            compute=lambda: tuple(ledger_record_row(r) for r in records),
+        )
+    except movers_read_skip_errors() as exc:
+        # A wedged volume can still fail the READ itself (EIO inside
+        # ``load_window_ledger``'s own stat — its never-raises contract does
+        # not cover a raising ``Path.is_file``). Honest NAMED degrade: one
+        # WARN + an empty grid this poll — never a 500; nothing is cached
+        # (the raising compute stores nothing), so the next poll retries.
+        _LOG.warning("db.window_ledger_read_degraded", path=path.as_posix(), error=str(exc))
+        return ()
 
 
 def _window_market_bucket(market: str) -> str:
