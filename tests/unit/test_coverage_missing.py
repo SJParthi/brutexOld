@@ -18,6 +18,7 @@ from brutex.calendars import (
     is_trading_day,
     trading_days_between,
 )
+from brutex.dashboard import coverage_missing as cm
 from brutex.dashboard.coverage_missing import (
     ABSTAIN_BAD_RANGE_OVERRIDE,
     ABSTAIN_NO_RANGE,
@@ -505,8 +506,6 @@ class TestExpectedSessionsMemo:
     DISTINCT (start, end, exchange) range — not once per dataset."""
 
     def test_identical_ranges_walk_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.dashboard.coverage_missing as cm
-
         calls: list[tuple[date, date, str | None]] = []
         real = trading_days_between
 
@@ -527,8 +526,6 @@ class TestExpectedSessionsMemo:
         assert calls == [(date(2024, 1, 2), date(2024, 1, 5), "NSE")]
 
     def test_distinct_ranges_each_walk(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.dashboard.coverage_missing as cm
-
         calls: list[tuple[date, date, str | None]] = []
         real = trading_days_between
 
