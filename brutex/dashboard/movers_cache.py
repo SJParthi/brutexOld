@@ -479,7 +479,12 @@ class MoversSnapshotCache:
             # SINGLE-FLIGHT wait: another thread is paying the scan for this
             # exact key — wait (no lock held), then loop: a stored
             # same-generation entry serves as a hit; a raised / stale-generation
-            # compute makes THIS thread the next computer.
+            # compute makes THIS thread the next computer. When this runs on a
+            # dashboard offload worker, the waiting THREAD holds a LAKE-limiter
+            # token (DEC-DASHBOARD-LAKE-IO-LIMITER-001): wedged waiters are
+            # bounded by the 32-token lake pool and can no longer exhaust
+            # AnyIO's default 40-token pool — the waiter SEMANTICS here are
+            # deliberately unchanged.
             wait_event.wait()
         started_at = self._clock()
         try:

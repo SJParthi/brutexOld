@@ -45,7 +45,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -233,6 +233,10 @@ from brutex.dashboard.spot_cascade import (
     symbol_to_json,
 )
 from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.sweep_progress_cache import SweepProgressCache
+
+if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
+    from brutex.dashboard.lake_offload import LakeOffload
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
 )
@@ -778,7 +782,11 @@ class DashboardState:
         with self._lock:
             self.sweep_progress = dict(snapshot)
 
-    def sweep_progress_view(self) -> dict[str, Any]:
+    def sweep_progress_view(
+        self,
+        *,
+        file_read: Callable[[Path], dict[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
         """Return the current live sweep-progress snapshot for the dashboard route.
 
         Resolution order (crash-tolerant — a dashboard poll NEVER raises):
@@ -792,14 +800,29 @@ class DashboardState:
         A missing / malformed progress file falls through to (2)/(3) — never an
         error (delegated to :func:`brutex.engine.sweep_supervisor.read_progress`,
         which returns the idle view on any read/parse failure).
+
+        *file_read* is the DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 seam: the
+        route injects :meth:`SweepProgressCache.read
+        <brutex.dashboard.sweep_progress_cache.SweepProgressCache.read>` so
+        the file arm becomes a TTL-memoised, DEADLINE-BOUNDED read (a wedged
+        lake volume serves the last-known payload labelled ``unverified``
+        instead of blocking) — it returns the file payload to serve, or
+        ``None`` to fall through to (2)/(3), exactly like the direct
+        ``exists()`` check. The default ``None`` keeps the direct,
+        byte-identical legacy read (the in-process test/consumer contract).
         """
         from brutex.engine.sweep_supervisor import idle_progress, read_progress
 
         with self._lock:
             path = self.sweep_progress_path
             in_process = self.sweep_progress
-        if path is not None and path.exists():
-            return read_progress(path)
+        if path is not None:
+            if file_read is not None:
+                payload = file_read(path)
+                if payload is not None:
+                    return payload
+            elif path.exists():
+                return read_progress(path)
         if in_process is not None:
             return dict(in_process)
         return idle_progress()
@@ -1132,6 +1155,8 @@ def build_app(
     movers_cache: MoversSnapshotCache | None = None,
     universe_cache: UniverseSnapshotCache | None = None,
     rate_bridge_cache: RateBridgeCache | None = None,
+    sweep_progress_cache: SweepProgressCache | None = None,
+    lake_offload: LakeOffload | None = None,
     prebuild_gate: PrebuildGate | None = None,
     pull_active_probe: Callable[[], bool | None] | None = None,
     pull_phase_probe: Callable[[], str | None] | None = None,
@@ -1192,6 +1217,26 @@ def build_app(
         drive the slow-read / cache-hit / provenance behaviour
         deterministically; ``None`` (the default) builds a fresh production
         cache.
+    sweep_progress_cache
+        Optional :class:`~brutex.dashboard.sweep_progress_cache.SweepProgressCache`
+        backing the ``/api/v1/sweep-progress`` file-bridge read
+        (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001) — the sweep-progress twin of
+        *rate_bridge_cache*: a repeat poll within its 1 s TTL is a
+        zero-syscall O(1) memo hit, a post-TTL refresh is deadline-guarded on
+        a worker daemon, and a wedged lake volume serves the last-known
+        payload honestly labelled ``unverified``. Injected so tests drive the
+        slow-read / cache-hit / provenance behaviour deterministically;
+        ``None`` (the default) builds a fresh production cache.
+    lake_offload
+        Optional :class:`~brutex.dashboard.lake_offload.LakeOffload` — the
+        dedicated bounded CapacityLimiter every LAKE-touching offload site
+        rides (DEC-DASHBOARD-LAKE-IO-LIMITER-001): a wedged lake volume pins
+        at most its 32 lake tokens, leaving AnyIO's DEFAULT 40-token pool
+        free for the liveness / in-memory / CPU offloads (``/pull/rate``,
+        ``/sweep-progress``, the report renders, the log tail), which a lake
+        outage therefore can no longer starve. Injected so tests size the
+        limiter deterministically; ``None`` (the default) builds one at the
+        env-resolved production size.
     prebuild_gate
         Optional :class:`~brutex.dashboard.prebuild_gate.PrebuildGate` gating
         the ``/api/v1/movers`` screens while the one-click pull pipeline runs
@@ -1309,6 +1354,9 @@ def build_app(
         )
         from fastapi.staticfiles import StaticFiles
 
+        # Lazy like fastapi itself: lake_offload imports anyio, which ships
+        # with the [ui] extra only (the app.py wheel-free-import doctrine).
+        from brutex.dashboard.lake_offload import LakeOffload as _LakeOffload
         from brutex.dashboard.trusted_host import BracketAwareTrustedHostMiddleware
     except ImportError as exc:
         raise RuntimeError(
@@ -1450,6 +1498,30 @@ def build_app(
     # the payload (`bridge_source` / `bridge_probe_age_s`), never a stale illusion.
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
+    # The /api/v1/sweep-progress file-bridge read memo
+    # (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001): the progress JSON lives under
+    # <lake>/sweeps/progress/ on the SAME external volume, so its per-poll
+    # synchronous exists()+read used to run ON the event loop — a measured
+    # 1.5 s stalled read froze a concurrent /api/v1/state poll 9.1 ms →
+    # 1305.4 ms. Same doctrine as the rate-bridge cache above: 1 s TTL memo,
+    # deadline-bounded refresh (0.5 s) on a daemon, non-blocking single-flight,
+    # honest additive `progress_source` / `progress_probe_age_s` provenance.
+    # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _sweep_progress_cache = (
+        sweep_progress_cache if sweep_progress_cache is not None else SweepProgressCache()
+    )
+    # The dedicated LAKE-I/O capacity limiter (DEC-DASHBOARD-LAKE-IO-LIMITER-001
+    # — the #1522/#1622 named follow-up, audit M4): EVERY lake-touching offload
+    # below rides `_run_lake` (a `run_in_threadpool` twin bound to this app's
+    # OWN 32-token AnyIO CapacityLimiter) instead of the DEFAULT shared
+    # 40-token pool, so a wedged lake volume pins at most the 32 lake tokens
+    # and the liveness/in-memory/CPU offloads — the deadline-guarded
+    # /pull/rate + /sweep-progress memos, the .xlsx/.zip renders, the local
+    # log tail — keep the default pool to themselves and stay responsive
+    # through a lake outage (the measured repro: the 41st offload queued
+    # 2701 ms behind 40 wedged workers, starving even the bounded /pull/rate).
+    # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
+    _run_lake = lake_offload if lake_offload is not None else _LakeOffload()
 
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
@@ -1936,19 +2008,27 @@ def build_app(
         freshest of the cross-process file bridge, the in-process push, or an idle
         snapshot, and never raises (see :meth:`DashboardState.sweep_progress_view`).
 
-        HONEST envelope (DEC-LATENCY-HONESTY-BATCH-001, Golden Rule #10 —
-        supersedes the prior "a pure O(1) read that never touches the lake"
-        claim, which was FALSE): when a sweep-progress path is configured,
-        every poll performs ONE synchronous ``path.exists()`` + small-JSON
-        ``read_progress`` of the lake-volume file bridge
-        (``<lake>/sweeps/progress/sweep-progress.json``) ON the event loop —
-        so a stalled lake volume can block the loop for the duration of that
-        stat + read (the same class the ``RateBridgeCache`` bounds for
-        ``/api/v1/pull/rate``). Offloading/memoising this read is a NAMED
-        follow-up (owned by a separate change), not claimed here. It holds the
-        state lock only briefly and never takes the results-store lock.
+        HONEST envelope (DEC-SWEEP-PROGRESS-NONBLOCK-CACHE-001 — this route's
+        prior "pure O(1) read that never touches the lake" claim was FALSE): the
+        file-bridge arm READS ``<lake>/sweeps/progress/sweep-progress.json`` on
+        the lake volume — a stalled 1.5 s read used to run ON the uvicorn event
+        loop and moved a concurrent ``/api/v1/state`` poll 9.1 ms → 1305.4 ms.
+        Now the whole view runs on the threadpool (never the loop) and the file
+        arm rides the injected :class:`~brutex.dashboard.sweep_progress_cache.
+        SweepProgressCache` — a 1 s-TTL memo whose refresh is deadline-bounded
+        (0.5 s) with a non-blocking single-flight, so even the offloaded worker
+        is bounded on a wedged volume (last-known payload served, labelled with
+        the ADDITIVE ``progress_source`` / ``progress_probe_age_s`` keys — never
+        a stale-as-fresh illusion). The in-process-push + idle arms stay pure
+        in-memory, byte-identical, unstamped. Stays on the DEFAULT AnyIO pool
+        (not the lake limiter): like ``/api/v1/pull/rate`` it is a
+        deadline-guarded LIVENESS poll whose worker hold is capped per outage.
         """
-        return JSONResponse(state.sweep_progress_view())
+        return JSONResponse(
+            await run_in_threadpool(
+                lambda: state.sweep_progress_view(file_read=_sweep_progress_cache.read)
+            )
+        )
 
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
@@ -1992,7 +2072,7 @@ def build_app(
           * per-underlying instrument count (for the chart strip)
         """
         store = _require_store()
-        stats = await run_in_threadpool(_collect_store_stats, store)
+        stats = await _run_lake(_collect_store_stats, store)
         return JSONResponse(stats)
 
     @app.get("/api/v1/instruments")
@@ -2020,7 +2100,7 @@ def build_app(
             keep responses snappy even on large universes.
         """
         store = _require_store()
-        rows = await run_in_threadpool(
+        rows = await _run_lake(
             lambda: _query_instruments(
                 store,
                 underlying=underlying,
@@ -2050,7 +2130,7 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"expiries": []})
         lake = lake_root.parent
-        series = await run_in_threadpool(
+        series = await _run_lake(
             lambda: list_option_series(store.connection, lake, underlying_symbol=underlying)
         )
         seen: set[tuple[str, str, int | None]] = set()
@@ -2099,7 +2179,7 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"contracts": [], "limit": limit})
         lake = lake_root.parent
-        series = await run_in_threadpool(
+        series = await _run_lake(
             lambda: list_option_series(store.connection, lake, underlying_symbol=underlying)
         )
         rows = [
@@ -2143,7 +2223,7 @@ def build_app(
         cannot freeze the whole dashboard.
         """
         store = _require_store()
-        return JSONResponse(await run_in_threadpool(_universe_cache.summary, store))
+        return JSONResponse(await _run_lake(_universe_cache.summary, store))
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -2171,7 +2251,7 @@ def build_app(
             # per-kind base reads run on a threadpool worker, never the event loop
             # (the classifier's ValueError for a bad kind still propagates out of
             # run_in_threadpool → 400, before any caching).
-            rows = await run_in_threadpool(lambda: _universe_cache.instruments(store, kind=kind))
+            rows = await _run_lake(lambda: _universe_cache.instruments(store, kind=kind))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
@@ -2241,7 +2321,7 @@ def build_app(
             )
             return candidates, [row["symbol"] for row in stock_rows]
 
-        candidates, held_symbols = await run_in_threadpool(_held_universe)
+        candidates, held_symbols = await _run_lake(_held_universe)
 
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
@@ -2258,7 +2338,7 @@ def build_app(
                 }
             )
         # The cache lives beside the lake at <lake>/index_constituents/.
-        result = await run_in_threadpool(
+        result = await _run_lake(
             resolve_constituents,
             symbol,
             cache_root=lake_root.parent,
@@ -2372,7 +2452,11 @@ def build_app(
             dry_run=dry_run,
         )
         store = _require_store()
-        instrument = store.get(symbol)
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003: the symbol lookup is a synchronous
+        # DuckDB read on the lake volume — run it on a worker (the #1622 doctrine)
+        # so a slow/stalled volume can never freeze the loop at click time. The
+        # unknown-symbol 400 stays OUT here (the api_universe_instruments idiom).
+        instrument = await _run_lake(store.get, symbol)
         if instrument is None:
             raise HTTPException(
                 status_code=400,
@@ -2388,7 +2472,7 @@ def build_app(
             # the loop so the rest of the dashboard stays responsive DURING a pull
             # (DEC-DASHBOARD-PULL-ASYNC-001). The vendor-bound pull duration itself
             # is unchanged (vendor rate-limit), but it no longer blocks the UI.
-            report = await run_in_threadpool(
+            report = await _run_lake(
                 pull_candles,
                 instrument,
                 lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
@@ -2671,30 +2755,45 @@ def build_app(
         loudly-labeled synthetic dry-run.
         """
         dry_run = _gate_pull_dry_run(dry_run, route="universe.pull_all")
-        if symbols is not None:
-            try:
-                instruments = resolve_pull_symbols(symbols, _require_store().get)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            detail = f"{len(instruments)} symbols spot"
-        elif symbol is not None:
-            store = _require_store()
-            instrument = store.get(symbol)
-            if instrument is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
-                )
-            instruments = [instrument]
-            detail = f"{symbol} spot"
-        elif kind is not None:
-            instruments = _select_bulk_targets(kind)
-            detail = f"{kind} spot"
-        else:
+
+        def _resolve_selection() -> tuple[list[Instrument], str]:
+            """Resolve the spot selection + its progress label — store reads only.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class):
+            ``resolve_pull_symbols`` runs one DuckDB ``store.get`` per token and
+            ``_select_bulk_targets`` runs two whole-store reads — all of which
+            sat ON the event loop, so a slow/stalled lake volume froze every
+            concurrent poll the moment the operator clicked Pull. Runs on a
+            threadpool worker; the ``HTTPException``s raised here propagate out
+            of ``run_in_threadpool`` unchanged, and the ``ValueError`` → 400
+            mapping stays OUTSIDE the offload (the #1622
+            ``api_universe_instruments`` idiom).
+            """
+            if symbols is not None:
+                selected = resolve_pull_symbols(symbols, _require_store().get)
+                return selected, f"{len(selected)} symbols spot"
+            if symbol is not None:
+                instrument = _require_store().get(symbol)
+                if instrument is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                    )
+                return [instrument], f"{symbol} spot"
+            if kind is not None:
+                return _select_bulk_targets(kind), f"{kind} spot"
             raise HTTPException(
                 status_code=400,
                 detail="pull-all requires ?symbols=..., ?symbol=... or ?kind=...",
             )
+
+        try:
+            instruments, detail = await _run_lake(_resolve_selection)
+        except ValueError as exc:
+            # resolve_pull_symbols' fail-CLOSED empty/unknown-selection refusal
+            # (byte-identical to the pre-offload per-arm catch — the other arms
+            # raise HTTPException directly, which passes through untouched).
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
@@ -2839,46 +2938,63 @@ def build_app(
             years = _resolve_metadata_years(from_date, to_date)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if symbols is not None:
-            try:
-                instruments = resolve_pull_symbols(symbols, _require_store().get)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            detail = f"{len(instruments)} symbols metadata"
-        elif symbol is not None:
-            store = _require_store()
-            instrument = store.get(symbol)
-            if instrument is None:
+
+        def _resolve_selection() -> tuple[list[Instrument], str, frozenset[int]]:
+            """Resolve the metadata selection + the reference-only skip set.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class):
+            the per-token ``store.get``s, ``_select_bulk_targets``' two
+            whole-store reads AND the ``reference_only_security_ids`` scan are
+            all synchronous DuckDB reads that sat ON the event loop. One
+            threadpool closure resolves everything the launch needs;
+            ``HTTPException``s propagate unchanged, the ``ValueError`` → 400
+            mapping stays OUTSIDE (the #1622 ``api_universe_instruments``
+            idiom).
+
+            The reference-only set skips REF underlyings BEFORE the chain
+            pull's network calls (DEC-SKIP-REF-METADATA-001): a REFERENCE_ONLY
+            underlying — a spot-only index (INDIAVIX / MIDCAP50 / NIFTY100, …)
+            or a non-F&O NTM constituent (DEC-NTM-GROWW-REPOINT-001 /
+            DEC-NON-OPTION-INDEX-REFTAG-001) — has NO F&O chain, so
+            ``get_expiries`` would return empty and persist nothing (already
+            SAFE), but it still costs one wasted empty network call. The
+            store's ``reference_only_security_ids`` is the SAME set the
+            /universe REF badge uses; the caller partitions on it so a
+            mistaken REF selection is a TRUE zero-call no-op — reported, never
+            silently dropped; TRADABLE behaviour byte-unchanged.
+            """
+            if symbols is not None:
+                selected = resolve_pull_symbols(symbols, _require_store().get)
+                label = f"{len(selected)} symbols metadata"
+            elif symbol is not None:
+                instrument = _require_store().get(symbol)
+                if instrument is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                    )
+                selected = [instrument]
+                label = f"{symbol} metadata"
+            elif kind is not None:
+                selected = _select_bulk_targets(kind)
+                label = f"{kind} metadata"
+            else:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                    detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
                 )
-            instruments = [instrument]
-            detail = f"{symbol} metadata"
-        elif kind is not None:
-            instruments = _select_bulk_targets(kind)
-            detail = f"{kind} metadata"
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
-            )
+            return selected, label, _require_store().reference_only_security_ids()
+
+        try:
+            instruments, detail, reference_only_ids = await _run_lake(_resolve_selection)
+        except ValueError as exc:
+            # resolve_pull_symbols' fail-CLOSED refusal (byte-identical to the
+            # pre-offload per-arm catch).
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             detail = label_synthetic(detail)
-        # Skip reference-only underlyings BEFORE the chain pull's network calls
-        # (DEC-SKIP-REF-METADATA-001). A REFERENCE_ONLY underlying — a spot-only
-        # index (INDIAVIX / MIDCAP50 / NIFTY100, …) or a non-F&O NTM constituent
-        # (DEC-NTM-GROWW-REPOINT-001 / DEC-NON-OPTION-INDEX-REFTAG-001) — has NO
-        # F&O chain, so ``get_expiries`` would return empty and persist nothing
-        # (already SAFE), but it still costs one wasted empty network call. The
-        # store's ``reference_only_security_ids`` is the SAME set the /universe REF
-        # badge uses; partition on it so a mistaken REF selection is a TRUE
-        # zero-call no-op. The set is reported (never silently dropped); TRADABLE
-        # behaviour is byte-unchanged (observability + an efficiency guard, NOT a
-        # behaviour change for F&O underlyings).
-        reference_only_ids = _require_store().reference_only_security_ids()
         tradable = [inst for inst in instruments if inst.security_id not in reference_only_ids]
         skipped_reference_only = [
             inst.symbol_name for inst in instruments if inst.security_id in reference_only_ids
@@ -2993,7 +3109,7 @@ def build_app(
             }
         )
 
-    def _start_composite_historical_pull(
+    async def _start_composite_historical_pull(
         *,
         symbols: str | None,
         interval: str,
@@ -3014,18 +3130,30 @@ def build_app(
         :func:`brutex.dashboard.composite_pull.pull_historical_for_underlyings` on the
         single-flight background job (poll ``/pull-progress``). An ALL-reference-only
         selection is an honest no-op (``started: False``, never a 400).
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003: the selection resolution (one DuckDB
+        ``store.get`` per token + the ``reference_only_security_ids`` scan) runs on
+        a threadpool worker — it sat ON the event loop, freezing every concurrent
+        poll at click time on a slow/stalled lake volume. The ``ValueError`` → 400
+        mapping stays OUTSIDE the offload (the #1622 idiom).
         """
         if symbols is None:
             raise HTTPException(
                 status_code=400,
                 detail="enumerate=true requires ?symbols=a,b,c (the multi-select)",
             )
+        selected_symbols = symbols
+
+        def _resolve_composite_selection() -> tuple[list[Instrument], list[int], frozenset[int]]:
+            """Resolve selection + year grid + REF skip set — store reads only."""
+            resolved = resolve_pull_symbols(selected_symbols, _require_store().get)
+            year_grid = _resolve_metadata_years(from_date, to_date)
+            return resolved, year_grid, _require_store().reference_only_security_ids()
+
         try:
-            instruments = resolve_pull_symbols(symbols, _require_store().get)
-            years = _resolve_metadata_years(from_date, to_date)
+            instruments, years, reference_only_ids = await _run_lake(_resolve_composite_selection)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        reference_only_ids = _require_store().reference_only_security_ids()
         skipped_reference_only = [
             inst.symbol_name for inst in instruments if inst.security_id in reference_only_ids
         ]
@@ -3196,7 +3324,7 @@ def build_app(
         # candles, reusing BOTH existing spines + the reference-only guard. The single-
         # underlying / contract / kind / all grammar below is byte-unchanged.
         if symbols is not None or enumerate:
-            return _start_composite_historical_pull(
+            return await _start_composite_historical_pull(
                 symbols=symbols,
                 interval=interval,
                 intervals=intervals,
@@ -3209,19 +3337,67 @@ def build_app(
                 lake_root=lake_root,
             )
         registry_path = lake_root / "registry.duckdb"
-        # Resolve the selection to concrete registry rows BEFORE the job starts, so an
-        # empty/no-match selection is an immediate honest 400 (never a fabricated contract).
-        with RegistryStore.open(registry_path) as registry:
-            selected = _resolve_historical_contracts(
-                registry,
-                contract=contract,
-                contracts=contracts,
-                underlying=underlying,
-                expiry_date=expiry_date,
-                kind=kind,
-                all_cached=all,
-                select_kind=_select_bulk_targets,
+
+        def _resolve_direct_selection() -> tuple[list[ContractRow], dict[str, bool]]:
+            """Resolve the direct grammar to registry rows + the six-step kind map.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class — the
+            WORST offender): ``RegistryStore.open`` + ``_resolve_historical_contracts``
+            (a full ``list_contracts`` over the whole cached chain) +
+            ``_underlying_kind_map`` over BOTH ``_select_bulk_targets`` reads all ran
+            ON the event loop, so a click on "Pull historical" froze every concurrent
+            dashboard request for the whole resolution on a slow/stalled volume. The
+            selection is still resolved BEFORE the job starts, so an empty/no-match
+            selection stays an immediate honest 400 (raised by the caller — never a
+            fabricated contract).
+
+            Six-step order on the DIRECT-selection grammars too
+            (DEC-PULL-SIX-STEP-ORDER-001 review fix): this route's
+            ?contract/?contracts/?underlying/?kind/?all paths ran the legacy 2-bucket
+            FUT-then-OPT order because no ``underlying_kinds`` was threaded —
+            reproducing the motivating 2026-07-05 inversion (stock options before
+            index options) on a real vendor pull. Build the classification map over
+            EVERY admitted underlying (both kinds) with the SAME resolved-key builder
+            the composite uses; a selection whose underlying is somehow absent orders
+            stock-side (WARNed + counted inside the spine, never dropped). Built at
+            launch time on the worker, captured by the job closure below; skipped
+            entirely for an empty selection (the pre-offload order — the map was
+            never built when the 400 fired first).
+            """
+            with RegistryStore.open(registry_path) as registry:
+                rows = _resolve_historical_contracts(
+                    registry,
+                    contract=contract,
+                    contracts=contracts,
+                    underlying=underlying,
+                    expiry_date=expiry_date,
+                    kind=kind,
+                    all_cached=all,
+                    select_kind=_select_bulk_targets,
+                )
+            if not rows:
+                return [], {}
+            return rows, _underlying_kind_map(
+                _select_bulk_targets("index") + _select_bulk_targets("stock")
             )
+
+        try:
+            selected, underlying_kinds = await _run_lake(_resolve_direct_selection)
+        except RegistryError as exc:
+            # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 review fold: offloading this
+            # resolution WIDENED the concurrency window on ``RegistryStore.open``
+            # — open is write-on-open (schema DDL + an ``INSERT OR REPLACE INTO
+            # schema_meta`` stamp), so two simultaneous launch clicks that both
+            # reach the open can now race a DuckDB Transaction/Constraint
+            # exception → ``RegistryError`` (a BruteXError, NOT a ValueError),
+            # which pre-offload the on-loop serialization made unreachable.
+            # An honest 503 "busy — retry" instead of a misleading 500 (the
+            # registry read routes' RegistryError-degrade precedent; the click
+            # is retryable — nothing was launched, nothing was corrupted).
+            raise HTTPException(
+                status_code=503,
+                detail=f"registry busy — retry (concurrent open on registry.duckdb): {exc}",
+            ) from exc
         if not selected:
             raise HTTPException(
                 status_code=400,
@@ -3230,18 +3406,6 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
-        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
-        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
-        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
-        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
-        # before index options) on a real vendor pull. Build the classification map over
-        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
-        # composite uses; a selection whose underlying is somehow absent orders
-        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
-        # time (request thread), captured by the job closure below.
-        underlying_kinds = _underlying_kind_map(
-            _select_bulk_targets("index") + _select_bulk_targets("stock")
-        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -4189,7 +4353,7 @@ def build_app(
         byte-identical).
         """
         return JSONResponse(
-            await run_in_threadpool(
+            await _run_lake(
                 lambda: _launch_pipeline(
                     symbols=symbols,
                     symbol=symbol,
@@ -4288,11 +4452,16 @@ def build_app(
         ``?dry_run=true`` runs the loudly-labeled synthetic pass.
         """
         dry_run = _gate_pull_dry_run(dry_run, route="universe.retry_failed")
+
         # SHARED selection resolver (CLAUDE.md §11 COMMON — the same precedence
         # symbols > symbol > whole-universe the pull-pipeline uses; fail-CLOSED on an
-        # empty/unknown selection → 400, DEC-PULL-SELECTED-PIPELINE-001).
-        try:
-            instruments, target_source = resolve_pull_targets(
+        # empty/unknown selection → 400, DEC-PULL-SELECTED-PIPELINE-001). Resolved on
+        # a threadpool worker (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 — the per-token
+        # `store.get`s + the two whole-store `_select_bulk_targets` reads are
+        # synchronous DuckDB reads that sat ON the event loop); the ValueError → 400
+        # mapping stays OUTSIDE the offload (the #1622 api_universe_instruments idiom).
+        def _resolve_targets() -> tuple[list[Instrument], str]:
+            return resolve_pull_targets(
                 symbols=symbols,
                 symbol=symbol,
                 lookup=_require_store().get,
@@ -4300,6 +4469,9 @@ def build_app(
                     _select_bulk_targets("index") + _select_bulk_targets("stock")
                 ),
             )
+
+        try:
+            instruments, target_source = await _run_lake(_resolve_targets)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         detail = f"retry {symbols or symbol or (kind or 'all')} spot ({target_source})"
@@ -4596,7 +4768,7 @@ def build_app(
                 generation=_summary_cache.generation,
             )
 
-        snap["phases"] = await run_in_threadpool(_phases)
+        snap["phases"] = await _run_lake(_phases)
         return JSONResponse(snap)
 
     @app.get("/api/v1/universe/pull-verdict")
@@ -4738,7 +4910,7 @@ def build_app(
                 compute=_build,
             )
 
-        return JSONResponse(await run_in_threadpool(_cached_build))
+        return JSONResponse(await _run_lake(_cached_build))
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -4802,7 +4974,7 @@ def build_app(
                 SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
             )
 
-        return JSONResponse(await run_in_threadpool(_rows_and_rollup))
+        return JSONResponse(await _run_lake(_rows_and_rollup))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
@@ -4925,9 +5097,7 @@ def build_app(
             return _summary_cache.stamp_freshness(
                 SPOT, build_completeness_scoreboard([], {}, [], {})
             )
-        board: dict[str, Any] = await run_in_threadpool(
-            _build_completeness_board, store, lake_root.parent
-        )
+        board: dict[str, Any] = await _run_lake(_build_completeness_board, store, lake_root.parent)
         return board
 
     async def _completeness_csv() -> str:
@@ -4936,7 +5106,7 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return scoreboard_to_csv(build_completeness_scoreboard([], {}, [], {}))
-        csv_text: str = await run_in_threadpool(_build_completeness_csv, store, lake_root.parent)
+        csv_text: str = await _run_lake(_build_completeness_csv, store, lake_root.parent)
         return csv_text
 
     @app.get("/api/v1/completeness/scoreboard.csv")
@@ -4991,7 +5161,7 @@ def build_app(
                 compute=lambda: _build_per_symbol_completeness(store, lake),
             )
 
-        per_symbol = await run_in_threadpool(_cached_per_symbol)
+        per_symbol = await _run_lake(_cached_per_symbol)
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -5064,7 +5234,7 @@ def build_app(
         line+branch); READ-ONLY, no pull. No store wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
+        report = await _run_lake(_build_mapping_integrity_report_cached)
         return JSONResponse(report_to_dict(report))
 
     @app.get("/api/v1/universe/mapping-integrity.csv")
@@ -5081,7 +5251,7 @@ def build_app(
         wired → 503.
         """
         _require_store()
-        report = await run_in_threadpool(_build_mapping_integrity_report_cached)
+        report = await _run_lake(_build_mapping_integrity_report_cached)
         return Response(
             content=mapping_integrity_to_csv(report),
             media_type="text/csv; charset=utf-8",
@@ -5111,7 +5281,7 @@ def build_app(
         IDX/EQ spot by symbol AND token, else orphan/ambiguous/disagreement/empty). READ-ONLY;
         ``{"present": false}`` until the instrument master has been loaded once. No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_master_integrity)
+        snapshot = await _run_lake(_read_master_integrity)
         if snapshot is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
@@ -5127,7 +5297,7 @@ def build_app(
         formula-injection-safe). READ-ONLY; a one-line placeholder until the master is loaded.
         No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_master_integrity)
+        snapshot = await _run_lake(_read_master_integrity)
         if snapshot is None:
             content = (
                 "BruteX — Instrument-Master Integrity Audit\n"
@@ -5160,7 +5330,7 @@ def build_app(
         within-expiry mismatch is RED; cross-expiry lot revisions are informational. READ-ONLY;
         ``{"present": false}`` until the master has been loaded once. No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_economics_integrity)
+        snapshot = await _run_lake(_read_economics_integrity)
         if snapshot is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
@@ -5175,7 +5345,7 @@ def build_app(
         formula-injection-safe). READ-ONLY; a one-line placeholder until the master is loaded;
         no store → 503.
         """
-        snapshot = await run_in_threadpool(_read_economics_integrity)
+        snapshot = await _run_lake(_read_economics_integrity)
         if snapshot is None:
             content = (
                 "BruteX — Instrument-Master Economics Integrity Audit\n"
@@ -5210,7 +5380,7 @@ def build_app(
         ``skipped_count <= max(10, ceil(0.1% of in-scope rows))``. READ-ONLY;
         ``{"present": false}`` until the master has been loaded once. No store → 503.
         """
-        snapshot = await run_in_threadpool(_read_parse_skips)
+        snapshot = await _run_lake(_read_parse_skips)
         if snapshot is None:
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
@@ -5288,7 +5458,7 @@ def build_app(
         ``{"present": false}``.
         """
         _require_store()
-        payload = await run_in_threadpool(_build_lake_census_payload_cached)
+        payload = await _run_lake(_build_lake_census_payload_cached)
         return JSONResponse(payload)
 
     @app.get("/api/v1/coverage/windows")
@@ -5368,7 +5538,7 @@ def build_app(
                 since=last_pull_start_utc(lake),
             )
 
-        return JSONResponse(await run_in_threadpool(_payload))
+        return JSONResponse(await _run_lake(_payload))
 
     @app.get("/api/v1/coverage/options")
     async def api_coverage_options() -> JSONResponse:
@@ -5406,7 +5576,7 @@ def build_app(
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await run_in_threadpool(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
         # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
         return JSONResponse(
@@ -5499,7 +5669,7 @@ def build_app(
             # which is one flock syscall on the lake volume, so it runs on a
             # threadpool worker — never on the event loop (the app.py offload
             # doctrine, DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
-            gate = await run_in_threadpool(_prebuild_gate.snapshot)
+            gate = await _run_lake(_prebuild_gate.snapshot)
             if gate.blocking:
                 return JSONResponse(
                     gated_movers_payload(
@@ -5789,7 +5959,7 @@ def build_app(
                     latest_time=latest_time,
                 )
 
-            payload = await run_in_threadpool(_resolve)
+            payload = await _run_lake(_resolve)
             return JSONResponse(payload)
         except PcrCorruptionError as exc:
             # Lake VALUE corruption (an out-of-band negative OI/volume cell —
@@ -5945,7 +6115,7 @@ def build_app(
                 "basis": report_basis,
             }
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/reports/preopen.xlsx")
     async def api_preopen_xlsx(
@@ -5989,11 +6159,7 @@ def build_app(
                 basis=report_basis,
             )
 
-        rows = (
-            await run_in_threadpool(_build_rows, lake_root.parent)
-            if isinstance(lake_root, Path)
-            else []
-        )
+        rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # Self-describing download name (DEC-REPORT-FILENAME-001): basis +
         # the selected symbols + the range — never a selection-blind static name.
         filename = report_filename(
@@ -6069,11 +6235,7 @@ def build_app(
                 basis=report_basis,
             )
 
-        rows = (
-            await run_in_threadpool(_build_rows, lake_root.parent)
-            if isinstance(lake_root, Path)
-            else []
-        )
+        rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # One xlsx per year + zip packing is CPU-bound over every report row —
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         blob = await run_in_threadpool(
@@ -6168,7 +6330,7 @@ def build_app(
                 "survivors": report.n_survived,
             }
 
-        status_code, payload = await run_in_threadpool(_run)
+        status_code, payload = await _run_lake(_run)
         return JSONResponse(payload, status_code=status_code)
 
     @app.post("/api/v1/sweep/run")
@@ -6449,7 +6611,7 @@ def build_app(
             )
 
         try:
-            return JSONResponse(await run_in_threadpool(_resolve))
+            return JSONResponse(await _run_lake(_resolve))
         except ResultsStoreError as exc:
             # C3 (DEC-SWEEP-RESULTS-DEPTH-001): a typed store fault escaping the
             # per-store skip net degrades to the honest error payload — 200 with
@@ -6570,7 +6732,7 @@ def build_app(
                 f"oc_runs|rev={rev}|fx={fixture_active}", generation=0, compute=_fresh
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/manifest")
     async def api_oneclick_manifest(
@@ -6644,7 +6806,7 @@ def build_app(
                 compute=_fresh,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/top100")
     async def api_oneclick_top100(
@@ -6690,7 +6852,7 @@ def build_app(
                 compute=_fresh,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/events")
     async def api_oneclick_events(
@@ -6754,7 +6916,7 @@ def build_app(
             )
             return _oneclick_cache.get_or_compute(key, generation=0, compute=_fresh)
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/trades")
     async def api_oneclick_trades(
@@ -6791,7 +6953,7 @@ def build_app(
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
@@ -6855,7 +7017,7 @@ def build_app(
                 fixture_root_active=fixture_active,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/logs")
     async def api_logs(
@@ -6890,7 +7052,7 @@ def build_app(
         Tolerates a missing table (count 0) so a fresh/empty store works.
         """
         store = _require_store()
-        tables = await run_in_threadpool(lambda: table_summary(store.connection))
+        tables = await _run_lake(lambda: table_summary(store.connection))
         return JSONResponse({"tables": tables})
 
     @app.get("/api/v1/db/table/{name}")
@@ -6911,7 +7073,7 @@ def build_app(
         """
         store = _require_store()
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: sample_rows(store.connection, name, limit=limit, offset=offset)
             )
         except ValueError as exc:
@@ -6950,7 +7112,7 @@ def build_app(
         """
         store = _require_store()
         try:
-            columns = await run_in_threadpool(lambda: list_columns(store.connection, name))
+            columns = await _run_lake(lambda: list_columns(store.connection, name))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"table": name, "columns": columns})
@@ -6987,7 +7149,7 @@ def build_app(
         parsed_filters = _parse_filters(f or [])
         columns = tuple(column) if column else None
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: query_table(
                     store.connection,
                     name,
@@ -7062,7 +7224,7 @@ def build_app(
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
         return JSONResponse(
-            await run_in_threadpool(
+            await _run_lake(
                 lambda: _db_datasets_cache.get_or_compute(
                     DB_DATASETS_KEY, generation=_summary_cache.generation, compute=_datasets
                 )
@@ -7086,7 +7248,7 @@ def build_app(
         lake = lake_root.parent
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
-        index: FnoCascadeIndex = await run_in_threadpool(
+        index: FnoCascadeIndex = await _run_lake(
             lambda: _fno_cascade_cache.get_or_compute(
                 FNO_CASCADE_KEY,
                 generation=_summary_cache.generation,
@@ -7161,9 +7323,7 @@ def build_app(
         if idx is None:
             return JSONResponse({"underlying": underlying, "expiries": [], "expiry_counts": []})
         expiries = list(idx.expiries(underlying))
-        listed_by_expiry = await run_in_threadpool(
-            lambda: _fno_listed_by_expiry(underlying, expiries)
-        )
+        listed_by_expiry = await _run_lake(lambda: _fno_listed_by_expiry(underlying, expiries))
         return JSONResponse(
             {
                 "underlying": underlying,
@@ -7217,7 +7377,7 @@ def build_app(
 
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
-        index: SpotCascadeIndex = await run_in_threadpool(
+        index: SpotCascadeIndex = await _run_lake(
             lambda: _spot_cascade_cache.get_or_compute(
                 SPOT_CASCADE_KEY, generation=_summary_cache.generation, compute=_build
             )
@@ -7273,7 +7433,7 @@ def build_app(
         lake = store_path.parent
         columns = tuple(column) if column else None
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: query_candles(
                     store.connection,
                     lake,
@@ -7394,7 +7554,7 @@ def build_app(
                 "offset": offset,
             }
 
-        return JSONResponse(await run_in_threadpool(_load))
+        return JSONResponse(await _run_lake(_load))
 
     @app.get("/api/v1/db/options")
     async def api_db_options(
@@ -7424,7 +7584,7 @@ def build_app(
         lake = lake_root.parent
         columns = tuple(column) if column else None
         try:
-            payload = await run_in_threadpool(
+            payload = await _run_lake(
                 lambda: query_option_candles(
                     store.connection,
                     lake,
@@ -7488,7 +7648,7 @@ def build_app(
             return payload
 
         try:
-            return JSONResponse(await run_in_threadpool(_load))
+            return JSONResponse(await _run_lake(_load))
         except RegistryError:
             # A corrupt / truncated / version-incompatible registry.duckdb makes
             # RegistryStore.open raise RegistryError (a BruteXError, NOT a ValueError):
@@ -7539,7 +7699,7 @@ def build_app(
             return payload
 
         try:
-            return JSONResponse(await run_in_threadpool(_load))
+            return JSONResponse(await _run_lake(_load))
         except RegistryError:
             # Corrupt / unreadable registry.duckdb → honest 200 empty-state, mirroring
             # the expiries route (DEC-DASHBOARD-EMPTY-STATE-001). A malformed expiry_date
