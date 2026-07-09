@@ -45,6 +45,23 @@ _hyp_settings.register_profile(
 _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 
+@pytest.fixture
+def _inert_sweep_logging_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the CLI dispatch-level sweep logging guard inert (opt-in).
+
+    The ``main()`` sweep dispatch configures PROCESS-GLOBAL structlog state
+    (DEC-SWEEP-LOG-VOLUME-GUARD-001). Test files that drive
+    ``main([... "sweep*" ...])`` for OTHER behavior opt in via a module-level
+    ``pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")`` so
+    their assertions stay byte-identical and no global logging config leaks
+    into later tests in the same process. The guard's own behavior is pinned
+    in ``tests/unit/test_cli_sweep_log_level.py``.
+    """
+    from brutex import cli
+
+    monkeypatch.setattr(cli, "_configure_sweep_logging", lambda: None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_groww_token_cache(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
