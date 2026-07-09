@@ -157,6 +157,7 @@ def assemble_candle(
     volume: object,
     open_interest: object,
     on_clamp: Callable[[], None] | None = None,
+    on_negative_count_clamp: Callable[[], None] | None = None,
 ) -> CandleBar:
     """Build a validated :class:`CandleBar` from raw field values.
 
@@ -176,6 +177,17 @@ def assemble_candle(
         window and WARN instead of the clamp firing silently. ``None`` (the
         default — every other caller) is byte-identical to before; the
         returned bar is IDENTICAL either way (parse behavior unchanged).
+    on_negative_count_clamp
+        OBSERVE-ONLY hook (DEC-AUDIT-ALERT-CLAMP-OBS-001, the sibling of
+        *on_clamp*): invoked exactly once per bar whose ``volume`` and/or
+        ``open_interest`` the ``max(0, ...)`` count-field normalization below
+        actually CLAMPED from a NEGATIVE vendor value to ``0`` (an impossible
+        count — DEC-VENDOR-VOLUME-NORMALIZE-001). Like the OHLC clamp, this
+        used to fire SILENTLY with no counter and no log, so a vendor
+        systematically emitting negative counts never surfaced. ``None`` (the
+        default — every other caller) is byte-identical to before; the
+        returned bar's clamped ``0`` is IDENTICAL either way (parse behavior
+        unchanged — this only ADDS observability, never changes the value).
 
     Raises
     ------
@@ -224,7 +236,27 @@ def assemble_candle(
     # the bar's authoritative OHLC price. (Indices additionally have ``volume``
     # IGNORED outright upstream — the spot parser's ``drop_volume`` — so an index
     # bar is always 0 regardless of the junk volume the vendor sends.)
-    oi = None if is_absent(open_interest) else max(0, to_int(open_interest, "open_interest"))
+    # Count-field (volume / open_interest) NEGATIVE-clamp observability
+    # (DEC-AUDIT-ALERT-CLAMP-OBS-001, sibling of the OHLC clamp below): a
+    # vendor-emitted NEGATIVE count is impossible, so it is clamped to 0
+    # (DEC-VENDOR-VOLUME-NORMALIZE-001) — but the clamp used to fire with NO
+    # counter and NO log. Detect a negative BEFORE the ``max(0, ...)`` so a
+    # caller can count it; the stored 0 is byte-identical either way.
+    negative_count_clamped = False
+    if is_absent(open_interest):
+        oi = None
+    else:
+        oi_raw = to_int(open_interest, "open_interest")
+        if oi_raw < 0:
+            negative_count_clamped = True
+        oi = max(0, oi_raw)
+    if is_absent(volume):
+        volume_value = 0
+    else:
+        volume_raw = to_int(volume, "volume")
+        if volume_raw < 0:
+            negative_count_clamped = True
+        volume_value = max(0, volume_raw)
     open_price = to_price(open_, "open")
     high_price = to_price(high, "high")
     low_price = to_price(low, "low")
@@ -247,13 +279,15 @@ def assemble_candle(
     # below is byte-identical whether or not a hook is present.
     if on_clamp is not None and (clamped_high != high_price or clamped_low != low_price):
         on_clamp()
+    if on_negative_count_clamp is not None and negative_count_clamped:
+        on_negative_count_clamp()
     return CandleBar(
         timestamp=parse_timestamp(ts_raw),
         open=open_price,
         high=clamped_high,
         low=clamped_low,
         close=close_price,
-        volume=0 if is_absent(volume) else max(0, to_int(volume, "volume")),
+        volume=volume_value,
         open_interest=oi,
     )
 

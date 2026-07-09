@@ -30,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  issues: write # file/update/close the single redteam-nightly tracking issue
 
 concurrency:
   group: redteam-${{ github.ref }}
@@ -66,7 +67,9 @@ jobs:
       - name: Run red-team harness
         # Every test in tests/redteam/ MUST pass. A failure means a
         # CI gate that's supposed to block violations is silently passing them.
-        # NO `|| true` here — this is the meta-gate.
+        # NO `|| true` here — this is the meta-gate. The id feeds the
+        # step-scoped alert guards below (mirrors doctor-daily.yml's doctor step).
+        id: redteam
         run: |
           pytest tests/redteam/ -v --no-cov --tb=short
 
@@ -84,3 +87,111 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "This is exactly the failure mode the harness exists to detect. Per docs/STANDARDS_100PCT.md and Golden Rule #10 (honest limits), this MUST be fixed before claiming the gate is enforced." >> $GITHUB_STEP_SUMMARY
           fi
+
+      - name: File or update the single redteam-nightly tracking issue
+        # DEC-AUDIT-ALERT-CLAMP-OBS-001 (mirrors doctor-daily.yml exactly):
+        # this scheduled security net previously had ZERO failure alerting —
+        # only an `if: always()` step-summary echo, and `permissions:
+        # contents: read` could not even file an issue, so a RED redteam run
+        # (a claimed CI gate silently broken) died silently. cancelled() is in
+        # the guard because a job killed by its own timeout-minutes reports
+        # CANCELLED, not FAILED (DEC-MUTATION-ALERT-CANCELLED-001, live-probed
+        # run 28748795864); a kill mid-harness leaves steps.redteam.outcome =
+        # 'cancelled' != 'success', so the step-scoped guard still fires. Both
+        # arms — failure() AND cancelled() — are STEP-SCOPED to the harness
+        # outcome so a post-harness summary flake on a GREEN day can never file
+        # a false 'redteam is RED' alarm. Dedupe via a STABLE (SHA-free) title:
+        # all red days fold into ONE open tracking issue via createComment.
+        # try/catch so a denied issues:write degrades to a warning, never a
+        # masking second failure (a PRIMARY best-effort channel, not
+        # guaranteed — Golden Rule #10). REF-GATED to main: the tracking issue
+        # is repo-global state keyed by the stable title, but the concurrency
+        # group serializes only per-ref — a red branch workflow_dispatch could
+        # otherwise race the find-then-create against a main red or pollute the
+        # main alarm.
+        if: ((failure() || cancelled()) && steps.redteam.outcome != 'success') && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'redteam-nightly: a claimed CI gate is silently broken (RED)';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const line = `Red on \`${context.sha}\` (${context.eventName}) — [run](${runUrl}).`;
+            try {
+              const existing = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'bug,redteam',
+              });
+              const open = existing.data.find((i) => i.title === title);
+              if (open) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: open.number,
+                  body: `Still red: ${line}`,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body: [
+                    `The nightly red-team / planted-bug harness (redteam-nightly.yml) is red or was cancelled (e.g. timeout-killed).`,
+                    '',
+                    line,
+                    '',
+                    '### What a red here means',
+                    'A `tests/redteam/` test failed — a claimed CI gate (ruff, mypy, bandit,',
+                    'conventional-commits, fork-PR hardening, …) did NOT catch its planted',
+                    'violation, so the gate is silently letting violations through. Per',
+                    'docs/STANDARDS_100PCT.md and Golden Rule #10 this MUST be fixed before',
+                    'claiming the gate is enforced.',
+                    '',
+                    'This is the single tracking issue — subsequent red days append comments here;',
+                    'a green day auto-closes it.',
+                  ].join('\n'),
+                  labels: ['bug', 'redteam', 'critical'],
+                });
+              }
+            } catch (e) {
+              core.warning(`redteam-nightly alert issue could not be filed/updated: ${e.message}`);
+            }
+
+      - name: Close the tracking issue on recovery
+        # Golden Rule #1: a recovered redteam harness must not leave a stale
+        # open 'critical' alarm. Green closes with a recovery comment; the next
+        # red opens a fresh thread (one issue per red EPISODE). REF-GATED to
+        # main so a GREEN branch workflow_dispatch (the natural debug move while
+        # main is red) never falsely closes the live main alarm.
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'redteam-nightly: a claimed CI gate is silently broken (RED)';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            try {
+              const existing = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'bug,redteam',
+              });
+              const open = existing.data.find((i) => i.title === title);
+              if (!open) return;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.number,
+                body: `Recovered: green on \`${context.sha}\` — [run](${runUrl}). Closing.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            } catch (e) {
+              core.warning(`redteam-nightly recovery close failed (non-fatal): ${e.message}`);
+            }

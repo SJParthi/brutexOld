@@ -884,7 +884,19 @@ def _process_option_window_tail(
     # PHANTOM FUTURE partition. ``key.end`` is the clamped end (``_clamped_window_key``); a
     # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
     # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
-    bars = drop_bars_after(bars, key.end)
+    bars, future_dropped = drop_bars_after(bars, key.end)
+    if future_dropped:
+        # EXACTLY ONE aggregated WARNING per window (never per bar), mirroring the
+        # session-filter WARNING above (DEC-AUDIT-ALERT-CLAMP-OBS-001): a
+        # future-phantom bar mixed with good bars used to vanish silently here.
+        _LOG.warning(
+            "option.ingest.future_bar_dropped",
+            pull_id=pull_id,
+            window_start=key.start.isoformat(),
+            window_end=key.end.isoformat(),
+            dropped=future_dropped,
+            **fields,
+        )
     # The write-health GROUP key (DEC-WRITE-HEALTH-BREAKER-001) — grouped by the
     # UNDERLYING, not the contract: each F&O ``(contract, interval)`` pair has exactly
     # ONE clamped ledger window per pass (``_clamped_window_key``) and the tail has NO

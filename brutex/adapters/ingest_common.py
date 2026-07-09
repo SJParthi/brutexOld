@@ -211,8 +211,15 @@ def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
     return min(end, today)
 
 
-def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> list[CandleBar]:
+def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> tuple[list[CandleBar], int]:
     """Drop every bar whose IST trading date is STRICTLY AFTER *window_end* — a FUTURE phantom.
+
+    Returns a ``(kept, dropped_count)`` tuple (DEC-AUDIT-ALERT-CLAMP-OBS-001):
+    the count is surfaced so the caller can emit ONE aggregated WARNING per
+    window naming it — a future-phantom bar mixed with good bars used to vanish
+    SILENTLY here, unlike the session-filter sibling which WARNs with per-cause
+    counts. The KEPT bars are byte-identical to before; only the count is newly
+    reported.
 
     DEC-CANDLE-DROP-FUTURE-BAR-001. *window_end* is the CLAMPED window end (the
     spine never requests current-day / future data — :func:`clamp_window_end`). A
@@ -237,7 +244,7 @@ def drop_bars_after(bars: Sequence[CandleBar], window_end: date) -> list[CandleB
     for bar in bars:
         if bar.timestamp.astimezone(_IST_ZONE).date() <= window_end:
             kept.append(bar)
-    return kept
+    return kept, len(bars) - len(kept)
 
 
 #: Resolve a canonical interval to its per-call max-window width (days), or

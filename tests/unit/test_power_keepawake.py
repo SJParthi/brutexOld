@@ -187,3 +187,38 @@ def test_default_spawn_launches_a_real_detached_process() -> None:
 
     proc = _default_spawn([sys.executable, "-c", "pass"])
     assert proc.wait(timeout=30) == 0
+
+
+# --------------------------------------------------------------------------- #
+# serve_keep_awake_enabled (DEC-AUDIT-ALERT-CLAMP-OBS-001) — opt-in, default OFF.
+# --------------------------------------------------------------------------- #
+def test_serve_keep_awake_default_off() -> None:
+    from brutex.observability.power_keepawake import serve_keep_awake_enabled
+
+    assert serve_keep_awake_enabled(None) is False  # unset via explicit None
+
+
+def test_serve_keep_awake_truthy_values_enable() -> None:
+    from brutex.observability.power_keepawake import serve_keep_awake_enabled
+
+    for raw in ("1", "true", "TRUE", "yes", "on", "  On  "):
+        assert serve_keep_awake_enabled(raw) is True
+
+
+def test_serve_keep_awake_falsy_and_junk_stay_off() -> None:
+    from brutex.observability.power_keepawake import serve_keep_awake_enabled
+
+    for raw in ("0", "false", "no", "off", "", "banana"):
+        assert serve_keep_awake_enabled(raw) is False
+
+
+def test_serve_keep_awake_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from brutex.observability.power_keepawake import (
+        SERVE_KEEP_AWAKE_ENV,
+        serve_keep_awake_enabled,
+    )
+
+    monkeypatch.setenv(SERVE_KEEP_AWAKE_ENV, "1")
+    assert serve_keep_awake_enabled() is True
+    monkeypatch.delenv(SERVE_KEEP_AWAKE_ENV, raising=False)
+    assert serve_keep_awake_enabled() is False

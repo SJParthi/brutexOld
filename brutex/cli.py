@@ -3540,11 +3540,45 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # rotating file + the kept JSON data endpoint, not the dead page.
     print(f"[brutex] logs → {log_path}  ·  tail via GET http://{host}:{port}/api/v1/logs")
     _log.info("dashboard.ready", host=host, port=port, log_file=str(log_path))
-    # log_config=None lets uvicorn's access/error loggers PROPAGATE into our
-    # root handlers (console + rotating JSON file) instead of uvicorn's own
-    # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
-    # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
-    uvicorn.run(app, host=host, port=port, log_config=None)
+    # Idle heartbeat + serve-lifetime keep-awake (DEC-AUDIT-ALERT-CLAMP-OBS-001):
+    # a real overnight incident saw the server go DARK for 8h10m — the mechanism
+    # (dead vs sleeping vs wedged) was undiagnosable because an idle server emits
+    # nothing. The heartbeat makes a dark log gap mean genuine death, and the
+    # OPT-IN serve keep-awake (default OFF — never silently change power policy)
+    # closes the gap where post-pull macOS sleep takes the whole server down. Both
+    # are released when uvicorn.run returns (Ctrl-C / signal).
+    from contextlib import ExitStack
+
+    from brutex.observability.power_keepawake import keep_awake, serve_keep_awake_enabled
+    from brutex.observability.server_heartbeat import start_server_heartbeat
+
+    with ExitStack() as serve_stack:
+        heartbeat = start_server_heartbeat(log=_log)
+        if heartbeat is not None:
+            serve_stack.callback(heartbeat.stop)
+        if serve_keep_awake_enabled():
+            serve_stack.enter_context(keep_awake("brutex serve"))
+            _log.info(
+                "server.keepawake.serve_enabled",
+                env="BRUTEX_SERVE_KEEP_AWAKE",
+                note="host held awake for the serve lifetime",
+            )
+            print("[brutex] serve keep-awake ENABLED — this process holds the host awake.")
+        else:
+            _log.info(
+                "server.keepawake.serve_disabled",
+                env="BRUTEX_SERVE_KEEP_AWAKE",
+                note="default OFF — the server does NOT prevent system sleep",
+            )
+            print(
+                "[brutex] NOTE: this server does NOT prevent system sleep "
+                "(set BRUTEX_SERVE_KEEP_AWAKE=1 to hold the host awake for the serve lifetime)."
+            )
+        # log_config=None lets uvicorn's access/error loggers PROPAGATE into our
+        # root handlers (console + rotating JSON file) instead of uvicorn's own
+        # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
+        # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+        uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
 
