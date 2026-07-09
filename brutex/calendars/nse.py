@@ -47,7 +47,11 @@ now ADDED (DEC-CALENDAR-2020-DATA-001) so 2020 — the data-pull floor year — 
 fully covered and the loud-guard now applies to pre-2020 (2019 and earlier)
 weekdays. The remaining unguarded production consumers were made LOUD by the
 calendar-correctness pack: the dashboard pre-open report + the doctor probe-day
-walk catch-and-degrade honestly (one ``calendar.coverage_exhausted`` warning),
+walk catch-and-degrade honestly (the pre-open report now rides
+:func:`previous_trading_session`'s ONE
+``calendar.previous_session_coverage_exhausted`` warning —
+DEC-PREOPEN-PREVDAY-COMMON-001; the doctor walk keeps its own
+``calendar.coverage_exhausted`` twin),
 the engine trade-sim walkers + the bar-metadata stamper refuse an
 out-of-coverage weekday via the checked variants, and the synthetic generator
 (unguarded by design — it fabricates data) warns once per out-of-coverage call.
