@@ -319,3 +319,82 @@ class TestKeyedChannelRouting:
         # An exact keyed hit NEVER falls back outward to the legacy channel
         # (the anti-masking invariant): the canary saw ZERO beats.
         assert legacy_beats == []
+
+
+class TestRealJobKeyedBinding:
+    """Item-4 pin: the REAL `BackgroundPullJob` path binds the heal/save beats.
+
+    The synthetic `pull_id_scope` test above proves ROUTING; this drives the
+    production thread/scope binding end-to-end — `BackgroundPullJob._run`
+    opens `pull_id_scope(run_pull_id)` and registers its watchdog beat KEYED
+    on that run id (pull_jobs.py, DEC-PULL-BEAT-PERRUN-001 #1537), and the
+    drain-stage `save_window_ledger` + `heal_after_pull` beats emitted INSIDE
+    `work` must land on THAT keyed channel: with a fake clock advanced past
+    the 600 s stall timeout across both stages, `check_once()` stays HEALTHY
+    (beats landed) and a LEGACY-channel canary stays silent (keyed routing,
+    not fallback). Reverting the heal/save beat wiring fails this test.
+    """
+
+    def test_job_run_binds_heal_and_save_beats_to_its_keyed_channel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_jobs as pull_jobs_module
+        from brutex.dashboard.pull_jobs import BackgroundPullJob
+        from brutex.dashboard.pull_progress import STATE_DONE, PullProgress
+        from brutex.dashboard.pull_stall import PullWatchdog
+
+        # No cross-process account flock for the job-level test (the
+        # test_pipeline_stall_heartbeat.py discipline).
+        monkeypatch.setattr(pull_jobs_module, "_default_lake_root_resolver", lambda: None)
+
+        box = _ClockBox()
+
+        def clock() -> float:
+            return box.t
+
+        lake_root = tmp_path / "lake"
+        lake_root.mkdir()
+        _write_engine_bar(lake_root)
+
+        legacy_beats, legacy_beat = _counting_beat()
+        register_progress_beat(legacy_beat)  # the LEGACY canary — must stay silent
+
+        built: list[PullWatchdog] = []
+
+        def factory(on_hung: Callable[[WorkerEvent], None]) -> PullWatchdog:
+            wd = PullWatchdog(
+                on_hung=on_hung, timeout_seconds=600.0, spawn=lambda _fn: None, clock=clock
+            )
+            built.append(wd)
+            return wd
+
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=clock),
+            spawn=lambda fn: fn(),  # synchronous worker — the test IS the worker thread
+            watchdog_factory=factory,
+        )
+
+        def work(on_progress: object) -> None:
+            wd = built[0]
+            # The last fetched-window heartbeat, then two silent drain stages
+            # each longer than the 600 s timeout — covered ONLY by the
+            # heal/save production beat seams routing onto the job's keyed
+            # channel via the worker's ambient pull id.
+            box.advance(650.0)
+            save_window_ledger(WindowLedger(), tmp_path, clock=clock)
+            assert wd.check_once() == (), "the save beats did not reach the keyed channel"
+            box.advance(650.0)
+            report = heal_after_pull(
+                lake_root=lake_root,
+                targets=[("NSE", "INDEX", "NIFTY")],
+                start=date(2025, 9, 1),
+                end=date(2025, 9, 2),
+                scope="test",
+            )
+            assert report.findings == 0
+            assert wd.check_once() == (), "the heal beats did not reach the keyed channel"
+
+        assert job.start(work, total=1) is True
+        assert job.snapshot().state == STATE_DONE
+        # Keyed routing, never the legacy fallback: the canary saw ZERO beats.
+        assert legacy_beats == []

@@ -74,9 +74,21 @@ CENSUS_THREAD_NAME: Final[str] = "brutex-lake-census"
 #: dynamic 2× term scales the bound once a real duration is known).
 #: DETECTION, not termination (the #999 stance): the daemon thread is never
 #: killed, the last-known verdict keeps serving, and the WARN fires once per
-#: scan episode. NOT an env knob — the non-blocking behaviour is DEFAULT-ON
+#: episode. NOT an env knob — the non-blocking behaviour is DEFAULT-ON
 #: with zero configuration; the constructor parameter is a test seam only.
+#: FIRST-scan honesty: before any scan has landed a duration, the bound is
+#: additionally seeded from the L3 sweep sentinel via the
+#: ``first_scan_bound_hint`` seam (``max(hint, this floor)``) so a bigger
+#: lake's legitimately-slow FIRST scan is never false-flagged; after the
+#: first completion the 2× law takes over.
 SCAN_STALE_FLOOR_S: Final[float] = 1800.0
+
+#: Conservative per-file budget (seconds) for deriving the FIRST-scan stall
+#: bound from the L3 sentinel's ``files_scanned`` when it recorded no
+#: duration: 2 ms/file — the measured production scan ran ~26 min over the
+#: 2.14M-file lake (~0.73 ms/file), so 2 ms/file over-estimates ~2.7× (a
+#: stall bound must err generous, never trigger-happy).
+FIRST_SCAN_PER_FILE_BUDGET_S: Final[float] = 0.002
 
 #: The census scan callable: receives the holder's per-file progress callback
 #: (threaded into ``scan_lake_invariants(per_file_pause=...)`` — the existing
@@ -130,6 +142,13 @@ class LakeCensusHolder:
         derives ``max(2 × the last landed scan's duration,
         :data:`SCAN_STALE_FLOOR_S`)`` per snapshot. A test seam, never an env
         knob — the non-blocking route is DEFAULT-ON with zero configuration.
+    first_scan_bound_hint
+        Optional zero-arg FIRST-scan stall-bound seed (seconds; production:
+        the L3 sentinel's recorded duration when stored, else its
+        ``files_scanned`` × :data:`FIRST_SCAN_PER_FILE_BUDGET_S`). Read ON
+        the daemon thread before the first scan (it is lake I/O); a raising
+        / ``None`` hint degrades to the bare floor. Inert once a scan has
+        landed a real duration (the 2× law governs from then on).
     """
 
     def __init__(
@@ -144,6 +163,7 @@ class LakeCensusHolder:
         ttl_floor_s: float = DEFAULT_TTL_FLOOR_S,
         max_floor_s: float = MAX_ADAPTIVE_FLOOR_S,
         scan_stale_after_s: float | None = None,
+        first_scan_bound_hint: Callable[[], float | None] | None = None,
     ) -> None:
         self._scan = scan
         self._generation = generation
@@ -154,6 +174,10 @@ class LakeCensusHolder:
         self._ttl_floor_s = ttl_floor_s
         self._max_floor_s = max_floor_s
         self._scan_stale_after_s = scan_stale_after_s
+        self._first_scan_bound_hint = first_scan_bound_hint
+        #: The resolved first-scan bound seed (read once on the daemon thread
+        #: before the first scan; ``None`` until read / when unavailable).
+        self._first_bound_hint: float | None = None
         self._lock = threading.Lock()
         #: Single-flight over the whole check-then-maybe-scan thread body.
         self._in_flight = False
@@ -183,7 +207,9 @@ class LakeCensusHolder:
         self._stall_warned = False
         #: Completion wall-clock of the last LANDED scan (the verdict's age).
         self._as_of_utc: str | None = None
-        #: Last scan error (``"Type: msg"``), cleared by the next clean scan.
+        #: Last scan error — a STABLE sanitised token + exception CLASS name
+        #: only (the full detail lives in the server log — never raw
+        #: exception text into the route/DOM); cleared by the next clean scan.
         self._error: str | None = None
         #: Landed-scan counter (observability / test oracle).
         self._scans_completed = 0
@@ -204,12 +230,18 @@ class LakeCensusHolder:
 
         LOUD STALENESS (never a silent forever-warming): an in-flight scan
         older than ``max(2 × the last landed scan's duration,
-        SCAN_STALE_FLOOR_S)`` reads ``scan_stalled: true`` + ONE
-        ``lake_census.scan_stalled`` WARN per episode — DETECTION not
-        termination (the #999 stance: the daemon thread cannot be killed;
-        the last-known verdict keeps serving). A backwards clock (skew:
-        now < scan start) can never false-flag — negative elapsed is below
-        every bound. Completion / error clears the flag.
+        SCAN_STALE_FLOOR_S)`` — seeded on the FIRST scan from the L3
+        sentinel hint — reads ``scan_stalled: true`` + ONE
+        ``lake_census.scan_stalled`` WARN per episode (``phase="scan"``) —
+        DETECTION not termination (the #999 stance: the daemon thread cannot
+        be killed; the last-known verdict keeps serving). The SAME verdict
+        covers a wedged check PREFIX (``phase="probe"`` — the generation
+        probe is lake I/O and can hang BEFORE the scan body sets
+        ``_scanning``; without this arm a first-ever boot would read
+        ``scan_in_progress`` with ``started_utc=None`` FOREVER, a silent
+        forever-warming). A backwards clock (skew: now < baseline) can never
+        false-flag — negative elapsed is below every bound. Completion /
+        error clears the flag.
         """
         stall_warn: dict[str, Any] | None = None
         with self._lock:
@@ -221,12 +253,24 @@ class LakeCensusHolder:
             # honestly reads in-progress even before the scan body is entered.
             base["scan_in_progress"] = self._scanning or (self._in_flight and self._payload is None)
             stalled = False
+            phase: str | None = None
+            baseline: float | None = None
             if self._scanning:
-                started_clock = self._scan_started_clock
                 # ``_scanning`` is only ever set together with the start stamp
                 # (same lock block in ``_run_scan``) — the ternary is a
                 # type-narrowing belt, not a live branch.
+                started_clock = self._scan_started_clock
                 baseline = started_clock if started_clock is not None else self._clock()
+                phase = "scan"
+            elif self._in_flight:
+                # The check PREFIX (generation probe / bound-hint read — lake
+                # I/O) wedged before the scan body: judge from the arming
+                # stamp. ``_last_check_at`` is always set when arming (same
+                # lock block in ``maybe_refresh``) — narrowing belt again.
+                check_at = self._last_check_at
+                baseline = check_at if check_at is not None else self._clock()
+                phase = "probe"
+            if baseline is not None:
                 elapsed = self._clock() - baseline
                 bound = self._stale_bound_locked()
                 if elapsed > bound:
@@ -234,6 +278,7 @@ class LakeCensusHolder:
                     if not self._stall_warned:
                         self._stall_warned = True
                         stall_warn = {
+                            "phase": phase,
                             "elapsed_s": elapsed,
                             "bound_s": bound,
                             "started_utc": self._started_utc,
@@ -255,12 +300,18 @@ class LakeCensusHolder:
     def _stale_bound_locked(self) -> float:
         """The scan-STALLED bound (seconds) — caller holds the lock, O(1).
 
-        The explicit constructor bound when given (test seam); else the
-        dynamic ``max(2 × last landed duration, SCAN_STALE_FLOOR_S)`` —
+        The explicit constructor bound when given (test seam); before the
+        FIRST landed scan, ``max(sentinel hint, SCAN_STALE_FLOOR_S)`` (the
+        hint = the L3 sweep's own recorded duration / per-file derivation —
+        a bigger lake's legitimately-slow first scan is not false-flagged);
+        after it, ``max(2 × last landed duration, SCAN_STALE_FLOOR_S)`` —
         generous, and self-scaling once a real scan duration is known.
         """
         if self._scan_stale_after_s is not None:
             return self._scan_stale_after_s
+        if self._scans_completed == 0:
+            hint = self._first_bound_hint if self._first_bound_hint is not None else 0.0
+            return max(hint, SCAN_STALE_FLOOR_S)
         return max(2.0 * self._compute_duration, SCAN_STALE_FLOOR_S)
 
     @property
@@ -298,6 +349,9 @@ class LakeCensusHolder:
                 return False
             self._in_flight = True
             self._last_check_at = now
+            # A new in-flight episode re-arms the once-per-episode stall WARN
+            # (the probe-phase verdict judges from this arming stamp).
+            self._stall_warned = False
         try:
             self._spawn(self._run_check)
         except Exception as exc:  # pylint: disable=broad-except — spawn must never 500 a poll
@@ -312,6 +366,25 @@ class LakeCensusHolder:
     def _run_check(self) -> None:
         """Check freshness, scan if stale — the whole body runs OFF the loop."""
         try:
+            with self._lock:
+                need_hint = (
+                    self._scans_completed == 0
+                    and self._first_bound_hint is None
+                    and self._first_scan_bound_hint is not None
+                )
+            if need_hint and self._first_scan_bound_hint is not None:
+                # Seed the FIRST-scan stall bound from the L3 sentinel (lake
+                # I/O — daemon thread only); a raising / None hint degrades
+                # to the bare floor. Read ONCE; inert after the first scan
+                # lands a real duration.
+                hint: float | None = None
+                try:
+                    hint = self._first_scan_bound_hint()
+                except Exception as exc:  # pylint: disable=broad-except — the hint is best-effort
+                    _LOG.warning("lake_census.first_scan_bound_hint_failed", error=str(exc))
+                    hint = None
+                with self._lock:
+                    self._first_bound_hint = hint
             gen: int | None
             try:
                 gen = self._generation()
@@ -351,6 +424,11 @@ class LakeCensusHolder:
         try:
             payload = self._scan(self._count_file)
         except Exception as exc:  # pylint: disable=broad-except — an erroring scan must not kill polls
+            # The FULL detail (exception text — which may carry absolute lake
+            # paths) goes to the server log ONLY; the served ``scan_error`` is
+            # a STABLE generic token + the exception CLASS name — never raw
+            # exception text into the route/DOM (the `store_error_payload`
+            # sanitisation stance; CodeQL py/stack-trace-exposure).
             _LOG.warning("lake_census.scan_failed", error=str(exc), error_type=type(exc).__name__)
             with self._lock:
                 self._scanning = False
@@ -359,7 +437,10 @@ class LakeCensusHolder:
                 # fabricated. The base floor (duration reset to 0) lets the
                 # next poll past ~2 s re-arm instead of waiting out a stale
                 # 120 s adaptive floor from the previous slow success.
-                self._error = f"{type(exc).__name__}: {exc}"
+                self._error = (
+                    f"census scan failed ({type(exc).__name__}) — "
+                    "see server log (lake_census.scan_failed)"
+                )
                 self._computed_at = self._clock()
                 self._compute_duration = 0.0
             return
@@ -382,6 +463,7 @@ class LakeCensusHolder:
 
 __all__ = [
     "CENSUS_THREAD_NAME",
+    "FIRST_SCAN_PER_FILE_BUDGET_S",
     "SCAN_STALE_FLOOR_S",
     "CensusScan",
     "LakeCensusHolder",

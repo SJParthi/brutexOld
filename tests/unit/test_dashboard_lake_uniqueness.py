@@ -402,8 +402,9 @@ class TestStartupSweepChipFreshness:
 class TestCensusEstimateSeam:
     """The L3-sentinel progress-denominator honesty arms (route estimate seam)."""
 
+    @pytest.mark.parametrize("junk", [True, -5, "12"])
     def test_foreign_shaped_sentinel_reads_null_estimate_never_a_crash(
-        self, store: InstrumentStore
+        self, store: InstrumentStore, junk: object
     ) -> None:
         """A junk ``files_scanned`` (bool / negative / non-int) degrades to null."""
         import json as _json
@@ -411,11 +412,30 @@ class TestCensusEstimateSeam:
         lake_root = store.path.parent
         sentinel = lake_root / ".lake_heal" / "last_sweep.json"
         sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text(_json.dumps({"files_scanned": True}), encoding="utf-8")
+        sentinel.write_text(
+            _json.dumps({"files_scanned": junk, "duration_ms": junk}), encoding="utf-8"
+        )
         client = _make_client(store, SummaryCache())
         payload = client.get("/api/v1/universe/lake-uniqueness").json()
         assert payload["findings_total"] == 0  # the scan itself still landed
         assert payload["scan_progress"]["files_total_estimate"] is None
+
+    def test_sentinel_duration_ms_arm_serves_normally(self, store: InstrumentStore) -> None:
+        """A sentinel carrying a recorded duration exercises the duration-first
+        bound-hint arm — the route serves the verdict identically."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": 1560000}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
 
 
 class TestUniverseChipMarkers:
@@ -511,5 +531,11 @@ class TestExtremePermutations:
         assert resp.status_code == 200
         payload = resp.json()
         assert payload["findings_total"] == 0  # last-known verdict still serves
-        assert payload["scan_error"] is not None and "vanished" in payload["scan_error"]
+        # SECURITY (the store_error_payload stance): the served scan_error is
+        # the STABLE sanitised token + class name — the raw OSError text (which
+        # carried path-like detail) never reaches the route/DOM.
+        assert payload["scan_error"] == (
+            "census scan failed (OSError) — see server log (lake_census.scan_failed)"
+        )
+        assert "vanished" not in payload["scan_error"]
         assert payload["scan_stalled"] is False

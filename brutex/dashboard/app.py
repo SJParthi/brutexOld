@@ -134,7 +134,10 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
-from brutex.dashboard.lake_census_holder import LakeCensusHolder
+from brutex.dashboard.lake_census_holder import (
+    FIRST_SCAN_PER_FILE_BUDGET_S,
+    LakeCensusHolder,
+)
 from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
@@ -5214,6 +5217,37 @@ def build_app(
             return None
         return files
 
+    def _census_first_scan_bound_hint() -> float | None:
+        """Seed the FIRST-scan stall bound from the L3 sweep sentinel.
+
+        Prefers the sentinel's own recorded duration (``duration_ms`` /
+        ``duration_s`` when a future sweep stores one — none does today),
+        else derives ``files_scanned × FIRST_SCAN_PER_FILE_BUDGET_S`` (the
+        conservative 2 ms/file budget). ``None`` on a first-ever lake / a
+        foreign-shaped sentinel — the holder then uses the bare 30-min
+        floor. Runs ON the census daemon thread (lake I/O), guarded by the
+        holder's hint fence.
+        """
+        from brutex.data.lake_heal import load_last_sweep
+
+        lake_db = getattr(instrument_store, "path", None)
+        if not isinstance(lake_db, Path):
+            return None
+        sweep = load_last_sweep(lake_db.parent)
+        if sweep is None:
+            return None
+        duration_ms = sweep.get("duration_ms")
+        if (
+            isinstance(duration_ms, (int, float))
+            and not isinstance(duration_ms, bool)
+            and duration_ms > 0
+        ):
+            return float(duration_ms) / 1000.0
+        files = sweep.get("files_scanned")
+        if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+            return None
+        return files * FIRST_SCAN_PER_FILE_BUDGET_S
+
     # DEC-LAKE-CENSUS-NONBLOCKING-001: the census holder — the scan runs on a
     # DEDICATED named daemon thread (zero AnyIO threadpool tokens), single-flight
     # (a concurrent poll neither spawns a second scan nor waits), and the route
@@ -5228,6 +5262,7 @@ def build_app(
         files_total_estimate=_census_files_estimate,
         spawn=census_spawn,
         clock=census_clock,
+        first_scan_bound_hint=_census_first_scan_bound_hint,
     )
 
     @app.get("/api/v1/universe/lake-uniqueness")
