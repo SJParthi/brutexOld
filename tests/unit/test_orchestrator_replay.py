@@ -108,6 +108,27 @@ class TestProjectSubjects:
         subjects = project_subjects(entries, action_filter="add")
         assert subjects == frozenset()
 
+    def test_accepts_streaming_iterator(self, tmp_path: Path) -> None:
+        """DEC-AUDIT-READERS-STREAM-001: the signature widened
+        ``list[AuditEntry]`` → ``Iterable[AuditEntry]`` — a one-shot
+        generator (``iter_entries``) projects identically to the
+        materialised ``read_entries`` list (equivalence by construction:
+        ``read_entries`` IS ``list(iter_entries(path))``)."""
+        path = tmp_path / "audit.jsonl"
+        _write_audit(
+            path=path,
+            rows=[
+                ("add", "subj-a", {}),
+                ("remove", "subj-b", {}),
+                ("add", "subj-c", {}),
+            ],
+        )
+        from brutex.orchestrator.audit import iter_entries, read_entries
+
+        streamed = project_subjects(iter_entries(path), action_filter="add")
+        materialised = project_subjects(read_entries(path), action_filter="add")
+        assert streamed == materialised == frozenset({"subj-a", "subj-c"})
+
 
 # ────────────────────────────────────────────────────────────────────────
 # compute_replay_diff
@@ -217,6 +238,45 @@ class TestReplayAuditToDiff:
             action_filter="remove",
         )
         assert diff.is_consistent
+
+    def test_mid_chain_corruption_raises_audit_error(self, tmp_path: Path) -> None:
+        """DEC-AUDIT-READERS-STREAM-001: the streaming reader raises its
+        ``AuditError`` lazily, DURING the projection, at the malformed
+        committed line — the error contract of the old materialised
+        ``read_entries`` (raise before any diff is produced) is preserved."""
+        path = tmp_path / "audit.jsonl"
+        _write_audit(path=path, rows=[("add", "x", {})])
+        with path.open("a", encoding="utf-8") as f:
+            f.write("{not jsonl mid-chain\n")  # committed (newline-terminated) corruption
+        with pytest.raises(AuditError):
+            replay_audit_to_diff(audit_path=path, live_subjects=frozenset({"x"}))
+
+    def test_missing_file_raises_audit_error(self, tmp_path: Path) -> None:
+        """``iter_entries`` raises at CALL time on a missing file — the same
+        AuditError contract ``read_entries`` had (regression pin for the
+        streaming conversion)."""
+        with pytest.raises(AuditError, match="not found"):
+            replay_audit_to_diff(audit_path=tmp_path / "absent.jsonl", live_subjects=frozenset())
+
+    def test_streams_without_materialising_the_chain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memory-shape pin (DEC-AUDIT-READERS-STREAM-001): the replay path
+        rides ``iter_entries``, never the whole-chain ``read_entries`` list.
+        ``raising=False``: post-fix the module no longer binds
+        ``read_entries`` at all; pre-fix the module-global lookup resolved at
+        call time, so this spy intercepts and FAILS the pre-fix code."""
+        import brutex.orchestrator.replay as replay_mod
+
+        def _boom(_path: Path) -> list[object]:
+            raise AssertionError("read_entries called — chain materialised")
+
+        monkeypatch.setattr(replay_mod, "read_entries", _boom, raising=False)
+        path = tmp_path / "audit.jsonl"
+        _write_audit(path=path, rows=[("add", "x", {})])
+        diff = replay_audit_to_diff(audit_path=path, live_subjects=frozenset({"x"}))
+        assert diff.is_consistent
+        assert diff.replayed_count == 1
 
 
 # ────────────────────────────────────────────────────────────────────────

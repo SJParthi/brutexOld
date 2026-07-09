@@ -85,7 +85,6 @@ if TYPE_CHECKING:
     # of this module's runtime import graph (the sweep_run TYPE_CHECKING
     # discipline) so the engine coverage gates stay stable.
     from brutex.engine.cascade_wire import Stage3ManifestRecord
-    from brutex.orchestrator.audit import AuditEntry
 
 _LOG = structlog.get_logger("brutex.engine.sweep_verify")
 
@@ -225,45 +224,55 @@ def recorded_context_from_audit(audit_path: Path) -> RecordedContext | None:
     strings. Returns ``None`` when the audit file does not exist or carries no
     ``SWEEP_START`` line (the caller falls back to explicit operator input).
 
+    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` —
+    one entry resident at a time, O(1) peak memory in chain length
+    (DEC-AUDIT-READERS-STREAM-001; the old ``list(read_entries(...))``
+    materialised the ENTIRE never-rotated chain, measured ~1,165 B/entry
+    logical). Fold semantics are byte-equivalent by construction —
+    ``read_entries`` is itself ``list(iter_entries(path))``.
+
     Raises
     ------
     SweepVerifyError
-        If the audit log is unreadable/corrupt, a ``SWEEP_START`` payload is
-        missing a context key, or two entries disagree (an inconsistent tree
-        is not a verifiable tree — refuse rather than guess, Golden Rule #1).
+        If the audit log is unreadable/corrupt (an :class:`AuditError` at
+        the ``iter_entries`` call OR mid-iteration on a malformed committed
+        line — both map here), a ``SWEEP_START`` payload is missing a
+        context key, or two entries disagree (an inconsistent tree is not a
+        verifiable tree — refuse rather than guess, Golden Rule #1).
     """
     if not audit_path.exists():
         return None
     # Function-local import: the audit module pulls the orchestrator/bloom
     # graph nowhere, but keeping the verifier's module surface minimal mirrors
     # the trial_stats discipline.
-    from brutex.orchestrator.audit import AuditError, read_entries
+    from brutex.orchestrator.audit import AuditError, iter_entries
 
+    context: RecordedContext | None = None
     try:
-        entries: list[AuditEntry] = list(read_entries(audit_path))
+        # The try spans the ITERATION, not just the call: a streaming reader
+        # raises its AuditError lazily, at the malformed line, mid-loop.
+        for entry in iter_entries(audit_path):
+            if entry.action != "SWEEP_START":
+                continue
+            payload = entry.payload
+            missing = [key for key in _CONTEXT_KEYS if key not in payload]
+            if missing:
+                raise SweepVerifyError(
+                    f"SWEEP_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+                )
+            found = RecordedContext(
+                data_snapshot_hash=str(payload["data_snapshot_hash"]),
+                indicator_version=str(payload["indicator_version"]),
+                code_commit_sha=str(payload["code_commit_sha"]),
+            )
+            if context is None:
+                context = found
+            elif context != found:
+                raise SweepVerifyError(
+                    f"inconsistent recorded context in {audit_path}: {context} vs {found}"
+                )
     except AuditError as exc:
         raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
-    context: RecordedContext | None = None
-    for entry in entries:
-        if entry.action != "SWEEP_START":
-            continue
-        payload = entry.payload
-        missing = [key for key in _CONTEXT_KEYS if key not in payload]
-        if missing:
-            raise SweepVerifyError(
-                f"SWEEP_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
-            )
-        found = RecordedContext(
-            data_snapshot_hash=str(payload["data_snapshot_hash"]),
-            indicator_version=str(payload["indicator_version"]),
-            code_commit_sha=str(payload["code_commit_sha"]),
-        )
-        if context is None:
-            context = found
-        elif context != found:
-            raise SweepVerifyError(
-                f"inconsistent recorded context in {audit_path}: {context} vs {found}"
-            )
     return context
 
 
@@ -760,50 +769,57 @@ def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
 
     Returns the no-history record when the file or the pass lines are absent.
 
+    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` —
+    O(1) peak memory in chain length, the ``recorded_context_from_audit``
+    discipline (DEC-AUDIT-READERS-STREAM-001).
+
     Raises
     ------
     SweepVerifyError
-        If the audit log is unreadable or a pass payload is missing a knob key
-        (a malformed tree is not a verifiable tree).
+        If the audit log is unreadable (an :class:`AuditError` at the
+        ``iter_entries`` call or mid-iteration — both map here) or a pass
+        payload is missing a knob key (a malformed tree is not a verifiable
+        tree).
     """
     if not audit_path.exists():
         return RecordedStage3Audit(knobs=None, consistent=True, optimizer_versions=())
-    from brutex.orchestrator.audit import AuditError, read_entries
+    from brutex.orchestrator.audit import AuditError, iter_entries
 
-    try:
-        entries: list[AuditEntry] = list(read_entries(audit_path))
-    except AuditError as exc:
-        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
     knobs: RecordedStage3Knobs | None = None
     consistent = True
     versions: set[tuple[str, str]] = set()
-    for entry in entries:
-        if entry.action == "STAGE_3_REFINE_START":
+    try:
+        # The try spans the ITERATION (streaming AuditError raises mid-loop).
+        for entry in iter_entries(audit_path):
+            if entry.action == "STAGE_3_REFINE_START":
+                payload = entry.payload
+                versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
+                continue
+            if entry.action != "STAGE_3_PASS_START":
+                continue
             payload = entry.payload
-            versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
-            continue
-        if entry.action != "STAGE_3_PASS_START":
-            continue
-        payload = entry.payload
-        missing = [
-            key
-            for key in ("stage3_top_k", "max_fevals", "max_restarts", "train_snapshot_hash")
-            if key not in payload
-        ]
-        if missing:
-            raise SweepVerifyError(
-                f"STAGE_3_PASS_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+            missing = [
+                key
+                for key in ("stage3_top_k", "max_fevals", "max_restarts", "train_snapshot_hash")
+                if key not in payload
+            ]
+            if missing:
+                raise SweepVerifyError(
+                    f"STAGE_3_PASS_START payload at {audit_path} "
+                    f"(seq {entry.seq}) missing {missing}"
+                )
+            found = RecordedStage3Knobs(
+                stage3_top_k=int(payload["stage3_top_k"]),
+                max_fevals=int(payload["max_fevals"]),
+                max_restarts=int(payload["max_restarts"]),
+                train_snapshot_hash=str(payload["train_snapshot_hash"]),
             )
-        found = RecordedStage3Knobs(
-            stage3_top_k=int(payload["stage3_top_k"]),
-            max_fevals=int(payload["max_fevals"]),
-            max_restarts=int(payload["max_restarts"]),
-            train_snapshot_hash=str(payload["train_snapshot_hash"]),
-        )
-        if knobs is None:
-            knobs = found
-        elif knobs != found:
-            consistent = False
+            if knobs is None:
+                knobs = found
+            elif knobs != found:
+                consistent = False
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
     return RecordedStage3Audit(
         knobs=knobs, consistent=consistent, optimizer_versions=tuple(sorted(versions))
     )
