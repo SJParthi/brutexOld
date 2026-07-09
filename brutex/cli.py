@@ -6398,6 +6398,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
 
         corrupt_partitions: list[str] = []
+        empty_partitions: list[str] = []
         for symbol in symbol_list:
             for interval in interval_list:
                 reconcile_result = reconcile_catalog_from_lake(
@@ -6409,6 +6410,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval=interval,
                 )
                 corrupt_partitions.extend(reconcile_result.unreadable)
+                empty_partitions.extend(reconcile_result.empty_partitions)
         # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1644): a CORRUPT / version-
         # incompatible Parquet partition the reconcile SKIPPED is an INTERIOR data
         # hole invisible in the swept output — Stage-1A rolls _prev_day_ohlc from
@@ -6440,6 +6442,42 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 "sweep_launch.corrupt_partitions_refused",
                 lake=str(resolved_lake),
                 files=corrupt_sorted,
+            )
+            return EXIT_USER_ERROR
+        # DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: a PRESENT, readable,
+        # EXACTLY-0-row month partition is the corrupt-month refusal's twin — no
+        # BruteX writer emits a valid 0-row parquet (ParquetWriter.write raises on
+        # empty input, the all-filtered heal UNLINKS the partition, a footer-last
+        # crash truncates → PolarsError → corrupt refusal above), so a PRESENT
+        # 0-row file is externally-forged / anomalous. Left benign it silently
+        # DROPS the whole month with a data_snapshot_hash bit-identical to the
+        # drop — the exact silent-partial class this refusal exists to close.
+        # REFUSE loudly, naming the file(s), mirroring the corrupt refusal. Scoped
+        # to the unambiguous exactly-0-row present case: a legitimately data-less
+        # month has NO file (benign ENOENT) and a legitimately THIN present month
+        # has rows > 0, so neither is refused (a row-COUNT density oracle is
+        # DEFERRED — DEC-RECONCILE-ROW-DENSITY-ORACLE-001, follow-up only).
+        if empty_partitions:
+            empty_sorted = sorted(empty_partitions)
+            shown = empty_sorted[:10]
+            extra = len(empty_sorted) - len(shown)
+            more = f" (+{extra} more)" if extra > 0 else ""
+            print(
+                f"[brutex] REFUSED: {len(empty_sorted)} present-but-EMPTY (0-row) partition "
+                "file(s) found by the catalog reconcile — no BruteX writer emits a valid "
+                "0-row parquet, so a present 0-row file is externally-forged/anomalous and "
+                "the sweep would silently DROP the whole month (its bars vanish with a "
+                "data_snapshot_hash bit-identical to the drop, Golden Rule #4): "
+                f"{', '.join(shown)}{more}. Remedy: delete/heal the empty file(s) "
+                "(brutex lake audit-unique) or re-pull the named months, then re-run.",
+                file=sys.stderr,
+            )
+            import structlog
+
+            structlog.get_logger("brutex.cli").error(
+                "sweep_launch.empty_partitions_refused",
+                lake=str(resolved_lake),
+                files=empty_sorted,
             )
             return EXIT_USER_ERROR
         for symbol in symbol_list:

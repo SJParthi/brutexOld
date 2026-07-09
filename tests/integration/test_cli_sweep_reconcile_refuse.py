@@ -13,8 +13,16 @@ remedy, with NO escape flag (this is the freshness-gate class; absent != corrupt
 These tests drive the REAL ``cmd_sweep_all`` over real Parquet lakes:
 * a corrupt Feb month refuses the launch (fails-before: the sweep launched over
   the silently-holed data and exited EXIT_OK with no stderr mention of the hole);
-* benign skips (a zero-row partition + an unparseable stray file) do NOT refuse —
-  the sweep proceeds (the false-refuse twin);
+* a PRESENT, readable, EXACTLY-0-row month partition ALSO refuses the launch
+  (DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: no BruteX writer emits a valid
+  0-row parquet, so a present 0-row file is externally-forged/anomalous and left
+  benign it would silently DROP the whole month — the sweep outcome is no longer
+  bit-identical to the genuine drop; fails-before: pre-hardening it exited EXIT_OK
+  and silently swept the smaller lake, its outcome IDENTICAL to the drop);
+* an unparseable-path stray file does NOT refuse — a benign skip BEFORE any read;
+* a legitimately THIN present month (real rows > 0) does NOT refuse — the
+  false-refuse-safety guard that keeps refusal scoped to the exactly-0-row case
+  (a row-COUNT density oracle is DEFERRED, DEC-RECONCILE-ROW-DENSITY-ORACLE-001);
 * the corrupt-file list caps at 10 shown + "(+N more)";
 * a clean lake is byte-neutral (no corrupt/REFUSED mention on stderr).
 """
@@ -168,18 +176,13 @@ def test_corrupt_month_refuses_launch(tmp_path: Path, capsys: pytest.CaptureFixt
     assert any("02.parquet" in f for f in events[0]["files"])
 
 
-def test_benign_skips_do_not_refuse(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The false-refuse twin: a zero-row partition + an unparseable-path stray file
-    are DATA ABSENCE, not data LOSS — the sweep proceeds to completion (EXIT_OK)."""
-    import polars as pl
-
+def test_unparseable_stray_does_not_refuse(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The false-refuse twin: an unparseable-path stray file (month segment is not
+    an int) is a benign skip BEFORE any read (its garbage bytes are never opened) —
+    the sweep proceeds to completion (EXIT_OK)."""
     lake_root, catalog_path = _seed(tmp_path)
-    # (a) a zero-row partition inside the requested coordinates (benign skip).
-    empty = _partition(lake_root, year=2024, month=3)
-    empty.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(empty)
-    # (b) an unparseable-path stray file (month segment is not an int) → benign skip
-    #     BEFORE any read (its garbage bytes are never opened).
     stray = (
         lake_root
         / "bars"
@@ -196,6 +199,97 @@ def test_benign_skips_do_not_refuse(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert rc == EXIT_OK
     assert "REFUSED" not in err
     assert "corrupt" not in err
+    assert "EMPTY" not in err
+
+
+def test_empty_present_month_refuses_launch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE R2N-06 pin (DEC-LAKE-STATS-MANIFEST-001 residual): a PRESENT, readable,
+    EXACTLY-0-row Feb partition REFUSES the sweep loudly + logs the ERROR event.
+
+    Fails-before (caeda584 pre-hardening): the 0-row month read cleanly, was counted
+    a benign zero-row skip, and the sweep silently DROPPED the whole month, exiting
+    EXIT_OK with a data_snapshot_hash bit-identical to the genuine drop. This test
+    ALSO proves the outcome is no longer identical to that drop: the SAME lake with
+    Feb genuinely ABSENT still sweeps to EXIT_OK, while the present-0-row lake now
+    REFUSES — the two outcomes diverge (the whole point of the hardening).
+    """
+    import polars as pl
+    from structlog.testing import capture_logs
+
+    lake_root, catalog_path = _seed(tmp_path)
+    feb = _partition(lake_root, year=2024, month=2)
+    # Overwrite the real Feb month with a valid, readable, EXACTLY-0-row parquet of
+    # the SAME schema — the externally-forged shape (no BruteX writer emits it).
+    pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(feb)
+    with capture_logs() as logs:
+        rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path))
+    err = capsys.readouterr().err
+    assert rc == EXIT_USER_ERROR
+    assert "REFUSED" in err
+    assert "EMPTY" in err
+    assert "02.parquet" in err  # the forged Feb file is named
+    events = [e for e in logs if e["event"] == "sweep_launch.empty_partitions_refused"]
+    assert len(events) == 1
+    assert any("02.parquet" in f for f in events[0]["files"])
+
+    # The genuine-drop twin: Feb simply ABSENT (deleted) is benign — the sweep runs
+    # on Jan alone and exits EXIT_OK. Pre-hardening the present-0-row lake produced
+    # this SAME silent EXIT_OK; post-hardening it refuses, so the outcomes diverge.
+    lake2, catalog2 = _seed(tmp_path / "drop")
+    _partition(lake2, year=2024, month=2).unlink()
+    rc_drop = cmd_sweep_all(**_kwargs(lake2, catalog2, tmp_path / "drop"))
+    drop_err = capsys.readouterr().err
+    assert rc_drop == EXIT_OK
+    assert "REFUSED" not in drop_err
+
+
+def test_thin_present_month_does_not_refuse(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """False-refuse-safety (the density-oracle scope limit): a legitimately THIN
+    present month — a real half-day/holiday session with FEW but > 0 rows — must NOT
+    refuse. Refusing on low row-density would false-refuse legitimate data, so the
+    guard is scoped to the unambiguous exactly-0-row case; a per-session density
+    model is DEFERRED (DEC-RECONCILE-ROW-DENSITY-ORACLE-001, follow-up only).
+    """
+    lake_root, catalog_path = _seed(tmp_path)
+    # A March partition (globbed + reconciled like any month) holding just 5 real
+    # 1-minute bars — a plausibly thin session, present with rows > 0.
+    thin_day = datetime(2024, 3, 1, tzinfo=_IST)
+    thin_bars: list[CandleBar] = []
+    price = 100.0
+    for m in range(5):
+        close = price + 0.4
+        ts = thin_day.replace(hour=9, minute=16) + timedelta(minutes=m)
+        thin_bars.append(
+            CandleBar(
+                timestamp=ts.astimezone(UTC),
+                open=Decimal(str(round(price, 2))),
+                high=Decimal(str(round(close + 0.5, 2))),
+                low=Decimal(str(round(price - 0.5, 2))),
+                close=Decimal(str(round(close, 2))),
+                volume=1000,
+                open_interest=None,
+            )
+        )
+        price = close
+    writer = ParquetWriter(lake_root=lake_root)
+    with Catalog.open(tmp_path / "thin_catalog.duckdb") as cat:
+        ParquetBarSink(writer=writer, catalog=cat).append(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            interval=_INTERVAL,
+            bars=thin_bars,
+        )
+    (tmp_path / "thin_catalog.duckdb").unlink()
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path))
+    err = capsys.readouterr().err
+    assert rc == EXIT_OK
+    assert "REFUSED" not in err
+    assert "EMPTY" not in err
 
 
 def test_vanished_file_does_not_refuse(
@@ -257,6 +351,25 @@ def test_corrupt_list_caps_at_ten_shown(tmp_path: Path, capsys: pytest.CaptureFi
     err = capsys.readouterr().err
     assert rc == EXIT_USER_ERROR
     assert "REFUSED" in err
+    assert "(+2 more)" in err
+
+
+def test_empty_list_caps_at_ten_shown(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """R2N-06 log-volume cap: 12 present-0-row partitions → 10 named + "(+2 more)"."""
+    import polars as pl
+
+    lake_root, catalog_path = _seed(tmp_path)
+    for month in range(1, 13):  # 12 present, readable, EXACTLY-0-row months
+        part = _partition(lake_root, year=2024, month=month)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(
+            part
+        )
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path))
+    err = capsys.readouterr().err
+    assert rc == EXIT_USER_ERROR
+    assert "REFUSED" in err
+    assert "EMPTY" in err
     assert "(+2 more)" in err
 
 

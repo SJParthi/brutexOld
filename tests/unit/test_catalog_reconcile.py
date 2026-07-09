@@ -11,8 +11,9 @@ Covered branches:
 * ``_partition_files``: missing ``bars/`` dir → ``[]``; present → globbed; each
   coordinate filter both set and ``None`` (the ``*`` widening).
 * ``reconcile_catalog_from_lake``: a valid partition (upsert + counts), an
-  unparseable partition path (``PartitionError`` skip), a zero-row Parquet (skip),
-  idempotent re-reconcile, and the ``raw_hash`` == ``sha256(file bytes)`` contract.
+  unparseable partition path (``PartitionError`` skip), a PRESENT 0-row Parquet
+  (skip + flagged on ``empty_partitions``, R2N-06), idempotent re-reconcile, and
+  the ``raw_hash`` == ``sha256(file bytes)`` contract.
 * ``_as_utc``: tz-aware passthrough (``astimezone``) and tz-naive stamping
   (``replace``).
 """
@@ -216,15 +217,34 @@ class TestReconcile:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
             assert result == ReconcileResult(partitions_reconciled=0, bars_total=0, skipped=1)
 
-    def test_skips_zero_row_partition(self, tmp_path: Path) -> None:
+    def test_present_zero_row_partition_is_skipped_and_flagged_empty(self, tmp_path: Path) -> None:
+        """DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: a PRESENT, readable,
+        EXACTLY-0-row partition is counted a benign ``skipped`` AND recorded
+        DISTINCTLY on ``empty_partitions`` + one ``catalog.reconcile.empty_partition``
+        WARN — no BruteX writer emits a valid 0-row parquet, so it is externally-forged
+        and the sweep launch must be able to REFUSE it (else the whole month silently
+        drops). Fails-before: the file was a benign zero-row skip with ``empty_partitions``
+        empty, so the launch swept the smaller lake with a data_snapshot_hash identical
+        to the drop.
+        """
+        from structlog.testing import capture_logs
+
         empty = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2021" / "01.parquet"
         empty.parent.mkdir(parents=True)
         pl.DataFrame({"timestamp": pl.Series([], dtype=pl.Datetime("us", "UTC"))}).write_parquet(
             empty
         )
-        with _open(tmp_path) as cat:
+        with _open(tmp_path) as cat, capture_logs() as logs:
             result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
-            assert result == ReconcileResult(partitions_reconciled=0, bars_total=0, skipped=1)
+            assert result == ReconcileResult(
+                partitions_reconciled=0,
+                bars_total=0,
+                skipped=1,
+                empty_partitions=(str(empty),),
+            )
+        events = [e for e in logs if e["event"] == "catalog.reconcile.empty_partition"]
+        assert len(events) == 1
+        assert events[0]["path"] == str(empty)
 
     def test_empty_lake_is_a_clean_noop(self, tmp_path: Path) -> None:
         with _open(tmp_path) as cat:
