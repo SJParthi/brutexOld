@@ -152,7 +152,7 @@
       <a href="/results" aria-current="page">Results</a>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">loading</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot" aria-hidden="true"></span><span id="livetxt">loading</span></div>
   </header>
 
   <main class="bx-wrap">
@@ -223,6 +223,10 @@
     <strong>never rounded</strong> (ranking integrity). The brute-force engine scope is
     <strong>NIFTY&nbsp;/&nbsp;BANKNIFTY&nbsp;/&nbsp;SENSEX</strong> (CLAUDE.md&nbsp;§3) — this
     page displays the results, it does not run the engine.
+    Legend: "—" = value not recorded · ▾/▴ marks the active sort column (click a header
+    to sort, click again to flip) · long "Matched conditions" cells clip — hover for the
+    full list · hover Sharpe/Sortino/PF/Win% for the full-precision stored value · hover
+    # for run-id / data-era / mode.
   </div>
 
   </main>
@@ -293,18 +297,37 @@ function setDot(state) {
 
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
+/* Full-precision hover (never-round-stats law, CLAUDE.md §4): the tooltip
+   carries the EXACT stored payload value while the visible text keeps the
+   display rounding; emitted only when the value is non-null so a "—" cell
+   never gets an empty/fabricated tooltip (Golden Rule #1). */
+function rawTitle(v, prefix) {
+  return v == null ? "" : ' title="' + (prefix || "") + esc(v) + '"';
+}
 const COLS = [
-  ["rank", "#", (r) => '<span class="rank">' + num(r.rank) + "</span>"],
+  /* Rank tooltip = per-row provenance: the Golden-Rule-#4 run identity + the
+     honest era marker the era banner says is "in the API payload
+     (snapshot_era)" — previously dropped by the display layer. */
+  ["rank", "#", (r) => '<span class="rank" title="run_id: ' + esc(r.run_id)
+    + ' · data era: ' + esc(r.snapshot_era) + ' · mode: ' + esc(r.mode) + '">'
+    + num(r.rank) + "</span>"],
   ["instrument", "Instrument", (r) => '<span class="sym">' + esc(r.instrument) + "</span>"],
   ["tf", "TF", (r) => esc(r.tf)],
   ["direction", "Dir", (r) => esc(r.direction)],
   ["net_pnl_rupees", "Net P&L", (r) =>
     '<span class="pnl ' + (Number(r.net_pnl_rupees) >= 0 ? "pos" : "neg") + '">' + esc(r.net_pnl) + "</span>"],
-  ["sharpe_ratio", "Sharpe", (r) => metric(r.sharpe_ratio)],
-  ["sortino_ratio", "Sortino", (r) => metric(r.sortino_ratio)],
-  ["profit_factor", "PF", (r) => metric(r.profit_factor)],
-  ["win_rate", "Win %", (r) => pct(r.win_rate)],
-  ["total_trades", "Trades", (r) => num(r.total_trades)],
+  ["sharpe_ratio", "Sharpe", (r) =>
+    '<span class="num"' + rawTitle(r.sharpe_ratio) + '>' + metric(r.sharpe_ratio) + "</span>"],
+  ["sortino_ratio", "Sortino", (r) =>
+    '<span class="num"' + rawTitle(r.sortino_ratio) + '>' + metric(r.sortino_ratio) + "</span>"],
+  ["profit_factor", "PF", (r) =>
+    '<span class="num"' + rawTitle(r.profit_factor) + '>' + metric(r.profit_factor) + "</span>"],
+  ["win_rate", "Win %", (r) =>
+    '<span' + rawTitle(r.win_rate, "raw win-rate fraction: ") + '>' + pct(r.win_rate) + "</span>"],
+  ["total_trades", "Trades", (r) =>
+    '<span' + (r.winning_trades == null || r.losing_trades == null ? ""
+      : ' title="wins: ' + esc(r.winning_trades) + ' · losses: ' + esc(r.losing_trades) + '"')
+    + '>' + num(r.total_trades) + "</span>"],
   ["conditions", "Matched conditions", (r) =>
     r.conditions
       ? '<span class="cond" title="' + esc(r.conditions) + '">' + esc(r.conditions) + "</span>"
@@ -323,13 +346,22 @@ const CARD_DEFS = [
   ["skipped (unreadable)", (b) => num(b.skipped)],
 ];
 
+/* KPI card tooltips: name each count's EXACT semantics (static strings, indexed
+   1:1 with CARD_DEFS). */
+const CARD_TITLES = [
+  "total_rows: combos matching the active filters across every readable sweep store",
+  "rows on this page (top-N slice of total_rows)",
+  "store_count: readable per-tuple ResultsStore files under <lake>/sweeps",
+  "skipped: store files that failed to parse — counted, never silently dropped",
+];
 function ensureCards() {
   if (cardVals) return;
   cardVals = [];
   cardsEl.textContent = "";
-  for (const [label] of CARD_DEFS) {
+  for (const [i, [label]] of CARD_DEFS.entries()) {
     const card = document.createElement("div");
     card.className = "card";
+    card.title = CARD_TITLES[i];
     const v = document.createElement("span");
     v.className = "v";
     const l = document.createElement("span");
@@ -502,9 +534,13 @@ async function load() {
         + ") — old-era and new-era backtest results are co-ranked in this one table;"
         + " census/heal pending (dup-train PR-3). Per-row era details are in the API"
         + " payload (snapshot_era).";
+      /* Hover carries the FULL era hashes (the banner truncates to 12 chars);
+         DOM property assignment, never innerHTML. */
+      eraBanner.title = eras.map(String).join(", ");
       eraBanner.classList.add("show");
     } else {
       eraBanner.textContent = "";
+      eraBanner.title = "";
       eraBanner.classList.remove("show");
     }
     fillSelect(fInstrument, board.instruments);

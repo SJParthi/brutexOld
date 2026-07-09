@@ -305,6 +305,12 @@
     background:var(--surface); display:none; position:relative; overflow:hidden; box-shadow:var(--elev-1); }
   #pullpanel.on { display:block; animation: fadeInUp .4s ease both; }
   #pullpanel .title { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  /* Page-local scope for the .sub span(s) inside the pull panel title: the
+     shared design-system replacement scopes .sub to `header .sub`
+     (bx-theme.css), so this keeps the panel's muted/12px styling intact even
+     once the page's own unscoped .sub rule is retired (values mirror the
+     original unscoped rule). */
+  #pullpanel .sub { color: var(--muted); font-size: 12px; }
   /* The sweeping beam is the LIVE "running" indicator. Show it ONLY while a
      pull is actually in flight (panel has `.running`); the panel itself stays
      `.on` after the job settles so the ✓/✕ result + chunk grid remain visible,
@@ -615,7 +621,7 @@
          surfaces finally speak one language. Counts are bucket-global
          (all recorded windows for spot/options), not per-pull — said here
          plainly. -->
-    <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
+    <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;" title="bucket-global counts — ALL recorded fetch windows for spot/futures/options from the window ledger, not just this pull; resolved = SUCCESS+SKIPPED+EMPTY"></div>
     <!-- DEC-UNIVERSE-PER-PHASE-PROGRESS-001: the LIVE per-phase progress block —
          spot / futures / options each read identically (done/total windows + a
          progress bar + the status breakdown), with the current phase highlighted.
@@ -817,7 +823,9 @@ function buildTabs(summary) {
     '<span class="key"><span class="chip index">INDEX</span></span>'
     + '<span class="key"><span class="chip stock">STOCK</span></span>'
     + '<span class="key"><span class="chip opt">OPT</span> option-pullable · F&amp;O</span>'
-    + '<span class="key"><span class="chip ref">REF</span> reference-only · no options</span>';
+    + '<span class="key"><span class="chip ref">REF</span> reference-only · no options</span>'
+    // Completeness-strip marker key (static text — mirrors the spotSeg rules).
+    + '<span class="key">✓ full from 2020 · ⚠ partial / late start · ✕ failed windows · — not pulled</span>';
   tabsEl.appendChild(legend);
   /* Search-first UX: focus the box on load so the operator types a symbol
      immediately instead of scrolling 240 rows. Guard on document.body so a
@@ -988,13 +996,18 @@ function econLine(i) {
    failed windows · dim — = never pulled / no record. */
 function spotSeg(label, dim) {
   if (!dim || dim.status === "none" || !dim.first_date) {
-    return '<span class="seg"><span class="k">' + label + '</span> <span class="dim">—</span></span>';
+    return '<span class="seg" title="1-minute coverage · not pulled / no record"><span class="k">' + label + '</span> <span class="dim">—</span></span>';
   }
   let cls = "warn", flag = "⚠";
   if (dim.status === "failed") { cls = "bad"; flag = "✕"; }
   else if (dim.status === "full" && dim.from_2020) { cls = "ok"; flag = "✓"; }
   const span = esc(dim.first_date) + "→" + esc(dim.last_date || "?");
-  return '<span class="seg"><span class="k">' + label + '</span> <span class="' + cls + '">'
+  /* Raw stored completeness fields on hover — the values behind the color/flag
+     encoding, all already fetched by loadCompleteness() (esc()'d). */
+  const segTitle = ' title="1-minute coverage · status=' + esc(dim.status)
+    + ' · from_2020=' + esc(Boolean(dim.from_2020))
+    + ' · first ' + esc(dim.first_date) + ' → last ' + esc(dim.last_date || "?") + '"';
+  return '<span class="seg"' + segTitle + '><span class="k">' + label + '</span> <span class="' + cls + '">'
     + span + " " + flag + "</span></span>";
 }
 /* Daily-open substitution honesty (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001):
@@ -1007,21 +1020,28 @@ function spotSeg(label, dim) {
 function openSubSeg(dim) {
   const n = Number((dim && dim.open_substituted_days) || 0);
   const m = Number((dim && dim.session_days) || 0);
+  /* Tooltip carries the FULL stored 0/M tally — including the n=0 branch where
+     the display collapses to "—" and would otherwise hide session_days entirely.
+     Both operands are Number()-coerced above (digits/NaN only, never markup). */
+  const subTitle = ' title="daily-open substitution: ' + n + ' of ' + m
+    + ' stored sessions (first present minute ≠ 09:15 IST on a non-Muhurat session)"';
   if (!(n > 0)) {
-    return '<span class="seg"><span class="k">open subst</span> <span class="dim">—</span></span>';
+    return '<span class="seg"' + subTitle + '><span class="k">open subst</span> <span class="dim">—</span></span>';
   }
-  return '<span class="seg"><span class="k">open subst</span> <span class="warn">'
+  return '<span class="seg"' + subTitle + '><span class="k">open subst</span> <span class="warn">'
     + n + "/" + m + "</span></span>";
 }
 function optSeg(opt) {
   if (!opt || opt.status === "none") {
-    return '<span class="seg"><span class="k">opt</span> <span class="dim">—</span></span>';
+    return '<span class="seg" title="options coverage · not pulled / no record"><span class="k">opt</span> <span class="dim">—</span></span>';
   }
   let cls = "warn";
   if (opt.status === "failed") cls = "bad";
   else if (opt.status === "stable") cls = "ok";
   const span = (opt.first_year != null) ? (opt.first_year + "–" + opt.last_year) : "";
-  return '<span class="seg"><span class="k">opt</span> <span class="' + cls + '">'
+  const optTitle = ' title="options · status=' + esc(opt.status)
+    + ' · years ' + esc(opt.first_year != null ? opt.first_year + "–" + opt.last_year : "?") + '"';
+  return '<span class="seg"' + optTitle + '><span class="k">opt</span> <span class="' + cls + '">'
     + esc(span) + " " + esc(opt.status) + "</span></span>";
 }
 function covStrip(i) {
@@ -1079,6 +1099,9 @@ async function loadMappingIntegrity() {
       verdict.style.color = "#f87171";
       detail.textContent = (reds.length ? (" · " + reds.slice(0, 12).join(", ") +
         (reds.length > 12 ? " …" : "")) : "") + pendingNote;
+      /* Full under-pulled symbol list on hover — the display slices to 12; the
+         title DOM property is not an HTML sink. */
+      detail.title = reds.join(", ");
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1169,6 +1192,9 @@ async function loadParseSkips() {
       verdict.style.color = "#f87171";
       const samples = (m.samples || []).slice(0, 3).join(" | ");
       detail.textContent = denom + (samples ? (" · e.g. " + samples) : "");
+      /* Complete stored sample set on hover — display slices to 3 (title
+         property, not an HTML sink). */
+      detail.title = (m.samples || []).join(" | ");
     }
   } catch (e) { /* transient — keep the last shown verdict */ }
 }
@@ -1253,16 +1279,23 @@ function renderInstruments() {
     if (listAnimated) { d.style.animation = "none"; }
     else { d.style.animationDelay = Math.min(ix, 12) * 0.03 + "s"; }
     const checked = selMulti.has(i.symbol) ? " checked" : "";
+    /* Raw stored economics on hover — surfaces the fields econLine deliberately
+       omits (lot ≤ 1, tick ≤ 0, null freeze → "—", never a fabricated value)
+       and the never-displayed vendor pull_symbol; all in UNIV[] already. */
+    const econTitle = "stored: lot_size " + (i.lot_size ?? "—")
+      + " · tick_size " + (i.tick_size ?? "—")
+      + " · freeze_quantity " + (i.freeze_quantity ?? "—");
     d.innerHTML = `<input type="checkbox" class="msel"${checked} aria-label="multi-select ${esc(i.symbol)}">`
       + `<span class="chip ${esc(i.kind)}">${esc(i.kind)}</span>`
       + (refOnly
           ? '<span class="chip ref" title="Reference-only — fetched + stored for context, but NOT brute-forced and no option chain (NIFTY Total Market + its non-F&amp;O constituents, India VIX)">REF</span>'
           : '<span class="chip opt" title="Option-pullable — this underlying has a listed option chain, so &quot;Pull options chain&quot; is allowed (DEC-OPTIONS-ELIGIBLE-GUARD-001)">OPT</span>')
-      + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div>`
-      + ((econ) => econ ? `<div class="econ">${esc(econ)}</div>` : "")(econLine(i))
+      + `<div><div class="sym" title="vendor symbol: ${esc(i.pull_symbol)}">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div>`
+      + ((econ) => econ ? `<div class="econ" title="${esc(econTitle)}">${esc(econ)}</div>` : "")(econLine(i))
       + covStrip(i)
       + `</div>`
       + `<span class="cc">${esc(i.exchange)}</span>`;
+    if (!econLine(i)) { d.title = econTitle; }
     const cb = d.querySelector(".msel");
     cb.onclick = (ev) => { ev.stopPropagation(); toggleMulti(i, cb.checked); };
     d.onclick = () => selectInstrument(i);
@@ -1325,6 +1358,11 @@ async function selectInstrument(i) {
       p.className = "pill" + (ix === 0 ? " near" : "");
       p.style.animationDelay = (ix * 0.05) + "s";
       p.textContent = expiryDate;
+      /* fetched_at (REGISTRY_EXPIRY_COLUMNS[4], fetched + previously discarded)
+         on hover; the first pill also explains the otherwise-unexplained yellow
+         .near highlight (registry order: expiry_date ascending). */
+      p.title = (ix === 0 ? "earliest listed expiry (registry order: expiry_date ascending) · " : "")
+        + "registry: fetched " + (row[4] ?? "—");
       p.onclick = () => selectExpiry(i.symbol, expiryDate, p);
       ex.appendChild(p);
     });
@@ -1368,8 +1406,11 @@ async function renderContracts(symbol, expiryDate) {
       if (strike == null) return;  // FUT leg — no strike, skip the option ladder
       const s = strike;
       byStrike[s] = byStrike[s] || {};
-      if (side === "CE") byStrike[s].ce = true;
-      else if (side === "PE") byStrike[s].pe = true;
+      /* Keep the FULL registry row per side (not a boolean) so the cell tooltip
+         can surface the fetched-but-previously-discarded contract_symbol /
+         candle_status / fetched_at columns. */
+      if (side === "CE") byStrike[s].ce = row;
+      else if (side === "PE") byStrike[s].pe = row;
     });
     const strikes = Object.keys(byStrike).sort((a, b) => parseFloat(a) - parseFloat(b));
     if (!strikes.length) { c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>No CE/PE strikes for this expiry yet</div>'; return; }
@@ -1393,13 +1434,21 @@ async function renderContracts(symbol, expiryDate) {
    removed with the "Pull historical" button — the ONE full pipeline pulls every
    contract's history automatically (futures then options) over the selection / the
    whole universe, so the operator never clicks a single cell to fill it. */
-function optionCell(side, present, ix) {
+function optionCell(side, presentRow, ix) {
   const cell = document.createElement("div");
-  cell.className = "cell " + side + (present ? " live" : "");
+  cell.className = "cell " + side + (presentRow ? " live" : "");
   cell.style.animationDelay = (ix * 0.02) + "s";
-  cell.textContent = present ? side.toUpperCase() : "—";
-  if (present) {
-    cell.title = side.toUpperCase() + " series in the lake";
+  cell.textContent = presentRow ? side.toUpperCase() : "—";
+  if (presentRow) {
+    /* REGISTRY_CONTRACT_COLUMNS: [3]=contract_symbol · [6]=candle_status ·
+       [7]=fetched_at — already fetched, previously discarded by the ladder
+       builder. title is a DOM property, not an HTML sink. */
+    cell.title = (presentRow[3] ?? "—") + " · candle_status=" + (presentRow[6] ?? "—")
+      + " · fetched " + (presentRow[7] ?? "—");
+  } else {
+    const absentMsg = "no " + side.toUpperCase() + " contract in the registry at this strike";
+    cell.title = absentMsg;
+    cell.setAttribute("aria-label", absentMsg);
   }
   return cell;
 }
@@ -1492,11 +1541,16 @@ function updateSelectionLead() {
     const more = syms.length > LEAD_MAX_NAMED ? ` +${syms.length - LEAD_MAX_NAMED} more` : "";
     lead.textContent = `Selected: ${named}${more} (${n}) — one combined selection across the `
       + `Index + Stocks lists. Hit ▶ Pull · full pipeline above (✗ clear unticks both lists).`;
+    /* Full ticked-symbol list on hover once the "+N more" cap kicks in
+       (title DOM property — not an HTML sink). */
+    lead.title = n > LEAD_MAX_NAMED ? syms.join(", ") : "";
   } else if (selInst) {
     lead.textContent = `Selected ${selInst} — tick more rows to scope the pull, `
       + `or hit ▶ Pull · full pipeline above`;
+    lead.title = "";
   } else {
     lead.textContent = DEFAULT_PULL_LEAD;
+    lead.title = "";
   }
 }
 function updateMultiBtn() {
@@ -1883,6 +1937,10 @@ async function pollProgress(label) {
     document.getElementById('counter').textContent = s.open_ended
       ? (s.completed || 0).toLocaleString('en-IN') + ' / ?'
       : (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
+    // Mirror of the open-ended '?' legend on the unit counter (title property).
+    document.getElementById('counter').title = s.open_ended
+      ? "total not final — the F&O denominator grows as contracts are planned (open_ended=true), so ? avoids a fake final count"
+      : "";
     renderLiveStats(s);
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
     if (s.state === 'running') {
@@ -1891,6 +1949,11 @@ async function pollProgress(label) {
       document.getElementById('pulltitle').textContent = s.open_ended
         ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${esc(s.current || '…')}`
         : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}` + etaSuffix(s);
+      /* Full-precision hover: the display rounds percent (Math.round) and folds
+         eta_seconds to ~Xh Ym — the raw polled values on the header title
+         (?? / || "—" so an absent field never fabricates a value). */
+      document.getElementById('pulltitle').title = 'percent=' + (s.percent ?? '—')
+        + ' · eta_seconds=' + (s.eta_seconds ?? '—') + ' · current=' + (s.current || '—');
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
@@ -1916,6 +1979,9 @@ async function pollProgress(label) {
 
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  // Clear the running-only full-precision header tooltip (set in pollProgress).
+  const pt = document.getElementById('pulltitle');
+  if (pt) pt.title = "";
   updateStallChip(null);  // a settled run is never stalled-suspect — hide the chip (DEC-PULL-STALL-CHIP-001)
   setBulkDisabled(false);
   // Restore the ONE pull button to its selection-driven label/enabled state
@@ -1979,6 +2045,13 @@ function renderLiveStats(s) {
     const d = document.createElement('div');
     d.className = 'bstat ' + (cls || '');
     const shown = (v === null) ? '?' : (v || 0).toLocaleString('en-IN');
+    /* Marker legends on hover: the amber no-data gaps + the open-ended '?'
+       already render; the titles restate their documented semantics. */
+    if (k === 'no-data gaps') {
+      d.title = "vendor-confirmed empty windows (benign boundary) — counted separately, never failures (DEC-DHAN-NO-DATA-GAP-COUNT-001)";
+    } else if (k === 'of total' && s.open_ended) {
+      d.title = "total not final — the F&O denominator grows as contracts are planned (open_ended=true), so ? avoids a fake final count";
+    }
     d.innerHTML = `<span class="bv">${shown}</span>`
       + `<span class="bk">${esc(k)}</span>`;
     row.appendChild(d);

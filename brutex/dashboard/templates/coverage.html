@@ -143,14 +143,14 @@
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
-    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">polling</span></div>
+    <div class="live" id="live"><span class="dot bx-live-dot" id="livedot" aria-hidden="true"></span><span id="livetxt">polling</span></div>
   </header>
 
   <div class="band">
-    <div class="kpi"><span class="v ok" id="ul"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">underlyings pulled</span></div>
-    <div class="kpi"><span class="v" id="ser"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">expired-option series</span></div>
-    <div class="kpi"><span class="v" id="spotds"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">spot datasets</span></div>
-    <div class="kpi"><span class="v" id="winc"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">fetch windows</span></div>
+    <div class="kpi"><span class="v ok" id="ul"><span class="bx-skel" aria-hidden="true"></span></span><span class="l" title="— = this surface has not answered yet (failed/pending tick — retrying every 4 s); a KPI that has data keeps its last real value">underlyings pulled</span></div>
+    <div class="kpi"><span class="v" id="ser"><span class="bx-skel" aria-hidden="true"></span></span><span class="l" title="— = this surface has not answered yet (failed/pending tick — retrying every 4 s); a KPI that has data keeps its last real value">expired-option series</span></div>
+    <div class="kpi"><span class="v" id="spotds"><span class="bx-skel" aria-hidden="true"></span></span><span class="l" title="— = this surface has not answered yet (failed/pending tick — retrying every 4 s); a KPI that has data keeps its last real value">spot datasets</span></div>
+    <div class="kpi"><span class="v" id="winc"><span class="bx-skel" aria-hidden="true"></span></span><span class="l" title="— = this surface has not answered yet (failed/pending tick — retrying every 4 s); a KPI that has data keeps its last real value">fetch windows</span></div>
   </div>
 
   <!-- The combined ledger was split into three focused pages
@@ -352,6 +352,12 @@ async function pollCompleteness() {
       cCmp.classList.remove("err");
       setText(cCmp, num(idx.full_1minute) + "/" + num(idx.total) + " indices · "
         + num(eq.full_1minute) + "/" + num(eq.total) + " equities full");
+      /* Tooltip carries the already-fetched open_substituted_days tallies
+         (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001); ?? "—" so an absent field
+         never fabricates a 0. Attribute write only — the visible stat string
+         above stays byte-identical. */
+      cCmp.title = "open-substituted sessions — indices: " + (idx.open_substituted_days ?? "—")
+        + " · equities: " + (eq.open_substituted_days ?? "—");
     }
     return true;
   } catch (e) {

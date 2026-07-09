@@ -117,6 +117,9 @@
      under the F&O candle grid when the ATM±N grid came from the sparse lake ladder
      only (no vendor registry chain) — the step may be overestimated. */
   .stepnote { color:var(--muted); font-size:11px; padding:6px 2px 0; }
+  /* Static marker legend under the candle grid — same muted styling as .stepnote
+     but a DISTINCT class: patchGridRows keys its shape check on ".stepnote". */
+  .gridlegend { color:var(--muted); font-size:11px; padding:6px 2px 0; }
   /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
   @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
   td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
@@ -248,7 +251,7 @@
     <div id="data"><div class="empty emptyart"><div class="art">🗄️</div><div>Select a table on the left to browse its <b>columns &amp; sample rows</b>.</div></div></div>
   </div>
 
-  <div id="copytoast">✓ copied to clipboard</div>
+  <div id="copytoast" role="status" aria-live="polite">✓ copied to clipboard</div>
 
 <!-- Shared half-up 2dp display formatter (DEC-STORED-DATA-VALIDATION-001):
      deliberately NON-defer so bxFixed2 is defined before the inline script
@@ -846,16 +849,50 @@ function gridTableOpen(cols) {
      or empty repaint can never leave a stale match behind. */
   return '<table data-cols="' + esc(JSON.stringify(cols)) + '">';
 }
+/* Column-header provenance titles (additive to the tchip glyph title): static
+   text mirroring the PCT_COLS / GREEK_DP / DEC-SPOT-PREVCLOSE-1MIN-001 comments
+   above — what the served column IS, right where the operator reads it. */
+function headTitleAttr(c) {
+  if (PCT_COLS.has(c)) {
+    return ' title="server-derived per bar from the prior trading day\'s LAST 1-minute close'
+      + ' — not a stored Parquet column; shown 2dp half-up, hover cells for exact value"';
+  }
+  if (c === "iv") return ' title="stored as a fraction; shown as percent 2dp"';
+  if (Object.prototype.hasOwnProperty.call(GREEK_DP, c)) {
+    return ' title="display-rounded broker-style; stored full precision"';
+  }
+  return "";
+}
 function gridTheadHtml(cols) {
   return '<thead><tr>' + cols.map(c => {
     const t = colType(c);
-    return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+    return '<th' + headTitleAttr(c) + '><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
   }).join("") + '</tr></thead>';
+}
+/* Cell tooltips — full-precision + honesty markers, values ALREADY in the page's
+   rendered payload (never a new fetch): PCT_COLS / iv / Greeks carry the exact
+   stored value (display rounds only — the never-round-stats law), the moneyness
+   markers restate their documented semantics (DEC-FNO-MONEYNESS-001). The td
+   textContent is unchanged, so click-to-copy behavior is untouched. */
+function cellTitleAttr(col, cell) {
+  if (cell == null) return "";
+  if (PCT_COLS.has(col)) return ' title="' + esc(cell) + '"';
+  if (col === "iv") return ' title="stored fraction: ' + esc(cell) + '"';
+  if (Object.prototype.hasOwnProperty.call(GREEK_DP, col)) return ' title="' + esc(cell) + '"';
+  if (col === "moneyness" && typeof cell === "string") {
+    if (cell.startsWith("ITM") || cell.startsWith("OTM")) {
+      return ' title="strikes from ATM vs spot at this bar (sign: ITM −, OTM +, depth = strike count)"';
+    }
+    if (cell === "ATM") return ' title="at the money"';
+    if (cell === "?") return ' title="no underlying spot stored at this bar — moneyness unknown, never fabricated"';
+    if (cell === "—") return ' title="futures contract or undecodable symbol — moneyness not applicable"';
+  }
+  return "";
 }
 function gridRowsHtml(cols, rows) {
   return rows.map(row =>
     '<tr>' + row.map((cell, i) =>
-      cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '">' + esc(fmtCell(cols[i], cell)) + '</td>'
+      cell == null ? '<td class="nullcell">null</td>' : '<td class="' + moneynessClass(cols[i], cell).trim() + '"' + cellTitleAttr(cols[i], cell) + '>' + esc(fmtCell(cols[i], cell)) + '</td>'
     ).join("") + '</tr>'
   ).join("");
 }
@@ -988,7 +1025,7 @@ function tableControlsHtml(name) {
     + cols.map(c => '<option value="' + esc(c) + '"' + (c === f.c ? " selected" : "") + '>' + esc(c) + '</option>').join("") + '</select>'
     + '<select class="fop">' + OPS.map(o => '<option value="' + o[0] + '"' + (o[0] === f.op ? " selected" : "") + '>' + esc(o[1]) + '</option>').join("") + '</select>'
     + '<input class="fval" placeholder="value" value="' + esc(f.v) + '">'
-    + '<button class="rm" title="remove filter">✕</button></div>'
+    + '<button class="rm" title="remove filter" aria-label="remove filter">✕</button></div>'
   ).join("");
   return '<div class="qbar">'
     + '<div class="qrow"><span class="lab">Filters</span>'
@@ -1419,7 +1456,7 @@ function candleHeadHtml(body) {
   else if (d) { title = esc(d.symbol + " · " + d.interval); }
   /* #crange is filled via setRangeChip (textContent) right after each render. */
   return '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + esc(sub) + '</span>'
-    + '<span class="rangechip" id="crange" style="display:none"></span></div>';
+    + '<span class="rangechip" id="crange" style="display:none" title="server-resolved range actually served — blank From/To shows the dataset\'s true stored span, never echoes the input"></span></div>';
 }
 
 /* The grid + pager body (or the error message). HONESTY MARKER
@@ -1441,7 +1478,11 @@ function candleGridHtml(body, err, notice) {
   const stepNote = body.strike_step_confidence === "observed"
     ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote;
+  /* Static marker legend (no data interpolation): explains the grid's otherwise
+     unexplained markers; the "~" stepnote above self-explains when shown. */
+  const legend = '<div class="gridlegend">click any cell to copy · null (italic) = value not stored'
+    + ' · moneyness ? = no spot at bar · — = future/undecodable</div>';
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + legend;
 }
 
 /* Publish the candle page window into the ONE delegated Prev/Next pager
