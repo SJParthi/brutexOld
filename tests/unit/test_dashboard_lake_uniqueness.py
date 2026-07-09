@@ -1,26 +1,32 @@
 """``GET /api/v1/universe/lake-uniqueness`` + the ``/universe`` chip (DEC-LAKE-HEAL-001).
 
-The census route rides the ``SummaryCache`` ADAPTIVE-TTL-FLOOR path (the #920
-machinery ``/coverage/spot`` uses — the hostile-review MAJOR fold; NOT a
-generation-KEYED memo, which a pull's per-write-tick generation bumps would
-re-key on every 15 s chip poll into back-to-back whole-lake scans), so:
+Since DEC-LAKE-CENSUS-NONBLOCKING-001 the census route rides the
+``LakeCensusHolder`` (a dedicated daemon scan thread + an O(1) last-known
+verdict snapshot — the superseded ``SummaryCache`` cold single-flight parked
+every stacked 15 s poller in an unbounded wait ON a threadpool worker and
+starved the shared AnyIO limiter for the whole production scan). The
+FRESHNESS law is byte-compatible with the pre-fix wiring:
 
-* a repeat 15 s chip poll is an O(1) HIT (the O(files) scanner runs exactly
-  once — spy-pinned),
+* a repeat 15 s chip poll is an O(1) snapshot (the O(files) scanner runs
+  exactly once — spy-pinned),
 * a write-tick STORM of ``mark_dirty`` bumps yields at most ONE scan per
   adaptive floor window — ``max(2 s, the scan's own duration)`` capped 120 s
-  (the fails-before pin: the old generation-keyed memo re-scanned per poll),
-* a dirty entry past the floor recomputes (a pull / the L3 sweeper's
+  (the #920 law, preserved verbatim by the holder),
+* a dirty holder past the floor rescans (a pull / the L3 sweeper's
   ``on_healed`` is served fresh within one bounded floor window — never
   indefinitely stale),
-* an instrument-master change is NOT a lake-bytes signal → clean HIT.
+* an instrument-master change is NOT a lake-bytes signal → no rescan.
 
-Plus the payload shape (clean + engine-poisoned), the honest
+Plus the payload shape (clean + engine-poisoned — the pre-fix verdict keys
+byte-compatible, the four additive scan-state keys stamped on top), the honest
 ``{"present": false}`` no-lake-root gate, the 503 no-store contract, and the
-``universe.html`` chip markers (textContent-only JS — the CodeQL XSS rule).
+``universe.html`` chip markers (textContent-only JS — the CodeQL XSS rule)
+including the new honest warming arm.
 
 Lakes are REAL Parquet trees under ``tmp_path``; poison is planted with raw
-pyarrow (the fixed writer refuses duplicates).
+pyarrow (the fixed writer refuses duplicates). Tests inject a SYNCHRONOUS
+``census_spawn`` (build_app's holder test seam) so the daemon-thread scan runs
+inline + deterministic under coverage.
 """
 
 # pyright: reportPrivateUsage=none
@@ -142,10 +148,24 @@ def _bump_master(store: InstrumentStore) -> None:
     )
 
 
-def _make_client(store: InstrumentStore | None, cache: SummaryCache) -> TestClient:
+def _sync_spawn(body: Callable[[], None]) -> None:
+    """Run the census check/scan inline — the deterministic holder test seam."""
+    body()
+
+
+def _make_client(
+    store: InstrumentStore | None,
+    cache: SummaryCache,
+    *,
+    census_clock: Callable[[], float] | None = None,
+) -> TestClient:
     return TestClient(
         app_module.build_app(
-            app_module.DashboardState(), instrument_store=store, summary_cache=cache
+            app_module.DashboardState(),
+            instrument_store=store,
+            summary_cache=cache,
+            census_spawn=_sync_spawn,
+            census_clock=census_clock,
         ),
         raise_server_exceptions=False,
     )
@@ -195,6 +215,15 @@ class TestLakeUniquenessRoute:
         }
         assert payload["healed_total"] == 0
         assert payload["last_sweep_utc"] is None
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the four ADDITIVE scan-state keys
+        # (every verdict key above is byte-compatible with the pre-fix payload).
+        assert payload["scan_in_progress"] is False
+        assert payload["scan_error"] is None
+        assert isinstance(payload["as_of_utc"], str)
+        progress = payload["scan_progress"]
+        assert progress["files_scanned"] == 1  # one bar file → one progress tick
+        assert progress["files_total_estimate"] is None  # first-ever — no L3 sentinel
+        assert isinstance(progress["started_utc"], str)
 
     def test_engine_poisoned_verdict(self, store: InstrumentStore) -> None:
         """A poisoned NIFTY partition flips ``engine_clean`` — the chip's headline answer."""
@@ -224,7 +253,8 @@ class TestLakeUniquenessRoute:
 
 
 class TestLakeUniquenessCache:
-    """The generation-stamped O(1) repeat-poll contract (DEC-LAKE-HEAL-001)."""
+    """The O(1) repeat-poll + adaptive-floor contract (DEC-LAKE-HEAL-001 law,
+    served by the DEC-LAKE-CENSUS-NONBLOCKING-001 holder)."""
 
     def test_repeat_poll_hits_then_dirty_past_floor_rescans_master_is_irrelevant(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
@@ -240,7 +270,7 @@ class TestLakeUniquenessCache:
 
         clock = _FakeClock()
         cache = SummaryCache(clock=clock)
-        client = _make_client(store, cache)
+        client = _make_client(store, cache, census_clock=clock)
 
         first = client.get("/api/v1/universe/lake-uniqueness")
         assert first.status_code == 200
@@ -272,13 +302,15 @@ class TestLakeUniquenessCache:
         """THE hostile-review MAJOR pin (the #920 regression class) — fails before.
 
         During a pull, ``pull_jobs`` bumps the write generation on EVERY
-        per-pair write tick, so the PRE-FIX generation-KEYED
+        per-pair write tick, so the PRE-#1074 generation-KEYED
         ``MoversSnapshotCache`` memo re-keyed on every bump and re-ran the
-        whole-lake O(files) scan on every 15 s chip poll — on the OLD wiring
-        this test fails with ``calls == 5``. Through the ``SummaryCache``
-        adaptive TTL floor, an expensive scan (30 s on the fake clock) sets
-        its OWN refresh floor: five dirty polls inside that window pay ONE
-        scan, and a poll past the window re-scans (a floor, never a freeze).
+        whole-lake O(files) scan on every 15 s chip poll — on that wiring
+        this test fails with ``calls == 5``. The ``LakeCensusHolder`` keeps
+        the SummaryCache-era adaptive TTL floor verbatim
+        (DEC-LAKE-CENSUS-NONBLOCKING-001): an expensive scan (30 s on the
+        fake clock) sets its OWN refresh floor — five dirty polls inside that
+        window pay ONE scan, and a poll past the window re-scans (a floor,
+        never a freeze).
         """
         calls = {"n": 0}
         clock = _FakeClock()
@@ -291,7 +323,7 @@ class TestLakeUniquenessCache:
 
         monkeypatch.setattr(app_module, "scan_lake_invariants", _slow_scan)
         cache = SummaryCache(clock=clock)
-        client = _make_client(store, cache)
+        client = _make_client(store, cache, census_clock=clock)
 
         for _ in range(5):  # five chip polls, each preceded by a pull write tick
             cache.mark_dirty()  # pull_jobs' per-pair generation bump
@@ -330,7 +362,7 @@ class TestStartupSweepChipFreshness:
         _poison_engine_partition(lake_root)
         clock = _FakeClock()
         cache = SummaryCache(clock=clock)
-        client = _make_client(store, cache)
+        client = _make_client(store, cache, census_clock=clock)
 
         before = client.get("/api/v1/universe/lake-uniqueness").json()
         assert before["engine_clean"] is False
@@ -360,6 +392,30 @@ class TestStartupSweepChipFreshness:
         assert after["findings_total"] == 0
         assert after["healed_total"] >= 1
         assert after["last_sweep_utc"] is not None
+        # The L3 sweep sentinel now exists → the census progress denominator is
+        # its honest ``files_scanned`` (DEC-LAKE-CENSUS-NONBLOCKING-001's
+        # estimate seam; the pre-sweep polls read the first-ever ``None``).
+        estimate = after["scan_progress"]["files_total_estimate"]
+        assert isinstance(estimate, int) and estimate >= 1
+
+
+class TestCensusEstimateSeam:
+    """The L3-sentinel progress-denominator honesty arms (route estimate seam)."""
+
+    def test_foreign_shaped_sentinel_reads_null_estimate_never_a_crash(
+        self, store: InstrumentStore
+    ) -> None:
+        """A junk ``files_scanned`` (bool / negative / non-int) degrades to null."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(_json.dumps({"files_scanned": True}), encoding="utf-8")
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0  # the scan itself still landed
+        assert payload["scan_progress"]["files_total_estimate"] is None
 
 
 class TestUniverseChipMarkers:
@@ -383,3 +439,13 @@ class TestUniverseChipMarkers:
         assert "textContent" in body
         assert "innerHTML" not in body
         assert "engine indexes POISONED" in body
+        # DEC-LAKE-CENSUS-NONBLOCKING-001: the honest warming/rescan arms —
+        # no-verdict-yet renders live progress instead of a fabricated verdict,
+        # a rescan alongside a verdict is called out, a failed scan is visible,
+        # and the 15 s cadence is unchanged (no unguarded faster poll — the
+        # single setInterval pin above stays the ONLY census poll).
+        assert "census scanning…" in body
+        assert "(rescanning…" in body
+        assert "census scan failed" in body
+        assert "scan_in_progress" in body
+        assert text.count("setInterval(loadLakeUniqueness") == 1

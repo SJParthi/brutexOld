@@ -57,11 +57,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-#: The summary kinds the cache stores — the spot candle lake summary, the
-#: expired-option lake summary, and the lake duplicate-census (the ``/universe``
-#: lake-uniqueness chip, DEC-LAKE-HEAL-001 — a full bounded lake scan whose own
-#: duration drives the adaptive TTL floor, exactly the #920 machinery). A
-#: :meth:`SummaryCache.get_or_refresh` call names exactly one of these.
+#: The summary kinds the cache stores — the spot candle lake summary and the
+#: expired-option lake summary. A :meth:`SummaryCache.get_or_refresh` call
+#: names exactly one of these. The lake duplicate-census kind
+#: (:data:`LAKE_UNIQUENESS`) is RETIRED from this cache
+#: (DEC-LAKE-CENSUS-NONBLOCKING-001): the ``/universe`` lake-uniqueness census
+#: now rides the ``LakeCensusHolder`` daemon-thread runner — the COLD
+#: single-flight below parks every concurrent waiter in an UNBOUNDED
+#: ``decision.wait()`` ON a threadpool worker, and the census's 26-minute
+#: production scan × the 15 s chip poll exhausted the shared AnyIO limiter
+#: (the reproduced dashboard-wide freeze). The constant is kept for the
+#: historical single-flight tests; no production route keys on it any more.
 SPOT: Final[str] = "spot"
 OPTIONS: Final[str] = "options"
 LAKE_UNIQUENESS: Final[str] = "lake_uniqueness"
@@ -293,7 +299,15 @@ class SummaryCache:
         #: duplicating the scan (DEC-SCAN-SINGLE-FLIGHT-001 — the operator's
         #: restart log measured SIX concurrent 58-68 min lake-uniqueness census
         #: scans, one per cold poll, because the pre-fix cold path deliberately
-        #: fell through to a "transient double-scan"). The owner thread ident
+        #: fell through to a "transient double-scan"). SUPERSESSION NOTE
+        #: (DEC-LAKE-CENSUS-NONBLOCKING-001): that census no longer rides this
+        #: cache AT ALL — the unbounded cold wait parks each waiter ON a
+        #: threadpool worker, and the census's 26-min scan × the 15 s poll
+        #: starved the shared AnyIO limiter; LAKE_UNIQUENESS moved to the
+        #: non-blocking ``LakeCensusHolder``. The SPOT/OPTIONS kinds KEEP this
+        #: wait (their scans are seconds, not tens of minutes) — the same
+        #: hazard class at a smaller scale, a NAMED follow-up in #1625's
+        #: honest-limits clause. The owner thread ident
         #: preserves the one legal fall-through: a RE-ENTRANT read from inside
         #: the in-flight recompute itself (same thread) must recompute rather
         #: than self-deadlock waiting on its own event (the
@@ -469,9 +483,15 @@ class SummaryCache:
                 # wait for it (no lock held), then re-plan: the stored entry
                 # serves as a hit/throttled read; if the scan RAISED instead,
                 # exactly one woken waiter re-registers and becomes the new
-                # computer. Unbounded wait is deliberate + honest: pre-fix,
+                # computer. Unbounded wait is deliberate + honest for the
+                # remaining SPOT/OPTIONS kinds (seconds-scale scans): pre-fix,
                 # every cold poller duplicated the wedged scan and hung anyway
-                # — now at most ONE scan is in flight to wedge.
+                # — now at most ONE scan is in flight to wedge. For the
+                # LAKE_UNIQUENESS census this clause is SUPERSEDED
+                # (DEC-LAKE-CENSUS-NONBLOCKING-001): each waiter parks ON a
+                # threadpool worker, so the census's 26-min scan × stacked
+                # 15 s polls exhausted the shared AnyIO limiter — that route
+                # now rides the non-blocking ``LakeCensusHolder`` instead.
                 decision.wait()
                 continue
             gen_at_start = decision
@@ -588,6 +608,8 @@ class SummaryCache:
             # (DEC-SCAN-SINGLE-FLIGHT-001 — pre-fix, every cold concurrent
             # poller duplicated the whole-lake census; the 2026-07-05 restart
             # log measured SIX concurrent 58-68 min duplicate scans). Wait.
+            # (The census itself has since moved OFF this cache entirely —
+            # DEC-LAKE-CENSUS-NONBLOCKING-001; SPOT/OPTIONS remain.)
             return event
         if entry is not None:
             # ADAPTIVE floor (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001): throttle for at

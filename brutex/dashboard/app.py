@@ -134,6 +134,7 @@ from brutex.dashboard.fno_underlying import (
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
+from brutex.dashboard.lake_census_holder import LakeCensusHolder
 from brutex.dashboard.lake_revision import lake_revision, sweep_results_revision
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
@@ -231,7 +232,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import LAKE_UNIQUENESS, OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.sweep_results_view import (
     DEFAULT_TOP_N as SWEEP_LEADERBOARD_DEFAULT_TOP_N,
 )
@@ -1139,6 +1140,8 @@ def build_app(
     pull_intent_store: PullIntentStore | None = None,
     oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
+    census_spawn: Callable[[Callable[[], None]], None] | None = None,
+    census_clock: Callable[[], float] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1649,10 +1652,15 @@ def build_app(
     # O(files), one key-column read per file — and `pull_jobs` bumps the write
     # generation on EVERY per-pair write tick, so a generation-keyed memo would
     # re-run the whole-lake scan on every 15 s chip poll during a pull (the #920
-    # regression class). It rides `_summary_cache.get_or_refresh(LAKE_UNIQUENESS,
-    # …)` instead — the COMMON adaptive-TTL-floor path /coverage/spot uses — so
-    # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
-    # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
+    # regression class). Since DEC-LAKE-CENSUS-NONBLOCKING-001 it rides the
+    # `LakeCensusHolder` (constructed beside the route, which needs the scan
+    # closure defined below): the scan runs on a DEDICATED daemon thread (zero
+    # AnyIO tokens), the route serves an O(1) last-known-verdict snapshot, and
+    # the SAME adaptive-TTL-floor law throttles rescans — SUPERSEDING the prior
+    # `_summary_cache.get_or_refresh(LAKE_UNIQUENESS, …)` wiring, whose COLD
+    # single-flight parked every stacked 15 s poller in an unbounded wait ON a
+    # threadpool worker and starved the shared AnyIO limiter for the whole
+    # 26-minute production scan (the reproduced dashboard-wide freeze).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
     # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
     # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
@@ -5148,16 +5156,22 @@ def build_app(
             return JSONResponse({"present": False})
         return JSONResponse({"present": True, **snapshot})
 
-    def _build_lake_census_payload() -> dict[str, Any]:
+    def _build_lake_census_payload(
+        per_file_pause: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Scan the lake + fold the duplicate census JSON (DEC-LAKE-HEAL-001, thin I/O glue).
 
-        The ONE builder behind the cached ``/api/v1/universe/lake-uniqueness`` route:
+        The ONE builder behind the ``/api/v1/universe/lake-uniqueness`` route —
+        since DEC-LAKE-CENSUS-NONBLOCKING-001 invoked ONLY by the
+        ``LakeCensusHolder``'s dedicated daemon scan thread, never a request:
         runs the bounded invariant scanner (READ-ONLY / observe — the ROUTE never
         heals; healing belongs to the L2 pull seams + the L3 startup sweep), folds
         :func:`~brutex.data.lake_invariants.build_lake_census`, and stamps the heal
         mode + the ``.lake_heal`` stats/sentinel reads into the SAME dict shape
         ``brutex lake audit-unique --json`` prints. ``{"present": False}`` when no
         lake root can be resolved (mirrors the sibling panel routes' honest gate).
+        *per_file_pause* is the holder's live progress tick, threaded through the
+        scanner's EXISTING L3 throttle seam (fires per file incl. skips).
         """
         from brutex.data.lake_heal import (
             load_heal_stats,
@@ -5169,7 +5183,7 @@ def build_app(
         if not isinstance(lake_db, Path):
             return {"present": False}
         lake = lake_db.parent
-        census = build_lake_census(scan_lake_invariants(lake))
+        census = build_lake_census(scan_lake_invariants(lake, per_file_pause=per_file_pause))
         return census_to_dict(
             census,
             mode=resolve_lake_heal_mode(),
@@ -5177,52 +5191,74 @@ def build_app(
             last_sweep=load_last_sweep(lake),
         )
 
-    def _build_lake_census_payload_cached() -> dict[str, Any]:
-        """Memoise the lake census behind the ``SummaryCache`` adaptive TTL floor.
+    def _census_files_estimate() -> int | None:
+        """The honest census progress denominator — the L3 sweep sentinel's count.
 
-        DEC-LAKE-HEAL-001 (hostile-review MAJOR fold): the census rides the SAME
-        ``_summary_cache.get_or_refresh`` path ``/coverage/spot`` uses — NOT a
-        generation-KEYED memo. ``pull_jobs`` bumps the write generation on every
-        per-pair write tick, so a generation-keyed cache re-ran this whole-lake
-        O(files) scan on every 15 s chip poll during a pull (the #920 regression
-        class); the ``SummaryCache`` instead serves the dirty entry until the
-        ADAPTIVE floor — ``max(2 s, the last scan's own duration)`` capped 120 s
-        (DEC-SUMMARY-CACHE-ADAPTIVE-FLOOR-001) — elapses, so an expensive scan
-        self-throttles to a ≤50% duty cycle while an idle lake keeps the snappy
-        2 s floor. Freshness: a pull, a materialize, OR a heal (the L3 sweeper's
-        ``on_healed=summary_cache.mark_dirty``) dirties the entry → one fresh
-        scan once past the floor; staleness is bounded by that floor, never
-        indefinite (Golden Rule #1, stated honestly per Golden Rule #10). The
-        payload dict is byte-identical to the uncached build — only the refresh
-        SCHEDULING changed. (The single-payload dict rides the ``SummaryPayload``
-        list shape as a one-element list.)
+        Reads ``.lake_heal/last_sweep.json``'s ``files_scanned`` (the last L3
+        startup sweep's own full-lake tally — the best available prior for how
+        many files THIS scan will visit). ``None`` on a first-ever lake with no
+        sentinel / a foreign-shaped sentinel — the UI then reads ``~?`` instead
+        of a fabricated total (Golden Rule #1). Runs ON the census daemon
+        thread (it is lake I/O), guarded by the holder's estimate fence.
         """
-        rows = _summary_cache.get_or_refresh(
-            LAKE_UNIQUENESS, recompute=lambda: [_build_lake_census_payload()]
-        )
-        return rows[0]
+        from brutex.data.lake_heal import load_last_sweep
+
+        lake_db = getattr(instrument_store, "path", None)
+        if not isinstance(lake_db, Path):
+            return None
+        sweep = load_last_sweep(lake_db.parent)
+        if sweep is None:
+            return None
+        files = sweep.get("files_scanned")
+        if isinstance(files, bool) or not isinstance(files, int) or files < 0:
+            return None
+        return files
+
+    # DEC-LAKE-CENSUS-NONBLOCKING-001: the census holder — the scan runs on a
+    # DEDICATED named daemon thread (zero AnyIO threadpool tokens), single-flight
+    # (a concurrent poll neither spawns a second scan nor waits), and the route
+    # below serves an O(1) snapshot. The generation probe (`_summary_cache
+    # .generation` — one ledger stat + the O(dirs) sweeps digest, lake I/O per
+    # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002 #1622) is read ON the daemon thread,
+    # never the event loop. `census_spawn`/`census_clock` are the build_app test
+    # seams (a synchronous spawn + fake clock make the holder deterministic).
+    _lake_census_holder = LakeCensusHolder(
+        scan=_build_lake_census_payload,
+        generation=lambda: _summary_cache.generation,
+        files_total_estimate=_census_files_estimate,
+        spawn=census_spawn,
+        clock=census_clock,
+    )
 
     @app.get("/api/v1/universe/lake-uniqueness")
     async def api_universe_lake_uniqueness() -> JSONResponse:
         """GET /api/v1/universe/lake-uniqueness — the lake duplicate-census verdict.
 
-        DEC-LAKE-HEAL-001: per-segment (INDEX/CASH/FNO/OPTIONS) clean vs
-        dup/foreign/overlap/drift file counts + the ENGINE-index
-        (NIFTY/BANKNIFTY/SENSEX) ``engine_clean`` verdict + the heal mode and
-        ``.lake_heal`` stats/sentinel — the ``/universe`` chip's data source.
-        READ-ONLY (never heals). Served through the ``SummaryCache`` adaptive
-        TTL floor (the #920 machinery): a repeat poll is an O(1) handoff
-        within the TTL window, and a scan's own cost sets its refresh floor
-        (``max(2 s, scan duration)`` capped 120 s) — so a pull's write-tick
-        generation storm can never amplify the 15 s poll into back-to-back
-        whole-lake scans. HONEST: the refresh itself stays O(files); a dirty
-        census may be served up to one floor window stale — bounded, never
-        indefinite. No store wired → 503; no resolvable lake root →
-        ``{"present": false}``.
+        DEC-LAKE-HEAL-001 payload; DEC-LAKE-CENSUS-NONBLOCKING-001 serving law:
+        per-segment (INDEX/CASH/FNO/OPTIONS) clean vs dup/foreign/overlap/drift
+        file counts + the ENGINE-index (NIFTY/BANKNIFTY/SENSEX) ``engine_clean``
+        verdict + the heal mode and ``.lake_heal`` stats/sentinel — the
+        ``/universe`` chip's data source. READ-ONLY (never heals). The route is
+        **O(1) and never blocks**: it returns the holder's LAST-KNOWN verdict
+        merged with the additive ``scan_in_progress`` / ``scan_progress`` /
+        ``as_of_utc`` / ``scan_error`` keys, after arming (at most) ONE
+        single-flight background freshness check on the DEDICATED census daemon
+        thread — no ``run_in_threadpool`` (a 26-minute production scan + the
+        stacked 15 s pollers previously starved the shared AnyIO limiter and
+        froze the whole data surface), no on-loop lake I/O (the generation
+        probe runs on the daemon thread, the #1622 offload law). Rescans keep
+        the pre-fix freshness law: generation moved AND past the adaptive
+        floor (``max(2 s, scan duration)`` capped 120 s). HONEST: the scan
+        itself stays O(files); the first-ever boot serves ``scan_in_progress``
+        with live progress until one scan lands — never a fabricated verdict.
+        No store wired → 503; no resolvable lake root → ``{"present": false}``.
         """
-        _require_store()
-        payload = await run_in_threadpool(_build_lake_census_payload_cached)
-        return JSONResponse(payload)
+        store = _require_store()
+        lake_db = getattr(store, "path", None)
+        if not isinstance(lake_db, Path):
+            return JSONResponse({"present": False})
+        _lake_census_holder.maybe_refresh()
+        return JSONResponse(_lake_census_holder.snapshot())
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
