@@ -1318,12 +1318,24 @@ def _execute_parquet_resilient(
     The skip set is the COMMON :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`
     (``duckdb.Error`` covers a corrupt ``read_parquet``; ``OSError`` covers a file-level
     fault). ``duckdb.Error`` is deliberately BROAD (DuckDB exposes no version-stable
-    *unreadable-file* subclass), but a genuine SQL bug is STILL never swallowed: the
-    per-file probe finds every file readable (``omitted`` stays ``False``), so the
-    degraded re-run over the SAME files RE-RAISES the original error — it propagates as a
-    500, not a silent empty result (proven in the tests). The per-file probing is paid
-    ONLY when a read actually fails; the happy path stays a single query (Golden Rule #5
-    O(1) steady-state).
+    *unreadable-file* subclass). The per-file probe is SCHEMA-AWARE
+    (DEC-ALIEN-SCHEMA-READ-HEAL-001): each file is probed with the REAL *sql* bound to
+    that ONE file, so an ALIEN-schema Parquet — readable bytes whose columns/dtypes
+    detonate the query (a missing ``timestamp`` binder error, a wrong-dtype
+    ``arg_max``/``SUM`` conversion error) — folds into the SAME skip set a corrupt file
+    does, instead of riding the old readability-only probe into a re-raise that 500'd
+    the surface on EVERY poll until manual cleanup (the sticky-500 class; the
+    lake-invariants scanner now emits a ``SchemaAlienFile`` finding for the same file so
+    the healer quarantines it for real). The residual union-conflict case (every file
+    passes its OWN probe yet the union over the subset still fails — a cross-file dtype
+    conflict) degrades to ``[]`` after ONE *unreadable_event* ERROR — never a 500.
+    HONEST envelope (Golden Rule #1/#10): this SUPERSEDES the earlier genuine-SQL-bug
+    re-raise carve-out — a genuine SQL bug in a call site's constant query now ALSO
+    degrades to a LOUDLY-logged empty result instead of a 500 (sanctioned: the constant
+    SQL strings are pinned by the per-module 100% coverage gate, which is the bug net;
+    the operator-facing alien-DATA sticky-500 outweighs the lab-only raise signal). The
+    per-file probing is paid ONLY when a read actually fails; the happy path stays a
+    single query (Golden Rule #5 O(1) steady-state).
     """
     glob = directory.as_posix() + "/**/*.parquet"
     try:
@@ -1333,6 +1345,8 @@ def _execute_parquet_resilient(
             conn,
             directory,
             whole_glob_error,
+            sql=sql,
+            extra_params=extra_params,
             source=source,
             skip_event=skip_event,
             unreadable_event=unreadable_event,
@@ -1341,7 +1355,18 @@ def _execute_parquet_resilient(
             skip_sink.append(True)
         if not readable:
             return []
-        return list(conn.execute(sql, [readable, *extra_params]).fetchall())
+        try:
+            return list(conn.execute(sql, [readable, *extra_params]).fetchall())
+        except movers_read_skip_errors() as subset_error:
+            # Cross-file union conflict: every file passed its OWN real-sql
+            # probe, yet the union over the subset still fails (e.g. two files
+            # whose shared column carries irreconcilable dtypes). Degrade to an
+            # honest empty result after ONE loud ERROR — never a 500, never a
+            # fabricated row (DEC-ALIEN-SCHEMA-READ-HEAL-001).
+            _LOG.error(unreadable_event, source=source, error=str(subset_error))
+            if skip_sink is not None and not omitted:
+                skip_sink.append(True)
+            return []
 
 
 def _readable_parquet_subset(
@@ -1349,6 +1374,8 @@ def _readable_parquet_subset(
     directory: Path,
     whole_glob_error: BaseException,
     *,
+    sql: str,
+    extra_params: list[Any],
     source: str,
     skip_event: str,
     unreadable_event: str,
@@ -1357,12 +1384,20 @@ def _readable_parquet_subset(
 
     The shared degraded-path resolver (CLAUDE.md §11 COMMON) reached ONLY after a
     whole-glob ``read_parquet`` already raised an unreadable-Parquet error
-    (*whole_glob_error*). Each file is probed with a cheap ``SELECT 1 ... LIMIT 1``; an
-    unreadable one is logged as *skip_event* (path + reason) and OMITTED — never a
-    fabricated bar. An empty return (NO readable file) is logged once as
-    *unreadable_event* so the caller degrades to an empty result instead of re-raising.
-    The skip set is the COMMON
-    :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`.
+    (*whole_glob_error*). Each file is probed in TWO stages
+    (DEC-ALIEN-SCHEMA-READ-HEAL-001): (1) a cheap readability probe (``SELECT 1 ...
+    LIMIT 1`` — catches a corrupt / truncated / version-incompatible file), then (2) a
+    SCHEMA probe — the caller's REAL *sql* bound to that ONE file (+ *extra_params*
+    verbatim; results discarded) — which catches an ALIEN-schema file (missing column /
+    wrong dtype) the readability probe is structurally blind to. A file failing either
+    stage is logged as *skip_event* (path + ``reason`` ∈ {``unreadable``,
+    ``alien_schema``} + error) and OMITTED — never a fabricated bar. An empty return
+    (NO file passed both stages) is logged once as *unreadable_event* so the caller
+    degrades to an empty result instead of re-raising. The skip set is the COMMON
+    :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`. HONEST cost
+    (Golden Rule #10): the stage-2 probe executes the real query per file (an aggregate
+    reads that file's rows), so one degraded pass costs about ONE whole-partition scan
+    — paid only after the whole-glob read already failed, never on the happy path.
 
     The second tuple element ``any_omitted`` is ``True`` when at least one file was
     DROPPED from the read (a real skip OR the all-unreadable case). The adjacency-sensitive
@@ -1380,7 +1415,25 @@ def _readable_parquet_subset(
         try:
             conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
         except skip_errors as skip_reason:
-            _LOG.warning(skip_event, source=source, path=candidate, error=str(skip_reason))
+            _LOG.warning(
+                skip_event,
+                source=source,
+                path=candidate,
+                reason="unreadable",
+                error=str(skip_reason),
+            )
+            omitted = True
+            continue
+        try:
+            conn.execute(sql, [[candidate], *extra_params]).fetchall()
+        except skip_errors as skip_reason:
+            _LOG.warning(
+                skip_event,
+                source=source,
+                path=candidate,
+                reason="alien_schema",
+                error=str(skip_reason),
+            )
             omitted = True
         else:
             readable.append(candidate)
@@ -1401,7 +1454,9 @@ def _aggregate_parquet_resilient(
     only bound ``?`` and no further params. A thin wrapper over the COMMON
     :func:`_execute_parquet_resilient` (no extra params, ``coverage.*`` log namespace) —
     the SAME probe-and-skip the ``/db`` candle pager uses (DEC-DB-CORRUPT-SKIP-001), so a
-    corrupt file degrades to its readable subset (or 0 rows) here too, never a 500.
+    corrupt file — and, since DEC-ALIEN-SCHEMA-READ-HEAL-001, an ALIEN-schema file the
+    schema-aware probe skips — degrades to its readable subset (or 0 rows) here too,
+    never a 500.
     """
     return _execute_parquet_resilient(
         conn,
@@ -1427,10 +1482,13 @@ def _execute_candle_page_resilient(
     The :func:`query_candles` page cursor needs the cursor *description* (the projected
     column names, which drive every downstream derived-column join) in addition to the
     rows, so it cannot use the row-only :func:`_execute_parquet_resilient`. SAME COMMON
-    probe-and-skip (``db.*`` log namespace, DEC-DB-CORRUPT-SKIP-001) via the shared
-    :func:`_readable_parquet_subset`: fast path binds the glob; on an unreadable-Parquet
-    error the readable subset is re-bound (the SELECT list is identical, so the column
-    description is byte-identical to the fast path). When NO file is readable, returns
+    probe-and-skip (``db.*`` log namespace, DEC-DB-CORRUPT-SKIP-001; schema-aware since
+    DEC-ALIEN-SCHEMA-READ-HEAL-001 — an alien-schema file folds into the skip set) via
+    the shared :func:`_readable_parquet_subset`: fast path binds the glob; on an
+    unreadable-Parquet error the readable subset is re-bound (the SELECT list is
+    identical, so the column description is byte-identical to the fast path). When NO
+    file passes the probes — or the subset re-run itself fails (the cross-file
+    union-conflict residue, logged ONCE as ``db.parquet_unreadable``) — returns
     ``([], [])`` — the caller renders an empty (degraded-but-correct) page, never a 500,
     never a fabricated bar.
     """
@@ -1442,13 +1500,19 @@ def _execute_candle_page_resilient(
             conn,
             directory,
             whole_glob_error,
+            sql=sql,
+            extra_params=extra_params,
             source=source,
             skip_event="db.parquet_skip",
             unreadable_event="db.parquet_unreadable",
         )
         if not readable:
             return [], []
-        cursor = conn.execute(sql, [readable, *extra_params])
+        try:
+            cursor = conn.execute(sql, [readable, *extra_params])
+        except movers_read_skip_errors() as subset_error:
+            _LOG.error("db.parquet_unreadable", source=source, error=str(subset_error))
+            return [], []
     out_columns = [str(col[0]) for col in (cursor.description or [])]
     return out_columns, list(cursor.fetchall())
 
