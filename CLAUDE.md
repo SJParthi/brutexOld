@@ -21,7 +21,17 @@
 _Last updated: 2026-07-09 (T2 SWEEP-HARDENING integration train, branch
 `integration/t2-sweep-hardening` — based on T1's `integration/t1-sweep-core` (NOT main; the
 train PR diff shows T1+T2 until T1 lands — expected, disclosed). Folded so far: **#1285
-DEC-SWEEP-SCALE-GUARDS-001** (MIGRATION.md #1634, renumbered from #1615 at the fold — the
+DEC-SWEEP-SCALE-GUARDS-001** (#1634) + **#1305 DEC-SWEEP-KEEPAWAKE-001** (MIGRATION.md
+#1635, renumbered from #1631 at the fold — every SWEEP entrypoint engages the macOS
+keep-awake guard: `cmd_sweep_all` wraps lake preload → grid → stage-3 → options-sim →
+cascade in ONE source-level `keep_awake("brutex sweep-all")` (the T2 composition: #1305's
+WIDER preload-covering span is THE wrap, superseting #1285's fix-3 span; T1's
+`sweep_run_core` G9 keep-awake nests inside it — harmless, independent caffeinates);
+`cmd_sweep` ("brutex sweep") + `cmd_sweep_daemon` ("brutex sweep-daemon", covering the
+between-cycle sleep) wrap their bodies; the dashboard sweep job inherits in-process, and
+#1285's `run_sweep_from_request` wrap is KEPT as a redundant-nested guard; best-effort,
+never raises; 6 new tests in `tests/unit/test_cli_sweep_keepawake.py`). #1285
+(MIGRATION.md #1634, renumbered from #1615 at the fold — the
 sweep scale-guards pack, THREE fixes as ONE change set, required before the institutional
 k=5 run: (1) CRITICAL worker-aware rank-memory budget (the OOM fix) —
 `sweep_mem_budget.resolve_mem_budget_bytes()` is a WHOLE-MACHINE figure (RAM×1/6 = 8 GiB on
@@ -1821,9 +1831,14 @@ hostile-review pass._
   worker-aware rank-memory budget (`per_worker_mem_budget_bytes`, threaded driver →
   `run_one_tuple(sweep_concurrency=)` → `run_persisted_sweep` inside T1's G1 `_attempt()`
   retry body), k-aware SLA projection (`TupleCostCell` + `project_weighted_grid_cost`),
-  keep_awake on the dashboard sweep job body (the `cmd_sweep_all` wrap is SUBSUMED by T1's
-  `sweep_run_core` G9 keep-awake — a disclosed train-fold re-derivation). See the §1 header
-  blurb for the full member one-liner. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+  keep_awake on the dashboard sweep job body; plus #1305 DEC-SWEEP-KEEPAWAKE-001
+  (MIGRATION.md #1635, renumbered from #1631) — keep_awake on every sweep entrypoint
+  (`cmd_sweep_all` ONE wide source-level wrap covering the lake preload, with T1's
+  `sweep_run_core` G9 hook nested inside — a disclosed train-fold composition;
+  `cmd_sweep`; `cmd_sweep_daemon` incl. the between-cycle sleep; the dashboard job
+  inherits in-process and #1285's `run_sweep_from_request` wrap is kept
+  redundant-nested). See the §1 header blurb for the full member one-liners. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
   Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
   coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001
   (MIGRATION.md #1594 / ADR-0019; its single-flight mechanism WINS all competing variants) →
@@ -4302,7 +4317,8 @@ hostile-review pass._
 
 - **Active feature branch:** `integration/t2-sweep-hardening`
   (T2 SWEEP-HARDENING integration train — based on `integration/t1-sweep-core`; folds #1285
-  DEC-SWEEP-SCALE-GUARDS-001 (#1634, renumbered from #1615) so far; see §1 Active branch
+  DEC-SWEEP-SCALE-GUARDS-001 (#1634, renumbered from #1615) + #1305
+  DEC-SWEEP-KEEPAWAKE-001 (#1635, renumbered from #1631) so far; see §1 Active branch
   for the full blurb)
   Earlier: `integration/t1-sweep-core`
   (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1594) +
