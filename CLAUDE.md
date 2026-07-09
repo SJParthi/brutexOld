@@ -1686,7 +1686,7 @@ hostile-review pass._
   pick always serves the COMPLETED /db-equal bar (every non-last slot `_stored_serves_cutoff`-aligned; the
   always-`15:29` last slot resample-path byte-equal on non-divisor TFs), closing the 24360.00-vs-24355.1
   forming-cut confusion; NEW persistent `state.instant` written ONLY by an explicit pick (survives TF walks +
-  1day round-trips; round-trip 1→3→5→1min exact — a 25,560-case ordered-TF-pair property); `bxResolveTime`
+  1day round-trips; round-trip 1→3→5→1min exact — a 24,282-case ordered-TF-pair (src ≠ dst) property); `bxResolveTime`
   superseded + DELETED; mid-bucket Latest labelled "forming <tf> bar — … completed bar closes at HH:MM"
   (client-derived from the existing `latest_time` echo); explicit multi-minute picks show the bucket SPAN
   ("15:27–15:29"); /db gains a static bucket-START-label stepnote; the `/movers` route ships `Cache-Control:

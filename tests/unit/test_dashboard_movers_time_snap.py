@@ -441,11 +441,15 @@ console.log(JSON.stringify(bad));
 @node_required
 class TestRoundTripNeverResetProperty:
     def test_every_ordered_tf_pair_every_slot(self) -> None:
-        # For EVERY ordered intraday TF pair (src, dst) × EVERY slot of src:
-        # pick the slot (instant = its bucket-final) → switch to dst → back to
-        # src reproduces the original slot exactly (value AND label), and the
-        # dst view is NEVER "" (the Latest reset) — the whole reset bug class,
-        # both captured targets, dead by property (~26k cases in one node run).
+        # For EVERY ordered intraday TF pair (src, dst) with src != dst (a
+        # self-pair is the fixed-point law, already pinned above) × EVERY slot
+        # of src: pick the slot (instant = its bucket-final) → switch to dst →
+        # back to src reproduces the original slot exactly (value AND label),
+        # and the dst view is NEVER "" (the Latest reset) — the whole reset bug
+        # class, both captured targets, dead by property. Exactly
+        # 1,278 slots × 19 destinations = 24,282 cases in one node run,
+        # EXACT-pinned below against the _TF_GOLDEN slot counts so the ledger's
+        # case number can never silently drift from what actually executes.
         script = f"""
 const t = require({json.dumps(str(_STATIC_JS))});
 const tfs = {json.dumps(sorted(_TF_GOLDEN))};
@@ -469,7 +473,14 @@ console.log(JSON.stringify({{ cases, bad: bad.slice(0, 5) }}));
         result = _node(script)
         assert isinstance(result, dict)
         assert result["bad"] == []
-        assert result["cases"] > 20000  # the property genuinely swept the grid
+        # The property genuinely swept the whole grid: every src slot visits
+        # every OTHER TF once — Σ slots × (|TFs| − 1), derived (never a magic
+        # literal) from the machine-verified golden slot counts = 24,282.
+        expected_cases = sum(slots for slots, _, _, _ in _TF_GOLDEN.values()) * (
+            len(_TF_GOLDEN) - 1
+        )
+        assert expected_cases == 24_282  # 1,278 slots × 19 destinations (the ledger number)
+        assert result["cases"] == expected_cases
 
 
 @node_required
