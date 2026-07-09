@@ -695,7 +695,7 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     # multi-hour pull reaches thousands of pending files and every fresh-stamp
     # reader fold pays one Parquet footer open per file (db_view's
     # `_ledger_scan_source` envelope). The read side is floor-throttled + page-
-    # cached (MIGRATION.md #1631); bounding the FILE COUNT itself (periodic
+    # cached (MIGRATION.md #1632); bounding the FILE COUNT itself (periodic
     # mid-pull delta consolidation under this same lock) stays the named
     # follow-up.
     directory = deltas_dir(lake_root)
