@@ -276,7 +276,15 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 90 (2026-07-09, run 29006226255): cancelled at 75m15s MID the
+    # doctor.py auto-discovery touched-module gate with EVERY executed gate
+    # green at 100.00% (whole-package + strict per-module steps SUCCESS, the
+    # cli.py + lake_invariants.py discovery gates both 100%): pure wall-time
+    # growth — main #1275 (DEC-SWEEP-RESULTS-DEPTH-001) added ~12 new
+    # per-module gates + PACK1 touches cli.py, whose discovery gate alone is
+    # 573 tests / 234s. Zero real failures; wall-clock budget only — no gate
+    # is weakened. Continues the 15->25->40->60->75 ratchet.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
