@@ -6852,7 +6852,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     sweep_id=sweep_id,
                     specs=cascade_specs,
                     bars_for=_bars_for,
-                    bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
+                    bars_context=BarsContext(
+                        exchange=exchange, segment=segment, start=start, end=end
+                    ),
                     cascade_config=cascade_config_for_sweep(sweep_id),
                     stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                     leaderboard_trials=leaderboard_trials,
