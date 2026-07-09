@@ -6199,7 +6199,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     Bloom→exact dedup, a hash-chained audit log, and one load-or-create Parquet
     store per tuple (idempotent, lossless re-run — Golden Rule #7).
     """
-    from brutex.data.catalog import Catalog
+    from brutex.data.catalog import Catalog, CatalogError
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
@@ -6316,6 +6316,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # ── RES-7: resolve the sweep rank-memory env knobs EAGERLY too ──
+    # BRUTEX_SWEEP_MEM_BUDGET_BYTES and BRUTEX_SWEEP_BOUNDED_RANK are otherwise
+    # resolved LAZILY per tuple deep in the grid runner (sweep_run.py), so a
+    # config typo (e.g. 'lots' / '-5' / a bad mode word) escapes as an uncaught
+    # ValueError MID-sweep — inside the sweep_abort_alert span below — and fires
+    # a FALSE CRITICAL "sweep halted" alert after work has already begun.
+    # Resolve them here, before any compute, so a junk value is a clean
+    # pre-sweep EXIT_USER_ERROR with no alert (mirrors BRUTEX_RESULTS_DEPTH
+    # above). The runner re-resolves per tuple; for a VALID value that
+    # re-resolution reads the identical env → the identical budget/mode, so
+    # this changes nothing about the sweep's behaviour on good config.
+    from brutex.engine.sweep_mem_budget import (
+        resolve_bounded_rank_mode,
+        resolve_mem_budget_bytes,
+    )
+
+    try:
+        resolve_bounded_rank_mode()
+        resolve_mem_budget_bytes()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # Refuse a typo'd/nonexistent lake root BEFORE Catalog.open can mkdir a
     # fresh empty lake (DEC-CLI-USER-ERROR-HYGIENE-001). The catalog FILE is
     # deliberately NOT gated — sweep-all reconciles the catalog from the lake
@@ -6325,7 +6348,24 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
     # content fingerprint and each tuple reuses the cached bars (no re-read).
     slices: dict[tuple[str, str], list[Any]] = {}
-    with Catalog.open(catalog) as cat:
+    # RES-5: a SECOND concurrent `sweep-all` over the same output dir holds the
+    # DuckDB catalog lock; DuckDB then raises "Conflicting lock is held … (PID)"
+    # which Catalog.open wraps in a CatalogError. Convert THAT specific case to
+    # a clean "another sweep is running" refusal (EXIT_USER_ERROR) instead of a
+    # raw traceback — but re-raise any OTHER CatalogError (genuine catalog
+    # corruption / a real open failure) LOUDLY, never masking it as contention.
+    try:
+        _catalog_ctx = Catalog.open(catalog)
+    except CatalogError as exc:
+        if "Conflicting lock" not in str(exc):
+            raise
+        print(
+            f"[brutex] another sweep is already running on this output dir "
+            f"(catalog {catalog} is locked); refusing to start a second one",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    with _catalog_ctx as cat:
         # Rebuild the catalog from the on-disk Parquet truth for the swept
         # coordinates BEFORE reading, so a lake whose partitions were never
         # registered (every production ingest sink historically passed

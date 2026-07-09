@@ -268,8 +268,9 @@ class SweepCheckpointStore:
         Raises
         ------
         SweepCheckpointError
-            If the file exists but is unreadable, oversized, malformed, or
-            carries this ``sweep_id`` with a mismatched ``total_combos``.
+            If the file exists but is unreadable, undecodable (invalid UTF-8 —
+            a torn checkpoint / bitrot), oversized, malformed, or carries this
+            ``sweep_id`` with a mismatched ``total_combos``.
         """
         if not self._path.exists():
             return None
@@ -287,6 +288,16 @@ class SweepCheckpointStore:
             raw = self._path.read_text(encoding="utf-8")
         except OSError as exc:
             raise SweepCheckpointError(f"Failed to read checkpoint {self._path}: {exc}") from exc
+        except (UnicodeDecodeError, ValueError) as exc:
+            # A torn checkpoint (a kill -9 landing mid-write) or on-disk bitrot
+            # can leave invalid UTF-8 bytes; ``read_text`` then raises
+            # ``UnicodeDecodeError`` (a ``ValueError``), which — like the
+            # malformed-JSON branch below — must map to the typed error, never
+            # escape RAW past a consumer's narrow ``SweepCheckpointError`` catch
+            # and fire a false halt alert (Golden Rule #1).
+            raise SweepCheckpointError(
+                f"Undecodable checkpoint bytes at {self._path}: {exc}"
+            ) from exc
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, RecursionError) as exc:
