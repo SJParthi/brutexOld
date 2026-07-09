@@ -439,8 +439,8 @@ jobs:
           # 100% line+branch over its two suites (the module also rides the
           # whole-engine glob gate above; this line keeps the divisor seam's
           # coverage visible on its own).
-          if compgen -G "tests/unit/test_engine_sweep_budget_workers.py" > /dev/null; then
-            pytest --cov=brutex.engine.sweep_mem_budget --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_mem_budget.py tests/unit/test_engine_sweep_budget_workers.py
+          if compgen -G "tests/unit/test_engine_sweep_mem_budget_workers.py" > /dev/null; then
+            pytest --cov=brutex.engine.sweep_mem_budget --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_mem_budget.py tests/unit/test_engine_sweep_mem_budget_workers.py
           else
             echo "(sweep_mem_budget worker-divisor test file not present yet — gate inactive)"
           fi
