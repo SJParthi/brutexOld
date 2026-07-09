@@ -133,17 +133,27 @@ class TestHeaderRoundNarrationRetired:
     rounds 3-8 — a within-file freshness drift baked into the header's shape.
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
+
+    The pin is scoped to the #1614 header BLOCK wherever it lives in the
+    header chain — the ``_Last updated:`` slot while
+    DEC-LAKE-STATS-MANIFEST-001 is the newest entry, a demoted ``Earlier:``
+    entry once a successor decision takes the slot (this module's own
+    "stay green across future branches without edits" law; the original
+    current-header anchor broke on the FIRST successor —
+    DEC-MOVERS-TIME-SNAP-UX-001 merge fold).
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
         text = _CLAUDE_MD.read_text(encoding="utf-8")
-        header = _normalized_region(text, "_Last updated:", "Earlier:")
+        start = text.index("DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614")
+        end = text.index("Earlier:", start)
+        header = " ".join(text[start:end].split())
         assert "review round 1 (which" not in header, (
-            "the CLAUDE.md _Last updated: header resurrected per-round narration — "
+            "the CLAUDE.md #1614 header block resurrected per-round narration — "
             "it froze at round 2 once (endgame round 2); keep the pointer, not the story"
         )
         assert "per-round record lives ONLY in the §1 Active-branch blurb" in header, (
-            "the CLAUDE.md _Last updated: header lost its pointer to the §1 blurb + "
+            "the CLAUDE.md #1614 header block lost its pointer to the §1 blurb + "
             "MIGRATION.md per-round record (endgame round 2)"
         )
 
