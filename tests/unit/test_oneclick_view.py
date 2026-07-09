@@ -195,6 +195,22 @@ class TestBuildTop100Payload:
         assert payload["empty_note"] is None
         assert payload["detail"] == "bad"
 
+    def test_preset_passes_through_for_the_sort_basis_label(self) -> None:
+        """DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the artifact's R30 preset token
+        reaches the payload so the pages can LABEL the sort basis honestly."""
+        payload = ov.build_top100_payload(
+            "r-x",
+            Top100Result("ok", (), "", "1:1", "min_dd_first"),
+            fixture_root_active=False,
+        )
+        assert payload["preset"] == "min_dd_first"
+
+    def test_preset_defaults_to_none_when_the_root_never_parsed(self) -> None:
+        payload = ov.build_top100_payload(
+            "r-x", Top100Result("awaiting", (), "", None), fixture_root_active=False
+        )
+        assert payload["preset"] is None  # honest — the label falls back client-side
+
 
 class TestBuildEventsPayload:
     def test_passthrough_and_window_filter_flag(self) -> None:
