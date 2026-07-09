@@ -1,0 +1,1 @@
+R54 none-leg relax patch for PR #1284, base 86068ce0 of claude/sweep-p1-preflight-estimator. Prepared + 2-round hostile-reviewed 2026-07-09. Apply from the branch root: git apply handoffs/r54-relax/PATCH.diff (3-way if the branch moved), then re-run the family suites. See FINDINGS.md for both review rounds' evidence. Not normative documentation — delivery artifact.
