@@ -3,7 +3,13 @@
 `latest_movers_date` over a real seeded Parquet+DuckDB lake (latest day / empty → None),
 plus the pure `warm_movers_snapshots` best-effort job runner (counts non-empty, a 0-count
 job is not counted, a raising job is logged + counted 0 — never re-raised).
+
+Since DEC-MOVERS-STORED-FRESHNESS-001 fold-in C the latest-date resolver is 1m-AWARE
+(the max of the per-arm-guarded 1day + month-pruned 1minute arms) — the r2j_seam2
+default-date repro + the per-arm resilience / junk-dir / month-prune pins live here.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -263,6 +269,232 @@ def test_latest_movers_date_none_on_corrupt_lake(tmp_path: Path) -> None:
     corrupt.parent.mkdir(parents=True)
     corrupt.write_bytes(b"this is not a parquet file at all")
     assert latest_movers_date(tmp_path) is None
+
+
+# ── DEC-MOVERS-STORED-FRESHNESS-001 fold-in C: the 1m-aware latest date ────
+
+
+def _write_1m(tmp_path: Path, *, symbol: str, segment: str, bars: list[CandleBar]) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE", segment=segment, symbol=symbol, interval="1minute", bars=bars
+    )
+
+
+def test_latest_movers_date_considers_fresher_1minute_day(tmp_path: Path) -> None:
+    """C1 — the r2j_seam2 repro shape: 1day through D−1 + 1minute through D → D.
+
+    During a multi-hour fetch the 1day partitions only materialise at the
+    pull-END prebuild, so the 1day-only resolver pinned the default view to the
+    PREVIOUS day while the true latest day's 1-minute bars were already stored.
+    The 1day arm is additionally pinned at D−1 — exactly what the OLD resolver
+    returned (the regression teeth: without the 1m arm the fold reads D−1).
+    """
+    from brutex.dashboard.movers_warm import _latest_spot_1day_date
+
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(date(2024, 6, 12), "20000")],
+    )
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    assert _latest_spot_1day_date(tmp_path) == "2024-06-12"  # the pre-fix answer
+    assert latest_movers_date(tmp_path) == "2024-06-13"
+
+
+def test_latest_movers_date_1m_only_lake_resolves_its_1m_day(tmp_path: Path) -> None:
+    # C2 — a 1m-only never-prebuilt lake now resolves its real latest 1m day
+    # (previously None) — the disclosed honest improvement.
+    _write_1m(
+        tmp_path,
+        symbol="RELIANCE",
+        segment="CASH",
+        bars=[_minute_bar(date(2024, 6, 14), 10, 0, "1300")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-14"
+
+
+def test_latest_movers_date_1day_newer_than_1m_wins_the_fold(tmp_path: Path) -> None:
+    # C2 — the fold is a genuine MAX in both directions: a post-prebuild lake
+    # whose 1day already covers a newer day than the (partially-pruned) 1m
+    # resolves the 1day answer.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(date(2024, 6, 14), "20200")],
+    )
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-14"
+
+
+def test_latest_movers_date_corrupt_1m_month_still_answers_from_1day(tmp_path: Path) -> None:
+    """C3 — per-arm guarding is load-bearing: a corrupt newest 1m month file
+    degrades ONLY the 1m arm (one ``movers.latest_date.unreadable_1m`` WARN);
+    the 1day arm still answers."""
+    from structlog.testing import capture_logs
+
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1day",
+        bars=[_day_bar(date(2024, 6, 12), "20000")],
+    )
+    corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "06.parquet"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"this is not a parquet file at all")
+    with capture_logs() as logs:
+        assert latest_movers_date(tmp_path) == "2024-06-12"
+    assert [e for e in logs if e["event"] == "movers.latest_date.unreadable_1m"]
+
+
+def test_latest_movers_date_corrupt_1day_still_answers_from_1m(tmp_path: Path) -> None:
+    # C3 — the reverse arm: a corrupt 1day partition (the pre-fix total blank)
+    # no longer blanks the answer — the healthy 1m arm resolves it.
+    from structlog.testing import capture_logs
+
+    corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day" / "2024" / "06.parquet"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"this is not a parquet file at all")
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    with capture_logs() as logs:
+        assert latest_movers_date(tmp_path) == "2024-06-13"
+    assert [e for e in logs if e["event"] == "movers.latest_date.unreadable_lake"]
+
+
+def test_latest_movers_date_junk_dirs_under_1minute_are_skipped(tmp_path: Path) -> None:
+    """C3 — junk tolerance: a stray ``tmp/`` dir, a non-decimal-Unicode-digit
+    year (``²024``), a non-ASCII-decimal year (``٢٠٢٤``) and a non-canonical
+    month stem (``6.parquet``) under ``1minute`` are name-gated OUT — their
+    garbage bytes are NEVER opened (no unreadable WARN), never a crash — and
+    the canonical month still resolves."""
+    from structlog.testing import capture_logs
+
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    minute_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute"
+    for junk_year in ("tmp", "²024", "٢٠٢٤", "99999"):
+        junk = minute_dir / junk_year / "01.parquet"
+        junk.parent.mkdir(parents=True)
+        junk.write_bytes(b"garbage that must never be opened")
+    (minute_dir / "2024" / "6.parquet").write_bytes(b"non-canonical month stem")
+    with capture_logs() as logs:
+        assert latest_movers_date(tmp_path) == "2024-06-13"
+    assert [e for e in logs if e["event"] == "movers.latest_date.unreadable_1m"] == []
+
+
+def test_latest_movers_date_1m_reads_only_the_max_month(tmp_path: Path) -> None:
+    """C4 — the month-prune teeth: an OLDER month's file is corrupt garbage;
+    the pre-prune ``1minute/**/*.parquet`` glob would hand it to DuckDB and
+    the guard would degrade the whole 1m arm to None (proven by the
+    corrupt-1m sibling above) — the max-month file list never touches it and
+    the real date resolves with ZERO unreadable WARNs."""
+    from structlog.testing import capture_logs
+
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    poisoned = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2024" / "05.parquet"
+    poisoned.write_bytes(b"this is not a parquet file at all")
+    with capture_logs() as logs:
+        assert latest_movers_date(tmp_path) == "2024-06-13"
+    assert [e for e in logs if e["event"] == "movers.latest_date.unreadable_1m"] == []
+
+
+def test_latest_movers_date_1m_max_month_spans_symbols_and_segments(tmp_path: Path) -> None:
+    # C4 — append-on-equal: two symbols sharing the SAME max month both feed the
+    # bounded MAX (the newest day may live in the CASH sibling's file), and an
+    # older-YEAR month proves reset-on-greater across the year boundary.
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2023, 12, 29), 9, 15, "19000")],
+    )
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 12), 9, 15, "20000")],
+    )
+    _write_1m(
+        tmp_path,
+        symbol="RELIANCE",
+        segment="CASH",
+        bars=[_minute_bar(date(2024, 6, 14), 10, 0, "1300")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-14"
+
+
+def test_latest_movers_date_1m_older_month_after_max_is_passed_over(tmp_path: Path) -> None:
+    # C4 — the strictly-OLDER-key branch, deterministic via the fixed
+    # `_SPOT_SEGMENTS` order (INDEX scanned before CASH): INDEX establishes the
+    # max month; the CASH sibling's strictly older month is compared and passed
+    # over (neither reset nor append), and the max-month answer stands.
+    _write_1m(
+        tmp_path,
+        symbol="NIFTY",
+        segment="INDEX",
+        bars=[_minute_bar(date(2024, 6, 13), 9, 15, "20100")],
+    )
+    _write_1m(
+        tmp_path,
+        symbol="RELIANCE",
+        segment="CASH",
+        bars=[_minute_bar(date(2024, 5, 20), 10, 0, "1300")],
+    )
+    assert latest_movers_date(tmp_path) == "2024-06-13"
+
+
+def test_canonical_digits_mirrors_the_greeks_pass_gate() -> None:
+    """The mirror pin: `_canonical_digits` is byte-equivalent to the PRIVATE
+    `greeks_enrich_pass._is_canonical_digits` precedent it deliberately does
+    not import (the DEC-CLI-GREEKS-ENRICH-001 junk-tolerance gate) — if either
+    side drifts, this pin names it."""
+    from brutex.dashboard.movers_warm import _canonical_digits
+    from brutex.data.greeks_enrich_pass import _is_canonical_digits
+
+    cases = [
+        ("2024", 4),
+        ("06", 2),
+        ("6", 2),
+        ("2024", 2),
+        ("²024", 4),  # superscript-two "²024": isdigit-True, non-decimal junk
+        ("٢٠٢٤", 4),  # Arabic-Indic "٢٠٢٤": decimal but non-ASCII
+        ("abcd", 4),
+        ("", 2),
+        ("20 4", 4),
+    ]
+    for token, width in cases:
+        assert _canonical_digits(token, width) == _is_canonical_digits(token, width), (
+            token,
+            width,
+        )
 
 
 def test_warm_counts_only_non_empty_jobs() -> None:

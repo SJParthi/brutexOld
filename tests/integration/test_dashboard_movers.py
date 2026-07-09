@@ -645,14 +645,16 @@ class TestMoversApi:
     def test_pull_active_probe_prefers_resample_over_stored(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
-        """REGRESSION (DEC-MOVERS-GATE-PREBUILD-SCOPE-001; fail-before proven):
-        on origin/main the route never threaded a pull signal into
-        ``compute_spot_candidates`` — with a pull running, the aligned stored
-        partition was served (``stored_reads == 1``) even when it predated the
-        fresh 1-minute data, so this test's pull-active arm FAILED. Now the
-        route passes ``prefer_resample=_pull_live()``: pull running → the
-        1-minute resample serves (fresh, ``resampled_reads == 1``); idle →
-        stored-first byte-identical."""
+        """The route passes ``prefer_resample=_pull_live()``
+        (DEC-MOVERS-GATE-PREBUILD-SCOPE-001): pull running → the 1-minute
+        resample serves WITHOUT paying the freshness compare (the zero-cost
+        mid-pull bypass). CONSCIOUSLY FLIPPED idle arm
+        (DEC-MOVERS-STORED-FRESHNESS-001): the idle read used to serve the
+        POISONED stale stored close (``(1, 0)`` + ``₹99,999.00``) — the
+        always-on freshness guard now catches the drift on the idle path too,
+        so BOTH arms serve the fresh close; ``prefer_resample`` remains as
+        defense-in-depth + the mid-pull compare-cost bypass, no longer the
+        only net."""
         # Fresh 1-minute session 09:15–09:19 + a STALE stored 5minute partition
         # whose poisoned close the resample can never produce.
         writer = ParquetWriter(lake_root=tmp_path)
@@ -687,14 +689,15 @@ class TestMoversApi:
         assert (body["stored_reads"], body["resampled_reads"]) == (0, 1)
         # No prior-day 1day baseline → the row ranks under volume (no % change).
         assert body["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close
-        # No pull → the stored-first read is byte-identical to before (the
-        # stale stored close is served — mid-pull is the only switch window).
+        # No pull → the freshness guard ITSELF catches the stale stored
+        # partition (DEC-MOVERS-STORED-FRESHNESS-001): the fallback serves the
+        # SAME fresh close — the stale ₹99,999.00 illusion is gone on idle too.
         idle = TestClient(
             build_app(DashboardState(), instrument_store=store, pull_active_probe=lambda: False)
         )
         body2 = idle.get("/api/v1/movers", params=params).json()
-        assert (body2["stored_reads"], body2["resampled_reads"]) == (1, 0)
-        assert body2["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        assert (body2["stored_reads"], body2["resampled_reads"]) == (0, 1)
+        assert body2["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close, both arms
 
     def test_raising_pull_probe_is_swallowed_to_idle_read(
         self, store: InstrumentStore, tmp_path: Path
@@ -702,8 +705,11 @@ class TestMoversApi:
         """The ``_pull_live`` closure's never-break-a-read guarantee (app.py):
         an injected pull-active probe that RAISES is swallowed to ``False``
         (the documented "a raising probe is swallowed" except-arm), so the
-        movers read serves the byte-identical IDLE stored-first path — a 200
-        with ``stored_reads == 1``, never a 500, never a resample switch."""
+        movers read lands on the IDLE path — a 200, never a 500. CONSCIOUSLY
+        FLIPPED (DEC-MOVERS-STORED-FRESHNESS-001): on the idle path the
+        freshness guard itself now catches the stale stored partition, so the
+        swallowed probe serves the FRESH resample (``(0, 1)`` + ``₹22,040.00``)
+        instead of the poisoned stored close — the never-500 pin is retained."""
         # Same lake shape as the pin above: fresh 1-minute session + a stale
         # aligned stored 5minute partition whose poisoned close identifies
         # which read path served the row.
@@ -743,10 +749,11 @@ class TestMoversApi:
         )
         assert resp.status_code == 200  # the probe error never breaks the read
         body = resp.json()
-        # Swallowed to False ⇒ no pull signal ⇒ the stored-first read serves,
-        # byte-identical to the idle arm of the pin above.
-        assert (body["stored_reads"], body["resampled_reads"]) == (1, 0)
-        assert body["volume"][0]["ltp"] == "₹99,999.00"  # the stored bar
+        # Swallowed to False ⇒ no pull signal ⇒ the IDLE path serves — where
+        # the freshness guard catches the stale partition and the fallback
+        # serves the fresh close (byte-identical to the idle arm above).
+        assert (body["stored_reads"], body["resampled_reads"]) == (0, 1)
+        assert body["volume"][0]["ltp"] == "₹22,040.00"  # the FRESH close
 
     def test_no_date_defaults_to_latest_available_day(
         self, store: InstrumentStore, tmp_path: Path
@@ -828,6 +835,11 @@ def _seed_finalized_day_lake(tmp_path: Path) -> None:
     bar's close == the 15:29 close (22000), so the DAILY read agrees with the
     whole-day 1-minute last bar. Prior-day (06-12) 1-day close 20000 gives a
     clean +10% gainer. Used by DEC-MOVERS-ASOF-LATEST-DEFAULT-001's equality pin.
+
+    The _DAY 1-day volume is 800 — the 1-minute session sum (100+100+100+500),
+    RE-SEEDED derive-consistent for DEC-MOVERS-STORED-FRESHNESS-001 (the prior
+    700 drifted from the session, which would reroute the daily arms to the
+    stale fallback and stop this fixture pinning the STORED path).
     """
     _write(
         tmp_path,
@@ -846,7 +858,7 @@ def _seed_finalized_day_lake(tmp_path: Path) -> None:
         "1day",
         [
             _day_bar(day=date(2024, 6, 12), open_="19900", close="20000", volume=300),
-            _day_bar(day=_DAY, open_="20000", close="22000", volume=700),
+            _day_bar(day=_DAY, open_="20000", close="22000", volume=800),
         ],
     )
 

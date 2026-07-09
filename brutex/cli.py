@@ -6459,13 +6459,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
     # DERIVED-TF FRESHNESS gate (DEC-SUSPICION-SWEEP-FIXES-001 G1): a stored derived
     # timeframe that drifted from a fresh 1-minute re-derivation (a 1m backfill after
-    # the last prebuild) would feed the engine stale bars AND hash them into the run
-    # identity as if canonical (Golden Rule #4) — refuse the launch loudly with the
-    # exact remedy instead. Verifiable pairs only (derived intraday TFs with BOTH a
-    # stored partition and a 1-minute base — the zero-bar preflight above owns the
-    # missing-data refusal; abstains never block). NO escape flag by design:
+    # the last prebuild, a kill-9 mid-incremental-re-derive) would feed the engine
+    # stale bars AND hash them into the run identity as if canonical (Golden
+    # Rule #4) — refuse the launch loudly with the exact remedy instead. Verifiable
+    # pairs only (derived TFs — the intraday TFs AND the derived `1day`
+    # (DEC-MOVERS-STORED-FRESHNESS-001 fold-in, each vs its own canonical law;
+    # round 2: the `1day` judged set is session-scoped to the 1m base's coverage
+    # — a vendor-era 1m-less day abstains per-bar — and the cutoff mirrors the
+    # writer's data-grounded DEFER-only law, so a truncated run day judged
+    # post-close never flags the writer's own deferred output) — with BOTH a
+    # stored partition and a 1-minute base; the zero-bar preflight above owns the
+    # missing-data refusal; abstains — incl. an FNO-segment `1day`, a different
+    # daily law — never block). NO escape flag by design:
     # Correctness > everything (the merge-readiness priority law) — the remedy is
-    # the pipeline's prebuild, never sweeping known-stale data.
+    # the pipeline's prebuild (plus `remediation()`'s delete-1day-partition
+    # escalation for the one residual class a latest-wins merge cannot heal),
+    # never sweeping known-stale data.
     from brutex.data.tf_autoderive import lake_derived_freshness_verdicts
     from brutex.engine.sweep_preflight import preflight_derived_freshness
 

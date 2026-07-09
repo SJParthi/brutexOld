@@ -1588,13 +1588,16 @@ def build_app(
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
     _spot_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
     # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
-    # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
-    # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
-    # It is invariant between lake writes, so it is memoised behind the SAME write
-    # generation as the caches above (a pull bumps it → re-resolve; otherwise a default
-    # poll is an O(1) handoff). REUSES the COMMON `MoversSnapshotCache` (one date key).
-    # Pull-time staleness note: the derived 1day partitions are rewritten ONLY by the
-    # pipeline's final prebuild, so the latest date genuinely cannot move mid-fetch.
+    # NO explicit date resolves the latest available spot day via `latest_movers_date` —
+    # since DEC-MOVERS-STORED-FRESHNESS-001 fold-in C the MAX of the spot 1day AND the
+    # month-pruned spot 1minute arms (a bounded filename walk + two DuckDB MAXes) — re-run
+    # on EVERY default poll. It only moves on a lake write, so it is memoised behind the
+    # SAME write generation as the caches above (a write bumps it → re-resolve; otherwise
+    # a default poll is an O(1) handoff). REUSES the COMMON `MoversSnapshotCache` (one
+    # date key). Pull-time staleness note: the 1minute arm means the date CAN advance
+    # mid-fetch — freshness rides the generation bump (the per-window ledger checkpoint
+    # cross-process, DEC-CLI-LEDGER-CHECKPOINT-001 + DEC-HARDENING-LEFTOVERS-001; the
+    # write tick in-process), so mid-pull staleness is bounded by the adaptive floor.
     _latest_movers_date_cache = MoversSnapshotCache(
         pull_active_probe=_pull_live, adaptive_floor=True
     )
@@ -5507,16 +5510,19 @@ def build_app(
                 generation = _summary_cache.generation
                 # Normalise the date so the candidate cache key is canonical. With NO
                 # explicit date, default to the LATEST available spot day
-                # (DEC-PULL-MOVERS-WARM-001), NOT today: a historical pull fills the lake
-                # only to the previous trading day, so a today-default would show an EMPTY
+                # (DEC-PULL-MOVERS-WARM-001; since DEC-MOVERS-STORED-FRESHNESS-001
+                # fold-in C the MAX of the 1day AND 1minute arms, so a mid-fetch lake
+                # whose 1day only materialises at the pull-END prebuild still defaults
+                # to the day whose 1-minute bars are already landing), NOT today: a
+                # today-default on a lake with no data for today would show an EMPTY
                 # snapshot on open (and miss the post-pull warm, which keys on that same
                 # latest day). Falls back to today only when the lake has no spot data yet
                 # (an honest empty payload). An EXPLICIT malformed date raises ValueError
                 # here → caught by the outer `except ValueError` → 400. The latest-date
-                # resolution is the O(datasets) `latest_movers_date` DuckDB MAX, so it runs
-                # HERE on the threadpool worker (never the event loop) AND is memoised
-                # behind the same write generation, so a repeat DEFAULT poll is an O(1)
-                # handoff and a pull invalidates it (GAP #4).
+                # resolution is the bounded `latest_movers_date` walk + DuckDB MAXes, so
+                # it runs HERE on the threadpool worker (never the event loop) AND is
+                # memoised behind the same write generation, so a repeat DEFAULT poll is
+                # an O(1) handoff and a lake write invalidates it (GAP #4).
                 if date is None:
                     date_str = (
                         _latest_movers_date_cache.get_or_compute(

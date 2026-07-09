@@ -23,6 +23,28 @@ isolation therefore yields byte-identical buckets to materialising the whole
 series and filtering to that day; the equality is pinned by
 ``tests/integration/test_movers_stored_read.py``.
 
+Since DEC-MOVERS-STORED-FRESHNESS-001 the equality contract is additionally
+**VERIFIED per read**, never assumed: the movers stored-first reader judges the
+day slice it is about to serve against a fresh re-derive of the in-hand raw
+1-minute base (:func:`stored_day_frame_is_stale`, delegating to the ONE
+existing comparator :func:`brutex.data.tf_autoderive.compare_derived_freshness`)
+and falls back to the on-the-fly 1-minute resample on ANY drift — a stale
+prebuilt partition can no longer serve a wrong LTP silently. The AUDITED
+reachable stale-serve set is exactly three states: (1) a CLI-pulled lake
+growing an ALREADY-materialised day's 1-minute SAME-DAY (``brutex fetch``
+runs no prebuild — #1145); (2) a prebuild-QUARANTINED symbol whose stored
+TFs froze at an older generation (#1221; a crashed/partial prebuild reduces
+to this flavor); (3) a mid-session partial day (the prebuild's live-edge
+bucket predates later minutes). Three neighbouring states were audited
+ALREADY SAFE without this guard and are PINNED rather than re-guarded: an
+in-process dashboard pull bypasses the stored read entirely
+(``prefer_resample`` — spy-pinned to never pay the compare); a CLI fetch
+landing a NEW day self-heals via the pre-existing absent-day 1-minute
+fallback (pinned — fresh bytes, zero stale events); the F&O tabs have no
+stored-TF channel at all (the locked 1-minute-native snapshot below); and
+the ENGINE never reads through this path (the sweep has its own #1492-G1
+preflight freshness gate).
+
 The stored partitions hold FULL buckets, so under the unified raw-1m as-of
 semantic (DEC-HARDENING-LEFTOVERS-001 —
 :func:`~brutex.dashboard.movers_snapshot.filter_to_ist_minute` cuts the
@@ -76,7 +98,7 @@ if TYPE_CHECKING:
 
     import polars as pl
 
-__all__ = ["read_stored_day_frame"]
+__all__ = ["read_stored_day_frame", "stored_day_frame_is_stale"]
 
 #: IST is a fixed +05:30 (no DST) — mirrors ``movers_snapshot._IST`` (the lake
 #: stores bar time as tz-aware UTC; the day filter converts per bar).
@@ -142,3 +164,56 @@ def read_stored_day_frame(
     if day_df.is_empty():
         return None
     return day_df
+
+
+def stored_day_frame_is_stale(
+    stored_df: pl.DataFrame, base_1m_df: pl.DataFrame, *, tf_minutes: int
+) -> bool:
+    """``True`` iff the stored day frame drifts from a fresh re-derive of the raw-1m base.
+
+    DEC-MOVERS-STORED-FRESHNESS-001 — the movers stored-first freshness verdict.
+    PURE: frames in, ``bool`` out, zero I/O, zero logging — the composition seam
+    for a screening bar-reader wrapper (a screen can stack before/after the
+    stored-first read in either merge order). CONTRACT: feed BOTH frames from
+    the SAME screening stage — screened-vs-screened or raw-vs-raw, never mixed,
+    or a one-sided row drop reads as drift.
+
+    Delegates to the ONE existing comparator
+    :func:`brutex.data.tf_autoderive.compare_derived_freshness` (the ``brutex
+    doctor`` probe + the DEC-SUSPICION-SWEEP-FIXES-001 G1 sweep-preflight gate
+    core — exact frame equality over the canonical bar columns, height
+    early-out, ``stored.cast(expected.schema)``; CLAUDE.md §11 COMMON, never a
+    third comparator). Day-scoping is purely the CALLER's frame slicing (both
+    inputs day-sliced + cutoff-aligned) — sound because the resampler grid is
+    per-bar-IST-date anchored (DEC-RESAMPLE-ANCHOR-002: day-in-isolation ≡
+    whole-series-then-filter, this module's pinned equality contract).
+
+    ``tf_minutes == 1`` short-circuits ``False``: the stored ``1minute``
+    partition IS the fetched base — trivially fresh, so no per-candidate
+    validate + clone + equals is paid on the hottest interval. A base with no
+    verdict (``None``) is the CALLER's abstain — this predicate takes real
+    frames only (never guesses, Golden Rule #1).
+
+    Parameters
+    ----------
+    stored_df
+        The CUT stored day frame about to be served (resampler-shaped
+        ``ts_utc``/OHLCV columns) — comparing the exact served frame leaves no
+        TOCTOU gap on the served bytes.
+    base_1m_df
+        The raw 1-minute day frame cut at the SAME as-of instant.
+    tf_minutes
+        The stored interval's bar length in minutes.
+
+    Returns
+    -------
+    bool
+        ``True`` when the re-derive of *base_1m_df* differs from *stored_df*
+        in ANY row/timestamp/value; ``False`` on exact agreement (or the
+        ``1minute`` short-circuit).
+    """
+    if tf_minutes == 1:
+        return False
+    from brutex.data.tf_autoderive import compare_derived_freshness
+
+    return compare_derived_freshness(base_1m_df, stored_df, tf_minutes) == "stale"
