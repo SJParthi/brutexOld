@@ -90,6 +90,46 @@ def test_symbols_lists_report_eligible(tmp_path: Path) -> None:
     assert rows[0]["option_pullable"] is False
 
 
+def test_symbols_carries_1day_basis_freshness_keys(tmp_path: Path) -> None:
+    """DEC-STALENESS-CACHE-TRUTH-001 (item 8a): the symbols payload stamps the
+    1day-basis freshness — ``basis_derived`` (is the chosen basis the
+    pipeline-DERIVED 1day one?) + ``derived_last_built`` (the lake_footprint
+    META_MEASURED_AT stamp; None = no prebuild ever observed — honest unknown,
+    e.g. a CLI-only lake — never a fabricated time). Fails before: keys absent."""
+    client = _client(tmp_path)
+    # Virgin store: the day basis is flagged derived, with an honest None stamp.
+    body = client.get("/api/v1/reports/preopen/symbols").json()
+    assert body["basis"] == "day"
+    assert body["basis_derived"] is True
+    assert body["derived_last_built"] is None
+    # The minute basis reads the fetched 1minute partition directly — not derived.
+    minute = client.get("/api/v1/reports/preopen/symbols?basis=minute").json()
+    assert minute["basis_derived"] is False
+
+
+def test_symbols_serves_the_prebuild_observation_stamp(tmp_path: Path) -> None:
+    """DEC-STALENESS-CACHE-TRUTH-001 (item 8a): once a prebuild observation lands
+    (record_lake_footprint's ``set_meta(META_MEASURED_AT, …)``), the symbols
+    payload serves the stamp verbatim (the stamp is written BEFORE the app opens
+    its own store handle — one live DuckDB connection at a time)."""
+    from brutex.data.lake_footprint import META_MEASURED_AT
+
+    stamp = "2026-07-08T21:30:00+00:00"
+    seed = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    try:
+        seed.set_meta(META_MEASURED_AT, stamp)
+    finally:
+        seed.close()
+    body = _client(tmp_path).get("/api/v1/reports/preopen/symbols").json()
+    assert body["basis_derived"] is True
+    assert body["derived_last_built"] == stamp
+
+
+# (The no-lake arm's stable freshness-key shape is pinned in
+# tests/unit/test_dashboard_app_backfill.py::test_preopen_symbols_empty_when_no_lake_root
+# — the established home of the no-lake-root route arms; no second copy here.)
+
+
 def _eq(symbol: str) -> Instrument:
     """A minimal NSE cash-equity (EQ) instrument-master row."""
     return Instrument(

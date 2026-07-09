@@ -247,14 +247,18 @@ from brutex.dashboard.sweep_runner import (
     run_sweep_from_request,
     sweep_progress_file,
 )
-from brutex.dashboard.universe_cache import UniverseSnapshotCache, master_revision
+from brutex.dashboard.universe_cache import (
+    UniverseSnapshotCache,
+    coverage_revision,
+    master_revision,
+)
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
-from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
+from brutex.data.lake_footprint import META_MEASURED_AT, make_disk_guard, record_lake_footprint
 from brutex.data.lake_invariants import (
     build_lake_census,
     census_to_dict,
@@ -4323,20 +4327,27 @@ def build_app(
         """Build the COMPOSITE cache key for the nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001).
 
         Encodes the route name, the dashboard write-generation (``_summary_cache.generation``,
-        bumped by every pull / materialize) AND the instrument-master content revision
+        bumped by every pull / materialize), the instrument-master content revision
         (:func:`master_revision`, moved by a keyless ``load-instruments`` that does NOT bump
-        the generation) into ONE string key, plus any route-specific ``extra`` discriminants
-        (e.g. the coverage ``years`` span). Folding BOTH freshness signals into the KEY — and
-        passing ``generation=0`` to :meth:`MoversSnapshotCache.get_or_compute` — means a cache
-        hit fires ONLY when neither the ledger NOR the master has changed since the entry was
-        stored, so a pull or an instrument load always yields a fresh key (never a stale
-        payload — Golden Rule #1). The token is cheap (a COUNT+MAX over the lean master table
-        plus an O(1) generation read), strictly lighter than the projection it guards.
+        the generation) AND the coverage-ledger content revision (:func:`coverage_revision`,
+        moved by every ``upsert_coverage`` — a metadata pull, in THIS process or another one,
+        writes coverage cells without moving either of the first two signals;
+        DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md #1641) into ONE string key, plus any
+        route-specific ``extra`` discriminants (e.g. the coverage ``years`` span). Folding ALL
+        THREE freshness signals into the KEY — and passing ``generation=0`` to
+        :meth:`MoversSnapshotCache.get_or_compute` — means a cache hit fires ONLY when neither
+        the ledger, the master, NOR the coverage ledger has changed since the entry was
+        stored, so a pull, an instrument load, or a coverage write always yields a fresh key
+        (never a stale payload — Golden Rule #1). The token is cheap (two COUNT+MAX
+        aggregates over the lean master + the PK-indexed coverage ledger plus an O(1)
+        generation read), strictly lighter than the projections it guards; an unchanged
+        store yields a byte-identical key (no thrash).
         """
         gen = _summary_cache.generation
         count, latest = master_revision(store)
+        c_count, c_latest = coverage_revision(store)
         extra_repr = "|".join(repr(item) for item in extra)
-        return f"{name}|gen={gen}|m={count}:{latest}|{extra_repr}"
+        return f"{name}|gen={gen}|m={count}:{latest}|c={c_count}:{c_latest}|{extra_repr}"
 
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
@@ -5556,7 +5567,17 @@ def build_app(
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse({"symbols": []})
+            # Same additive freshness-key shape as the real path (stable key set;
+            # DEC-STALENESS-CACHE-TRUTH-001) — a store without a filesystem lake
+            # has trivially never observed a prebuild.
+            return JSONResponse(
+                {
+                    "symbols": [],
+                    "basis": report_basis,
+                    "basis_derived": report_basis == "day",
+                    "derived_last_built": None,
+                }
+            )
         lake = lake_root.parent
         gen = _summary_cache.generation
 
@@ -5591,6 +5612,17 @@ def build_app(
                     for e, s, y in triples
                 ],
                 "basis": report_basis,
+                # 1day-basis freshness (DEC-STALENESS-CACHE-TRUTH-001): the 1day
+                # partitions the "day" basis reads are written ONLY by the
+                # pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001), so a
+                # CLI-pulled / mid-pull lake serves a 1day basis that lags the
+                # 1-minute truth. `derived_last_built` = the last SUCCESSFUL
+                # post-prebuild footprint OBSERVATION (lake_footprint's
+                # META_MEASURED_AT stamp, one O(1) get_meta — lake-wide, not
+                # per-symbol; best-effort writer, so None = honestly never
+                # observed, e.g. a CLI-only lake — never a fabricated time).
+                "basis_derived": report_basis == "day",
+                "derived_last_built": store.get_meta(META_MEASURED_AT),
             }
 
         return JSONResponse(await run_in_threadpool(_resolve))

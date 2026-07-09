@@ -83,7 +83,7 @@ from typing import Any, Final
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Exchange, Instrument
 
-__all__ = ["UniverseSnapshotCache", "master_revision"]
+__all__ = ["UniverseSnapshotCache", "coverage_revision", "master_revision"]
 
 #: The content-revision probe: the row-count + newest write time over the
 #: ``instruments`` table — the exact table the cached reads project from. A COUNT +
@@ -122,7 +122,65 @@ def master_revision(store: Any) -> tuple[int, str]:
     tuple[int, str]
         ``(count, str(max_fetched_at))``; ``(0, "")`` for an empty / never-loaded store.
     """
-    row = store.connection.execute(_REVISION_SQL).fetchone()
+    return _revision_token(store, _REVISION_SQL)
+
+
+#: The coverage-ledger content-revision probe — the ``master_revision`` twin over
+#: the ``coverage_ledger`` table (DEC-STALENESS-CACHE-TRUTH-001, MIGRATION.md
+#: #1641). Content-exact for the same reason: every ``upsert_coverage`` writes a
+#: fresh ``last_fetched_at`` on the cell it replaces, so any coverage write moves
+#: ``max(last_fetched_at)`` and/or ``count(*)``. A COUNT + MAX aggregate over the
+#: PK-indexed ~universe×years table (at most a few thousand rows) — strictly
+#: lighter than the coverage/mapping-integrity projections it guards.
+_COVERAGE_REVISION_SQL: Final[str] = "SELECT count(*), max(last_fetched_at) FROM coverage_ledger"
+
+
+def coverage_revision(store: Any) -> tuple[int, str]:
+    """Probe the coverage-ledger's content-revision token — ``(count, str(max_last_fetched_at))``.
+
+    The exact :func:`master_revision` TWIN over the ``coverage_ledger`` table
+    (DEC-STALENESS-CACHE-TRUTH-001): the row-count + newest ``last_fetched_at``
+    over the table :meth:`~brutex.data.instrument_store.InstrumentStore.upsert_coverage`
+    writes. An empty ledger normalises to the stable ``(0, "")`` token, exactly
+    like an empty master. Read on the store's READ cursor (``store.connection``) —
+    DuckDB MVCC keeps it consistent with the writer's committed snapshot, so the
+    token advances right after a committed ``upsert_coverage``, INCLUDING one from
+    another process sharing the same ``instruments.duckdb`` (the cross-process
+    freshness signal a ``mark_dirty`` hook can never provide — the #1149
+    content-token doctrine).
+
+    A metadata (expiries/contracts) pull writes coverage cells WITHOUT bumping the
+    dashboard write-generation and WITHOUT touching the ``instruments`` table or
+    the window-ledger Parquet, so any cache whose payload depends on the coverage
+    ledger (the ``/coverage`` grid, the ``/universe`` completeness +
+    mapping-integrity reports) MUST fold this token into its key alongside the
+    generation + :func:`master_revision` — the ``_nav_latency_key`` 4th component
+    (DEC-STALENESS-CACHE-TRUTH-001, closing the mid-metadata-phase +
+    out-of-process stale-serve gap of DEC-DASHBOARD-NAV-LATENCY-001).
+
+    Parameters
+    ----------
+    store
+        Anything exposing a DuckDB-style ``connection`` with ``execute(...).fetchone()``.
+
+    Returns
+    -------
+    tuple[int, str]
+        ``(count, str(max_last_fetched_at))``; ``(0, "")`` for an empty ledger.
+    """
+    return _revision_token(store, _COVERAGE_REVISION_SQL)
+
+
+def _revision_token(store: Any, sql: str) -> tuple[int, str]:
+    """Run one ``(COUNT, MAX)`` revision probe and normalise it to ``(int, str)``.
+
+    The ONE shared normalisation (CLAUDE.md §11 COMMON) behind
+    :func:`master_revision` and :func:`coverage_revision`: an empty table (or a
+    paranoid ``None`` row) keys at the stable ``(0, "")``; the timestamp is
+    stringified so the token is hashable + comparable independent of the DuckDB
+    row type.
+    """
+    row = store.connection.execute(sql).fetchone()
     if row is None:  # defensive: COUNT(*) always returns a row, but never trust it.
         return (0, "")
     count = int(row[0]) if row[0] is not None else 0
