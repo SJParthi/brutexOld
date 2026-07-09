@@ -23,6 +23,7 @@ impact: ``--cov=brutex`` measures the package only), no network.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -34,7 +35,7 @@ def _read(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
 
 
-def _load(name: str) -> dict[str, object]:
+def _load(name: str) -> dict[str, Any]:
     return yaml.safe_load(_read(name))
 
 

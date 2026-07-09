@@ -10,7 +10,7 @@ covers the OTHER two branches: heartbeat DISABLED and keep-awake ON.
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -40,7 +40,7 @@ def _fake_keep_awake_factory(acquired: list[str], *, engaged: bool) -> Any:
     """A keep_awake double yielding the injected engaged verdict (bool contract)."""
 
     @contextmanager
-    def fake_keep_awake(reason: str, **_kw: Any) -> Iterator[bool]:
+    def fake_keep_awake(reason: str, **_kw: Any) -> Generator[bool]:
         acquired.append(reason)
         try:
             yield engaged
