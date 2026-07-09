@@ -45,6 +45,7 @@ from typing import Any
 
 import brutex.engine.sweep_parallel as mod
 import pytest
+import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.sweep_audit import SweepAuditWriter
@@ -69,6 +70,7 @@ from brutex.engine.sweep_supervisor import (
     tuple_label,
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.observability.logging import LOG_LEVEL_ENV, reset_configuration
 from brutex.orchestrator.audit import (
     AuditWriter,
     BufferedAuditCollector,
@@ -80,6 +82,15 @@ from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_state() -> Generator[None, None, None]:
+    """``_worker_init`` now binds process logging (DEC-SWEEP-LOG-VOLUME-GUARD-001
+    R4 fold) — in-process ``_worker_init`` calls configure GLOBAL structlog
+    state, so reset after each test to keep the suite leak-free."""
+    yield
+    reset_configuration()
 
 
 # ────────────────────────── shared fixtures ──────────────────────────
@@ -567,6 +578,73 @@ class TestWorkerInit:
         ctx = mod._WorkerContext(grid=_grid(), root=Path("/tmp/y"))
         mod._worker_init(ctx)
         assert mod._WORKER_CTX is ctx
+
+    def test_binds_worker_logging(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """R4 fold: the initializer bounds the worker's OWN structlog sink.
+
+        A spawn worker starts unconfigured (the parent's config is not
+        inherited) — after ``_worker_init`` the process is configured and a
+        per-trade-shaped DEBUG event is suppressed at the INFO default.
+        """
+        reset_configuration()
+        import os as _os
+
+        _os.environ.pop(LOG_LEVEL_ENV, None)
+        assert not structlog.is_configured()
+        mod._worker_init(mod._WorkerContext(grid=_grid(), root=Path("/tmp/z")))
+        assert structlog.is_configured()
+        structlog.get_logger("brutex.engine.trade_sim").debug("trade_sim.entry", idx=1)
+        assert "trade_sim.entry" not in capsys.readouterr().err
+
+    def test_logging_failure_never_breaks_the_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Best-effort contract: a raising logging config cannot kill the worker."""
+        reset_configuration()
+
+        def _boom(**_kw: object) -> None:
+            raise RuntimeError("logging config blew up")
+
+        monkeypatch.setattr("brutex.observability.logging.configure_logging", _boom)
+        ctx = mod._WorkerContext(grid=_grid(), root=Path("/tmp/boom"))
+        mod._worker_init(ctx)  # must NOT raise
+        assert mod._WORKER_CTX is ctx
+
+
+class TestWorkerLogVolumeGuardSpawn:
+    """R4 regression net: REAL spawn workers through ``run_parallel_grid``.
+
+    The parent guard alone cannot cover the parallel path — spawn workers
+    start from a clean interpreter and the per-trade ``trade_sim.entry`` /
+    ``trade_sim.exit`` DEBUG events fire INSIDE the workers onto the
+    inherited stderr fd. ``capfd`` captures at the fd level, so the child
+    processes' actual output bytes are asserted — never a mock. The DEBUG-env
+    twin proves the assertion is non-vacuous (the same grid DOES emit
+    per-trade events when the operator opts in).
+    """
+
+    def test_spawn_worker_per_trade_debug_suppressed_by_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capfd: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+        _run_parallel(tmp_path, _grid(), workers=2)
+        captured = capfd.readouterr()
+        assert "trade_sim." not in captured.err
+        assert "trade_sim." not in captured.out
+
+    def test_spawn_worker_per_trade_debug_restored_with_debug_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capfd: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "DEBUG")
+        _run_parallel(tmp_path, _grid(), workers=2)
+        captured = capfd.readouterr()
+        combined = captured.err + captured.out
+        assert "trade_sim.entry" in combined
+        assert "trade_sim.exit" in combined
 
 
 class TestRunTupleInWorker:
