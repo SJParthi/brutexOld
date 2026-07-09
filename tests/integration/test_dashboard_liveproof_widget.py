@@ -39,7 +39,8 @@ def test_widget_script_served_and_honest() -> None:
     assert "textContent" in js.text
     assert "innerHTML" not in js.text
     # The widget never re-runs the proof — it only polls the status route
-    # (via the bounded fetchJson helper — DEC-PULL-UI-STALENESS-001 port).
+    # (via the bounded fetchJson helper — DEC-PULL-UI-STALENESS-001 port,
+    # carrying the DEC-WINDOWS-COUNTS-ONLY-001 M15 one-in-flight discipline).
     assert "fetchJson(ENDPOINT)" in js.text
     assert 'method: "POST"' not in js.text
     # m1: the pill dot renders the WORST of preflight+probes — a red probes
@@ -131,3 +132,63 @@ def test_pill_headline_is_flow_scoped_worst_of_never_preflight_only() -> None:
     assert "bxlp-min" in js
     # textContent-only rendering stays absolute (CodeQL XSS gate).
     assert "innerHTML" not in js
+
+
+def test_poll_fetch_is_bounded_single_flight_and_ordered() -> None:
+    """DEC-WINDOWS-COUNTS-ONLY-001 M15: the poll fetch discipline pins.
+
+    HONESTY ENVELOPE: this repo has NO JavaScript execution harness — these are
+    SOURCE-STRING pins (the ``test_dashboard_js_perf_frontend.py`` idiom), not a
+    browser-executed proof. They pin the mechanisms the fix relies on:
+
+    (a) the bounded ``fetchJson`` helper mirroring ``bx-rate-monitor.js`` — an
+        ``AbortController`` deadline (``FETCH_TIMEOUT_MS``) armed through the
+        BODY read (cleared only after ``r.json()`` settles, re-cleared on the
+        catch path), so a hung server / stalled body aborts instead of
+        accumulating pending requests onto the browser's ~6-per-origin pool;
+        under the display-truth merge a non-ok status THROWS (a COUNTED
+        failure feeding the staleness clock + backoff) — strictly stronger
+        than the original M15 silent-null arm, never weaker;
+    (b) the one-in-flight guard (``pollInFlight``) — poll() never stacks a
+        second request behind a live one;
+    (c) the monotonic ``pollSeq`` token — a stale straggler response is
+        discarded, never painted over a fresher one;
+    (d) the widget contract intact: best-effort catch (the last real VERDICT
+        is retained — only freshness escalates), the hidden-tab guard +
+        visibilitychange catch-up preserved (the
+        ``test_dashboard_widget_visibility_pause.py`` suite pins their
+        exact shape), and the poll cadence unchanged.
+
+    FAILS on the pre-fix widget (bare ``fetch(ENDPOINT`` with none of these).
+    """
+    js = (
+        Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static" / "bx-liveproof.js"
+    ).read_text(encoding="utf-8")
+    # (a) the bounded helper — abort deadline armed through the body read.
+    assert "function fetchJson(url)" in js
+    assert "var FETCH_TIMEOUT_MS = 10000;" in js
+    assert 'typeof AbortController !== "undefined" ? new AbortController() : null' in js
+    assert "setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS)" in js
+    assert "opts.signal = ctrl.signal;" in js
+    # Non-ok THROWS (counted failure — the display-truth arm superseding the
+    # silent-null); the killer is cleared only AFTER the body settles and
+    # re-cleared on the catch path.
+    assert 'if (!r.ok) { throw new Error("HTTP " + r.status); }' in js
+    assert "return r.json();   // killer still armed" in js
+    assert ".catch(function (err) { if (killer) { clearTimeout(killer); } throw err; })" in js
+    # (b) one in flight, released on BOTH settle paths.
+    assert "var pollInFlight = false;" in js
+    assert "if (pollInFlight) { return; }" in js
+    # 3 = the `var` declaration + the .then release + the .catch release.
+    assert js.count("pollInFlight = false;") == 3, "both settle paths must release the guard"
+    # (c) monotonic ordering token — a stale response never repaints.
+    assert "var pollSeq = 0;" in js
+    assert "var seq = ++pollSeq;" in js
+    assert js.count("if (seq !== pollSeq) { return; }") == 2, (
+        "both settle paths must discard a superseded response"
+    )
+    # (d) contract intact: bare unbounded fetch gone; a failed poll retains the
+    # last real verdict (only the freshness readout escalates).
+    assert "fetch(ENDPOINT" not in js  # the old bare fetch is GONE
+    assert "fetchJson(ENDPOINT" in js
+    assert "The last real VERDICT is retained" in js

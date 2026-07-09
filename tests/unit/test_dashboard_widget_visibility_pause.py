@@ -109,10 +109,12 @@ def test_poll_guard_is_first_statement_before_any_fetch(name: str) -> None:
 def test_no_fetch_outside_the_guarded_poll(name: str) -> None:
     """Every network CALL SITE in the widget sits AFTER the guard — no side-channel.
 
-    Both widgets (post-#1241 / display-truth port) route every request through
-    their bounded ``fetchJson`` helper: the ONE raw ``fetch(`` lives inside that
-    helper's definition, and every ``fetchJson(`` CALL SITE sits after the guard
-    inside the guarded ``poll()``.
+    BOTH widgets route every request through their bounded ``fetchJson``
+    helper (``bx-rate-monitor.js`` since #1241; ``bx-liveproof.js`` via the
+    display-truth port carrying the DEC-WINDOWS-COUNTS-ONLY-001 M15
+    abort-deadline + one-in-flight discipline): the ONE raw ``fetch(`` lives
+    inside that helper's definition, and every ``fetchJson(`` CALL SITE sits
+    after the guard inside the guarded ``poll()``.
     """
     js = _widget_js(name)
     guard_pos = js.index(_GUARDS[name])
