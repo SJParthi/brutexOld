@@ -56,6 +56,20 @@ import structlog
 #: ``level`` argument from a config file or env var.
 _DEFAULT_LEVEL: Final[str] = "INFO"
 
+#: Environment variable read by :func:`resolve_env_log_level` — the operator's
+#: per-process log-level override for entry points that wrap
+#: :func:`configure_logging` with env-var control (per this module's design
+#: contract, the env-var resolution lives BESIDE the core function, never
+#: inside it). First consumer: the CLI sweep entry points
+#: (DEC-SWEEP-LOG-VOLUME-GUARD-001).
+LOG_LEVEL_ENV: Final[str] = "BRUTEX_LOG_LEVEL"
+
+#: The exact level names :func:`resolve_env_log_level` accepts (matched
+#: case-insensitively). Deliberately NARROWER than stdlib
+#: ``getLevelNamesMapping`` — an operator env var wants four obvious words,
+#: not numeric strings or ``FATAL`` aliases; anything else fails loud.
+ENV_ALLOWED_LEVELS: Final[tuple[str, ...]] = ("DEBUG", "INFO", "WARNING", "ERROR")
+
 #: Default rotating-file size before a rollover (10 MiB) and number of
 #: retained backups. Override per-call via :func:`configure_logging`.
 _DEFAULT_MAX_BYTES: Final[int] = 10 * 1024 * 1024
@@ -129,6 +143,89 @@ def resolve_log_file(log_file: Path | str | None = None) -> Path:
     env_dir = os.environ.get("BRUTEX_LOG_DIR")
     base = Path(env_dir).expanduser() if env_dir else Path.home() / ".brutex" / "logs"
     return base / "brutex.log"
+
+
+def resolve_env_log_level(*, default: str = _DEFAULT_LEVEL) -> str:
+    """Resolve the process log level from ``$BRUTEX_LOG_LEVEL`` (fail-loud).
+
+    The env-var wrapper this module's design contract prescribes for callers
+    that want env-var control over :func:`configure_logging` — the core
+    function itself stays env-free. An unset or blank/whitespace-only
+    variable returns *default*; a recognised name (one of
+    :data:`ENV_ALLOWED_LEVELS`, matched case-insensitively after stripping)
+    returns its canonical uppercase form; anything else raises — junk is
+    NEVER silently coerced to a default (Golden Rule #10: a typo'd
+    ``BRUTEX_LOG_LEVEL=DEBG`` silently running at INFO would hide the very
+    events the operator asked for).
+
+    Parameters
+    ----------
+    default
+        The level name returned when the variable is unset or blank.
+
+    Returns
+    -------
+    str
+        A canonical uppercase stdlib level name.
+
+    Raises
+    ------
+    ValueError
+        If the variable is set to anything outside
+        :data:`ENV_ALLOWED_LEVELS`.
+    """
+    raw = os.environ.get(LOG_LEVEL_ENV)
+    if raw is None or not raw.strip():
+        return default
+    candidate = raw.strip().upper()
+    if candidate not in ENV_ALLOWED_LEVELS:
+        allowed = "/".join(ENV_ALLOWED_LEVELS)
+        raise ValueError(
+            f"invalid {LOG_LEVEL_ENV}={raw!r}: expected one of {allowed} "
+            "(case-insensitive) — refusing to guess a log level"
+        )
+    return candidate
+
+
+def configure_process_logging_best_effort(*, json_renderer: bool = False) -> None:
+    """Best-effort structlog bound for a SPAWNED worker process — never raises.
+
+    The worker-side twin of the CLI sweep dispatch guard
+    (DEC-SWEEP-LOG-VOLUME-GUARD-001, R4 fold): a ``spawn`` multiprocessing
+    child starts from a CLEAN interpreter, so the parent's structlog
+    configuration is NOT inherited — but ``$BRUTEX_LOG_LEVEL`` DOES propagate
+    via the environment, and the child's stdout/stderr are the parent's
+    inherited fds. Without this bound, the engine's per-trade DEBUG events
+    fire UNFILTERED inside every worker. Called by pool initializers
+    (``sweep_parallel._worker_init``).
+
+    Semantics differ from the fail-loud CLI entry deliberately:
+
+    * a junk ``$BRUTEX_LOG_LEVEL`` falls back to the INFO default instead of
+      raising — the parent entry points already failed loud on junk BEFORE
+      any pool was built, and a worker must never die over logging;
+    * an already-configured process is deferred to (mirrors the dispatch
+      guard — relevant only to in-process test callers, since a real spawn
+      child can never start configured);
+    * ANY configuration failure is swallowed — the worker stays fully
+      functional even if logging setup raises (best-effort by contract).
+
+    Parameters
+    ----------
+    json_renderer
+        Renderer choice forwarded to :func:`configure_logging`
+        (default console, matching the CLI sweep guard).
+    """
+    try:
+        try:
+            level = resolve_env_log_level()
+        except ValueError:
+            level = _DEFAULT_LEVEL
+        if structlog.is_configured():
+            return
+        configure_logging(level=level, json_renderer=json_renderer)
+    except Exception:
+        return
 
 
 def _build_file_handler(
@@ -350,10 +447,60 @@ def _level_to_int(level: str) -> int:
     return mapping[upper]
 
 
+def _clear_structlog_first_use_cache() -> None:
+    """Un-freeze structlog's first-use logger cache so a re-config is observable.
+
+    :func:`configure_logging` binds structlog with
+    ``cache_logger_on_first_use=True`` — a deliberate production choice so a
+    sweep's engine loggers assemble their processor chain exactly once.
+    structlog implements that cache by overwriting each
+    ``BoundLoggerLazyProxy``'s ``bind`` method (an INSTANCE attribute) with a
+    closure returning the concrete logger it assembled on first use — a logger
+    that CAPTURED the processors list current AT THAT MOMENT.
+
+    :func:`reset_configuration` below then calls ``structlog.reset_defaults()``,
+    which installs a FRESH default-processors list — but it cannot reach the
+    already-frozen module-level proxies (e.g. ``brutex.engine.sweep_run._LOG``):
+    they keep pointing at the OLD list. Since ``structlog.testing.capture_logs``
+    captures by mutating the CURRENT config's processors list IN PLACE
+    (deliberately, "to not break references held by bound loggers"), a later
+    ``capture_logs`` can no longer observe a proxy frozen against a now-orphaned
+    list — the proxy's events silently bypass the capture sink.
+
+    This is a TEST-ISOLATION hazard only: any test that configures structlog
+    in-process (e.g. an in-process ``sweep_parallel._worker_init`` /
+    ``cli._configure_sweep_logging`` call) and then emits from a shared module
+    logger freezes that logger for the rest of the process. Dropping ONLY the
+    overridden ``bind`` instance attribute (never the class method, never
+    ``_logger``) makes every proxy re-assemble against the CURRENT config on its
+    next use, so ``capture_logs`` works again. Production is unaffected — only
+    :func:`reset_configuration` (a test-only helper) calls this.
+    """
+    import gc
+
+    # Resolve the proxy class without importing structlog's private ``_config``
+    # module: an unconfigured ``get_logger()`` returns a ``BoundLoggerLazyProxy``.
+    proxy_cls = type(structlog.get_logger())
+    for obj in gc.get_objects():
+        if isinstance(obj, proxy_cls):
+            # ``bind`` sits in ``__dict__`` ONLY when first-use caching froze it;
+            # removing it restores the lazy class-level ``bind`` (re-binds per
+            # call). ``pop(..., None)`` is a no-op for a never-frozen proxy.
+            obj.__dict__.pop("bind", None)
+
+
 def reset_configuration() -> None:
-    """Reset the idempotence guard and release any file handler. Test-only helper."""
+    """Reset the idempotence guard and release any file handler. Test-only helper.
+
+    Also clears structlog's first-use logger cache
+    (:func:`_clear_structlog_first_use_cache`) so a subsequent re-configuration —
+    or a ``structlog.testing.capture_logs`` in a later test — is fully
+    observable, never silently bypassed by a module logger frozen against the
+    pre-reset processors list.
+    """
     root_logger = logging.getLogger()
     _close_handlers(root_logger.handlers)
     root_logger.handlers = []
     _ConfigState.last = None
     structlog.reset_defaults()
+    _clear_structlog_first_use_cache()
