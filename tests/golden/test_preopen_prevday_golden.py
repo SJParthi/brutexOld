@@ -28,6 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import duckdb
+import pytest
 from brutex.dashboard.preopen_report import (
     PreOpenRow,
     build_preopen_rows,
@@ -193,3 +194,20 @@ def test_minute_basis_bytes_match_prefix_capture(tmp_path: Path) -> None:
 def test_zip_bytes_match_prefix_capture(tmp_path: Path) -> None:
     build_golden_lake(tmp_path)
     assert golden_artifacts(tmp_path)["zip"] == GOLDEN_ZIP.read_bytes()
+
+
+def test_generator_refuses_to_overwrite_existing_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The pre-fix capture IS the oracle: with the fixtures present and the
+    # explicit BRUTEX_REGEN_PREOPEN_GOLDEN=1 escape hatch unset, the generator
+    # REFUSES (SystemExit) before writing a byte — a post-fix tree can never
+    # silently regenerate the oracle (the hostile-review fold).
+    from tests.golden import generate_preopen_prevday_golden as gen
+
+    monkeypatch.delenv(gen.REGEN_ENV, raising=False)
+    before = {p: p.read_bytes() for p in (GOLDEN_DAY_XLSX, GOLDEN_MINUTE_XLSX, GOLDEN_ZIP)}
+    with pytest.raises(SystemExit, match="REFUSED"):
+        gen.main()
+    for path, blob in before.items():
+        assert path.read_bytes() == blob

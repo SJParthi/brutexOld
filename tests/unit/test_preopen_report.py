@@ -40,6 +40,8 @@ from brutex.dashboard.preopen_report import (
     _daily_open_by_date,
     _daily_prev_close_contiguous,
     _group_by_month,
+    _hole_detail,
+    _hole_shape,
     _minute_prev_close_contiguous,
     _month_label,
     _previous_trading_day,
@@ -56,7 +58,7 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
@@ -77,9 +79,11 @@ def _bar(ts: datetime, *, open_: str, close: str) -> CandleBar:
     )
 
 
-def _write(lake: Path, symbol: str, interval: str, bars: list[CandleBar]) -> None:
+def _write(
+    lake: Path, symbol: str, interval: str, bars: list[CandleBar], *, exchange: str = "NSE"
+) -> None:
     ParquetWriter(lake_root=lake).write(
-        exchange="NSE", segment="CASH", symbol=symbol, interval=interval, bars=bars
+        exchange=exchange, segment="CASH", symbol=symbol, interval=interval, bars=bars
     )
 
 
@@ -1507,6 +1511,9 @@ def test_minute_basis_refuses_real_session_hole_regression(tmp_path: Path) -> No
     assert events[0]["day"] == "2024-01-04"
     assert events[0]["expected_session"] == "2024-01-03"
     assert events[0]["nearest_lake_session"] == "2024-01-02"
+    # 01-03 is absent from the minute series too → the GENUINE hole shape,
+    # keeping the re-pull remediation verbatim.
+    assert events[0]["hole_shape"] == "missing_session"
     assert "re-pull" in str(events[0]["detail"])
     suppressed = [
         log for log in logs if log["event"] == "preopen.prev_close_noncontiguous_suppressed"
@@ -1532,6 +1539,10 @@ def test_day_basis_control_on_the_hole_lake_unchanged(tmp_path: Path) -> None:
     events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
     assert len(events) == 1
     assert events[0]["basis"] == "day"
+    # The daily basis reads no minute series, so its diagnostic is two-way:
+    # this genuine hole reads missing_session with the re-pull remediation.
+    assert events[0]["hole_shape"] == "missing_session"
+    assert "re-pull" in str(events[0]["detail"])
 
 
 def test_minute_basis_hole_mutation_teeth(tmp_path: Path) -> None:
@@ -1554,6 +1565,11 @@ def test_minute_basis_hole_mutation_teeth(tmp_path: Path) -> None:
     assert rows == []
     events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
     assert len(events) == 1
+    # This fixture IS the prebuild-lag shape (01-03 has minute bars, no 1-day
+    # bar): the diagnostic names the pipeline prebuild, never a re-pull.
+    assert events[0]["hole_shape"] == "prebuild_lag"
+    assert "prebuild" in str(events[0]["detail"])
+    assert "re-pull" not in str(events[0]["detail"])
 
 
 # ── the pure guards: branch-complete over the new seams ─────────────────────
@@ -1718,9 +1734,10 @@ def test_minute_guard_contiguous_run_matches_old_rule() -> None:
 def test_minute_guard_contiguous_property_new_equals_old(start: date, length: int) -> None:
     # Hypothesis twin of the deterministic run: any calendar-generated
     # contiguous window anywhere in coverage → new == old for every day.
+    # A degenerate draw is REJECTED via assume (never a silent vacuous pass —
+    # the hostile-review fold on the earlier bare `return`).
     sessions = trading_days_between(start, start + timedelta(days=length * 3))[:length]
-    if len(sessions) < 2:
-        return  # degenerate draw — nothing to compare
+    assume(len(sessions) >= 2)
     minute_last = {d: Decimal(100) + Decimal(i) for i, d in enumerate(sessions)}
     for i, day in enumerate(sessions[1:], start=1):
         assert (
@@ -1866,6 +1883,9 @@ def test_build_missing_budget_saturday_is_a_hole_both_bases(tmp_path: Path, basi
     assert len(events) == 1
     assert events[0]["expected_session"] == "2025-02-01"
     assert events[0]["nearest_lake_session"] == "2025-01-31"
+    # The Saturday session is absent from BOTH series → the genuine hole
+    # shape on both bases (the minute basis holds evidence proving it).
+    assert events[0]["hole_shape"] == "missing_session"
 
 
 def test_build_minute_basis_holi_cluster_gap_is_not_a_hole(tmp_path: Path) -> None:
@@ -1921,6 +1941,62 @@ def test_build_minute_basis_muhurat_bar_day_after_is_skipped(tmp_path: Path) -> 
     assert len(events) == 1
     assert events[0]["expected_session"] == "2024-10-31"
     assert events[0]["nearest_lake_session"] == "2024-11-01"
+    # The Muhurat shape: an EXTRA non-session bar (found > expected). The
+    # detail names the extra bar and gives NO re-pull advice — the lake is
+    # not missing a session, so a re-pull cannot change the verdict.
+    assert events[0]["hole_shape"] == "extra_nonsession_bar"
+    assert "2024-11-01" in str(events[0]["detail"])
+    assert "re-pull" not in str(events[0]["detail"])
+
+
+def test_build_day_basis_muhurat_extra_bar_shape(tmp_path: Path) -> None:
+    # The DAILY twin of the Muhurat pin: the day basis carries no minute
+    # evidence, but found (2024-11-01) > expected (2024-10-31) needs none —
+    # the two-way daily diagnostic still names the extra-non-session shape.
+    _both_series(
+        tmp_path,
+        "MUHURAT",
+        [
+            (date(2024, 11, 1), "100.00", "101.00"),
+            (date(2024, 11, 4), "102.00", "103.00"),
+        ],
+    )
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "MUHURAT")],
+            start=date(2024, 11, 2),
+            end=date(2024, 11, 30),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["hole_shape"] == "extra_nonsession_bar"
+    assert "re-pull" not in str(events[0]["detail"])
+
+
+def test_day_basis_prebuild_lag_lake_reads_missing_session(tmp_path: Path) -> None:
+    # The daily basis's DOCUMENTED two-way limit, pinned: on the prebuild-lag
+    # lake (01-03 has minute bars but no 1-day bar) the day basis holds no
+    # minute evidence — the shape honestly degrades to missing_session (the
+    # minute basis, which holds the evidence, names prebuild_lag instead).
+    _hole_lake(tmp_path, jan3_minute_close="106.00")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("NSE", "CASH", "HOLETEST")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert len(events) == 1
+    assert events[0]["hole_shape"] == "missing_session"
+    assert "re-pull" in str(events[0]["detail"])
 
 
 def test_build_minute_basis_overlay_recovers_row(tmp_path: Path) -> None:
@@ -1976,12 +2052,13 @@ def test_build_minute_basis_pure_minute_fallback_stays_calendar_blind(tmp_path: 
     assert [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"] == []
 
 
-# ── the capped, per-symbol-deduped WARN machinery ────────────────────────────
+# ── the capped, per-(exchange, segment, symbol)-deduped WARN machinery ───────
 
 
-def test_hole_warn_dedupes_per_symbol(tmp_path: Path) -> None:
-    # TWO holes for ONE symbol (01-03 and 01-05 both missing) → exactly ONE
-    # warn (per-symbol dedup), and still zero rows fabricated.
+def test_hole_warn_dedupes_per_dataset_triple(tmp_path: Path) -> None:
+    # TWO holes for ONE dataset triple (01-03 and 01-05 both missing) →
+    # exactly ONE warn (per-(exchange, segment, symbol) dedup), and still
+    # zero rows fabricated.
     _write(
         tmp_path,
         "TWOHOLES",
@@ -2005,6 +2082,77 @@ def test_hole_warn_dedupes_per_symbol(tmp_path: Path) -> None:
     events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
     assert len(events) == 1
     assert events[0]["symbol"] == "TWOHOLES"
+
+
+def test_hole_warn_dual_exchange_symbol_warns_per_exchange(tmp_path: Path) -> None:
+    # The hostile-review regression: a DUAL-LISTED symbol with the same hole
+    # on BOTH exchanges must warn TWICE (once per (exchange, segment, symbol)
+    # triple) — the old bare-symbol dedupe key silenced (and uncounted) the
+    # second exchange entirely.
+    bars = [
+        _bar(datetime(2024, 1, 2, 3, 45, tzinfo=UTC), open_="99.00", close="100.00"),
+        _bar(datetime(2024, 1, 4, 3, 45, tzinfo=UTC), open_="110.00", close="111.00"),
+    ]
+    _write(tmp_path, "DUAL", "1day", bars)
+    _write(tmp_path, "DUAL", "1day", bars, exchange="BSE")
+    with capture_logs() as logs:
+        rows = build_preopen_rows(
+            _conn(),
+            tmp_path,
+            datasets=[("BSE", "CASH", "DUAL"), ("NSE", "CASH", "DUAL")],
+            start=date(2024, 1, 4),
+            end=date(2024, 1, 4),
+            basis="day",
+        )
+    assert rows == []
+    events = [log for log in logs if log["event"] == "preopen.prev_close_noncontiguous"]
+    assert [(e["exchange"], e["segment"], e["symbol"]) for e in events] == [
+        ("BSE", "CASH", "DUAL"),
+        ("NSE", "CASH", "DUAL"),
+    ]
+
+
+# ── the pure hole-shape classifier + shape-matched detail ────────────────────
+
+
+def test_hole_shape_extra_nonsession_bar_ignores_minute_evidence() -> None:
+    # found > expected → the Muhurat shape, with OR without minute evidence
+    # (the classification needs none).
+    expected, found = date(2024, 10, 31), date(2024, 11, 1)
+    assert _hole_shape(expected, found, None) == "extra_nonsession_bar"
+    assert _hole_shape(expected, found, {found: Decimal("1")}) == "extra_nonsession_bar"
+
+
+def test_hole_shape_prebuild_lag_requires_minute_presence() -> None:
+    # found < expected AND the expected session IS in the minute evidence →
+    # the 1-day series lags the minute series.
+    expected, found = date(2024, 1, 3), date(2024, 1, 2)
+    assert _hole_shape(expected, found, {expected: Decimal("106")}) == "prebuild_lag"
+
+
+def test_hole_shape_missing_session_arms() -> None:
+    # found < expected with NO minute evidence (the daily basis) or with the
+    # expected session absent from it (the minute basis) → the genuine hole.
+    expected, found = date(2024, 1, 3), date(2024, 1, 2)
+    assert _hole_shape(expected, found, None) == "missing_session"
+    assert _hole_shape(expected, found, {found: Decimal("100")}) == "missing_session"
+
+
+def test_hole_detail_texts_are_shape_honest() -> None:
+    # Muhurat: names the extra non-session bar, no re-pull advice.
+    muhurat = _hole_detail("extra_nonsession_bar", date(2024, 10, 31), date(2024, 11, 1))
+    assert "2024-11-01" in muhurat
+    assert "2024-10-31" in muhurat
+    assert "re-pull" not in muhurat
+    # Prebuild lag: names the pipeline prebuild, no re-pull advice.
+    lag = _hole_detail("prebuild_lag", date(2024, 1, 3), date(2024, 1, 2))
+    assert "2024-01-03" in lag
+    assert "prebuild" in lag
+    assert "re-pull" not in lag
+    # Genuine hole: the original detail text, verbatim.
+    assert _hole_detail("missing_session", date(2024, 1, 3), date(2024, 1, 2)) == (
+        "row skipped — prior NSE session missing from the lake; re-pull the missing session"
+    )
 
 
 def test_hole_warn_cap_emits_one_suppressed_summary(tmp_path: Path) -> None:

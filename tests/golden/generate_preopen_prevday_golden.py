@@ -11,11 +11,17 @@ a temp dir and freezes the three artifacts
 (``tests/golden/test_preopen_prevday_golden.py``) rebuilds the SAME lake and
 asserts byte equality — so the contiguity fix is proven a pure guard (the
 contiguous arm is byte-unchanged). Never regenerate these on the post-fix
-tree; the pre-fix capture IS the oracle (Golden Rule #1).
+tree; the pre-fix capture IS the oracle (Golden Rule #1) — and the refusal is
+now MECHANICAL (the DEC-PREOPEN-PREVDAY-COMMON-001 hostile-review fold): when
+any fixture already exists, :func:`main` raises ``SystemExit`` instead of
+silently overwriting the oracle, unless the explicit escape hatch
+``BRUTEX_REGEN_PREOPEN_GOLDEN=1`` is set (a deliberate, ledger-worthy act,
+never an accident).
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -31,8 +37,20 @@ from tests.golden.test_preopen_prevday_golden import (
     golden_artifacts,
 )
 
+#: The explicit overwrite escape hatch — the ONLY way to regenerate an
+#: existing fixture (the pre-fix capture is the oracle; Golden Rule #1).
+REGEN_ENV = "BRUTEX_REGEN_PREOPEN_GOLDEN"
+
 
 def main() -> None:
+    existing = [p for p in (GOLDEN_DAY_XLSX, GOLDEN_MINUTE_XLSX, GOLDEN_ZIP) if p.exists()]
+    if existing and os.environ.get(REGEN_ENV) != "1":
+        names = ", ".join(str(p) for p in existing)
+        raise SystemExit(
+            "REFUSED: golden fixture(s) already exist and are the PRE-fix oracle "
+            f"({names}); a post-fix tree must never silently regenerate them "
+            f"(Golden Rule #1). Set {REGEN_ENV}=1 to overwrite deliberately."
+        )
     with tempfile.TemporaryDirectory() as tmp:
         lake = Path(tmp)
         build_golden_lake(lake)
