@@ -2739,7 +2739,15 @@ def build_app(
         # bar's completed / total / bars / failed are driven per-WINDOW from the live
         # WindowLedger via _ledger_sync, so it advances continuously instead of ticking
         # once per finished symbol (DEC-SPOT-WINDOW-PROGRESS-001).
-        started = _pull_job.start(_work, total=unit_total, detail=detail, ledger_synced=True)
+        started = _pull_job.start(
+            _work,
+            total=unit_total,
+            detail=detail,
+            ledger_synced=True,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: a --dry-run pull uses a synthetic
+            # adapter (no Groww API call), so it is EXEMPT from the market-hours gate.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -2932,7 +2940,14 @@ def build_app(
         # NOT by the per-pair 4-arg hook — so it fills 0→100% instead of freezing
         # (DEC-METADATA-LIVE-PROGRESS-001). The initial total is the instrument count, a
         # placeholder the first cell-settle resync re-scales to cells (then cells+jobs).
-        started = _pull_job.start(_work, total=len(instruments), detail=detail, ledger_synced=True)
+        started = _pull_job.start(
+            _work,
+            total=len(instruments),
+            detail=detail,
+            ledger_synced=True,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3058,7 +3073,13 @@ def build_app(
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             composite_detail = label_synthetic(composite_detail)
-        started = _pull_job.start(_work, total=tradable_count, detail=composite_detail)
+        started = _pull_job.start(
+            _work,
+            total=tradable_count,
+            detail=composite_detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -3261,7 +3282,13 @@ def build_app(
             _greeks_health.observe(report.greeks_enrich_ok, error=report.greeks_enrich_error)
             return report.to_dict()
 
-        started = _pull_job.start(_work, total=len(selected), detail=detail)
+        started = _pull_job.start(
+            _work,
+            total=len(selected),
+            detail=detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -4086,6 +4113,8 @@ def build_app(
             detail=pipeline_detail,
             ledger_synced=True,
             on_finally=on_finally,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
         )
         if pull_intent_store is not None:
             # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
@@ -4303,7 +4332,13 @@ def build_app(
             return report
 
         unit_total = len(instruments) * len(fetch_intervals)
-        started = _pull_job.start(_work, total=unit_total, detail=detail)
+        started = _pull_job.start(
+            _work,
+            total=unit_total,
+            detail=detail,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+            market_hours_exempt=dry_run,
+        )
         return JSONResponse(
             {
                 "started": started,
@@ -4463,6 +4498,10 @@ def build_app(
             detail=("greeks backfill (DRY RUN)" if dry_run else "greeks backfill"),
             ledger_synced=True,
             cross_process_lock=not dry_run,
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: the Greeks backfill re-enriches
+            # ALREADY-STORED bars and makes ZERO Groww API calls, so it is EXEMPT
+            # from the market-hours start gate (safe to run in the trading window).
+            market_hours_exempt=True,
         )
         return JSONResponse(
             {

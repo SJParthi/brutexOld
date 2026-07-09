@@ -33,8 +33,11 @@ and a `now`-injectable `MarketHoursGuard`. NEW `MarketHoursHalt(BruteXError)` in
 `data/errors.py` added to BOTH ingest spines' `_GLOBAL_STOP_ERRORS` +
 `pull_jobs.is_pull_halt` (propagates past per-symbol/contract quarantine, fires the
 CRITICAL Telegram `emit_pull_halt_alert`). START GATES: `BackgroundPullJob.start`
-refuses a `JOB_KIND_PULL` in-window (Greeks-backfill/sweep EXEMPT), `cmd_fetch`
-defers a LIVE pull with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN: a
+defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE
+vendor-free exemptions are the sweep (`job_kind != PULL`), the dashboard
+Greeks-backfill start and every dashboard dry-run pull start (both pass
+`market_hours_exempt`); `cmd_fetch` defers a LIVE pull with a clean EXIT_OK
+(dry-run/inspect EXEMPT). MID-RUN: a
 `market_closed` predicate threaded to the PER-WINDOW seam of both spines raises
 `MarketHoursHalt` (the durable window ledger leaves PLANNED/FAILED windows
 RESUMABLE — no new checkpoint); `run_until_clean` gains a `market_closed` hook →
@@ -1778,8 +1781,11 @@ hostile-review pass._
   env kill switch `BRUTEX_MARKET_HOURS_GUARD` default ENABLED; `guard_active_default`; a `now`-injectable
   `MarketHoursGuard`) + NEW `MarketHoursHalt(BruteXError)` in `data/errors.py` (in BOTH spines' `_GLOBAL_STOP_ERRORS`
   + `pull_jobs.is_pull_halt` → fires the CRITICAL Telegram pull-halt alert). START GATES: `BackgroundPullJob.start`
-  refuses a `JOB_KIND_PULL` in-window (Greeks-backfill/sweep EXEMPT); `cmd_fetch` defers a LIVE pull with a clean
-  EXIT_OK (dry-run/inspect EXEMPT). MID-RUN: a `market_closed` predicate threaded to the PER-WINDOW seam of both
+  defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE vendor-free exemptions are the
+  sweep (`job_kind != PULL`), the dashboard Greeks-backfill start + every dashboard dry-run pull start (both pass
+  `market_hours_exempt`; the over-block fix — Greeks-backfill runs under `JOB_KIND_PULL`, so job_kind alone was not
+  enough); `cmd_fetch` defers a LIVE pull with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN: a `market_closed`
+  predicate threaded to the PER-WINDOW seam of both
   spines raises `MarketHoursHalt` (durable ledger leaves PLANNED/FAILED windows RESUMABLE); `run_until_clean` gains a
   `market_closed` hook → `stop_market_hours`; `pull_all_spot`/`pull_contract_candles` catch it mid-round + belt-break
   later steps + the minute phase; `run_full_pipeline` skips the vendor chain with `stopped_after="market_hours"`.

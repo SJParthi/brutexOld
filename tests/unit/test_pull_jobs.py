@@ -153,6 +153,52 @@ class TestMarketHoursStartGate:
         assert job.start(work, total=1) is True
         assert ran == [True]
 
+    def test_market_hours_exempt_greeks_backfill_allowed_in_window(self) -> None:
+        """A Greeks-backfill start (JOB_KIND_PULL + market_hours_exempt=True) makes ZERO
+        vendor calls, so it is ALLOWED even inside the market-hours window."""
+        ran: list[bool] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,  # window is OPEN
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            ran.append(True)
+
+        assert job.start(work, total=1, market_hours_exempt=True) is True
+        assert ran == [True]  # the vendor-free backfill ran despite the open window
+
+    def test_market_hours_exempt_dry_run_pull_allowed_in_window(self) -> None:
+        """A --dry-run pull (JOB_KIND_PULL + market_hours_exempt=True) hits no Groww API,
+        so it is ALLOWED inside the market-hours window."""
+        ran: list[bool] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:
+            ran.append(True)
+
+        # dry_run=True → market_hours_exempt=True at the call site.
+        assert job.start(work, total=1, market_hours_exempt=True) is True
+        assert ran == [True]
+
+    def test_non_exempt_pull_still_deferred_in_window(self) -> None:
+        """market_hours_exempt=False (a REAL vendor pull) is still deferred in-window."""
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+            market_hours_guard=lambda: True,
+        )
+
+        def work(_on_progress: ProgressHook) -> None:  # pragma: no cover — never runs
+            raise AssertionError("a non-exempt vendor pull must not run in market hours")
+
+        assert job.start(work, total=1, market_hours_exempt=False) is False
+
 
 def test_successful_job_advances_then_finishes() -> None:
     job = _job()

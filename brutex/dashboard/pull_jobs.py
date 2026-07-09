@@ -554,6 +554,7 @@ class BackgroundPullJob:
         on_finally: FinallyHook | None = None,
         job_kind: str = JOB_KIND_PULL,
         pull_id: str | None = None,
+        market_hours_exempt: bool = False,
     ) -> bool:
         """Launch *work* in the background over *total* units; return whether it started.
 
@@ -624,16 +625,31 @@ class BackgroundPullJob:
         probe so a 2-4-day sweep reads an honest "idle", never a site-wide red
         "stalled" (the #1593 C5 fix). It changes NOTHING else — ``running``, the
         progress feed and the single-flight are byte-identical for either kind.
+
+        *market_hours_exempt* (DEC-GROWW-MARKET-HOURS-GUARD-001) exempts THIS start
+        from the market-hours START gate below — set ``True`` by callers that make
+        ZERO Groww API calls and are therefore safe to run inside the NSE trading
+        window: the dashboard Greeks-backfill start (a stamp-driven re-enrich over
+        ALREADY-STORED bars) and every ``--dry-run`` pull start (a synthetic adapter,
+        no vendor call). Default ``False`` gates a REAL ``JOB_KIND_PULL`` vendor pull.
+        Orthogonal to *job_kind*: a sweep is already exempt by kind; this flag covers
+        the vendor-free operations that still run under ``JOB_KIND_PULL``.
         """
         # Market-hours START gate (DEC-GROWW-MARKET-HOURS-GUARD-001): refuse to BEGIN a
         # VENDOR pull inside the NSE market-hours window ``[08:45, 15:35)`` IST on a
         # trading day, so a manual/auto-resume click during the session never competes
-        # with TickVault's live feed for the shared Groww account. Gated STRICTLY on
-        # ``JOB_KIND_PULL`` — the Greeks-backfill / sweep kinds make ZERO vendor calls
-        # and stay EXEMPT. Returns ``False`` with a distinct "deferred" detail + log,
-        # exactly like a refused single-flight (no watchdog built, no lock taken, no
-        # worker spawned → a clean no-op). The pull resumes on the next out-of-hours run.
-        if job_kind == JOB_KIND_PULL and self._market_hours_guard():
+        # with TickVault's live feed for the shared Groww account. THREE exemptions —
+        # each makes ZERO Groww API calls, so each is safe in market hours:
+        #   (a) the sweep route (``job_kind != JOB_KIND_PULL`` — a brute-force sweep
+        #       reads the lake, never the vendor);
+        #   (b) any caller that sets ``market_hours_exempt=True`` — the dashboard's
+        #       Greeks-backfill start (a stamp-driven re-enrich over stored bars) AND
+        #       every ``--dry-run`` pull start (a synthetic adapter, no vendor call).
+        # Only a REAL (``JOB_KIND_PULL``, non-exempt) vendor pull is deferred here.
+        # Returns ``False`` with a distinct "deferred" detail + log, exactly like a
+        # refused single-flight (no watchdog built, no lock taken, no worker spawned →
+        # a clean no-op). The pull resumes on the next out-of-hours run.
+        if job_kind == JOB_KIND_PULL and not market_hours_exempt and self._market_hours_guard():
             self._progress.fail(
                 "deferred — inside NSE market-hours window (08:45-15:35 IST); "
                 "pulls run outside market hours only"
