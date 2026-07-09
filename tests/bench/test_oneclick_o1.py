@@ -134,7 +134,7 @@ def _write_run(
     events_lines: int = 0,
     top100_rows: int = 100,
 ) -> Path:
-    """Materialise ONE contract-shaped run dir under ``<root>/runs/<rid>``."""
+    """Materialise ONE contract-shaped run dir under the Ruling-4 ``sweep_runs/<rid>``."""
     run_dir = oca.runs_root(root) / rid
     run_dir.mkdir(parents=True)
     (run_dir / oca.MANIFEST_FILENAME).write_text(json.dumps(_manifest_obj(rid)), encoding="utf-8")
@@ -167,8 +167,8 @@ def _write_runs_tree(root: Path, *, runs: int, events_lines: int = 0) -> Path:
 
 
 def _write_trades_root(root: Path, rows: int) -> Path:
-    """A fixture root carrying ``runs/<rid>/trades/rank-0001.json`` with *rows* rows."""
-    path = oca.trades_path(root, _RID, 1)
+    """A fixture root carrying ``sweep_runs/<rid>/trades/rank-0001.json`` with *rows* rows."""
+    path = oca.trades_path(oca.fixture_results_root(root), _RID, 1)
     path.parent.mkdir(parents=True)
     payload = {"rows": [{"i": i, "pnl_paisa": i * 3} for i in range(rows)], "total": rows}
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -187,8 +187,8 @@ class TestEventsTailOPageFlat:
         ``ratio_ceiling(8.0)`` — file open/seek I/O noise (the
         ``test_registry_pagination_o1.py`` precedent).
         """
-        small = _write_run(tmp_path / "small", _RID, events_lines=_SMALL_EVENT_LINES)
-        large = _write_run(tmp_path / "large", _RID, events_lines=_LARGE_EVENT_LINES)
+        small = _write_run(tmp_path / "small" / "sweeps", _RID, events_lines=_SMALL_EVENT_LINES)
+        large = _write_run(tmp_path / "large" / "sweeps", _RID, events_lines=_LARGE_EVENT_LINES)
 
         def _page(run_dir: Path) -> oca.EventsPage:
             page = oca.tail_events(run_dir, offset=-1, limit=200)
@@ -235,8 +235,8 @@ class TestPrimedCacheHitFlatVsRunCount:
         Ceiling: ``ratio_ceiling(5.0)`` — pure dict hit (the
         ``test_db_option_count_cache_o1.py`` precedent).
         """
-        root_small = tmp_path / "small"
-        root_big = tmp_path / "big"
+        root_small = tmp_path / "small" / "sweeps"
+        root_big = tmp_path / "big" / "sweeps"
         _write_runs_tree(root_small, runs=3)
         _write_runs_tree(root_big, runs=50)
         cache_small, key_small = self._primed_runs(root_small)
@@ -255,7 +255,7 @@ class TestPrimedCacheHitFlatVsRunCount:
 
     def test_primed_hits_never_recompute(self, tmp_path: Path) -> None:
         """Deterministic teeth: primed runs AND top100 hits never re-run the compute."""
-        root = tmp_path / "root"
+        root = tmp_path / "root" / "sweeps"
         run_dir = _write_runs_tree(root, runs=5)
         cache, runs_key = self._primed_runs(root)
         # The runs hit serves the cached payload with a raising compute.
@@ -310,8 +310,8 @@ class TestEventsEofRepeatPollFlat:
         runs). Ceiling: ``ratio_ceiling(8.0)`` — an ``os.stat`` syscall sits
         inside the timed loop.
         """
-        small = _write_run(tmp_path / "small", _RID, events_lines=_SMALL_EVENT_LINES)
-        large = _write_run(tmp_path / "large", _RID, events_lines=_LARGE_EVENT_LINES)
+        small = _write_run(tmp_path / "small" / "sweeps", _RID, events_lines=_SMALL_EVENT_LINES)
+        large = _write_run(tmp_path / "large" / "sweeps", _RID, events_lines=_LARGE_EVENT_LINES)
         cache_s, key_s, path_s = self._primed_eof(small)
         cache_l, key_l, path_l = self._primed_eof(large)
 
@@ -390,8 +390,8 @@ class TestLoaderFlatVsSiblingTree:
         tree-independence, not parse cost — the cached-poll pins gate that).
         Ceiling: ``ratio_ceiling(8.0)`` — real file I/O both sides.
         """
-        target_small = _write_runs_tree(tmp_path / "small", runs=3)
-        target_big = _write_runs_tree(tmp_path / "big", runs=200)
+        target_small = _write_runs_tree(tmp_path / "small" / "sweeps", runs=3)
+        target_big = _write_runs_tree(tmp_path / "big" / "sweeps", runs=200)
 
         def _reads(run_dir: Path) -> None:
             assert oca.load_top100(run_dir).status == "ok"
@@ -450,8 +450,8 @@ class TestManifestPollFlatVsHistory:
         F-M6/F-M3, deliberately outside the timed loop. Ceiling:
         ``ratio_ceiling(8.0)``.
         """
-        root_small = tmp_path / "small"
-        root_big = tmp_path / "big"
+        root_small = tmp_path / "small" / "sweeps"
+        root_big = tmp_path / "big" / "sweeps"
         _write_runs_tree(root_small, runs=5, events_lines=_SMALL_EVENT_LINES)
         _write_runs_tree(root_big, runs=100, events_lines=_SMALL_EVENT_LINES)
         cache_s, key_s, dir_s = self._primed_manifest(root_small)
@@ -474,7 +474,7 @@ class TestManifestPollFlatVsHistory:
 
     def test_primed_manifest_poll_never_recomputes(self, tmp_path: Path) -> None:
         """Deterministic teeth: the primed manifest key never re-runs the compute."""
-        root = tmp_path / "root"
+        root = tmp_path / "root" / "sweeps"
         _write_runs_tree(root, runs=5, events_lines=100)
         cache, key, _run_dir = self._primed_manifest(root)
         payload: dict[str, Any] = cache.get_or_compute(key, generation=0, compute=_must_not_run)
