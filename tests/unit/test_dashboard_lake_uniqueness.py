@@ -423,18 +423,17 @@ class TestCensusEstimateSeam:
         assert payload["findings_total"] == 0  # the scan itself still landed
         assert payload["scan_progress"]["files_total_estimate"] is None
 
-    @pytest.mark.parametrize("junk_ms", [float("inf"), float("-inf"), float("nan"), 1e308])
-    def test_poisoned_sentinel_duration_falls_to_the_files_arm(
+    @pytest.mark.parametrize("junk_ms", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_sentinel_duration_falls_to_the_files_arm(
         self, store: InstrumentStore, junk_ms: float
     ) -> None:
-        """Round-1 + round-2 refuters (route arm): ``Infinity`` IS valid input
-        to Python's tolerant JSON decoder and passed the ``> 0`` gate — the
-        hint would have seeded an INFINITE stall bound — and a
-        finite-but-astronomical ``1e308`` ms passed the round-1 ``isfinite``
-        gate too (a 1e305 s bound, the same silent disable through a FINITE
-        number). The finite + 24 h-ceiling guards reject both and the hint
-        falls to the ``files_scanned`` derivation; the route serves the
-        verdict + the honest estimate normally."""
+        """Round-1 refuter (route arm): ``Infinity`` IS valid input to
+        Python's tolerant JSON decoder and passed the ``> 0`` gate — the
+        hint would have seeded an INFINITE stall bound. The ``math.isfinite``
+        guard rejects it and the hint falls to the ``files_scanned``
+        derivation; the route serves the verdict + the honest estimate
+        normally. (A FINITE huge duration is a DIFFERENT case — accepted
+        here and clamped by the holder, round-3 law; see the sibling test.)"""
         import json as _json
 
         lake_root = store.path.parent
@@ -449,6 +448,29 @@ class TestCensusEstimateSeam:
         assert payload["scan_progress"]["files_total_estimate"] == 3
         assert payload["scan_stalled"] is False
         assert payload["refresh_probe_wedged"] is False
+
+    def test_huge_finite_sentinel_duration_is_accepted_and_holder_clamps(
+        self, store: InstrumentStore
+    ) -> None:
+        """Round-3 refuter (route arm): a FINITE positive ``duration_ms`` of
+        ANY magnitude (here the round-2 corrupt-sentinel repro ``1e308`` ms)
+        is ACCEPTED by the hint helper — never rejected to the files arm /
+        floor — and BOUNDED by the holder's single 24 h clamp site (the
+        bound teeth live in the holder suite; behaviourally the route
+        serves the verdict + estimate normally)."""
+        import json as _json
+
+        lake_root = store.path.parent
+        sentinel = lake_root / ".lake_heal" / "last_sweep.json"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            _json.dumps({"files_scanned": 3, "duration_ms": 1e308}), encoding="utf-8"
+        )
+        client = _make_client(store, SummaryCache())
+        payload = client.get("/api/v1/universe/lake-uniqueness").json()
+        assert payload["findings_total"] == 0
+        assert payload["scan_progress"]["files_total_estimate"] == 3
+        assert payload["scan_stalled"] is False
 
     def test_absurd_magnitude_files_scanned_hint_degrades_never_a_crash(
         self, store: InstrumentStore

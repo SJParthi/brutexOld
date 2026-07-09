@@ -846,23 +846,45 @@ class TestFirstScanBoundHint:
         assert holder.maybe_refresh() is True
         assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]
 
-    def test_astronomical_finite_hint_degrades_to_the_bare_floor(self) -> None:
-        """Round-2 refuter: a FINITE-but-astronomical hint (a corrupt sentinel
-        ``duration_ms=1e308`` → 1e305 s) passed the finite+positive gates and
-        seeded an effectively infinite bound — staleness detection silently
-        disabled. Above the 24 h physical ceiling → the bare floor governs
-        (this probe reads NOT-stalled pre-fix — the killing teeth)."""
+    @pytest.mark.parametrize(
+        "huge_hint",
+        [
+            FIRST_SCAN_BOUND_CEILING_S + 1.0,  # just past the ceiling
+            27 * 3600.0,  # a LEGITIMATE 27 h hint (files arm at ~48.6M files)
+            1e305,  # the round-2 corrupt-sentinel repro (duration_ms=1e308)
+        ],
+    )
+    def test_above_ceiling_hint_is_clamped_to_the_ceiling_not_the_floor(
+        self, huge_hint: float
+    ) -> None:
+        """Round-3 refuter: CLAMP, never DROP. The round-2 fix treated an
+        above-ceiling hint as ABSENT → the 30-min floor — but a LEGITIMATE
+        >24 h hint exists (the deliberately-2.7×-conservative 2 ms/file
+        budget crosses 24 h at ~43.2M files; a genuinely-recorded >24 h
+        duration), so the drop re-opened the exact large-lake first-scan
+        false-stall the hint prevents, with a discontinuity at the ceiling.
+        Now corrupt-huge AND legit-huge both bound at the generous 24 h
+        ceiling: NOT stalled at exactly the ceiling (FAILS on the round-2
+        tip — the floor bound read stalled there), stalled strictly past it
+        (FAILS pre-round-2 for the 1e305 arm — the unbounded hint never
+        stalled)."""
         clock = _FakeClock()
         probes: list[tuple[float, bool]] = []
         holder = self._stalling_probe_holder(
-            clock, lambda: 1e305, probes, [SCAN_STALE_FLOOR_S + 1.0]
+            clock,
+            lambda: huge_hint,
+            probes,
+            [FIRST_SCAN_BOUND_CEILING_S, 1.0],
         )
         assert holder.maybe_refresh() is True
-        assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]
+        assert probes == [
+            (FIRST_SCAN_BOUND_CEILING_S, False),  # bound == ceiling, NOT the floor
+            (FIRST_SCAN_BOUND_CEILING_S + 1.0, True),  # strictly past → stalled
+        ]
 
     def test_hint_exactly_at_the_ceiling_is_accepted(self) -> None:
-        """Boundary law: a hint AT the 24 h ceiling is a legitimate (if
-        extreme) seed — the bound IS the ceiling, strictly-past stalls."""
+        """Boundary law: a hint AT the 24 h ceiling passes through unclamped
+        — the bound IS the ceiling, strictly-past stalls."""
         clock = _FakeClock()
         probes: list[tuple[float, bool]] = []
         holder = self._stalling_probe_holder(
@@ -877,17 +899,14 @@ class TestFirstScanBoundHint:
             (FIRST_SCAN_BOUND_CEILING_S + 1.0, True),
         ]
 
-    def test_hint_just_past_the_ceiling_is_rejected_to_the_bare_floor(self) -> None:
-        """Boundary law: strictly ABOVE the ceiling → treated as absent —
-        the bare 1800 s floor governs (pre-fix the 86401 s hint was accepted
-        and this probe read NOT-stalled)."""
+    @pytest.mark.parametrize("junk_hint", [-5.0, 0.0])
+    def test_non_positive_hint_degrades_to_the_bare_floor(self, junk_hint: float) -> None:
+        """A non-positive hint is unusable — never a seed, never clamped
+        (the explicit ``<= 0`` arm of the rounds-1-3 guard chain)."""
         clock = _FakeClock()
         probes: list[tuple[float, bool]] = []
         holder = self._stalling_probe_holder(
-            clock,
-            lambda: FIRST_SCAN_BOUND_CEILING_S + 1.0,
-            probes,
-            [SCAN_STALE_FLOOR_S + 1.0],
+            clock, lambda: junk_hint, probes, [SCAN_STALE_FLOOR_S + 1.0]
         )
         assert holder.maybe_refresh() is True
         assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]

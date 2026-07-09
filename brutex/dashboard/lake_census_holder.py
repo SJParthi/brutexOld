@@ -96,12 +96,22 @@ FIRST_SCAN_PER_FILE_BUDGET_S: Final[float] = 0.002
 #: sentinel with a FINITE-but-astronomical value (``duration_ms=1e308`` →
 #: hint 1e305 s) passed the finite+positive gates and yielded an effectively
 #: infinite bound, silently disabling staleness detection for the
-#: corrupt-sentinel + wedged-first-scan combo. A hint ABOVE this ceiling is
-#: treated as ABSENT (the bare :data:`SCAN_STALE_FLOOR_S` governs). 24 h is
-#: generous by orders of magnitude against physics — the measured production
-#: census runs ~26 min over a 2.14M-file lake and is unthrottled (unlike the
-#: L3 sweep's opt-in pacing); no plausible lake legitimately needs a >24 h
-#: FIRST-scan bound, so anything above it is a corrupt sentinel, never a hint.
+#: corrupt-sentinel + wedged-first-scan combo. Round-3 refuter CORRECTION —
+#: CLAMP, never DROP: a positive finite hint above the ceiling is clamped
+#: TO the ceiling (``min``), not collapsed to the 30-min floor — a
+#: LEGITIMATE >24 h hint exists (the deliberately-conservative 2 ms/file
+#: budget crosses 24 h at ~43.2M files, ~2.7× the real per-file rate; a
+#: future sweep could genuinely record a >24 h duration), and dropping it
+#: to the floor re-opened the exact large-lake first-scan false-stall the
+#: hint exists to prevent, with a discontinuity at the ceiling. So the
+#: bound is BOUNDED: corrupt-huge and legit-huge both get the generous
+#: 24 h ceiling, never a floor collapse. 24 h is generous against physics
+#: — the measured production census runs ~26 min over a 2.14M-file lake,
+#: unthrottled (unlike the L3 sweep's opt-in pacing). INTENDED ASYMMETRY
+#: (round-3 A''-verified): the ceiling caps the SENTINEL-seeded FIRST-scan
+#: arm ONLY — the 2×-last-duration law after a landed scan stays
+#: deliberately UNcapped (a monotonically-measured delta from this
+#: process's own clock, not inflatable by a corrupt sentinel).
 FIRST_SCAN_BOUND_CEILING_S: Final[float] = 24 * 3600.0
 
 #: The census scan callable: receives the holder's per-file progress callback
@@ -161,9 +171,10 @@ class LakeCensusHolder:
         the L3 sentinel's recorded duration when stored, else its
         ``files_scanned`` × :data:`FIRST_SCAN_PER_FILE_BUDGET_S`). Read ON
         the daemon thread before the first scan (it is lake I/O); a raising
-        / ``None`` / non-finite / above-:data:`FIRST_SCAN_BOUND_CEILING_S`
-        hint degrades to the bare floor (a corrupt sentinel is never a
-        hint). Inert once a scan has landed a real duration (the 2× law
+        / ``None`` / non-finite / non-positive hint degrades to the bare
+        floor, and a positive finite hint is CLAMPED to
+        :data:`FIRST_SCAN_BOUND_CEILING_S` (24 h) — bounded, never a floor
+        collapse. Inert once a scan has landed a real duration (the 2× law
         governs from then on).
     """
 
@@ -353,23 +364,34 @@ class LakeCensusHolder:
         after it, ``max(2 × last landed duration, SCAN_STALE_FLOOR_S)`` —
         generous, and self-scaling once a real scan duration is known.
 
-        POISONED-HINT GUARDS (round-1 + round-2 refuters): a sentinel hint
-        that is non-finite (``inf``/``-inf``/``nan`` — ``max(inf, floor)``
-        yields an INFINITE bound, ``max(nan, floor)`` is order-dependent) OR
-        finite-but-ABOVE the physical :data:`FIRST_SCAN_BOUND_CEILING_S`
-        (24 h — a corrupt ``duration_ms=1e308`` sentinel passed the
-        finite+positive gates and seeded a 1e305 s bound, staleness detection
-        effectively disabled) is treated as ABSENT — the bound degrades to
-        the bare :data:`SCAN_STALE_FLOOR_S`, and is therefore NEVER wider
-        than the ceiling on the first-scan arm. A hint exactly AT the
-        ceiling is accepted (boundary law pinned).
+        POISONED-HINT GUARDS (rounds 1-3 refuters): an UNUSABLE sentinel
+        hint — ``None`` / non-finite (``inf``/``-inf``/``nan`` —
+        ``max(inf, floor)`` yields an INFINITE bound, ``max(nan, floor)``
+        is order-dependent) / non-positive — degrades to the bare
+        :data:`SCAN_STALE_FLOOR_S`; a USABLE (positive finite) hint is
+        CLAMPED to the physical :data:`FIRST_SCAN_BOUND_CEILING_S` (24 h —
+        a corrupt ``duration_ms=1e308`` sentinel passed the finite+positive
+        gates and seeded a 1e305 s bound, staleness detection effectively
+        disabled), so the first-scan bound is NEVER wider than the ceiling.
+        Round-3 CORRECTION: clamp, never drop — a LEGITIMATE above-ceiling
+        hint (the conservative 2 ms/file budget crosses 24 h at ~43.2M
+        files; a genuinely-recorded >24 h duration) previously COLLAPSED to
+        the 30-min floor, re-opening the large-lake first-scan false-stall
+        with a discontinuity at the ceiling; corrupt-huge and legit-huge
+        now both get the generous ceiling. A hint exactly AT the ceiling
+        passes through unclamped (boundary law pinned). INTENDED ASYMMETRY
+        (A''-verified): the post-first-scan 2×-last-duration arm is
+        deliberately UNcapped — a monotonic measured delta from this
+        process's own clock, not inflatable by a corrupt sentinel.
         """
         if self._scan_stale_after_s is not None:
             return self._scan_stale_after_s
         if self._scans_completed == 0:
             hint = self._first_bound_hint
-            if hint is None or not math.isfinite(hint) or hint > FIRST_SCAN_BOUND_CEILING_S:
+            if hint is None or not math.isfinite(hint) or hint <= 0:
                 hint = 0.0
+            else:
+                hint = min(hint, FIRST_SCAN_BOUND_CEILING_S)
             return max(hint, SCAN_STALE_FLOOR_S)
         return max(2.0 * self._compute_duration, SCAN_STALE_FLOOR_S)
 
