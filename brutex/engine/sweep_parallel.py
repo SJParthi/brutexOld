@@ -177,6 +177,7 @@ from brutex.engine.sweep_run import (
 )
 from brutex.engine.sweep_supervisor import (
     SUPERVISOR_ACTION_ABORT,
+    SUPERVISOR_ACTION_CANCELLED,
     SUPERVISOR_ACTION_COMPLETE,
     SUPERVISOR_ACTION_START,
     SUPERVISOR_ACTION_TUPLE_CACHE,
@@ -1028,8 +1029,10 @@ class ParallelGridDriver:
         "_monotonic",
         "_n_unique",
         "_next_apply",
+        "_cancelled",
         "_quarantined",
         "_root",
+        "_should_stop",
         "_stall_min_mask_bars_per_sec",
         "_stall_seconds",
         "_subject",
@@ -1048,6 +1051,7 @@ class ParallelGridDriver:
         stall_seconds: float | None = None,
         stall_min_mask_bars_per_sec: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         """Build a driver for one grid run.
 
@@ -1083,6 +1087,10 @@ class ParallelGridDriver:
             environment via :func:`resolve_stall_min_mask_bars_per_sec`.
         monotonic
             Injected monotonic clock (tests drive the stall watchdog with a fake).
+        should_stop
+            Optional cooperative-cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001),
+            consulted PARENT-side at the dispatch gate — it never crosses the
+            process boundary (nothing new is pickled). See :func:`run_parallel_grid`.
 
         Raises
         ------
@@ -1127,6 +1135,12 @@ class ParallelGridDriver:
         self._subject = f"sweep:{grid_identity(grid)[:16]}"
         self._heap: list[_Outcome] = []
         self._next_apply = 0
+        #: Cooperative-cancel probe + latch (DEC-JOB-COOPERATIVE-CANCEL-001):
+        #: parent-side only. ``_cancelled`` flips ONCE in :meth:`_drive`'s
+        #: dispatch gate; :meth:`run` then emits the cancelled terminal instead
+        #: of the normal completion.
+        self._should_stop = should_stop
+        self._cancelled = False
         #: Labels a PRIOR run's broken pool quarantined (loaded from the durable
         #: sidecar in :meth:`run`) — gated FIRST in :meth:`_gate_or_dispatch` so a
         #: resume classifies them VISIBLY as ``quarantined_prior``, regardless of
@@ -1210,6 +1224,45 @@ class ParallelGridDriver:
                     payload={"error": detail},
                 )
             raise
+
+        if self._cancelled:
+            # COOPERATIVE cancel terminal (DEC-JOB-COOPERATIVE-CANCEL-001): every
+            # in-flight tuple was drained + applied above, the checkpoint holds
+            # the contiguous clean prefix, and NOTHING was recorded for unrun
+            # tuples — on-disk state ≡ a graceful stop at this boundary. ONE
+            # audit line + the honest ``cancelled`` progress terminal (never a
+            # fabricated COMPLETE, never an ERROR).
+            cancel_payload = {
+                "index_reached": self._next_apply,
+                "tuples_run": acc.tuples_run,
+                "checkpoint_next_index": self._guards.checkpoint.next_index,
+            }
+            self._guards.audit.append(
+                action=SUPERVISOR_ACTION_CANCELLED,
+                subject=self._subject,
+                payload=cancel_payload,
+            )
+            self._guards.progress.cancelled(
+                detail=f"cancelled at tuple {self._next_apply}/{total}"
+            )
+            _LOG.warning("sweep_parallel.cancelled", subject=self._subject, **cancel_payload)
+            return SupervisedGridSummary(
+                sweep_id=sweep_id,
+                tuples_total=total,
+                tuples_run=acc.tuples_run,
+                tuples_skipped_no_bars=acc.tuples_skipped_no_bars,
+                skipped_cache=acc.skipped_cache,
+                skipped_resume=acc.skipped_resume,
+                enumerated=acc.enumerated,
+                conflict_pruned=acc.conflict_pruned,
+                skipped_dedup=acc.skipped_dedup,
+                evaluated=acc.evaluated,
+                ranked=acc.ranked,
+                persisted=acc.persisted,
+                tuples_failed=acc.tuples_failed,
+                tuples_quarantined_prior=acc.tuples_quarantined_prior,
+                cancelled=True,
+            )
 
         payload = {
             "sweep_id": sweep_id,
@@ -1308,6 +1361,25 @@ class ParallelGridDriver:
 
         try:
             while not exhausted or pending or self._heap:
+                # 0. COOPERATIVE cancel gate (DEC-JOB-COOPERATIVE-CANCEL-001):
+                #    on a cancel request STOP DISPATCHING (treat the grid as
+                #    exhausted) but NEVER cancel a running future — the loop
+                #    below DRAINS every in-flight tuple normally, so each
+                #    in-worker durable store write lands and its parent-side
+                #    apply (cache.record + checkpoint.record) runs in order.
+                #    The contiguous-clean-prefix law holds by construction.
+                #    Probed ONCE per outer iteration — O(1) (one os.stat on
+                #    the production sidecar probe).
+                if not self._cancelled and self._should_stop is not None and self._should_stop():
+                    self._cancelled = True
+                    exhausted = True
+                    _LOG.warning(
+                        "sweep_parallel.cancel_requested",
+                        subject=self._subject,
+                        in_flight=len(pending),
+                        next_apply=self._next_apply,
+                        note="dispatch stopped; draining in-flight tuples to the durable boundary",
+                    )
                 # 1. Dispatch until the in-flight window OR the heap cap is full (or
                 #    the grid is done). Coupling dispatch to the heap cap is the
                 #    memory bound under head-of-line blocking (Golden Rule #5).
@@ -1908,6 +1980,7 @@ def run_parallel_grid(
     stall_seconds: float | None = None,
     stall_min_mask_bars_per_sec: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    should_stop: Callable[[], bool] | None = None,
 ) -> SupervisedGridSummary:
     """Run the grid across ``workers - 1`` EVAL processes + a single writer-actor.
 
@@ -1925,6 +1998,18 @@ def run_parallel_grid(
     signature difference from ``run_supervised_grid``). ``stall_seconds`` /
     ``stall_min_mask_bars_per_sec`` default to ``None`` → resolved from the
     environment (the heavy-grid-aware stall bound, DEC-SWEEP-STALL-OOM-GUARDS-001).
+
+    ``should_stop`` (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL
+    cooperative-cancel probe, consulted at the dispatch gate: on ``True`` the
+    driver STOPS DISPATCHING, DRAINS every in-flight future normally (a
+    running worker's durable tuple write is never cancelled; its parent-side
+    ``cache.record`` + ``checkpoint.record`` still apply in order — the
+    contiguous-clean-prefix law is preserved by construction), then returns a
+    ``cancelled=True`` summary with ONE ``SUPERVISOR_CANCELLED`` audit line.
+    ``None`` (every existing caller) is byte-identical. HONEST latency
+    (Golden Rule #10): the drain waits on up to ``workers - 1`` in-flight
+    tuples, still bounded by the stall watchdog (a wedged worker raises
+    :class:`SweepStallError`, never a silent hang).
 
     Raises
     ------
@@ -1944,6 +2029,7 @@ def run_parallel_grid(
         stall_seconds=stall_seconds,
         stall_min_mask_bars_per_sec=stall_min_mask_bars_per_sec,
         monotonic=monotonic,
+        should_stop=should_stop,
     )
     return driver.run()
 
@@ -1958,6 +2044,7 @@ __all__ = [
     "STALL_MASK_BARS_PER_SEC_ENV",
     "STALL_MIN_MASK_BARS_PER_SEC",
     "STALL_SECONDS_ENV",
+    "SUPERVISOR_ACTION_CANCELLED",
     "SUPERVISOR_ACTION_TUPLE_POOL_BROKEN",
     "SUPERVISOR_ACTION_TUPLE_QUARANTINED_PRIOR",
     "SWEEP_WORKERS_ENV",

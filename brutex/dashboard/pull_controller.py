@@ -103,6 +103,8 @@ from brutex.adapters.groww.vendor_floor import (
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     GROWW_COVERAGE_MARKET,
+    CancelCheck,
+    PullCancelled,
     PullStep,
     PullVerdict,
     StepOrderMonitor,
@@ -778,6 +780,12 @@ class BulkSpotReport:
     """MAX absolute keep-first close delta across the pull's conflicts — exact
     Decimal rupees (never float, CLAUDE.md §6 price-unit row); ``None`` when no
     conflict was recorded."""
+    cancelled: bool = False
+    """True iff the pull stopped at a window boundary on an operator cooperative
+    cancel (DEC-JOB-COOPERATIVE-CANCEL-001): every settled window's row is
+    durably in the ledger (the ``finally`` drains + persists), unissued windows
+    stay PLANNED/FAILED, and the next pull idempotently resumes ONLY those —
+    an honest partial, never an ``error``."""
 
     @property
     def total_symbols(self) -> int:
@@ -841,6 +849,7 @@ class BulkSpotReport:
             "total_no_data": self.total_no_data,
             "windows_skipped": self.windows_skipped,
             "ledger_load_failed": self.ledger_load_failed,
+            "cancelled": self.cancelled,
             "conflicts": self.conflicts,
             "vendor_dup_rows_dropped": self.vendor_dup_rows_dropped,
             # JSON-safe: the exact Decimal renders as its string (never a float
@@ -1609,8 +1618,18 @@ def pull_all_spot(
     on_ledger_sync: OnLedgerSync | None = None,
     floor_store: VendorFloorMetaStore | None = None,
     step_monitor: StepOrderMonitor | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2020-01-01, previous day]`` range.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe threaded down to the per-WINDOW fetch boundary: a cancel mid-
+    pull raises :class:`~brutex.adapters.ingest_common.PullCancelled` out of the
+    spine, which is CAUGHT here (like the quota / mass-empty global stops) —
+    the ``final_cancelled`` latch halts the remaining step groups, the existing
+    ``finally`` drains the pipeline + persists the ledger, and the report reads
+    ``cancelled=True`` (an honest partial; NO CRITICAL Telegram alert — the
+    operator asked for it). ``None`` (every legacy caller) is byte-identical.
 
     **Six-step pull order, steps 1-2 (DEC-PULL-SIX-STEP-ORDER-001):** the
     instrument list is ALWAYS partitioned into ordered (INDICES-SPOT,
@@ -1998,6 +2017,10 @@ def pull_all_spot(
         # set when a phase raises MassEmptySettleHalt — drives the loud, needs-operator
         # ``mass_empty_halt`` verdict naming the counts + the likely causes.
         final_mass_empty_cause: str | None = None
+        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): set when a
+        # phase raises PullCancelled — halts the remaining step groups gracefully
+        # (the finally still drains + persists the ledger); NEVER an alert.
+        final_cancelled = False
         # Per-phase FIRST-pass reports keyed by interval — the per-symbol rollup reads
         # each interval's 1-day/1-minute outcome from its own phase's report. Both
         # phases run over EVERY requested instrument (DEC-SPOT-INTERVAL-DECOUPLE-001 —
@@ -2050,7 +2073,7 @@ def pull_all_spot(
             convention above is deliberately NOT reused for the event).
             """
             nonlocal final_still_failed, final_auth_aborted, final_quota_exhausted
-            nonlocal final_mass_empty_cause
+            nonlocal final_mass_empty_cause, final_cancelled
             passes: list[SpotIngestWithRetry] = []
             # Group-scoped until-clean + step-attributed writes
             # (DEC-PULL-SIX-STEP-ORDER-001): the outstanding read below folds ONLY
@@ -2096,6 +2119,7 @@ def pull_all_spot(
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
+                    should_stop=should_stop,
                 )
                 passes.append(res)
                 return res
@@ -2186,6 +2210,27 @@ def pull_all_spot(
                     res = _one_pass(auto_retry)
                     final_still_failed += res.report.still_failed_windows
                     final_auth_aborted = final_auth_aborted or res.report.auth_aborted
+            except PullCancelled as exc:
+                # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the
+                # spine raised at a WINDOW boundary — everything already committed
+                # survives (bars via the sink, window records via the throttled
+                # flush + the outer finally's drain + ledger persist), every
+                # unissued window stays PLANNED/FAILED and is idempotently
+                # re-pulled by the NEXT pull. Latch + stop the remaining groups;
+                # deliberately NO Telegram alert (the operator asked for this) and
+                # never an ``error`` terminal — the report reads cancelled=True.
+                final_cancelled = True
+                final_still_failed += passes[-1].report.still_failed_windows if passes else 0
+                _LOG.warning(
+                    "universe.pull_all.cancelled",
+                    pull_id=pid,
+                    error=str(exc),
+                    rounds_completed=len(passes),
+                    note=(
+                        "operator cancel at the window boundary — committed work kept; "
+                        "the next pull resumes the remaining windows"
+                    ),
+                )
             except DailyQuotaExceeded as exc:
                 # The daily quota died MID-round (DEC-SPOT-QUOTA-MIDROUND-001, the
                 # spot arm of the options DEC-OPTIONS-UNTIL-CLEAN-001 mapping): the
@@ -2363,6 +2408,7 @@ def pull_all_spot(
                     final_auth_aborted
                     or final_quota_exhausted
                     or final_mass_empty_cause is not None
+                    or final_cancelled
                 ):
                     reason = (
                         "auth_expired"
@@ -2370,6 +2416,8 @@ def pull_all_spot(
                         else "quota_exhausted"
                         if final_quota_exhausted
                         else "mass_empty_halt"
+                        if final_mass_empty_cause is not None
+                        else "cancelled"
                     )
                     _LOG.warning(
                         "pull.step.halted",
@@ -2461,6 +2509,7 @@ def pull_all_spot(
                     final_auth_aborted
                     or final_quota_exhausted
                     or final_mass_empty_cause is not None
+                    or final_cancelled
                 ):
                     _LOG.warning(
                         "universe.pull_all.minute_skipped_global_stop",
@@ -2468,6 +2517,7 @@ def pull_all_spot(
                         auth_aborted=final_auth_aborted,
                         quota_exhausted=final_quota_exhausted,
                         mass_empty_halt=final_mass_empty_cause is not None,
+                        cancelled=final_cancelled,
                     )
                 else:
                     if ledger is not None:
@@ -2678,6 +2728,7 @@ def pull_all_spot(
             windows_skipped=sum(pr.skipped_windows for pr in phase_reports),
             ledger_load_failed=ledger_reload_failed,
             mass_empty_cause=final_mass_empty_cause,
+            cancelled=final_cancelled,
             # Honest-verdict settle tally (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the
             # per-pull ledger instance counted every window THIS pull newly settled
             # SKIPPED (fast-settle + streak promotion + degraded accept-gap), so the

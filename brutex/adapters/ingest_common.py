@@ -1813,6 +1813,42 @@ def partition_spot_steps(instruments: Sequence[Instrument]) -> tuple[SpotStepGro
     return tuple(groups)
 
 
+class PullCancelled(BruteXError):
+    """Operator cooperative cancel — a GRACEFUL pull-wide stop, NEVER an alert-bearing halt.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001: raised at a SAFE boundary ONLY (before a
+    window's vendor fetch — never mid-write), it rides both ingest spines'
+    ``_GLOBAL_STOP_ERRORS`` so the existing graceful-halt propagation applies
+    for free: the per-symbol/contract quarantine is bypassed, the fetch
+    pipeline drains its in-flight write tails, and the durable window ledger
+    is persisted by the controllers' existing ``finally`` blocks — so a
+    cancelled pull's on-disk state is bit-identical to a graceful stop at that
+    window boundary, and the next pull idempotently re-pulls ONLY the windows
+    the cancel left unsettled (Golden Rule #7). Deliberately EXCLUDED from the
+    job layer's :func:`~brutex.dashboard.pull_jobs.is_pull_halt` — an operator
+    cancel must never fire the CRITICAL Telegram pull-halt alert nor read as
+    an ``error`` terminal.
+    """
+
+
+#: The zero-arg cooperative-cancel probe threaded down the pull spines
+#: (DEC-JOB-COOPERATIVE-CANCEL-001). ``True`` ⇒ stop at the next safe boundary.
+CancelCheck: TypeAlias = Callable[[], bool]
+
+
+def raise_if_cancelled(should_stop: CancelCheck | None) -> None:
+    """Raise :class:`PullCancelled` iff *should_stop* is wired and reads ``True`` — O(1).
+
+    The ONE boundary-check helper (CLAUDE.md §11 COMMON) both spines call at
+    their window/contract boundaries: a ``None`` probe (every legacy caller)
+    is a no-op, so an un-wired path is byte-identical to before the feature.
+    """
+    if should_stop is not None and should_stop():
+        raise PullCancelled(
+            "pull cancelled at operator request (cooperative stop at the window boundary)"
+        )
+
+
 class StepOrderError(BruteXError):
     """A pull-step rank regression under ``StepOrderMonitor(raise_on_violation=True)``.
 
@@ -1947,8 +1983,10 @@ __all__ = [
     "OLD_GAP_HORIZON_DAYS",
     "SETTLED_SKIPPED_OPERATOR_THRESHOLD",
     "SYNTHETIC_DRY_RUN_LABEL",
+    "CancelCheck",
     "DateWindow",
     "LoopVerdict",
+    "PullCancelled",
     "PullStep",
     "PullVerdict",
     "PullVerdictKind",
@@ -1974,6 +2012,7 @@ __all__ = [
     "now_ist",
     "partition_spot_steps",
     "plan_windows",
+    "raise_if_cancelled",
     "retry_failed_windows",
     "run_until_clean",
     "summarize_conflicts",

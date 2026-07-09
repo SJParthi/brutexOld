@@ -108,6 +108,8 @@ from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    CancelCheck,
+    PullCancelled,
     PullStep,
     PullVerdict,
     StepOrderMonitor,
@@ -1142,8 +1144,19 @@ def _run_phase(
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is threaded verbatim into every
+    :func:`run_groww_option_ingest` pass — checked per ``(contract, interval)``
+    pair (the F&O window boundary) — and its propagated
+    :class:`~brutex.adapters.ingest_common.PullCancelled` is CAUGHT at the bucket
+    loop (like the mass-empty halt, but with NO Telegram alert — the operator
+    asked): the remaining steps are announced ``pull.step.halted``
+    (``reason="cancelled"``), the ``finally`` drains the pipeline + persists the
+    ledger, so a cancelled phase's on-disk state ≡ a graceful stop at that
+    boundary. ``None`` (every legacy caller) is byte-identical.
 
     The single ingest call site (CLAUDE.md §11 COMMON) — BOTH phases funnel through here,
     differing only by *interval* and the optional per-contract *contract_windows* bounds.
@@ -1367,6 +1380,7 @@ def _run_phase(
                 # in production the PersistentSymbolFormPreference over the
                 # instrument master, so the winner survives across pulls too.
                 form_preference=form_preference,
+                should_stop=should_stop,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1544,6 +1558,30 @@ def _run_phase(
             )
             if step_auth:
                 auth_latched = True
+    except PullCancelled as exc:
+        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spine
+        # raised at a (contract, interval) window boundary. Everything already
+        # committed survives (bars via the sink; window records via the finally's
+        # drain + ledger persist below); every un-fetched window stays
+        # PLANNED/unsettled — idempotently re-pulled next time. Deliberately NO
+        # Telegram alert (the operator asked for this stop); the sequencer's
+        # between-phase probe carries the "cancelled" attribution to the report.
+        _LOG.warning(
+            "historical.pull.cancelled",
+            error=str(exc),
+            note=(
+                "operator cancel at the window boundary — committed work kept; "
+                "the next pull resumes the remaining windows"
+            ),
+        )
+        for later_key, _later_bucket in ordered_buckets[buckets_started:]:
+            later_step = _STEP_FOR_BUCKET[later_key]
+            _LOG.warning(
+                "pull.step.halted",
+                step=later_step.label,
+                ordinal=int(later_step),
+                reason="cancelled",
+            )
     except MassEmptySettleHalt as exc:
         # The mass-empty circuit breaker TRIPPED mid-phase (DEC-EMPTY-WINDOW-CIRCUIT-
         # BREAKER-001 minor M-5 — the F&O bulk route's polished halt, mirroring the
@@ -1945,6 +1983,7 @@ def pull_contract_candles(
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -2289,6 +2328,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
                 form_preference=form_preference,
+                should_stop=should_stop,
             )
         finally:
             # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute

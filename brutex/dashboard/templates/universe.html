@@ -522,6 +522,15 @@
         <span class="pe-sub">spot → expiries + contracts → historical → pre-build · auto-gated, fail-closed · ticked rows scope it, else the whole universe</span>
       </span>
     </button>
+    <!-- Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): shown while a pull
+         runs; POSTs /api/v1/pull/cancel. The pull stops at the WINDOW boundary —
+         the in-flight window's fetch + durable write + ledger record complete
+         first, so the next pull resumes exactly the unsettled remainder. -->
+    <button class="pull-everything-btn" id="pullStopBtn" hidden
+            title="Cooperative stop — the current window finishes its durable write + ledger checkpoint, then the pull settles as an honest partial. The next pull resumes the remaining windows (nothing is lost).">
+      <span class="pe-icon">⏹</span>
+      <span class="pe-text"><b id="pullStopLabel">Stop pull</b></span>
+    </button>
   </div>
 
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
@@ -1639,7 +1648,45 @@ document.getElementById("tickconstbtn").onclick = async () => {
    setBulkDisabled so startAndPoll / finishLive call it unchanged. */
 function setBulkDisabled(on) {
   if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
+  // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): visible exactly while the
+  // Run button is disabled-because-running — startAndPoll disables, finishLive
+  // re-enables, and the attach branch ("already running — watch it below")
+  // rides the same call.
+  const stopBtn = document.getElementById('pullStopBtn');
+  if (stopBtn) {
+    stopBtn.hidden = !on;
+    if (!on) {
+      stopBtn.disabled = false;
+      const lbl = document.getElementById('pullStopLabel');
+      if (lbl) lbl.textContent = 'Stop pull';
+    }
+  }
 }
+
+/* Cooperative pull cancel (DEC-JOB-COOPERATIVE-CANCEL-001): POST the kind-gated
+   cancel route; the running pull stops at its next WINDOW boundary and settles
+   through the NORMAL poll path as an honest amber partial ("(cancelled)").
+   textContent only — never markup. */
+(function () {
+  const stopBtn = document.getElementById('pullStopBtn');
+  if (!stopBtn) return;
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    const lbl = document.getElementById('pullStopLabel');
+    if (lbl) lbl.textContent = 'Stopping — finishing current window…';
+    try {
+      const r = await fetch('/api/v1/pull/cancel', { method: 'POST' });
+      const j = await r.json();
+      if (!j.cancelling) {
+        if (lbl) lbl.textContent = 'No running pull to cancel';
+        stopBtn.disabled = false;
+      }
+    } catch (e) {
+      if (lbl) lbl.textContent = 'Cancel request failed — retry';
+      stopBtn.disabled = false;
+    }
+  };
+})();
 
 /* ── The LIVE feed: start a background pull, then poll /pull-progress ──
    The pull runs off the request thread (DEC-PULL-PROGRESS-LIVE-001); we POST to
@@ -2125,9 +2172,13 @@ async function pollProgress(label) {
       const subNote = subUnitNote(s, trackSubUnit(s));
       const suEl = document.getElementById('subunit');
       if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';
-      document.getElementById('pulltitle').textContent = s.open_ended
+      // Cooperative cancel visibility (DEC-JOB-COOPERATIVE-CANCEL-001): while
+      // the run's cancel token is set the header says so honestly — the pull
+      // finishes its current window's durable write, then settles.
+      const cancelPrefix = s.cancelling ? 'CANCELLING — finishing current window… · ' : '';
+      document.getElementById('pulltitle').textContent = cancelPrefix + (s.open_ended
         ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '')
-        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s);
+        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s));
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }

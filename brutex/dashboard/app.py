@@ -3496,6 +3496,9 @@ def build_app(
                     until_clean=True,
                     on_ledger_sync=_ledger_sync,
                     floor_store=instrument_store,
+                    # Cooperative cancel at the spot WINDOW boundary
+                    # (DEC-JOB-COOPERATIVE-CANCEL-001).
+                    should_stop=_pull_job.cancel_requested,
                 )
 
             def _run_metadata() -> MetadataPullReport:
@@ -3566,6 +3569,9 @@ def build_app(
                         on_ledger_sync=_hist_ledger_sync,
                         form_preference=form_preference,
                         prior_steps=prior_steps,
+                        # Cooperative cancel at the F&O (contract, interval)
+                        # window boundary (DEC-JOB-COOPERATIVE-CANCEL-001).
+                        should_stop=_pull_job.cancel_requested,
                     )
 
             def _warm_for_date() -> tuple[str, int] | None:
@@ -3988,6 +3994,14 @@ def build_app(
                         warm_options_movers=_warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
+                        # Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001):
+                        # the sequencer probes the job's per-run token BETWEEN
+                        # phases; the spot/historical bodies below thread the
+                        # SAME probe to their window boundaries. A cancelled
+                        # pull settles via the NORMAL path (amber partial with
+                        # the honest "(cancelled)" stop — never a red error,
+                        # never a fabricated green).
+                        should_stop=_pull_job.cancel_requested,
                     )
                 # Discovery-memo warm (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001 item
                 # 1b): re-seed EVERY discovery memo off ONE shared walk at the
@@ -4530,7 +4544,74 @@ def build_app(
             )
 
         snap["phases"] = await run_in_threadpool(_phases)
+        # ADDITIVE cancel visibility (DEC-JOB-COOPERATIVE-CANCEL-001): True while
+        # the CURRENT run's cooperative-cancel token is set — the frontend shows
+        # "cancelling — finishing current window…" until the job settles. Every
+        # pre-existing snapshot key is unchanged.
+        snap["cancelling"] = _pull_job.cancel_requested()
         return JSONResponse(snap)
+
+    @app.post("/api/v1/pull/cancel")
+    async def api_pull_cancel() -> JSONResponse:
+        """POST /api/v1/pull/cancel — request a COOPERATIVE cancel of the running pull.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside the pull/pipeline
+        Run buttons). Kind-gated: cancels ONLY a running PULL-kind job — a
+        running SWEEP is never cancelled through this route (use
+        ``/api/v1/sweep/cancel``), and an idle job is a ``{"cancelling": false}``
+        no-op. HONEST latency (Golden Rule #10): cooperative — the in-flight
+        window's fetch + durable write + ledger record always complete first
+        (≤ one fetch + the 90 s write deadline), then the job settles via the
+        NORMAL path as an honest amber partial ("(cancelled)" stop) — never a
+        red ✕, never a fabricated green; the durable ledger makes the next pull
+        resume exactly the unsettled remainder.
+        """
+        cancelling = (
+            _pull_job.running_job_kind == JOB_KIND_PULL and _pull_job.request_cancel()
+        )
+        return JSONResponse({"cancelling": bool(cancelling)})
+
+    @app.post("/api/v1/sweep/cancel")
+    async def api_sweep_cancel() -> JSONResponse:
+        """POST /api/v1/sweep/cancel — request a COOPERATIVE cancel of the running sweep.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001 (the Stop button beside 🚀 Run Sweep).
+        Writes the DURABLE cancel sidecar ``<results_root>/.sweep_cancel.json``
+        the engine probes at the tuple boundary — ONE mechanism covering the
+        dashboard's in-process sweep (``target: "in-process"``) AND a DETACHED
+        launch-page / CLI sweep whose live pid the launch state names
+        (``target: "detached"``). Nothing running ⇒ ``{"cancelling": false}``
+        and NO sidecar is written (a stray request must never pre-poison the
+        next launch — which also clears stale sidecars itself). HONEST latency
+        (Golden Rule #10): cooperative — the in-flight tuple (sequential) / the
+        drain of up to ``workers-1`` in-flight tuples (parallel) completes its
+        durable write chain first; a heavy k=5 tuple legitimately runs many
+        minutes, and a wedged worker ignores it (the stall watchdog remains
+        that class's terminal). A cancelled sweep's checkpoint is a CLEAN
+        resumable boundary — run again to resume.
+        """
+        from brutex.dashboard.launch_button import read_launch_state, state_liveness
+        from brutex.engine.sweep_cancel import request_cancel as request_sweep_cancel
+
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        root = default_results_root(lake)
+
+        def _cancel() -> dict[str, object]:
+            """Resolve the running-sweep target + write the sidecar (threadpool)."""
+            if _pull_job.running_job_kind == JOB_KIND_SWEEP:
+                request_sweep_cancel(root, source="route")
+                return {"cancelling": True, "target": "in-process"}
+            detached = read_launch_state(lake)
+            if detached is not None and state_liveness(detached) == "running":
+                request_sweep_cancel(root, source="route-detached")
+                return {"cancelling": True, "target": "detached"}
+            return {"cancelling": False}
+
+        return JSONResponse(await run_in_threadpool(_cancel))
 
     @app.get("/api/v1/universe/pull-verdict")
     async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route
