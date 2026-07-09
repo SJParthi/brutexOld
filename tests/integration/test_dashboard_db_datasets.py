@@ -230,12 +230,14 @@ class TestDbCandleDatasetsApi:
             "option_type",
             "interval",
             # READ-time derived combined moneyness label (DEC-FNO-MONEYNESS-001) + the
-            # value columns (DEC-DB-FNO-COLUMNS-001).
+            # value columns (DEC-DB-FNO-COLUMNS-001) + the decoded Greeks status
+            # (DEC-DB-FNO-DISPLAY-TRUTH-001).
             "moneyness",
             "spot",
             "intrinsic",
             "time_value",
             "days_to_expiry",
+            "greeks_status",
         ]
 
 

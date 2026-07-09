@@ -195,6 +195,20 @@ FNO_CANDLE_COLUMNS: Final[tuple[FnoCandleColumn, ...]] = (
         True,
         "Calendar days from the bar's IST date to expiry; None if undecodable.",
     ),
+    # READ-time derived Greeks status (DEC-DB-FNO-DISPLAY-TRUTH-001 item 3) — the stored
+    # ``greeks_provenance_id`` stamp's packed status decoded into words per bar via the ONE
+    # COMMON ``brutex.data.greeks_provenance.greeks_status_label``, so a NULL iv/delta is
+    # never explained only by a bare packed int. ADDITIVE — no schema-version bump (the
+    # version bumps only on a non-additive shape change; contrast v2, which DROPPED a column).
+    FnoCandleColumn(
+        "greeks_status",
+        "string",
+        "derived",
+        True,
+        'Decoded Greeks provenance status ("ok" / "below intrinsic — no unique IV" / …; '
+        '"not enriched" when no stamp — Greeks are stored on the 1minute partition; '
+        '"—" for a future).',
+    ),
 )
 
 

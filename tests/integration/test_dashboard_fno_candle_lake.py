@@ -208,3 +208,91 @@ class TestFnoCandleRegistryStep:
         )
         assert 'strike_step_confidence === "observed"' in template
         assert "stepnote" in template
+
+
+class TestFnoDisplayTruthPack:
+    """DEC-DB-FNO-DISPLAY-TRUTH-001 — the /db F&O display-truth pack, route +
+    template surfaces (items 3 / 9 / 10)."""
+
+    def test_greeks_status_words_reach_the_route(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Item 3 end-to-end: an enriched below-intrinsic bar's stored NULL reason
+        # renders as WORDS through the real route — never a bare "null" beside an
+        # opaque packed int.
+        from brutex.data.greeks_provenance import (
+            RATE_SOURCE_ID_FIXED,
+            STATUS_BELOW_INTRINSIC,
+            STYLE_EUROPEAN_EXACT,
+            pack_greeks_provenance,
+        )
+        from brutex.data.models import FnoGreeksBar
+
+        bar = FnoGreeksBar(
+            timestamp=datetime(2025, 1, 2, 9, 15, tzinfo=UTC),
+            open=Decimal("100.10"),
+            high=Decimal("101.20"),
+            low=Decimal("99.50"),
+            close=Decimal("100.80"),
+            volume=375,
+            open_interest=12000,
+            greeks_provenance_id=pack_greeks_provenance(
+                rate_source_id=RATE_SOURCE_ID_FIXED,
+                rate_version=1,
+                style_flag=STYLE_EUROPEAN_EXACT,
+                status=STATUS_BELOW_INTRINSIC,
+            ),
+        )
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+        sink.append(exchange="NSE", segment="FNO", symbol=_CE, interval="1minute", bars=[bar])
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get(
+            "/api/v1/db/candles",
+            params={"exchange": "NSE", "segment": "FNO", "symbol": _CE, "interval": "1minute"},
+        ).json()
+        idx = page["columns"].index("greeks_status")
+        assert page["rows"][0][idx] == "below intrinsic — no unique IV"
+        # Item 9 provenance key rides every F&O page (a 1minute page joined — or
+        # not — at 1minute; here no spot exists, so the honest None).
+        assert "spot_join_interval" in page
+
+    def test_greeks_status_advertised_in_the_fno_schema(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Item 3: the datasets endpoint's advertised schema carries the ADDITIVE
+        # derived column (no version bump — the bump law is non-additive-only).
+        _write(tmp_path, segment="FNO", symbol=_CE, oi=12000)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/db/candles/datasets").json()
+        schema = {c["name"]: c for c in body["fno_schema"]}
+        assert schema["greeks_status"]["source"] == "derived"
+
+    def test_db_template_renders_the_spot_join_fallback_note(self) -> None:
+        # Item 9 frontend (substring-presence envelope — the #1529/#1530 accepted
+        # precedent; no headless JS runner).
+        import brutex.dashboard as dashboard_pkg
+
+        template = (Path(dashboard_pkg.__file__).parent / "templates" / "db.html").read_text(
+            encoding="utf-8"
+        )
+        assert "underlying spot joined from the 1minute series" in template
+        assert "spot_join_interval" in template
+        assert "tfnote" in template
+        # The tbody-patch gate requires the note's presence to be unchanged —
+        # never a stale note across paging (the wantNote/wantContig idiom).
+        assert 'grid.querySelector(".tfnote")' in template
+
+    def test_db_template_marks_expired_dte_and_titles_the_spot_headers(self) -> None:
+        # Item 10 frontend (substring-presence envelope): the negative
+        # days_to_expiry "(expired)" marker + the per-tab <th title> provenance map.
+        import brutex.dashboard as dashboard_pkg
+
+        template = (Path(dashboard_pkg.__file__).parent / "templates" / "db.html").read_text(
+            encoding="utf-8"
+        )
+        assert '(cell + " (expired)")' in template
+        assert "const SPOT_TITLES = {" in template
+        assert "derived at read time (not stored)" in template
+        assert "stored spot used by the Greeks enrichment (per-bar stamp)" in template
+        assert "stored per-bar spot stamp written at ingest" in template
+        assert "function gridTheadHtml(cols, titles)" in template
