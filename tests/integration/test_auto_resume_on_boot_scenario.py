@@ -135,12 +135,14 @@ def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
 ) -> None:
     """DEC-AUTO-RESUME-INPROCESS-001 — the 2026-07-09T02:47:24Z incident shape.
 
-    A REAL durable window ledger on disk with a FAILED window, the dashboard's
-    lifetime rw ``instruments.duckdb`` handle HELD OPEN, the opt-in flag ON:
-    the boot resume must fire the IN-PROCESS launch (through the intent
-    machinery — :func:`~brutex.dashboard.pull_intent.run_legacy_resume`) —
-    exactly where the deleted subprocess child died in ~0.3 s on DuckDB's
-    exclusive cross-process file lock, stranding the failed windows silently.
+    A REAL durable window ledger on disk with a FAILED window, BOTH dashboard
+    DuckDB handles HELD OPEN — the boot-window L3 sweeper's ``catalog.duckdb``
+    (the incident traceback's actual first-raising site) and the lifetime rw
+    ``instruments.duckdb`` — and the opt-in flag ON: the boot resume must fire
+    the IN-PROCESS launch (through the intent machinery —
+    :func:`~brutex.dashboard.pull_intent.run_legacy_resume`) — exactly where
+    the deleted subprocess child died in ~0.3 s on DuckDB's exclusive
+    cross-process file locks, stranding the failed windows silently.
     """
     import pytest
 
@@ -152,6 +154,7 @@ def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
         ResumeAction,
         run_legacy_resume,
     )
+    from brutex.data.catalog import Catalog
     from brutex.data.instrument_store import InstrumentStore
     from brutex.data.window_ledger_store import load_window_ledger, save_window_ledger
 
@@ -164,7 +167,9 @@ def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
     ledger.record(_window(5), raw_bars=0, error_type="RATE_LIMIT", bars_appended=0, now=now)
     save_window_ledger(ledger, lake_root)
 
-    # The dashboard's lifetime READ-WRITE store handle — the lock the old child died on.
+    # BOTH dashboard handles the old child died on: the boot-window L3 sweeper's
+    # catalog (the incident's first-raising site) + the lifetime rw store.
+    catalog = Catalog.open(lake_root / "catalog.duckdb")
     store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
         reloaded = load_window_ledger(lake_root)
@@ -195,3 +200,4 @@ def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
         assert direct is ResumeAction.FIRED
     finally:
         store.close()
+        catalog.close()

@@ -698,12 +698,16 @@ def run_legacy_resume(
 
     DEC-AUTO-RESUME-INPROCESS-001 — replaces the deleted
     ``brutex fetch --until-clean`` subprocess child, which was DOA on every
-    opted-in boot: the dashboard holds ``instruments.duckdb`` READ-WRITE for its
-    lifetime, so the child's own ``InstrumentStore.open`` hit DuckDB's exclusive
-    cross-process file lock and exited 1 in ~0.3 s (stderr inherited, never
-    captured), stranding the outstanding windows silently. Running IN-PROCESS
-    through the dashboard's own ``/pull-pipeline`` launcher needs NO second
-    store handle, so the lock class is structurally gone.
+    opted-in boot: BOTH DuckDB files its ``cmd_fetch`` must open are
+    exclusively locked against it — ``<lake>/catalog.duckdb`` FIRST (held by
+    the dashboard's boot-window L3 lake-heal sweeper — the incident's actual
+    first-raising site, ``catalog.py`` ``duckdb.connect``), and one step
+    later ``<lake>/instruments.duckdb``, which the dashboard holds READ-WRITE
+    for its LIFETIME — so the child exited 1 in ~0.3 s (stderr inherited,
+    never captured), stranding the outstanding windows silently. Running
+    IN-PROCESS through the dashboard's own ``/pull-pipeline`` launcher opens
+    NO second catalog/store handle, so the whole lock class is structurally
+    gone.
 
     Persist a synthesized whole-universe intent (:func:`synthesize_legacy_intent`)
     iff none is already on disk — a pre-existing intent (reachable here only when

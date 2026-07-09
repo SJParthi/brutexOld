@@ -3058,14 +3058,21 @@ def _start_auto_resume_on_boot(
     launcher via :func:`~brutex.dashboard.pull_intent.run_legacy_resume`
     (DEC-AUTO-RESUME-INPROCESS-001). This REPLACES the deleted
     ``brutex fetch --until-clean`` subprocess child, which was DOA on every
-    opted-in boot: the dashboard holds ``instruments.duckdb`` READ-WRITE for its
-    lifetime, so the child's own ``InstrumentStore.open`` hit DuckDB's exclusive
-    cross-process file lock (read-only opens also refused) and exited 1 in
-    ~0.3 s with inherited (never captured) stderr — the outstanding windows
-    stranded silently (production incident 2026-07-09T02:47:24Z). In-process,
-    no second store handle is ever opened, so the lock class is structurally
-    gone; the resume also inherits the intent machinery's restart cap +
-    CRITICAL alert + red banner + single-flight peer probe.
+    opted-in boot — BOTH DuckDB files the child must open are exclusively
+    locked against it: its ``cmd_fetch`` first opens
+    ``Catalog.open(<lake>/catalog.duckdb)``, which the dashboard's boot-time
+    L3 lake-heal ``StartupSweeper`` (launched right after this launcher) holds
+    for its sweep window — the incident's actual first-raising site
+    (``catalog.py`` ``duckdb.connect``, production traceback
+    2026-07-09T02:47:24Z) — and even when that is momentarily free the child
+    dies one step later at ``_resolve_brute_force_instruments`` →
+    ``InstrumentStore.open(<lake>/instruments.duckdb)``, which the dashboard
+    holds READ-WRITE for its LIFETIME (read-only opens also refused). Exit 1
+    in ~0.3 s with inherited (never captured) stderr — the outstanding
+    windows stranded silently. In-process, no second catalog/store handle is
+    ever opened, so the whole lock class is structurally gone; the resume
+    also inherits the intent machinery's restart cap + CRITICAL alert + red
+    banner + single-flight peer probe.
 
     An UNWIRED *resume_legacy* (the intent-store build failed, so the app never
     exposed the seam) makes the legacy arm raise into ``maybe_resume_on_boot``'s

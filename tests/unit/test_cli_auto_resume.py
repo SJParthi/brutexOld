@@ -5,25 +5,29 @@ DEC-AUTO-RESUME-ON-BOOT-001 (the gated decision) + DEC-PULL-INTENT-RESUME-001
 (the ONE decision point with the intent resume) + DEC-AUTO-RESUME-INPROCESS-001
 (the in-process legacy resume): the legacy boot resume used to SPAWN
 ``python -m brutex fetch --until-clean --lake-root <root>`` — a child that was
-DOA on every opted-in boot, because the dashboard holds ``instruments.duckdb``
-READ-WRITE for its lifetime and the child's own ``InstrumentStore.open`` hit
-DuckDB's exclusive cross-process file lock (uncaught ``CatalogError`` → exit 1
-in ~0.3 s, stderr inherited and never captured — the 2026-07-09T02:47:24Z
-production incident). The child machinery
-(``_spawn_auto_resume_pull`` / ``_auto_resume_child_argv`` /
+DOA on every opted-in boot, because BOTH DuckDB files its ``cmd_fetch`` must
+open are exclusively locked against it: ``<lake>/catalog.duckdb`` FIRST
+(``Catalog.open`` before ``_resolve_brute_force_instruments``; held by the
+dashboard's boot-window L3 lake-heal sweeper — the 2026-07-09T02:47:24Z
+production traceback's actual first-raising site, ``catalog.py``
+``duckdb.connect``), and one step later ``<lake>/instruments.duckdb``, which
+the dashboard holds READ-WRITE for its LIFETIME (uncaught ``CatalogError`` →
+exit 1 in ~0.3 s either way, stderr inherited and never captured). The child
+machinery (``_spawn_auto_resume_pull`` / ``_auto_resume_child_argv`` /
 ``_validate_auto_resume_argv``) is DELETED; the legacy arm now fires the
 injected IN-PROCESS ``resume_legacy`` seam
 (``app.state.brutex_resume_legacy`` →
-:func:`brutex.dashboard.pull_intent.run_legacy_resume`), which needs no second
-store handle — so the lock class is structurally gone.
+:func:`brutex.dashboard.pull_intent.run_legacy_resume`), which opens no second
+catalog/store handle — so the whole lock class is structurally gone.
 
 These tests pin, through the REAL ``_start_auto_resume_on_boot`` daemon-thread
-seam: (a) the incident class itself (a REAL rw-held ``instruments.duckdb``
-makes a child-process store open exit non-zero — the documented DOA shape);
-(b) the fix (the in-process resume fires with ZERO ``subprocess.Popen`` calls,
-even while the same store is held); (c) the honest ``error`` verdict when the
-in-process seam is unwired (never a false ``resumed``, never a DOA child); and
-(d) the intent-exclusivity decision point, unchanged.
+seam: (a) the incident class itself (a REAL rw-held ``catalog.duckdb`` AND a
+REAL rw-held ``instruments.duckdb`` each make a child-process open exit
+non-zero — BOTH documented DOA arms); (b) the fix (the in-process resume fires
+with ZERO ``subprocess.Popen`` calls, even while the store is held); (c) the
+honest ``error`` verdict when the in-process seam is unwired (never a false
+``resumed``, never a DOA child); and (d) the intent-exclusivity decision
+point, unchanged.
 """
 
 from __future__ import annotations
@@ -139,34 +143,69 @@ class TestInProcessLegacyResume:
 
 
 class TestIncidentClassRegression:
-    """The 2026-07-09 incident shape: a rw-held ``instruments.duckdb`` vs the resume.
+    """The 2026-07-09 incident shape: dashboard-held DuckDB locks vs the resume.
 
-    (a) documents the DELETED child's death class — a SECOND process opening the
-    store while the dashboard-shaped parent holds it rw exits non-zero on the
-    DuckDB exclusive lock; (b) proves the NEW in-process path fires under the
-    SAME held lock with zero subprocess spawns.
+    (a)+(b) document the DELETED child's death class on BOTH files its
+    ``cmd_fetch`` had to open — ``catalog.duckdb`` (opened FIRST; the incident
+    traceback's actual first-raising site, held by the dashboard's boot-window
+    L3 lake-heal sweeper) and ``instruments.duckdb`` (opened one step later;
+    held by the dashboard READ-WRITE for its lifetime) — a SECOND process
+    opening either while a dashboard-shaped parent holds it exits non-zero on
+    the DuckDB exclusive lock; (c) proves the NEW in-process path fires under
+    the SAME held lock with zero subprocess spawns.
     """
+
+    @staticmethod
+    def _run_child(child_code: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", child_code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    def test_child_process_catalog_open_is_doa_while_dashboard_sweeps(self, tmp_path: Path) -> None:
+        """The incident's FIRST-raising arm: ``Catalog.open(<lake>/catalog.duckdb)``.
+
+        ``cmd_fetch`` opens the catalog BEFORE ``_resolve_brute_force_instruments``;
+        the dashboard's boot-window L3 lake-heal sweeper holds the same file —
+        the production traceback died here (``catalog.py`` ``duckdb.connect``).
+        """
+        pytest.importorskip("duckdb", reason="the incident class needs the real DuckDB lock")
+        from brutex.data.catalog import Catalog
+
+        db = tmp_path / "catalog.duckdb"
+        catalog = Catalog.open(db)  # the L3 sweeper's boot-window handle
+        try:
+            proc = self._run_child(
+                "from pathlib import Path\n"
+                "from brutex.data.catalog import Catalog\n"
+                f"Catalog.open(Path({str(db)!r}))\n"
+            )
+        finally:
+            catalog.close()
+        assert proc.returncode != 0, "the child MUST die on the exclusive DuckDB lock"
+        assert "CatalogError" in proc.stderr or "lock" in proc.stderr.lower()
 
     def test_child_process_store_open_is_doa_while_dashboard_holds_store(
         self, tmp_path: Path
     ) -> None:
+        """The DETERMINISTIC arm: the dashboard's LIFETIME-held ``instruments.duckdb``.
+
+        Even when the catalog is momentarily free, the child dies one step
+        later here — the store handle is held for the whole dashboard process.
+        """
         pytest.importorskip("duckdb", reason="the incident class needs the real DuckDB lock")
         from brutex.data.instrument_store import InstrumentStore
 
         db = tmp_path / "instruments.duckdb"
         store = InstrumentStore.open(db)  # the dashboard's lifetime rw handle
         try:
-            child_code = (
+            proc = self._run_child(
                 "from pathlib import Path\n"
                 "from brutex.data.instrument_store import InstrumentStore\n"
                 f"InstrumentStore.open(Path({str(db)!r}))\n"
-            )
-            proc = subprocess.run(
-                [sys.executable, "-c", child_code],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
             )
         finally:
             store.close()

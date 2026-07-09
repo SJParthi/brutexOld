@@ -4196,8 +4196,11 @@ def build_app(
             Exposed as ``app.state.brutex_resume_legacy`` for the
             ``cli.cmd_dashboard`` startup launcher (DEC-AUTO-RESUME-INPROCESS-001
             — replaces the deleted DOA ``brutex fetch --until-clean`` subprocess
-            child, which died in ~0.3 s on DuckDB's exclusive cross-process
-            ``instruments.duckdb`` lock every opted-in boot). Every load-bearing
+            child, which died in ~0.3 s every opted-in boot on DuckDB's
+            exclusive cross-process locks: ``catalog.duckdb`` first — held by
+            the boot-window L3 lake-heal sweeper, the incident's first-raising
+            site — and the dashboard's lifetime-held ``instruments.duckdb``
+            one step later). Every load-bearing
             decision lives in the 100 %-tested
             :func:`~brutex.dashboard.pull_intent.run_legacy_resume` /
             :func:`~brutex.dashboard.pull_intent.run_auto_resume`; this binding
