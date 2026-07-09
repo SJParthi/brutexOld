@@ -1508,6 +1508,8 @@ def sidecar_paths_from_ref(run_dir: Path, tuple_ref: str) -> SidecarPaths | None
         aggs=base / f"{stem}.aggs.parquet",
         equity=base / f"{stem}.equity.parquet",
         stamp=base / f"{stem}.stamp.json",
+        resilience=base / f"{stem}.resilience.parquet",
+        resilience_stamp=base / f"{stem}.resilience.stamp.json",
     )
 
 

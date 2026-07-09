@@ -210,6 +210,8 @@ class TestSidecarPathsFor:
             aggs=base / "bull_k3_deadbeef00000000.aggs.parquet",
             equity=base / "bull_k3_deadbeef00000000.equity.parquet",
             stamp=base / "bull_k3_deadbeef00000000.stamp.json",
+            resilience=base / "bull_k3_deadbeef00000000.resilience.parquet",
+            resilience_stamp=base / "bull_k3_deadbeef00000000.resilience.stamp.json",
         )
 
     def test_nothing_lands_inside_the_globbed_sweeps_tree(self, tmp_path: Path) -> None:
@@ -218,7 +220,14 @@ class TestSidecarPathsFor:
         root = tmp_path / "sweeps"
         store = root / "NIFTY" / "5minute" / "bull_k3_deadbeef00000000.parquet"
         mapped = sidecar_paths_for(store, root, run_id=_GRID_RUN)
-        for path in (mapped.trades, mapped.aggs, mapped.equity, mapped.stamp):
+        for path in (
+            mapped.trades,
+            mapped.aggs,
+            mapped.equity,
+            mapped.stamp,
+            mapped.resilience,
+            mapped.resilience_stamp,
+        ):
             assert not path.is_relative_to(root), path
 
     def test_rejects_store_outside_root(self, tmp_path: Path) -> None:

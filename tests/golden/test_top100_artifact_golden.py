@@ -39,7 +39,7 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
-_GOLDEN_TOP100_SHA256 = "db2cfaffcf4786988a059595a46a3c720897f9021b9a9588e42d29bc152e4764"
+_GOLDEN_TOP100_SHA256 = "5c5fe695f6b4f23f510c6b210b78cc6dedef9c4377f99f46486dd5dbe22d8134"
 
 
 def _fixture_artifact() -> Top100Artifact:

@@ -88,6 +88,14 @@ from brutex.engine.baseline import baseline_filename, compute_baseline, write_ba
 from brutex.engine.combo_aggregates import ComboAggregate, aggregate_combo
 from brutex.engine.minute_path import MinuteIndex
 from brutex.engine.reference_series import TradeReferenceStamper
+from brutex.engine.resilience_streaks import (
+    ResilienceStreaks,
+    fold_resilience,
+    load_resilience_stamp,
+    read_captured_trades,
+    read_resilience_records,
+    write_resilience_sidecar,
+)
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.session_lens import build_session_lens
 from brutex.engine.stage1a import build_bar_bits
@@ -241,6 +249,7 @@ class _Tallies:
     tuples_skipped_current: int = 0
     tuples_missing_store: int = 0
     tuples_errored: int = 0
+    resilience_backfilled: int = 0
     combos_captured: int = 0
     combos_parity_failed: int = 0
     combos_zero_trades: int = 0
@@ -362,12 +371,21 @@ def _build_tuple_sidecars(
     store_hash: str,
     tallies: _Tallies,
 ) -> None:
-    """Capture + aggregate + persist one STALE tuple's sidecar trio."""
+    """Capture + aggregate + persist one STALE tuple's sidecar trio + resilience.
+
+    The resilience fold (:mod:`brutex.engine.resilience_streaks`) runs BESIDE
+    ``aggregate_combo`` over the SAME already-materialised ``capture.trades``
+    (one extra linear pass, O(trades) time, run-END only — ZERO hot-path
+    diffs), sharing the ONE hoisted ``fp`` fingerprint; its sibling
+    ``.resilience.parquet`` + own stamp are written right after the trio (never
+    through :func:`write_tuple_sidecars` — structurally collision-free).
+    """
     bar_bits = build_bar_bits(
         bars, proximity=tuple_.proximity, prior_n=grid.prior_n, fib_anchor=tuple_.fib_anchor
     )
     captures = []
     aggs: list[ComboAggregate] = []
+    resiliences: list[ResilienceStreaks] = []
     for row in rows:
         capture = capture_combo(
             row,
@@ -390,14 +408,24 @@ def _build_tuple_sidecars(
         if capture.vix_missing_trades > 0:
             _warn_vix_miss(row.run_id, capture.vix_missing_trades, tallies)
         captures.append(capture)
+        fp = trade_fingerprint(capture.trades)
         aggs.append(
             aggregate_combo(
                 capture,
                 row,
                 lens=context.lens,
                 composite_score=None,
-                fingerprint=trade_fingerprint(capture.trades),
+                fingerprint=fp,
                 start_equity_paisa=grid.start_equity_paisa,
+            )
+        )
+        resiliences.append(
+            fold_resilience(
+                row.run_id,
+                capture.trades,
+                parity_ok=capture.parity_ok,
+                start_equity_paisa=grid.start_equity_paisa,
+                fingerprint=fp,
             )
         )
     composites = _composites_for({row.run_id: row for row in rows}, aggs)
@@ -408,6 +436,35 @@ def _build_tuple_sidecars(
         [agg.to_record() for agg in aggs],
         store_content_hash=store_hash,
     )
+    write_resilience_sidecar(paths, resiliences, store_content_hash=store_hash)
+
+
+def _backfill_resilience(
+    paths: SidecarPaths, *, store_hash: str, start_equity_paisa: int
+) -> int:
+    """Adoption backfill — fold the resilience sidecar from the CURRENT trio.
+
+    For a lake that already ran the depth pass BEFORE this feature (the trio is
+    current but the resilience sidecar is absent/stale): the record is re-folded
+    from the on-disk trades sidecar + the agg records — NO re-simulation. The
+    fingerprint + parity verdict come from each agg row and the trades are read
+    back exactly (epoch-µs → tz-aware UTC), so the rebuilt ``.resilience.parquet``
+    is BYTE-IDENTICAL to a fresh build's. Returns the number of records folded.
+    """
+    aggs = _load_agg_records(paths)
+    trades_by_run = read_captured_trades(paths.trades)
+    records = [
+        fold_resilience(
+            agg.run_id,
+            trades_by_run.get(agg.run_id, []),
+            parity_ok=agg.parity_ok,
+            start_equity_paisa=start_equity_paisa,
+            fingerprint=agg.fingerprint,
+        )
+        for agg in aggs
+    ]
+    write_resilience_sidecar(paths, records, store_content_hash=store_hash)
+    return len(records)
 
 
 def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
@@ -463,6 +520,10 @@ def _pool_tuple(
     (write-then-verify, and a resumed tuple contributes identically).
     """
     agg_by_id = {agg.run_id: agg for agg in _load_agg_records(paths)}
+    # ONE bounded read of the sibling resilience sidecar per tuple (the
+    # _load_agg_records precedent); an absent/stale sidecar → {} → each
+    # candidate carries an honest ``resilience=None`` (annotation-only).
+    resilience_by_id = read_resilience_records(paths)
     tuple_ref = f"{tuple_.instrument}/{tuple_.tf.label}/{store_stem}"
     candidates: list[Top100Candidate] = []
     for row in rows:
@@ -483,6 +544,7 @@ def _pool_tuple(
                 sl_paisa=tuple_.sl_paisa,
                 tp_paisa=tuple_.tp_paisa,
                 tuple_ref=tuple_ref,
+                resilience=resilience_by_id.get(row.run_id),
             )
         )
     passers = [c for c in candidates if passes_hard_gates(c.row, c.agg)]
@@ -607,12 +669,27 @@ def run_results_depth_pass(
             paths = sidecar_paths_for(store_path, out_root, run_id=run_id)
             rows = ResultsStore.load(store_path).rows()
             stamp = load_stamp(paths)
-            if stamp is not None and stamp.store_content_hash == store_hash:
+            trio_current = stamp is not None and stamp.store_content_hash == store_hash
+            res_stamp = load_resilience_stamp(paths)
+            res_current = res_stamp is not None and res_stamp.store_content_hash == store_hash
+            if trio_current and res_current:
                 tallies.tuples_skipped_current += 1
                 _LOG.info(
                     "results_depth.tuple_skipped_current",
                     store=str(store_path),
-                    run_ids=stamp.run_ids,
+                    run_ids=stamp.run_ids if stamp is not None else 0,
+                )
+            elif trio_current:
+                # ADOPTION BACKFILL: the trio is current but the resilience
+                # sidecar is absent/stale — re-fold it from disk, NO re-sim.
+                folded = _backfill_resilience(
+                    paths, store_hash=store_hash, start_equity_paisa=grid.start_equity_paisa
+                )
+                tallies.resilience_backfilled += 1
+                _LOG.info(
+                    "results_depth.resilience_backfilled",
+                    store=str(store_path),
+                    records=folded,
                 )
             else:
                 _build_tuple_sidecars(
