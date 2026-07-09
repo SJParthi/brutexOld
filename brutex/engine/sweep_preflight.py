@@ -105,8 +105,10 @@ class FreshnessReport:
 
     DEC-SUSPICION-SWEEP-FIXES-001 (G1). The zero-bar :class:`PreflightReport`
     refuses a MISSING slice; this refuses a PRESENT-but-STALE one: a stored
-    derived timeframe that no longer equals a fresh re-derivation from its
-    1-minute base (a 1m backfill after the last prebuild, a
+    derived table — an intraday TF OR the derived ``1day``
+    (DEC-MOVERS-STORED-FRESHNESS-001 fold-in) — that no longer equals a fresh
+    re-derivation from its 1-minute base (a 1m backfill after the last
+    prebuild, a kill-9 mid-incremental-re-derive, a
     pre-DEC-RESAMPLE-ANCHOR-002 grid) would feed the engine bars that disagree
     with the lake's own base data — and the run identity would hash the stale
     snapshot as if it were canonical (Golden Rule #4). Correctness > everything
@@ -119,8 +121,8 @@ class FreshnessReport:
         drifted from a fresh re-derivation, in sorted deterministic order.
     checked
         Total pairs the freshness source could verify (pairs it abstained on —
-        no stored derived partition / no 1-minute base / a non-derived
-        interval — are NOT counted; see
+        no stored derived partition / no 1-minute base / the fetched
+        ``1minute`` / an FNO-segment ``1day`` — are NOT counted; see
         :func:`~brutex.data.tf_autoderive.lake_derived_freshness_verdicts`).
     """
 
@@ -147,9 +149,12 @@ def preflight_derived_freshness(verdicts: Mapping[tuple[str, str], str]) -> Fres
 
     *verdicts* maps each VERIFIABLE requested ``(symbol, interval)`` pair to
     :func:`~brutex.data.tf_autoderive.compare_derived_freshness`'s verdict
-    (``"fresh"`` / ``"stale"``) — anything not exactly ``"fresh"`` counts stale
-    (fail-closed: an unexpected verdict string can never silently pass).
-    Deterministic sorted output; pure + O(pairs).
+    (intraday TFs) or
+    :func:`~brutex.data.tf_autoderive.compare_daily_freshness`'s (the derived
+    ``1day`` — DEC-MOVERS-STORED-FRESHNESS-001 fold-in), ``"fresh"`` /
+    ``"stale"`` — anything not exactly ``"fresh"`` counts stale (fail-closed:
+    an unexpected verdict string can never silently pass). Deterministic
+    sorted output; pure + O(pairs).
     """
     stale = tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
     return FreshnessReport(stale=stale, checked=len(verdicts))

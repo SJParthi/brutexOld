@@ -1162,7 +1162,11 @@ def _daily_stored_is_stale(stored: Sequence[CandleBar], derived: Sequence[Candle
     ``open_interest=None``). Values stay EXACT — no tolerance band (both sides
     are 2dp-snapped at the write boundary, DEC-SPOT-PRICE-2DP-001; the derive's
     OHLC are element-SELECTIONS of already-2dp 1-minute values plus an int
-    volume sum, so the write snap is an identity here).
+    volume sum, so the write snap is an identity here). The sweep-preflight
+    twin :func:`brutex.data.tf_autoderive.compare_daily_freshness` deliberately
+    INCLUDES the timestamp — the sweep consumes the ``1day`` stamps into run
+    identity (Golden Rule #4), a different honesty plane from this read-only
+    display compare — so the two comparators must never be "unified".
     """
     return [(b.open, b.high, b.low, b.close, b.volume) for b in stored] != [
         (b.open, b.high, b.low, b.close, b.volume) for b in derived

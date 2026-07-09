@@ -12,13 +12,18 @@ removed auto-derive surface stays removed.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
 from brutex.data import tf_autoderive
-from brutex.data.tf_autoderive import compare_derived_freshness
+from brutex.data.tf_autoderive import compare_daily_freshness, compare_derived_freshness
 
 _OPEN_UTC = datetime(2025, 6, 9, 3, 45, tzinfo=UTC).replace(tzinfo=None)
+
+# Trading days for the 1day-arm fixtures (2024-01-02/03 are real NSE sessions).
+_D1 = date(2024, 1, 2)
+_D2 = date(2024, 1, 3)
+_D3 = date(2024, 1, 4)
 
 
 def _df_1m(n_bars: int = 20) -> pl.DataFrame:
@@ -87,10 +92,12 @@ class TestAutoDeriveSurfaceRemoved:
                 f"{gone} must stay removed — derived TFs are written only by the "
                 "pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001)"
             )
-        # The compare core + the sweep-preflight freshness source + its shared lake
-        # reader (DEC-SUSPICION-SWEEP-FIXES-001 G1) — and NOTHING of the removed
-        # auto-derive arm.
+        # The compare cores (intraday + the 1day sibling of
+        # DEC-MOVERS-STORED-FRESHNESS-001) + the sweep-preflight freshness source +
+        # its shared lake reader (DEC-SUSPICION-SWEEP-FIXES-001 G1) — and NOTHING
+        # of the removed auto-derive arm.
         assert tf_autoderive.__all__ == [
+            "compare_daily_freshness",
             "compare_derived_freshness",
             "lake_derived_freshness_verdicts",
             "read_lake_bars_frame",
@@ -144,6 +151,67 @@ def _write_derived(lake_root, sink, *, symbol: str = "NIFTY", interval: str = "5
         symbol=symbol,
         interval=interval,
         bars=frame_to_candle_bars(derived),
+    )
+
+
+def _day_1m_bars(day: date, *, n_bars: int = 20, base: str = "100.00"):
+    """*n_bars* in-session 1-minute bars (09:16 IST →) on *day*."""
+    from datetime import timezone
+    from decimal import Decimal
+
+    from brutex.data.models import CandleBar
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    bars = []
+    for i in range(n_bars):
+        ts = datetime(day.year, day.month, day.day, 9, 16 + i, tzinfo=ist).astimezone(UTC)
+        close = Decimal(base) + Decimal(i) / 10
+        bars.append(
+            CandleBar(
+                timestamp=ts,
+                open=close - Decimal("0.05"),
+                high=close + Decimal("0.05"),
+                low=close - Decimal("0.10"),
+                close=close,
+                volume=1000,
+                open_interest=None,
+            )
+        )
+    return bars
+
+
+def _seed_lake_1m_days(lake_root, days, symbol: str = "NIFTY"):
+    """Write one 1-minute session per day in *days* to a real Parquet lake; return the sink."""
+    from pathlib import Path
+
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=Path(lake_root)))
+    for j, day in enumerate(days):
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol=symbol,
+            interval="1minute",
+            bars=_day_1m_bars(day, base=f"{100 + j}.00"),
+        )
+    return sink
+
+
+def _write_daily_derived(lake_root, sink, *, before: date, symbol: str = "NIFTY") -> None:
+    """Materialise the derived ``1day`` from the STORED 1-minute via the canonical
+    midnight-IST daily law + the REAL lake writer (the prebuild write path)."""
+    from brutex.data.spot_daily_resample import resample_1m_to_daily
+
+    symbol_dir = lake_root / "bars" / "NSE" / "INDEX" / symbol
+    df_1m = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute")
+    sink.append(
+        exchange="NSE",
+        segment="INDEX",
+        symbol=symbol,
+        interval="1day",
+        bars=resample_1m_to_daily(df_1m, before=before),
     )
 
 
@@ -278,5 +346,297 @@ class TestLakeDerivedFreshnessVerdicts:
         assert verdicts == {
             ("NIFTY", "5minute"): "fresh",
             ("NIFTY", "15minute"): "fresh",
+        }
+        assert reads["1minute"] == 1
+
+
+class TestCompareDailyFreshness:
+    """The ``1day`` comparator (DEC-MOVERS-STORED-FRESHNESS-001 fold-in — closes
+    the BND-5b sweep-preflight abstain on the derived ``1day``)."""
+
+    def _frames(self, tmp_path, *, days, daily_before: date) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """Seed 1m for *days* + a ``1day`` partition derived at *daily_before*
+        through the REAL writer path; return the two read-back compare frames."""
+        sink = _seed_lake_1m_days(tmp_path, days)
+        _write_daily_derived(tmp_path, sink, before=daily_before)
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        return (
+            tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute"),
+            tf_autoderive.read_lake_bars_frame(symbol_dir, "1day"),
+        )
+
+    def test_fresh_through_the_real_writer_round_trip(self, tmp_path) -> None:
+        """The dtype/stamp round-trip proof: derive + WRITE via the production
+        path, read back, verdict fresh — midnight-IST stamps survive the lake."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D3)
+        assert df_1day.height == 2
+        assert compare_daily_freshness(df_1m, df_1day, before=_D3) == "fresh"
+
+    def test_value_drift_is_stale(self, tmp_path) -> None:
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D3)
+        drifted = df_1day.with_columns((pl.col("volume") + 1).alias("volume"))
+        assert compare_daily_freshness(df_1m, drifted, before=_D3) == "stale"
+
+    def test_grown_1m_extra_day_is_stale(self, tmp_path) -> None:
+        """The BND-5b shape: the 1m base grew a completed day the stored ``1day``
+        never derived (kill-9 mid-re-derive / CLI fetch with no prebuild) —
+        the height early-out fires stale."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D2)
+        assert df_1day.height == 1  # only _D1 derived; _D2 exists in 1m only
+        assert compare_daily_freshness(df_1m, df_1day, before=_D3) == "stale"
+
+    def test_stamp_only_drift_is_stale_the_deliberate_divergence(self, tmp_path) -> None:
+        """A 09:15-session-open-stamped stored bar with EQUAL values is stale HERE
+        (the sweep consumes the stamp into run identity, Golden Rule #4) while the
+        movers VALUE-plane comparator deliberately calls the same bars equal —
+        the documented divergence pin: never 'unify' the two comparators."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D3)
+        # Midnight IST (18:30 UTC prior day) → the 09:15-IST session open (03:45 UTC).
+        shifted = df_1day.with_columns(pl.col("ts_utc") + timedelta(hours=9, minutes=15))
+        assert compare_daily_freshness(df_1m, shifted, before=_D3) == "stale"
+        from brutex.dashboard.movers_snapshot import _daily_stored_is_stale
+        from brutex.data.spot_daily_resample import frame_to_candle_bars, resample_1m_to_daily
+
+        stored_bars = frame_to_candle_bars(shifted, absent_open_interest=None)
+        derived_bars = resample_1m_to_daily(df_1m, before=_D3)
+        assert _daily_stored_is_stale(stored_bars, derived_bars) is False
+
+    def test_forming_day_excluded_on_both_sides_is_fresh(self, tmp_path) -> None:
+        """Mid-session determinism: *before* drops the forming day from the
+        EXPECTED side exactly as the writer did — no false-stale mid-session."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D2)
+        assert compare_daily_freshness(df_1m, df_1day, before=_D2) == "fresh"
+
+
+class TestLakeDailyFreshnessVerdicts:
+    """The ``1day`` arm of the sweep-preflight freshness source
+    (DEC-MOVERS-STORED-FRESHNESS-001 fold-in) over REAL Parquet lakes."""
+
+    def test_new_1m_day_without_rederive_reads_stale(self, tmp_path) -> None:
+        """THE BND-5b pin: 1day derived through D1, then a 1m fetch adds D2 with
+        NO re-derive → the pair is KEYED stale (previously an ungated abstain)."""
+        sink = _seed_lake_1m_days(tmp_path, (_D1,))
+        _write_daily_derived(tmp_path, sink, before=_D2)
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=_day_1m_bars(_D2, base="101.00"),
+        )
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
+        assert verdicts == {("NIFTY", "1day"): "stale"}
+
+    def test_fully_derived_1day_reads_fresh(self, tmp_path) -> None:
+        sink = _seed_lake_1m_days(tmp_path, (_D1, _D2))
+        _write_daily_derived(tmp_path, sink, before=_D3)
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
+        assert verdicts == {("NIFTY", "1day"): "fresh"}
+
+    def test_default_cutoff_resolves_via_production_daily_derive_cutoff(self, tmp_path) -> None:
+        """No *daily_before* injected → the production resolver
+        (``daily_derive_cutoff(now_ist())``) — the 2024 fixture sessions are long
+        complete under any current-clock cutoff, so the verdict is fresh."""
+        sink = _seed_lake_1m_days(tmp_path, (_D1, _D2))
+        _write_daily_derived(tmp_path, sink, before=_D3)
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+        )
+        assert verdicts == {("NIFTY", "1day"): "fresh"}
+
+    def test_daily_before_injection_is_deterministic(self, tmp_path) -> None:
+        """The test seam controls the forming-session cutoff: a D1-only stored
+        ``1day`` is FRESH at ``before=_D2`` (D2 treated as forming) and STALE at
+        ``before=_D3`` (D2 complete → the stored table is provably behind)."""
+        sink = _seed_lake_1m_days(tmp_path, (_D1, _D2))
+        _write_daily_derived(tmp_path, sink, before=_D2)
+        common = {
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbols": ["NIFTY"],
+            "intervals": ["1day"],
+        }
+        fresh = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, daily_before=_D2, **common)
+        stale = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, daily_before=_D3, **common)
+        assert fresh == {("NIFTY", "1day"): "fresh"}
+        assert stale == {("NIFTY", "1day"): "stale"}
+
+    def test_abstains_without_stored_1day_partition(self, tmp_path) -> None:
+        """A 1m-only lake (never prebuilt) → NOT keyed — the zero-bar slice
+        preflight owns missing data (abstain semantics preserved)."""
+        _seed_lake_1m_days(tmp_path, (_D1,))
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
+        assert verdicts == {}
+
+    def test_abstains_without_1minute_base_for_1day(self, tmp_path) -> None:
+        """A ``1day``-only partition (no 1m base) is unverifiable → honest abstain."""
+        from datetime import timezone
+        from decimal import Decimal
+        from pathlib import Path
+
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        daily_bar = CandleBar(
+            timestamp=datetime(_D1.year, _D1.month, _D1.day, 0, 0, tzinfo=ist).astimezone(UTC),
+            open=Decimal("100.00"),
+            high=Decimal("102.00"),
+            low=Decimal("99.00"),
+            close=Decimal("101.00"),
+            volume=20000,
+            open_interest=None,
+        )
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=Path(tmp_path)))
+        sink.append(
+            exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1day", bars=[daily_bar]
+        )
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
+        assert verdicts == {}
+
+    def test_fno_segment_1day_abstains(self, tmp_path) -> None:
+        """An FNO-segment ``1day`` is never keyed — the F&O daily law is the
+        OI-carrying ``resample_1m_to_fno_daily`` (spot comparator would
+        false-flag; named follow-up DEC-FNO-DAILY-FRESHNESS-001) — proven over a
+        REAL stored FNO 1m + 1day pair, not an empty lake."""
+        from datetime import timezone
+        from decimal import Decimal
+        from pathlib import Path
+
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        contract = "NSE-NIFTY-25Jan24-22000-CE"
+
+        def _fno_bar(hour: int, minute: int) -> CandleBar:
+            return CandleBar(
+                timestamp=datetime(
+                    _D1.year, _D1.month, _D1.day, hour, minute, tzinfo=ist
+                ).astimezone(UTC),
+                open=Decimal("100.00"),
+                high=Decimal("102.00"),
+                low=Decimal("99.00"),
+                close=Decimal("101.00"),
+                volume=100,
+                open_interest=500,
+            )
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=Path(tmp_path)))
+        sink.append(
+            exchange="NSE",
+            segment="FNO",
+            symbol=contract,
+            interval="1minute",
+            bars=[_fno_bar(9, 16), _fno_bar(9, 17)],
+        )
+        sink.append(
+            exchange="NSE", segment="FNO", symbol=contract, interval="1day", bars=[_fno_bar(0, 0)]
+        )
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbols=[contract],
+            intervals=["1day"],
+            daily_before=_D3,
+        )
+        assert verdicts == {}
+
+    def test_1minute_only_request_short_circuits(self, tmp_path) -> None:
+        """Neither an intraday TF nor ``1day`` requested → the early return
+        (byte-preserved pre-change fast path)."""
+        sink = _seed_lake_1m_days(tmp_path, (_D1,))
+        _write_daily_derived(tmp_path, sink, before=_D2)
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1minute"],
+        )
+        assert verdicts == {}
+
+    def test_mixed_request_intraday_verdicts_byte_identical(self, tmp_path) -> None:
+        """The B3 non-regression pin: adding ``1day`` to the request leaves the
+        intraday verdicts byte-identical to an intraday-only call, and an
+        intervals list WITHOUT ``1day`` never keys the daily pair."""
+        sink = _seed_lake_1m_days(tmp_path, (_D1,))
+        _write_derived(tmp_path, sink)  # fresh 5minute
+        _write_daily_derived(tmp_path, sink, before=_D2)
+        common = {"exchange": "NSE", "segment": "INDEX", "symbols": ["NIFTY"]}
+        only = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path, intervals=["5minute"], **common
+        )
+        mixed = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path, intervals=["5minute", "1day"], daily_before=_D2, **common
+        )
+        assert only == {("NIFTY", "5minute"): "fresh"}
+        assert {k: v for k, v in mixed.items() if k[1] != "1day"} == only
+        assert mixed[("NIFTY", "1day")] == "fresh"
+        assert ("NIFTY", "1day") not in only
+
+    def test_one_minute_frame_read_once_across_intraday_and_daily(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The ``df_1m`` memo is SHARED by the intraday and ``1day`` arms —
+        exactly ONE 1-minute read for a mixed request."""
+        sink = _seed_lake_1m_days(tmp_path, (_D1,))
+        _write_derived(tmp_path, sink)
+        _write_daily_derived(tmp_path, sink, before=_D2)
+        reads = {"1minute": 0}
+        real_read = tf_autoderive.read_lake_bars_frame
+
+        def _counting_read(symbol_dir, interval, *, source=""):
+            if interval == "1minute":
+                reads["1minute"] += 1
+            return real_read(symbol_dir, interval, source=source)
+
+        monkeypatch.setattr(tf_autoderive, "read_lake_bars_frame", _counting_read)
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["5minute", "1day"],
+            daily_before=_D2,
+        )
+        assert verdicts == {
+            ("NIFTY", "5minute"): "fresh",
+            ("NIFTY", "1day"): "fresh",
         }
         assert reads["1minute"] == 1
