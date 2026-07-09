@@ -34,10 +34,19 @@ from brutex.dashboard.app import _render_universe_html
 
 
 def test_design_tokens_present() -> None:
-    """One source of truth for radius / spacing / control-height / gutter."""
+    """One source of truth for the design tokens.
+
+    The radius / spacing / gutter / elevation tokens moved to the TWO shared
+    sheets (bx-theme.css + bx-design.css — DEC-DASHBOARD-VISUAL-OVERHAUL-001
+    Batch A deleted the inline :root duplicate block); the page keeps ONLY its
+    page-scoped control-height/touch-target tokens inline.
+    """
     html = _render_universe_html()
-    for token in ("--ctl-h: 38px", "--tap: 40px", "--gutter: clamp(", "--r-md: 10px"):
-        assert token in html, f"design token missing: {token}"
+    for token in ("--ctl-h: 38px", "--tap: 40px"):
+        assert token in html, f"page-scoped design token missing: {token}"
+    assert '<link rel="stylesheet" href="/static/bx-design.css">' in html, (
+        "the shared design-system sheet (the radius/spacing/gutter token owner) must be linked"
+    )
 
 
 def test_line_custom_property_is_defined() -> None:
@@ -87,7 +96,12 @@ def test_nav_is_class_driven_with_current_marker() -> None:
         "the /universe page must mark its OWN nav link active (not /db), and a "
         "Universe link must exist so other pages can navigate back"
     )
-    assert ".topnav a:hover" in html, "the nav hover affordance is missing"
+    # The nav hover affordance lives in the SHARED bx-theme.css header rules
+    # (the page's duplicate .topnav skin was removed —
+    # DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A; one source, Golden Rule #11).
+    assert '<link rel="stylesheet" href="/static/bx-theme.css">' in html, (
+        "the shared theme sheet that owns the nav hover affordance must be linked"
+    )
 
 
 def test_instrument_rows_are_keyboard_operable() -> None:
