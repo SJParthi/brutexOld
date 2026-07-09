@@ -406,7 +406,7 @@ def test_guarded_prebuild_reraises_lake_write_halt_from_materialize() -> None:
 
 
 def _global_stop_errors() -> list[Exception]:
-    """The pull-wide halt set — DERIVED from the spine's ``_GLOBAL_STOP_ERRORS``.
+    """The pull-wide HALT set — the spine's ``_GLOBAL_STOP_ERRORS`` minus the cancel carve-out.
 
     Previously a hand-copied list that silently went stale when
     DEC-VENDOR-DOWN-BREAKER-001 added ``VendorDownError`` +
@@ -414,13 +414,27 @@ def _global_stop_errors() -> list[Exception]:
     hostile-review MINOR folded). Now built generically from
     ``run_ingest._GLOBAL_STOP_ERRORS`` (every member is bare-message
     constructible by the drift-pin contract), so a NEW global-stop class is
-    picked up automatically and can never be missed here again.
+    picked up automatically and can never be missed here again — MINUS the ONE
+    DELIBERATE exclusion: ``PullCancelled`` (DEC-JOB-COOPERATIVE-CANCEL-001) IS
+    a spine global-stop (it halts every remaining window) but is NOT a pull
+    HALT for the dashboard job layer — an operator's cooperative cancel must
+    never fire the CRITICAL Telegram pull-halt alert nor read as an ``error``
+    terminal. The exclusion's False side is pinned in
+    ``test_pull_jobs.py::test_is_pull_halt_excludes_pull_cancelled`` and its
+    guard-side twin lives in
+    ``test_guarded_prebuild_swallows_operator_cancel_honestly`` below, so a
+    silent widening OR narrowing of the carve-out fails a named test.
     """
     from brutex.adapters.groww.run_ingest import (
         _GLOBAL_STOP_ERRORS,  # pyright: ignore[reportPrivateUsage] — the drift-pin source
     )
+    from brutex.adapters.ingest_common import PullCancelled
 
-    return [cls(f"{cls.__name__} halt") for cls in _GLOBAL_STOP_ERRORS]
+    # Membership sanity: the carve-out below must subtract a REAL member — if a
+    # refactor ever drops PullCancelled from the spine set, this pin fails loudly
+    # instead of the exclusion rotting into a silent no-op.
+    assert PullCancelled in _GLOBAL_STOP_ERRORS
+    return [cls(f"{cls.__name__} halt") for cls in _GLOBAL_STOP_ERRORS if cls is not PullCancelled]
 
 
 @pytest.mark.parametrize("halt", _global_stop_errors(), ids=lambda e: type(e).__name__)
@@ -448,11 +462,46 @@ def test_is_pull_halt_matches_every_spine_global_stop(halt: Exception) -> None:
     deleting ``VendorDownError`` / ``GrowwCredentialDeadError`` (or any other
     member) from the hand-mirrored ``is_pull_halt`` tuple previously passed the
     whole suite, silently dropping the dashboard's generic CRITICAL pull-halt
-    alert for that halt class.
+    alert for that halt class. ``PullCancelled`` is the ONE deliberate exclusion
+    (DEC-JOB-COOPERATIVE-CANCEL-001 — filtered in ``_global_stop_errors``; its
+    False side is pinned in
+    ``test_pull_jobs.py::test_is_pull_halt_excludes_pull_cancelled``).
     """
     from brutex.dashboard.pull_jobs import is_pull_halt
 
     assert is_pull_halt(halt) is True
+
+
+def test_guarded_prebuild_swallows_operator_cancel_honestly() -> None:
+    """A ``PullCancelled`` inside the prebuild folds to the honest crash outcome.
+
+    The guard-side twin of the DEC-JOB-COOPERATIVE-CANCEL-001 carve-out
+    (``test_pull_jobs.py::test_is_pull_halt_excludes_pull_cancelled``): an
+    operator's cooperative cancel is a spine global-stop but NOT a pull halt —
+    it must NOT re-raise out of the guard (re-raising would land in
+    ``BackgroundPullJob._run``'s halt handling and fire the CRITICAL Telegram
+    pull-halt alert the operator explicitly asked to never see on a cancel).
+    Instead it takes the ordinary guarded path: the LOUD
+    ``pipeline.prebuild.failed`` log + an honest ``ok=False`` outcome carrying
+    ``crashed="PullCancelled"`` — never a silent zero, never an alert.
+    """
+    from brutex.adapters.ingest_common import PullCancelled
+
+    def _cancelled_cascade() -> FnoCascadeIndex:
+        raise PullCancelled("operator cancel")
+
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild_guarded(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade_or_error=_cancelled_cascade,
+            materialize=_FakeMaterializer(),
+        )
+    assert outcome.ok is False
+    assert outcome.crashed == "PullCancelled"
+    assert outcome.symbols_built == 0
+    failed = [e for e in logs if e["event"] == "pipeline.prebuild.failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_type"] == "PullCancelled"
 
 
 def test_is_pull_halt_rejects_a_plain_domain_error() -> None:

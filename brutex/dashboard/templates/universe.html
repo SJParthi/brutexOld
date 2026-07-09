@@ -2450,6 +2450,14 @@ if (greeksBackfillBtn) {
   gbAttachIfRunning();   // a re-opened page re-attaches to a running backfill
 }
 
+const verdictRefreshBtn = document.getElementById('verdictRefresh');
+if (verdictRefreshBtn) verdictRefreshBtn.addEventListener('click', refreshVerdict);
+const verdictRetryBtn = document.getElementById('verdictRetry');
+if (verdictRetryBtn) verdictRetryBtn.addEventListener('click', () =>
+  // Wire to the EXISTING manual retry engine (DEC-INGEST-AUTO-RETRY-001 / PR #483) —
+  // re-pull ONLY the still-failed windows over the full admitted spot universe.
+  startAndPoll('/api/v1/universe/retry-failed', 'retry failed windows'));
+
 /* Page-load re-attach for the PULL watch (DEC-JOB-COOPERATIVE-CANCEL-001 review
    fold — the gbAttachIfRunning precedent above): an operator re-opening
    /universe during a multi-hour pull previously saw NO Stop control until they
@@ -2460,12 +2468,18 @@ if (greeksBackfillBtn) {
    watch) re-attaches the FULL live watch: Run disabled + Stop visible + the
    pollProgress chain, which settles through finishLive exactly like a clicked
    run (the buttons come back when the pull ends). Best-effort — any probe
-   failure leaves the page as-is (a later Run click still works). */
+   failure leaves the page as-is (a later Run click still works). The probe
+   rides the COMMON gbFetchJson helper (CLAUDE.md §11 — the ONE bounded
+   JSON-fetch core on this page) so it carries the FEED_FETCH_TIMEOUT_MS
+   hung-fetch abort bound through the BODY read AND adds no second raw
+   pull-progress fetch site — the one-fetch-site law of
+   test_no_new_poll_loop_added stands (the poll chain it attaches IS
+   pollProgress, never a new loop). */
 async function pullAttachIfRunning() {
   try {
-    const r = await fetch('/api/v1/universe/pull-progress');
-    if (!r.ok) return;
-    const s = await r.json();
+    const res = await gbFetchJson('/api/v1/universe/pull-progress');
+    if (!res.ok) return;
+    const s = res.body;
     if (!s || s.state !== 'running' || s.job_kind !== 'pull') return;
     const panel = document.getElementById('pullpanel');
     if (panel) panel.classList.add('on', 'running');
@@ -2477,14 +2491,6 @@ async function pullAttachIfRunning() {
   } catch (e) { /* best-effort — the page stays as-is; the next Run click works */ }
 }
 pullAttachIfRunning();
-
-const verdictRefreshBtn = document.getElementById('verdictRefresh');
-if (verdictRefreshBtn) verdictRefreshBtn.addEventListener('click', refreshVerdict);
-const verdictRetryBtn = document.getElementById('verdictRetry');
-if (verdictRetryBtn) verdictRetryBtn.addEventListener('click', () =>
-  // Wire to the EXISTING manual retry engine (DEC-INGEST-AUTO-RETRY-001 / PR #483) —
-  // re-pull ONLY the still-failed windows over the full admitted spot universe.
-  startAndPoll('/api/v1/universe/retry-failed', 'retry failed windows'));
 
 /* Render the live stat row (units done/total · failed · no-data gaps · bars). A
    no-data gap is a benign Groww DH-905 boundary (e.g. NIFTY NEXT 50's pre-2021
