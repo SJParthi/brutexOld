@@ -417,6 +417,55 @@ class TestPayloadAndLine:
         assert pay["n_trades"] == 9
         assert pay["worst_streak_start"] is None
 
+    def test_absent_payload_every_display_field_is_none_never_zero(self) -> None:
+        """FIX B (mutation-killer): the absent payload's EVERY nullable display
+        field is ``None`` (never a fabricated 0) — a None→0 drift on any of
+        these renders a lie on the ungated /screener + /operator surfaces.
+        """
+        pay = resilience_payload(None)  # the absent (record is None) payload
+        for key in (
+            "n_trades",
+            "losing_streak_p50",
+            "losing_streak_p95",
+            "losing_streak_count",
+            "worst_streak_pnl_paisa",
+            "worst_streak_pnl_pct",
+            "worst_streak_len",
+            "worst_streak_start",
+            "worst_streak_end",
+            "longest_underwater_trades",
+            "longest_underwater_days",
+            "still_underwater_at_end",
+            "worst_loss_month",
+            "worst_loss_month_count",
+            "worst_loss_week",
+            "worst_loss_week_count",
+            "win_rate_year_spread",
+            "fingerprint",
+        ):
+            assert pay[key] is None, key
+        assert pay["stats_live"] is False
+        assert pay["win_rate_by_year"] == {}
+        assert pay["losses_by_month"] == {}
+
+    def test_absent_payload_is_single_sourced_from_null_record(self) -> None:
+        """FIX B: the absent payload is DERIVED from ``resilience_null`` — every
+        key matches the NULL-record payload except ``n_trades``/``fingerprint``
+        (which an absent record cannot know → ``None``). Pins the derivation so
+        no hand-literal can drift a field back in.
+        """
+        absent = resilience_payload(None)
+        null_pay = resilience_payload(resilience_null("x", 0, "fp"))
+        # n_trades / fingerprint are the only two deliberate divergences.
+        assert absent["n_trades"] is None
+        assert null_pay["n_trades"] == 0
+        assert absent["fingerprint"] is None
+        assert null_pay["fingerprint"] == "fp"
+        for key in absent:
+            if key in ("n_trades", "fingerprint"):
+                continue
+            assert absent[key] == null_pay[key], key
+
     def test_line_live_has_badge_and_money(self) -> None:
         r = _fold([_t(-100, 2024, 1, 1), _t(-100, 2024, 1, 2)])
         entry = {
@@ -427,7 +476,40 @@ class TestPayloadAndLine:
         line = render_resilience_line(entry)
         assert "STILL UNDERWATER" in line
         assert "₹" in line
-        assert "worst-streak 2" in line
+        assert "longest streak 2 by count" in line
+
+    def test_line_pairs_worst_by_rupees_length_with_its_own_cost(self) -> None:
+        """FIX A (fails-before): when the LONGEST run (by count) is NOT the
+        WORST run (by ₹), the line must show the worst-by-₹ run's OWN length
+        beside its cost, and the longest-by-count separately — never conflate.
+        """
+        # A short DEEP run (2 × -1000, Σ-2000) then a long SHALLOW run
+        # (4 × -10, Σ-40): longest-by-count = 4, worst-by-₹ = the len-2 run.
+        trades = [
+            _t(-1000, 2024, 1, 1),
+            _t(-1000, 2024, 1, 2),
+            _t(5000, 2024, 1, 3),
+            _t(-10, 2024, 1, 4),
+            _t(-10, 2024, 1, 5),
+            _t(-10, 2024, 1, 6),
+            _t(-10, 2024, 1, 7),
+        ]
+        r = _fold(trades)
+        assert r.worst_streak_pnl_paisa == -2000  # the DEEP run
+        assert r.worst_streak_len == 2  # ...whose length is 2
+        entry = {
+            "run_id": "e" * 20,
+            "metrics": {"max_consecutive_losses": 4},  # the LONG shallow run
+            "resilience": resilience_payload(r),
+        }
+        line = render_resilience_line(entry)
+        # The longest-by-count (4) is labelled distinctly...
+        assert "longest streak 4 by count" in line
+        # ...and the worst-by-₹ phrase pairs the DEEP run's OWN length (2) with
+        # its cost — the old conflated "worst-streak 4 ... cost ₹-20.00" wording
+        # (4 juxtaposed with the len-2 run's ₹) must be gone.
+        assert "worst streak (by ₹) 2 losses cost ₹-20.00" in line
+        assert "worst-streak 4" not in line
 
     def test_line_recovered_badge(self) -> None:
         r = _fold([_t(-100, 2024, 1, 1), _t(300, 2024, 1, 2)])

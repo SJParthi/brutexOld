@@ -371,8 +371,10 @@ class TestResilienceLines:
         # header + 2 entry lines + the honest NULL footer.
         assert len(lines) == 4
         assert "losing-streak endurance" in lines[0]
-        # rank-1 LIVE line names the worst streak (2 in a row) + honest tail.
-        assert "worst-streak 2" in lines[1]
+        # rank-1 LIVE line names the longest streak (by count) AND the worst
+        # streak (by ₹) as DISTINCT facts (here both are the same len-2 run).
+        assert "longest streak 2 by count" in lines[1]
+        assert "worst streak (by ₹) 2 losses" in lines[1]
         assert "signal-only gross per-unit" in lines[1]
         # rank-2 NULL line reads the honest em-dash.
         assert "— (parity-failed or no trades)" in lines[2]

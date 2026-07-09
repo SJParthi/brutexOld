@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from brutex.engine.resilience_streaks import resilience_payload
 
 _ROOT = Path(__file__).resolve().parents[2]
 _STATIC = _ROOT / "brutex" / "dashboard" / "static"
@@ -316,3 +317,28 @@ class TestScreenerCellDomRender:
         assert cells["win_rate_year_spread"] == "0.15"
         # The MAX cold streak reads from metrics (no rival resilience column).
         assert cells["max_consecutive_losses"] == "5"
+
+    def test_real_absent_payload_renders_every_resilience_cell_as_dash(
+        self, tmp_path: Path
+    ) -> None:
+        """FIX B (mutation-killer): drive the PRODUCTION ``_absent_payload()``
+        (``resilience_payload(None)`` — the parity-failed/resilience_errored
+        wire shape) through the REAL screener render. A None→0 drift on ANY
+        nullable field would render "+₹0.00" / "0" here (not "—") and FAIL.
+        """
+        row = {
+            "rank": 1,
+            "metrics": {"max_consecutive_losses": 0},
+            "resilience": resilience_payload(None),  # the REAL absent payload
+        }
+        out = _render("screener", row, tmp_path)
+        assert out["rendered"] is True
+        cells = out["cells"]
+        for explain in (
+            "worst_streak_pnl",
+            "losing_streak_p95",
+            "longest_underwater",
+            "worst_loss_month",
+            "win_rate_year_spread",
+        ):
+            assert cells[explain] == "—", explain

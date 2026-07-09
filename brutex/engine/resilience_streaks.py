@@ -39,7 +39,11 @@ the structurally collision-free dividend).
 * The win-rate ``total`` denominator counts EVERY trade that year (scratches
   included as non-wins), so ``wins / total`` is the literal win rate on a
   CONSISTENT denominator — a scratch is neither a win here nor a loss in the
-  streak arm (they are treated distinctly, by design).
+  streak arm (they are treated distinctly, by design). A DEGENERATE all-scratch
+  year (never lost, only ``pnl == 0``) therefore reads ``win_rate == 0.0`` and,
+  if it qualifies (``>= YEAR_MIN_TRADES``), can inflate ``win_rate_year_spread``
+  — spec-locked (§d1.5), documented here so it is not hidden, never a defect
+  against the locked wins/total contract.
 * ``losing_streak_count`` counts losing RUNS, never losing TRADES — the name is
   intentional; a display consumer must not read it as a trade count.
 
@@ -453,6 +457,15 @@ def fold_resilience(
     fingerprint: str,
 ) -> ResilienceStreaks:
     """Fold one finalist's chronological trades into its resilience record.
+
+    PRECONDITION (upstream-guaranteed, NOT re-asserted): *trades* are in
+    CHRONOLOGICAL exit order. The single-position sim emits trades in
+    ``trade_seq`` order and ``read_captured_trades`` sorts read-back rows on
+    ``trade_seq``, so every production caller satisfies this. A caller feeding
+    non-chronological trades would UNDER-count the underwater-DAYS span (a
+    later-in-seq trade with an EARLIER exit date yields a negative day-delta
+    clamped to 0 — an under-count, never a crash and never an over-count); do
+    not violate it.
 
     ONE pass over *trades* (``trade_seq`` order). ``parity_ok=False`` OR zero
     trades ⇒ the FULL NULL record. Percentiles come from the exact run-length
@@ -979,31 +992,28 @@ def resilience_payload(record: ResilienceStreaks | None) -> dict[str, object]:
     }
 
 
+#: The sentinel run_id fed to the throwaway NULL record `_absent_payload`
+#: derives from (never surfaced — `resilience_payload` omits `run_id`).
+_ABSENT_SENTINEL_RUN_ID: Final = "resilience-absent-sentinel"
+
+
 def _absent_payload() -> dict[str, object]:
-    """The all-``None`` payload for an absent record (keys always present)."""
-    return {
-        "stats_live": False,
-        "n_trades": None,
-        "losing_streak_p50": None,
-        "losing_streak_p95": None,
-        "losing_streak_count": None,
-        "worst_streak_pnl_paisa": None,
-        "worst_streak_pnl_pct": None,
-        "worst_streak_len": None,
-        "worst_streak_start": None,
-        "worst_streak_end": None,
-        "longest_underwater_trades": None,
-        "longest_underwater_days": None,
-        "still_underwater_at_end": None,
-        "worst_loss_month": None,
-        "worst_loss_month_count": None,
-        "worst_loss_week": None,
-        "worst_loss_week_count": None,
-        "win_rate_by_year": {},
-        "win_rate_year_spread": None,
-        "losses_by_month": {},
-        "fingerprint": None,
-    }
+    """The all-``None`` payload for an absent record (keys always present).
+
+    DERIVED from the single ``resilience_null`` → ``resilience_payload`` source
+    of truth (NOT a hand literal), so a future None→0 regression on a nullable
+    DISPLAY field is structurally impossible here: every nullable field is
+    ``None`` because the source NULL record's ``__post_init__``
+    (:meth:`ResilienceStreaks._assert_null_consistency`) rejects any non-None
+    nullable. The two fields a genuine NULL record carries but an ABSENT record
+    cannot know — ``n_trades`` and ``fingerprint`` — are then nulled.
+    """
+    payload = resilience_payload(
+        resilience_null(run_id=_ABSENT_SENTINEL_RUN_ID, n_trades=0, fingerprint="")
+    )
+    payload["n_trades"] = None
+    payload["fingerprint"] = None
+    return payload
 
 
 def render_resilience_line(entry: Mapping[str, object]) -> str:
@@ -1013,6 +1023,13 @@ def render_resilience_line(entry: Mapping[str, object]) -> str:
     key must fail here, never silently render nothing; the futures leaderboard
     precedent). A NULL / unavailable record renders the honest
     ``"resilience: — (parity-failed or no trades)"``.
+
+    HONESTY (display): the LONGEST streak (``max_consecutive_losses``, by
+    COUNT) and the WORST streak (``worst_streak_pnl_paisa``, by ₹) are DISTINCT
+    runs — commonly a different episode (many tiny losses vs one gap-down). The
+    line labels them separately and pairs the worst-by-₹ cost with THAT run's
+    OWN length (``worst_streak_len``), never implying the longest run cost the
+    worst amount.
     """
     from brutex.money import format_inr
 
@@ -1026,9 +1043,10 @@ def render_resilience_line(entry: Mapping[str, object]) -> str:
     if not resilience["stats_live"]:
         return f"  resilience {run_id[:12]}: — (parity-failed or no trades)"
 
-    max_losses = metrics["max_consecutive_losses"]
+    longest_by_count = metrics["max_consecutive_losses"]
     p50 = _dash(resilience["losing_streak_p50"])
     p95 = _dash(resilience["losing_streak_p95"])
+    worst_len = _dash(resilience["worst_streak_len"])
     worst_pnl = resilience["worst_streak_pnl_paisa"]
     worst_str = "—" if worst_pnl is None else format_inr(int(worst_pnl))
     pct = resilience["worst_streak_pnl_pct"]
@@ -1038,7 +1056,8 @@ def render_resilience_line(entry: Mapping[str, object]) -> str:
     underwater_badge = "STILL UNDERWATER" if resilience["still_underwater_at_end"] else "recovered"
     month = _dash(resilience["worst_loss_month"])
     return (
-        f"  resilience {run_id[:12]}: worst-streak {max_losses} (typical {p50} · P95 {p95}) · "
+        f"  resilience {run_id[:12]}: longest streak {longest_by_count} by count "
+        f"(typical {p50} · P95 {p95}) · worst streak (by ₹) {worst_len} losses "
         f"cost {worst_str} ({pct_str}) · underwater {uw_trades} trades / {uw_days} days "
         f"[{underwater_badge}] · worst month {month} · signal-only gross per-unit"
     )
