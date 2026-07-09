@@ -52,9 +52,9 @@ def _clean_fixture_env(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _lake_with_corpus(tmp_path: Path) -> Path:
-    """A tmp lake whose ``<lake>/sweeps/runs`` is the committed fixture corpus."""
+    """A tmp lake whose Ruling-4 ``<lake>/sweep_runs`` is the committed fixture corpus."""
     lake = tmp_path / "lake"
-    shutil.copytree(_FIXTURES / "runs", lake / "sweeps" / "runs")
+    shutil.copytree(_FIXTURES / "sweep_runs", lake / "sweep_runs")
     return lake
 
 
@@ -321,7 +321,10 @@ class TestEventsRoute:
 
 class TestTradesRoute:
     def test_production_default_is_honest_awaiting(self, tmp_path: Path) -> None:
-        """C-M5: no fixture root ⇒ AwaitingTradesReader — NEVER fabricated rows."""
+        """C-M5 / DEC-ONECLICK-SWEEP-RUNS-REBIND-001: no fixture root ⇒ the
+        production TradeStoreReader — a run without results-depth references
+        (the corpus top100 predates #1275) degrades to honest awaiting, NEVER
+        fabricated rows."""
         client = _client(_lake_with_corpus(tmp_path))
         payload = client.get(f"/api/v1/oneclick/trades?run_id={RUN_ID}&rank=1").json()
         assert payload["status"] == "awaiting"
@@ -329,7 +332,7 @@ class TestTradesRoute:
         assert payload["total"] is None
         assert payload["source"] == "none"
         assert payload["fixture_root_active"] is False
-        assert "merge-integration" in payload["detail"]
+        assert "pre-#1275" in payload["detail"]
 
     def test_fixture_root_serves_paged_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(oc.FIXTURE_ROOT_ENV, str(_FIXTURES))
@@ -411,7 +414,7 @@ class TestVerifyRoute:
 
     def test_tampered_chain_fails_with_the_break_line(self, tmp_path: Path) -> None:
         lake = _lake_with_corpus(tmp_path)
-        events = lake / "sweeps" / "runs" / RUN_ID / "events.jsonl"
+        events = lake / "sweep_runs" / RUN_ID / "events.jsonl"
         lines = events.read_text(encoding="utf-8").splitlines()
         tampered = json.loads(lines[4])
         tampered["kind"] = "tampered"
@@ -434,7 +437,7 @@ class TestVerifyRoute:
         ZERO-byte events.jsonl whose chain replays "clean" over 0 records —
         the click must read awaiting (verified nothing), never a green PASS."""
         lake = _lake_with_corpus(tmp_path)
-        events_path = lake / "sweeps" / "runs" / RUN_ID / "events.jsonl"
+        events_path = lake / "sweep_runs" / RUN_ID / "events.jsonl"
         events_path.write_bytes(b"")
         payload = _client(lake).get(f"/api/v1/oneclick/verify?run_id={RUN_ID}&check=chain").json()
         row = {check["id"]: check for check in payload["checks"]}[2]
@@ -446,7 +449,7 @@ class TestVerifyRoute:
         """Regression: an empty actual.funnel + per_door_kills used to read a
         green check #7 having reconciled nothing — it must abstain."""
         lake = _lake_with_corpus(tmp_path)
-        manifest_path = lake / "sweeps" / "runs" / RUN_ID / "manifest.json"
+        manifest_path = lake / "sweep_runs" / RUN_ID / "manifest.json"
         body = json.loads(manifest_path.read_text(encoding="utf-8"))
         body["actual"]["funnel"] = []
         body["per_door_kills"] = []
@@ -482,7 +485,7 @@ class TestVerifyRoute:
 
     def test_broken_funnel_fails_check_7(self, tmp_path: Path) -> None:
         lake = _lake_with_corpus(tmp_path)
-        manifest_path = lake / "sweeps" / "runs" / RUN_ID / "manifest.json"
+        manifest_path = lake / "sweep_runs" / RUN_ID / "manifest.json"
         body = json.loads(manifest_path.read_text(encoding="utf-8"))
         body["actual"]["enumerated"] = 999_999
         manifest_path.write_text(json.dumps(body), encoding="utf-8")
@@ -605,3 +608,145 @@ class TestHostileFixtureNever500:
         events = client.get("/api/v1/oneclick/events?run_id=r-hostile01").json()["records"]
         assert events[0]["kind"] == "<script>alert(1)</script>"
         assert events[0]["payload"]["note"] == "<svg onload=alert(1)>"
+
+
+# ── the production trades rebind (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) ───
+
+
+_COMBO = "combo-0001"
+_TUPLE_REF = "NSE-NIFTY/5m/long_k3_deadbeef"
+
+
+def _rebind_lake(tmp_path: Path, *, n_trades: int) -> Path:
+    """A tmp lake whose run carries REAL writer-built results-depth sidecars.
+
+    The top100.json is the CONTRACT wire shape (what the adapter validates);
+    the sidecar trio + stamp are built via trade_store's OWN public writer —
+    internal formats are never hand-forged.
+    """
+    pytest.importorskip("polars")
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from brutex.engine.minute_path import PathStatus
+    from brutex.engine.trade_capture import CapturedTrade, ComboCapture
+    from brutex.engine.trade_store import write_tuple_sidecars
+    from brutex.strategies.types import Side
+
+    lake = tmp_path / "lake"
+    run_dir = lake / "sweep_runs" / RUN_ID
+    row = {
+        "rank": 1,
+        "run_id": _COMBO,
+        "mask_hex": "0x05",
+        "conditions": ["PDH_CROSS_UP"],
+        "tf": "5m",
+        "direction": "long",
+        "arm": {"sl_paisa": None, "tp_paisa": None},
+        "metrics": {"sharpe": 1.25},
+        "regime": {},
+        "vix_band": None,
+        "family_id": "fam-0001",
+        "equity_ref": {"tuple": _TUPLE_REF, "sidecar": "equity"},
+    }
+    run_dir.mkdir(parents=True)
+    (run_dir / oc.TOP100_FILENAME).write_text(json.dumps([row]), encoding="utf-8")
+
+    statuses = [PathStatus.OK, PathStatus.PARTIAL, PathStatus.NO_1M_DATA]
+    trades = []
+    for i in range(n_trades):
+        status = statuses[i % 3]
+        with_1m = status is not PathStatus.NO_1M_DATA
+        trades.append(
+            CapturedTrade(
+                entry_ts=datetime(2026, 7, 1, 4, i % 60, i // 60 % 60, tzinfo=UTC),
+                entry_px=Decimal("100.00"),
+                exit_ts=datetime(2026, 7, 1, 6, i % 60, i // 60 % 60, tzinfo=UTC),
+                exit_px=Decimal("101.00"),
+                direction=Side.BUY,
+                lots=None,  # Ruling 18 NULL-by-design
+                exit_reason="signal",
+                pnl_paisa=100 + i,
+                costs_paisa=None,  # Ruling 18 NULL-by-design
+                mae_paisa=50 + i,
+                mfe_paisa=150 + i,
+                mae_1m_paisa=(40 + i) if with_1m else None,
+                mfe_1m_paisa=(160 + i) if with_1m else None,
+                path_1m_status=status,
+                vix_entry=None,
+                vix_exit=None,
+            )
+        )
+    capture = ComboCapture(
+        run_id=_COMBO,
+        trades=tuple(trades),
+        equity=(),
+        equity_status=PathStatus.OK,
+        vix_missing_trades=0,
+        parity_ok=True,
+        parity_detail="",
+    )
+    paths = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+    assert paths is not None
+    write_tuple_sidecars(paths, [capture], [], store_content_hash="0" * 64)
+    return lake
+
+
+class TestTradesRebindEndToEnd:
+    """The real-reader activation: sidecars exist ⇒ source='results_store'."""
+
+    def test_real_reader_activates_when_sidecars_exist(self, tmp_path: Path) -> None:
+        client = _client(_rebind_lake(tmp_path, n_trades=3))
+        payload = client.get(f"/api/v1/oneclick/trades?run_id={RUN_ID}&rank=1").json()
+        assert payload["status"] == "ok"
+        assert payload["source"] == "results_store"
+        assert payload["fixture_root_active"] is False
+        assert payload["total"] == 3
+        rows = payload["rows"]
+        assert [row["trade_seq"] for row in rows] == [0, 1, 2]
+        # Ruling 18: lots/costs pass through as honest null — never 1/0.
+        assert rows[0]["lots"] is None
+        assert rows[0]["costs_paisa"] is None
+        # The additive granularity flag says which values mae/mfe carry.
+        assert rows[0]["path_1m_status"] == "ok"
+        assert rows[0]["mae_granularity"] == "1m"
+        assert (rows[0]["mae"], rows[0]["mfe"]) == (40, 160)
+        assert rows[1]["mae_granularity"] == "tf"
+        assert (rows[1]["mae"], rows[1]["mfe"]) == (51, 151)
+        assert rows[2]["path_1m_status"] == "no_1m_data"
+        assert rows[2]["mae_granularity"] == "tf"
+
+    def test_page_clamp_rides_the_trade_store_law(self, tmp_path: Path) -> None:
+        """limit=1000 through the route clamps at PAGE_LIMIT_MAX=500, named."""
+        from brutex.engine.trade_store import PAGE_LIMIT_MAX
+
+        client = _client(_rebind_lake(tmp_path, n_trades=PAGE_LIMIT_MAX + 40))
+        payload = client.get(f"/api/v1/oneclick/trades?run_id={RUN_ID}&rank=1&limit=1000").json()
+        assert payload["status"] == "ok"
+        assert len(payload["rows"]) == PAGE_LIMIT_MAX
+        assert payload["total"] == PAGE_LIMIT_MAX + 40
+        assert f"limit clamped to {PAGE_LIMIT_MAX}" in payload["detail"]
+        tail = client.get(
+            f"/api/v1/oneclick/trades?run_id={RUN_ID}&rank=1&offset={PAGE_LIMIT_MAX}"
+        ).json()
+        assert [row["trade_seq"] for row in tail.get("rows")] == list(
+            range(PAGE_LIMIT_MAX, PAGE_LIMIT_MAX + 40)
+        )
+
+    def test_fixture_env_still_overrides_the_real_reader(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The explicit fixture override outranks the production rebind (loud badge)."""
+        lake = _rebind_lake(tmp_path, n_trades=3)
+        monkeypatch.setenv(oc.FIXTURE_ROOT_ENV, str(_FIXTURES))
+        client = _client(lake)
+        payload = client.get(f"/api/v1/oneclick/trades?run_id={RUN_ID}&rank=1").json()
+        assert payload["source"] == "fixture"
+        assert payload["fixture_root_active"] is True
+
+    def test_verify_panel_reads_trades_wired_from_the_real_reader(self, tmp_path: Path) -> None:
+        client = _client(_rebind_lake(tmp_path, n_trades=3))
+        payload = client.get(f"/api/v1/oneclick/verify?run_id={RUN_ID}").json()
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks[3]["state"] == "ready"  # operator-judged cap — never pass
+        assert checks[4]["state"] == "ready"

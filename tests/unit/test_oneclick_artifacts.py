@@ -98,12 +98,25 @@ def _fixture_log_reset() -> Any:
 
 
 class TestPathHelpers:
-    def test_runs_root_appends_runs(self, tmp_path: Path) -> None:
-        assert oc.runs_root(tmp_path) == tmp_path / "runs"
+    def test_runs_root_is_the_ruling4_sweep_runs_sibling(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-SWEEP-RUNS-REBIND-001: <results_root parent>/sweep_runs."""
+        assert oc.runs_root(tmp_path / "sweeps") == tmp_path / "sweep_runs"
+
+    def test_runs_root_mirror_pins_the_engine_sweep_run_dir_seam(self, tmp_path: Path) -> None:
+        """The discovery seam is byte-equal to trade_store.sweep_run_dir (Ruling 4)."""
+        from brutex.engine.trade_store import sweep_run_dir
+
+        results_root = tmp_path / "lake" / "sweeps"
+        assert oc.runs_root(results_root) / "r-x" == sweep_run_dir(results_root, "r-x")
+
+    def test_fixture_results_root_keeps_runs_inside_the_fixture_tree(self, tmp_path: Path) -> None:
+        pseudo = oc.fixture_results_root(tmp_path)
+        assert pseudo == tmp_path / oc.FIXTURE_SWEEPS_DIRNAME
+        assert oc.runs_root(pseudo) == tmp_path / oc.SWEEP_RUNS_DIRNAME  # never escapes
 
     def test_trades_path_zero_pads_rank(self, tmp_path: Path) -> None:
-        path = oc.trades_path(tmp_path, "r-x", 7)
-        assert path == tmp_path / "runs" / "r-x" / "trades" / "rank-0007.json"
+        path = oc.trades_path(tmp_path / "sweeps", "r-x", 7)
+        assert path == tmp_path / "sweep_runs" / "r-x" / "trades" / "rank-0007.json"
 
     @pytest.mark.parametrize("run_id", ["r-20260707-fixt01", "RUN_1", "a", "r.1-b_c", "A" * 128])
     def test_safe_run_ids_accepted(self, run_id: str) -> None:
@@ -140,10 +153,11 @@ class TestArtifactRevision:
         monkeypatch.setattr(oc.os, "stat", _fake_stat)
         assert oc.artifact_revision(target) is None
 
-    def test_runs_revision_stats_the_runs_dir(self, tmp_path: Path) -> None:
-        assert oc.runs_revision(tmp_path) is None
-        (tmp_path / "runs").mkdir()
-        assert oc.runs_revision(tmp_path) is not None
+    def test_runs_revision_stats_the_sweep_runs_dir(self, tmp_path: Path) -> None:
+        results_root = tmp_path / "sweeps"
+        assert oc.runs_revision(results_root) is None
+        (tmp_path / "sweep_runs").mkdir()
+        assert oc.runs_revision(results_root) is not None
 
 
 # ── discovery ───────────────────────────────────────────────────────────
@@ -190,33 +204,33 @@ class TestProbeRunDir:
 
 class TestDiscoverRuns:
     def test_absent_runs_tree_is_empty(self, tmp_path: Path) -> None:
-        assert oc.discover_runs(tmp_path) == ()
+        assert oc.discover_runs(tmp_path / "sweeps") == ()
 
     def test_newest_first_and_limit(self, tmp_path: Path) -> None:
-        runs = tmp_path / "runs"
+        runs = tmp_path / "sweep_runs"
         for name, age in (("r-old", 100), ("r-mid", 50), ("r-new", 0)):
             (runs / name).mkdir(parents=True)
             stamp = 1_700_000_000 - age
             os.utime(runs / name, (stamp, stamp))
-        found = oc.discover_runs(tmp_path)
+        found = oc.discover_runs(tmp_path / "sweeps")
         assert [info.run_id for info in found] == ["r-new", "r-mid", "r-old"]
-        assert [info.run_id for info in oc.discover_runs(tmp_path, limit=2)] == [
+        assert [info.run_id for info in oc.discover_runs(tmp_path / "sweeps", limit=2)] == [
             "r-new",
             "r-mid",
         ]
-        assert oc.discover_runs(tmp_path, limit=0) == ()
+        assert oc.discover_runs(tmp_path / "sweeps", limit=0) == ()
 
     def test_stray_file_under_runs_is_ignored(self, tmp_path: Path) -> None:
-        runs = tmp_path / "runs"
+        runs = tmp_path / "sweep_runs"
         (runs / "r-good").mkdir(parents=True)
         (runs / "stray.txt").write_text("x", encoding="utf-8")
-        assert [info.run_id for info in oc.discover_runs(tmp_path)] == ["r-good"]
+        assert [info.run_id for info in oc.discover_runs(tmp_path / "sweeps")] == ["r-good"]
 
     def test_unreadable_entries_skipped_with_warn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """T-MINOR-1: unreadability via monkeypatched scandir entries, never chmod."""
-        runs = tmp_path / "runs"
+        runs = tmp_path / "sweep_runs"
         (runs / "r-good").mkdir(parents=True)
         real_scandir = os.scandir
 
@@ -240,7 +254,7 @@ class TestDiscoverRuns:
 
         monkeypatch.setattr(oc.os, "scandir", _fake_scandir)
         with structlog.testing.capture_logs() as logs:
-            found = oc.discover_runs(tmp_path)
+            found = oc.discover_runs(tmp_path / "sweeps")
         assert [info.run_id for info in found] == ["r-good"]
         skipped = [entry for entry in logs if entry["event"] == "oneclick.run_skipped"]
         assert {entry["run"] for entry in skipped} == {"r-badstat", "r-badisdir"}
@@ -694,11 +708,12 @@ class TestAwaitingTradesReader:
         assert page.rows == ()
         assert page.total is None  # never a fabricated 0
         assert page.source == "none"
-        assert "merge-integration" in page.detail
+        assert "no lake root wired" in page.detail
 
 
 def _trades_file(root: Path, run_id: str = "r-x", rank: int = 1, rows: int = 10) -> Path:
-    path = oc.trades_path(root, run_id, rank)
+    """Write an interim trades page INSIDE the fixture tree rooted at *root*."""
+    path = oc.trades_path(oc.fixture_results_root(root), run_id, rank)
     payload = {
         "rows": [{"entry_ts": f"t{i}", "pnl_paisa": i * 100} for i in range(rows)],
         "total": rows,
@@ -758,7 +773,7 @@ class TestFixtureTradesReader:
         assert fresh.rows[0]["entry_ts"] == "new"
 
     def test_corrupt_json_is_corrupt_and_memoised(self, tmp_path: Path) -> None:
-        path = oc.trades_path(tmp_path, "r-x", 1)
+        path = oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1)
         _write(path, "{broken")
         reader = oc.FixtureTradesReader(tmp_path)
         assert reader.page("r-x", 1, offset=0, limit=10).status == "corrupt"
@@ -766,13 +781,15 @@ class TestFixtureTradesReader:
         assert reader.parse_count == 1  # the corrupt verdict is memoised too
 
     def test_unreadable_file_is_corrupt(self, tmp_path: Path) -> None:
-        oc.trades_path(tmp_path, "r-x", 1).mkdir(parents=True)  # dir → IsADirectoryError
+        oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1).mkdir(
+            parents=True
+        )  # dir → IsADirectoryError
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "corrupt"
 
     @pytest.mark.parametrize("text", ["[]", '{"total": 3}', '{"rows": "junk"}'])
     def test_wrong_shape_is_corrupt(self, tmp_path: Path, text: str) -> None:
-        _write(oc.trades_path(tmp_path, "r-x", 1), text)
+        _write(oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1), text)
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "corrupt"
         assert '"rows"' in page.detail
@@ -782,14 +799,14 @@ class TestFixtureTradesReader:
         payload: dict[str, Any] = {"rows": [{"entry_ts": "t0"}]}
         if raw_total is not None:
             payload["total"] = raw_total
-        _write(oc.trades_path(tmp_path, "r-x", 1), json.dumps(payload))
+        _write(oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1), json.dumps(payload))
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "ok"
         assert page.total is None  # unknown stays None — never fabricated
 
     def test_bad_row_is_partial_keeping_prefix(self, tmp_path: Path) -> None:
         payload = {"rows": [{"entry_ts": "t0"}, "junk", {"entry_ts": "t2"}], "total": 3}
-        _write(oc.trades_path(tmp_path, "r-x", 1), json.dumps(payload))
+        _write(oc.trades_path(oc.fixture_results_root(tmp_path), "r-x", 1), json.dumps(payload))
         page = oc.FixtureTradesReader(tmp_path).page("r-x", 1, offset=0, limit=10)
         assert page.status == "partial"
         assert [row["entry_ts"] for row in page.rows] == ["t0"]
@@ -804,3 +821,305 @@ class TestFixtureTradesReader:
         reader.page("r-x", 2, offset=0, limit=2)
         reader.page("r-x", 1, offset=0, limit=2)  # single-entry memo: re-parse
         assert reader.parse_count == 3
+
+
+# ── production trades reader (DEC-ONECLICK-SWEEP-RUNS-REBIND-001) ───────
+
+
+def _rebind_top100_row(rank: int, *, combo: str | None, tuple_ref: Any) -> dict[str, Any]:
+    """One contract-complete top100 row + the SHIPPED #1275 additive keys."""
+    row: dict[str, Any] = {
+        "rank": rank,
+        "mask_hex": "0x05",
+        "conditions": ["PDH_CROSS_UP"],
+        "tf": "5m",
+        "direction": "long",
+        "arm": {"sl_paisa": None, "tp_paisa": None},
+        "metrics": {"sharpe": 1.25},
+        "regime": {},
+        "vix_band": None,
+        "family_id": "fam-0001",
+    }
+    if combo is not None:
+        row["run_id"] = combo
+    if tuple_ref is not None:
+        row["equity_ref"] = tuple_ref
+    return row
+
+
+_COMBO = "combo-0001"
+_TUPLE_REF = "NSE-NIFTY/5m/long_k3_deadbeef"
+
+
+def _captured_trade(seq: int, *, status_name: str = "OK") -> Any:
+    """One REAL CapturedTrade via the engine's public dataclass (never forged)."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from brutex.engine.minute_path import PathStatus
+    from brutex.engine.trade_capture import CapturedTrade
+    from brutex.strategies.types import Side
+
+    status = PathStatus[status_name]
+    with_1m = status is not PathStatus.NO_1M_DATA
+    return CapturedTrade(
+        entry_ts=datetime(2026, 7, 1, 4, 0, seq % 60, tzinfo=UTC),
+        entry_px=Decimal("100.00"),
+        exit_ts=datetime(2026, 7, 1, 5, 0, seq % 60, tzinfo=UTC),
+        exit_px=Decimal("101.00"),
+        direction=Side.BUY,
+        lots=None,  # NULL-by-design (Ruling 18)
+        exit_reason="signal",
+        pnl_paisa=100 + seq,
+        costs_paisa=None,  # NULL-by-design (Ruling 18)
+        mae_paisa=50 + seq,
+        mfe_paisa=150 + seq,
+        mae_1m_paisa=(40 + seq) if with_1m else None,
+        mfe_1m_paisa=(160 + seq) if with_1m else None,
+        path_1m_status=status,
+        vix_entry=None,
+        vix_exit=None,
+    )
+
+
+def _write_sidecars(
+    run_dir: Path,
+    *,
+    tuple_ref: str = _TUPLE_REF,
+    combo: str = _COMBO,
+    n_trades: int = 3,
+    statuses: tuple[str, ...] = (),
+) -> None:
+    """Write a REAL results-depth trio via trade_store's OWN public writer."""
+    from brutex.engine.minute_path import PathStatus
+    from brutex.engine.trade_capture import ComboCapture
+    from brutex.engine.trade_store import write_tuple_sidecars
+
+    paths = oc.sidecar_paths_from_ref(run_dir, tuple_ref)
+    assert paths is not None
+    kinds = statuses or tuple("OK" for _ in range(n_trades))
+    capture = ComboCapture(
+        run_id=combo,
+        trades=tuple(_captured_trade(i, status_name=kind) for i, kind in enumerate(kinds)),
+        equity=(),
+        equity_status=PathStatus.OK,
+        vix_missing_trades=0,
+        parity_ok=True,
+        parity_detail="",
+    )
+    write_tuple_sidecars(paths, [capture], [], store_content_hash="0" * 64)
+
+
+def _rebind_run(tmp_path: Path, run_id: str = "r-x", **row_kwargs: Any) -> Path:
+    """A results root whose sweep_runs/<run_id> carries a rank-1 top100 entry."""
+    results_root = tmp_path / "sweeps"
+    run_dir = oc.runs_root(results_root) / run_id
+    rows = [
+        _rebind_top100_row(
+            1,
+            combo=row_kwargs.pop("combo", _COMBO),
+            tuple_ref=row_kwargs.pop("tuple_ref", {"tuple": _TUPLE_REF, "sidecar": "equity"}),
+        )
+    ]
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps(rows))
+    return results_root
+
+
+class TestSidecarPathsFromRef:
+    def test_mirror_pins_the_engine_sidecar_paths_for_law(self, tmp_path: Path) -> None:
+        """The display-side twin is byte-equal to trade_store.sidecar_paths_for."""
+        from brutex.engine.trade_store import sidecar_paths_for, sweep_run_dir
+
+        sweeps = tmp_path / "sweeps"
+        store_path = sweeps / "NSE-NIFTY" / "5m" / "long_k3_deadbeef.parquet"
+        engine = sidecar_paths_for(store_path, sweeps, run_id="r-x")
+        run_dir = sweep_run_dir(sweeps, "r-x")
+        display = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+        assert display == engine
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "",
+            "NSE-NIFTY/5m",
+            "NSE-NIFTY/5m/stem/extra",
+            "../evil/5m/stem",
+            "NSE-NIFTY/5m/..",
+            "NSE-NIFTY//stem",
+        ],
+    )
+    def test_unsafe_or_malformed_refs_return_none(self, tmp_path: Path, ref: str) -> None:
+        assert oc.sidecar_paths_from_ref(tmp_path, ref) is None
+
+
+class TestTradeStoreReader:
+    def test_unsafe_run_id_and_bad_rank_degrade(self, tmp_path: Path) -> None:
+        reader = oc.TradeStoreReader(tmp_path / "sweeps")
+        assert reader.page("../evil", 1, offset=0, limit=10).status == "awaiting"
+        assert reader.page("r-x", 0, offset=0, limit=10).status == "awaiting"
+        assert reader.parse_count == 0
+
+    def test_absent_top100_is_awaiting(self, tmp_path: Path) -> None:
+        page = oc.TradeStoreReader(tmp_path / "sweeps").page("r-x", 1, offset=0, limit=10)
+        assert page.status == "awaiting"
+        assert page.total is None
+        assert page.source == "none"
+        assert oc.AWAITING_DETAIL in page.detail
+
+    def test_corrupt_top100_is_corrupt(self, tmp_path: Path) -> None:
+        results_root = tmp_path / "sweeps"
+        _write(oc.runs_root(results_root) / "r-x" / oc.TOP100_FILENAME, "{broken")
+        page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert page.status == "corrupt"
+        assert page.rows == ()
+
+    def test_rank_not_in_top100_is_awaiting(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        page = oc.TradeStoreReader(results_root).page("r-x", 42, offset=0, limit=10)
+        assert page.status == "awaiting"
+        assert "rank 42" in page.detail
+
+    @pytest.mark.parametrize(
+        "row_kwargs",
+        [
+            {"combo": None},  # pre-#1275 artifact: no additive run_id
+            {"tuple_ref": None},  # no equity_ref at all
+            {"tuple_ref": "not-a-dict"},  # equity_ref not an object
+            {"tuple_ref": {"sidecar": "equity"}},  # no tuple key
+            {"combo": ""},  # empty combo run_id
+        ],
+    )
+    def test_missing_results_depth_reference_is_awaiting(
+        self, tmp_path: Path, row_kwargs: dict[str, Any]
+    ) -> None:
+        results_root = _rebind_run(tmp_path, **row_kwargs)
+        page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert page.status == "awaiting"
+        assert "pre-#1275" in page.detail
+
+    def test_unsafe_tuple_ref_is_corrupt_never_touching_disk(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(
+            tmp_path, tuple_ref={"tuple": "../../evil/5m/stem", "sidecar": "equity"}
+        )
+        page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert page.status == "corrupt"
+        assert "safe path segments" in page.detail
+
+    def test_absent_sidecars_is_awaiting(self, tmp_path: Path) -> None:
+        """Top100 present but NO results-depth trio → honest awaiting (never 0)."""
+        results_root = _rebind_run(tmp_path)
+        page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert page.status == "awaiting"
+        assert page.total is None
+        assert page.source == "none"
+        assert "results-depth sidecars absent" in page.detail
+
+    def test_corrupt_stamp_is_named_corrupt_never_a_raise(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        paths = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+        assert paths is not None
+        paths.stamp.write_text("{broken", encoding="utf-8")
+        with structlog.testing.capture_logs() as logs:
+            page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert page.status == "corrupt"
+        assert page.source == "results_store"
+        assert "results-depth read failed" in page.detail
+        assert any(entry["event"] == "oneclick.artifact_corrupt" for entry in logs)
+
+    def test_real_sidecars_page_with_additive_and_null_fields(self, tmp_path: Path) -> None:
+        """The happy rebind: REAL writer-built sidecars page through the reader."""
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, statuses=("OK", "PARTIAL", "NO_1M_DATA"))
+        page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert page.status == "ok"
+        assert page.source == "results_store"
+        assert page.total == 3
+        assert page.detail == ""  # no clamp engaged
+        assert [row["trade_seq"] for row in page.rows] == [0, 1, 2]
+        first, second, third = page.rows
+        # Ruling 18: lots/costs pass through as honest None — never 1/0.
+        assert first["lots"] is None
+        assert first["costs_paisa"] is None
+        # mae_granularity: 1m when the minute path fully covered, else tf.
+        assert first["path_1m_status"] == "ok"
+        assert first["mae_granularity"] == "1m"
+        assert (first["mae"], first["mfe"]) == (40, 160)  # the 1m values
+        assert second["mae_granularity"] == "tf"
+        assert (second["mae"], second["mfe"]) == (51, 151)  # the sweep-TF values
+        assert third["path_1m_status"] == "no_1m_data"
+        assert third["mae_granularity"] == "tf"
+
+    def test_offset_pages_and_unknown_combo_totals_zero(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, n_trades=5)
+        reader = oc.TradeStoreReader(results_root)
+        tail = reader.page("r-x", 1, offset=3, limit=10)
+        assert [row["trade_seq"] for row in tail.rows] == [3, 4]
+        assert tail.total == 5
+        # A combo absent from the stamp pages honestly as total 0 (trade_store law).
+        _write(
+            run_dir / oc.TOP100_FILENAME,
+            json.dumps(
+                [
+                    _rebind_top100_row(
+                        1, combo="combo-ghost", tuple_ref={"tuple": _TUPLE_REF, "sidecar": "equity"}
+                    )
+                ]
+            ),
+        )
+        ghost = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)
+        assert ghost.status == "ok"
+        assert ghost.total == 0
+        assert ghost.rows == ()
+
+    def test_limit_beyond_page_limit_max_is_clamped_and_named(self, tmp_path: Path) -> None:
+        """PAGE_LIMIT_MAX=500 (the trade_store clamp law) — named in detail."""
+        pytest.importorskip("polars")
+        from brutex.engine.trade_store import PAGE_LIMIT_MAX
+
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, n_trades=PAGE_LIMIT_MAX + 40)
+        page = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=1000)
+        assert page.status == "ok"
+        assert len(page.rows) == PAGE_LIMIT_MAX
+        assert page.total == PAGE_LIMIT_MAX + 40
+        assert f"limit clamped to {PAGE_LIMIT_MAX}" in page.detail
+
+    def test_top100_parse_once_per_revision_memo(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        reader.page("r-x", 1, offset=0, limit=5)
+        reader.page("r-x", 1, offset=1, limit=5)
+        assert reader.parse_count == 1  # the memo held across pages
+        # A top100 rewrite moves the stat token → exactly one re-parse.
+        top_path = run_dir / oc.TOP100_FILENAME
+        rows = json.loads(top_path.read_text(encoding="utf-8"))
+        top_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 2
+
+    def test_unstattable_top100_computes_fresh_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A None revision computes fresh and caches NOTHING (lake_revision law)."""
+        results_root = _rebind_run(tmp_path)
+        reader = oc.TradeStoreReader(results_root)
+        monkeypatch.setattr(oc, "artifact_revision", lambda _path: None)
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        # revision None on top100 → fresh parse; then the stamp probe also
+        # reads None → the awaiting sidecars arm (nothing fabricated).
+        assert page.status == "awaiting"
+        assert reader.parse_count == 1
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # nothing was cached
