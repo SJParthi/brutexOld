@@ -663,11 +663,13 @@ class TestCompositesFor:
 
 
 class TestMissingStoreLoud:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): a missing finalist store is
-    counted + capped-INFO'd + (when beyond the sweep's own skip/fail count)
-    WARNed loud, with an actionable path sample. The out_root fixture swept the
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): a missing
+    finalist store is classified deterministically (no-bars ⇒ expected; bars
+    present ⇒ deletion-suspect), counted + capped-INFO'd + — when the
+    bars-present count exceeds the run-scoped failed/quarantined allowance —
+    WARNed loud with an actionable path sample. The out_root fixture swept the
     ONE-arm _grid(); running the pass over the TWO-arm grid leaves the tp=None
-    tuple with no store on disk — exactly one missing store."""
+    tuple with no store on disk — exactly one (bars-present) missing store."""
 
     def _two_arm_grid(self) -> SweepGridConfig:
         return _grid(take_profits=[50, None])
@@ -676,10 +678,18 @@ class TestMissingStoreLoud:
         with capture_logs() as logs:
             report = _run_pass(out_root, self._two_arm_grid(), expected_missing=0)
         assert report.tuples_missing_store == 1
+        assert report.missing_expected_no_bars == 0  # bars present — deletion-suspect
+        assert report.missing_store_unexplained == 1  # the pass's OWN computed field
         warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
         assert len(warns) == 1
         assert warns[0]["unexplained"] == 1
         assert warns[0]["expected"] == 0
+        # Review round 1 item 3: the remediation names sweep-verify's REAL flag
+        # (--results-root; --out-root does not exist) + review round 1 M2: the
+        # run-scoped-allowance residual heuristic is disclosed in the note.
+        assert "--results-root" in warns[0]["note"]
+        assert "--out-root" not in warns[0]["note"]
+        assert "run-scoped" in warns[0]["note"]
         # The per-store INFO fired (capped) + the sample carries the absent path.
         infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
         assert len(infos) == 1
@@ -725,11 +735,90 @@ class TestMissingStoreLoud:
         tallies = _Tallies()
         with capture_logs() as logs:
             for i in range(_MISSING_STORE_LOG_CAP + 5):
-                _note_missing_store(Path(f"/lake/{i}.parquet"), tallies)
+                _note_missing_store(Path(f"/lake/{i}.parquet"), tallies, no_bars=False)
         infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
         assert len(infos) == _MISSING_STORE_LOG_CAP  # INFO capped
         assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 5  # count uncapped
         assert len(tallies.missing_store_sample) == _MISSING_STORE_SAMPLE_CAP  # sample capped
+
+    def test_no_bars_note_shares_the_info_cap_and_never_samples(self) -> None:
+        """Review round 1 M2: the no-bars class logs its OWN capped INFO
+        (results_depth.missing_store_no_bars), shares the ONE log-volume cap
+        with the bars-present class, counts missing_expected_no_bars, and is
+        NEVER sampled (the sample feeds the actionable deletion WARN only)."""
+        from brutex.engine.results_depth_pass import (
+            _MISSING_STORE_LOG_CAP,
+            _note_missing_store,
+        )
+
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(_MISSING_STORE_LOG_CAP + 3):
+                _note_missing_store(Path(f"/lake/nb-{i}.parquet"), tallies, no_bars=True)
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_no_bars"]
+        assert len(infos) == _MISSING_STORE_LOG_CAP  # shared INFO cap
+        assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 3
+        assert tallies.missing_expected_no_bars == _MISSING_STORE_LOG_CAP + 3
+        assert tallies.missing_store_sample == []  # never sampled
+        assert not [log for log in logs if log["event"] == "results_depth.missing_store"]
+
+    def test_no_bars_missing_store_is_expected_never_unexplained(self, out_root: Path) -> None:
+        """Review round 1 M2 — THE RESUME regression: a tuple whose bar slice
+        is EMPTY is deterministically storeless (the sweep never writes a
+        store for it — first run AND checkpoint resume alike). On a RESUMED
+        run its skip folds into skipped_resume, so the run-scoped allowance is
+        0 (modelled by expected_missing=0 here) — the pre-fix run-N-counter
+        formula false-WARNed "partial store deletion" on that healthy resume.
+        The deterministic classification fires NO unexplained WARN."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        with capture_logs() as logs:
+            report = run_results_depth_pass(
+                out_root=out_root,
+                grid=grid,
+                # BANKNIFTY was never swept (its slice is empty) — the no-bars
+                # prefix tuple; NIFTY's store exists from the fixture sweep.
+                bars_for=lambda instrument, _tf: _BARS if instrument == "NIFTY" else [],
+                minute_bars_for=lambda _i: _BARS,
+                expected_missing=0,
+            )
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_no_bars == 1
+        assert report.missing_store_unexplained == 0
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_no_bars"]
+        assert len(infos) == 1
+        assert report.missing_store_sample == ()  # no-bars misses are never sampled
+
+    def test_genuine_deletion_still_warns_with_run_scoped_allowance(self, out_root: Path) -> None:
+        """The M2 teeth twin (genuine-deletion-on-resume): a swept BARS-PRESENT
+        store deleted out from under the tree still WARNs against the resume's
+        run-scoped allowance (expected_missing=0) — the classification never
+        masks a real deletion."""
+        grid = _grid()
+        store = tuple_store_path(out_root, next(iter_sweep_tuples(grid)), grid)
+        store.unlink()
+        with capture_logs() as logs:
+            report = _run_pass(out_root, grid, expected_missing=0)
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_no_bars == 0
+        assert report.missing_store_unexplained == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["missing_no_bars"] == 0
+        assert store.name in str(warns[0]["sample"])
+
+    def test_over_allowance_clamps_to_zero_never_negative(self, out_root: Path) -> None:
+        """max(0, …): an allowance larger than the observed misses reports an
+        honest 0 (never a negative unexplained count) and stays silent."""
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid(), expected_missing=5)
+        assert report.tuples_missing_store == 1
+        assert report.missing_store_unexplained == 0
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
 
 
 class TestBarsSha256:
@@ -770,6 +859,17 @@ class TestBarsSha256:
         with_oi = [replace(_BARS[0], open_interest=42)]
         without_oi = [replace(_BARS[0], open_interest=None)]
         assert _bars_sha256(with_oi) != _bars_sha256(without_oi)
+
+    def test_naive_timestamp_fails_loud(self) -> None:
+        """Review round 1 item 7: a tz-NAIVE timestamp must raise — a naive
+        ``astimezone(UTC)`` would resolve via the MACHINE's local zone, making
+        the digest (and the resume decision) silently host-dependent."""
+        from brutex.engine.results_depth_pass import _bar_ts_us
+
+        with pytest.raises(ValueError, match="naive bar timestamp"):
+            _bar_ts_us(datetime(2026, 1, 5, 9, 16))
+        # The tz-aware path stays exact-integer µs (no float rounding).
+        assert _bar_ts_us(datetime(1970, 1, 1, 0, 0, 1, 500, tzinfo=UTC)) == 1_000_500
 
 
 class TestReferenceFingerprintRedo:

@@ -36,7 +36,7 @@ import polars as pl
 import structlog
 
 from brutex.data.catalog import Catalog
-from brutex.data.errors import PartitionError, parquet_read_skip_errors
+from brutex.data.errors import PartitionError
 from brutex.data.lake_invariants import (
     LakeFinding,
     PartitionCoords,
@@ -72,14 +72,19 @@ class ReconcileResult:
         and skipped instead of crashing the whole reconcile, GAP #9).
     unreadable
         Absolute paths of the CORRUPT / version-incompatible Parquet partition
-        files skipped by the GAP-#9 ``except parquet_read_skip_errors()`` arm
-        ONLY (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1635) — the
-        distinct corrupt-class subset of ``skipped``. A benign
-        ``PartitionError`` (unparseable path) or a zero-row partition is data
-        ABSENCE, not data LOSS, and is counted in ``skipped`` but NEVER here
-        (the false-refuse guard). Populated so the ``brutex sweep-all`` launch
-        can REFUSE loudly on a corrupt month — an INTERIOR hole invisible in
-        the swept output that silently poisons the PDH/PDL/pivot/Fib anchors
+        files skipped by the GAP-#9 ``except pl.exceptions.PolarsError`` arm
+        ONLY (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1635 —
+        review round 1 NARROWED the populating arm to the polars decode
+        failure) — the distinct corrupt-class subset of ``skipped``. A benign
+        ``PartitionError`` (unparseable path), a zero-row partition, AND an
+        ``OSError`` file-level fault (a VANISHED file — ENOENT from a
+        concurrent heal/fetch — or a transient FS blip) are data ABSENCE, not
+        data LOSS, and are counted in ``skipped`` but NEVER here (the
+        false-refuse guard: "absent != corrupt", and the sweep-launch refusal
+        has no escape flag, so a transient glitch must never abort a multi-day
+        launch). Populated so the ``brutex sweep-all`` launch can REFUSE
+        loudly on a corrupt month — an INTERIOR hole invisible in the swept
+        output that silently poisons the PDH/PDL/pivot/Fib anchors
         (bits 6-29+48-51) while ``data_snapshot_hash`` stamps the holed series
         as canonical (Golden Rule #4). Defaulted ``()`` so every existing
         three-/four-field construction stays compatible.
@@ -206,7 +211,7 @@ def reconcile_catalog_from_lake(
         # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
         # runs at the START of every sweep load + F&O window derivation. Log + skip that
         # one file (counted in `skipped`) and continue; every readable partition still
-        # reconciles. NARROW set (`parquet_read_skip_errors`): a genuine code bug still
+        # reconciles. NARROW set (the two arms below): a genuine code bug still
         # propagates (Golden Rule #1).
         try:
             timestamps = pl.read_parquet(path, columns=["timestamp"]).get_column("timestamp")
@@ -217,7 +222,7 @@ def reconcile_catalog_from_lake(
             first_ts = timestamps.min()
             last_ts = timestamps.max()
             raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except parquet_read_skip_errors() as exc:
+        except pl.exceptions.PolarsError as exc:
             # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): a CORRUPT /
             # version-incompatible partition file is an INTERIOR data hole, not a
             # benign absence — record its absolute path DISTINCTLY so the sweep
@@ -228,6 +233,16 @@ def reconcile_catalog_from_lake(
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
             unreadable.append(str(path))
+            continue
+        except OSError as exc:
+            # #1635 review round 1 (M1): an OSError is a FILE-LEVEL fault — a
+            # VANISHED file (ENOENT from a concurrent heal/fetch racing the glob)
+            # or a transient FS blip — data ABSENCE, not data LOSS. Count it as a
+            # benign ``skipped`` (WARN kept) and NEVER on ``unreadable``: the
+            # sweep-launch refusal has no escape flag, so a transient glitch must
+            # not abort a multi-day launch ("absent != corrupt").
+            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
+            skipped += 1
             continue
         if check_invariants:
             # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column this

@@ -218,9 +218,17 @@ class ResultsDepthReport:
     counters (``pool`` / ``gate_passers`` / ``excluded_*`` / ``parity_excluded``
     / ``families_collapsed``) cover the WHOLE grid (fresh + resumed).
     ``missing_store_sample`` (additive, capped
-    :data:`_MISSING_STORE_SAMPLE_CAP`) carries the first absent finalist-store
-    paths so a missing-store WARN is actionable
+    :data:`_MISSING_STORE_SAMPLE_CAP`) carries the first absent BARS-PRESENT
+    finalist-store paths so a missing-store WARN is actionable
     (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636).
+    ``missing_expected_no_bars`` (additive, review round 1 M2) is the
+    DETERMINISTICALLY-explained subset of ``tuples_missing_store``: the
+    tuple's own bar slice is EMPTY, so the sweep can never have written a
+    store — resume or not — and it NEVER counts toward the unexplained WARN.
+    ``missing_store_unexplained`` (additive) is the pass's OWN computed
+    ``max(0, (tuples_missing_store - missing_expected_no_bars) -
+    (expected_missing or 0))`` so the CLI adapter mirrors the SAME number
+    instead of re-deriving the formula.
     """
 
     tuples_processed: int
@@ -241,6 +249,8 @@ class ResultsDepthReport:
     top100_written: bool
     top100_entries: int
     missing_store_sample: tuple[str, ...] = ()
+    missing_expected_no_bars: int = 0
+    missing_store_unexplained: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +268,7 @@ class _Tallies:
     tuples_processed: int = 0
     tuples_skipped_current: int = 0
     tuples_missing_store: int = 0
+    missing_expected_no_bars: int = 0
     tuples_errored: int = 0
     combos_captured: int = 0
     combos_parity_failed: int = 0
@@ -284,7 +295,16 @@ _EPOCH_UTC: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def _bar_ts_us(ts: datetime) -> int:
-    """Exact integer µs-since-epoch for a bar timestamp (no float rounding)."""
+    """Exact integer µs-since-epoch for a bar timestamp (no float rounding).
+
+    Fail-loud on a tz-NAIVE timestamp (review round 1 item 7): a naive
+    ``astimezone(UTC)`` interprets the value in the MACHINE's local zone, so
+    the digest — and therefore the resume decision — would silently vary by
+    host. Bars are stored tz-aware UTC; a naive one is a caller bug
+    (mirroring the ``_as_utc`` defensive posture — raise, never guess).
+    """
+    if ts.tzinfo is None:
+        raise ValueError(f"naive bar timestamp (tz-aware UTC required): {ts!r}")
     delta = ts.astimezone(UTC) - _EPOCH_UTC
     return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
 
@@ -348,18 +368,37 @@ def _warn_vix_miss(run_id: str, missing: int, tallies: _Tallies) -> None:
         )
 
 
-def _note_missing_store(store_path: Path, tallies: _Tallies) -> None:
+def _note_missing_store(store_path: Path, tallies: _Tallies, *, no_bars: bool) -> None:
     """Count + (capped) log + (capped) sample a grid tuple with no store on disk.
 
-    DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1636). A missing finalist
-    store is legitimate for a not-swept / no-bars / quarantined tuple, so the
-    per-store INFO is capped (:data:`_MISSING_STORE_LOG_CAP`) — the count
-    (``tuples_missing_store``) ALWAYS increments and the unexplained-excess WARN
-    at pass end is the loud signal. The first
-    :data:`_MISSING_STORE_SAMPLE_CAP` absent paths are kept so that WARN + the
-    adapter summary can NAME them (a WARN without paths is unactionable).
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1636, review round 1 M2 —
+    deterministic classification). A missing finalist store is DETERMINISTICALLY
+    explained when the tuple's own bar slice is EMPTY (``no_bars=True``): a
+    no-bars tuple never writes a store, on the first run AND on a checkpoint
+    resume alike, so it counts ``missing_expected_no_bars`` + a capped INFO
+    (``results_depth.missing_store_no_bars``) and NEVER feeds the unexplained
+    WARN. A BARS-PRESENT missing store is the actionable class — capped INFO
+    (``results_depth.missing_store``) + the first
+    :data:`_MISSING_STORE_SAMPLE_CAP` paths sampled so the pass-end WARN + the
+    adapter summary can NAME them (a WARN without paths is unactionable). The
+    total (``tuples_missing_store``) ALWAYS increments for both classes; the
+    per-store INFO volume is capped at :data:`_MISSING_STORE_LOG_CAP` across
+    both. DISCLOSED COST (Golden Rule #10): classifying requires the caller to
+    load the tuple's bars via the memoised ``bars_for`` seam — paid ONLY when a
+    store is missing (zero lake reads on a clean run), at most once per
+    ``(instrument, tf)`` thanks to the memo.
     """
     tallies.tuples_missing_store += 1
+    if no_bars:
+        tallies.missing_expected_no_bars += 1
+        if tallies.missing_store_logged < _MISSING_STORE_LOG_CAP:
+            tallies.missing_store_logged += 1
+            _LOG.info(
+                "results_depth.missing_store_no_bars",
+                store=str(store_path),
+                note="empty bar slice — the sweep deterministically never writes this store",
+            )
+        return
     if tallies.missing_store_logged < _MISSING_STORE_LOG_CAP:
         tallies.missing_store_logged += 1
         _LOG.info("results_depth.missing_store", store=str(store_path))
@@ -625,14 +664,24 @@ def run_results_depth_pass(
     reason_provider, margin_roi_provider
         The WP3 seams, threaded to :func:`build_top100` (see that module).
     expected_missing
-        The caller-known count of tuples that are LEGITIMATELY storeless this
-        grid (``tuples_skipped_no_bars + tuples_failed + tuples_quarantined_prior``
-        from the sweep's own summary) — DEC-DEPTH-MISSING-STORE-LOUD-001
-        (MIGRATION.md #1636). ``tuples_missing_store`` beyond this count is
-        UNEXPLAINED (partial store deletion or a foreign grid identity) and
-        raises one ``results_depth.missing_store_unexplained`` WARN. ``None``
-        (the default — direct callers / unknown) treats EVERY missing store as
-        unexplained (the fail-loud direction).
+        The caller-known RUN-SCOPED failed/quarantined allowance
+        (``tuples_failed + tuples_quarantined_prior`` from the sweep's own
+        summary) — DEC-DEPTH-MISSING-STORE-LOUD-001 (MIGRATION.md #1636,
+        review round 1 M2). The no-bars class is NOT part of this allowance:
+        the pass classifies it DETERMINISTICALLY per missing store (an empty
+        ``bars_for`` slice ⇒ the sweep never writes a store — true on the
+        first run AND on a checkpoint resume whose prefix folded into
+        ``skipped_resume``, the false-WARN class this closes). A BARS-PRESENT
+        missing count beyond this allowance is UNEXPLAINED (partial store
+        deletion or a foreign grid identity) and raises one
+        ``results_depth.missing_store_unexplained`` WARN. ``None`` (the
+        default — direct callers / unknown) treats EVERY bars-present missing
+        store as unexplained (the fail-loud direction). HONEST residual
+        heuristic (disclosed in the WARN note): the allowance is run-scoped —
+        a deletion coinciding with PRIOR-run failures can be
+        under-attributed. DISCLOSED COST: classifying a missing store loads
+        that tuple's bars once via the memoised ``bars_for`` seam — paid only
+        when a store is missing, zero on clean runs.
 
     Returns
     -------
@@ -700,9 +749,12 @@ def run_results_depth_pass(
 
         Folds the shared VIX digest + this instrument's 1m/1day reference bars +
         the WP3 provider-presence flags. DISCLOSED cost (Golden Rule #10): a
-        fully-current resume now loads each instrument's reference series once to
-        compute the fp — O(reference bars)/instrument/pass, run-end only, never
-        on the ~33B-trial hot path.
+        fully-current resume now invokes ``minute_bars_for``/``daily_bars_for``
+        for the fp — and because this memo (``ref_fp_cache``) is SEPARATE from
+        the ``_context`` memo, an instrument whose tuples also build a context
+        loads its reference series up to TWICE on first touch (once per memo) —
+        O(reference bars)/instrument/pass, run-end only, never on the
+        ~33B-trial hot path.
         """
         cached = ref_fp_cache.get(instrument)
         if cached is not None:
@@ -729,7 +781,12 @@ def run_results_depth_pass(
     for tuple_ in iter_sweep_tuples(grid):
         store_path = tuple_store_path(out_root, tuple_, grid)
         if not store_path.exists():
-            _note_missing_store(store_path, tallies)
+            # Review round 1 M2: classify deterministically — an EMPTY bar slice
+            # means the sweep never writes this store (resume or not), so it is
+            # expected-missing; only a bars-present miss is deletion-suspect.
+            # Costs one memoised bars_for load, paid ONLY on a missing store.
+            no_bars = not _bars(tuple_.instrument, tuple_.tf.label)
+            _note_missing_store(store_path, tallies, no_bars=no_bars)
             continue
         try:
             store_hash = _store_sha256(store_path)
@@ -872,22 +929,28 @@ def run_results_depth_pass(
             error=str(exc),
         )
 
-    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): a missing finalist store is
-    # legitimate for the sweep's own skip/fail/quarantine tuples; a count BEYOND
-    # that is UNEXPLAINED (partial store deletion or a foreign grid identity) and
-    # is NEVER silent again — one WARN naming the excess + a path sample.
-    unexplained_missing = tallies.tuples_missing_store - (expected_missing or 0)
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): a no-bars
+    # tuple is deterministically storeless (classified above — resume-safe);
+    # a BARS-PRESENT missing store beyond the caller's run-scoped
+    # failed/quarantined allowance is UNEXPLAINED (partial store deletion or a
+    # foreign grid identity) and is NEVER silent again — one WARN naming the
+    # excess + a path sample.
+    missing_with_bars = tallies.tuples_missing_store - tallies.missing_expected_no_bars
+    unexplained_missing = max(0, missing_with_bars - (expected_missing or 0))
     if unexplained_missing > 0:
         _LOG.warning(
             "results_depth.missing_store_unexplained",
             missing=tallies.tuples_missing_store,
+            missing_no_bars=tallies.missing_expected_no_bars,
             expected=expected_missing,
             unexplained=unexplained_missing,
             sample=tuple(tallies.missing_store_sample),
             note=(
-                "finalist stores absent beyond the sweep's own "
-                "skip/fail/quarantine count — partial store deletion or a "
-                "foreign grid identity; run brutex sweep-verify --out-root <root>"
+                "bars-present finalist stores absent beyond the sweep's own "
+                "failed/quarantined allowance — partial store deletion or a "
+                "foreign grid identity (the allowance is run-scoped: a deletion "
+                "coinciding with prior-run failures can be under-attributed); "
+                "run brutex sweep-verify --results-root <root>"
             ),
         )
 
@@ -910,6 +973,8 @@ def run_results_depth_pass(
         top100_written=top100_written,
         top100_entries=top100_entries,
         missing_store_sample=tuple(tallies.missing_store_sample),
+        missing_expected_no_bars=tallies.missing_expected_no_bars,
+        missing_store_unexplained=unexplained_missing,
     )
     _LOG.info(
         "results_depth.pass_done",

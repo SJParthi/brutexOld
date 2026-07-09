@@ -6921,14 +6921,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
-                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): the sweep's OWN count
-                # of legitimately-storeless tuples (no-bars / failed / quarantined)
-                # — anything missing beyond this is UNEXPLAINED and WARNed loud.
-                expected_missing=(
-                    result.tuples_skipped_no_bars
-                    + result.tuples_failed
-                    + result.tuples_quarantined_prior
-                ),
+                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2):
+                # the RUN-SCOPED failed/quarantined allowance ONLY. The no-bars
+                # class is deliberately NOT summed here — the pass classifies it
+                # deterministically per missing store (an empty bars_for slice ⇒
+                # expected-missing), which is resume-safe: a resumed run's
+                # prefix no-bars tuples fold into skipped_resume, so a run-N
+                # counter here would false-WARN on a healthy resume, and summing
+                # tuples_skipped_no_bars would DOUBLE-allow (masking deletions).
+                expected_missing=(result.tuples_failed + result.tuples_quarantined_prior),
             )
         else:
             print(
@@ -8715,13 +8716,19 @@ def _run_results_depth_adapter(
     raw (global stops are never swallowed). Returns ``True`` iff the pass
     completed and its report printed.
 
-    ``expected_missing`` is the sweep's own legitimately-storeless tuple count
-    (``tuples_skipped_no_bars + tuples_failed + tuples_quarantined_prior``),
-    threaded into the pass so a missing-store count BEYOND it raises one
+    ``expected_missing`` is the sweep's RUN-SCOPED failed/quarantined allowance
+    (``tuples_failed + tuples_quarantined_prior`` — the no-bars class is NOT
+    summed: the pass classifies it deterministically per missing store, which
+    is resume-safe; review round 1 M2), threaded into the pass so a
+    BARS-PRESENT missing-store count beyond it raises one
     ``results_depth.missing_store_unexplained`` WARN + one mirrored stderr line
-    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636). The return value
-    STAYS ``True`` in the unexplained case — the fenced "NEVER fails the sweep"
-    contract is byte-preserved; it is observability, not an exit change.
+    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636). The stderr mirror
+    reads the pass's OWN ``report.missing_store_unexplained`` — ONE formula,
+    never re-derived here. HONEST residual (disclosed in both messages): the
+    allowance is run-scoped, so a deletion coinciding with prior-run failures
+    can be under-attributed. The return value STAYS ``True`` in the unexplained
+    case — the fenced "NEVER fails the sweep" contract is byte-preserved; it is
+    observability, not an exit change.
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
@@ -8786,18 +8793,22 @@ def _run_results_depth_adapter(
         f"top100={'written' if report.top100_written else 'FAILED'} "
         f"entries={report.top100_entries}"
     )
-    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): mirror the pass's unexplained
-    # missing-store WARN onto stderr so a cron tail sees it; the sweep's exit
-    # path is UNCHANGED (return stays True — observability, not a failure).
-    unexplained_missing = report.tuples_missing_store - (expected_missing or 0)
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): mirror the
+    # pass's OWN unexplained count (report.missing_store_unexplained — the ONE
+    # formula lives in the pass) onto stderr so a cron tail sees it; the
+    # sweep's exit path is UNCHANGED (return stays True — observability, not a
+    # failure).
+    unexplained_missing = report.missing_store_unexplained
     if unexplained_missing > 0:
         sample = ", ".join(report.missing_store_sample)
         sample_suffix = f": {sample}" if sample else ""
         print(
-            f"[brutex] WARNING: results-depth — {unexplained_missing} finalist "
-            "store(s) missing beyond the sweep's own skip/fail count "
-            f"(missing={report.tuples_missing_store}, expected={expected_missing}) — "
-            "partial store deletion or a foreign grid identity; re-run "
+            f"[brutex] WARNING: results-depth — {unexplained_missing} bars-present finalist "
+            "store(s) missing beyond the sweep's run-scoped failed/quarantined allowance "
+            f"(missing={report.tuples_missing_store}, "
+            f"no_bars={report.missing_expected_no_bars}, expected={expected_missing}) — "
+            "partial store deletion or a foreign grid identity (a deletion coinciding "
+            "with prior-run failures can be under-attributed); re-run "
             f"'brutex sweep-all' with the same selection to rebuild{sample_suffix}",
             file=sys.stderr,
         )

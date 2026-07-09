@@ -52,9 +52,12 @@ _SEGMENT = "INDEX"
 # #1342 seam detection: its `lake_derived_freshness_verdicts` grows a
 # `daily_before` parameter (the midnight-IST daily-comparator anchor). Absent at
 # HEAD ⇒ the 1day arm does not exist yet ⇒ skip (test-only DEPEND-on-#1342).
+# NOT a module-wide pytestmark: `test_1342_seam_tripwire` below must ALWAYS run
+# so a 1day arm landing under a DIFFERENT parameter name fails LOUDLY instead of
+# skipping this suite forever (review round 1 item 6).
 _HAS_1DAY_ARM = "daily_before" in inspect.signature(lake_derived_freshness_verdicts).parameters
 
-pytestmark = pytest.mark.skipif(
+_skip_until_1342 = pytest.mark.skipif(
     not _HAS_1DAY_ARM,
     reason="the derived-1day freshness arm lands with #1342 (DEC-MOVERS-STORED-FRESHNESS-001)",
 )
@@ -92,7 +95,7 @@ def _minute_bars() -> list[CandleBar]:
 
 def _seed(tmp_path: Path, *, daily: str) -> tuple[Path, Path]:
     """Seed 1minute NIFTY bars + a derived 1day partition (fresh|stale)."""
-    from brutex.data.spot_daily_resample import frame_to_candle_bars, resample_1m_to_daily
+    from brutex.data.spot_daily_resample import resample_1m_to_daily
     from brutex.data.tf_autoderive import read_lake_bars_frame
 
     lake_root = tmp_path / "lake"
@@ -109,16 +112,24 @@ def _seed(tmp_path: Path, *, daily: str) -> tuple[Path, Path]:
         )
         symbol_dir = lake_root / "bars" / _EXCHANGE / _SEGMENT / "NIFTY"
         df_1m = read_lake_bars_frame(symbol_dir, "1minute")
-        derived = frame_to_candle_bars(
-            resample_1m_to_daily(df_1m, before=datetime(2024, 1, 20).date())
-        )
+        # resample_1m_to_daily already yields list[CandleBar] (a latent bug in
+        # this previously-always-skipped helper wrapped it in
+        # frame_to_candle_bars — caught the moment the round-1 tripwire made
+        # this module actually EXECUTE; review round 1 item 6).
+        derived = resample_1m_to_daily(df_1m, before=datetime(2024, 1, 20).date())
         if daily == "stale":
-            # The drift shape: bump one stored daily close so it no longer matches
-            # a fresh re-derivation from the stored 1-minute base.
+            # The drift shape: bump one stored daily close (high raised with it —
+            # CandleBar enforces low <= close <= high) so it no longer matches a
+            # fresh re-derivation from the stored 1-minute base. The ordering fix
+            # is another latent defect in this previously-always-skipped helper,
+            # caught when the round-1 tripwire made it execute (item 6).
             from dataclasses import replace
 
             derived = list(derived)
-            derived[0] = replace(derived[0], close=derived[0].close + Decimal("5.00"))
+            stale_close = derived[0].close + Decimal("5.00")
+            derived[0] = replace(
+                derived[0], close=stale_close, high=max(derived[0].high, stale_close)
+            )
         sink.append(
             exchange=_EXCHANGE,
             segment=_SEGMENT,
@@ -154,6 +165,7 @@ def _kwargs(lake_root: Path, catalog_path: Path, tmp_path: Path) -> dict[str, An
     }
 
 
+@_skip_until_1342
 def test_stale_derived_1day_refuses_launch(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -166,8 +178,38 @@ def test_stale_derived_1day_refuses_launch(
     assert "NIFTY/1day" in err
 
 
+@_skip_until_1342
 def test_fresh_derived_1day_launches(tmp_path: Path) -> None:
     """A byte-fresh derived 1day passes the gate — the sweep runs (EXIT_OK)."""
     lake_root, catalog_path = _seed(tmp_path, daily="fresh")
     rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path))
     assert rc == EXIT_OK
+
+
+def test_1342_seam_tripwire(tmp_path: Path) -> None:
+    """Fail-loud tripwire (review round 1 item 6) — NEVER skipped.
+
+    The skipif above keys on the #1342 ``daily_before`` parameter NAME. If the
+    1day freshness arm lands under a DIFFERENT name, the gate tests above would
+    silently skip FOREVER while the arm ships untested. So while the skip
+    condition holds, functionally PROVE the arm is still absent: a genuinely
+    STALE stored derived 1day must yield ZERO verdicts keyed ("NIFTY", "1day").
+    An arm landing under ANY name/mechanism produces a verdict here and fails
+    this test — forcing the detection constant + the gate tests above to be
+    reactivated together.
+    """
+    if _HAS_1DAY_ARM:
+        pytest.skip("the #1342 `daily_before` seam landed — the gate tests above are active")
+    lake_root, _catalog_path = _seed(tmp_path, daily="stale")
+    verdicts = lake_derived_freshness_verdicts(
+        lake_root,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbols=["NIFTY"],
+        intervals=["1day"],
+    )
+    assert ("NIFTY", "1day") not in verdicts, (
+        "a derived-1day freshness arm has landed (under a different name than "
+        "#1342's `daily_before`) — update _HAS_1DAY_ARM's detection and activate "
+        "the stale-1day refusal tests in this file"
+    )

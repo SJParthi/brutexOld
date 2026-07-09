@@ -267,6 +267,49 @@ class TestReconcile:
         assert len(skips) == 1
         assert "BANKNIFTY" in skips[0]["path"]
 
+    def test_vanished_file_is_benign_skipped_not_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1635 review round 1 M1: an ``OSError`` at read time is data ABSENCE,
+        not data LOSS — a file that VANISHES between the glob listing and the
+        read (ENOENT from a concurrent heal/fetch, an NFS blip) is counted in
+        ``skipped`` (WARN kept) but NEVER on ``unreadable``, so the escape-less
+        sweep-launch refusal cannot be tripped by a transient FS glitch.
+
+        Fails-before: the pre-fix combined ``parquet_read_skip_errors()`` arm
+        recorded the vanished file on ``unreadable`` → a launch REFUSAL.
+        """
+        import errno
+        from types import SimpleNamespace
+
+        import brutex.data.catalog_reconcile as cr
+        from structlog.testing import capture_logs
+
+        _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
+        target = _write_partition(tmp_path, symbol="BANKNIFTY", n=3)
+        real_read = pl.read_parquet
+
+        def _vanishing_read(path: object, *args: object, **kwargs: object) -> object:
+            if Path(str(path)) == target:
+                # The file genuinely vanishes between listing and read.
+                target.unlink(missing_ok=True)
+                raise FileNotFoundError(errno.ENOENT, "vanished mid-reconcile", str(target))
+            return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        # Scope the shim to the module-level `pl` name (never the shared polars
+        # module object) so only the reconcile's reads are intercepted.
+        monkeypatch.setattr(
+            cr, "pl", SimpleNamespace(read_parquet=_vanishing_read, exceptions=pl.exceptions)
+        )
+        with _open(tmp_path) as cat, capture_logs() as logs:
+            result = cr.reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        assert result.partitions_reconciled == 1  # the good partition still lands
+        assert result.skipped == 1
+        assert result.unreadable == ()  # absent != corrupt — never a refusal signal
+        skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
+        assert len(skips) == 1
+        assert "BANKNIFTY" in skips[0]["path"]
+
     def test_unreadable_is_populated_only_by_the_corrupt_arm(self, tmp_path: Path) -> None:
         """DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): the three skip classes
         disambiguate — a CORRUPT/unreadable partition lands on ``unreadable``, while

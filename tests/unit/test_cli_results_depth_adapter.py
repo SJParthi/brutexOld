@@ -185,9 +185,10 @@ class TestDefaultRunnerArm:
 
 
 class TestMissingStoreThreading:
-    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636): the adapter threads the sweep's
-    own legitimately-storeless count into the pass + mirrors the UNEXPLAINED
-    excess onto stderr, while the fence (``return True``) is byte-preserved."""
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): the adapter
+    threads the sweep's run-scoped failed/quarantined allowance into the pass +
+    mirrors the pass's OWN computed ``missing_store_unexplained`` onto stderr,
+    while the fence (``return True``) is byte-preserved."""
 
     def test_expected_missing_is_threaded_to_the_pass(self, tmp_path: Path) -> None:
         captured: dict[str, Any] = {}
@@ -205,28 +206,57 @@ class TestMissingStoreThreading:
         report = _report(
             tuples_missing_store=5,
             missing_store_sample=("/lake/a.parquet", "/lake/b.parquet"),
+            missing_store_unexplained=3,
         )
         ok = _call(tmp_path, lambda **_kwargs: report, expected_missing=2)
         assert ok is True  # the fence's "NEVER fails the sweep" contract holds
         err = capsys.readouterr().err
-        assert "3 finalist store(s) missing beyond the sweep's own skip/fail count" in err
+        assert (
+            "3 bars-present finalist store(s) missing beyond the sweep's "
+            "run-scoped failed/quarantined allowance"
+        ) in err
         assert "missing=5" in err
+        assert "no_bars=0" in err
         assert "expected=2" in err
         assert "/lake/a.parquet" in err
+        # Review round 1 M2: the run-scoped residual heuristic is disclosed.
+        assert "under-attributed" in err
 
     def test_explained_missing_is_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        report = _report(tuples_missing_store=2, missing_store_sample=("/lake/a.parquet",))
+        report = _report(
+            tuples_missing_store=2,
+            missing_store_sample=("/lake/a.parquet",),
+            missing_store_unexplained=0,
+        )
         ok = _call(tmp_path, lambda **_kwargs: report, expected_missing=2)
+        assert ok is True
+        assert "finalist store(s) missing" not in capsys.readouterr().err
+
+    def test_adapter_mirrors_the_pass_computed_count_never_a_recompute(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Review round 1 M2: all 5 misses are no-bars-EXPECTED (the pass
+        computed unexplained=0). A local ``missing - expected`` recompute would
+        falsely print 5 — silence proves the adapter mirrors the report's own
+        ``missing_store_unexplained`` (ONE formula, owned by the pass)."""
+        report = _report(
+            tuples_missing_store=5,
+            missing_expected_no_bars=5,
+            missing_store_unexplained=0,
+        )
+        ok = _call(tmp_path, lambda **_kwargs: report, expected_missing=0)
         assert ok is True
         assert "finalist store(s) missing" not in capsys.readouterr().err
 
     def test_unexplained_without_sample_has_no_path_suffix(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        report = _report(tuples_missing_store=1, missing_store_sample=())
+        report = _report(
+            tuples_missing_store=1, missing_store_sample=(), missing_store_unexplained=1
+        )
         _call(tmp_path, lambda **_kwargs: report, expected_missing=0)
         err = capsys.readouterr().err.rstrip()
-        assert "1 finalist store(s) missing" in err
+        assert "1 bars-present finalist store(s) missing" in err
         assert err.endswith("rebuild")  # no ": <sample>" suffix when the sample is empty

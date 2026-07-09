@@ -195,6 +195,54 @@ def test_benign_skips_do_not_refuse(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert "corrupt" not in err
 
 
+def test_vanished_file_does_not_refuse(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1635 review round 1 M1: a partition file that VANISHES between the
+    reconcile's glob listing and its read (an ``OSError`` — ENOENT from a
+    concurrent heal/fetch, an NFS blip) is data ABSENCE, not corruption — the
+    launch PROCEEDS (EXIT_OK, no refusal, "absent != corrupt").
+
+    Fails-before: the combined ``parquet_read_skip_errors()`` arm recorded the
+    vanished file on ``unreadable`` and the escape-less refusal aborted the
+    launch with EXIT_USER_ERROR on a transient FS glitch.
+    """
+    import errno
+    from types import SimpleNamespace
+
+    import brutex.data.catalog_reconcile as cr
+    import polars as pl
+
+    lake_root, catalog_path = _seed(tmp_path)
+    # An EXTRA March partition (real Parquet, outside the swept Jan-Feb bars)
+    # that vanishes exactly at the reconcile's read.
+    extra = _partition(lake_root, year=2024, month=3)
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "timestamp": pl.Series(
+                [datetime(2024, 3, 1, 9, 16, tzinfo=UTC)], dtype=pl.Datetime("us", "UTC")
+            )
+        }
+    ).write_parquet(extra)
+    real_read = pl.read_parquet
+
+    def _vanishing_read(path: object, *args: object, **kwargs: object) -> object:
+        if Path(str(path)) == extra:
+            extra.unlink(missing_ok=True)  # the file genuinely vanishes
+            raise FileNotFoundError(errno.ENOENT, "vanished mid-reconcile", str(extra))
+        return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        cr, "pl", SimpleNamespace(read_parquet=_vanishing_read, exceptions=pl.exceptions)
+    )
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path))
+    err = capsys.readouterr().err
+    assert rc == EXIT_OK
+    assert "REFUSED" not in err
+    assert "corrupt" not in err
+
+
 def test_corrupt_list_caps_at_ten_shown(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """12 corrupt partitions → 10 named + a "(+2 more)" suffix (the log-volume cap)."""
     lake_root, catalog_path = _seed(tmp_path)
