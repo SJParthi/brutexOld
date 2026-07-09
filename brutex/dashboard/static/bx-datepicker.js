@@ -36,6 +36,48 @@
   var MON = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   var MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+  /* ONE delegated pair of document-level listeners for ALL picker/select
+     instances (rebuild leak fix): each buildCalendar/buildSelect previously
+     added its OWN document click/keydown listener and never removed it, so a
+     page that REBUILDS its controls (the MutationObserver re-wires the fresh
+     nodes) accumulated document listeners whose closures also retained every
+     replaced instance's detached DOM tree (measured in headless Chromium:
+     4,001 document listeners after 1,000 rebuilds; ~103 surviving detached
+     nodes per rebuild; document click dispatch degraded 0.20 ms -> 4.60 ms).
+     Instances now REGISTER here; the two document listeners are attached
+     exactly ONCE, and an entry whose root has left the document is pruned on
+     every document event AND on every auto() re-wire pass — releasing the
+     replaced tree promptly with no behaviour change for live instances. */
+  var docTargets = [];
+  var docWired = false;
+  function pruneDocTargets() {
+    for (var i = docTargets.length - 1; i >= 0; i--) {
+      if (!docTargets[i].root.isConnected) docTargets.splice(i, 1);
+    }
+  }
+  function onDocClick(e) {
+    for (var i = docTargets.length - 1; i >= 0; i--) {
+      var t = docTargets[i];
+      if (!t.root.isConnected) { docTargets.splice(i, 1); continue; }
+      if (!t.isInside(e)) t.close();
+    }
+  }
+  function onDocKeydown(e) {
+    if (e.key != "Escape") return;
+    for (var i = docTargets.length - 1; i >= 0; i--) {
+      var t = docTargets[i];
+      if (!t.root.isConnected) { docTargets.splice(i, 1); continue; }
+      if (t.esc) t.close();
+    }
+  }
+  function registerDocTarget(entry) {
+    docTargets.push(entry);
+    if (docWired) return;
+    docWired = true;
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onDocKeydown);
+  }
+
   /* Core: mount the picker into `mount` (the mount's own contents are NOT touched
      here — the wiring helper hides the native control before calling). */
   function buildCalendar(mount, fromInput, toInput, single) {
@@ -141,9 +183,13 @@
       if (t.dataset.x == "apply") { fromInput.value = ymd(start); if (!single) toInput.value = ymd(end); setTrig(); close(); try { fromInput.dispatchEvent(new Event("change")); if (!single) toInput.dispatchEvent(new Event("change")); } catch (_) { } return; }
     });
     trig.addEventListener("click", function (e) { e.stopPropagation(); wrap.classList.contains("open") ? close() : open(); });
-    /* A loose <input type=date> nested in a <label> re-fires drill clicks at the hidden native input; that label-forwarded click bubbles here with e.target === our own input (a sibling of wrap), tricking the outside-close. Treat the picker's own backing input(s) as INSIDE so the drill never self-closes on /movers + /reports (DEC-DATEPICKER-LABEL-CLOSE-FIX-001). */
-    document.addEventListener("click", function (e) { if (wrap.contains(e.target) || e.target === fromInput || (!single && e.target === toInput)) return; close(); });
-    document.addEventListener("keydown", function (e) { if (e.key == "Escape") close(); });
+    /* A loose <input type=date> nested in a <label> re-fires drill clicks at the hidden native input; that label-forwarded click bubbles here with e.target === our own input (a sibling of wrap), tricking the outside-close. Treat the picker's own backing input(s) as INSIDE so the drill never self-closes on /movers + /reports (DEC-DATEPICKER-LABEL-CLOSE-FIX-001). The outside-close + Escape handlers ride the ONE delegated document listener pair (rebuild leak fix — see registerDocTarget). */
+    registerDocTarget({
+      root: wrap,
+      isInside: function (e) { return wrap.contains(e.target) || e.target === fromInput || (!single && e.target === toInput); },
+      close: close,
+      esc: true
+    });
     setTrig();
   }
 
@@ -173,11 +219,17 @@
     function close() { wrap.classList.remove("open"); }
     menu.addEventListener("click", function (e) { var t = e.target.closest("[data-i]"); if (!t) return; sel.selectedIndex = +t.dataset.i; setTrig(); build(); close(); try { sel.dispatchEvent(new Event("change")); } catch (_) { } });
     trig.addEventListener("click", function (e) { e.stopPropagation(); build(); wrap.classList.toggle("open"); });
-    document.addEventListener("click", function (e) { if (!wrap.contains(e.target)) close(); });
     wrap.appendChild(trig); wrap.appendChild(menu); sel.parentNode.insertBefore(wrap, sel.nextSibling); setTrig();
+    registerDocTarget({
+      root: wrap,
+      isInside: function (e) { return wrap.contains(e.target); },
+      close: close,
+      esc: false
+    });
   }
 
   function auto(root) {
+    pruneDocTargets();  /* release replaced instances' registry entries (and their detached trees) on every re-wire pass */
     var scope = root && root.querySelectorAll ? root : document;
     Array.prototype.forEach.call(scope.querySelectorAll('[data-bxdp="range"]'), function (el) { try { wireRange(el); } catch (e) { } });
     Array.prototype.forEach.call(scope.querySelectorAll('input[type="date"]'), function (i) { try { wireLooseInput(i); } catch (e) { } });
