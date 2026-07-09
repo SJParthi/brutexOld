@@ -305,6 +305,8 @@ class TestOneclickSections:
             "r1_dsr",
             "r1_cpcv",
             "r1_vix_band",
+            "r1_worst_streak_pct",
+            "r1_uw_days",
             "actual_enumerated",
             "actual_tested",
             "actual_skipped",
@@ -412,6 +414,25 @@ class TestScreenerPage:
         assert 'id="bxTickerStrip"' in html
         assert _AWAITING in html
 
+    def test_resilience_columns_in_the_shared_config(self) -> None:
+        """The losing-streak resilience columns ride the ONE COLUMNS config
+        (dotted resilience.* / metrics.* keys — generic render, null → "—")."""
+        js = (_STATIC / "bx-screener.js").read_text(encoding="utf-8")
+        for key in (
+            "metrics.max_consecutive_losses",
+            "resilience.losing_streak_p95",
+            "resilience.worst_streak_pnl_paisa",
+            "resilience.longest_underwater_days",
+            "resilience.worst_loss_month_count",
+            "resilience.win_rate_year_spread",
+        ):
+            assert f'key: "{key}"' in js, key
+        # The worst-streak ₹ column formats via the money path (display 2dp).
+        assert (
+            '"resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true'
+            in js
+        )
+
 
 class TestStrategyPage:
     def test_chart_first_layout_markers(self) -> None:
@@ -472,6 +493,37 @@ class TestStrategyPage:
         html = _template("strategy.html")
         assert 'id="stVixBand"' in html
         assert "window.BXOneclick.vixBandText(row.vix_band)" in html
+
+    def test_resilience_hero_panel_present_and_wired(self) -> None:
+        """The losing-streak resilience panel: every cell hook, the self-locate
+        input, and the ONE shared builder wiring (textContent-only)."""
+        html = _template("strategy.html")
+        assert 'aria-label="Losing-streak resilience"' in html
+        for hook in (
+            "stResWorstStreak",
+            "stResCost",
+            "stResUnderwater",
+            "stResWorstMonth",
+            "stResWinSpread",
+            "stResGuide",
+            "stResLossesIn",  # the pure-client "you are N losses in" input
+            "stResLocate",
+        ):
+            assert f'id="{hook}"' in html, hook
+        # The MAX reads from metrics; every other cell from the sibling block —
+        # via the ONE shared pure builders (no second copy).
+        assert "window.BXOneclick.resilienceCells(row, money)" in html
+        assert "window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow)" in html
+        # The honest signal-only / gross / per-unit caveat is on the panel.
+        assert "gross of brokerage &amp; taxes · per-unit (no sizing)" in html
+        # data-explain hooks so every cell hovers to its R27 line.
+        for key in (
+            "max_consecutive_losses",
+            "worst_streak_pnl",
+            "longest_underwater",
+            "win_rate_year_spread",
+        ):
+            assert f'data-explain="{key}"' in html, key
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "works when VIX between" in js
         assert "VIX band not stamped for this run" in js

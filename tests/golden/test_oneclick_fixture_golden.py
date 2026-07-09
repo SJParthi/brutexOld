@@ -39,7 +39,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "344184a57b869707f2497d8a4a78687c051da7a9c8dca6191c18a0f010cb4a7a"
     ),
     "sweep_runs/r-20260707-fixt01/top100.json": (
-        "53602211d94fda7a6c31b21033f5907f7fd9c76bbd40f0a00eb9213ffa73cdf8"
+        "7c6833917049414b744703e763477c6afd856b8e336954fb205af0532d27adb0"
     ),
     "sweep_runs/r-20260707-fixt01/trades/rank-0001.json": (
         "3b2c4ce7d42ff046c27e6a262128f1fd2273f51ef78932ac6d9f4c1edf977386"
@@ -60,10 +60,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "cdcabe6fdd16bf59275c8c2bc3b9470e0f07830f17714bd381d06c456b4a7422"
     ),
     "sweep_runs/r-hostile01/top100.json": (
-        "003d143bdacde169e6bedb1bc9f8665e91e94484f12012d63e4188d58696e766"
+        "123587766da55bbdc4715c2afe192ccd4f4f9e16cb1880fe52abb57f04da4ce8"
     ),
     "sweep_runs/r-short01/top100.json": (
-        "624c97191db8ca2904e2982a96647eb5e5b2b31616657a2abd79e45f82607f5a"
+        "b16dee260ffb69441773a16100e40735030c611bfa953755da5f13cd86a1a95a"
     ),
 }
 
@@ -159,6 +159,21 @@ class TestMainRunRoundTrips:
         assert by_rank[1]["arm"] == "SL ₹51.50 · TP ₹93.75"
         assert by_rank[1]["arm_raw"] == {"sl_paisa": 5_150, "tp_paisa": 9_375}
         assert by_rank[gen.NULL_ARM_RANK]["arm"] == "SL — · TP —"
+
+    def test_resilience_block_reaches_the_wire_untouched(self) -> None:
+        """The sibling resilience block (top-level key) survives the reader
+        boundary — a LIVE row carries stats + the null zero-trades edge reads
+        the honest stats_live=false (never a fabricated streak)."""
+        top100 = oc.load_top100(_RUNS / gen.RUN_ID)
+        by_rank = {row["rank"]: row for row in top100.rows}
+        live = by_rank[1]["resilience"]
+        assert live["stats_live"] is True
+        assert isinstance(live["losing_streak_p95"], int)
+        assert live["worst_streak_pnl_paisa"] <= 0  # gross, per-unit, ≤ 0
+        assert isinstance(live["win_rate_by_year"], dict)
+        null = by_rank[gen.ZERO_TRADES_RANK]["resilience"]
+        assert null["stats_live"] is False
+        assert null["losing_streak_p95"] is None  # never a fabricated 0
 
     def test_events_chain_verifies_end_to_end(self) -> None:
         """Self-consistency ONLY: generator and verifier share ONE chain_hash."""

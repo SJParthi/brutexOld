@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -51,18 +52,32 @@ pytestmark = pytest.mark.skipif(_NODE is None, reason="node not installed")
 
 
 def _node_call(expr: str, *argv: str) -> Any:
-    """Run the REAL shipped bx-screener.js under node and return the JSON result."""
-    script = (
-        f"const S = require({json.dumps(str(_SCREENER_JS))});"
-        "const ARGS = process.argv.slice(1).map((a) => JSON.parse(a));"
-        f"console.log(JSON.stringify({expr}));"
-    )
-    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
-        ["node", "-e", script, *argv],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    """Run the REAL shipped bx-screener.js under node and return the JSON result.
+
+    The JSON arguments are handed to node via TEMP FILES (node reads + parses
+    each), not the process argv — the full 100-row fixture payload now exceeds
+    the kernel's per-arg ``MAX_ARG_STRLEN`` (128 KiB) once every row carries its
+    resilience block, so a bare argv would raise ``Argument list too long``.
+    ``ARGS[i]`` stays the parsed value, so every call site is byte-unchanged.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        paths: list[str] = []
+        for i, arg in enumerate(argv):
+            path = Path(tmp) / f"arg{i}.json"
+            path.write_text(arg, encoding="utf-8")
+            paths.append(str(path))
+        script = (
+            f"const S = require({json.dumps(str(_SCREENER_JS))});"
+            "const fs = require('fs');"
+            "const ARGS = process.argv.slice(1).map((p) => JSON.parse(fs.readFileSync(p, 'utf8')));"
+            f"console.log(JSON.stringify({expr}));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script, *paths],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
     return json.loads(proc.stdout)
 
 
