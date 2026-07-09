@@ -10,10 +10,17 @@ Contract surfaces consumed here (read-only, never written):
 * ``<sweep_runs root>/<run_id>/manifest.json`` — the P2 run manifest
   ``{run_id, selection, estimate, actual, per_stage_timings, per_door_kills,
   dedup_skips, tripwires[], suspect}``.
-* ``<sweep_runs root>/<run_id>/top100.json`` — the P3 ordered leaderboard
-  rows ``{rank, mask_hex, conditions[], tf, direction, arm, metrics{},
-  regime{}, vix_band{}, family_id}`` plus the SHIPPED additive keys
-  (``run_id``, ``equity_ref``, …) the production trades reader keys on.
+* ``<sweep_runs root>/<run_id>/top100.json`` — the SHIPPED engine artifact
+  (``brutex.engine.top100_artifact.write_top100``): a JSON OBJECT root
+  ``{schema_version, run_id, preset, source, baselines, entries: [...]}``
+  whose ``entries`` carry the ordered leaderboard rows ``{rank, mask_hex,
+  conditions[], tf, direction, arm, metrics{}, regime{}, vix_band{},
+  family_id}`` plus the SHIPPED additive keys (``run_id``, ``equity_ref``,
+  …) the production trades reader keys on. The reader ADOPTS the writer's
+  object root (DEC-ONECLICK-TOP100-OBJECT-ROOT-001 — the pre-#1621 bare-array
+  fixture form is RETIRED and reads a NAMED corrupt) and maps the writer's
+  metric names onto the display vocabulary at this ONE boundary
+  (:data:`TOP100_METRIC_KEY_MAP`).
 * ``<sweep_runs root>/<run_id>/events.jsonl`` — the P2 flight-recorder JSONL
   (record shape ``{ts_utc, run_id, kind, payload}`` + hash-chaining). The
   FILENAME is an ASSUMPTION registered with the contracts memory (§0.4) and
@@ -61,6 +68,7 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 
 import structlog
 
+from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
 from brutex.engine.trade_store import (
     RESULTS_DEPTH_DIRNAME,
     SWEEP_RUNS_DIRNAME,
@@ -68,6 +76,7 @@ from brutex.engine.trade_store import (
     TradeStoreError,
     read_trade_page,
 )
+from brutex.money import format_inr
 
 _LOG = structlog.get_logger(__name__)
 
@@ -82,7 +91,9 @@ __all__ = [
     "PREFLIGHT_REQUIRED_KEYS",
     "SWEEP_RUNS_DIRNAME",
     "TOP100_FILENAME",
+    "TOP100_METRIC_KEY_MAP",
     "TOP100_ROW_REQUIRED_KEYS",
+    "TOP100_SCHEMA_VERSION",
     "TRADES_DIRNAME",
     "ArtifactStatus",
     "AwaitingTradesReader",
@@ -181,6 +192,23 @@ TOP100_ROW_REQUIRED_KEYS: Final[tuple[str, ...]] = (
     "family_id",
 )
 
+#: The ONE reader-boundary metric-key mapping — engine writer name → display
+#: name (DEC-ONECLICK-TOP100-OBJECT-ROOT-001). The SHIPPED engine artifact
+#: (``brutex.engine.top100_artifact._metrics_payload``) emits the full
+#: engine metric names; the display vocabulary (bx-screener.js COLUMNS /
+#: bx-oneclick.js / strategy.html) reads the short names. Applied ADDITIVELY
+#: in :func:`load_top100`: the display alias is added ONLY when absent, the
+#: engine key passes through verbatim, every unmapped key is untouched, and
+#: a metric the writer does not emit (``cpcv_pass_pct`` — no CPCV source in
+#: the artifact today) stays ABSENT so the client renders the honest "—",
+#: NEVER a fabricated 0.
+TOP100_METRIC_KEY_MAP: Final[tuple[tuple[str, str], ...]] = (
+    ("max_drawdown_paisa", "max_dd_paisa"),
+    ("sharpe_ratio", "sharpe"),
+    ("deflated_sharpe", "dsr"),
+    ("total_trades", "trades"),
+)
+
 #: The contract's required preflight-verdict keys (P1 → P4).
 PREFLIGHT_REQUIRED_KEYS: Final[tuple[str, ...]] = ("ok", "refusals", "clamps", "estimator")
 
@@ -259,20 +287,28 @@ class Top100Result:
     Attributes
     ----------
     status
-        The :data:`ArtifactStatus` verdict — a VALID empty or short list is
-        ``ok`` (the artifact EXISTS; T-M2 status law).
+        The :data:`ArtifactStatus` verdict — a VALID empty or short entries
+        list is ``ok`` (the artifact EXISTS; T-M2 status law).
     rows
-        The validated rows (kept up to the first bad row on ``partial``).
+        The validated entries (kept up to the first bad row on ``partial``),
+        metric keys already mapped via :data:`TOP100_METRIC_KEY_MAP` and the
+        writer's ``arm`` dict already bridged to its display string
+        (:func:`_bridge_top100_arm`; the raw dict rides as ``arm_raw``).
     detail
         Defect note naming the bad row index / missing keys (empty when ok).
     revision
         The ``"mtime_ns:size"`` stat token, ``None`` when absent.
+    preset
+        The artifact object root's ranking ``preset`` token (the R30 sort
+        basis — surfaced so the pages can LABEL the ordering honestly);
+        ``None`` when the artifact never parsed that far.
     """
 
     status: ArtifactStatus
     rows: tuple[dict[str, Any], ...]
     detail: str
     revision: str | None
+    preset: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,13 +514,27 @@ def artifact_revision(path: Path) -> str | None:
 
 
 def runs_revision(results_root: Path) -> str | None:
-    """Return the stat token of the ``sweep_runs/`` directory itself.
+    """Return the runs-tree revision token keying the cached runs LISTING.
 
-    Honest envelope (Golden Rule #10): a directory mtime moves when a run dir
-    is ADDED/REMOVED — an in-place rewrite of a file INSIDE an existing run
-    dir does not move it, so the cached runs LISTING may lag such a rewrite
-    until the next run lands (per-artifact routes key on the artifact's own
-    file token and do not share this bound).
+    The token folds the ``sweep_runs/`` directory's own stat token with a
+    digest over every run's ``manifest.json`` stat token
+    (DEC-ONECLICK-TOP100-OBJECT-ROOT-001 fold of finding [12]): the listing's
+    ``suspect`` badge is PARSED from each manifest, and an IN-PLACE manifest
+    rewrite (e.g. ``suspect`` flipping true mid-run) moves the manifest's
+    file token but NOT the directory mtime — the old directory-only key
+    served the stale badge until the next run landed. Probe cost is honest
+    O(run dirs) ``stat`` calls per poll (never a parse — the parses stay
+    behind the memo this token keys); the primed cache HIT itself remains a
+    dict lookup. DELIBERATELY UNCAPPED (hostile-round F5 ruling): bounding
+    the digest to the listing's newest-50 cap would need one ``stat`` per
+    run DIR to rank by mtime first — N dir stats + 50 manifest stats is MORE
+    syscalls than today's N manifest stats, so the full walk IS the cheaper
+    honest option; the O(run dirs) scaling is disclosed here and in the
+    ``test_oneclick_o1.py`` B-2 bench docstring instead. Remaining bound
+    (Golden Rule #10): an in-place rewrite of
+    ``top100.json``/``events.jsonl`` still does not move this token — the
+    listing carries only their PRESENCE, which cannot change without the
+    directory mtime moving, so nothing served from the listing goes stale.
 
     Parameters
     ----------
@@ -494,10 +544,30 @@ def runs_revision(results_root: Path) -> str | None:
     Returns
     -------
     str or None
-        The ``"mtime_ns:size"`` token of the Ruling-4
-        ``<results_root parent>/sweep_runs`` tree, or ``None``.
+        ``"<dir mtime_ns:size>:m<manifest-digest16>"`` for the Ruling-4
+        ``<results_root parent>/sweep_runs`` tree; the bare directory token
+        when the tree cannot be listed; ``None`` when it cannot be statted.
     """
-    return artifact_revision(runs_root(results_root))
+    root = runs_root(results_root)
+    base = artifact_revision(root)
+    if base is None:
+        return None
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return base
+    names: list[str] = []
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                names.append(entry.name)
+        except OSError:
+            continue
+    digest = sha256(base.encode("utf-8"))
+    for name in sorted(names):
+        token = artifact_revision(root / name / MANIFEST_FILENAME)
+        digest.update(f"{name}={token}\n".encode())
+    return f"{base}:m{digest.hexdigest()[:16]}"
 
 
 # ── Discovery ───────────────────────────────────────────────────────────
@@ -666,12 +736,119 @@ def load_manifest(run_dir: Path) -> ManifestResult:
     return ManifestResult("ok", obj, "", revision)
 
 
-def load_top100(run_dir: Path) -> Top100Result:
-    """Load ``top100.json`` (list-of-dict validated; a bad ROW → partial, rows kept up to it).
+def _top100_row_shape_defect(row: dict[str, Any]) -> str | None:
+    """Name the first INNER-shape defect of one required-keys-complete row.
 
-    A VALID EMPTY or SHORT list is ``status="ok"`` — the artifact EXISTS
-    (T-M2 status law); the row count is ALWAYS ``len(rows)``, never assumed
-    100.
+    Sub-key validation (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): the required
+    keys must also carry usable SHAPES — ``metrics``/``regime`` objects (the
+    metric mapping and every downstream ``row.metrics.*`` read key on them),
+    ``conditions`` an array, ``rank`` an integer, ``vix_band`` an object or
+    the honest R31 null. Returns ``None`` when sound, else the named defect.
+    """
+    rank = row["rank"]
+    if not isinstance(rank, int) or isinstance(rank, bool):
+        return "carries a non-integer rank"
+    if not isinstance(row["conditions"], list):
+        return "conditions is not an array"
+    # Deliberately NO metric SUB-key mandate (hostile-round finder (a) pin):
+    # the writer legitimately emits null metric values (``deflated_sharpe``
+    # can be ``None``) and omits others entirely (``cpcv_pass_pct``) — a
+    # sub-key/type mandate here would false-flag REAL artifacts as partial.
+    # An absent/None metric sub-key renders the honest "—" client-side BY
+    # DESIGN; only the CONTAINER shapes are gated.
+    if not isinstance(row["metrics"], dict):
+        return "metrics is not an object"
+    if not isinstance(row["regime"], dict):
+        return "regime is not an object"
+    vix_band = row["vix_band"]
+    if vix_band is not None and not isinstance(vix_band, dict):
+        return "vix_band is neither an object nor null"
+    return None
+
+
+def _map_top100_metrics(row: dict[str, Any]) -> dict[str, Any]:
+    """Apply :data:`TOP100_METRIC_KEY_MAP` additively to one validated row.
+
+    The display alias is added ONLY when absent (an artifact already carrying
+    the display name is never overwritten); the engine key stays verbatim;
+    everything else — the row AND its unmapped metric keys — passes through
+    untouched at full precision (money 2dp is client-side only,
+    DEC-MONEY-2DP-001). An absent engine key adds NOTHING — ``cpcv_pass_pct``
+    et al. stay absent so the client renders "—", never a fabricated 0.
+    """
+    metrics: dict[str, Any] = dict(row["metrics"])
+    changed = False
+    for engine_key, display_key in TOP100_METRIC_KEY_MAP:
+        if engine_key in metrics and display_key not in metrics:
+            metrics[display_key] = metrics[engine_key]
+            changed = True
+    if not changed:
+        return row
+    mapped = dict(row)
+    mapped["metrics"] = metrics
+    return mapped
+
+
+def _arm_leg_text(value: object) -> str:
+    """One SL/TP leg of the arm display string — ``format_inr`` paisa→₹ 2dp.
+
+    A non-integer leg (the writer's honest ``None``, or hand-edited junk)
+    renders the "—" segment — never a fabricated amount (Golden Rule #1).
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return format_inr(value)
+    return "—"
+
+
+def _bridge_top100_arm(row: dict[str, Any]) -> dict[str, Any]:
+    """Bridge the writer's arm DICT to an honest display string (hostile-round F1).
+
+    The SHIPPED engine writer emits ``arm`` as an OBJECT
+    (``brutex.engine.top100_artifact._entry_payload`` —
+    ``{"sl_paisa": int | None, "tp_paisa": int | None}``), but every display
+    site stringifies the field raw (``String(row.arm)`` in bx-oneclick.js /
+    strategy.html / screener.html), which renders ``"[object Object]"`` on a
+    REAL sweep card. This ONE reader boundary (the :data:`TOP100_METRIC_KEY_MAP`
+    pattern) replaces the dict with ``"SL <₹sl> · TP <₹tp>"`` — each leg via
+    the house :func:`brutex.money.format_inr` (paisa → rupees, exactly 2dp,
+    DEC-MONEY-2DP-001), a ``None``/junk leg reading "—" — and keeps the raw
+    dict ADDITIVELY under ``arm_raw`` (only when that key is absent). A
+    non-dict ``arm`` (a legacy display string) passes through untouched.
+    """
+    arm = row["arm"]
+    if not isinstance(arm, dict):
+        return row
+    bridged = dict(row)
+    bridged["arm"] = (
+        f"SL {_arm_leg_text(arm.get('sl_paisa'))} · TP {_arm_leg_text(arm.get('tp_paisa'))}"
+    )
+    if "arm_raw" not in bridged:
+        bridged["arm_raw"] = arm
+    return bridged
+
+
+def load_top100(run_dir: Path) -> Top100Result:
+    """Load ``top100.json`` — the WRITER's object root, entries validated per row.
+
+    READER ADOPTS WRITER (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): the canonical
+    shape is the SHIPPED engine artifact object root
+    ``{schema_version, run_id, preset, source, baselines, entries: [...]}``
+    (``brutex.engine.top100_artifact.write_top100``). The pre-#1621
+    bare-array fixture form is RETIRED — it reads a NAMED ``corrupt``, never
+    a silent second dialect (a dual shape let the fixture corpus green-light
+    a reader every real sweep artifact failed). An unknown FUTURE
+    ``schema_version`` degrades to a NAMED ``corrupt`` (never a crash); a
+    missing ``schema_version`` key is tolerated (validated only when
+    present). A VALID EMPTY or SHORT entries list is ``status="ok"`` — the
+    artifact EXISTS (T-M2 status law); the row count is ALWAYS ``len(rows)``,
+    never assumed 100. A bad ROW → ``partial``, rows kept up to it, defect
+    named (required keys + the :func:`_top100_row_shape_defect` inner
+    shapes). Each kept row's metrics gain the :data:`TOP100_METRIC_KEY_MAP`
+    display aliases additively, and the writer's ``arm`` OBJECT is bridged to
+    its display string via :func:`_bridge_top100_arm` (the raw dict rides
+    along additively as ``arm_raw``) — the display sites ``String()`` the
+    field, so an unbridged dict rendered ``"[object Object]"`` on every real
+    sweep card (hostile-round F1).
 
     Parameters
     ----------
@@ -681,8 +858,9 @@ def load_top100(run_dir: Path) -> Top100Result:
     Returns
     -------
     Top100Result
-        Rows are passed through UNTOUCHED (metrics keep full precision —
-        money 2dp is client-side only, DEC-MONEY-2DP-001).
+        Beyond the mapping aliases, rows pass through UNTOUCHED (full
+        precision); ``preset`` carries the artifact's ranking token (the
+        sort-basis label source) once the object root parsed.
     """
     path = run_dir / TOP100_FILENAME
     text, error = _read_artifact_text(path, artifact=TOP100_FILENAME)
@@ -703,16 +881,54 @@ def load_top100(run_dir: Path) -> Top100Result:
             error_type=type(exc).__name__,
         )
         return Top100Result("corrupt", (), f"{TOP100_FILENAME} is not valid JSON", revision)
-    if not isinstance(obj, list):
-        return Top100Result("corrupt", (), f"{TOP100_FILENAME} is not a JSON array", revision)
+    if isinstance(obj, list):
+        return Top100Result(
+            "corrupt",
+            (),
+            f"{TOP100_FILENAME} is a bare JSON array — the retired pre-#1621 fixture "
+            "form; the engine writer emits an object root with an entries array",
+            revision,
+        )
+    if not isinstance(obj, dict):
+        return Top100Result(
+            "corrupt", (), f"{TOP100_FILENAME} is not the writer's JSON object root", revision
+        )
+    version = obj.get("schema_version")
+    # Hostile-round finder (b): the version must be a GENUINE int — a JSON
+    # ``true`` (Python bool, ``True == 1``) or a float ``1.0`` pun must not
+    # slip past ``!=`` equality; both name themselves corrupt instead.
+    if version is not None and (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != TOP100_SCHEMA_VERSION
+    ):
+        return Top100Result(
+            "corrupt",
+            (),
+            f"{TOP100_FILENAME} schema_version {version!r} is not the supported "
+            f"integer {TOP100_SCHEMA_VERSION} — a newer writer? upgrade the display reader",
+            revision,
+        )
+    raw_preset = obj.get("preset")
+    preset = raw_preset if isinstance(raw_preset, str) and raw_preset else None
+    entries_raw = obj.get("entries")
+    if not isinstance(entries_raw, list):
+        return Top100Result(
+            "corrupt",
+            (),
+            f"{TOP100_FILENAME} object root carries no entries array",
+            revision,
+            preset,
+        )
     rows: list[dict[str, Any]] = []
-    for idx, row in enumerate(obj):
+    for idx, row in enumerate(entries_raw):
         if not isinstance(row, dict):
             return Top100Result(
                 "partial",
                 tuple(rows),
                 f"row {idx} is not an object — rows kept up to it",
                 revision,
+                preset,
             )
         missing = [key for key in TOP100_ROW_REQUIRED_KEYS if key not in row]
         if missing:
@@ -721,9 +937,19 @@ def load_top100(run_dir: Path) -> Top100Result:
                 tuple(rows),
                 f"row {idx} missing contract keys: {', '.join(missing)} — rows kept up to it",
                 revision,
+                preset,
             )
-        rows.append(row)
-    return Top100Result("ok", tuple(rows), "", revision)
+        defect = _top100_row_shape_defect(row)
+        if defect is not None:
+            return Top100Result(
+                "partial",
+                tuple(rows),
+                f"row {idx} {defect} — rows kept up to it",
+                revision,
+                preset,
+            )
+        rows.append(_bridge_top100_arm(_map_top100_metrics(row)))
+    return Top100Result("ok", tuple(rows), "", revision, preset)
 
 
 def load_preflight_fixture(run_dir: Path) -> ManifestResult:
