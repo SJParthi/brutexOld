@@ -263,10 +263,16 @@ def test_second_click_while_running_is_a_noop(
 # ── page wiring ───────────────────────────────────────────────────────────────
 
 
-def test_reports_page_carries_sweep_button(client: TestClient) -> None:
-    resp = client.get("/reports")
+def test_operator_page_carries_sweep_button(client: TestClient) -> None:
+    """DEC-OPERATOR-PAGE-REAL-001 / R25: the ONE canonical Run button lives on
+    the Operator page (/); /reports returned to the pre-open report ONLY."""
+    resp = client.get("/")
     assert resp.status_code == 200
     assert "/api/v1/sweep/run" in resp.text
     assert 'id="run-sweep"' in resp.text
     assert 'id="swSymbols"' in resp.text
     assert "Run Sweep" in resp.text
+    reports = client.get("/reports")
+    assert reports.status_code == 200
+    assert 'id="run-sweep"' not in reports.text
+    assert 'id="run-cascade"' not in reports.text
