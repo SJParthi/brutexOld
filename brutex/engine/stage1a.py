@@ -92,6 +92,7 @@ from brutex.strategies.fib_definitions import (
     FibAnchorKind,
     resolve_fib_anchor_levels,
 )
+from brutex.strategies.types import PriceSource
 from brutex.vocabulary import bits as B  # noqa: N812 — B = bit-position namespace
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
@@ -302,6 +303,101 @@ def _ema_to_paisa(value: float | None) -> int | None:
     return _price_to_paisa(Decimal(str(value)))
 
 
+def _reduce_vwap_source_paisa(
+    source: PriceSource,
+    bar: CandleBar,
+    *,
+    open_paisa: int,
+    high_paisa: int,
+    low_paisa: int,
+    close_paisa: int,
+) -> int:
+    """Reduce *bar* to the VWAP typical-price scalar in int64 paisa for *source*.
+
+    The swept VWAP price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): the value
+    fed into the running :class:`trading_core.VwapState` each bar. The ``HLC3``
+    arm is today's hardcoded typical price VERBATIM — routed through the SAME
+    :func:`_price_to_paisa` seam as OHLC/EMA so the ``(HLC3, CLOSE)`` baseline
+    cell stays byte-identical (Override 1 / the golden). The O/H/L/C arms reuse
+    the ``*_paisa`` locals already snapped at the bar boundary, so they cost no
+    extra ``_price_to_paisa`` call. O(1) per bar.
+
+    RUST-OWNER INTERFACE CONTRACT (the sibling Rust sweep-core port — the
+    reduction stays Python pre-FFI TODAY; ``VwapState::update`` /
+    ``EmaState::update`` and the FFI signatures are UNCHANGED, only this per-cell
+    scalar selection must be mirrored bit-identically)::
+
+        enum PriceSource { Open, High, Low, Close, Hlc3 }   // hl2/ohlc4 absent
+
+        // VWAP -> typical_paisa: i64 (o/h/l/c are exact 2dp paisa integers)
+        Open  => o_paisa
+        High  => h_paisa                    // (deferred variant)
+        Low   => l_paisa                    // (deferred variant)
+        Close => c_paisa
+        Hlc3  => let s = h_paisa + l_paisa + c_paisa;   // exact i64 add
+                 let (q, r) = (s / 3, s % 3);           // Euclidean, s >= 0
+                 q + if 2*r >= 3 { 1 } else { 0 }       // ROUND_HALF_UP on thirds
+
+    The integer HLC3 form is PROVABLY bit-identical to this Python
+    ``int(round_money((H+L+C)/Decimal(3)) * 100)`` path: at the paisa scale the
+    remainder ``r ∈ {0,1,2}`` so ``r/3`` never equals ½ — no tie ever reaches the
+    HALF_UP boundary, so the 28-sig-fig Decimal path and the integer path
+    coincide. In PYTHON keep the Decimal ``_price_to_paisa`` path (do NOT
+    float-divide, do NOT introduce a new integer path) so the baseline is
+    byte-identical to today (the golden). (If ``hl2`` / ``ohlc4`` are ever added,
+    ``/2`` and ``/4`` CAN tie at ½ paisa → ROUND_HALF_UP becomes load-bearing;
+    add a golden then.)
+    """
+    if source is PriceSource.OPEN:
+        return open_paisa
+    if source is PriceSource.HIGH:
+        return high_paisa
+    if source is PriceSource.LOW:
+        return low_paisa
+    if source is PriceSource.CLOSE:
+        return close_paisa
+    # HLC3 — the only remaining member (the enum is closed at 5; ``hl2``/``ohlc4``
+    # are deliberately absent and pinned by a membership test). VERBATIM the
+    # pre-axis line so the (HLC3, CLOSE) baseline is byte-identical.
+    return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+
+
+def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
+    """Reduce *bar* to the EMA-input price scalar (float rupees) for *source*.
+
+    The swept EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): the value
+    fed into both :class:`EMAState` recurrences each bar. The ``CLOSE`` arm is
+    today's hardcoded ``float(bar.close)`` VERBATIM so the ``(HLC3, CLOSE)``
+    baseline stays byte-identical (Override 1 / the golden). The EMA source is
+    deliberately NOT paisa-snapped (preserving today's unsnapped EMA contract —
+    the snap happens once AFTER the recurrence via :func:`_ema_to_paisa`). O(1).
+
+    RUST-OWNER INTERFACE CONTRACT (see :func:`_reduce_vwap_source_paisa`)::
+
+        // EMA -> ema_source: f64
+        Open  => o_paisa as f64 (via the SAME Decimal->float single conversion as close)
+        Close => c_paisa as f64                       // == today's float(bar.close), verbatim
+        Hlc3  => float( (H + L + C) / Decimal(3) )     // Decimal-divide THEN one float() cast
+
+    CRITICAL: for ``Hlc3`` mirror Python's Decimal-divide-THEN-convert-to-f64-once,
+    NOT ``(f64(H)+f64(L)+f64(C))/3.0`` — the two are not IEEE-754-identical. This
+    is the one place the Rust owner must ship a golden/property test against
+    Python's ``float((H+L+C)/Decimal(3))`` over a wide paisa corpus. ``Open`` /
+    ``Close`` are exact int→f64 casts (paisa ≪ 2⁵³), trivially identical.
+    """
+    if source is PriceSource.OPEN:
+        return float(bar.open)
+    if source is PriceSource.HIGH:
+        return float(bar.high)
+    if source is PriceSource.LOW:
+        return float(bar.low)
+    if source is PriceSource.CLOSE:
+        return float(bar.close)
+    # HLC3 — the only remaining member (enum closed at 5). Decimal-divide THEN a
+    # single float() cast (never float-add-then-divide — not IEEE-754-identical).
+    return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+
+
 @dataclass
 class _DayOHLC:
     """Running OHLC accumulator for one IST trading day (int64 paisa).
@@ -383,6 +479,15 @@ class Stage1AMatrixBuilder:
         (DEFAULT-PRESERVATION — the goldens still pin the same matrix). Only the
         Group-4 Fib levels move with this anchor; the pivot / PDH / day-type
         groups stay prev-day-anchored regardless (R-2).
+    vwap_source, ema_source
+        The SWEPT VWAP / EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001)
+        — which per-bar scalar feeds the running VWAP / EMA accumulators. Default
+        ``(HLC3, CLOSE)`` reproduces today's hardcoded reduction bit-for-bit, so a
+        builder constructed without these arguments is byte-identical to the
+        pre-axis builder (the goldens still pin the same matrix). ``vwap_source``
+        moves only bits 52-53 (VWAP position); ``ema_source`` moves only bits 0-5
+        (EMA-vs-close). See :func:`_reduce_vwap_source_paisa` /
+        :func:`_reduce_ema_source_float`.
 
     Notes
     -----
@@ -398,10 +503,18 @@ class Stage1AMatrixBuilder:
         proximity: ProximityParams | None = None,
         prior_n: int = _DEFAULT_PRIOR_N,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        vwap_source: PriceSource = PriceSource.HLC3,
+        ema_source: PriceSource = PriceSource.CLOSE,
     ) -> None:
         self._proximity = proximity if proximity is not None else ProximityParams()
         self._prior_history = PriorBarHistory(prior_n=prior_n)
         self._fib_anchor = fib_anchor
+        # Swept VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001). The
+        # defaults (HLC3 / CLOSE) reproduce today's hardcoded reduction bit-for-bit
+        # (Override 1 / the golden). Only bits 52-53 (VWAP position) move with
+        # ``vwap_source`` and bits 0-5 (EMA-vs-close) with ``ema_source``.
+        self._vwap_source = vwap_source
+        self._ema_source = ema_source
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._day_extremes = DayExtremesState()
@@ -503,12 +616,14 @@ class Stage1AMatrixBuilder:
             today_ohlc = self._today_ohlc
             today_ohlc.absorb(high_paisa=high_paisa, low_paisa=low_paisa, close_paisa=close_paisa)
 
-        # Both EMAs are close-driven (vocabulary Group 1: "EMA 20 close, EMA
-        # 200 close"). The float close is taken directly from the Decimal bar;
-        # the EMA recurrence runs in float, then snaps to paisa once.
-        close_float = float(bar.close)
-        ema20_paisa = _ema_to_paisa(self._ema_fast.update(close_float))
-        ema200_paisa = _ema_to_paisa(self._ema_slow.update(close_float))
+        # Both EMAs are fed the swept EMA price-source scalar (default CLOSE ==
+        # today's ``float(bar.close)`` verbatim, so the (HLC3, CLOSE) baseline is
+        # byte-identical — Override 1 / the golden). The recurrence runs in float,
+        # then snaps to paisa once; the source is NOT paisa-snapped (today's
+        # unsnapped EMA contract). Only bits 0-5 (EMA-vs-close) move with it.
+        ema_source_float = _reduce_ema_source_float(self._ema_source, bar)
+        ema20_paisa = _ema_to_paisa(self._ema_fast.update(ema_source_float))
+        ema200_paisa = _ema_to_paisa(self._ema_slow.update(ema_source_float))
 
         day_high_paisa, day_low_paisa = self._day_extremes.update(
             ts_ist=ts_ist, high_paisa=high_paisa, low_paisa=low_paisa
@@ -529,7 +644,17 @@ class Stage1AMatrixBuilder:
         # re-derives the same value for this bar (+1 crossing) — threading one
         # value through is a larger refactor, out of scope here.
         tod_seconds = int(trading_core.seconds_of_day(ts_ist.hour, ts_ist.minute, ts_ist.second))
-        typical_paisa = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+        # Swept VWAP price-source scalar (default HLC3 == today's typical price
+        # verbatim, so the (HLC3, CLOSE) baseline is byte-identical — Override 1 /
+        # the golden). Only bits 52-53 (VWAP position) move with it.
+        typical_paisa = _reduce_vwap_source_paisa(
+            self._vwap_source,
+            bar,
+            open_paisa=open_paisa,
+            high_paisa=high_paisa,
+            low_paisa=low_paisa,
+            close_paisa=close_paisa,
+        )
         vwap_paisa = self._vwap.update(
             typical_paisa,
             bar.volume,
@@ -737,6 +862,8 @@ def build_bar_bits(
     proximity: ProximityParams | None = None,
     prior_n: int = _DEFAULT_PRIOR_N,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
 ) -> list[int]:
     """Build the Stage-1A ``bar_bits`` matrix for one ``(instrument, interval)``.
 
@@ -755,15 +882,23 @@ def build_bar_bits(
         The SWEPT Fibonacci anchor (DEC-NIFTY-FIB-AXIS-001). Defaults to
         :attr:`FibAnchorKind.PREV_DAY` so an unset call is byte-identical to the
         pre-axis prev-day-only build.
+    vwap_source, ema_source
+        The SWEPT VWAP / EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+        Default ``(HLC3, CLOSE)`` reproduces today's hardcoded reduction, so an
+        unset call is byte-identical to the pre-axis build.
 
     Returns
     -------
     list[int]
         One u128 condition mask per input bar, in input order (1:1).
     """
-    return Stage1AMatrixBuilder(proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor).build(
-        bars
-    )
+    return Stage1AMatrixBuilder(
+        proximity=proximity,
+        prior_n=prior_n,
+        fib_anchor=fib_anchor,
+        vwap_source=vwap_source,
+        ema_source=ema_source,
+    ).build(bars)
 
 
 # ────────────────────────────────────────────────────────────────────────

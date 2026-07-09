@@ -87,8 +87,8 @@ the flag, not a real production limitation.
 ## What is DEFERRED to follow-up PRs (honest, not shipped here)
 
 * **Block-partition kernel locality** — each worker rebuilds its resident kernel
-  per distinct ``(instrument, tf, proximity, prior_n, fib_anchor)``; contiguous
-  block dispatch to preserve the DEC-SWEEP-RESIDENT-KERNEL-001 reuse win is
+  per distinct ``(instrument, tf, proximity, prior_n, fib_anchor, price_source)``;
+  contiguous block dispatch to preserve the DEC-SWEEP-RESIDENT-KERNEL-001 reuse win is
   future work. This slice dispatches per-tuple (correct, just not locality-tuned).
 * **Resident-kernel reuse across the pool / a persistent worker kernel** — a
   follow-up.

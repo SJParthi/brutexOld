@@ -106,6 +106,7 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
 from brutex.engine.sweep_run import SweepComboError, _direction_label
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.strategies.types import PriceSource
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` / `lmdb` PyO3 wheels (pulled by
@@ -285,6 +286,21 @@ class SupervisedGridSummary:
     tuples_quarantined_prior: int = 0
 
 
+def _price_source_cells_are_default(grid: SweepGridConfig) -> bool:
+    """Return whether *grid*'s price-source axis is exactly the sole baseline cell.
+
+    ``True`` when the axis is the single default ``(HLC3, CLOSE)`` cell (the
+    dormant, pre-axis-byte-identical case). The DEFAULT-OMIT gate (Override 1)
+    for the grid identity + the tuple cache key.
+    """
+    cells = grid.price_source_cells
+    return (
+        len(cells) == 1
+        and cells[0].vwap_source is PriceSource.HLC3
+        and cells[0].ema_source is PriceSource.CLOSE
+    )
+
+
 def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     """Return the canonical JSON-serialisable identity descriptor of *grid*.
 
@@ -293,7 +309,7 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     so two grids that differ in ANY knob produce different digests. ``None`` legs
     and proximity tolerances are flattened to JSON-native scalars (Golden Rule #4).
     """
-    return {
+    descriptor: dict[str, Any] = {
         "instruments": list(grid.instruments),
         "timeframes": [[tf.label, tf.minutes] for tf in grid.timeframes],
         "directions": [d.value for d in grid.directions],
@@ -321,6 +337,17 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
         "top_k": grid.top_k,
         "min_hits": grid.min_hits,
     }
+    # The swept price-source axis distinguishes one grid from another
+    # (DEC-NIFTY-PRICE-SOURCE-AXIS-001): an expanded grid must not silently resume
+    # a baseline checkpoint's work. DEFAULT-OMITTED (Override 1): the whole key is
+    # absent for the sole-baseline ``((HLC3, CLOSE),)`` axis so a baseline grid's
+    # identity (checkpoint key) is byte-identical to the pre-axis grid.
+    if _price_source_cells_are_default(grid):
+        return descriptor
+    descriptor["price_source_cells"] = [
+        [c.vwap_source.value, c.ema_source.value] for c in grid.price_source_cells
+    ]
+    return descriptor
 
 
 def grid_identity(grid: SweepGridConfig) -> str:
@@ -378,7 +405,7 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
             tuple_.proximity.fib_proximity_bps,
         ]
     )
-    return {
+    params: dict[str, Any] = {
         "k": tuple_.k,
         "condition_bits": sorted(set(grid.condition_bits)),
         "tf_minutes": tuple_.tf.minutes,
@@ -398,6 +425,17 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
         "min_hits": grid.min_hits,
         "max_combos": grid.max_combos,
     }
+    # The swept price-source cell is part of the tuple identity
+    # (DEC-NIFTY-PRICE-SOURCE-AXIS-001): two tuples differing ONLY by source
+    # evaluate DIFFERENT bits 52-53 / 0-5, so a cache-skip keyed without it would
+    # FALSELY skip the second cell as already-done (the same P0-1 class as the Fib
+    # anchor above). DEFAULT-OMITTED (Override 1): absent ⟺ the (HLC3, CLOSE)
+    # default, so a baseline tuple's cache key is byte-identical to the pre-axis key.
+    if tuple_.price_source.vwap_source is not PriceSource.HLC3:
+        params["vwap_source"] = tuple_.price_source.vwap_source.value
+    if tuple_.price_source.ema_source is not PriceSource.CLOSE:
+        params["ema_source"] = tuple_.price_source.ema_source.value
+    return params
 
 
 def tuple_cache_key(tuple_: SweepTuple, grid: SweepGridConfig) -> bytes:

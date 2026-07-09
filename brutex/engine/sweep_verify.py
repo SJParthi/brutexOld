@@ -547,6 +547,11 @@ def _verify_store_rows(
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        # The swept price-source axis is part of the run-identity
+        # (DEC-NIFTY-PRICE-SOURCE-AXIS-001, DEFAULT-OMITTED): a non-default cell's
+        # store re-derives its run_id at ITS OWN source, never a stale (HLC3, CLOSE).
+        vwap_source=cfg.vwap_source,
+        ema_source=cfg.ema_source,
     )
     expected_label = _direction_label(tuple_.direction)
     bits_mask = 0
