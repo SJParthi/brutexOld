@@ -39,15 +39,29 @@ class _GateConfigInput(Protocol):
     """
 
     @property
-    def overfit(self) -> OverfitGateConfig | None: ...
+    def overfit(self) -> OverfitGateConfig | None:
+        """The overfit gate config, or ``None`` when the gate is off."""
+        ...
+
     @property
-    def stage3_enable(self) -> bool: ...
+    def stage3_enable(self) -> bool:
+        """Whether the Stage-3 refinement pass is enabled."""
+        ...
+
     @property
-    def stage3_top_k(self) -> int: ...
+    def stage3_top_k(self) -> int:
+        """Number of top finalists Stage-3 refines."""
+        ...
+
     @property
-    def stage3_max_fevals(self) -> int: ...
+    def stage3_max_fevals(self) -> int:
+        """Per-finalist function-evaluation budget for Stage-3."""
+        ...
+
     @property
-    def stage3_max_restarts(self) -> int: ...
+    def stage3_max_restarts(self) -> int:
+        """Per-finalist restart budget for Stage-3."""
+        ...
 
 
 def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
