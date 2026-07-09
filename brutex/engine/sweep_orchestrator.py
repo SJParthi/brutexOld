@@ -127,7 +127,10 @@ TUPLE_STORE_CORRUPT_REMEDIATION: Final[str] = (
     "'brutex sweep-heal <results-root>/heal/<plan>.json --results-root "
     "<results-root> --execute' (quarantines the store AND wipes checkpoint/ and "
     "dedup-cache/ so the tuple genuinely recomputes) — or move the corrupt store "
-    "file aside and wipe both skip-tier dirs manually"
+    "file aside and wipe both skip-tier dirs manually; NOTE: when the plan "
+    "condemns >= 50% of the grid's expected stores (e.g. a single-tuple grid), "
+    "'sweep-heal' refuses until --allow-mass-quarantine is also passed (the C7 "
+    "mass-quarantine gate)"
 )
 
 #: Default ceiling on the number of tuples a grid may enumerate (the honest

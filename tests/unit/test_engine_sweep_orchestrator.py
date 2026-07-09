@@ -1076,3 +1076,7 @@ class TestRemediationFlagsRunnable:
         assert "--execute" in text
         assert "/heal/" in text  # the plan location the verify leg writes
         assert "move the corrupt store file aside" in text  # the manual fallback
+        # The C7 mass-quarantine gate disclosure (a >= 50%-condemned plan —
+        # e.g. a single-tuple grid — refuses without the override flag).
+        assert "--allow-mass-quarantine" in text
+        assert "C7" in text

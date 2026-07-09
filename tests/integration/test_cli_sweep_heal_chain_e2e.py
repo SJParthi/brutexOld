@@ -102,7 +102,8 @@ def _grid_kwargs(lake_root: Path, catalog_path: Path, results_root: Path) -> dic
         "conditions": "0,1,2,3,4",
         # Four SL legs → four tuples, so healing ONE corrupt store is a MINORITY
         # (< 50%) and clears the C7 mass-quarantine guard WITHOUT the
-        # --allow-mass-quarantine flag (which the printed remediation never names).
+        # --allow-mass-quarantine flag (the printed remediation discloses that
+        # gate for >= 50%-condemned plans; this chain exercises the plain path).
         "sl": "80,120,160,none",
         "tp": "50",
         "top": 5,
