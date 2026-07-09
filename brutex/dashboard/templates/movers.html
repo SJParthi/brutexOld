@@ -75,6 +75,11 @@
   .controls-row { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
   #asof { margin-left:auto; font-size:12px; color:var(--muted); align-self:center; }
   .note { font-size:12px; color:var(--muted); margin-top:12px; line-height:1.5; } .note b { color:var(--text); }
+  /* Source-provenance line + live verify chip (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+  .srclink { color:var(--blue); text-decoration:none; } .srclink:hover { color:var(--green); }
+  #verifyChip.pos { color:var(--green); }
+  #verifyChip.neg { color:var(--red); font-weight:700; }
+  #verifyChip.muted { color:var(--muted); }
   /* Per-underlying PCR panel (DEC-MOVERS-OPTIONS-PCR-001) — Options tab only. */
   #pcrPanel { margin-bottom:12px; }
   #pcrRows .name { color:var(--text-bright); font-weight:600; }
@@ -189,6 +194,16 @@
         <thead><tr id="head"></tr></thead>
         <tbody id="rows"></tbody>
       </table>
+      <!-- Data-source provenance line + live verify chip
+           (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): a STATIC skeleton — runtime
+           writes ONLY .textContent / .hidden / .className and the srcLink href
+           ATTRIBUTE (never markup; DEC-DASHBOARD-XSS-HARDENING-001). The line
+           names exactly what was read (logical lake table · scope · interval ·
+           date · as-of · read mode — spot surfaces the EXISTING stored_reads /
+           resampled_reads #1145 provenance), deep-links to /db pre-filtered to
+           the top visible row, and the chip reports the post-paint /db
+           cross-check of the visible top-K rows' displayed cells. -->
+      <p class="note" id="src" hidden><b>Source:</b> <span id="srcText"></span><span id="srcLinkWrap" hidden> · <a id="srcLink" class="srclink"></a></span> · <span id="verifyChip" class="muted"></span></p>
       <p class="note" id="note"><b>Note:</b> <span id="noteText"></span></p>
     </div>
   </div>
@@ -202,6 +217,12 @@
      Loaded SYNCHRONOUSLY (like bx-format.js) so BXMoversTime is defined before the inline
      script below runs fillTimes() — a deferred script would execute AFTER this inline block. -->
 <script src="/static/bx-movers-time.js"></script>
+<!-- The PURE /movers ↔ /db live-verify comparison primitives
+     (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). Loaded SYNCHRONOUSLY AFTER
+     bx-format.js (order-pinned): BXVerify resolves the ONE shared bxFixed2 —
+     the comparison rides the SAME rounder the cells render with, never a
+     re-implementation that could false-mismatch. -->
+<script src="/static/bx-verify.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -293,6 +314,25 @@ let baseNote = "";
    loads so recovery always repaints, and the skip is additionally gated behind
    `state.sort.idx === null` so a client-sorted view is never involved. */
 let lastRenderSig = null;
+/* The CURRENT sorted view (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): renderRows()
+   sorts a LOCAL copy (rowsData stays server-ordered), so the provenance link +
+   the verify pass stash that sorted copy here — "top-K visible rows" means the
+   rows the operator actually SEES, manual column sort included. */
+let visibleData = [];
+/* Live-verify single-flight discipline: a generation counter (a newer render
+   supersedes an in-flight pass — its late results are discarded), the shared
+   AbortController for the pass's K probes, and a trailing debounce so a sort-
+   click burst coalesces into ONE pass. */
+let verifyGen = 0;
+let verifyTimer = null;
+let verifyAbort = null;
+/* True while the LAST scheduleVerify() paused on a hidden tab — the
+   visibilitychange listener re-schedules exactly then, so the chip never
+   shows a stale "paused (hidden tab)" on a visible tab (refuter S5). */
+let verifyHiddenPaused = false;
+const VERIFY_TOP_K = 5;
+const VERIFY_TIMEOUT_MS = 10000;
+const VERIFY_DEBOUNCE_MS = 150;
 
 /* Clearly-labelled SAMPLE rows so the page shows the layout standalone (no backend). NOT real data. */
 const SAMPLE = {
@@ -483,8 +523,11 @@ function renderRows() {
       return (x - y) * d;
     });
   }
+  /* Stash the SORTED view for the provenance link + the verify pass — rowsData
+     itself stays server-ordered (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+  visibleData = data;
   const tb = $("rows");
-  if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; return; }
+  if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; refreshProvenance(); scheduleVerify(); return; }
   tb.innerHTML = data.map(row => "<tr>" + cols.map(([,field,type],i) => {
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
@@ -527,6 +570,255 @@ function renderRows() {
     if ((field==="oi_chg"||field==="oi_chg_pct") && row.oi_baseline_contiguous === false && v!=="—" && v!=="?") v += " *";
     return `<td class="${cls}">${esc(v)}</td>`;
   }).join("") + "</tr>").join("");
+  /* Post-paint (DEC-MOVERS-DB-PROVENANCE-VERIFY-001): refresh the source line
+     for the freshly-painted view, then schedule the debounced /db verify pass
+     — never blocking the paint. */
+  refreshProvenance(); scheduleVerify();
+}
+
+/* ── Data-source provenance + live /db verify (DEC-MOVERS-DB-PROVENANCE-VERIFY-001) ──
+   The operator demand: the data source must be VISIBLE, IDENTIFIED, and
+   READABLE on the page, with a real-time proven guarantee. The source line
+   names exactly what was read; the link opens /db pre-filtered to the top
+   visible row; the chip re-fetches the corresponding /db 1-minute rows after
+   each render and cross-checks the DISPLAYED cells. All writes are
+   textContent / .hidden / .className / the href ATTRIBUTE — never innerHTML
+   (DEC-DASHBOARD-XSS-HARDENING-001). */
+function asofWords(j) {
+  /* The SAME as-of derivation the #asof label uses (DEC-MOVERS-ASOF-LATEST-DEFAULT-001). */
+  const isDaily = (TF_MIN[j.interval] || 375) >= 375;
+  return j.time ? `@ ${j.time}`
+       : isDaily ? "(daily)"
+       : (j.latest_time ? `latest (${j.latest_time})` : "latest");
+}
+function refreshProvenance() {
+  const j = lastPayload;
+  const src = $("src");
+  if (!j) { src.hidden = true; return; }
+  const exch = $("exchange").value || "NSE";
+  const when = ` · ${j.interval||""} · ${j.date||""} · ${asofWords(j)}`;
+  let text;
+  if (state.asset === "spot") {
+    const seg = visibleData.length && visibleData[0].segment ? "/" + visibleData[0].segment : "";
+    /* Read-mode honesty: the EXISTING #1145 stored-first provenance counts —
+       how many contributing instruments were served from the prebuilt STORED
+       interval partitions vs the on-the-fly derived-from-1m resample. */
+    text = `spot candles lake (bars/${exch}${seg})${when}`
+      + ` · reads: ${j.stored_reads ?? 0} stored-TF / ${j.resampled_reads ?? 0} derived-from-1m`;
+  } else {
+    /* The F&O read mode is a documented CONSTANT (DEC-FNO-TF-DERIVE-OI-001):
+       the session readers are 1-minute-native with the stored Greeks overlay —
+       the display timeframe only reshapes buckets, never the read. */
+    const tier = ($("expiry").value || "Near").toLowerCase();
+    const kind = state.asset === "options"
+      ? `options · ${tier} tier · ${($("track").value || "All").toLowerCase()} track`
+      : `futures · ${tier} tier`;
+    text = `F&O candles lake (bars/*/FNO) · ${kind}`
+      + ` · read: 1-minute-native session + stored Greeks overlay · display${when}`;
+  }
+  $("srcText").textContent = text;
+  /* Click-through: /db pre-filtered to the TOP row of the CURRENT sorted view
+     (coherent with the verify chip). F&O pins interval=1minute — the partition
+     the F&O tabs actually read (always stored for a pulled contract). */
+  const top = visibleData.length ? visibleData[0] : null;
+  if (top && top.symbol && j.date) {
+    const q = new URLSearchParams();
+    if (state.asset === "spot") {
+      q.set("candles", "spot");
+      q.set("exchange", top.exchange || "");
+      q.set("segment", top.segment || "");
+      q.set("symbol", top.symbol);
+      q.set("interval", j.interval || "1minute");
+    } else {
+      q.set("candles", "fno");
+      q.set("exchange", top.exchange || "");
+      q.set("segment", "FNO");
+      q.set("symbol", top.symbol);
+      q.set("interval", "1minute");
+    }
+    q.set("date", j.date);
+    $("srcLink").href = "/db?" + q.toString();
+    $("srcLink").textContent = `open ${top.symbol} in /db →`;
+    $("srcLinkWrap").hidden = false;
+  } else {
+    $("srcLinkWrap").hidden = true;
+    $("srcLink").removeAttribute("href");
+    $("srcLink").textContent = "";
+  }
+  src.hidden = false;
+}
+function setVerifyChip(cls, text) {
+  const chip = $("verifyChip");
+  chip.className = cls;
+  chip.textContent = text;
+}
+/* Schedule ONE verify pass for the current view: bump the generation (a newer
+   render supersedes an in-flight pass), abort the in-flight probes, debounce
+   150 ms. Preview/gated/error views (lastPayload null), a hidden tab, and an
+   empty view schedule NOTHING (zero requests). A hidden-tab pause remembers
+   itself (verifyHiddenPaused) so the visibilitychange listener can re-schedule
+   on return — the chip never shows a stale "paused (hidden tab)" on a VISIBLE
+   tab (round-2 refuter S5). */
+function scheduleVerify() {
+  verifyGen += 1;
+  verifyHiddenPaused = false;
+  if (verifyAbort) { verifyAbort.abort(); verifyAbort = null; }
+  clearTimeout(verifyTimer);
+  if (!lastPayload) { setVerifyChip("muted", ""); return; }  /* #src is hidden too */
+  if (document.hidden) { verifyHiddenPaused = true; setVerifyChip("muted", "verify: paused (hidden tab)"); return; }
+  if (!visibleData.length) { setVerifyChip("muted", "verify: n/a (no rows)"); return; }
+  setVerifyChip("muted", `verify: checking top ${Math.min(VERIFY_TOP_K, visibleData.length)} vs /db…`);
+  const gen = verifyGen;
+  /* Capture the ASSET at SCHEDULE time (round-2 refuter S2): the asset-tab
+     click mutates state.asset while a debounce timer / an in-flight pass armed
+     by the PREVIOUS tab's render is still pending — a fire-time read would
+     probe spot rows as segment=FNO (a guaranteed empty page → a false LOUD
+     red) and run the F&O-excluded %CHNG check in reverse. The captured asset
+     is the one consistent with THIS pass's lastPayload + visibleData (the
+     still-painted table), so its verdict stays truthful for what is on screen. */
+  const asset = state.asset;
+  verifyTimer = setTimeout(() => { runVerify(gen, asset); }, VERIFY_DEBOUNCE_MS);
+}
+/* Cancel any pending/in-flight verify pass WITHOUT scheduling a new one — the
+   asset-tab switch handler calls this BEFORE mutating state (belt on top of
+   the schedule-time asset capture above): the superseded pass must not paint
+   an interim verdict for the outgoing tab while the incoming tab's fetch is
+   still resolving (possibly seconds on a busy backend). The new tab's own
+   render re-schedules via renderRows() → scheduleVerify(). */
+function cancelVerify() {
+  verifyGen += 1;
+  verifyHiddenPaused = false;
+  if (verifyAbort) { verifyAbort.abort(); verifyAbort = null; }
+  clearTimeout(verifyTimer);
+  setVerifyChip("muted", "verify: pending…");
+}
+/* The verify pass: K = min(5, visible rows) PARALLEL probes of the EXISTING
+   /api/v1/db/candles API (one desc day-page of the 1-minute base per row —
+   there is NO batch API, so the honest bound is K requests, each ≤ 500 rows),
+   under ONE AbortController + ONE 10 s timeout armed through the body reads.
+   Cross-checks the DISPLAYED LTP (all tabs) + %CHNG (spot) of the visible
+   top-K rows via the pure BXVerify primitives riding the ONE shared bxFixed2.
+   F&O verifies LTP only (the %CHNG baseline law is not proven byte-equal
+   there — named follow-up DEC-MOVERS-VERIFY-FNO-PCT-001); a non-contiguous
+   " *" baseline row skips its % (the two sides' hole-walks are not proven
+   identical). */
+async function runVerify(gen, asset) {
+  const j = lastPayload;
+  if (gen !== verifyGen || !j || !visibleData.length) return;
+  const isSpot = asset === "spot";
+  const candidates = visibleData.slice(0, VERIFY_TOP_K).filter(r => r && r.symbol);
+  if (!candidates.length) { setVerifyChip("muted", "verify: n/a (no verifiable cells)"); return; }
+  /* /db read-allowlist pre-check (round-2 refuter fold): the lake WRITE
+     allowlist is broader than the /db READ allowlist (db_view._SYMBOL_RE), so
+     a lake-legal symbol carrying ";" / "'" / "=" would 400 on EVERY probe —
+     a burned request per render + a console error. Such a row is a DISCLOSED
+     skip, never a request that is guaranteed to fail. */
+  const rows = candidates.filter(r =>
+    BXVerify.bxDbProbeOk(r.exchange || "", isSpot ? (r.segment || "") : "FNO", r.symbol));
+  const unreadable = candidates.length - rows.length;
+  if (!rows.length) { setVerifyChip("muted", `verify: n/a (${unreadable} row(s) not /db-readable)`); return; }
+  /* The as-of ANCHOR for the /db desc-page cut (round-2 refuter S3): an
+     explicit pick uses its own minute; the spot Latest mode anchors at the
+     payload's OWN latest_time echo (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 — the
+     exact minute the snapshot's whole-day cut ended at), so a live pull
+     appending newer 1-minute bars between the movers read and this probe can
+     no longer flip the chip red on a matching view. F&O Latest + the daily TF
+     stay un-anchored (rows[0]): latest_time is a SPOT-derived echo, NOT the
+     F&O read's anchor (an F&O lake ahead of the spot lake would false-red),
+     and a daily payload carries none — the residual live-pull race there is
+     disclosed in the red copy below. */
+  const anchor = isSpot ? (j.time || j.latest_time || null) : (j.time || null);
+  const ctl = new AbortController();
+  verifyAbort = ctl;
+  const killer = setTimeout(() => ctl.abort(), VERIFY_TIMEOUT_MS);
+  const probes = rows.map(r => {
+    const q = new URLSearchParams({
+      exchange: r.exchange || "",
+      segment: isSpot ? (r.segment || "") : "FNO",
+      symbol: r.symbol,
+      interval: "1minute",
+      start: j.date, end: j.date, desc: "true", limit: "500",
+    });
+    return fetch("/api/v1/db/candles?" + q.toString(), { signal: ctl.signal })
+      .then(async (resp) => {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      });
+  });
+  let settled;
+  try { settled = await Promise.allSettled(probes); }
+  finally { clearTimeout(killer); if (verifyAbort === ctl) verifyAbort = null; }
+  if (gen !== verifyGen) return;  /* superseded by a newer render — discard */
+  const mismatches = [], missing = [], noCut = [];
+  let checked = 0, skipped = 0, unavailable = 0, unavailReason = "";
+  settled.forEach((res, i) => {
+    const row = rows[i];
+    if (res.status !== "fulfilled") {
+      unavailable += 1;
+      if (!unavailReason) {
+        const e = res.reason;
+        unavailReason = (e && e.name === "AbortError") ? "timeout"
+          : (e && /^HTTP \d+$/.test(e.message || "")) ? e.message : "network";
+      }
+      return;
+    }
+    const body = res.value || {};
+    const cols = body.columns || [];
+    const tsIdx = cols.indexOf("timestamp");
+    const closeIdx = cols.indexOf("close");
+    const pctIdx = cols.indexOf("change_pct");
+    const dbRows = Array.isArray(body.rows) ? body.rows : [];
+    const target = (tsIdx >= 0 && closeIdx >= 0)
+      ? BXVerify.bxCutRow(dbRows, tsIdx, anchor) : null;
+    /* Honest wording split (round-2 refuter S4): an EMPTY /db day-page is
+       "no rows for the date"; a non-empty page with no row at/before the
+       anchor is a DIFFERENT truth ("/db has rows, none at/before the cut")
+       — both red, each naming what /db actually holds. */
+    if (!target) { (dbRows.length ? noCut : missing).push(row.symbol); return; }
+    const out = BXVerify.bxVerifyRow({
+      sym: row.symbol,
+      ltpStr: row.ltp,
+      pctStr: row.pct_change,
+      checkPct: isSpot && row.prev_close_contiguous !== false,
+      dbClose: target[closeIdx],
+      dbChangePct: pctIdx >= 0 ? target[pctIdx] : null,
+    });
+    mismatches.push(...out.mismatches); checked += out.checked; skipped += out.skipped;
+  });
+  /* Precedence: mismatch > missing-rows/no-cut > unavailable > all-skipped >
+     green. A probe failure with zero found mismatches is an honest "verify
+     unavailable" — never a fake green (Golden Rule #1). */
+  if (mismatches.length) {
+    const m = mismatches[0];
+    let text = `✗ /db MISMATCH — ${m.sym} ${m.cell} shown ${m.shown} · /db ${m.db}`;
+    if (mismatches.length > 1) text += ` (+${mismatches.length - 1} more)`;
+    if ((j.interval || "") !== "1minute") {
+      /* An actionable red: on a non-1minute display TF the likeliest cause is a
+         stale stored partition vs the 1-minute base (the #1342 class). */
+      text += " — displayed TF may be stale vs the 1-minute base (re-run pull/prebuild)";
+    }
+    if (!anchor) {
+      /* Un-anchored cut = rows[0] (F&O Latest / daily TF): the residual race —
+         a live pull appending bars between the movers read and this probe —
+         is disclosed, never presented as a certain data fault. */
+      text += " — or a live pull advanced /db past this snapshot (↻ refresh)";
+    }
+    setVerifyChip("neg", text);
+  } else if (missing.length) {
+    setVerifyChip("neg", `✗ ${missing[0]}: no /db 1-minute rows for ${j.date || ""}`
+      + (missing.length > 1 ? ` (+${missing.length - 1} more)` : ""));
+  } else if (noCut.length) {
+    setVerifyChip("neg", `✗ ${noCut[0]}: /db has 1-minute rows for ${j.date || ""} but none at/before ${anchor}`
+      + (noCut.length > 1 ? ` (+${noCut.length - 1} more)` : ""));
+  } else if (unavailable) {
+    setVerifyChip("muted", `verify unavailable (${unavailReason || "network"})`);
+  } else if (!checked) {
+    setVerifyChip("muted", "verify: n/a (no verifiable cells)");
+  } else {
+    setVerifyChip("pos", `✓ matches /db (${rows.length} rows · spot LTP+%CHNG / F&O LTP only · 1m base)`
+      + (skipped ? ` · ${skipped} skipped` : "")
+      + (unreadable ? ` · ${unreadable} not /db-readable` : ""));
+  }
 }
 function syncControls() {
   ["date","interval","time","exchange"].forEach(id => {
@@ -660,6 +952,20 @@ async function load() {
       baseNote = j.note || "";
       refreshBaselineLegend(baseNote);
       showPcr(j);  /* load() hid the panel above — an identical repeat must restore it. */
+      refreshProvenance();
+      /* Re-PROVE, never re-ASSERT (round-3 refuter fold): an identical MOVERS
+         payload says nothing about the /db SIDE, so the verify pass re-runs on
+         this path too. The prior "the chip already reports exactly this
+         snapshot" rationale was wrong twice over: (1) a transient probe
+         failure ("verify unavailable" — timeout/network) wedged for the whole
+         session because every ↻ Refresh took this path and re-probed nothing;
+         (2) a green chip went STALE-GREEN over /db content that drifted
+         underneath (a heal/quarantine/manual partition edit touches no window
+         ledger, so the movers bytes stay identical) — a false green on the
+         guarantee surface (Golden Rule #1). Bounded: K ≤ 5 debounced probes
+         per EXPLICIT user re-load only — nothing on this page polls when idle
+         (DEC-MOVERS-DB-PROVENANCE-VERIFY-001). */
+      scheduleVerify();
       return;
     }
     lastRenderSig = sig;
@@ -774,6 +1080,10 @@ function onHeadClick(e) {
 $("head").addEventListener("click", onHeadClick);
 $("tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => {
   $("tabs").querySelectorAll(".tab").forEach(x=>x.classList.remove("on")); t.classList.add("on");
+  /* Supersede any pending/in-flight verify pass BEFORE mutating state.asset
+     (round-2 refuter S2 — the tab-switch false-red race); the new tab's own
+     render re-schedules. */
+  cancelVerify();
   state.asset = t.dataset.asset; state.category = ASSETS[state.asset].cats[0][0]; state.sort = {idx:null,dir:1};
   renderPills(); load();
 });
@@ -798,6 +1108,11 @@ fillTimes(); renderPills(); load();
    visible; clear the pending hidden-armed retry first so it cannot double-fire. */
 document.addEventListener("visibilitychange", function () {
   if (!document.hidden && wasGated) { clearTimeout(gateTimer); load(); }
+  /* Verify-pause catch-up (round-2 refuter S5): a render that landed while the
+     tab was hidden paused the verify pass ("paused (hidden tab)") — re-run it
+     NOW on return so a visible tab never wears a stale paused chip. The gated
+     branch above needs nothing: its load() re-renders and re-schedules. */
+  else if (!document.hidden && verifyHiddenPaused) scheduleVerify();
 });
 </script>
 </body>

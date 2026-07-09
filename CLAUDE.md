@@ -18,7 +18,39 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633 —
+_Last updated: 2026-07-09 (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md
+#1634 — the `/movers` data source made VISIBLE, IDENTIFIED, CLICKABLE, and
+LIVE-VERIFIED on the page; FRONTEND-ONLY (zero Python source change, every
+payload key byte-identical): (1) a textContent-only Source line on all three
+tabs naming the logical lake table, scope, interval, date, as-of words, and
+READ MODE — spot surfaces the EXISTING #1145 `stored_reads`/`resampled_reads`
+stored-first provenance verbatim, F&O states the DEC-FNO-TF-DERIVE-OI-001
+constant 1m-native read + Greeks overlay; (2) the line deep-links to `/db`
+pre-filtered via a NEW additive `?candles=…` boot handler in db.html (a bare
+`/db` boots byte-identically; invalid params DROP; DATA-only through the
+pre-existing encodeURIComponent/esc() sinks — no new innerHTML path); (3) a
+post-paint verify chip cross-checks the visible top-K(=5) rows' DISPLAYED
+LTP (all tabs) + %CHNG (spot) against the EXISTING `/api/v1/db/candles`
+1-minute base — K parallel probes under ONE AbortController + 10 s timeout +
+a `verifyGen` single-flight; `✓ matches /db` green / a LOUD red naming the
+exact cell + BOTH values / an honest `verify unavailable` — NEVER a fake
+green; F&O verifies LTP ONLY (disclosed; named follow-up
+DEC-MOVERS-VERIFY-FNO-PCT-001); the comparison rides the ONE shared
+`bxFixed2` via the NEW pure node-golden'd `static/bx-verify.js` with BOTH
+sides Number-coerced FIRST (the /db wire delivers `change_pct` as a JSON
+STRING). Round-2 refuter folds executed-repro driven: the tab-switch
+false-red race killed (asset captured at schedule time + `cancelVerify()`
+supersede); the spot Latest cut anchored at the payload's OWN `latest_time`
+echo; the guaranteed-400 probe class killed via the pure `bxDbProbeOk`
+read-allowlist mirror (an unreadable row is a DISCLOSED skip); the
+skip-render wedge killed — the chip re-PROVES on the skip-render path
+(never a stale green / stale unavailable across refresh). Tests:
+node-executed goldens over the REAL bx-verify.js + bx-format.js, substring
+pins, AND the Chromium browser truth suite (`tests/browser/`, the chip's
+real green state + the zero-400 probe discipline). READ-ONLY dashboard —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; ruff/ruff-format/`mypy --strict` clean on the new tests.)
+Earlier: 2026-07-09 (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633 —
 the `/movers` selected as-of TIME now PERSISTS across timeframe switches and
 SNAPS to the completed bucket of the new TF containing the instant
 (operator-reported: a TF change reset the pick — to 09:15 on the stale
@@ -1844,7 +1876,45 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-time-snap-ux` (**DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633** —
+- **Active branch:** `claude/movers-db-provenance-verify` (**DEC-MOVERS-DB-PROVENANCE-VERIFY-001,
+  MIGRATION.md #1634** — the `/movers` data source made VISIBLE, IDENTIFIED, CLICKABLE, and
+  LIVE-VERIFIED on the page; FRONTEND-ONLY (zero Python source change, every payload key
+  byte-identical): (1) a textContent-only Source line on all three tabs naming the logical lake
+  table, scope, interval, date, as-of words, and READ MODE — spot surfaces the EXISTING #1145
+  `stored_reads`/`resampled_reads` stored-first provenance verbatim, F&O states the
+  DEC-FNO-TF-DERIVE-OI-001 constant 1m-native read + Greeks overlay; (2) the line deep-links to
+  `/db` pre-filtered via a NEW additive `?candles=spot|fno&exchange&segment&symbol&interval&date`
+  boot handler in db.html (a bare `/db` boots byte-identically; invalid `date`/`interval` DROP the
+  param; an unstored TF falls to the `1minute` base; symbol/exchange/segment are DATA-only through
+  the pre-existing encodeURIComponent/esc() sinks — no new innerHTML path); (3) a post-paint verify
+  chip cross-checks the visible top-K(=5) rows' DISPLAYED LTP (all tabs) + %CHNG (spot) against the
+  EXISTING `/api/v1/db/candles` 1-minute base — K parallel desc day-page probes (the HONEST bound
+  is K requests, no batch API exists) under ONE AbortController + 10 s timeout + a `verifyGen`
+  single-flight + 150 ms debounce + `document.hidden` skip; `✓ matches /db` green / a LOUD red
+  naming the exact cell + BOTH values (+ the actionable stale-TF remediation suffix on a
+  non-1minute display TF) / an honest `verify unavailable` — NEVER a fake green (Golden Rule #1);
+  F&O verifies LTP ONLY (disclosed; the F&O %CHNG baseline law is unproven byte-equal — named
+  follow-up DEC-MOVERS-VERIFY-FNO-PCT-001); the comparison rides the ONE shared `bxFixed2` via the
+  NEW pure node-golden'd `static/bx-verify.js` with BOTH sides Number-coerced FIRST (the /db wire
+  delivers `change_pct` as a JSON STRING — `_json_safe` stringifies Decimal; feeding it raw to
+  bxFixed2 would guarantee a false mismatch, golden-pinned). ROUND-2 refuter folds (executed-repro
+  driven — a node vm harness over the REAL inline script + the live Chromium truth suite): the
+  tab-switch false-red race killed (asset CAPTURED at schedule time — `runVerify(gen, asset)` —
+  plus a `cancelVerify()` supersede in the tab handler); the spot Latest cut anchored at the
+  payload's OWN `latest_time` echo (a live pull appending 1m bars mid-probe can no longer flip a
+  matching view red; F&O/daily stay first-row with the residual race DISCLOSED in the red copy);
+  the guaranteed-400 probe class killed — NEW pure `bxDbProbeOk` (the `db_view._validate_candle_coords`
+  mirror) pre-screens every coordinate because the lake WRITE allowlist is broader than the /db READ
+  allowlist — an unreadable row is a DISCLOSED `not /db-readable` skip; the missing-row red wording
+  split (`no rows for <date>` vs `rows exist but none at/before <anchor>`); the hidden-tab paused chip
+  resumes on visibilitychange. Tests: node-executed goldens over the REAL bx-verify.js + bx-format.js,
+  substring-presence pins (the fast unit layer), AND the Chromium browser truth suite
+  (`test_movers_gate.py::test_verify_chip_green_execution` — the chip's real green state + the
+  zero-400 probe discipline via the harness console-clean law; the round-1 "no executable-browser
+  harness" claim was WRONG and is retracted). READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format/`mypy --strict`
+  clean on the new tests).
+  Earlier: `claude/movers-time-snap-ux` (**DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633** —
   the `/movers` selected as-of TIME persists across timeframe switches and SNAPS to the completed bucket of the
   new TF containing the instant (operator-reported reset: 09:15 on the stale pre-#1243 page via first-option
   innerHTML autoselect, "Latest" on current main via `bxResolveTime`'s not-a-slot `""` fallback — both captured
@@ -4339,7 +4409,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-time-snap-ux`
+- **Active feature branch:** `claude/movers-db-provenance-verify`
+  (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md #1634 — the `/movers`
+  data source made visible, identified, clickable, and live-verified: a
+  textContent-only Source line (spot surfaces the #1145 stored/resampled read
+  provenance), a `/db?candles=…` deep-link boot handler, and a post-paint
+  top-K verify chip against the existing `/api/v1/db/candles` 1-minute base
+  riding the ONE shared bxFixed2 (NEW pure node-golden'd `bx-verify.js`);
+  FRONTEND-ONLY, READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/movers-time-snap-ux`
   (DEC-MOVERS-TIME-SNAP-UX-001, MIGRATION.md #1633 — the `/movers` selected
   as-of TIME persists across TF switches + snaps to the completed containing
   bucket (label = bucket-START, sent value = bucket-FINAL — the /db-equal
