@@ -559,7 +559,8 @@ def bridge_age_seconds(
     tuple[float, bool]
         ``(age_seconds, dead_evidence)``. On ``dead_evidence`` the age is ``inf`` so
         the merged guard treats the bridge as absent; the caller additionally labels
-        the served ``bridge_source`` ``unverified`` and WARNs once.
+        the served ``bridge_source`` ``unverified`` and WARNs once per distinct dead
+        ``wall_time`` stamp (:func:`should_warn_dead_bridge`).
     """
     if not math.isfinite(wall_time) or not math.isfinite(now_wall):
         return math.inf, True
@@ -567,6 +568,52 @@ def bridge_age_seconds(
     if delta < -future_skew_s:
         return math.inf, True
     return (delta if delta > 0.0 else 0.0), False
+
+
+def should_warn_dead_bridge(current_wall_time: float, last_warned: float | None) -> bool:
+    """Return ``True`` iff the dead-bridge WARN should fire for this poll's ``wall_time``.
+
+    DEDUP per distinct dead ``wall_time`` stamp. The live-rate widget polls
+    ``GET /api/v1/pull/rate`` site-wide every ~3 s, and a dead bridge (a SIGKILLed
+    CLI leaving a stuck ``+inf`` / ``NaN`` / materially-future stamp — see
+    :func:`bridge_age_seconds`) is a PERSISTENT condition. An unthrottled
+    ``pull_rate.bridge_dead_wall_time`` WARN would therefore fire ~20/min
+    INDEFINITELY. This is the ONE decision function that collapses that to ONE WARN
+    per distinct dead stamp, matching the repo's deduped-per-key WARN convention
+    (Golden Rule #10 honesty; CLAUDE.md §11 COMMON — one source of truth).
+
+    Rules, in order:
+
+    * ``last_warned is None`` (the FIRST dead poll, or the bridge just recovered and
+      the caller re-armed the dedup) → ``True`` (warn).
+    * a ``NaN`` ``current_wall_time`` whose prior warned stamp was ALSO ``NaN`` →
+      ``False`` — a persistent ``NaN`` bridge must warn only once, but ``NaN != NaN``
+      would otherwise re-warn every poll, so the ``NaN``-vs-``NaN`` case is handled
+      explicitly here.
+    * otherwise → warn iff the stamp CHANGED (``current_wall_time != last_warned``),
+      so a NEW distinct dead episode (``+inf`` → a different future stamp, or a
+      changed ``NaN``-vs-finite pair) re-warns exactly once.
+
+    The caller resets ``last_warned`` to ``None`` whenever the bridge is healthy (or
+    absent), so a fresh dead episode after a recovery always re-warns.
+
+    Parameters
+    ----------
+    current_wall_time
+        This poll's dead-evidence ``wall_time`` (non-finite or materially future).
+    last_warned
+        The last dead ``wall_time`` the caller acted on, or ``None`` when re-armed.
+
+    Returns
+    -------
+    bool
+        ``True`` to emit the WARN this poll; ``False`` to suppress it as a duplicate.
+    """
+    if last_warned is None:
+        return True
+    if math.isnan(current_wall_time):
+        return not math.isnan(last_warned)
+    return current_wall_time != last_warned
 
 
 def build_pull_rate_view_merged(
@@ -763,4 +810,5 @@ __all__ = [
     "bridge_age_seconds",
     "build_pull_rate_view",
     "build_pull_rate_view_merged",
+    "should_warn_dead_bridge",
 ]

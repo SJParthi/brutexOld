@@ -28,6 +28,7 @@ from brutex.dashboard.pull_rate_view import (
     bridge_age_seconds,
     build_pull_rate_view,
     build_pull_rate_view_merged,
+    should_warn_dead_bridge,
 )
 
 
@@ -1375,3 +1376,37 @@ class TestBridgeAgeSeconds:
         age, dead = bridge_age_seconds(math.inf, 1000.0)
         assert age == math.inf
         assert dead is True
+
+
+class TestShouldWarnDeadBridge:
+    """`should_warn_dead_bridge` — the dead-bridge WARN dedup (hostile-review MINOR):
+    a PERSISTENT dead CLI bridge (a stuck +inf/NaN/future ``wall_time``) polled
+    site-wide every ~3 s must WARN ONCE per distinct dead stamp, never ~20/min
+    forever, matching the repo's deduped-per-key WARN convention (Golden Rule #10)."""
+
+    def test_first_dead_poll_warns(self) -> None:
+        # No prior warned stamp (first dead poll, or just re-armed) → warn.
+        assert should_warn_dead_bridge(math.inf, None) is True
+
+    def test_persistent_same_infinity_stamp_is_suppressed(self) -> None:
+        # A repeat poll of the SAME dead +inf stamp is a duplicate → no warn.
+        assert should_warn_dead_bridge(math.inf, math.inf) is False
+
+    def test_distinct_future_stamp_after_infinity_re_warns(self) -> None:
+        # inf → a different (future finite) dead stamp is a NEW episode → warn.
+        assert should_warn_dead_bridge(1e18, math.inf) is True
+
+    def test_persistent_same_future_stamp_is_suppressed(self) -> None:
+        assert should_warn_dead_bridge(1e18, 1e18) is False
+
+    def test_persistent_nan_stamp_is_suppressed(self) -> None:
+        # NaN != NaN would re-warn forever; the NaN-vs-NaN case is handled explicitly.
+        assert should_warn_dead_bridge(math.nan, math.nan) is False
+
+    def test_nan_after_finite_dead_stamp_re_warns(self) -> None:
+        # A finite dead stamp → NaN is a distinct dead episode → warn.
+        assert should_warn_dead_bridge(math.nan, 1e18) is True
+
+    def test_finite_after_nan_dead_stamp_re_warns(self) -> None:
+        # NaN → a finite dead stamp (inf) is a distinct dead episode → warn.
+        assert should_warn_dead_bridge(math.inf, math.nan) is True

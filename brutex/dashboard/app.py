@@ -1454,6 +1454,14 @@ def build_app(
     # Owned by this app instance (no module-global mutable state — CLAUDE.md §4).
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
 
+    # Dedup baseline for the dead-bridge WARN (GET /api/v1/pull/rate). A dead CLI
+    # bridge (a stuck +inf/NaN/future wall_time) is PERSISTENT and the widget polls
+    # site-wide every ~3 s, so the WARN is emitted ONCE per distinct dead stamp and
+    # re-armed to None when the bridge is healthy/absent (DEC-PULL-RATE-BRIDGE-
+    # NONBLOCK-CACHE-001; see the route body). Touched only on the event loop, so no
+    # lock. App-instance state (no module-global mutable state — CLAUDE.md §4).
+    _last_warned_dead_wall_time: float | None = None
+
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
     # payload with ZERO lake reads (a half-filled lake / mid-overwrite derived
@@ -1782,8 +1790,10 @@ def build_app(
         from brutex.dashboard.pull_rate_view import (
             bridge_age_seconds,
             build_pull_rate_view_merged,
+            should_warn_dead_bridge,
         )
 
+        nonlocal _last_warned_dead_wall_time
         now_monotonic = time.monotonic()
         with state._lock:  # pyright: ignore[reportPrivateUsage]
             panel = state.rate_limit
@@ -1839,19 +1849,33 @@ def build_app(
             bridge_age, bridge_dead_evidence = bridge_age_seconds(time.time(), snapshot.wall_time)
             if bridge_dead_evidence:
                 # Label the served provenance ``unverified`` (never a trusted "live")
-                # and WARN once so a corrupt/skewed publisher is visible, not silent.
+                # so a corrupt/skewed publisher is visible, not silent. The WARN is
+                # DEDUPED per distinct dead ``wall_time`` stamp: the widget polls this
+                # route site-wide every ~3 s and a dead bridge (a SIGKILLed CLI's stuck
+                # +inf/NaN/future stamp) is a PERSISTENT condition, so an unthrottled
+                # WARN would fire ~20/min forever. ``should_warn_dead_bridge`` fires it
+                # ONCE per distinct dead stamp; the healthy/absent arms below re-arm the
+                # dedup so a NEW dead episode after a recovery re-warns (CLAUDE.md §11
+                # deduped-per-key WARN convention). ``_last_warned_dead_wall_time`` is
+                # touched only on the event loop between awaits, so it needs no lock.
                 bridge_result = BridgeReadResult(
                     snapshot, BRIDGE_SOURCE_UNVERIFIED, bridge_result.probe_age_s
                 )
-                _LOG.warning(
-                    "pull_rate.bridge_dead_wall_time",
-                    wall_time=snapshot.wall_time,
-                    detail=(
-                        "CLI rate-bridge wall_time is non-finite or materially in the "
-                        "future — DEAD EVIDENCE, treated as absent (idle), never a "
-                        "fabricated 'flowing'"
-                    ),
-                )
+                if should_warn_dead_bridge(snapshot.wall_time, _last_warned_dead_wall_time):
+                    _LOG.warning(
+                        "pull_rate.bridge_dead_wall_time",
+                        wall_time=snapshot.wall_time,
+                        detail=(
+                            "CLI rate-bridge wall_time is non-finite or materially in the "
+                            "future — DEAD EVIDENCE, treated as absent (idle), never a "
+                            "fabricated 'flowing'"
+                        ),
+                    )
+                _last_warned_dead_wall_time = snapshot.wall_time
+            else:
+                # Bridge healthy again → re-arm the dead-bridge WARN dedup so a NEW
+                # dead episode after this recovery re-warns exactly once.
+                _last_warned_dead_wall_time = None
             bridge_effective_rps = snapshot.effective_rps
             bridge_current_rps = snapshot.current_rps
             bridge_recent_minute = snapshot.recent_minute
@@ -1860,6 +1884,10 @@ def build_app(
             bridge_recent_600s = snapshot.recent_600s
             bridge_recent_3600s = snapshot.recent_3600s
             bridge_pull_active = snapshot.pull_active
+        else:
+            # No bridge snapshot (unwired / missing / unreadable) → re-arm the
+            # dead-bridge WARN dedup: a later dead episode is a fresh one.
+            _last_warned_dead_wall_time = None
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,
