@@ -688,6 +688,16 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     rows = ledger.dirty_rows()
     if not rows:
         return 0
+    # MID-PULL COMPACTION FOLLOW-UP (deferred by the coordinator with
+    # DEC-WINDOWS-MIDPULL-FLOOR-001, distinct from the crash-orphan compactor
+    # named above): deltas accrue HERE ~1 file per LIVE_FLUSH_MIN_INTERVAL_S
+    # (2 s) and are pruned only by the next FULL save's subsumption, so a
+    # multi-hour pull reaches thousands of pending files and every fresh-stamp
+    # reader fold pays one Parquet footer open per file (db_view's
+    # `_ledger_scan_source` envelope). The read side is floor-throttled + page-
+    # cached (MIGRATION.md #1637); bounding the FILE COUNT itself (periodic
+    # mid-pull delta consolidation under this same lock) stays the named
+    # follow-up.
     directory = deltas_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
     try:

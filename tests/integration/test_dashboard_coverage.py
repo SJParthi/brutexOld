@@ -724,6 +724,22 @@ class TestWindowStatusApi:
         assert "counts_since_pull_start" not in body
         assert "pull_start_utc" not in body
 
+        # Counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001): ?limit=0 ships the
+        # IDENTICAL counts/meta with rows=[] — the mode the coverage.html KPI +
+        # universe.html all-segments consumers poll (they never read rows, so
+        # the ~5.9 MB default row list stops shipping). The default (no-limit)
+        # response above is the existing-caller byte-parity witness: it stayed
+        # rowful and shape-identical through this change.
+        counts_only = client.get("/api/v1/coverage/windows?limit=0").json()
+        assert counts_only == {
+            **body,
+            "windows": [],
+            "returned": 0,
+            "capped": True,  # matching rows exist, none shipped — honest
+        }
+        # ge=0: a negative limit is still refused at validation (422), never a 500.
+        assert client.get("/api/v1/coverage/windows?limit=-1").status_code == 422
+
     def test_windows_per_run_counts_from_pull_journal(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
