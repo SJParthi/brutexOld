@@ -645,7 +645,7 @@ def test_tailread_spans_multiple_chunks(
     """A tiny reverse-read chunk forces the backwards walk to loop — parity holds.
 
     Shrinking ``_TAIL_CHUNK_BYTES`` to a few bytes makes the reader step back
-    through many chunks (the ``newline_idx == -1: continue`` arm and the loop
+    through many chunks (the no-newline-yet ``continue`` arm and the loop
     that isolates the last committed line), proving the multi-chunk walk is
     correct, not just the single-read fast case.
     """
@@ -964,13 +964,23 @@ def test_truncate_reverse_chunks_shared_with_tailread(backend: _Backend) -> None
 
     Guards the dedup: `_read_tail_entry` and `_find_last_newline_offset` must
     both delegate to the module's single `_iter_reverse_chunks` generator (no
-    copy-pasted reverse-walk loops).
+    copy-pasted reverse-walk loops). audit.py's tail-read walk lives in the
+    pragma-free `_isolate_last_committed_line` helper (DEC-MUTATION-RUNTIME-003
+    fixer round 3 F1, commit 33cc0d88) — there the pin follows the delegation:
+    `_read_tail_entry` must call the helper, and the helper must itself ride
+    the ONE generator. sweep_audit.py keeps the in-line walk shape.
     """
     import inspect
 
     module = backend.module
     assert hasattr(module, "_iter_reverse_chunks")
-    assert "_iter_reverse_chunks(" in inspect.getsource(module._read_tail_entry)
+    isolate = getattr(module, "_isolate_last_committed_line", None)
+    tail_src = inspect.getsource(module._read_tail_entry)
+    if isolate is not None:
+        assert "_isolate_last_committed_line(" in tail_src
+        assert "_iter_reverse_chunks(" in inspect.getsource(isolate)
+    else:
+        assert "_iter_reverse_chunks(" in tail_src
     assert "_iter_reverse_chunks(" in inspect.getsource(module._find_last_newline_offset)
     # And the repair itself no longer whole-file-reads: it delegates the cut
     # search to _find_last_newline_offset.
