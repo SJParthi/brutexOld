@@ -275,6 +275,26 @@ class TestLoadDamageWrap:
         with pytest.raises(ResultsStoreSchemaError, match=str(bad)):
             ResultsStore.load(bad)
 
+    def test_nesting_bomb_temporal_cell_raises_typed_schema_error(self, tmp_path: Path) -> None:
+        """Review round 1 (G14): a pathologically nested valid-JSON temporal
+        cell (`'['*60000` — a nesting bomb) previously ESCAPED load as a raw
+        `RecursionError` (not a `ValueError`), defeating the typed-damage law
+        and every downstream skip-and-count reader. Now surfaces as
+        `ResultsStoreSchemaError` naming the path like every other damage
+        shape."""
+        import polars as pl
+
+        good = tmp_path / "good.parquet"
+        store = ResultsStore(path=good)
+        store.append(_row(1, with_temporal=True))
+        store.flush()
+        bad = tmp_path / "bomb.parquet"
+        pl.read_parquet(good).with_columns(
+            pl.lit("[" * 60_000, dtype=pl.Utf8).alias("stats_by_year_json")
+        ).write_parquet(bad)
+        with pytest.raises(ResultsStoreSchemaError, match=str(bad)):
+            ResultsStore.load(bad)
+
 
 class TestAppendEnrichmentRule:
     """The D16 conflict law — all three cases + the reverse direction."""

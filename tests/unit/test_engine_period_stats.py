@@ -112,6 +112,15 @@ class TestDecodeStrictness:
         with pytest.raises(ValueError, match="JSON object"):
             decode_period_stats("[1,2]", kind="year")
 
+    def test_nesting_bomb_rejected_as_value_error(self) -> None:
+        """Review round 1: a pathologically nested valid-JSON payload raises
+        `RecursionError` inside `json.loads`, which is NOT a `ValueError` —
+        unmapped it escaped `ResultsStore.load`'s typed-damage tuple raw
+        (the G14 breach). The `_loads` shim folds it into `ValueError` (the
+        sweep_checkpoint house precedent)."""
+        with pytest.raises(ValueError, match="nesting bomb"):
+            decode_period_stats("[" * 60_000, kind="year")
+
     @pytest.mark.parametrize(
         ("kind", "bad_key"),
         [
@@ -205,6 +214,11 @@ class TestJudgedYearsColumn:
     def test_duplicate_rejected(self) -> None:
         with pytest.raises(ValueError, match="strictly ascending"):
             decode_judged_years('["2020","2020"]')
+
+    def test_nesting_bomb_rejected_as_value_error(self) -> None:
+        """The judged-years twin of the stats-column nesting-bomb mapping."""
+        with pytest.raises(ValueError, match="nesting bomb"):
+            decode_judged_years("[" * 60_000)
 
 
 class TestCrossSumValidation:

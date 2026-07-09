@@ -10,7 +10,10 @@ ResultRow` columns. Consumed by
   producer (:func:`fold_period_stats`, the engine-wiring commit);
 * :class:`~brutex.engine.results_store.ResultRow` construction/load — the
   cross-sum VALIDATORS (:func:`validate_period_stats`), so a fabricated or torn
-  stored cell is structurally impossible to load silently; and
+  stored ``n``/``pnl``/``wins`` cell is structurally impossible to load
+  silently (per-period ``max_dd`` is bounded ``>= 0`` int64 ONLY — non-rollup
+  by design, unre-derivable at load without the trade stream, so it is NOT
+  cross-validated and a tampered dd value alone is not detected); and
 * the dashboard parse — stored values only, decoded through the SAME
   :func:`decode_period_stats` / :func:`decode_judged_years`.
 
@@ -125,6 +128,24 @@ def _dumps(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _loads(payload: str, *, column: str) -> object:
+    """``json.loads`` with the nesting bomb folded into ``ValueError``.
+
+    ``RecursionError``: a pathologically nested valid-JSON payload (e.g. 60k
+    nested arrays) is parser-level corruption — the same contract as malformed
+    JSON, and the house convention at every sibling ``json.loads`` boundary
+    (the ``sweep_checkpoint`` precedent) — so a tampered/foreign store column
+    surfaces through the typed-damage law (G14) instead of escaping as a raw
+    ``RecursionError`` past :meth:`ResultsStore.load`'s except tuple.
+    """
+    try:
+        return json.loads(payload)  # json.JSONDecodeError ⊂ ValueError
+    except RecursionError as exc:
+        raise ValueError(
+            f"{column} payload is pathologically nested JSON (nesting bomb): {exc}"
+        ) from exc
+
+
 def _require_cell_int(value: object, *, key: str, position: int) -> int:
     """One validated cell int — bool/float/str rejected, int64-bounded."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -164,13 +185,14 @@ def decode_period_stats(payload: str, *, kind: str) -> dict[str, PeriodCell]:
     Raises
     ------
     ValueError
-        On non-JSON / non-object payloads, a malformed key, a wrong-arity or
-        non-int cell, ``wins > n``, a negative count/dd, or an
-        int64-out-of-range value — always naming the offending key. A
-        fabricated cell is structurally unloadable (Golden Rule #1).
+        On non-JSON / non-object / pathologically-nested (nesting-bomb)
+        payloads, a malformed key, a wrong-arity or non-int cell,
+        ``wins > n``, a negative count/dd, or an int64-out-of-range value —
+        always naming the offending key. A fabricated cell is structurally
+        unloadable (Golden Rule #1).
     """
     grammar, shape = _KEY_GRAMMAR[kind]
-    decoded = json.loads(payload)  # json.JSONDecodeError ⊂ ValueError
+    decoded = _loads(payload, column=f"stats_by_{kind}")
     if not isinstance(decoded, dict):
         raise ValueError(f"stats_by_{kind} payload must be a JSON object, got {decoded!r}")
     out: dict[str, PeriodCell] = {}
@@ -212,10 +234,11 @@ def decode_judged_years(payload: str) -> tuple[int, ...]:
     Raises
     ------
     ValueError
-        On a non-list payload, a non-``"YYYY"`` entry, or a non-strictly-
-        ascending sequence (the canonical order — duplicates included).
+        On a non-list / pathologically-nested (nesting-bomb) payload, a
+        non-``"YYYY"`` entry, or a non-strictly-ascending sequence (the
+        canonical order — duplicates included).
     """
-    decoded = json.loads(payload)
+    decoded = _loads(payload, column="temporal_judged_years")
     if not isinstance(decoded, list):
         raise ValueError(f"temporal_judged_years payload must be a JSON array, got {decoded!r}")
     years: list[int] = []
@@ -286,11 +309,12 @@ def validate_period_stats(
 ) -> tuple[str, str, str, str]:
     """Decode, cross-sum-validate, and canonically re-encode the four columns.
 
-    THE construction/load validator (graft 6): fabricated buckets are
-    structurally impossible — every month cell must sum to the row's own
-    ``total_trades`` / ``net_pnl_paisa`` / ``winning_trades``, and every
-    quarter/year cell must equal the sum of ITS months (n/pnl/wins; ``max_dd``
-    exempt — non-rollup by design). The judged-years column is grammar- and
+    THE construction/load validator (graft 6): fabricated ``n``/``pnl``/
+    ``wins`` buckets are structurally impossible — every month cell must sum
+    to the row's own ``total_trades`` / ``net_pnl_paisa`` / ``winning_trades``,
+    and every quarter/year cell must equal the sum of ITS months (n/pnl/wins;
+    ``max_dd`` exempt — non-rollup by design, bounded ``>= 0`` int64 only, NOT
+    cross-validated). The judged-years column is grammar- and
     order-validated (no cross-constraint with the buckets: a zero-trade judged
     year has no bucket, and an UNJUDGED sliver year may still carry one — the
     judged list is exactly what makes that distinction readable).

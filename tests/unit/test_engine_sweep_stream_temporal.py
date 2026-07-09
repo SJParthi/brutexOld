@@ -164,9 +164,11 @@ class TestBoundedTemporalGate:
         assert [f.mask for f in result.finalists] == [1]
         assert stats.killed == 0  # the lucky mask died at the DOORS, not here
 
-    def test_empty_survivors_short_circuit(self) -> None:
-        """All-door-failing columns: the temporal gate is skipped (positions
-        empty) and the result is the honest empty leaderboard."""
+    def test_empty_survivors_still_record_gate_stats(self) -> None:
+        """All-door-failing columns: the gate still RUNS on the empty survivor
+        set — exactly like the batch path's always-call `_temporal_survivors`
+        — so the recorded stats never diverge batch-vs-bounded (review round 1:
+        the old `and positions` short-circuit left `abstained` unset here)."""
         stats = TemporalGateStats()
         columns = SurvivorColumns(with_overfit=False, with_temporal=True)
         columns.append(
@@ -178,4 +180,23 @@ class TestBoundedTemporalGate:
             columns, overfit=None, top_k=10, temporal=_bundle(stats=stats)
         )
         assert result.finalists == ()
-        assert stats.evaluated is False  # never invoked on an empty survivor set
+        assert stats.evaluated is True  # invoked — batch-path parity
+        assert stats.abstained is False
+        assert stats.killed == 0
+
+    def test_empty_survivors_sub_floor_abstains_like_batch(self) -> None:
+        """Batch ≡ bounded on `temporal_abstained` for a zero-survivor
+        sub-floor tuple (review round 1): the bounded path previously reported
+        `abstained=False` (silent) where the batch path reported `True`."""
+        stats = TemporalGateStats()
+        columns = SurvivorColumns(with_overfit=False, with_temporal=True)
+        columns.append(
+            1,
+            _metrics(0, total_trades=5, winning_trades=3, losing_trades=2),
+            temporal=_STEADY,
+        )
+        result = rank_survivor_columns(
+            columns, overfit=None, top_k=10, temporal=_bundle(n_judged=1, stats=stats)
+        )
+        assert result.finalists == ()
+        assert stats.abstained is True  # the batch path's answer, now shared

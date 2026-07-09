@@ -453,7 +453,11 @@ def rank_survivor_columns(
     # Temporal year gate (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): filters the
     # hard-door SURVIVORS only, BEFORE the overfit gate — the DSR pool below
     # stays the FULL kept population (columns.sharpe_values()), untouched.
-    if temporal is not None and positions:
+    # Runs even with ZERO hard-door survivors so the abstention/observe stats
+    # are recorded identically to the batch path (`_temporal_survivors` always
+    # calls the gate) — batch-vs-bounded is a memory-budget choice and must
+    # never change the reported `temporal_abstained` state.
+    if temporal is not None:
         kept_relative_temporal = apply_temporal_gate(
             [columns.temporal_at(position) for position in positions],
             cfg=temporal.cfg,

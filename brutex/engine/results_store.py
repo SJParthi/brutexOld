@@ -720,13 +720,23 @@ class ResultsStore:
         try:
             for record in df.iter_rows(named=True):
                 store.append(_row_from_record(record))
-        except (ResultsStoreError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        except (
+            ResultsStoreError,
+            KeyError,
+            TypeError,
+            ValueError,
+            ArithmeticError,
+            RecursionError,
+        ) as exc:
             # ANY schema/decode failure — a missing required column (KeyError),
             # a null in a required cell (TypeError), a wrong-dtype value
-            # (ValueError / decimal.InvalidOperation ⊂ ArithmeticError), or row
+            # (ValueError / decimal.InvalidOperation ⊂ ArithmeticError), row
             # content failing ResultRow validation / the in-file duplicate
-            # conflict (ResultsStoreError) — surfaces as the typed damage
-            # class naming the store path, never a raw error (G14).
+            # conflict (ResultsStoreError), or a pathologically nested JSON
+            # temporal cell (RecursionError — primary mapping lives in
+            # period_stats._loads; this arm is the defence-in-depth belt) —
+            # surfaces as the typed damage class naming the store path, never
+            # a raw error (G14).
             raise ResultsStoreSchemaError(
                 f"results store at {path} is not decodable as the current "
                 f"ResultRow schema (old-schema / foreign / damaged file): {exc!r}"

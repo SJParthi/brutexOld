@@ -19,6 +19,8 @@ from brutex.cli import (
 )
 from brutex.ranking.temporal import MODE_GATE, MODE_OBSERVE, TemporalRobustnessConfig
 
+pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")  # see tests/conftest.py
+
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:

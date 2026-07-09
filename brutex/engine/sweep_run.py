@@ -794,8 +794,10 @@ class _TemporalRuntime:
         bounds; the DEC-SWEEP-EXIT-INDEX-FASTPATH-001 demote law): an
         inconsistent stream demotes to the per-trade
         ``ist_trade_date(exit_ts).year`` fold, which is identical by
-        construction (``exit_ts`` IS the exit bar's timestamp —
-        property-pinned equal), never to a wrong year.
+        construction (``exit_ts`` IS the exit bar's timestamp — the two arms
+        are pinned equal by concrete unit arm-agreement cases; the property
+        suite pins the reduction/projector laws, not these arms), never to a
+        wrong year.
         """
         n_bars = len(self.year_of_bar)
         acc = self._acc
