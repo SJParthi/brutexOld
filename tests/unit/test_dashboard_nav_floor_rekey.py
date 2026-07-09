@@ -34,6 +34,7 @@ from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
 def _instrument(symbol: str, security_id: int) -> Instrument:
@@ -130,7 +131,7 @@ def client(
         yield c
 
 
-def _stale_served(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _stale_served(logs: list[EventDict]) -> list[EventDict]:
     return [e for e in logs if e["event"] == "movers_cache.stale_served"]
 
 

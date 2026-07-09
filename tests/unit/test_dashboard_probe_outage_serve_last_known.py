@@ -33,6 +33,7 @@ from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
 def _nifty() -> Instrument:
@@ -101,7 +102,7 @@ def _write_run(lake_root: Path, run_id: str = "r-live1") -> Path:
     return run_dir
 
 
-def _outage_warns(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _outage_warns(logs: list[EventDict]) -> list[EventDict]:
     return [e for e in logs if e["event"] == "movers_cache.revision_probe_outage"]
 
 

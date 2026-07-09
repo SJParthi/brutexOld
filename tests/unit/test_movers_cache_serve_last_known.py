@@ -21,13 +21,14 @@ import threading
 import pytest
 from brutex.dashboard.movers_cache import OUTAGE_GENERATION, MoversSnapshotCache
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 
-def _outage_warns(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _outage_warns(logs: list[EventDict]) -> list[EventDict]:
     return [e for e in logs if e["event"] == "movers_cache.revision_probe_outage"]
 
 
-def _recovered_infos(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _recovered_infos(logs: list[EventDict]) -> list[EventDict]:
     return [e for e in logs if e["event"] == "movers_cache.revision_probe_recovered"]
 
 
