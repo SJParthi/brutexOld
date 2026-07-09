@@ -108,21 +108,24 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # per-module gate in ci.yml (which runs exactly that 5-file suite at
         # --cov-fail-under=100) + the whole-package floor — DEC-WRITE-BATCH-COALESCE-001.
         "brutex/dashboard/pull_controller.py",
-        # The ~720-statement ``/db`` lake-viewer module. Its 100% line+branch is
-        # reached by the WHOLE db_view test FAMILY collectively — six files
-        # (``test_dashboard_db_view.py`` · ``test_dashboard_db_query.py`` ·
-        # ``test_db_view_registry.py`` · ``test_dashboard_db_fno.py`` ·
-        # ``test_dashboard_db_fno_moneyness.py`` ·
-        # ``test_dashboard_db_candle_count_cache.py``), the exact suite the static
-        # per-module gate in ``ci.yml`` runs together at 100.00%. The discovery
-        # gate maps a module ONLY to its stem-matching tests (``test_db_view*`` /
-        # ``test_dashboard_db_view*``), so it sees just two of the six and tops out
-        # at ~45% STANDALONE — the SAME structural mismatch as app.py (a large
-        # module whose 100% is a multi-file-suite property, not a single-file one).
-        # Duplicating the other four files' coverage into the stem files to satisfy
-        # the discovery gate would be a Golden-Rule-#11 COMMON (no copy-paste)
-        # violation. db_view.py's real 100% gate is the whole-package
-        # ``--cov-fail-under=100`` floor + the static six-file per-module gate
+        # The ~1050-statement ``/db`` lake-viewer module. Its 100% line+branch is
+        # reached by the WHOLE db_view test FAMILY collectively — FIFTEEN files
+        # as of DEC-DASHBOARD-READ-SCREEN-001 (test_dashboard_db_view/_db_query/
+        # _db_fno/_db_fno_moneyness/_db_candle_count_cache/_db_option_count_cache/
+        # _db_ux_pack/_window_payload_retry/_db_view_window_rows_cache/
+        # _db_view_ledger_delta_fold/_db_view_ledger_read_cache/
+        # _split_brain_screen + test_db_view_registry/test_db_view_manifest/
+        # test_completeness_fno_skip — the exact list lives in the static
+        # per-module gate in ``ci.yml``, which runs them together at 100.00%).
+        # The discovery gate maps a module ONLY to its stem-matching tests
+        # (``test_db_view*`` / ``test_dashboard_db_view*``), so it sees only a
+        # fraction of the family and tops out far below 100% STANDALONE — the
+        # SAME structural mismatch as app.py (a large module whose 100% is a
+        # multi-file-suite property, not a single-file one). Duplicating the
+        # other files' coverage into the stem files to satisfy the discovery
+        # gate would be a Golden-Rule-#11 COMMON (no copy-paste) violation.
+        # db_view.py's real 100% gate is the whole-package
+        # ``--cov-fail-under=100`` floor + the static per-module gate
         # (DEC-DASHBOARD-EMPTY-STATE-001); the discovery gate is a COMPLEMENT, and
         # excluding it here keeps that complement honest (Golden Rule #10) instead
         # of blocking EVERY db_view-touching PR on an unreachable single-file 100%.

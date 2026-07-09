@@ -38,6 +38,7 @@ the module stays importable wheel-free).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Final
 
 from brutex.data.errors import ResampleInputError
@@ -81,10 +82,10 @@ def price_row_insane(
 
     The ONE COMMON SCALAR price-sanity predicate (CLAUDE.md §11 COMMON) — the
     row-at-a-time twin of the vectorized :func:`price_violation_expr`, so the
-    two are the SAME boolean by construction (pinned row-wise by a property
-    test). ``True`` for an INSANE row: ANY price ``None`` / non-positive
-    (``<= 0``), or the OHLC ordering broken (``high < low``, or
-    ``open`` / ``close`` outside ``[low, high]``).
+    two are the SAME boolean by construction over the shared input space
+    (pinned row-wise by a property test). ``True`` for an INSANE row: ANY
+    price ``None`` / ``NaN`` / non-positive (``<= 0``), or the OHLC ordering
+    broken (``high < low``, or ``open`` / ``close`` outside ``[low, high]``).
 
     Needed by the dashboard's scalar screening path
     (:mod:`brutex.data.bar_screen`), where the columnar
@@ -92,6 +93,17 @@ def price_row_insane(
     tuples). ``None`` is tested FIRST so a null price short-circuits before any
     ``<=`` / ``<`` comparison (a ``None <= 0`` would raise) — mirroring the
     ``is_null`` arm of the expression.
+
+    DELIBERATE NaN ASYMMETRY (scalar STRICTER — DEC-DASHBOARD-READ-SCREEN-001
+    round-2 refuter): a ``NaN`` price is INSANE here but NOT flagged by the
+    vectorized :func:`price_violation_expr` (every NaN comparison is False in
+    both planes). Without this arm the dashboard would SERVE a NaN bar the
+    engine REFUSES — the engine's :class:`~brutex.data.models.CandleBar`
+    constructor raises ``decimal.InvalidOperation`` on a NaN price (escaping
+    even ``arrow_table_to_bars``' ``except ValueError``), so outcome-parity
+    holds: neither surface ever serves a NaN bar. The vectorized twin (the
+    engine prebuild read path) + the ``arrow_table_to_bars`` except-clause gap
+    are the NAMED ENGINE-side follow-up, deliberately not changed here.
 
     Parameters
     ----------
@@ -101,9 +113,12 @@ def price_row_insane(
     Returns
     -------
     bool
-        ``True`` iff the row violates price positivity or OHLC ordering.
+        ``True`` iff the row violates price positivity or OHLC ordering
+        (a ``None`` / ``NaN`` price counts as a violation).
     """
     if open_ is None or high is None or low is None or close is None:
+        return True
+    if math.isnan(open_) or math.isnan(high) or math.isnan(low) or math.isnan(close):
         return True
     if open_ <= 0 or high <= 0 or low <= 0 or close <= 0:
         return True

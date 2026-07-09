@@ -2275,6 +2275,10 @@ def query_candles(
     if is_fno:
         parts = parse_fno_symbol(symbol)
         is_option_contract = parts is not None and parts.option_type is not None
+        # NIT (disclosed): an UNPARSEABLE F&O symbol falls to the default-ON
+        # full screen — unreachable via the product (the FNO cascade offers
+        # only parse-decoded contracts) and conservative in direction (a
+        # mystery partition is screened like a future, never served a spike).
     raw_rows = screen_rows(
         raw_rows,
         out_columns,

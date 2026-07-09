@@ -23,7 +23,12 @@ logic (Golden Rule #11 COMMON):
   engine drives, reused VERBATIM here so a corrupt bar is dropped identically;
 * :func:`~brutex.data.price_sanity.price_row_insane` — the scalar twin of the
   vectorized :func:`~brutex.data.price_sanity.price_violation_expr`
-  (positivity + ordering), the plane the engine RAISES on.
+  (positivity + ordering + a scalar-only NaN arm), the plane the engine
+  REFUSES: ``arrow_table_to_bars`` raises ``ValueError`` on a non-positive /
+  mis-ordered bar, and the ``CandleBar`` constructor raises
+  ``decimal.InvalidOperation`` on a NaN price (the NaN arm keeps outcome-parity
+  — neither surface ever serves a NaN bar; see ``price_row_insane``'s
+  deliberate-asymmetry note).
 
 :class:`SessionBarScreen` is the single causal per-session screen; two thin
 wrappers drive it — :func:`screen_frame` for the polars readers (``/movers``)
@@ -59,9 +64,12 @@ is a named follow-up, not claimed).
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final, cast
+
+import structlog
 
 from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled
 from brutex.data.price_sanity import price_row_insane
@@ -70,6 +78,8 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from datetime import date
 
     import polars as pl
+
+_LOG = structlog.get_logger(__name__)
 
 #: The polars time-zone region used to derive a bar's IST SESSION date (matches
 #: the dashboard readers' own ``dt.convert_time_zone`` calls, CLAUDE.md §11).
@@ -265,7 +275,13 @@ def screen_rows(
     ``timestamp`` cell is NOT a datetime (a schema-drifted parquet's
     ``union_by_name`` null-fill) is served RAW — excluded from screening entirely
     (never sorted, never classified, never dropped) — matching the seed helper's
-    ``isinstance`` guard; the datetime rows around it are still screened.
+    ``isinstance`` guard; the datetime rows around it are still screened. A page
+    mixing NAIVE + AWARE timestamps (incomparable — ``sorted`` raises
+    ``TypeError``) is served RAW wholesale with one
+    ``bar_screen.unsortable_page_served_raw`` WARN, never a 500. Duplicate-ts
+    rows are screened in a CANONICAL order (ts, then the price cells as
+    tie-break), so an ASC and a DESC page of the same data classify an
+    equal-timestamp pair identically.
     """
     if not rows:
         return rows
@@ -285,7 +301,39 @@ def screen_rows(
     # Screen ONLY the rows carrying a real datetime timestamp (see the docstring
     # resilience note) — a None/junk ts cell is served raw, never a TypeError.
     screenable = [i for i in range(len(rows)) if isinstance(rows[i][ts_idx], datetime)]
-    order = sorted(screenable, key=lambda i: rows[i][ts_idx])
+
+    def _sortable_cell(value: Any) -> tuple[int, float]:
+        """A total-order key for one price cell: junk (None/NaN/non-numeric) sorts LAST."""
+        if isinstance(value, (int, float)) and not (isinstance(value, float) and math.isnan(value)):
+            return (0, float(value))
+        return (1, 0.0)
+
+    def _canonical_key(i: int) -> tuple[Any, ...]:
+        """CANONICAL screening order (round-2 refuter MINOR-2): duplicate-ts rows
+        tie-break on the full price row, so an ASC page and a DESC page classify
+        an equal-timestamp pair IDENTICALLY (a stable ts-only sort kept PAGE
+        order, making the kept bar direction-dependent). Render order is still
+        restored via the original index."""
+        row = rows[i]
+        return (
+            row[ts_idx],
+            _sortable_cell(row[c_idx]),
+            _sortable_cell(row[h_idx]),
+            _sortable_cell(row[l_idx]),
+            _sortable_cell(row[o_idx]),
+        )
+
+    try:
+        order = sorted(screenable, key=_canonical_key)
+    except TypeError:
+        # Mixed naive/aware timestamps are incomparable (round-2 refuter NIT-1):
+        # serve the page RAW rather than 500 — the never-500 posture. One WARN.
+        _LOG.warning(
+            "bar_screen.unsortable_page_served_raw",
+            source=source,
+            rows=len(rows),
+        )
+        return rows
     dropped: set[int] = set()
     for i in order:
         row = rows[i]

@@ -60,6 +60,24 @@ class TestPriceRowInsaneScalar:
     ) -> None:
         assert price_row_insane(*row) is True
 
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    def test_nan_price_is_insane_in_each_field(self, field: int) -> None:
+        """The scalar NaN arm (round-2 refuter): a NaN price in ANY field is insane.
+
+        DELIBERATE scalar-vs-vector asymmetry — the vectorized
+        ``price_violation_expr`` is NaN-blind (every NaN comparison is False),
+        but the engine's CandleBar constructor raises decimal.InvalidOperation
+        on NaN, so without this arm the dashboard would SERVE what the engine
+        REFUSES.
+        """
+        row: list[float] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = float("nan")
+        assert price_row_insane(*row) is True
+
+    # NaN is DELIBERATELY excluded from this parity pin's input space
+    # (allow_nan=False): the scalar is STRICTER on NaN by design (see
+    # price_row_insane's deliberate-asymmetry note) — outcome-parity holds
+    # because the engine refuses NaN downstream at CandleBar construction.
     @given(
         rows=st.lists(
             st.tuples(

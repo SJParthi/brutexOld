@@ -167,6 +167,18 @@ class TestScreenFrame:
         out = screen_frame(df, ts_col="ts_utc")
         assert out.get_column("close").to_list() == [1000.0, 1002.0]
 
+    def test_nan_row_dropped(self) -> None:
+        """NaN arm on the polars path (round-2 refuter MINOR-1): NaN close drops."""
+        df = _movers_frame([1000.0, 1001.0, 1002.0])
+        df = df.with_columns(
+            pl.when(pl.arange(0, df.height) == 1)
+            .then(float("nan"))
+            .otherwise(pl.col("close"))
+            .alias("close")
+        )
+        out = screen_frame(df, ts_col="ts_utc")
+        assert out.get_column("close").to_list() == [1000.0, 1002.0]
+
     def test_kill_switch_off_keeps_spike(self) -> None:
         out = screen_frame(_movers_frame(_REPRO_CLOSES), ts_col="ts_utc", bad_tick_enabled=False)
         assert out.get_column("close").to_list() == _REPRO_CLOSES
@@ -266,6 +278,53 @@ class TestScreenRows:
         rows, cols = _page(_REPRO_CLOSES)
         out = screen_rows(rows, cols, bad_tick_enabled=False)
         assert [r[4] for r in out] == _REPRO_CLOSES
+
+    def test_duplicate_ts_asc_desc_same_kept_set(self) -> None:
+        """CANONICAL dup-ts order (round-2 refuter MINOR-2): ASC == DESC kept set.
+
+        Two rows at the SAME timestamp with closes 1000/5000 — a stable ts-only
+        sort kept PAGE order, so an ASC page kept [1000] and a DESC page kept
+        [5000] for identical data. The full-row canonical tie-break makes both
+        directions classify identically.
+        """
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        r_low = (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None)
+        r_high = (_OPEN_UTC, 4999.0, 5002.0, 4998.0, 5000.0, 10, None)
+        asc_kept = {r[4] for r in screen_rows([r_low, r_high], cols)}
+        desc_kept = {r[4] for r in screen_rows([r_high, r_low], cols)}
+        assert asc_kept == desc_kept
+
+    def test_mixed_naive_aware_ts_served_raw_never_raises(self) -> None:
+        """Mixed naive+aware timestamps (round-2 refuter NIT-1): served RAW, no 500."""
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        rows = [
+            (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),  # aware
+            (
+                _OPEN_UTC.replace(tzinfo=None) + timedelta(minutes=1),
+                999.0,
+                1002.0,
+                998.0,
+                10000.0,
+                10,
+                None,
+            ),  # naive spike
+        ]
+        out = screen_rows(rows, cols)
+        assert out is rows  # served raw wholesale — incomparable sort, never a raise
+
+    def test_nan_close_dropped_and_never_advances_baseline(self) -> None:
+        """NaN arm (round-2 refuter MINOR-1): a NaN bar drops + never poisons the baseline."""
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        nan = float("nan")
+        rows = [
+            (_OPEN_UTC, 999.0, 1002.0, 998.0, 1000.0, 10, None),
+            (_OPEN_UTC + timedelta(minutes=1), 999.0, 1002.0, 998.0, nan, 10, None),
+            # Judged vs 1000 (the last KEPT close), NOT vs NaN — a NaN baseline
+            # would silently disable the ×4 arm (every comparison False).
+            (_OPEN_UTC + timedelta(minutes=2), 9999.0, 10002.0, 9998.0, 10000.0, 10, None),
+        ]
+        out = screen_rows(rows, cols)
+        assert [r[4] for r in out] == [1000.0]  # NaN dropped; spike still caught
 
 
 class TestAntiDivergenceOracle:

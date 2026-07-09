@@ -807,11 +807,14 @@ def _read_future_session(
     cutoff_min
         Intraday minute-of-day cutoff, or ``None`` for the whole day.
     bad_tick
-        Whether to apply the ×4 bad-tick (scaled-spike) screen on top of the
+        Whether the ×4 bad-tick (scaled-spike) arm APPLIES on top of the
         always-on insane (positivity/ordering) screen. ``True`` (default) for
-        futures/spot (engine-screened); the options caller passes ``False`` —
-        option premia legitimately move ≥4×/minute, so the index-calibrated
-        threshold does not apply (DEC-DASHBOARD-READ-SCREEN-001).
+        futures/spot (engine-screened) — DEFERS to the ``BRUTEX_BAD_TICK_SCREEN``
+        env kill switch (never a hard override), so switch-off shows the same
+        raw view as the engine + ``/db``; the options caller passes ``False`` —
+        the arm is forced OFF regardless of the switch, because option premia
+        legitimately move ≥4×/minute and the index-calibrated threshold does
+        not apply (DEC-DASHBOARD-READ-SCREEN-001).
 
     Returns
     -------
@@ -861,11 +864,17 @@ def _read_future_session(
     # The frame is ascending-sorted + as-of-cut; clean frames return the SAME
     # object — but the screen itself is an O(rows) Python pass per read (honest
     # cost, not free).
+    # KILL-SWITCH PARITY (round-2 refuter MAJOR): futures/spot (`bad_tick=True`)
+    # pass `None` — DEFER to the BRUTEX_BAD_TICK_SCREEN env read, exactly like
+    # the engine + the /db candle pager (a hard `True` would FORCE the ×4 arm on
+    # and break the switch-off consistent-raw view — a /movers-futures ↔
+    # /db-futures ↔ engine split-brain). Options (`bad_tick=False`) force the
+    # arm OFF regardless of the switch (premia are never ×4-screened).
     day_df = screen_frame(
         day_df,
         ts_col="timestamp",
         source=f"{exchange}/{segment}/{symbol}/1minute",
-        bad_tick_enabled=bad_tick,
+        bad_tick_enabled=None if bad_tick else False,
     )
     if day_df.is_empty():
         return None

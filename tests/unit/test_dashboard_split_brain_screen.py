@@ -173,6 +173,59 @@ class TestMoversFuturesSplitBrain:
         assert value_paisa == _hlc3_paisa(_GOOD_CLOSES)  # spike screened out
         assert str(ltp) == "1003.00"  # last kept bar
 
+    def test_kill_switch_off_serves_raw_spike_on_futures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """KILL-SWITCH PARITY (round-2 MAJOR): `bad_tick=True` DEFERS to the env.
+
+        With BRUTEX_BAD_TICK_SCREEN=0 the futures reader must SERVE the ×10 spike
+        exactly as the engine + /db futures do — a hard `True` override here was
+        the /movers-futures ↔ /db-futures ↔ engine split-brain.
+        """
+        from brutex.dashboard.movers_futures import _read_future_session
+
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "0")
+        fut = "NSE-NIFTY-28Mar24-FUT"
+        _write_fno(tmp_path, _SPIKE_CLOSES, symbol=fut)
+        read = _read_future_session(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=fut,
+            day=_DAY,
+            cutoff_min=None,
+            bad_tick=True,  # the default futures posture — must defer to the env
+        )
+        assert read is not None
+        ltp, _vol, value_paisa, _oi, _iv, _delta = read
+        assert value_paisa == _hlc3_paisa(_SPIKE_CLOSES)  # raw view, engine-consistent
+        assert str(ltp) == "1003.00"
+
+    def test_options_arm_forced_off_even_with_switch_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`bad_tick=False` (options) forces the arm OFF regardless of the env switch."""
+        from brutex.dashboard.movers_futures import _read_future_session
+
+        monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "1")  # explicitly ON
+        sym = "NSE-NIFTY-28Mar24-17500-CE"
+        _fno_premium(tmp_path, sym)
+        read = _read_future_session(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=sym,
+            day=_DAY,
+            cutoff_min=None,
+            bad_tick=False,
+        )
+        assert read is not None
+        # All 3 premium bars kept (the 5x jump included) — the switch cannot
+        # re-enable the ×4 arm on an options read. `_premium_bar` brackets are
+        # ±0.5 so per-bar HLC3 == close: (1.00 + 5.00 + 1.00) × vol 10 = ₹70.
+        assert read[2] == 7000  # paisa
+        assert str(read[0]) == "1.00"
+
 
 # ── /db ─────────────────────────────────────────────────────────────────────
 
