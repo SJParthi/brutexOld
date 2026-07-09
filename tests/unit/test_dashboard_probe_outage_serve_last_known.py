@@ -238,3 +238,79 @@ class TestOneclickTop100Outage:
             assert payload["status"] == "awaiting"
             assert "revision_probe" not in payload
         assert calls["parse"] == 2  # fresh (cheap) awaiting parse per poll — uncached
+
+
+class TestOneclickManifestOutage:
+    def test_outage_serves_last_known_manifest(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fails-before: every outage poll re-parsed the manifest (uncovered branch)."""
+        lake_root = store.path.parent
+        run_dir = _write_run(lake_root, run_id="r-live1")
+        (run_dir / oc.MANIFEST_FILENAME).write_text("{not json", encoding="utf-8")
+        calls = {"parse": 0}
+        real_load = oc.load_manifest
+
+        def _spy(run_dir: Path) -> Any:
+            calls["parse"] += 1
+            return real_load(run_dir)
+
+        monkeypatch.setattr(oc, "load_manifest", _spy)
+        primed = client.get("/api/v1/oneclick/manifest", params={"run_id": "r-live1"}).json()
+        assert primed["status"] == "corrupt"  # named, never a 500
+        primed_parses = calls["parse"]  # _fresh parses via load_manifest + the pill probe
+        real_probe = oc.artifact_probe
+
+        def _outage_on_manifest(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.MANIFEST_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_manifest)
+        with capture_logs() as logs:
+            for _ in range(3):
+                payload = client.get(
+                    "/api/v1/oneclick/manifest", params={"run_id": "r-live1"}
+                ).json()
+                assert payload["status"] == "corrupt"  # the last-known payload
+                assert payload["revision_probe"] == "outage — serving last-known"
+        assert calls["parse"] == primed_parses  # zero re-parses across the outage
+        assert len(_outage_warns(logs)) == 1
+
+
+class TestOneclickEventsOutage:
+    def test_outage_serves_last_known_events_page(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fails-before: every outage poll re-tailed the events log (uncovered branch)."""
+        lake_root = store.path.parent
+        run_dir = _write_run(lake_root, run_id="r-live1")
+        (run_dir / oc.EVENTS_FILENAME).write_text(
+            json.dumps({"seq": 1, "kind": "SWEEP_START"}) + "\n", encoding="utf-8"
+        )
+        calls = {"tail": 0}
+        real_tail = oc.tail_events
+
+        def _spy(run_dir: Path, **kwargs: Any) -> Any:
+            calls["tail"] += 1
+            return real_tail(run_dir, **kwargs)
+
+        monkeypatch.setattr(oc, "tail_events", _spy)
+        primed = client.get("/api/v1/oneclick/events", params={"run_id": "r-live1"}).json()
+        assert primed["status"] == "ok"
+        assert calls["tail"] == 1
+        real_probe = oc.artifact_probe
+
+        def _outage_on_events(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.EVENTS_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_events)
+        with capture_logs() as logs:
+            for _ in range(3):
+                payload = client.get("/api/v1/oneclick/events", params={"run_id": "r-live1"}).json()
+                assert payload["status"] == "ok"  # the last-known page
+                assert payload["revision_probe"] == "outage — serving last-known"
+        assert calls["tail"] == 1  # zero re-tails across the outage
+        assert len(_outage_warns(logs)) == 1

@@ -35,6 +35,8 @@ pytest.importorskip("duckdb")
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
+# Module import (not ``from … import``): the tests monkeypatch attributes ON
+# this module object (``ledger_path``), which db_view resolves at call time.
 import brutex.data.window_ledger_store as wls
 from brutex.dashboard import db_view
 from brutex.dashboard.db_view import query_candles, window_ledger_rows_cached
@@ -43,7 +45,6 @@ from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.window_ledger import WindowLedger
-from brutex.data.window_ledger_store import save_window_ledger
 
 _CORRUPT = b"not a parquet file at all \r garbage"
 
@@ -109,7 +110,7 @@ def _seed_ledger(lake_root: Path) -> None:
         bars_net_new=3,
         now=datetime(2026, 7, 1, tzinfo=UTC),
     )
-    save_window_ledger(ledger, lake_root)
+    wls.save_window_ledger(ledger, lake_root)
 
 
 class TestLedgerBaseStat:
