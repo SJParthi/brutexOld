@@ -22,9 +22,11 @@ from brutex.data.bad_tick import (
     BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT,
     BAD_TICK_SKIP_EVENT,
     HEAD_CONFIRM_BARS,
+    NON_FINITE_SKIP_EVENT,
     BadTickScreen,
     bad_tick_screen_enabled,
     is_bad_tick,
+    non_finite_keep_mask,
 )
 from structlog.testing import capture_logs
 
@@ -582,6 +584,10 @@ def test_injected_logger_is_used_for_all_three_events() -> None:
                 "max_ratio": BAD_TICK_MAX_RATIO,
                 "first_ref_close": 101.0,
                 "first_close": 10.0,
+                # ADDITIVE fields (DEC-BADTICK-HILO-SCREEN-001): per-reason
+                # breakdown + the first offender's trigger.
+                "skip_reasons": {"close": 1},
+                "first_reason": "close",
             },
         ),
         (
@@ -603,6 +609,8 @@ def test_injected_logger_is_used_for_all_three_events() -> None:
                 "max_ratio": BAD_TICK_MAX_RATIO,
                 "first_ref_close": 100.0,
                 "first_close": 10.0,
+                "skip_reasons": {"close": 2},
+                "first_reason": "close",
             },
         ),
         (
@@ -616,3 +624,429 @@ def test_injected_logger_is_used_for_all_three_events() -> None:
             },
         ),
     ]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# High/low arm (DEC-BADTICK-HILO-SCREEN-001) — a bar whose HIGH or LOW is
+# out-of-band vs the session's close-derived reference is skipped even with a
+# sane close (the product-audit-3 DATA-3b reproducer: a ×10 high with a normal
+# close passed is_bad_tick AND price_sanity, then poisoned the NEXT day's PDH
+# anchor via TodayOHLC.absorb's running max).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _hilo_mask(
+    rows: list[tuple[date, float, float, float]],
+    *,
+    screen: BadTickScreen | None = None,
+) -> list[bool]:
+    """Run one table's (ist_date, close, high, low) rows through the screen."""
+    scr = screen if screen is not None else BadTickScreen()
+    return scr.screen_mask(
+        [r[0] for r in rows],
+        [r[1] for r in rows],
+        highs=[r[2] for r in rows],
+        lows=[r[3] for r in rows],
+    )
+
+
+def _healthy(day: date, close: float) -> tuple[date, float, float, float]:
+    """A healthy (close, high, low) row with a tight real-market range."""
+    return (day, close, close + 5.0, close - 5.0)
+
+
+def test_hilo_omitted_is_byte_identical_close_only() -> None:
+    # DATA-3b pre-arm blindspot pinned as the OMITTED-kwargs contract: with
+    # highs/lows omitted the screen is close-only — the ×10 high escapes
+    # (byte-identical pre-arm behavior); with them supplied it is caught.
+    rows = [
+        _healthy(_D1, 10000.0),
+        _healthy(_D1, 10001.0),
+        _healthy(_D1, 10002.0),
+        (_D1, 10003.0, 100050.0, 9998.0),  # HIGH ×10, sane close
+    ]
+    close_only = BadTickScreen().screen_mask([r[0] for r in rows], [r[1] for r in rows])
+    assert close_only == [True, True, True, True]  # the disclosed pre-arm escape
+    assert _hilo_mask(rows) == [True, True, True, False]
+
+
+def test_hilo_clean_session_mask_identical_with_and_without_kwargs() -> None:
+    rows = [_healthy(_D1, 10000.0 + i) for i in range(6)]
+    close_only = BadTickScreen().screen_mask([r[0] for r in rows], [r[1] for r in rows])
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == close_only == [True] * 6
+    assert not logs
+
+
+def test_high_only_x10_spike_skipped_with_reason_breakdown() -> None:
+    # DATA-3a/3b regression: HIGH ×10 (open/low/close normal) — skipped, the
+    # skip folds into `skipped`, and the WARN carries the ADDITIVE
+    # skip_reasons + first_reason fields (existing fields keep their meaning:
+    # first_close is the offending BAR's close, sane here).
+    rows = [
+        _healthy(_D1, 10050.0),
+        _healthy(_D1, 10051.0),
+        _healthy(_D1, 10052.0),
+        (_D1, 10053.0, 100500.0, 10048.0),  # high ×10 — the captured-PDH shape
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, True, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 1
+    assert warns[0]["skip_reasons"] == {"high": 1}
+    assert warns[0]["first_reason"] == "high"
+    assert warns[0]["first_close"] == 10053.0  # the bar's own (sane) close
+    # The first post-head bar's reference is the MEDIAN-seeded baseline
+    # (10051), not the last head close — the round-3 median-seed law.
+    assert warns[0]["first_ref_close"] == 10051.0
+
+
+def test_low_only_div10_spike_skipped() -> None:
+    rows = [
+        _healthy(_D1, 21008.0),
+        _healthy(_D1, 21009.0),
+        _healthy(_D1, 21010.0),
+        (_D1, 21011.0, 21015.0, 2101.0),  # low ÷10, sane close/high
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, True, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skip_reasons"] == {"low": 1}
+    assert warns[0]["first_reason"] == "low"
+
+
+def test_fat_range_bar_high_and_low_both_scaled_counts_once_as_high() -> None:
+    # Both-scaled "fat range" bar: high ×10 AND low ÷10 with a sane close —
+    # skipped ONCE, and the pinned reason precedence (close → high → low)
+    # names it "high".
+    rows = [
+        _healthy(_D1, 10000.0),
+        _healthy(_D1, 10001.0),
+        _healthy(_D1, 10002.0),
+        (_D1, 10003.0, 100000.0, 1000.0),  # fat range
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, True, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert warns[0]["skipped"] == 1
+    assert warns[0]["skip_reasons"] == {"high": 1}
+    assert warns[0]["first_reason"] == "high"
+
+
+def test_close_bad_takes_precedence_over_hilo() -> None:
+    # A ×10 close (whose high/low scale with it) is named "close" — the first
+    # failing field in the pinned precedence.
+    rows = [
+        _healthy(_D1, 10000.0),
+        _healthy(_D1, 10001.0),
+        _healthy(_D1, 10002.0),
+        (_D1, 100030.0, 100050.0, 100010.0),  # whole bar ×10
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, True, True, False]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert warns[0]["skip_reasons"] == {"close": 1}
+    assert warns[0]["first_reason"] == "close"
+
+
+@pytest.mark.parametrize("position", [0, 1, 4])
+def test_hilo_poison_positions_head_and_tail(position: int) -> None:
+    # DATA-3b permutations: the ×10-high bar is dropped at head position 0,
+    # head position 1 (judged vs the head median) and at the session tail
+    # (judged vs the running last-kept-close baseline); every healthy bar
+    # survives.
+    rows = [_healthy(_D1, 10000.0 + i) for i in range(5)]
+    healthy = rows[position]
+    rows[position] = (_D1, healthy[1], healthy[1] * 10.0, healthy[3])
+    expected = [True] * 5
+    expected[position] = False
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == expected
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skip_reasons"] == {"high": 1}
+
+
+def test_hilo_one_bar_session_kept_disclosed_limit() -> None:
+    # 1-bar session: unconfirmable (no witness) — kept even with a ×10 high.
+    with capture_logs() as logs:
+        assert _hilo_mask([(_D1, 10000.0, 100000.0, 9990.0)]) == [True]
+    assert not logs
+
+
+@pytest.mark.parametrize("position", [0, 1])
+def test_hilo_two_bar_session_poison_kept_each_position(position: int) -> None:
+    # 2-bar session: no confirmed reference exists, so a ×10 high at either
+    # position is KEPT (the disclosed unconfirmable-head limit extends to the
+    # high/low arm verbatim); the closes agree, so no unconfirmed WARN either.
+    rows = [_healthy(_D1, 10000.0), _healthy(_D1, 10001.0)]
+    healthy = rows[position]
+    rows[position] = (_D1, healthy[1], healthy[1] * 10.0, healthy[3])
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, True]
+    assert not logs
+
+
+def test_hilo_reopen_gap_session_never_trips() -> None:
+    # Legit overnight reopen gap with highs/lows supplied: the new session's
+    # head bars agree — nothing dropped (cross-session comparison forbidden).
+    rows = [
+        _healthy(_D1, 27945.0),
+        _healthy(_D2, 6005.0),  # big legitimate gap into the next session
+        _healthy(_D2, 6006.0),
+        _healthy(_D2, 6007.0),
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True] * 4
+    assert not [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+
+
+def test_hilo_skip_never_advances_baseline() -> None:
+    # A bar skipped for its HIGH never advances the close baseline: the next
+    # bar is judged against the last KEPT close and survives.
+    rows = [
+        _healthy(_D1, 10000.0),
+        _healthy(_D1, 10001.0),
+        _healthy(_D1, 10002.0),
+        (_D1, 10003.0, 100050.0, 9998.0),  # skipped (high ×10)
+        _healthy(_D1, 10000.0),  # fine vs last KEPT close (10002), kept
+    ]
+    assert _hilo_mask(rows) == [True, True, True, False, True]
+
+
+def test_hilo_highs_only_supplied_lows_none() -> None:
+    # highs may be supplied without lows (each independently optional): the
+    # high arm engages, the low check is skipped entirely.
+    rows = [_healthy(_D1, 10000.0 + i) for i in range(3)] + [(_D1, 10003.0, 100050.0, 9998.0)]
+    mask = BadTickScreen().screen_mask(
+        [r[0] for r in rows],
+        [r[1] for r in rows],
+        highs=[r[2] for r in rows],
+    )
+    assert mask == [True, True, True, False]
+
+
+def test_hilo_lows_only_supplied_highs_none() -> None:
+    rows = [_healthy(_D1, 10000.0 + i) for i in range(3)] + [(_D1, 10003.0, 10008.0, 1000.0)]
+    mask = BadTickScreen().screen_mask(
+        [r[0] for r in rows],
+        [r[1] for r in rows],
+        lows=[r[3] for r in rows],
+    )
+    assert mask == [True, True, True, False]
+
+
+def test_hilo_boundary_exactly_max_ratio_high_is_bad() -> None:
+    # The boundary law carries over: a high EXACTLY 4× the reference is bad.
+    rows = [
+        _healthy(_D1, 100.0),
+        _healthy(_D1, 100.0),
+        _healthy(_D1, 100.0),
+        (_D1, 101.0, 400.0, 99.0),  # high == 4 × baseline(100) exactly
+    ]
+    assert _hilo_mask(rows) == [True, True, True, False]
+
+
+def test_hilo_head_bar_judged_against_median() -> None:
+    # A head bar with a corrupt high is judged against the head CLOSE median —
+    # dropped by the vote while the healthy head bars survive, and the
+    # post-head baseline still seeds from the (close) median.
+    rows = [
+        (_D1, 10000.0, 100000.0, 9995.0),  # head bar 0: high ×10
+        _healthy(_D1, 10001.0),
+        _healthy(_D1, 10002.0),
+        _healthy(_D1, 10003.0),
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [False, True, True, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert warns[0]["skip_reasons"] == {"high": 1}
+    assert warns[0]["first_ref_close"] == 10001.0  # the head close median
+
+
+def test_hilo_mixed_reasons_fold_into_one_warn_with_breakdown() -> None:
+    # One session: a close spike + a high spike + a low spike — ONE WARN,
+    # skipped=3, per-reason breakdown, first offender named by ITS reason.
+    rows = [
+        _healthy(_D1, 10000.0),
+        _healthy(_D1, 10001.0),
+        _healthy(_D1, 10002.0),
+        (_D1, 100030.0, 100050.0, 100010.0),  # close ×10
+        (_D1, 10004.0, 100050.0, 9999.0),  # high ×10
+        (_D1, 10005.0, 10010.0, 1000.0),  # low ÷10
+        _healthy(_D1, 10006.0),
+    ]
+    with capture_logs() as logs:
+        assert _hilo_mask(rows) == [True, True, True, False, False, False, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 3
+    assert warns[0]["skip_reasons"] == {"close": 1, "high": 1, "low": 1}
+    assert warns[0]["first_reason"] == "close"
+
+
+def test_hilo_highs_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="highs/closes length mismatch"):
+        BadTickScreen().screen_mask([_D1], [100.0], highs=[100.0, 101.0])
+
+
+def test_hilo_lows_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="lows/closes length mismatch"):
+        BadTickScreen().screen_mask([_D1], [100.0], lows=[])
+
+
+# ────────────────────────────────────────────────────────────────────────
+# non_finite_keep_mask (DEC-READ-BOUNDARY-FINITE-001) — inf/-inf/nan OHLC at
+# the read boundary is certain corruption: skipped-and-counted, one WARN per
+# session, BEFORE the positivity raise and BEFORE the ratio screen (NaN
+# compares false — it would sail past both and poison the baseline).
+# ────────────────────────────────────────────────────────────────────────
+
+_NAN = float("nan")
+_INF = float("inf")
+
+
+def _nf_mask(
+    rows: list[tuple[date, float, float, float, float]],
+) -> list[bool]:
+    """Run one table's (ist_date, open, high, low, close) rows through the mask."""
+    return non_finite_keep_mask(
+        [r[0] for r in rows],
+        [r[1] for r in rows],
+        [r[2] for r in rows],
+        [r[3] for r in rows],
+        [r[4] for r in rows],
+    )
+
+
+def _nf_row(day: date, close: float) -> tuple[date, float, float, float, float]:
+    return (day, close, close + 5.0, close - 5.0, close)
+
+
+def test_non_finite_all_finite_all_kept_no_warn() -> None:
+    rows = [_nf_row(_D1, 100.0 + i) for i in range(4)]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [True] * 4
+    assert not logs
+
+
+def test_non_finite_nan_close_skipped_with_one_warn() -> None:
+    # THE NaN-compares-false trap: `nan <= 0` is False (past the positivity
+    # raise) and every is_bad_tick against a NaN is False (past the ratio
+    # screen) — only an explicit isfinite screen catches it.
+    assert not _NAN <= 0  # the trap, pinned
+    assert is_bad_tick(_NAN, 100.0) is False
+    assert is_bad_tick(100.0, _NAN) is False
+    rows = [_nf_row(_D1, 100.0), (_D1, 101.0, 106.0, 96.0, _NAN), _nf_row(_D1, 102.0)]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [True, False, True]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 1
+    assert warns[0]["session"] == "2024-01-02"
+    assert warns[0]["first_field"] == "close"
+    assert warns[0]["first_value"] == "nan"
+
+
+def test_non_finite_pos_inf_high_skipped() -> None:
+    rows = [_nf_row(_D1, 100.0), (_D1, 101.0, _INF, 96.0, 101.5)]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [True, False]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert warns[0]["first_field"] == "high"
+    assert warns[0]["first_value"] == "inf"
+
+
+def test_non_finite_neg_inf_low_skipped() -> None:
+    # -inf is skip-class here (the sanctioned raise→skip move is pinned at the
+    # replay boundary in tests/integration/test_feed_replay_bad_tick_screen.py).
+    rows = [_nf_row(_D1, 100.0), (_D1, 101.0, 106.0, -_INF, 101.5)]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [True, False]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert warns[0]["first_field"] == "low"
+    assert warns[0]["first_value"] == "-inf"
+
+
+def test_non_finite_nan_open_skipped_field_order_pinned() -> None:
+    # The first non-finite field in OHLC order names the skip: a bar with a
+    # NaN open AND a NaN close reports "open".
+    rows = [(_D1, _NAN, 106.0, 96.0, _NAN)]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [False]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert warns[0]["first_field"] == "open"
+
+
+def test_non_finite_multiple_in_one_session_one_warn_first_offender() -> None:
+    rows = [
+        (_D1, _NAN, 106.0, 96.0, 101.0),  # first offender: open
+        _nf_row(_D1, 102.0),
+        (_D1, 103.0, 108.0, 98.0, _INF),  # second: close
+    ]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [False, True, False]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 2
+    assert warns[0]["first_field"] == "open"
+
+
+def test_non_finite_two_sessions_two_warns() -> None:
+    rows = [
+        (_D1, 100.0, 105.0, 95.0, _NAN),
+        _nf_row(_D1, 101.0),
+        (_D2, 200.0, 205.0, 195.0, _NAN),
+        _nf_row(_D2, 201.0),
+    ]
+    with capture_logs() as logs:
+        assert _nf_mask(rows) == [False, True, False, True]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert [w["session"] for w in warns] == ["2024-01-02", "2024-01-03"]
+    assert [w["skipped"] for w in warns] == [1, 1]
+
+
+def test_non_finite_source_and_injected_logger() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeLog:
+        def warning(self, event: str, **kw: object) -> None:
+            events.append((event, kw))
+
+    mask = non_finite_keep_mask(
+        [_D1, _D1],
+        [100.0, _NAN],
+        [105.0, 106.0],
+        [95.0, 96.0],
+        [101.0, 102.0],
+        source="NSE/INDEX/NSE-NIFTY/1minute",
+        log=_FakeLog(),  # type: ignore[arg-type]
+    )
+    assert mask == [True, False]
+    assert events == [
+        (
+            NON_FINITE_SKIP_EVENT,
+            {
+                "source": "NSE/INDEX/NSE-NIFTY/1minute",
+                "session": "2024-01-02",
+                "skipped": 1,
+                "first_field": "open",
+                "first_value": "nan",
+            },
+        )
+    ]
+
+
+def test_non_finite_empty_input() -> None:
+    with capture_logs() as logs:
+        assert non_finite_keep_mask([], [], [], [], []) == []
+    assert not logs
+
+
+def test_non_finite_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="length mismatch"):
+        non_finite_keep_mask([_D1], [1.0], [1.0], [1.0], [1.0, 2.0])
+    with pytest.raises(ValueError, match="length mismatch"):
+        non_finite_keep_mask([_D1, _D2], [1.0], [1.0], [1.0], [1.0])

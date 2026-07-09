@@ -16,7 +16,11 @@ from datetime import UTC, datetime, timedelta
 
 import pyarrow as pa
 import pytest
-from brutex.data.bad_tick import BAD_TICK_HEAD_UNCONFIRMED_EVENT, BAD_TICK_SKIP_EVENT
+from brutex.data.bad_tick import (
+    BAD_TICK_HEAD_UNCONFIRMED_EVENT,
+    BAD_TICK_SKIP_EVENT,
+    NON_FINITE_SKIP_EVENT,
+)
 from brutex.feed.replay import arrow_table_to_bars
 from structlog.testing import capture_logs
 
@@ -196,3 +200,185 @@ def test_refused_table_emits_bad_tick_warns_before_the_positivity_raise() -> Non
     assert len(warns) == 1  # the D1 spike's WARN landed before the raise
     assert warns[0]["skipped"] == 1
     assert warns[0]["session"] == "2024-01-02"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# High/low arm end-to-end (DEC-BADTICK-HILO-SCREEN-001): replay.py passes the
+# table's highs/lows into the screen, so the DATA-3b shape — a ×10 HIGH with a
+# sane close, which passed is_bad_tick AND price_sanity and poisoned the next
+# day's PDH anchor via TodayOHLC.absorb — is dropped at the read boundary.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_high_only_scaled_bar_dropped_at_read_boundary() -> None:
+    # DATA-3b: HIGH ×10 (open/low/close normal). Pre-arm this bar was SERVED
+    # (its close is sane) and its captured high fed the next day's PDH.
+    rows = [
+        (_BASE + timedelta(minutes=i), 10050.0 + i, 10055.0 + i, 10045.0 + i, 10050.0 + i)
+        for i in range(3)
+    ] + [
+        (_BASE + timedelta(minutes=3), 10053.0, 100500.0, 10048.0, 10053.0)  # high ×10
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows), source="src")
+    assert [float(b.close) for b in bars] == [10050.0, 10051.0, 10052.0]
+    assert all(float(b.high) < 100500.0 for b in bars)  # the poison high is GONE
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 1
+    assert warns[0]["skip_reasons"] == {"high": 1}
+    assert warns[0]["first_reason"] == "high"
+
+
+def test_low_only_scaled_bar_dropped_at_read_boundary() -> None:
+    rows = [
+        (_BASE + timedelta(minutes=i), 21008.0 + i, 21013.0 + i, 21003.0 + i, 21008.0 + i)
+        for i in range(3)
+    ] + [
+        (_BASE + timedelta(minutes=3), 21011.0, 21016.0, 2101.0, 21011.0)  # low ÷10
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows), source="src")
+    assert [float(b.close) for b in bars] == [21008.0, 21009.0, 21010.0]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert warns[0]["skip_reasons"] == {"low": 1}
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Non-finite screen end-to-end (DEC-READ-BOUNDARY-FINITE-001): inf/-inf/nan
+# OHLC is skipped-and-counted BEFORE the positivity raise; -inf moves from
+# raise-class to skip-class (the documented sanctioned change); the kill
+# switch OFF restores the exact pre-#1616 raw path.
+# ────────────────────────────────────────────────────────────────────────
+
+_NAN = float("nan")
+_INF = float("inf")
+
+
+def test_nan_close_bar_skipped_not_crashed() -> None:
+    # THE NaN-compares-false trap: `nan <= 0` is False, so the positivity
+    # raise never fired, and Decimal("NaN") then blew up (or worse, survived)
+    # downstream. The finite screen skips-and-counts it instead.
+    rows = [
+        (_BASE, 100.0, 101.0, 99.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.5, 101.5, 99.5, _NAN),
+        (_BASE + timedelta(minutes=2), 101.0, 102.0, 100.0, 101.0),
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows), source="src")
+    assert [float(b.close) for b in bars] == [100.0, 101.0]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["skipped"] == 1
+    assert warns[0]["first_field"] == "close"
+    assert warns[0]["first_value"] == "nan"
+    assert warns[0]["source"] == "src"
+
+
+def test_pos_inf_high_bar_skipped() -> None:
+    rows = [
+        (_BASE, 100.0, 101.0, 99.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.5, _INF, 99.5, 100.5),
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows))
+    assert [float(b.close) for b in bars] == [100.0]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert warns[0]["first_field"] == "high"
+
+
+def test_neg_inf_moves_from_raise_class_to_skip_class() -> None:
+    # SANCTIONED CHANGE (DEC-READ-BOUNDARY-FINITE-001, documented not silent):
+    # a -inf low previously hit the positivity RAISE (`-inf <= 0` is True — a
+    # loud whole-table crash); a non-finite bar is the same certain-corruption
+    # class as NaN/+inf, so it now rides the skip class: the bar is dropped +
+    # counted, the healthy rows are SERVED, and no ValueError fires.
+    rows = [
+        (_BASE, 100.0, 101.0, 99.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.5, 101.5, -_INF, 100.5),
+        (_BASE + timedelta(minutes=2), 101.0, 102.0, 100.0, 101.0),
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows), source="src")  # does NOT raise
+    assert [float(b.close) for b in bars] == [100.0, 101.0]
+    warns = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["first_field"] == "low"
+    assert warns[0]["first_value"] == "-inf"
+
+
+def test_kill_switch_off_restores_neg_inf_positivity_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ONE shared kill switch (documented decision): OFF = the exact
+    # pre-#1616 raw read path for forensic replay — the finite screen stands
+    # down WITH the ratio screen, so a -inf low hits the positivity raise
+    # again (the pre-change envelope).
+    monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "0")
+    rows = [
+        (_BASE, 100.0, 101.0, 99.0, 100.0),
+        (_BASE + timedelta(minutes=1), 100.5, 101.5, -_INF, 100.5),
+    ]
+    with pytest.raises(ValueError, match="non-positive price"):
+        arrow_table_to_bars(_table(rows))
+
+
+def test_nan_row_does_not_poison_the_ratio_screen() -> None:
+    # The filtration law: non-finite rows are EXCLUDED from the ratio screen's
+    # input (a NaN reference compares false against everything — fed raw, a
+    # NaN head bar would blind the median vote / baseline). With the NaN row
+    # filtered, a later ×10 close spike in the SAME session is still caught.
+    rows = [
+        (_BASE, 100.0, 101.0, 99.0, _NAN),  # non-finite head row (filtered)
+        (_BASE + timedelta(minutes=1), 100.0, 101.0, 99.0, 100.0),
+        (_BASE + timedelta(minutes=2), 100.5, 101.5, 99.5, 100.5),
+        (_BASE + timedelta(minutes=3), 101.0, 102.0, 100.0, 101.0),
+        (_BASE + timedelta(minutes=4), 1010.0, 1011.0, 1009.0, 1010.0),  # ×10 spike
+    ]
+    with capture_logs() as logs:
+        bars = arrow_table_to_bars(_table(rows), source="src")
+    assert [float(b.close) for b in bars] == [100.0, 100.5, 101.0]
+    nf = [e for e in logs if e.get("event") == NON_FINITE_SKIP_EVENT]
+    bt = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(nf) == 1 and nf[0]["skipped"] == 1
+    assert len(bt) == 1 and bt[0]["skipped"] == 1
+    assert bt[0]["skip_reasons"] == {"close": 1}
+
+
+def test_screen_then_hash_kept_set_change_self_rekeys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SCREEN-THEN-HASH ordering pin (the verifier-B requirement): the
+    # run-identity `data_snapshot_hash` (bxsnap2, stage3_wire) is computed
+    # over the LOADED bar list — i.e. the `arrow_table_to_bars` OUTPUT, post
+    # screen (`cmd_sweep_all` loads `slices[(symbol, interval)] = [event.bar
+    # for event in feed]` via ReplayFeed._load_bars → Catalog.get_bars →
+    # arrow_table_to_bars, then hashes those slices) — so a lake whose
+    # kept-set changes under the screen SELF-RE-KEYS. Pinned at the seam: the
+    # SAME stored table hashes differently with the screen ON (poison
+    # dropped) vs OFF (raw bytes), proving the hash input is the screened
+    # list, never the raw table (hash-before-screen would make these equal).
+    from brutex.engine.stage3_wire import data_snapshot_hash
+
+    rows = [
+        (_BASE + timedelta(minutes=i), 100.0 + i, 105.0 + i, 95.0 + i, 100.0 + i) for i in range(3)
+    ] + [
+        (_BASE + timedelta(minutes=3), 1030.0, 1035.0, 1025.0, 1030.0)  # ×10 spike
+    ]
+    table = _table(rows)
+    monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+    bars_screened = arrow_table_to_bars(table)
+    monkeypatch.setenv("BRUTEX_BAD_TICK_SCREEN", "0")
+    bars_raw = arrow_table_to_bars(table)
+    assert len(bars_screened) == 3 < len(bars_raw) == 4  # the kept-set changed
+
+    def _hash(bars: list[object]) -> str:
+        return data_snapshot_hash(
+            exchange="NSE",
+            segment="INDEX",
+            start="2024-01-02",
+            end="2024-01-03",
+            slices={("NSE-NIFTY", "1minute"): bars},  # type: ignore[dict-item]
+        )
+
+    assert _hash(bars_screened) != _hash(bars_raw)

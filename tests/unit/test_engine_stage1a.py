@@ -590,7 +590,10 @@ def test_prev_day_anchor_over_muhurat_bars_unchanged_no_abstain_warn() -> None:
 
 
 @pytest.mark.parametrize("anchor", _WEEKLY_ANCHORS)
-def test_first_day_muhurat_stream_emits_the_abstain_warn(anchor: FibAnchorKind) -> None:
+@pytest.mark.parametrize(("muhurat", "next_reg"), [(m, n) for _, m, n in _MUHURAT_BOUNDARIES])
+def test_first_day_muhurat_stream_emits_the_abstain_warn(
+    anchor: FibAnchorKind, muhurat: _date, next_reg: _date
+) -> None:
     # Round-2 review fix: a bar stream whose FIRST day IS the Muhurat session
     # (an operator from-date landing exactly on e.g. 2024-11-01) used to hit
     # the prev_ohlc-is-None early return BEFORE the abstain branch and roll
@@ -599,11 +602,14 @@ def test_first_day_muhurat_stream_emits_the_abstain_warn(anchor: FibAnchorKind) 
     # arm too; the None anchor bundle still clears ALL anchor-dependent bits
     # (a strictly WIDER abstain than fib=None — no prior day exists, so the
     # pivots are cold too). FAILS with the fix reverted (zero warns pre-fix).
+    # Additions-cycle widening: ALL SIX real Muhurat dates 2020-2025 are
+    # exercised as the stream START (each × both weekly anchors), not just the
+    # 2024 boundary — the fix-forward register's D3 completeness item.
     from structlog.testing import capture_logs
 
     bars = [
-        _day_bar(_date(2024, 11, 1), "104.00", "104.50", "103.50", "104.20"),
-        _day_bar(_date(2024, 11, 4), "104.00", "104.00", "104.00", "104.00"),
+        _day_bar(muhurat, "104.00", "104.50", "103.50", "104.20"),
+        _day_bar(next_reg, "104.00", "104.00", "104.00", "104.00"),
     ]
     with capture_logs() as logs:
         masks = build_bar_bits(bars, fib_anchor=anchor)
@@ -611,7 +617,7 @@ def test_first_day_muhurat_stream_emits_the_abstain_warn(anchor: FibAnchorKind) 
     assert masks[0] & FIB_DEPENDENT_MASK == 0  # no anchors at all on day 1
     warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
     assert len(warns) == 1  # exactly ONE per Muhurat session — first-day arm
-    assert warns[0]["day"] == "2024-11-01"
+    assert warns[0]["day"] == muhurat.isoformat()
     assert warns[0]["fib_anchor"] == anchor.value
 
 

@@ -140,6 +140,72 @@ Honest limits (disclosed, not papered over):
   ``arrow_table_to_bars``, so they deliberately do not certify this screen
   (disclosed + test-pinned, never claimed).
 
+High/low arm (``DEC-BADTICK-HILO-SCREEN-001``)
+----------------------------------------------
+
+The close-only screen above was blind to a bar whose CLOSE is sane but whose
+HIGH or LOW carries the scaling corruption (the product-audit-3 DATA-3b
+reproducer: a HIGH x10 with a normal open/low/close passes ``is_bad_tick`` AND
+``price_sanity``, yet ``TodayOHLC.absorb``'s running max/min captures the
+scaled high — the NEXT day's PDH / pivot / Fib anchors read the poison). When
+the caller supplies the optional keyword-only ``highs`` / ``lows`` sequences,
+:meth:`BadTickScreen.screen_mask` ADDITIONALLY judges each bar's high and low
+against the SAME session-scoped close-derived reference (head median for a
+head bar, last-KEPT-close baseline after) under the SAME ``max_ratio``
+bounded-multiple law (boundary = bad):
+
+* an out-of-band high OR low skips the WHOLE bar (skip-and-count, never a
+  clamped/edited field — the never-value-edit law is absolute);
+* the baseline stays a CLOSE-derived quantity — highs/lows are *judged*, they
+  never *become* the reference (a kept bar advances the baseline to its close
+  exactly as before);
+* a skipped bar (for ANY reason) never advances the baseline;
+* per-bar reason precedence is pinned ``close`` → ``high`` → ``low`` (the
+  first failing field names the skip; a both-scaled "fat range" bar whose high
+  AND low are out-of-band counts once, as ``high``);
+* the one-WARN-per-session law is unchanged — high/low-triggered skips FOLD
+  into the same ``skipped`` counter, and the skip WARN gains the ADDITIVE
+  ``skip_reasons`` (per-reason count map) + ``first_reason`` fields (existing
+  fields keep their exact name + meaning; ``first_close`` remains the first
+  offending BAR's close even when the trigger was its high/low);
+* omitted ``highs``/``lows`` (the default) = the close-only screen,
+  byte-identical to the pre-arm behavior;
+* honest limits carry over verbatim: a 1-bar session is kept unscreened, a
+  2-bar session is kept (its highs/lows included — no confirmed reference
+  exists, so a 2-bar session's x10 high is a DISCLOSED escape), and the head
+  escape band applies to the high/low judgment identically (a
+  threshold-adjacent ~4.00-4.04x high inside ``[4·min-neighbor, 4·median)``
+  rides it; the x10 class is always caught).
+
+Non-finite screen (``DEC-READ-BOUNDARY-FINITE-001``)
+----------------------------------------------------
+
+:func:`non_finite_keep_mask` screens ``inf`` / ``-inf`` / ``nan`` OHLC values
+at the same read boundary: a bar with ANY non-finite OHLC field is
+skipped-and-counted (never served, never edited) with one
+:data:`NON_FINITE_SKIP_EVENT` WARN per affected session. A non-finite stored
+price is corrupt DATA with certainty (no threshold, no false-positive risk),
+but NaN COMPARES FALSE — pre-screen, a NaN close sailed past the positivity
+raise (``nan <= 0`` is ``False``), poisoned this module's ratio comparisons
+(every ``is_bad_tick`` against a NaN reference is ``False`` → everything
+kept), and reached ``Decimal("NaN")`` downstream. The screen must therefore
+run BEFORE both the positivity raise and the bad-tick ratio screen, and the
+ratio screen must never see a non-finite row (the caller filters them out —
+see :func:`brutex.feed.replay.arrow_table_to_bars`). SANCTIONED CHANGE
+(documented, not silent): ``-inf`` previously hit the positivity RAISE
+(``-inf <= 0`` is ``True`` — a loud crash); it now rides the skip class with
+the other non-finite values — a non-finite bar is corrupt DATA, same class as
+NaN/+inf, and a skip-and-count with a WARN is the graceful per-partition
+surface (the positivity raise remains reserved for FINITE non-positive
+prices). KILL SWITCH: SHARED with the bad-tick screen
+(``BRUTEX_BAD_TICK_SCREEN`` — the caller gates both behind ONE
+:func:`bad_tick_screen_enabled` check), deliberately NOT a second env knob:
+the switch's contract is "OFF = the exact pre-#1616 raw read path for a
+forensic replay of raw stored bytes", and a separate finite-only switch would
+mint a mixed mode with no operator story. OFF therefore restores the
+pre-#1616 behavior for non-finite values too (``-inf`` raises at positivity;
+NaN/+inf flow raw — the pre-existing envelope, disclosed).
+
 Contract (deliberately narrow, to never destroy real data):
 
 * the comparison is **within the SAME IST session only**;
@@ -153,13 +219,14 @@ Contract (deliberately narrow, to never destroy real data):
   ``0``/``false``/``no``/``off`` disables), so an operator can turn the screen
   off for a forensic replay of raw stored bytes.
 
-O(1)/bar: one multiply-compare per bar plus O(1) session state (a fixed
-≤ 3-element head buffer, no history, no allocation on the keep path beyond the
-output mask).
+O(1)/bar: one multiply-compare per bar (three with the high/low arm) plus O(1)
+session state (a fixed ≤ 3-element head buffer, no history, no allocation on
+the keep path beyond the output mask).
 """
 
 from __future__ import annotations
 
+import math
 import os
 from typing import TYPE_CHECKING, Final
 
@@ -203,6 +270,18 @@ BAD_TICK_HEAD_UNCONFIRMED_EVENT: Final[str] = "feed.bad_tick_head_unconfirmed"
 #: Disclosure only — the keep mask is unchanged; remediation is a re-pull /
 #: lake-heal of the named partition.
 BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT: Final[str] = "feed.bad_tick_session_majority_dropped"
+
+#: One structlog event per session that had ≥ 1 bar skipped for a NON-FINITE
+#: (``inf`` / ``-inf`` / ``nan``) OHLC field (``DEC-READ-BOUNDARY-FINITE-001``).
+#: A DISTINCT event name (not additive fields on :data:`BAD_TICK_SKIP_EVENT`):
+#: a non-finite price is a different corruption class (certain, not heuristic)
+#: with a different remediation story (the partition holds garbage bytes, not
+#: a plausible-but-scaled print).
+NON_FINITE_SKIP_EVENT: Final[str] = "feed.non_finite_bar_skipped"
+
+#: The OHLC field names :func:`non_finite_keep_mask` screens, in the pinned
+#: reporting order (the first non-finite field in this order names the skip).
+_OHLC_FIELDS: Final[tuple[str, str, str, str]] = ("open", "high", "low", "close")
 
 #: Falsy literals that DISABLE the (default-ON) screen — the mirror of the
 #: ``volume_keepalive`` kill-switch vocabulary (CLAUDE.md §11 COMMON pattern).
@@ -264,6 +343,101 @@ def is_bad_tick(prev_close: float, close: float, *, max_ratio: float = BAD_TICK_
     return close >= prev_close * max_ratio or close * max_ratio <= prev_close
 
 
+def non_finite_keep_mask(
+    ist_dates: Sequence[date],
+    opens: Sequence[float],
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    *,
+    source: str | None = None,
+    log: structlog.stdlib.BoundLogger | None = None,
+) -> list[bool]:
+    """Return the per-row KEEP mask screening non-finite OHLC values.
+
+    ``DEC-READ-BOUNDARY-FINITE-001``: a bar with ANY non-finite (``inf`` /
+    ``-inf`` / ``nan``) OHLC field is corrupt DATA with certainty and is
+    skipped-and-counted (never served, never value-edited). NaN COMPARES
+    FALSE, so without this screen a NaN close sails past the positivity raise
+    AND poisons the ratio screen's baseline — the caller MUST run this mask
+    FIRST (before the positivity raise, before :meth:`BadTickScreen.screen_mask`)
+    and must never feed a non-finite row into the ratio screen (module
+    docstring). One :data:`NON_FINITE_SKIP_EVENT` WARN per affected session,
+    emitted at the session boundary / stream end (never a per-bar storm),
+    naming the session's skip count + the first offending field/value.
+
+    Parameters
+    ----------
+    ist_dates
+        Each row's IST session date (the session-grouping key for the
+        one-WARN-per-session law), 1:1 with the OHLC sequences.
+    opens, highs, lows, closes
+        Each row's OHLC fields (any float, including non-finite).
+    source
+        Human-readable partition origin woven into the WARN, or ``None``.
+    log
+        Injectable structlog logger (tests); ``None`` uses the module logger.
+
+    Returns
+    -------
+    list[bool]
+        ``True`` = the row's OHLC is fully finite (keep), ``False`` = skip.
+        Same length and order as the inputs.
+
+    Raises
+    ------
+    ValueError
+        If the five input sequences differ in length.
+    """
+    n = len(closes)
+    if not (len(ist_dates) == len(opens) == len(highs) == len(lows) == n):
+        raise ValueError(
+            f"ist_dates/opens/highs/lows/closes length mismatch: "
+            f"{len(ist_dates)}/{len(opens)}/{len(highs)}/{len(lows)}/{n} — "
+            f"the non-finite screen needs one session date per OHLC row"
+        )
+    logger = log if log is not None else _LOG
+    keep = [True] * n
+
+    session: date | None = None
+    skipped = 0
+    first_offender: tuple[str, float] | None = None
+
+    def _flush() -> None:
+        nonlocal skipped, first_offender
+        if skipped > 0 and first_offender is not None:
+            field, value = first_offender
+            logger.warning(
+                NON_FINITE_SKIP_EVENT,
+                source=source,
+                session=session.isoformat() if session is not None else None,
+                skipped=skipped,
+                first_field=field,
+                # repr string: inf/nan are not JSON-serializable numbers — the
+                # WARN must never crash a structured-log renderer.
+                first_value=repr(value),
+            )
+        skipped = 0
+        first_offender = None
+
+    for i in range(n):
+        day = ist_dates[i]
+        if day != session:
+            _flush()
+            session = day
+        for field, value in zip(
+            _OHLC_FIELDS, (opens[i], highs[i], lows[i], closes[i]), strict=True
+        ):
+            if not math.isfinite(value):
+                keep[i] = False
+                skipped += 1
+                if first_offender is None:
+                    first_offender = (field, value)
+                break
+    _flush()
+    return keep
+
+
 class BadTickScreen:
     """Single-pass in-session bad-tick screen over one Arrow table (O(1)/bar).
 
@@ -273,7 +447,11 @@ class BadTickScreen:
     against their median close (the evidence-confirmed head seed,
     ``DEC-BADTICK-HEAD-SEED-001``), then judges every later bar against the
     last KEPT close — with the running baseline SEEDED at the head MEDIAN
-    (round-3 review), so a kept escape-band head spike never seats it. Emits exactly one :data:`BAD_TICK_SKIP_EVENT` WARN per
+    (round-3 review), so a kept escape-band head spike never seats it. With
+    the optional keyword-only ``highs``/``lows`` supplied, each bar's high and
+    low are ADDITIONALLY judged against the same close-derived reference
+    (``DEC-BADTICK-HILO-SCREEN-001`` — module docstring); omitted = the
+    close-only screen, byte-identical. Emits exactly one :data:`BAD_TICK_SKIP_EVENT` WARN per
     session that skipped ≥ 1 bar, one
     :data:`BAD_TICK_HEAD_UNCONFIRMED_EVENT` WARN per inconsistent-but-kept
     2-bar session (the disclosed unconfirmable-head limit), and one
@@ -310,7 +488,14 @@ class BadTickScreen:
         self._max_ratio = max_ratio
         self._log = log if log is not None else _LOG
 
-    def screen_mask(self, ist_dates: Sequence[date], closes: Sequence[float]) -> list[bool]:
+    def screen_mask(
+        self,
+        ist_dates: Sequence[date],
+        closes: Sequence[float],
+        *,
+        highs: Sequence[float] | None = None,
+        lows: Sequence[float] | None = None,
+    ) -> list[bool]:
         """Return the per-row KEEP mask for one chronologically ordered table.
 
         Parameters
@@ -319,8 +504,20 @@ class BadTickScreen:
             Each row's IST session date (the session-grouping key), 1:1 with
             *closes*.
         closes
-            Each row's close (assumed ``> 0`` — positivity screened at the
-            engine read boundary before any kept row is served).
+            Each row's close (assumed ``> 0`` and finite — positivity is
+            screened at the engine read boundary before any kept row is
+            served, and non-finite rows are filtered FIRST via
+            :func:`non_finite_keep_mask` — a NaN compares false and would
+            silently poison the head median / running baseline).
+        highs, lows
+            Optional keyword-only per-row high/low fields
+            (``DEC-BADTICK-HILO-SCREEN-001``): when supplied (each
+            independently), the bar's high/low are ADDITIONALLY judged
+            against the SAME close-derived session reference under the SAME
+            ``max_ratio`` law — an out-of-band high or low skips the WHOLE
+            bar even when its close is sane (reason precedence
+            ``close`` → ``high`` → ``low``, pinned). Omitted (the default) =
+            the close-only screen, byte-identical to the pre-arm behavior.
 
         Returns
         -------
@@ -331,13 +528,23 @@ class BadTickScreen:
         Raises
         ------
         ValueError
-            If *ist_dates* and *closes* differ in length.
+            If *ist_dates* / *highs* / *lows* and *closes* differ in length.
         """
         n = len(closes)
         if len(ist_dates) != n:
             raise ValueError(
                 f"ist_dates/closes length mismatch: {len(ist_dates)} != {n} — "
                 f"the screen needs one session date per close"
+            )
+        if highs is not None and len(highs) != n:
+            raise ValueError(
+                f"highs/closes length mismatch: {len(highs)} != {n} — "
+                f"the high/low arm needs one high per close"
+            )
+        if lows is not None and len(lows) != n:
+            raise ValueError(
+                f"lows/closes length mismatch: {len(lows)} != {n} — "
+                f"the high/low arm needs one low per close"
             )
         keep = [True] * n
 
@@ -346,21 +553,42 @@ class BadTickScreen:
         baseline: float | None = None  # median-seeded, then last KEPT close
         session_rows = 0  # total rows seen in the current session
         skipped = 0
-        first_offender: tuple[float, float] | None = None
+        skip_reasons: dict[str, int] = {}
+        first_offender: tuple[float, float, str] | None = None
+
+        def _skip_reason(reference: float, idx: int) -> str | None:
+            """Name row *idx*'s out-of-band field vs *reference*, or ``None``.
+
+            Reason precedence is PINNED ``close`` → ``high`` → ``low``
+            (``DEC-BADTICK-HILO-SCREEN-001``): the first failing field names
+            the skip, so a both-scaled "fat range" bar counts once as
+            ``high``. The high/low judgment reuses the ONE symmetric
+            :func:`is_bad_tick` law against the SAME close-derived reference
+            — highs/lows are judged, they never become the baseline.
+            """
+            if is_bad_tick(reference, closes[idx], max_ratio=self._max_ratio):
+                return "close"
+            if highs is not None and is_bad_tick(reference, highs[idx], max_ratio=self._max_ratio):
+                return "high"
+            if lows is not None and is_bad_tick(reference, lows[idx], max_ratio=self._max_ratio):
+                return "low"
+            return None
 
         def _judge(reference: float, idx: int) -> None:
             """Judge row *idx* against *reference*; skip-and-count or advance."""
             nonlocal baseline, skipped, first_offender
-            close = closes[idx]
-            if is_bad_tick(reference, close, max_ratio=self._max_ratio):
+            reason = _skip_reason(reference, idx)
+            if reason is not None:
                 keep[idx] = False
                 skipped += 1
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
                 if first_offender is None:
-                    first_offender = (reference, close)
+                    first_offender = (reference, closes[idx], reason)
                 # Deliberately do NOT advance the baseline: the next bar is
-                # judged against the last KEPT good close.
+                # judged against the last KEPT good close (a bar skipped for
+                # ANY reason — close, high or low — never advances it).
             else:
-                baseline = close
+                baseline = closes[idx]
 
         def _resolve_head() -> None:
             """Vote the 3 buffered head bars against their median close.
@@ -391,7 +619,10 @@ class BadTickScreen:
             ):
                 # 2-bar session, mutually inconsistent: the symmetric ratio test
                 # identifies no offender — keep BOTH (never destroy real data on
-                # 50/50 evidence) and disclose loudly (module docstring).
+                # 50/50 evidence) and disclose loudly (module docstring). The
+                # high/low arm deliberately does NOT extend into this
+                # unconfirmable shape: with no confirmed reference a 2-bar
+                # session's highs/lows are kept unscreened (disclosed limit).
                 self._log.warning(
                     BAD_TICK_HEAD_UNCONFIRMED_EVENT,
                     source=self._source,
@@ -402,7 +633,7 @@ class BadTickScreen:
                 )
             head.clear()
             if skipped > 0 and first_offender is not None:
-                reference, close = first_offender
+                reference, close, reason = first_offender
                 self._log.warning(
                     BAD_TICK_SKIP_EVENT,
                     source=self._source,
@@ -411,6 +642,13 @@ class BadTickScreen:
                     max_ratio=self._max_ratio,
                     first_ref_close=reference,
                     first_close=close,
+                    # ADDITIVE fields (DEC-BADTICK-HILO-SCREEN-001): the
+                    # per-reason breakdown of `skipped` + the first offender's
+                    # own trigger. Existing fields keep name + meaning —
+                    # `first_close` stays the first offending BAR's close even
+                    # when the trigger was its high/low.
+                    skip_reasons=dict(skip_reasons),
+                    first_reason=reason,
                 )
                 kept_in_session = session_rows - skipped
                 if skipped > kept_in_session:
@@ -434,6 +672,7 @@ class BadTickScreen:
                     )
             session_rows = 0
             skipped = 0
+            skip_reasons.clear()
             first_offender = None
 
         for i in range(n):
@@ -463,7 +702,9 @@ __all__ = [
     "BAD_TICK_SESSION_MAJORITY_DROPPED_EVENT",
     "BAD_TICK_SKIP_EVENT",
     "HEAD_CONFIRM_BARS",
+    "NON_FINITE_SKIP_EVENT",
     "BadTickScreen",
     "bad_tick_screen_enabled",
     "is_bad_tick",
+    "non_finite_keep_mask",
 ]
