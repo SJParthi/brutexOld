@@ -1250,6 +1250,16 @@ def register_launch_routes(
     from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import HTMLResponse, JSONResponse
 
+    # ``from __future__ import annotations`` stringifies the route return
+    # annotations (``-> JSONResponse``); FastAPI/pydantic resolve those
+    # ForwardRefs against each endpoint's ``__globals__`` — THIS module's
+    # namespace — at OpenAPI schema-generation time. The classes are imported
+    # lazily above (the app.py doctrine), so publish them to module scope too
+    # (the ``app._make_ws_handler`` precedent); without this the two JSON
+    # routes here broke ``app.openapi()`` / ``GET /openapi.json`` (500).
+    globals()["HTMLResponse"] = HTMLResponse
+    globals()["JSONResponse"] = JSONResponse
+
     async def launch_page() -> str:
         """GET /launch — the INTERIM Run-Sweep launch page."""
         return _load_launch_template()

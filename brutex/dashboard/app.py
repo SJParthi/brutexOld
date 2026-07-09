@@ -1316,6 +1316,21 @@ def build_app(
             "state model do not need FastAPI."
         ) from exc
 
+    # ``from __future__ import annotations`` (top of module) stringifies every
+    # route return annotation (``-> JSONResponse`` etc.), and FastAPI/pydantic
+    # resolve those ForwardRefs against each ENDPOINT's ``__globals__`` — this
+    # module's namespace — at OpenAPI schema-generation time. The response
+    # classes are imported LAZILY above (fastapi stays optional at
+    # module-import time — the documented contract this factory's RuntimeError
+    # guards), so publish them to module scope too, exactly like
+    # :func:`_make_ws_handler` does for ``WebSocket``; without this,
+    # ``app.openapi()`` raises ``PydanticUserError`` and ``GET /openapi.json``
+    # returns 500 (``/docs`` + ``/redoc`` render dead shells).
+    globals()["HTMLResponse"] = HTMLResponse
+    globals()["JSONResponse"] = JSONResponse
+    globals()["PlainTextResponse"] = PlainTextResponse
+    globals()["Response"] = Response
+
     from brutex.observability.metrics import get_registry, render_prometheus
 
     # The retired-vendor 24h-JWT token keepalive was retired here (PR-J4c): the
