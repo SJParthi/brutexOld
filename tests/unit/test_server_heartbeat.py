@@ -8,14 +8,12 @@ is swallowed (never crashes the server).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import pytest
 from brutex.observability import server_heartbeat as sh
+from structlog.stdlib import BoundLogger
 from structlog.testing import capture_logs
-
-if TYPE_CHECKING:
-    from structlog.stdlib import BoundLogger
 
 
 class TestResolveHeartbeatInterval:
@@ -147,7 +145,7 @@ class TestServerHeartbeat:
             interval=5.0,
             rss_probe=lambda: 1,
             spawn=lambda fn: None,
-            log=cast("BoundLogger", _ExplodingLog()),
+            log=cast(BoundLogger, _ExplodingLog()),
         )
         hb.start()
         hb._beat()  # must NOT raise despite both log calls exploding
