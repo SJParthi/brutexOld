@@ -5228,7 +5228,10 @@ def build_app(
     async def api_coverage_windows(
         market: str | None = Query(default=None),
         status: str | None = Query(default=None),
-        limit: int = Query(default=20_000, ge=1),
+        # ge=0 (DEC-WINDOWS-COUNTS-ONLY-001): `?limit=0` = counts-only — counts +
+        # meta with rows=[] (the cheap mode for the counts-only consumers). The
+        # SERVER default stays 20_000 (fetch_windows.html genuinely renders rows).
+        limit: int = Query(default=20_000, ge=0),
         offset: int = Query(default=0, ge=0),
     ) -> JSONResponse:
         """GET /api/v1/coverage/windows — per-window PLANNED / SUCCESS / EMPTY / FAILED / SKIPPED.
@@ -5248,6 +5251,13 @@ def build_app(
         hidden); ``PLANNED`` rows ship only on explicit ``?status=PLANNED``. The
         ledger read is mtime-cached so the 4 s page poll stops re-paying the
         full Parquet load at pre-planned-universe scale (~841k rows measured).
+
+        ``?limit=0`` (DEC-WINDOWS-COUNTS-ONLY-001) = COUNTS-ONLY: the identical
+        ``counts``/``count``/``matched`` meta with ``windows=[]`` — the row-page
+        query is skipped server-side. The consumers that render only counts
+        (coverage.html's windows KPI, universe.html's all-segments line) use it
+        so their poll stops downloading the up-to-20k-row default payload
+        (~294 B/row ⇒ ~5.9 MB per poll mid-pull) they never read.
         """
         from brutex.dashboard.db_view import build_window_payload, last_pull_start_utc
 
