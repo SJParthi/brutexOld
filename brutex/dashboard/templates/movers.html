@@ -84,6 +84,29 @@
   #pcrPanel { margin-bottom:12px; }
   #pcrRows .name { color:var(--text-bright); font-weight:600; }
   #pcrRows .muted { color:var(--muted); }
+  /* Header chips row + ⓘ explainer + expiry tabs + buildup pills
+     (DEC-MOVERS-HEADER-CHIPS-001) — kept in the page's OWN style block. */
+  .chiprow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .chip { display:inline-flex; align-items:center; gap:7px; padding:6px 12px; border-radius:999px;
+    font-size:12.5px; color:var(--muted); background:var(--surface-2); border:1px solid var(--border-strong); }
+  .chip .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
+  .chip b { color:var(--text-bright); font-variant-numeric:tabular-nums; }
+  .chip.amber { color:var(--yellow); border-color:var(--yellow); background:rgba(255,183,77,.10); }
+  .chip.amber b { color:var(--yellow); }
+  .chip.click { cursor:pointer; user-select:none; }
+  .seg { display:inline-flex; border:1px solid var(--border-strong); border-radius:9px; overflow:hidden; }
+  .segbtn { padding:7px 12px; font-size:12.5px; cursor:pointer; user-select:none;
+    color:var(--muted); background:var(--surface-2); border-right:1px solid var(--border-strong); }
+  .segbtn:last-child { border-right:none; }
+  .segbtn.on { color:var(--yellow); background:rgba(255,183,77,.10); }
+  details.explain summary { cursor:pointer; user-select:none; color:var(--blue); }
+  details.explain div { margin-top:8px; }
+  .bupill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11.5px;
+    font-weight:600; border:1px solid var(--border-strong); color:var(--muted); }
+  .bupill.bu-long { color:var(--green); border-color:var(--green); background:rgba(38,217,176,.10); }
+  .bupill.bu-short { color:var(--red); border-color:var(--red); background:rgba(255,92,92,.10); }
+  .bupill.bu-cover { color:var(--green); }
+  .bupill.bu-unwind { color:var(--red); }
   .preview-badge { font-size:10px; font-weight:700; color:var(--yellow); border:1px solid var(--yellow);
     border-radius:999px; padding:2px 8px; background:rgba(255,183,77,.10); }
   .empty { color:var(--muted); text-align:center; padding:24px 0; }
@@ -127,6 +150,13 @@
         <span id="pills"></span>
         <span class="spacer"></span>
         <select id="exchange" title="Exchange"><option>NSE</option><option>BSE</option></select>
+        <!-- Dhan-style expiry-tier / cadence-track TABS (DEC-MOVERS-HEADER-CHIPS-001):
+             the visible control; the two <select>s below STAY IN THE DOM permanently
+             hidden — every read site ($("expiry").value / $("track").value in load(),
+             refreshProvenance(), renderChips()) is untouched and the tabs WRITE them,
+             so the ?expiry=/?track= query semantics are byte-identical. -->
+        <span class="seg" id="trackTabs" hidden></span>
+        <span class="seg" id="expiryTabs" hidden></span>
         <select id="track" title="Expiry cadence (Options)" style="display:none;"></select>
         <select id="expiry" title="Expiry" style="display:none;"></select>
       </div>
@@ -175,6 +205,61 @@
         <span id="asof"></span>
       </div>
 
+      <!-- Header chips row + click-to-reveal detail + collapsible ⓘ explainer
+           (DEC-MOVERS-HEADER-CHIPS-001): readable LABELED chips replace the
+           dense stats micro-text line; every payload-derived value is built by
+           renderChips()/renderMissingOi() via createElement/textContent ONLY —
+           never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001). The <details>
+           explainer is STATIC template prose (no payload data), default
+           COLLAPSED (no `open` attribute), per-tab body toggled by
+           syncExplain(). -->
+      <div class="chiprow" id="chips" hidden></div>
+      <div class="note" id="chipDetail" hidden></div>
+      <details class="note explain" id="explain">
+        <summary>ⓘ What am I looking at?</summary>
+        <div id="explainSpot">
+          Each row is one index/stock at the selected date, timeframe and as-of
+          time. <b>LTP</b> is the last traded price at (or before) the as-of
+          instant; <b>Change / Change %</b> compare it to the previous NSE
+          session's close; <b>Volume</b> and <b>Value (₹ crore)</b> sum the
+          session's trading up to the as-of cutoff. A trailing " *" on a change
+          cell means the baseline is not the immediately-preceding session (a
+          gap in the stored data — the nearest prior session was used).
+        </div>
+        <div id="explainFutures" hidden>
+          Each row is one futures contract of the selected expiry tier (Near =
+          the closest unexpired month, Next = the second, Far = the third).
+          <b>Premium</b> is the contract price minus the underlying spot.
+          <b>OI</b> (open interest) is read at the as-of instant and
+          <b>OI Chg %</b> compares it to the prior day's OI. The <b>Buildup</b>
+          pill combines price and OI direction: price up + OI up reads Long
+          Buildup, price down + OI up Short Buildup, price up + OI down Short
+          Covering, price down + OI down Long Unwinding — "—" when either input
+          is missing or flat. Volume/Value sum the session up to the as-of
+          cutoff; " *" marks a change computed against a non-adjacent prior
+          session.
+        </div>
+        <div id="explainOptions" hidden>
+          Each row is one option contract at the tier expiry on the chosen
+          cadence track (All/Monthly/Weekly). <b>OI</b> (open interest) is read
+          at the as-of instant; <b>Volume</b> sums the session up to the as-of
+          cutoff; <b>Change %</b> is vs the contract's previous close and the
+          OI-change columns are vs its prior day. The <b>Put/Call Ratio</b>
+          chips divide the summed put-side OI (or volume) by the call side
+          across every chain shown — a ratio of sums; click a ratio chip for
+          the per-underlying detail. <b>Coverage</b> counts contracts actually
+          read out of the contracts discovered for the tier; "missing OI"
+          counts read contracts whose stored OI cell is empty (click the amber
+          badge to see which). The
+          all-exchanges view folds both listings of an underlying into one row
+          (the population the table and the chips rank) — pick an exchange for
+          a per-listing view. The <b>Buildup</b> pill
+          reads price vs OI direction as on Futures. " *" marks a change
+          computed against a non-adjacent prior session; " ~" marks a strike
+          grid estimated from stored data only.
+        </div>
+      </details>
+
       <!-- Per-underlying Put-Call Ratio panel (DEC-MOVERS-OPTIONS-PCR-001):
            Options tab only, hidden by default; rendered by renderPcr() with
            DOM APIs + textContent ONLY (never innerHTML for payload values —
@@ -182,11 +267,11 @@
            each leg's LAST open_interest at the as-of instant; Vol PCR is the
            session-to-cutoff flow ratio — the SAME reads the table rows use, so
            panel and table can never disagree. "~" marks non-full coverage.
-           Honest limit (design edge 20): the all-exchanges view folds an
-           underlying listed on both NSE and BSE into ONE row — the same
-           population the table ranks; pick an exchange for a per-listing PCR. -->
+           Since DEC-MOVERS-HEADER-CHIPS-001 the panel opens via the Put/Call
+           Ratio chips (pcrDetailOpen) and its semantics prose lives in the
+           ⓘ explainer above. -->
       <div class="note" id="pcrPanel" hidden>
-        <b>PCR (put/call) — tier expiry · OI at the as-of instant · volume session-to-cutoff · all-exchanges view folds both listings of an underlying into one row (the population the table ranks)</b>
+        <b>PCR detail — per-underlying Put/Call Ratios at the tier expiry</b>
         <div id="pcrRows"></div>
       </div>
 
@@ -213,6 +298,13 @@
      below parses — the pinned ROUND_HALF_UP display law
      (preopen_report._round2 / the #1154 half-up cells). -->
 <script src="/static/bx-format.js"></script>
+<!-- The PURE header-chip derivations (DEC-MOVERS-HEADER-CHIPS-001): the PCR
+     ratio-of-sums aggregate + coverage/expiry chip wording + the buildup
+     quadrant. Loaded SYNCHRONOUSLY AFTER bx-format.js (order-pinned):
+     BXMoversChips resolves the ONE shared bxFixed2, so chip ratios render
+     with the SAME half-up rounder as every 2dp cell — never a
+     re-implementation. -->
+<script src="/static/bx-movers-chips.js"></script>
 <!-- The shared as-of TIME default/persist primitives (DEC-MOVERS-ASOF-LATEST-DEFAULT-001).
      Loaded SYNCHRONOUSLY (like bx-format.js) so BXMoversTime is defined before the inline
      script below runs fillTimes() — a deferred script would execute AFTER this inline block. -->
@@ -250,7 +342,10 @@ const ASSETS = {
   },
   futures: {
     cats: [["price_gainers","Price Gainers"],["price_losers","Price Losers"],["premium","Premium"],["discount","Discount"],["volume","Top Volume"],["value","Top Value"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"]],
-    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["Value (Cr)","value_cr","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    /* "Buildup" (DEC-MOVERS-HEADER-CHIPS-001): a CLIENT-derived pill (price
+       direction × OI direction) — no payload field; the header click is a
+       stable no-op sort (numify(undefined) → null on every row). */
+    cols: [["Name","name","str"],["LTP","ltp","money"],["Spot","spot","money"],["Premium","premium","money"],["Change %","pct_change","num"],["Buildup","buildup","buildup"],["Value (Cr)","value_cr","num"],["OI","oi","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
   options: {
     cats: [["highest_oi","Highest OI"],["oi_gainers","OI Gainers"],["oi_losers","OI Losers"],["volume","Top Volume"],["value","Top Value"],["price_gainers","Price Gainers"],["price_losers","Price Losers"]],
@@ -258,7 +353,7 @@ const ASSETS = {
        session bar; DEC-GREEKS-ENGINE-PR3B-001 over the Phase-2b store) — full-precision
        floats in the payload, 4dp DISPLAY-only ("num4"); null (legacy pre-Greeks
        partition / stamped-NA bar) renders "—", never a fabricated Greek. */
-    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
+    cols: [["Name","name","str"],["Spot","spot","money"],["LTP","ltp","money"],["Moneyness","moneyness","str"],["IV","iv","num4"],["Delta","delta","num4"],["Change %","pct_change","num"],["Buildup","buildup","buildup"],["OI","oi","int"],["OI Chg","oi_chg","int"],["OI Chg %","oi_chg_pct","num"],["Volume","volume","int"]],
   },
 };
 /* Lake interval label → bar minutes for ALL 21 Track-1 timeframes — mirrors
@@ -304,6 +399,13 @@ let lastPayload = null;
    baseline-contiguity legend on a cached pill switch WITHOUT a refetch
    (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 legend-desync fix). */
 let baseNote = "";
+/* Header-chip UI toggles (DEC-MOVERS-HEADER-CHIPS-001): session-scoped —
+   whether the per-underlying PCR detail panel / the missing-OI reveal are
+   open. Written ONLY by the chip click handlers; the load()/showPcr()
+   re-renders HONOR them, so a refresh never silently re-collapses a panel
+   the operator opened. */
+let pcrDetailOpen = false;
+let missingOiOpen = false;
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): "params|bodyText"
    signature of the last fully-rendered NON-gated payload. A repeat fetch that
    round-trips to the byte-identical body for the SAME coordinate (repeat
@@ -411,13 +513,66 @@ function renderPills() {
      (onPillsClick), surviving this innerHTML swap by construction — so this
      function only rebuilds markup on asset switches; it wires no handlers and
      never recurses into itself (DEC-DASHBOARD-JS-PERF-001). */
-  /* Expiry applies to futures/options only — hidden for spot. */
+  /* Expiry applies to futures/options only — hidden for spot. Since
+     DEC-MOVERS-HEADER-CHIPS-001 the VISIBLE control is the #expiryTabs /
+     #trackTabs segmented buttons; the <select>s keep their inline
+     display:none permanently (never unhidden) but stay populated — every
+     value read/write site is unchanged (the tabs write them). */
   const derivAsset = (state.asset==="futures" || state.asset==="options");
-  $("expiry").style.display = derivAsset ? "" : "none";
+  $("expiryTabs").hidden = !derivAsset;
   if (derivAsset && !$("expiry").innerHTML) $("expiry").innerHTML = ["Near","Next","Far"].map(e=>`<option>${e}</option>`).join("");
   /* Options-only: the All/Monthly/Weekly cadence the Near/Next/Far tier ranks within. */
-  $("track").style.display = (state.asset==="options") ? "" : "none";
+  $("trackTabs").hidden = (state.asset!=="options");
   if (state.asset==="options" && !$("track").innerHTML) $("track").innerHTML = ["All","Monthly","Weekly"].map(e=>`<option>${e}</option>`).join("");
+  syncSegTabs();
+  syncExplain();
+}
+/* ── Expiry-tier / cadence-track tabs + the per-tab ⓘ explainer body
+   (DEC-MOVERS-HEADER-CHIPS-001) ── */
+/* Static tab labels per container — the EXACT select option tokens, so a tab
+   click writes a value normalize_options_selectors / normalize_futures_tier
+   already accept (query semantics byte-identical). */
+const SEG_TABS = { trackTabs: ["All","Monthly","Weekly"], expiryTabs: ["Near","Next","Far"] };
+const SEG_SELECT = { trackTabs: "track", expiryTabs: "expiry" };
+function initSegTabs() {
+  /* Build the static-label buttons ONCE (createElement — no innerHTML) and
+     attach ONE delegated click listener per container (the onPillsClick
+     precedent): a click writes the retained hidden <select>, moves the .on
+     class in place, and loads. */
+  Object.keys(SEG_TABS).forEach((boxId) => {
+    const box = $(boxId);
+    SEG_TABS[boxId].forEach((label) => {
+      const btn = document.createElement("span");
+      btn.className = "segbtn";
+      btn.dataset.val = label;
+      btn.textContent = label;
+      box.appendChild(btn);
+    });
+    box.addEventListener("click", (e) => {
+      const btn = e.target.closest(".segbtn");
+      if (!btn) return;
+      $(SEG_SELECT[boxId]).value = btn.dataset.val;
+      syncSegTabs();
+      load();
+    });
+  });
+}
+function syncSegTabs() {
+  /* Mirror each hidden select's CURRENT value onto its tab row (an unpopulated
+     select reads "" → the first tab shows as active — the same default the
+     query fallback `|| "Near"` / `|| "All"` sends). */
+  Object.keys(SEG_TABS).forEach((boxId) => {
+    const want = $(SEG_SELECT[boxId]).value || SEG_TABS[boxId][0];
+    $(boxId).querySelectorAll(".segbtn").forEach((btn) => {
+      btn.classList.toggle("on", btn.dataset.val === want);
+    });
+  });
+}
+function syncExplain() {
+  /* The ⓘ explainer body (static template prose) tracks the active tab. */
+  $("explainSpot").hidden = state.asset !== "spot";
+  $("explainFutures").hidden = state.asset !== "futures";
+  $("explainOptions").hidden = state.asset !== "options";
 }
 function renderHead() {
   const cols = ASSETS[state.asset].cols;
@@ -505,11 +660,135 @@ function renderPcr(rows) {
    full-render path and the skip-render-when-unchanged fast path (load() hides
    the panel unconditionally at its top, so the fast path must re-render it or a
    repeat identical fetch would blank the panel). Non-options assets, gated
-   payloads (no `pcr` key), and empty arrays leave the panel hidden. */
+   payloads (no `pcr` key), and empty arrays leave the panel hidden. Since
+   DEC-MOVERS-HEADER-CHIPS-001 the unhide is GATED on pcrDetailOpen — the
+   panel is the click-to-open DETAIL behind the Put/Call Ratio chips. */
 function showPcr(j) {
   if (state.asset === "options" && !j.gated && Array.isArray(j.pcr) && j.pcr.length) {
-    renderPcr(j.pcr); $("pcrPanel").hidden = false;
+    renderPcr(j.pcr); $("pcrPanel").hidden = !pcrDetailOpen;
   }
+}
+/* ── Header chips (DEC-MOVERS-HEADER-CHIPS-001) ──────────────────────────
+   Readable LABELED chips over the SAME payload the table renders — the pure
+   derivations live in bx-movers-chips.js (node-golden'd). XSS-safe BY
+   CONSTRUCTION: every payload-derived value reaches the DOM via
+   createElement / textContent / the title DOM property ONLY — these
+   functions never touch innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
+   HONESTY: the Put/Call Ratio chips show the RATIO OF SUMS across every
+   chain on screen (an OI-weighted aggregate — stated in the title; the
+   per-underlying truth is the PCR detail panel, one click away); the
+   Coverage badge goes AMBER when legs are unread or OI cells are missing,
+   and clicking it NAMES the missing-OI legs (the additive emit-on-nonempty
+   `oi_missing_symbols` key, server-capped at 50 with the true count in the
+   pre-existing `oi_missing_legs`; never-read legs are counted, not named —
+   disclosed in the reveal's tail line). */
+function makeChip(label, value, opts) {
+  const o = opts || {};
+  const el = document.createElement("span");
+  el.className = "chip" + (o.amber ? " amber" : "") + (o.onClick ? " click" : "");
+  if (o.id) el.id = o.id;
+  const lbl = document.createElement("span");
+  lbl.className = "lbl";
+  lbl.textContent = label;
+  el.appendChild(lbl);
+  const val = document.createElement("b");
+  val.textContent = value;
+  el.appendChild(val);
+  if (o.title) el.title = o.title;
+  if (o.onClick) el.addEventListener("click", o.onClick);
+  return el;
+}
+function grpInt(n) { return typeof n === "number" && isFinite(n) ? n.toLocaleString("en-IN") : "—"; }
+function renderMissingOi(j) {
+  /* The click-to-reveal list: WHICH legs are missing OI — one line per pcr
+     row carrying oi_missing_symbols (+K more when the server cap trimmed
+     names), plus one honest tail line for the UNREAD shortfall (counted in
+     the coverage total, structurally un-nameable — an unread leg produced no
+     PcrLeg). textContent-built throughout. */
+  const box = $("chipDetail");
+  box.textContent = "";
+  let unread = 0;
+  (Array.isArray(j.pcr) ? j.pcr : []).forEach((r) => {
+    if (typeof r.legs_read === "number" && typeof r.legs_total === "number"
+        && r.legs_read < r.legs_total) unread += r.legs_total - r.legs_read;
+    const syms = Array.isArray(r.oi_missing_symbols) ? r.oi_missing_symbols : [];
+    if (!syms.length) return;
+    const line = document.createElement("div");
+    const name = document.createElement("b");
+    name.textContent = String(r.display_underlying == null ? r.underlying : r.display_underlying);
+    line.appendChild(name);
+    const more = (typeof r.oi_missing_legs === "number" ? r.oi_missing_legs : syms.length) - syms.length;
+    line.appendChild(document.createTextNode(
+      " (" + String(r.expiry == null ? "" : r.expiry) + ") missing OI: "
+      + syms.map(String).join(", ")
+      + (more > 0 ? " … (+" + more + " more not listed)" : "")));
+    box.appendChild(line);
+  });
+  if (unread > 0) {
+    const tail = document.createElement("div");
+    tail.className = "muted";
+    tail.textContent = unread
+      + " leg(s) unread (no session bar / read error) — counted in the total, not named.";
+    box.appendChild(tail);
+  }
+  if (!box.firstChild) {
+    const none = document.createElement("div");
+    none.textContent = "no missing-OI legs in this snapshot.";
+    box.appendChild(none);
+  }
+  box.hidden = false;
+}
+function renderChips(j) {
+  const box = $("chips");
+  box.textContent = "";
+  syncExplain();
+  const skipSuffix = (typeof j.skipped_count === "number" && j.skipped_count > 0)
+    ? " · " + grpInt(j.skipped_count) + " skipped" : "";
+  const agg = state.asset === "options" ? BXMoversChips.bxPcrAggregate(j.pcr) : null;
+  if (agg) {
+    const tier = ($("expiry").value || "Near").toLowerCase();
+    const chains = " across " + agg.chains + " chain(s)";
+    const togglePcr = () => {
+      pcrDetailOpen = !pcrDetailOpen;
+      if (Array.isArray(j.pcr) && j.pcr.length) $("pcrPanel").hidden = !pcrDetailOpen;
+    };
+    box.appendChild(makeChip("Put/Call Ratio (OI)", agg.oi ? agg.oi.text : "—", {
+      id: "chipPcrOi",
+      title: "P " + grpInt(agg.putOi) + " / C " + grpInt(agg.callOi)
+        + " · ratio of sums" + chains + " — click for per-underlying detail",
+      onClick: togglePcr,
+    }));
+    box.appendChild(makeChip("Put/Call Ratio (Vol)", agg.vol ? agg.vol.text : "—", {
+      id: "chipPcrVol",
+      title: "P " + grpInt(agg.putVolume) + " / C " + grpInt(agg.callVolume)
+        + " · ratio of sums" + chains + " — click for per-underlying detail",
+      onClick: togglePcr,
+    }));
+    box.appendChild(makeChip("Expiry", BXMoversChips.bxExpiryChipText(j.pcr, tier), { id: "chipExpiry" }));
+    const cov = BXMoversChips.bxCoverageChip(agg);
+    const covOpts = { id: "chipCoverage", amber: cov.amber };
+    if (cov.amber) {
+      covOpts.title = "click to see which legs are missing OI";
+      covOpts.onClick = () => {
+        missingOiOpen = !missingOiOpen;
+        if (missingOiOpen) renderMissingOi(j);
+        else { $("chipDetail").hidden = true; $("chipDetail").textContent = ""; }
+      };
+    }
+    box.appendChild(makeChip("Coverage", cov.text, covOpts));
+    if (missingOiOpen && cov.amber) renderMissingOi(j);
+    else missingOiOpen = false;
+  } else if (state.asset === "futures") {
+    box.appendChild(makeChip("Expiry", (j.expiry_tier || "near") + " tier", { id: "chipExpiry" }));
+    box.appendChild(makeChip("Contracts", grpInt(j.instrument_count) + skipSuffix, { id: "chipCount" }));
+  } else if (state.asset === "options") {
+    /* Options with NO pcr rows (empty tier / no lake) — honest counts only. */
+    box.appendChild(makeChip("Expiry", ($("expiry").value || "Near").toLowerCase() + " tier", { id: "chipExpiry" }));
+    box.appendChild(makeChip("Contracts", grpInt(j.instrument_count) + skipSuffix, { id: "chipCount" }));
+  } else {
+    box.appendChild(makeChip("Instruments", grpInt(j.instrument_count) + skipSuffix, { id: "chipCount" }));
+  }
+  box.hidden = false;
 }
 function renderRows() {
   const cols = ASSETS[state.asset].cols;
@@ -529,6 +808,23 @@ function renderRows() {
   const tb = $("rows");
   if (!data.length) { tb.innerHTML = `<tr><td colspan="${cols.length}" class="empty">📭 no movers in this snapshot</td></tr>`; refreshProvenance(); scheduleVerify(); return; }
   tb.innerHTML = data.map(row => "<tr>" + cols.map(([,field,type],i) => {
+    /* Buildup pill (DEC-MOVERS-HEADER-CHIPS-001): price direction × OI
+       direction, derived CLIENT-side from the row's EXISTING fields (options:
+       the raw oi_chg int; futures: oi_chg_pct — sign-faithful, computed only
+       off a real positive prior OI). A missing/flat input reads an honest "—"
+       (never a guessed quadrant); a strictly-false OI-baseline contiguity
+       appends the SAME " *" the OI cells carry. Labels/classes are static
+       literals from bxBuildup; the value rides the same esc() as every cell. */
+    if (type === "buildup") {
+      const b = BXMoversChips.bxBuildup(
+        numify(row.pct_change),
+        state.asset === "options"
+          ? (typeof row.oi_chg === "number" ? row.oi_chg : null)
+          : numify(row.oi_chg_pct));
+      let bv = b ? b.label : "—";
+      if (b && row.oi_baseline_contiguous === false) bv += " *";
+      return `<td><span class="bupill ${b ? b.cls : "muted"}">${esc(bv)}</span></td>`;
+    }
     let v = row[field]; if (v===undefined||v===null) v = "—";
     let cls = i===0 ? "name" : "";
     /* Numeric cells get display formatting: money → ₹ + Indian grouping @ 2dp,
@@ -849,6 +1145,11 @@ async function load() {
      absent-key payloads — the panel only reappears via showPcr() on a
      successful options payload carrying rows. */
   $("pcrPanel").hidden = true; $("pcrRows").textContent = "";
+  /* Header-chips invalidation (DEC-MOVERS-HEADER-CHIPS-001): the SAME
+     one-move law — the chips row + the missing-OI reveal reappear ONLY via
+     renderChips() on a successful payload (gated / preview / error paths
+     stay chip-less). */
+  $("chips").hidden = true; $("chipDetail").hidden = true; $("chipDetail").textContent = "";
   syncControls();
   const p = new URLSearchParams({ asset:state.asset, category:state.category, interval:$("interval").value, top_n:$("topn").value||"100" });
   if ($("date").value) p.set("date", $("date").value);
@@ -952,6 +1253,7 @@ async function load() {
       baseNote = j.note || "";
       refreshBaselineLegend(baseNote);
       showPcr(j);  /* load() hid the panel above — an identical repeat must restore it. */
+      renderChips(j);  /* the chips row was hidden above too — restore it (same law). */
       refreshProvenance();
       /* Re-PROVE, never re-ASSERT (round-3 refuter fold): an identical MOVERS
          payload says nothing about the /db SIDE, so the verify pass re-runs on
@@ -973,6 +1275,7 @@ async function load() {
     rowsData = j.rows || j[state.category] || j.gainers || j.volume_movers || [];
     renderHead(); renderRows();
     showPcr(j);
+    renderChips(j);
     /* Honest as-of label (DEC-MOVERS-ASOF-LATEST-DEFAULT-001 +
        DEC-MOVERS-TIME-SNAP-UX-001): an intraday DEFAULT (blank time) reads
        "latest (HH:MM)" from the additive latest_time echo — NOT the wrong
@@ -1102,7 +1405,7 @@ function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeo
 ["exchange","expiry","track","date"].forEach(id => $(id).onchange = load);
 ["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
-fillTimes(); renderPills(); load();
+initSegTabs(); fillTimes(); renderPills(); load();
 /* Immediate catch-up on tab return while GATED (DEC-DASHBOARD-POLL-HYGIENE-001):
    the gated auto-retry pauses fetches while hidden, so re-poll NOW on becoming
    visible; clear the pending hidden-armed retry first so it cannot double-fire. */

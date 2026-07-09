@@ -18,7 +18,43 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md
+_Last updated: 2026-07-09 (DEC-MOVERS-HEADER-CHIPS-001, MIGRATION.md #1635 —
+the `/movers` header made READABLE (operator-flagged UX, DISPLAY zone only;
+the web.dhan.co screenshots as the visual bar): labeled CHIPS replace the
+dense Options stats micro-text — Put/Call Ratio (OI) + (Vol) as the honest
+RATIO OF SUMS across every chain on screen (the P/C sums + "ratio of sums"
+stated on the chip title; clicking opens the pre-existing per-underlying PCR
+panel, now the click-to-open detail), an Expiry chip
+("16-Jun-2026 (near tier)"; distinct expiries → "varies by underlying";
+malformed ISO abstains), and an AMBER Coverage badge
+("165/202 contracts · 27 missing OI") whose click reveals WHICH legs are
+missing OI via the ONE additive EMIT-ON-NONEMPTY `pcr[].oi_missing_symbols`
+key (sorted, capped 50 — the true count stays `oi_missing_legs`; leg names
+existed nowhere on the wire; `brutex/data/pcr.py` ZERO diff; a full-coverage
+lake's payload byte-identical, futures + spot payloads zero byte diff); the
+semantics prose moves into a collapsible default-COLLAPSED ⓘ "What am I
+looking at?" explainer on ALL THREE tabs (the pinned all-exchanges folding
+phrase relocated verbatim); the expiry-tier/cadence dropdowns become
+Dhan-style TABS that WRITE the retained permanently-hidden selects — query
+tokens + warm-grid cache keys BYTE-IDENTICAL; futures/options rows gain a
+client-derived colored BUILDUP pill (price↑OI↑ Long Buildup · price↓OI↑
+Short Buildup · price↑OI↓ Short Covering · price↓OI↓ Long Unwinding — off
+the EXISTING pct_change + oi_chg/oi_chg_pct fields, honest "—" on
+missing/flat input, the strict `=== false` " *" baseline gate). Pure
+derivations in the NEW node-golden'd `static/bx-movers-chips.js` riding the
+ONE shared `bxFixed2`; chips DOM-built createElement/textContent-only (the
+movers innerHTML sink count stays at the pinned baseline). NAMED trims: the
+strike-centered CE|PE chain view is the separate follow-up
+`DEC-MOVERS-OPTION-CHAIN-VIEW-001`; no futures `oi_chg` wire field
+fabricated; `unread_symbols` not emitted (counted + disclosed in the
+reveal's tail line); Buildup header sort is a stable no-op. Tests: node
+goldens + substring pins + Chromium browser truth (the amber-badge reveal
+names the seeded null-OI leg end-to-end; the Next tab issues exactly one
+`expiry=Next` request) + server 100.00% on `movers_pcr.py`/
+`movers_options.py`; every pre-existing pinned suite green UNTOUCHED.
+READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change.)
+Earlier: 2026-07-09 (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md
 #1634 — the `/movers` data source made VISIBLE, IDENTIFIED, CLICKABLE, and
 LIVE-VERIFIED on the page; FRONTEND-ONLY (zero Python source change, every
 payload key byte-identical): (1) a textContent-only Source line on all three
@@ -1876,7 +1912,54 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-db-provenance-verify` (**DEC-MOVERS-DB-PROVENANCE-VERIFY-001,
+- **Active branch:** `claude/movers-stored-freshness-guard-v2` (**DEC-MOVERS-HEADER-CHIPS-001,
+  MIGRATION.md #1635** — the `/movers` header chips redesign on the PR #1358 club vehicle (which also carries
+  #1632 freshness guard + #1633 time-snap UX + #1634 provenance/verify; operator-flagged UX, DISPLAY zone only, the
+  web.dhan.co screenshots as the visual bar): (1) labeled CHIPS replace the dense Options stats micro-text — the
+  Put/Call Ratio (OI)/(Vol) chips show the RATIO OF SUMS across every chain on screen (plain int sums of the raw
+  wire fields; the OI-weighted aggregate honestly titled "P … / C … · ratio of sums across N chain(s)" — NOT the
+  mean of the per-underlying ratios, whose truth stays in the PCR panel, now the click-to-open DETAIL behind the
+  ratio chips via `pcrDetailOpen`), the Expiry chip reads "16-Jun-2026 (near tier)" (≥2 distinct expiries →
+  "near tier (varies by underlying)"; malformed ISO ABSTAINS to the tier word), and the Coverage badge
+  ("165/202 contracts · 27 missing OI") goes AMBER on unread legs OR missing OI cells — its click reveals a
+  textContent-built `#chipDetail` list NAMING each chain's missing-OI contracts + one honest tail line for the
+  UNREAD shortfall ("counted in the total, not named" — an unread leg produced no PcrLeg, structurally
+  un-nameable); spot/futures get the same chip pattern (Instruments/Contracts + skipped; futures Expiry = the
+  `expiry_tier` echo). (2) the ⓘ "What am I looking at?" `<details>` explainer, default COLLAPSED, per-tab static
+  prose on ALL THREE tabs (plain words for session-to-cutoff volume / OI-at-instant / prev-close law / the
+  " *"/" ~" legends; the whole-html-pinned "all-exchanges view folds both listings of an underlying into one row"
+  phrase RELOCATED verbatim from the pcrPanel header, which rewords to the short "PCR detail" title). (3)
+  expiry-as-TABS: `#expiryTabs` Near/Next/Far + `#trackTabs` All/Monthly/Weekly segmented buttons
+  (createElement-built once, ONE delegated listener per container) WRITE the retained permanently-hidden
+  `<select>`s — every read site + the `normalize_options_selectors`/`normalize_futures_tier` wire tokens + the
+  warm-grid cache keys BYTE-IDENTICAL. (4) BUILDUP pills on futures + options rows: the pure `bxBuildup` quadrant
+  (price↑OI↑ "Long Buildup" · price↓OI↑ "Short Buildup" · price↑OI↓ "Short Covering" · price↓OI↓ "Long
+  Unwinding") off the EXISTING fields (options raw `oi_chg` int; futures sign-faithful `oi_chg_pct`), an honest
+  "—" when either input is missing/flat, the strict `=== false` OI-baseline " *" appended like the OI cells, the
+  value riding the SAME esc() inside the ONE sanctioned rows innerHTML write (the movers sink count stays at the
+  pinned baseline 9). Pure derivations live in the NEW `static/bx-movers-chips.js` (dual export; resolves the ONE
+  shared `bxFixed2` — structurally NO re-implemented rounding, node-golden-pinned incl. the 1.005→"1.01" half-up
+  parity). THE ONE ADDITIVE WIRE KEY (justified — leg names existed nowhere in the payload): `PcrLeg` gains a
+  defaulted-LAST `symbol` captured beside the existing parse-loop capture (zero new I/O), `UnderlyingPcr` gains
+  `oi_missing_symbols` (sorted — exactly the fold's `oi.missing_legs` class; empty-symbol legacy legs counted,
+  never named), `pcr_row_json` emits it EMIT-ON-NONEMPTY capped at `_OI_MISSING_SYMBOLS_CAP=50` (true count stays
+  `oi_missing_legs`); `brutex/data/pcr.py` ZERO diff; a full-coverage lake's options payload byte-identical
+  end-to-end (key-set-pinned), futures + spot payloads zero byte diff, server notes wire-pinned untouched. NAMED
+  trims: the strike-centered CE|PE chain + spot-marker band does NOT fit the ranking table — the separate-feature
+  follow-up `DEC-MOVERS-OPTION-CHAIN-VIEW-001`; no futures `oi_chg` wire field fabricated (the futures triplet
+  ships OI + OI Chg %); no futures tier-expiry DATE chip (the row's first cell already carries the dated contract
+  name); `unread_symbols` not emitted; Buildup header sort = a stable no-op (derived cell). Tests: node-executed
+  goldens over the REAL bx-movers-chips.js + bx-format.js; substring-presence pins
+  (`test_dashboard_movers_header_chips.py`); Chromium browser truth (`tests/browser/test_movers_header_chips.py`
+  — the computed 0.78/0.96 chips off a REAL Parquet lake, the amber-badge click naming the seeded null-OI leg
+  end-to-end, the Next tab issuing exactly ONE `expiry=Next` request + repaint, the PCR-chip panel toggle;
+  console-clean harness law); server arms in `test_movers_pcr.py` + `test_dashboard_movers_options.py`
+  (back-compat, sorted names, empty-symbol law, cap 50, the byte-identity key-set + absent-key wire pins); every
+  pre-existing pinned suite green UNTOUCHED (zero pinned-test edits). READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; `movers_pcr.py` +
+  `movers_options.py` 100.00% line+branch measured; ruff/ruff-format/`mypy --strict`/pyright clean on every
+  touched python file; `node --check` clean.)
+  Earlier: `claude/movers-db-provenance-verify` (**DEC-MOVERS-DB-PROVENANCE-VERIFY-001,
   MIGRATION.md #1634** — the `/movers` data source made VISIBLE, IDENTIFIED, CLICKABLE, and
   LIVE-VERIFIED on the page; FRONTEND-ONLY (zero Python source change, every payload key
   byte-identical): (1) a textContent-only Source line on all three tabs naming the logical lake
@@ -4409,7 +4492,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/movers-db-provenance-verify`
+- **Active feature branch:** `claude/movers-stored-freshness-guard-v2`
+  (DEC-MOVERS-HEADER-CHIPS-001, MIGRATION.md #1635 — the `/movers` header
+  chips redesign on the PR #1358 club vehicle: labeled PCR/Expiry/Coverage
+  chips (ratio-of-sums honesty; the amber Coverage badge's click reveals the
+  missing-OI legs via the ONE additive emit-on-nonempty
+  `pcr[].oi_missing_symbols` key, cap 50, true count in `oi_missing_legs`),
+  the default-collapsed ⓘ explainer on all three tabs, Dhan-style expiry/track
+  TABS writing the retained hidden selects (query semantics byte-identical),
+  and client-derived Buildup pills on futures/options rows; the strike-
+  centered CE|PE chain view is the named follow-up
+  `DEC-MOVERS-OPTION-CHAIN-VIEW-001`; READ-ONLY dashboard, DISPLAY zone only;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the
+  full blurb)
+  Earlier: `claude/movers-db-provenance-verify`
   (DEC-MOVERS-DB-PROVENANCE-VERIFY-001, MIGRATION.md #1634 — the `/movers`
   data source made visible, identified, clickable, and live-verified: a
   textContent-only Source line (spot surfaces the #1145 stored/resampled read
