@@ -486,12 +486,17 @@ class SummaryCache:
                 # computer. Unbounded wait is deliberate + honest for the
                 # remaining SPOT/OPTIONS kinds (seconds-scale scans): pre-fix,
                 # every cold poller duplicated the wedged scan and hung anyway
-                # — now at most ONE scan is in flight to wedge. For the
-                # LAKE_UNIQUENESS census this clause is SUPERSEDED
-                # (DEC-LAKE-CENSUS-NONBLOCKING-001): each waiter parks ON a
-                # threadpool worker, so the census's 26-min scan × stacked
-                # 15 s polls exhausted the shared AnyIO limiter — that route
-                # now rides the non-blocking ``LakeCensusHolder`` instead.
+                # — now at most ONE scan is in flight to wedge. When this
+                # runs on a dashboard offload worker, the waiting THREAD holds
+                # a LAKE-limiter token (DEC-DASHBOARD-LAKE-IO-LIMITER-001):
+                # wedged waiters are bounded by the 32-token lake pool and can
+                # no longer exhaust AnyIO's default 40-token pool — the waiter
+                # SEMANTICS here are deliberately unchanged. For the
+                # LAKE_UNIQUENESS census this clause is SUPERSEDED entirely
+                # (DEC-LAKE-CENSUS-NONBLOCKING-001): its 26-min scan × stacked
+                # 15 s polls made even a bounded wait unacceptable — that route
+                # now rides the non-blocking ``LakeCensusHolder`` instead and
+                # never enters this wait at all.
                 decision.wait()
                 continue
             gen_at_start = decision
