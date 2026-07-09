@@ -32,6 +32,7 @@ import brutex.dashboard.lake_census_holder as lake_census_holder_module
 import pytest
 from brutex.dashboard.lake_census_holder import (
     CENSUS_THREAD_NAME,
+    FIRST_SCAN_BOUND_CEILING_S,
     SCAN_STALE_FLOOR_S,
     LakeCensusHolder,
     _default_spawn,
@@ -841,6 +842,52 @@ class TestFirstScanBoundHint:
         probes: list[tuple[float, bool]] = []
         holder = self._stalling_probe_holder(
             clock, lambda: junk_hint, probes, [SCAN_STALE_FLOOR_S + 1.0]
+        )
+        assert holder.maybe_refresh() is True
+        assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]
+
+    def test_astronomical_finite_hint_degrades_to_the_bare_floor(self) -> None:
+        """Round-2 refuter: a FINITE-but-astronomical hint (a corrupt sentinel
+        ``duration_ms=1e308`` → 1e305 s) passed the finite+positive gates and
+        seeded an effectively infinite bound — staleness detection silently
+        disabled. Above the 24 h physical ceiling → the bare floor governs
+        (this probe reads NOT-stalled pre-fix — the killing teeth)."""
+        clock = _FakeClock()
+        probes: list[tuple[float, bool]] = []
+        holder = self._stalling_probe_holder(
+            clock, lambda: 1e305, probes, [SCAN_STALE_FLOOR_S + 1.0]
+        )
+        assert holder.maybe_refresh() is True
+        assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]
+
+    def test_hint_exactly_at_the_ceiling_is_accepted(self) -> None:
+        """Boundary law: a hint AT the 24 h ceiling is a legitimate (if
+        extreme) seed — the bound IS the ceiling, strictly-past stalls."""
+        clock = _FakeClock()
+        probes: list[tuple[float, bool]] = []
+        holder = self._stalling_probe_holder(
+            clock,
+            lambda: FIRST_SCAN_BOUND_CEILING_S,
+            probes,
+            [FIRST_SCAN_BOUND_CEILING_S, 1.0],
+        )
+        assert holder.maybe_refresh() is True
+        assert probes == [
+            (FIRST_SCAN_BOUND_CEILING_S, False),  # exactly AT the accepted bound
+            (FIRST_SCAN_BOUND_CEILING_S + 1.0, True),
+        ]
+
+    def test_hint_just_past_the_ceiling_is_rejected_to_the_bare_floor(self) -> None:
+        """Boundary law: strictly ABOVE the ceiling → treated as absent —
+        the bare 1800 s floor governs (pre-fix the 86401 s hint was accepted
+        and this probe read NOT-stalled)."""
+        clock = _FakeClock()
+        probes: list[tuple[float, bool]] = []
+        holder = self._stalling_probe_holder(
+            clock,
+            lambda: FIRST_SCAN_BOUND_CEILING_S + 1.0,
+            probes,
+            [SCAN_STALE_FLOOR_S + 1.0],
         )
         assert holder.maybe_refresh() is True
         assert probes == [(SCAN_STALE_FLOOR_S + 1.0, True)]

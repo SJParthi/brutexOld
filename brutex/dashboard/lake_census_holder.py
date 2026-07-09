@@ -91,6 +91,19 @@ SCAN_STALE_FLOOR_S: Final[float] = 1800.0
 #: stall bound must err generous, never trigger-happy).
 FIRST_SCAN_PER_FILE_BUDGET_S: Final[float] = 0.002
 
+#: PHYSICAL CEILING (seconds) on the sentinel-seeded FIRST-scan stall bound —
+#: 24 h. Round-2 refuter: ``math.isfinite`` alone is not enough — a corrupt
+#: sentinel with a FINITE-but-astronomical value (``duration_ms=1e308`` →
+#: hint 1e305 s) passed the finite+positive gates and yielded an effectively
+#: infinite bound, silently disabling staleness detection for the
+#: corrupt-sentinel + wedged-first-scan combo. A hint ABOVE this ceiling is
+#: treated as ABSENT (the bare :data:`SCAN_STALE_FLOOR_S` governs). 24 h is
+#: generous by orders of magnitude against physics — the measured production
+#: census runs ~26 min over a 2.14M-file lake and is unthrottled (unlike the
+#: L3 sweep's opt-in pacing); no plausible lake legitimately needs a >24 h
+#: FIRST-scan bound, so anything above it is a corrupt sentinel, never a hint.
+FIRST_SCAN_BOUND_CEILING_S: Final[float] = 24 * 3600.0
+
 #: The census scan callable: receives the holder's per-file progress callback
 #: (threaded into ``scan_lake_invariants(per_file_pause=...)`` — the existing
 #: L3 throttle seam, which fires per file INCLUDING skips) and returns the
@@ -148,8 +161,10 @@ class LakeCensusHolder:
         the L3 sentinel's recorded duration when stored, else its
         ``files_scanned`` × :data:`FIRST_SCAN_PER_FILE_BUDGET_S`). Read ON
         the daemon thread before the first scan (it is lake I/O); a raising
-        / ``None`` hint degrades to the bare floor. Inert once a scan has
-        landed a real duration (the 2× law governs from then on).
+        / ``None`` / non-finite / above-:data:`FIRST_SCAN_BOUND_CEILING_S`
+        hint degrades to the bare floor (a corrupt sentinel is never a
+        hint). Inert once a scan has landed a real duration (the 2× law
+        governs from then on).
     """
 
     def __init__(
@@ -338,17 +353,22 @@ class LakeCensusHolder:
         after it, ``max(2 × last landed duration, SCAN_STALE_FLOOR_S)`` —
         generous, and self-scaling once a real scan duration is known.
 
-        NON-FINITE HINT GUARD (round-1 refuter): a poisoned sentinel hint
-        (``inf``/``-inf``/``nan``) is IGNORED — ``max(inf, floor)`` would
-        yield an INFINITE bound (staleness detection silently disabled
-        forever) and ``max(nan, floor)`` is order-dependent — so the bound
-        degrades to the bare :data:`SCAN_STALE_FLOOR_S`, never wider.
+        POISONED-HINT GUARDS (round-1 + round-2 refuters): a sentinel hint
+        that is non-finite (``inf``/``-inf``/``nan`` — ``max(inf, floor)``
+        yields an INFINITE bound, ``max(nan, floor)`` is order-dependent) OR
+        finite-but-ABOVE the physical :data:`FIRST_SCAN_BOUND_CEILING_S`
+        (24 h — a corrupt ``duration_ms=1e308`` sentinel passed the
+        finite+positive gates and seeded a 1e305 s bound, staleness detection
+        effectively disabled) is treated as ABSENT — the bound degrades to
+        the bare :data:`SCAN_STALE_FLOOR_S`, and is therefore NEVER wider
+        than the ceiling on the first-scan arm. A hint exactly AT the
+        ceiling is accepted (boundary law pinned).
         """
         if self._scan_stale_after_s is not None:
             return self._scan_stale_after_s
         if self._scans_completed == 0:
             hint = self._first_bound_hint
-            if hint is None or not math.isfinite(hint):
+            if hint is None or not math.isfinite(hint) or hint > FIRST_SCAN_BOUND_CEILING_S:
                 hint = 0.0
             return max(hint, SCAN_STALE_FLOOR_S)
         return max(2.0 * self._compute_duration, SCAN_STALE_FLOOR_S)
@@ -522,6 +542,7 @@ class LakeCensusHolder:
 
 __all__ = [
     "CENSUS_THREAD_NAME",
+    "FIRST_SCAN_BOUND_CEILING_S",
     "FIRST_SCAN_PER_FILE_BUDGET_S",
     "SCAN_STALE_FLOOR_S",
     "CensusScan",

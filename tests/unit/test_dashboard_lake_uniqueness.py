@@ -423,15 +423,18 @@ class TestCensusEstimateSeam:
         assert payload["findings_total"] == 0  # the scan itself still landed
         assert payload["scan_progress"]["files_total_estimate"] is None
 
-    @pytest.mark.parametrize("junk_ms", [float("inf"), float("-inf"), float("nan")])
-    def test_non_finite_sentinel_duration_falls_to_the_files_arm(
+    @pytest.mark.parametrize("junk_ms", [float("inf"), float("-inf"), float("nan"), 1e308])
+    def test_poisoned_sentinel_duration_falls_to_the_files_arm(
         self, store: InstrumentStore, junk_ms: float
     ) -> None:
-        """Round-1 refuter FINDING 2 (route arm): ``Infinity`` IS valid input to
-        Python's tolerant JSON decoder and passed the ``> 0`` gate — the hint
-        would have seeded an INFINITE stall bound. The ``math.isfinite`` guard
-        rejects it and the hint falls to the ``files_scanned`` derivation; the
-        route serves the verdict + the honest estimate normally."""
+        """Round-1 + round-2 refuters (route arm): ``Infinity`` IS valid input
+        to Python's tolerant JSON decoder and passed the ``> 0`` gate — the
+        hint would have seeded an INFINITE stall bound — and a
+        finite-but-astronomical ``1e308`` ms passed the round-1 ``isfinite``
+        gate too (a 1e305 s bound, the same silent disable through a FINITE
+        number). The finite + 24 h-ceiling guards reject both and the hint
+        falls to the ``files_scanned`` derivation; the route serves the
+        verdict + the honest estimate normally."""
         import json as _json
 
         lake_root = store.path.parent

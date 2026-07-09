@@ -135,6 +135,7 @@ from brutex.dashboard.greeks_health import GreeksEnrichHealth
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_census_holder import (
+    FIRST_SCAN_BOUND_CEILING_S,
     FIRST_SCAN_PER_FILE_BUDGET_S,
     LakeCensusHolder,
 )
@@ -5225,16 +5226,20 @@ def build_app(
         else derives ``files_scanned × FIRST_SCAN_PER_FILE_BUDGET_S`` (the
         conservative 2 ms/file budget). ``None`` on a first-ever lake / a
         foreign-shaped sentinel — the holder then uses the bare 30-min
-        floor. NON-FINITE sentinel values are junk, never a hint (round-1
-        refuter: ``Infinity`` is valid JSON to Python's tolerant decoder,
-        passes ``> 0``, and would have yielded an INFINITE stall bound —
-        staleness detection silently disabled; the holder's
-        ``_stale_bound_locked`` carries the same guard as a second belt);
-        the ``files_scanned`` arm is a non-negative int (structurally
-        finite) whose product with the per-file budget is guarded against
-        an absurd-magnitude ``OverflowError`` → ``None``. Runs ON the
-        census daemon thread (lake I/O), guarded by the holder's hint
-        fence.
+        floor. POISONED sentinel values are junk, never a hint (round-1 +
+        round-2 refuters): a NON-FINITE ``duration_ms`` (``Infinity`` is
+        valid JSON to Python's tolerant decoder, passes ``> 0``, and would
+        have yielded an INFINITE stall bound — staleness detection
+        silently disabled) AND a finite-but-ABOVE-the-physical-ceiling one
+        (``1e308`` ms → a 1e305 s bound, the same silent disable through a
+        FINITE number) both fall through to the ``files_scanned`` arm; the
+        holder's ``_stale_bound_locked`` carries the same finite+ceiling
+        guard as a second belt, so NO arm can seed a bound wider than
+        ``FIRST_SCAN_BOUND_CEILING_S`` (24 h). The ``files_scanned`` arm
+        is a non-negative int (structurally finite) whose product with the
+        per-file budget is guarded against an absurd-magnitude
+        ``OverflowError`` → ``None``. Runs ON the census daemon thread
+        (lake I/O), guarded by the holder's hint fence.
         """
         from brutex.data.lake_heal import load_last_sweep
 
@@ -5249,7 +5254,7 @@ def build_app(
             isinstance(duration_ms, (int, float))
             and not isinstance(duration_ms, bool)
             and math.isfinite(duration_ms)
-            and duration_ms > 0
+            and 0 < duration_ms <= FIRST_SCAN_BOUND_CEILING_S * 1000.0
         ):
             return float(duration_ms) / 1000.0
         files = sweep.get("files_scanned")
