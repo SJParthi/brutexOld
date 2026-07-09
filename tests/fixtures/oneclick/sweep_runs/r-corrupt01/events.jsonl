@@ -1,0 +1,3 @@
+{"hash":"0a7157902d87de0720905fe1143d8fb0d9832de8f9373699529a71de07199733","kind":"preflight.start","payload":{},"run_id":"r-corrupt01","ts_utc":"2026-07-07T04:30:00Z"}
+{"hash":"e994a6057db986efdaf9d820d99625cf241284bec67ec53d517a299198da98eb","kind":"sweep.start","payload":{},"run_id":"r-corrupt01","ts_utc":"2026-07-07T04:30:01Z"}
+{"ts_utc":"2026-07-07T05:59:59Z","run_id":"r-corrupt01","ki

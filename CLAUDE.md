@@ -78,6 +78,108 @@ F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
 `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
 suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
 --strict` clean, pyright at the 46-error pre-change baseline, 0 new.)
+Earlier: 2026-07-08 (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 —
+the sweep CLI log-volume guard: `brutex sweep`/`sweep-all`/`sweep-daemon` now
+configure the ONE COMMON structlog seam
+(`observability/logging.configure_logging` — the seam `cmd_dashboard` already
+uses) at INFO by default via a single `main()`-dispatch guard, with the
+fail-loud `BRUTEX_LOG_LEVEL` override (DEBUG/INFO/WARNING/ERROR,
+case-insensitive; junk → `CliUserError` exit 1, never a silent fallback) — a
+bare sweep process previously ran structlog UNCONFIGURED (default wrapper
+filters at NOTSET) and streamed the engine's per-trade DEBUG events
+(`trade_sim.entry`/`trade_sim.exit`) unfiltered to stderr: measured 870 MB on a
+~200-session composite-e2e fixture, a disk-fill → `LakeWriteHalt` run-killer on
+the §8 2-4 day grid. Sink-level threshold ONLY — no event re-levelled,
+WARNING/ERROR untouched, and the Golden-Rule-#8 audit JSONL hash chain
+(`SweepAuditWriter`/`AuditWriter`) is direct file appends, NOT structlog, so
+audit records are byte-untouched (pinned). An already-configured process (the
+dashboard's in-process sweep job via `run_sweep_from_request`) is deferred to —
+its rotating file sink survives; the guard validates the env var first, so junk
+still fails loud there too. R4 FOLD: the guard covers the PARALLEL path —
+`sweep_parallel._worker_init` applies the SAME bound inside every SPAWN
+worker via the NEW `configure_process_logging_best_effort` (spawn children
+never inherit the parent's structlog config; `BRUTEX_LOG_LEVEL` propagates
+via env; junk → INFO fallback worker-side, never a dead worker; REAL
+2-worker spawn regression via capfd), and the dashboard-launched sweep
+inherits it automatically. OPERATOR NOTE: `BRUTEX_LOG_LEVEL=ERROR` silences
+the WARNING-level watchdog/quarantine events — INFO or WARNING recommended.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; `cli.py` + `observability/logging.py` +
+`engine/sweep_parallel.py` 100% line+branch.)
+Earlier: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
+the P4 merge-integration rebind of the one-click display adapter onto the
+SHIPPED #1275 results-depth artifacts: the ONE discovery seam
+(`oneclick_artifacts.runs_root`) repoints `<results_root>/runs/` → the
+gap-register Ruling-4 `sweep_runs/` SIBLING root — derived from the SAME
+imported `trade_store.SWEEP_RUNS_DIRNAME` and mirror-PINNED byte-equal to the
+ONE engine seam `trade_store.sweep_run_dir`; deliberately NO legacy `runs/`
+fallback probe (a dual root could silently serve stale artifacts) — the
+committed fixture corpus migrated `runs/` → `sweep_runs/` byte-identically
+instead, with NEW `fixture_results_root` (`<fixture_root>/sweeps` pseudo-lake
+law) keeping the fixture override self-contained. The trades seam's PRODUCTION
+default becomes the NEW `TradeStoreReader` paging the REAL
+`trade_store.read_trade_page` sidecars (top100 additive `run_id` +
+`equity_ref.tuple` → `sidecar_paths_from_ref`, every segment safe-validated —
+a hostile traversal ref never touches disk; reader order injected > fixture
+env > TradeStoreReader > no-lake AwaitingTradesReader). HONEST: a pre-#1275
+top100 / absent stamp → loud awaiting; stamp/read damage → NAMED corrupt,
+never a 500 or a fabricated count; an unknown combo pages total=0; limit
+clamps INSIDE read_trade_page at PAGE_LIMIT_MAX=500, the clamp NAMED in
+detail; lots/costs_paisa pass through as honest None (Ruling 18) rendered
+"—"; additive trade_seq/path_1m_status/mae_granularity surfaced (mae/mfe
+carry a "(1m)"/"(tf)" suffix, textContent-only). The P2 manifest/events
+writers are still NOT shipped — the awaiting states + the ASSUMED chain
+algorithm stand. DISPLAY zone only — ENGINE UNCHANGED
+(NIFTY/BANKNIFTY/SENSEX), engine modules imported never edited; both oneclick
+modules 100% line+branch standalone; ruff/ruff-format/`mypy
+--strict`/pyright clean.)
+Earlier: 2026-07-07 (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 —
+the Operator page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and
+the v29 PREVIEW mockup is KILLED by a MECHANICAL sweep (every hardcoded
+₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks,
+em-dashed, or deleted — the fabricated CHARGES table deleted outright,
+Track 1 is signal-only; a generic zero-₹-outside-allowlist pin guards the
+class): real funnel/badges/rank-1 card fed from
+`<lake>/sweeps/runs/<run_id>/` {manifest.json, top100.json, events.jsonl}
+through ONE clearly-marked integration adapter
+(`brutex/dashboard/oneclick_artifacts.py` + the pure `oneclick_view.py`
+builders) — LOUD "awaiting real run artifact" states, named
+corrupt/partial/EMPTY degrades, NEVER a 500 or fabricated counts; trades via
+a typed `TradesReader` seam whose PRODUCTION default is the honest
+`AwaitingTradesReader` (the file-reading fixture reader activates ONLY under
+the fail-loud `BRUTEX_ONECLICK_FIXTURE_ROOT` with a loud badge + visible
+`source` chip; ResultsStore rebind at merge-integration; fixtures live in
+tests/, production shows awaiting states). NEW
+`/api/v1/oneclick/{runs,manifest,top100,events,trades,verify}` — stat-token
+`MoversSnapshotCache` reads, all bench-pinned (`test_oneclick_o1.py`, 6 pin
+groups measured 0.98×–1.00× flat + deterministic teeth). HONEST O-envelope:
+the cached hit is O(1) vs run count/history/sibling tree/trades total and the
+events tail is O(page) (byte-offset seek, 1 MiB window, EOF stat-token
+short-circuit) — but the FIRST read per artifact revision parses the
+O(artifact) file, the manifest fresh compute adds one O(page) events tail
+for the chain map, and the timeline search is WINDOW-scoped (5,000-record
+client ring), never O(1)-total. The Run button MOVES to the Operator page
+(EXISTING `POST /api/v1/sweep/run`; the condition-subset selector ships
+DISABLED "lands at merge-integration (P1)"; the preflight strip is STATIC
+honest text — no route serves the estimator yet) and /reports returns to
+pre-open ONLY; NEW /screener (client filter/sort over top100,
+createElement-only rows; R26 virtual-scroll deviation LEDGERED — a ≤100-row
+artifact renders directly, no in-CI ms measured — the #1557 Playwright
+browser-truth job does not drive /screener) +
+/strategy (createElementNS candles off the EXISTING /api/v1/db/candles,
+trade-centered window, arrows dropped LOUDLY when out-of-window, trades
+inline at load, equity = client int-paisa cumsum labeled "per-trade close");
+R44 VERIFY-ME panel: 7 checks, 5-state truth (operator-judged cap at READY;
+the chain check permanently reads "algorithm assumed until P2 merges" — its
+golden proves generator↔verifier SELF-consistency only; `check=chain` =
+O(file) on click only). The events chain law / events path /
+per_door_kills+funnel shapes / interim trades layout are registered contract
+PROPOSALS behind named seams. XSS: textContent-only, payloads stringified
+into ONE text node, hostile-twin route-driven. NAMED out-of-PR: the
+bx-rate-monitor/bx-liveproof→bx-poll refactor; regime/family display (P3).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; display zone ONLY — zero
+engine/orchestrator/results-storage/preflight edits; both new modules 100%
+line+branch standalone + two new static ci.yml gates).
 Earlier: 2026-07-06 (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 —
 the bulk Greeks v1→v2 re-enrichment BACKFILL closing the #1188 named follow-up:
 NEW `brutex/data/greeks_backfill.py` — a stamp-driven target-DISCOVERY +
@@ -1664,6 +1766,79 @@ hostile-review pass._
   `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
   suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
   --strict` clean, pyright at the 46-error pre-change baseline, 0 new.)
+  Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
+  the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
+  `observability/logging.configure_logging` seam at INFO by default for
+  `sweep`/`sweep-all`/`sweep-daemon`, with the fail-loud `BRUTEX_LOG_LEVEL` override
+  (DEBUG/INFO/WARNING/ERROR; junk → loud exit 1) — an unconfigured sweep process streamed per-trade
+  DEBUG events unfiltered to stderr (measured 870 MB on a ~200-session fixture; disk-fill →
+  `LakeWriteHalt` run-killer on the 2-4 day grid). Sink-level threshold only; audit JSONL hash chain
+  untouched (structlog-free, pinned); an already-configured process (the dashboard sweep job) is
+  deferred to; R4 FOLD — the SAME bound is applied INSIDE every spawn worker at
+  `sweep_parallel._worker_init` via `configure_process_logging_best_effort` (spawn workers never inherit
+  the parent config; real 2-worker spawn regression), the dashboard sweep inherits it automatically, and
+  `BRUTEX_LOG_LEVEL=ERROR` is documented as an opt-in hazard (silences watchdog/quarantine WARNINGs).
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
+  Earlier: `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
+  P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
+  targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
+  `sweep_runs/` SIBLING root (mirror-pinned to `trade_store.sweep_run_dir`; NO legacy `runs/` fallback — the fixture
+  corpus migrated instead, `fixture_results_root` keeping the fixture override self-contained), and the trades seam's
+  PRODUCTION default becomes the NEW `TradeStoreReader` over the SHIPPED #1275 results-depth sidecars
+  (`read_trade_page`; top100 additive `run_id` + `equity_ref.tuple` → `sidecar_paths_from_ref`, hostile refs never
+  touch disk; pre-#1275 top100 / absent stamp → loud awaiting, damage → NAMED corrupt, PAGE_LIMIT_MAX=500 clamp named,
+  Ruling-18 None lots/costs rendered "—", additive `trade_seq`/`path_1m_status`/`mae_granularity` surfaced with a
+  "(1m)"/"(tf)" suffix). P2 manifest/events writers still NOT shipped — awaiting states + the ASSUMED chain algorithm
+  stand. DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine imported never edited; both oneclick
+  modules 100% line+branch standalone; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/operator-page-real-rebuild` (**DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561** — the Operator
+  page (/) is wired to the sweep-oneclick ARTIFACT CONTRACTS and the v29 PREVIEW mockup is KILLED by a MECHANICAL
+  sweep (every hardcoded ₹/count/date/invented-strategy-name site re-fed via `data-oc=` hooks, em-dashed, or
+  deleted — the fabricated CHARGES table deleted outright, Track 1 is signal-only; a generic
+  zero-₹-outside-allowlist pin guards the class). Real funnel/badges/rank-1 card fed from
+  `<lake>/sweeps/runs/<run_id>/` {manifest.json, top100.json, events.jsonl} through ONE clearly-marked integration
+  adapter (`brutex/dashboard/oneclick_artifacts.py` + the pure `oneclick_view.py` payload builders) — LOUD
+  "awaiting real run artifact" states, named corrupt/partial/EMPTY degrades (a valid-but-empty top100 is status ok,
+  `row_count` = `len(rows)` never an assumed 100), NEVER a 500 or a fabricated count; trades ride a typed
+  `TradesReader` seam whose PRODUCTION default is the honest `AwaitingTradesReader` — the file-reading
+  `FixtureTradesReader` activates ONLY under the fail-loud `BRUTEX_ONECLICK_FIXTURE_ROOT` (loud badge + a visible
+  per-table `source` chip; ResultsStore paged-API rebind at merge-integration; fixtures live in tests/, a
+  production lake with no artifacts shows awaiting states — the HONEST fixture-vs-real boundary). NEW
+  `/api/v1/oneclick/{runs,manifest,top100,events,trades,verify}` — stat-token-keyed `MoversSnapshotCache` reads,
+  bench-pinned (`tests/bench/test_oneclick_o1.py`, 6 pin groups measured 2026-07-07 at 0.98×–1.00× flat +
+  deterministic no-recompute/no-reparse teeth). HONEST O-envelope (Golden Rule #10): the cached hit is O(1) vs run
+  count / run-history depth / sibling-tree size / trades total, the events tail is O(page) (byte-offset seek +
+  1 MiB window; EOF repeat polls short-circuit on the stat token) — but the FIRST read per artifact revision
+  parses the O(artifact) file, the manifest fresh compute additionally pays one run-dir probe + one O(page) events
+  tail for the chain map, every repeat poll pays O(1) `os.stat` token syscalls, and the timeline search is
+  WINDOW-scoped over a capped 5,000-record client ring — never O(1)-total. The Run button MOVES to the Operator
+  page (wired to the EXISTING `POST /api/v1/sweep/run` + `/api/v1/cascade/run`; the condition-subset multi-select
+  ships DISABLED "lands at merge-integration (P1)" — shown, never faked live; the preflight/estimator strip is
+  STATIC honest text — the fixture adapter exists but no route serves it yet) and `/reports` returns to pre-open
+  ONLY. NEW `/screener` (client filter/sort over top100, createElement-only rows, full-precision BigInt/string
+  comparator with the rank-ascending tie-break, null-VIX rows excluded-but-COUNTED under a band filter; the R26
+  virtual-scroll deviation is LEDGERED — a fixed ≤100-row artifact renders directly in one pass with a
+  RENDER_CAP=200 guard, NO in-CI ms measurement claimed — the #1557 Playwright browser-truth job, which landed
+  on main mid-flight, does not drive /screener) + `/strategy` (chart-first:
+  createElementNS SVG candles off the EXISTING `/api/v1/db/candles`, trade-centered window, an out-of-window trade
+  DROPS its arrow with a loud note, trades inline at load — ≤2-click law; equity = client int-paisa cumsum LABELED
+  "per-trade close equity — minute-path equity lands with P3"; vix_band on the story card; ONE shared Beginner/Pro
+  mechanism). R44 VERIFY-ME panel: 7 checks under a 5-state truth table (pass/fail/READY/awaiting/not_wired —
+  operator-judged checks cap at READY server-side; not-wired capabilities never read green; `check=chain` runs the
+  O(file) hash-chain verify on CLICK only, cached per events revision, and every chain verdict permanently carries
+  "algorithm assumed until P2 merges" — the golden proves generator↔verifier SELF-consistency only). The events
+  chain law + `runs/<id>/events.jsonl` path + `per_door_kills`/`actual.funnel` shapes + the interim fixture-only
+  trades layout are registered contract PROPOSALS isolated behind named seams — never drifted unilaterally. XSS:
+  every artifact-derived string DOM-bound via textContent/createElement(NS) only, event payloads JSON.stringify'd
+  into ONE text node, the hostile fixture twin driven through the routes; one-shot fetch failures → errorCard +
+  Retry, never a blank grid. Display copy: stale "52-condition" → 60, "u64" → u128 (display surfaces only). NAMED
+  OUT-OF-PR: the bx-rate-monitor.js/bx-liveproof.js refactor onto the shared bx-poll.js core; regime/family
+  display (P3); the real trades rebind + P2 chain confirmation + the preflight render (merge-integration). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX, F&O lake REFERENCE_ONLY, no scope/vocab/rate change; DISPLAY zone only —
+  zero engine/orchestrator/ranking/results-storage/preflight edits, sweep/cascade POST endpoints byte-unchanged;
+  `oneclick_artifacts.py` (359/94) + `oneclick_view.py` (165/72) BOTH 100% line+branch STANDALONE + two NEW static
+  ci.yml per-module gates; ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline
+  (0 new); node-executed JS goldens + `node --check` clean on all five new JS files).
   Earlier: `claude/peaceful-newton-fehcc3` (**DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558** — the bulk
   Greeks v1→v2 re-enrichment BACKFILL closing the two #1188 named gaps: EXPIRED option contracts frozen at formula v1 +
   CLI-`brutex fetch`-only lakes that never enriched. NEW `brutex/data/greeks_backfill.py` — a stamp-driven
@@ -3883,7 +4058,26 @@ hostile-review pass._
   instead of the whole-grid-aborting resolver ValueError; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
   blurb)
+  Earlier: `claude/sweep-log-level-guard`
+  (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
+  log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
+  `main()` sweep dispatch AND inside every spawn worker
+  (`sweep_parallel._worker_init`, R4 fold); audit JSONL hash chain untouched;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/oneclick-sweep-runs-rebind`
+  (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 — the P4
+  merge-integration rebind: oneclick discovery repointed to the Ruling-4
+  `sweep_runs/` sibling root + the production `TradeStoreReader` over the
+  #1275 results-depth sidecars; DISPLAY zone only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/operator-page-real-rebuild`
+  (DEC-OPERATOR-PAGE-REAL-001, MIGRATION.md #1561 — the Operator page (/)
+  wired to the sweep-oneclick artifact contracts + NEW /screener + /strategy;
+  DISPLAY zone only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/peaceful-newton-fehcc3`
+  (DEC-GREEKS-BULK-REENRICH-001, MIGRATION.md #1558 — the bulk Greeks v1→v2
+  re-enrichment backfill for expired option contracts + CLI-fetch-only lakes;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/sweep-stall-oom-guards`
   (DEC-SWEEP-STALL-OOM-GUARDS-001, MIGRATION.md #1608 — the parallel grid-sweep
   gains a heavy-grid-aware stall watchdog + a distinct `BrokenProcessPool`
@@ -4164,7 +4358,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4816-4817` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4879-4880` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
