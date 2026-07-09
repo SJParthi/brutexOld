@@ -110,6 +110,7 @@ from typing import Any, Final
 
 import structlog
 
+from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_futures import (
     _read_future_session,
     _underlying_spot_ltp,
@@ -1270,6 +1271,10 @@ def compute_options_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
+    # call (an env parse + dict copy) and threaded into every per-candidate
+    # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
+    class_aliases = resolve_fno_index_aliases()
     for symbol, contract_exchange, underlying, expiry, strike, opt_type in contracts:
         try:
             read = _read_future_session(
@@ -1355,9 +1360,14 @@ def compute_options_candidates(
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
             # DEC-MOVERS-UNDERLYING-CLASS-001: index-vs-stock class from the
-            # stored-master kind map keyed by the PARSED underlying token, attached
-            # once for the rank-time filter (absent map / unknown → KIND_UNKNOWN).
-            underlying_kind=fno_kind_from_underlying(underlying, underlying_kinds),
+            # stored-master kind map. The PARSED token is hyphen-preserving
+            # (parse_fno_symbol yields BAJAJ-AUTO) while the map keys the
+            # primary_fno_underlying FORM (BAJAJAUTO) — the lookup normalises the
+            # token into the map's key space via the SAME resolver + the hoisted
+            # alias map (review round 1); absent map / unrecognised → KIND_UNKNOWN.
+            underlying_kind=fno_kind_from_underlying(
+                underlying, underlying_kinds, aliases=class_aliases
+            ),
         )
         if close_iso is not None and close_contig is False:
             warn_prev_baseline_noncontiguous(

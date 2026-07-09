@@ -24,9 +24,15 @@ derived live:
   :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` + ``is_index``
   classification the six-step pull order uses
   (``DEC-PULL-SIX-STEP-ORDER-001`` — ``historical_pull._underlying_kind_map``), so
-  the two never diverge and the map key space matches the contract underlying forms
-  exactly by construction (``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` →
-  ``BAJAJAUTO``).
+  the two never diverge. The map KEYS are the ``primary_fno_underlying`` FORMS
+  (``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` → ``BAJAJAUTO``), while the
+  candidate's PARSED underlying token is right-anchored and hyphen-PRESERVING
+  (:func:`~brutex.data.fno_symbol.parse_fno_symbol` yields ``BAJAJ-AUTO``, never
+  ``BAJAJAUTO``) — so :func:`fno_kind_from_underlying` normalises the token INTO
+  the map's key space AT the lookup, through the SAME resolver + alias map the
+  builder uses (review round 1: the prior raw ``dict`` lookup silently
+  misclassified every hyphenated / aliased F&O underlying as ``unknown``,
+  dropping it from BOTH Indices and Stocks).
 
 An underlying whose kind cannot be resolved is :data:`KIND_UNKNOWN`: it is honestly
 INCLUDED in ``All`` but EXCLUDED from BOTH ``Indices`` and ``Stocks`` (never a
@@ -49,7 +55,7 @@ resolver + the segment vocabulary).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Final, Protocol
 
 from brutex.dashboard.fno_underlying import primary_fno_underlying
@@ -159,11 +165,15 @@ def build_underlying_kind_map(instruments: Iterable[Instrument]) -> dict[str, st
     ``composite_pull._underlying_kind_map``): each instrument's key goes through
     :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` (the same alias /
     normalization bridge — ``NIFTYJR`` → ``NIFTYNXT50``, ``BAJAJ-AUTO`` →
-    ``BAJAJAUTO``) so the map key space matches the parsed contract underlying tokens
-    the futures/options movers carry EXACTLY by construction — never re-minted
-    (Golden Rule #11 COMMON). The value is :data:`KIND_INDEX` / :data:`KIND_STOCK`
-    from the master's ``is_index``. First-wins on a key collision (two spot spellings
-    sharing one F&O primary), mirroring the pull-side de-dup.
+    ``BAJAJAUTO``), so the map key space is the ``primary_fno_underlying`` FORM
+    space — never re-minted (Golden Rule #11 COMMON). NOTE (review round 1): the
+    parsed contract underlying tokens the futures/options movers carry are
+    hyphen-PRESERVING (``BAJAJ-AUTO``), NOT this form space — the lookup side
+    (:func:`fno_kind_from_underlying`) folds each token into it through the SAME
+    resolver, so the two sides meet at the lookup, not "by construction". The value
+    is :data:`KIND_INDEX` / :data:`KIND_STOCK` from the master's ``is_index``.
+    First-wins on a key collision (two spot spellings sharing one F&O primary),
+    mirroring the pull-side de-dup.
 
     Parameters
     ----------
@@ -185,23 +195,35 @@ def build_underlying_kind_map(instruments: Iterable[Instrument]) -> dict[str, st
     return kinds
 
 
-def fno_kind_from_underlying(underlying: str, kinds: dict[str, str] | None) -> str:
+def fno_kind_from_underlying(
+    underlying: str, kinds: dict[str, str] | None, *, aliases: Mapping[str, str]
+) -> str:
     """Resolve a FUTURES/OPTIONS candidate's kind from its parsed *underlying* token.
 
-    Looks the contract's parsed underlying token up in the *kinds* map built by
-    :func:`build_underlying_kind_map` (whose keys are the SAME
-    :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` forms the vendor
-    stamps on the contract legs, so a direct lookup is exact). An absent map
-    (``None``, e.g. a direct/test caller that threaded none) or an unrecognised
-    underlying yields :data:`KIND_UNKNOWN` — honest, never a guess (Golden Rule #1).
+    The *kinds* map (:func:`build_underlying_kind_map`) is keyed by
+    :func:`~brutex.dashboard.fno_underlying.primary_fno_underlying` FORMS
+    (``BAJAJAUTO``), but the contract's parsed underlying token is right-anchored
+    and hyphen-PRESERVING (``BAJAJ-AUTO`` —
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol`), so the token is normalised
+    into the map's key space HERE, through the SAME resolver + *aliases* map the
+    builder uses — never a second normalisation law (CLAUDE.md §11 COMMON). This is
+    the review-round-1 fix: the prior raw ``dict`` lookup silently misclassified
+    every hyphenated / aliased F&O underlying as unknown. An absent map (``None``,
+    e.g. a direct/test caller that threaded none) or an unrecognised underlying
+    yields :data:`KIND_UNKNOWN` — honest, never a guess (Golden Rule #1).
 
     Parameters
     ----------
     underlying
-        The contract's parsed underlying token (``NIFTY`` / ``BAJAJAUTO``).
+        The contract's parsed underlying token (``NIFTY`` / ``BAJAJ-AUTO``).
     kinds
         The ``{underlying → kind}`` map from :func:`build_underlying_kind_map`, or
         ``None`` when no map was threaded in.
+    aliases
+        The sourced spot→F&O index alias map
+        (:func:`~brutex.dashboard.instrument_loader.resolve_fno_index_aliases`).
+        Resolved ONCE per compute call by the caller and threaded per lookup, so
+        the per-candidate cost stays O(1) — never an env re-parse per row.
 
     Returns
     -------
@@ -210,7 +232,7 @@ def fno_kind_from_underlying(underlying: str, kinds: dict[str, str] | None) -> s
     """
     if kinds is None:
         return KIND_UNKNOWN
-    return kinds.get(underlying, KIND_UNKNOWN)
+    return kinds.get(primary_fno_underlying(underlying, aliases=aliases), KIND_UNKNOWN)
 
 
 def candidate_passes_class(kind: str, wanted: str) -> bool:
@@ -259,7 +281,9 @@ def class_note_suffix(wanted: str, excluded: int) -> str:
     Parameters
     ----------
     wanted
-        The normalised class token (from :func:`normalize_underlying_class`).
+        The normalised class token (from :func:`normalize_underlying_class` —
+        the ONLY sanctioned producer; a non-canonical token raises ``KeyError``
+        loudly below, never a silent raw echo — review-round-1 tightening).
     excluded
         The count of :data:`KIND_UNKNOWN` candidates dropped by the filter.
 
@@ -270,7 +294,9 @@ def class_note_suffix(wanted: str, excluded: int) -> str:
     """
     if wanted == CLASS_ALL:
         return ""
-    label = _CLASS_LABEL.get(wanted, wanted)
+    # Total by precondition: past the `all` early return, a normalised token is
+    # exactly indices/stocks — both keys. Fail-loud on junk (Golden Rule #1).
+    label = _CLASS_LABEL[wanted]
     excluded_note = f" ({excluded:,} unclassified excluded)" if excluded > 0 else ""
     return f" Class: {label}{excluded_note}."
 
@@ -325,7 +351,11 @@ def filter_by_underlying_class[C: _HasUnderlyingKind](
     count, so the default is byte-identical. Otherwise the items whose
     ``underlying_kind`` passes :func:`candidate_passes_class` are kept, and the number
     of :data:`KIND_UNKNOWN` items dropped (excluded from BOTH indices and stocks) is
-    returned so the caller can surface it honestly in the note.
+    returned so the caller can surface it honestly in the note. The excluded count is
+    taken over the FULL pre-top-N candidate set the payload builder passes in (the
+    ``min_volume`` precedent — the filter runs at rank time BEFORE the top-N slice),
+    so the note reflects the whole screened population, not just the visible page.
+    Single pass, O(items).
 
     Parameters
     ----------
@@ -341,6 +371,13 @@ def filter_by_underlying_class[C: _HasUnderlyingKind](
     """
     if wanted == CLASS_ALL:
         return list(items), 0
-    kept = [item for item in items if candidate_passes_class(item.underlying_kind, wanted)]
-    excluded = sum(1 for item in items if item.underlying_kind == KIND_UNKNOWN)
+    kept: list[C] = []
+    excluded = 0
+    for item in items:
+        if candidate_passes_class(item.underlying_kind, wanted):
+            kept.append(item)
+        elif item.underlying_kind == KIND_UNKNOWN:
+            # Past the `all` early return, `wanted` is indices/stocks, under which
+            # an unknown NEVER passes — the elif totals the unknown count exactly.
+            excluded += 1
     return kept, excluded

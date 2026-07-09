@@ -64,6 +64,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
     _DAILY_MIN_FLOOR,
@@ -196,8 +197,11 @@ def format_contract_date(value: date_cls) -> str:
 _EXPIRY_TOKEN_LEN: Final[int] = 7
 
 #: The minimum hyphen-split arity of a FUT contract groww_symbol
-#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts; a stock name never hyphenates,
-#: vendor symbols use hyphen only as the field separator).
+#: (``EXCH-UNDERLYING-DDMmmYY-FUT`` → 4 parts). NOTE (review round 1): an
+#: underlying CAN itself contain hyphens (``BAJAJ-AUTO`` — the vendor keeps the
+#: spot spelling's interior hyphen), so the parse is right-ANCHORED and joins the
+#: interior tokens back (mirroring :func:`~brutex.data.fno_symbol.parse_fno_symbol`);
+#: the prior "a stock name never hyphenates" claim here was FALSE.
 _MIN_FUT_PARTS: Final[int] = 4
 
 #: The three serial-month futures expiry TIERS → the 0-based rank of the live
@@ -224,6 +228,16 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     so its last hyphen part is not ``FUT``) and for any junk / unparseable expiry
     token — the caller then skips it, never raising (Golden Rule #1).
 
+    Right-ANCHORED, mirroring the canonical
+    :func:`~brutex.data.fno_symbol.parse_fno_symbol` (CLAUDE.md §11 COMMON): the
+    underlying is every token between the exchange (token ``0``) and the expiry,
+    joined through any interior hyphens, so a hyphenated underlying is preserved
+    intact — ``"NSE-BAJAJ-AUTO-30Sep25-FUT"`` → ``("BAJAJ-AUTO", …)``. Review
+    round 1 fix: the prior ``parts[1]`` read TRUNCATED it to ``"BAJAJ"``,
+    mis-keying the grouping / display name / underlying-spot probe AND the
+    underlying-class lookup (a sanctioned correction, ledgered in
+    ``MIGRATION.md`` #1631).
+
     Parameters
     ----------
     symbol
@@ -239,7 +253,9 @@ def parse_future_symbol(symbol: str) -> tuple[str, date_cls] | None:
     # Need at least EXCH, UNDERLYING, expiry, FUT — and the last part must be FUT.
     if len(parts) < _MIN_FUT_PARTS or parts[-1] != "FUT":
         return None
-    underlying = parts[1]
+    # Right-anchored: expiry/FUT from the END, the underlying is EVERYTHING between
+    # (interior hyphens re-joined — the parse_fno_symbol idiom, review round 1).
+    underlying = "-".join(parts[1:-2])
     expiry = _parse_expiry_token(parts[-2])
     if not underlying or expiry is None:
         return None
@@ -1179,6 +1195,10 @@ def compute_futures_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
+    # call (an env parse + dict copy) and threaded into every per-candidate
+    # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
+    class_aliases = resolve_fno_index_aliases()
     for underlying, contracts in by_underlying.items():
         chosen = select_expiry_tier(
             [(sym, exp) for sym, _exch, exp in contracts], on_date=day, tier=tier
@@ -1250,11 +1270,15 @@ def compute_futures_candidates(
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
             # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from
-            # the stored-master kind map keyed by the PARSED underlying token (the
-            # same primary_fno_underlying form the map is built with), attached once
-            # so the rank-time filter never re-reads the master. Absent map / unknown
-            # underlying → KIND_UNKNOWN (honest, Golden Rule #1).
-            underlying_kind=fno_kind_from_underlying(underlying, underlying_kinds),
+            # the stored-master kind map. The map is keyed by primary_fno_underlying
+            # FORMS (BAJAJAUTO) while the PARSED token is hyphen-preserving
+            # (BAJAJ-AUTO), so the lookup normalises the token into the map's key
+            # space via the SAME resolver + the hoisted alias map (review round 1).
+            # Attached once so the rank-time filter never re-reads the master;
+            # absent map / unrecognised underlying → KIND_UNKNOWN (Golden Rule #1).
+            underlying_kind=fno_kind_from_underlying(
+                underlying, underlying_kinds, aliases=class_aliases
+            ),
         )
         if close_iso is not None and close_contig is False:
             warn_prev_baseline_noncontiguous(

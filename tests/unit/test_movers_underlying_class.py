@@ -12,11 +12,13 @@ DEFAULT (``all`` / omitted) class is BYTE-IDENTICAL to the pre-change payload.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
-
+from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_underlying_class import (
     CLASS_ALL,
     CLASS_INDICES,
@@ -136,13 +138,38 @@ class TestBuildUnderlyingKindMap:
 
 class TestFnoKindFromUnderlying:
     def test_none_map_is_unknown(self) -> None:
-        assert fno_kind_from_underlying("NIFTY", None) == KIND_UNKNOWN
+        assert fno_kind_from_underlying("NIFTY", None, aliases={}) == KIND_UNKNOWN
 
     def test_hit(self) -> None:
-        assert fno_kind_from_underlying("NIFTY", {"NIFTY": KIND_INDEX}) == KIND_INDEX
+        assert fno_kind_from_underlying("NIFTY", {"NIFTY": KIND_INDEX}, aliases={}) == KIND_INDEX
 
     def test_miss_is_unknown(self) -> None:
-        assert fno_kind_from_underlying("FINNIFTY", {"NIFTY": KIND_INDEX}) == KIND_UNKNOWN
+        assert (
+            fno_kind_from_underlying("FINNIFTY", {"NIFTY": KIND_INDEX}, aliases={}) == KIND_UNKNOWN
+        )
+
+    def test_hyphenated_token_normalised_into_map_key_space(self) -> None:
+        # Review round 1 (the MAJOR): `parse_fno_symbol` preserves the interior
+        # hyphen (`BAJAJ-AUTO`) while the map keys the primary_fno_underlying FORM
+        # (`BAJAJAUTO`) — the lookup must fold the token into the map's key space,
+        # never a raw dict miss silently classifying every hyphenated stock unknown.
+        kinds = build_underlying_kind_map(
+            [_inst("BAJAJ-AUTO", kind=InstrumentType.EQ, segment=Segment.CASH)]
+        )
+        assert kinds == {"BAJAJAUTO": KIND_STOCK}
+        assert fno_kind_from_underlying("BAJAJ-AUTO", kinds, aliases={}) == KIND_STOCK
+
+    def test_aliased_index_resolves_through_the_same_alias_map(self) -> None:
+        # An aliased index master row keys the map at its F&O form (NIFTYJR →
+        # NIFTYNXT50); both the contract-stamped form AND the alias spelling
+        # resolve through the SAME sourced alias map the builder uses.
+        aliases = resolve_fno_index_aliases()
+        kinds = build_underlying_kind_map(
+            [_inst("NIFTYJR", kind=InstrumentType.IDX, segment=Segment.CASH)]
+        )
+        assert kinds == {"NIFTYNXT50": KIND_INDEX}
+        assert fno_kind_from_underlying("NIFTYNXT50", kinds, aliases=aliases) == KIND_INDEX
+        assert fno_kind_from_underlying("NIFTYJR", kinds, aliases=aliases) == KIND_INDEX
 
 
 # ── candidate_passes_class ────────────────────────────────────────────────
@@ -224,6 +251,12 @@ class TestClassNoteAndEcho:
             "underlying_class": CLASS_INDICES,
             "excluded_unclassified": 2,
         }
+
+    def test_note_junk_token_fails_loud(self) -> None:
+        # Review round 1 tightening: the label table is indexed directly — a
+        # non-normalised token raises loudly, never a silent raw echo.
+        with pytest.raises(KeyError):
+            class_note_suffix("junk", 0)
 
 
 # ── build_*_payload rank-time filter (default byte-identity + filtering) ───
@@ -368,8 +401,8 @@ class TestBuildFuturesPayloadClass:
 
 
 def _option(underlying: str, kind: str, pct: str) -> object:
-    from brutex.data.moneyness import Moneyness
     from brutex.dashboard.movers_options import OptionMover
+    from brutex.data.moneyness import Moneyness
 
     return OptionMover(
         underlying=underlying,
@@ -439,3 +472,111 @@ class TestBuildOptionsPayloadClass:
         )
         assert "pull the F&O" in payload["note"]
         assert " Class: Indices." in payload["note"]
+
+
+# ── FULL default-payload byte identity (review round 1, finding 3) ─────────
+
+
+class TestDefaultFullPayloadByteIdentity:
+    """The FULL default payload is identical across kwarg-omitted / ``None`` / ``All``.
+
+    Strengthens the key-absence pins (review round 1, finding 3): the
+    kwarg-OMITTED call is byte-for-byte the PRE-change caller shape (the parameter
+    is an additive default), so equality of the WHOLE serialised payload across
+    all three default spellings pins the frozen default — not merely the absence
+    of the new keys / note suffix.
+    """
+
+    @staticmethod
+    def _dump(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, sort_keys=True, default=str)
+
+    def test_spot_full_payload_identical(self) -> None:
+        from brutex.dashboard.movers_snapshot import build_snapshot_payload
+
+        omitted = build_snapshot_payload(
+            _spot_snaps(), interval="1day", date="2024-06-13", time=None, top_n=10, skipped=0
+        )
+        none_arg = build_snapshot_payload(
+            _spot_snaps(),
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class=None,
+        )
+        all_arg = build_snapshot_payload(
+            _spot_snaps(),
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class="All",
+        )
+        assert self._dump(omitted) == self._dump(none_arg) == self._dump(all_arg)
+
+    def test_futures_full_payload_identical(self) -> None:
+        from brutex.dashboard.movers_futures import build_futures_payload
+
+        movers = (_future("NIFTY", KIND_INDEX, "5"), _future("RELIANCE", KIND_STOCK, "3"))
+        omitted = build_futures_payload(
+            movers,  # type: ignore[arg-type]
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+        )
+        none_arg = build_futures_payload(
+            movers,  # type: ignore[arg-type]
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class=None,
+        )
+        all_arg = build_futures_payload(
+            movers,  # type: ignore[arg-type]
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class="All",
+        )
+        assert self._dump(omitted) == self._dump(none_arg) == self._dump(all_arg)
+
+    def test_options_full_payload_identical(self) -> None:
+        from brutex.dashboard.movers_options import build_options_payload
+
+        movers = (_option("NIFTY", KIND_INDEX, "5"), _option("RELIANCE", KIND_STOCK, "3"))
+        omitted = build_options_payload(
+            movers,  # type: ignore[arg-type]
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+        )
+        none_arg = build_options_payload(
+            movers,  # type: ignore[arg-type]
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class=None,
+        )
+        all_arg = build_options_payload(
+            movers,  # type: ignore[arg-type]
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=10,
+            skipped=0,
+            underlying_class="All",
+        )
+        assert self._dump(omitted) == self._dump(none_arg) == self._dump(all_arg)
