@@ -1964,8 +1964,12 @@ jobs:
           # guard + the readable-subset per-click latch are covered by
           # tests/unit/test_dashboard_db_ledger_stat_guard.py, which MUST
           # also join this gate.
+          # DEC-DB-BASELINE-MANIFEST-ROUTE-001: the %-baseline file pruning
+          # (manifest/month-grammar routing + the parity pins) is covered by
+          # tests/unit/test_dashboard_db_baseline_manifest.py, which MUST
+          # also join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
