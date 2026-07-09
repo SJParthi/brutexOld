@@ -151,6 +151,33 @@ not a measured constant), so peak ``≈ O(160 B) · |candidates_k|``, bounded by
 FRONTIER / candidate-list size, NOT by ``n_bars`` — the generator never holds the
 bar window (it calls the injected ``count_hits``), so its peak is flat versus bar
 count.
+
+## Per-level survivor census (counts only, ZERO identity impact)
+
+For every Apriori level it processes the generator emits ONE
+``sweep.apriori.census`` structlog event (:func:`_emit_census`) carrying the
+settled RAW candidate count ``|C_j|`` and — for the internal frequent frontiers
+``F_1 … F_{k-1}`` — the post-``min_hits`` frequent count ``|F_j|`` (the TARGET
+level ``k`` is NOT hit-filtered here, so its ``frequent`` is OMITTED; the
+caller's Stage-1B is the authority). A real-lake Apriori run therefore produces
+the EMPIRICAL per-level survivor curve, replacing the modeled numbers. This is
+pure observability — counts only, gated on the Apriori path (fires only when the
+generator runs): it never touches the returned candidates, the run identity, or
+the persisted store bytes.
+
+## The Apriori-aware ``max_combos`` pre-flight (guardrail semantics)
+
+The sweep's up-front pre-flight refuses any ``k`` whose raw ``C(n_unique, k)``
+mask count exceeds ``max_combos``. That is correct for the brute-force path but
+would REFUSE a full-vocab ``k >= 4`` grid (``C(60, 4) = 487_635 > 100_000``)
+BEFORE the Apriori generator ever runs — even though, with the flag ON, the
+deterministic ``MAX_MASK_BARS`` breaker is the real guardrail on emitted work,
+not raw ``C(n, k)``. :func:`effective_max_combos` therefore AUTO-RAISES the
+effective ``max_combos`` to admit every requested ``k`` when Apriori is enabled
+(emitting one ``sweep.apriori.max_combos_raised`` event), and returns the value
+UNCHANGED when it is not — the brute-force path's pre-flight is byte-identical
+(the guard LOGIC is never touched; this helper only ever FEEDS the guards a
+value).
 """
 
 from __future__ import annotations
@@ -163,7 +190,7 @@ import numpy as np
 import numpy.typing as npt
 import structlog
 
-from brutex.engine.combo_mask import count_supermasks
+from brutex.engine.combo_mask import count_combos, count_supermasks
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.vocabulary.conflicts import has_conflict
 
@@ -172,6 +199,7 @@ __all__ = [
     "MAX_MASK_BARS_ENV",
     "SWEEP_APRIORI_ENV",
     "apriori_enabled",
+    "effective_max_combos",
     "generate_apriori_candidates",
     "resolve_max_mask_bars",
 ]
@@ -245,6 +273,67 @@ def apriori_enabled() -> bool:
     # value was unobservable; this shape has no such default to mutate.)
     raw = os.environ.get(SWEEP_APRIORI_ENV)
     return raw is not None and env_flag_tristate(raw) is True
+
+
+def effective_max_combos(
+    *,
+    apriori_enabled: bool,
+    k_values: Sequence[int],
+    n_unique: int,
+    requested_max_combos: int,
+) -> int:
+    """Resolve the ``max_combos`` pre-flight cap, Apriori-AWARE (guardrail semantics).
+
+    DEC-SWEEP-APRIORI-TUPLE-001 guardrail: the sweep refuses up-front any ``k``
+    whose raw ``C(n_unique, k)`` mask count exceeds ``max_combos`` (the guards in
+    ``SweepGridConfig.__post_init__`` + ``run_persisted_sweep``). That raw-count
+    pre-flight is correct for the brute-force path, but it would REFUSE a
+    full-vocab ``k >= 4`` grid (``C(60, 4) = 487_635 > 100_000``) BEFORE the
+    Apriori generator ever runs — even though, with Apriori ON, the deterministic
+    ``MAX_MASK_BARS`` breaker (:func:`resolve_max_mask_bars`) is the real
+    guardrail on emitted work, not raw ``C(n, k)``.
+
+    So when *apriori_enabled* is ``True`` this AUTO-RAISES the effective
+    ``max_combos`` to ``max(requested, max_k C(n_unique, k))`` — admitting every
+    requested ``k`` while the breaker bounds the actual candidate·bar work. When
+    *apriori_enabled* is ``False`` the value is returned **unchanged**, so the
+    brute-force path's ``max_combos`` pre-flight is byte-identical (the guard
+    logic itself is never touched — this only ever FEEDS the guards a value). A
+    raise emits ONE counts-only ``sweep.apriori.max_combos_raised`` structlog
+    (gated on the flag); an already-sufficient *requested_max_combos* logs
+    nothing.
+
+    Parameters
+    ----------
+    apriori_enabled
+        Whether the Apriori generator is enabled for this process (typically
+        :func:`apriori_enabled`). ``False`` → *requested_max_combos* unchanged.
+    k_values
+        The resolved target combo sizes for the grid.
+    n_unique
+        The number of UNIQUE condition bits (``len(set(condition_bits))``).
+    requested_max_combos
+        The operator-requested (or default) ``max_combos`` cap.
+
+    Returns
+    -------
+    int
+        The effective ``max_combos`` to feed the grid + run pre-flight guards.
+    """
+    if not apriori_enabled:
+        return requested_max_combos
+    # The largest raw C(n, k) any requested k enumerates — the value the pre-flight
+    # guards must ADMIT so Apriori's breaker (not raw C(n,k)) becomes the guardrail.
+    needed = max((count_combos(k, n_unique) for k in k_values), default=0)
+    effective = max(requested_max_combos, needed)
+    if effective > requested_max_combos:
+        _LOG.info(
+            "sweep.apriori.max_combos_raised",
+            requested=requested_max_combos,
+            effective=effective,
+            reason="apriori_breaker_guardrail",
+        )
+    return effective
 
 
 def _resolve_positive_int_env(
@@ -453,6 +542,43 @@ def _raise_unsupported_bit(bit: int) -> None:
     )
 
 
+def _emit_census(
+    *,
+    cell_label: str,
+    k: int,
+    level: int,
+    candidates: int,
+    min_hits: int,
+    n_bars: int,
+    frequent: int | None = None,
+) -> None:
+    """Emit the counts-only per-level Apriori survivor census (structlog, no identity).
+
+    DEC-SWEEP-APRIORI-TUPLE-001 census: fires ONE ``sweep.apriori.census`` event
+    for every Apriori level the generator processes, carrying the settled RAW
+    candidate count ``|C_level|`` and — for the internal frequent frontiers
+    (levels ``1 .. k-1``) — the post-``min_hits`` frequent count ``|F_level|``.
+    The TARGET level ``k`` is NOT hit-filtered here (the caller's Stage-1B is the
+    authority), so its ``frequent`` is OMITTED. A real-lake Apriori run therefore
+    emits the EMPIRICAL per-level survivor curve, replacing the modeled numbers.
+
+    Pure observability — counts only. It does NOT touch the returned candidates,
+    the run identity, or the persisted store bytes; it only fires on the Apriori
+    path (when the generator runs). O(1) per level.
+    """
+    fields: dict[str, object] = {
+        "cell": cell_label,
+        "target_k": k,
+        "level": level,
+        "candidates": candidates,
+        "min_hits": min_hits,
+        "n_bars": n_bars,
+    }
+    if frequent is not None:
+        fields["frequent"] = frequent
+    _LOG.info("sweep.apriori.census", **fields)
+
+
 def generate_apriori_candidates(
     bar_bits: Sequence[int],
     *,
@@ -591,6 +717,15 @@ def generate_apriori_candidates(
     if k == 1:
         # AUTHORITATIVE on the WHOLE raw |C_1| (pre-shard) — stride + shard invariant.
         _budget_check(len(singleton_bits))
+        # k == 1 IS the target level: |C_1| emitted, frequent OMITTED (Stage-1B decides).
+        _emit_census(
+            cell_label=cell_label,
+            k=k,
+            level=1,
+            candidates=len(singleton_bits),
+            min_hits=min_hits,
+            n_bars=resolved_n_bars,
+        )
         return [1 << bit for bit in singleton_bits if bit % big_w == w]
 
     # ── k >= 2: build the frequent singleton frontier F_1 ──
@@ -601,6 +736,16 @@ def generate_apriori_candidates(
     ]
     frontier_masks: npt.NDArray[np.uint64] = np.array(
         [1 << bit for (bit,) in frontier_tuples], dtype=np.uint64
+    )
+    # Level-1 census: raw |C_1| singletons + the post-min_hits frequent frontier |F_1|.
+    _emit_census(
+        cell_label=cell_label,
+        k=k,
+        level=1,
+        candidates=len(singleton_bits),
+        frequent=len(frontier_tuples),
+        min_hits=min_hits,
+        n_bars=resolved_n_bars,
     )
 
     # Build the intermediate frequent frontiers F_2 … F_{k-1} (each hit-filtered).
@@ -629,6 +774,16 @@ def generate_apriori_candidates(
         ]
         frontier_tuples = [tpl for tpl, _ in frequent]
         frontier_masks = np.array(sorted(mask for _, mask in frequent), dtype=np.uint64)
+        # Intermediate-level census: raw |C_j| join output + frequent frontier |F_j|.
+        _emit_census(
+            cell_label=cell_label,
+            k=k,
+            level=j,
+            candidates=len(candidates),
+            frequent=len(frequent),
+            min_hits=min_hits,
+            n_bars=resolved_n_bars,
+        )
 
     # Final level k: build C_k (NOT hit-filtered — the caller's Stage-1B does that),
     # check the breaker on the WHOLE settled raw |C_k| BEFORE any shard-ownership
@@ -639,4 +794,13 @@ def generate_apriori_candidates(
         frontier_tuples, frontier_masks, drop_conflicts=(k == _PAIR_LEVEL), on_count=_budget_check
     )
     _budget_check(len(final_candidates))
+    # Target-level census: raw |C_k| (pre-shard); frequent OMITTED (Stage-1B decides).
+    _emit_census(
+        cell_label=cell_label,
+        k=k,
+        level=k,
+        candidates=len(final_candidates),
+        min_hits=min_hits,
+        n_bars=resolved_n_bars,
+    )
     return [_mask_of(tpl) for tpl in final_candidates if tpl[0] % big_w == w]

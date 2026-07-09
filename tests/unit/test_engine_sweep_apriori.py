@@ -26,12 +26,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 from brutex.engine import sweep_apriori
-from brutex.engine.combo_mask import count_supermasks, iter_masks_k_of_bits
+from brutex.engine.combo_mask import count_combos, count_supermasks, iter_masks_k_of_bits
 from brutex.engine.sweep_apriori import (
     DEFAULT_MAX_MASK_BARS,
     MAX_MASK_BARS_ENV,
     SWEEP_APRIORI_ENV,
     apriori_enabled,
+    effective_max_combos,
     generate_apriori_candidates,
     resolve_max_mask_bars,
 )
@@ -1153,3 +1154,197 @@ def test_driver_reports_breaker_trip_as_tuple_failed(
     # And the driver recorded a TUPLE_FAILED audit line for it.
     audit_text = (tmp_path / "grid.jsonl").read_text(encoding="utf-8")
     assert "TUPLE_FAILED" in audit_text
+
+
+# ─────────── FOLD 1: Apriori-aware max_combos guardrail (effective_max_combos) ───────────
+
+
+def test_effective_max_combos_returns_requested_when_apriori_off() -> None:
+    # Apriori OFF → the value is returned UNCHANGED (the brute-force pre-flight is
+    # byte-identical) even for a k whose C(n, k) dwarfs the request.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=False,
+            k_values=[1, 2, 3, 4],
+            n_unique=60,
+            requested_max_combos=100_000,
+        )
+    assert out == 100_000
+    assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
+
+
+def test_effective_max_combos_raises_to_admit_k4_when_on() -> None:
+    # Apriori ON with a k=4 over the default 100k cap → the effective value is
+    # RAISED to at least C(60, 4) so the guards ADMIT every requested k, and ONE
+    # counts-only structlog fires.
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True,
+            k_values=[1, 2, 3, 4],
+            n_unique=60,
+            requested_max_combos=100_000,
+        )
+    assert out == max(100_000, count_combos(4, 60))
+    assert out >= count_combos(4, 60)  # C(60,4) = 487_635 > 100_000
+    raised = [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"]
+    assert len(raised) == 1
+    assert raised[0]["requested"] == 100_000
+    assert raised[0]["effective"] == out
+    assert raised[0]["reason"] == "apriori_breaker_guardrail"
+
+
+def test_effective_max_combos_no_raise_when_already_sufficient() -> None:
+    # Apriori ON but the request already admits every k → returned unchanged, NO log.
+    from structlog.testing import capture_logs
+
+    big = count_combos(4, 60) + 1
+    with capture_logs() as logs:
+        out = effective_max_combos(
+            apriori_enabled=True, k_values=[1, 2, 3, 4], n_unique=60, requested_max_combos=big
+        )
+    assert out == big
+    assert [e for e in logs if e["event"] == "sweep.apriori.max_combos_raised"] == []
+
+
+def test_effective_max_combos_empty_k_values() -> None:
+    # No requested k → nothing to admit → requested unchanged (the max(..., default=0) arm).
+    assert (
+        effective_max_combos(
+            apriori_enabled=True, k_values=[], n_unique=60, requested_max_combos=123
+        )
+        == 123
+    )
+
+
+def test_effective_max_combos_grid_guard_interaction() -> None:
+    # The load-bearing interaction: the guards' LOGIC is byte-unchanged — we only
+    # FEED them a higher value. With n_unique = 60, C(60, 4) = 487_635 > the default
+    # 100k, so the raw pre-flight REFUSES k=4 unless the Apriori-aware value admits it.
+    from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.strategies.types import Side
+
+    bits = list(range(60))
+    k_values = [1, 2, 3, 4]
+    n_unique = len(set(bits))
+    assert DEFAULT_MAX_COMBOS == 100_000
+    assert count_combos(4, n_unique) > DEFAULT_MAX_COMBOS
+
+    def _grid(max_combos: int) -> SweepGridConfig:
+        return SweepGridConfig(
+            instruments=["NIFTY"],
+            timeframes=[Timeframe("1minute", 1)],
+            directions=[Side.BUY],
+            k_values=k_values,
+            condition_bits=bits,
+            stop_losses=[80],
+            take_profits=[50],
+            proximities=[None],
+            mode="A",
+            data_snapshot_hash="snap",
+            indicator_version="iv",
+            code_commit_sha="cc",
+            min_hits=0,
+            max_combos=max_combos,
+        )
+
+    # Default 100k REFUSES k=4 up front (guard byte-unchanged).
+    with pytest.raises(ValueError, match="max_combos"):
+        _grid(DEFAULT_MAX_COMBOS)
+
+    # Non-Apriori path: effective == requested, so the guard STILL refuses k=4.
+    off_effective = effective_max_combos(
+        apriori_enabled=False,
+        k_values=k_values,
+        n_unique=n_unique,
+        requested_max_combos=DEFAULT_MAX_COMBOS,
+    )
+    assert off_effective == DEFAULT_MAX_COMBOS
+    with pytest.raises(ValueError, match="max_combos"):
+        _grid(off_effective)
+
+    # Apriori ON: the effective value admits every k → the grid CONSTRUCTS cleanly.
+    on_effective = effective_max_combos(
+        apriori_enabled=True,
+        k_values=k_values,
+        n_unique=n_unique,
+        requested_max_combos=DEFAULT_MAX_COMBOS,
+    )
+    assert on_effective >= count_combos(4, n_unique)
+    grid = _grid(on_effective)  # must NOT raise
+    assert grid.max_combos == on_effective
+
+
+# ─────────── FOLD 2: per-level survivor census (sweep.apriori.census) ───────────
+
+
+def test_apriori_census_emitted_per_level_with_counts() -> None:
+    # A dense all-firing cell over 4 conflict-free bits at k=3: every candidate is
+    # frequent (min_hits=0), so |F_j| == |C_j| and the counts match the independent
+    # brute-force C(n, j). The internal frontiers carry `frequent`; the TARGET
+    # level k omits it (Stage-1B is the authority).
+    from structlog.testing import capture_logs
+
+    bar_bits = [0b1111] * 40  # every mask fires on all 40 bars
+    with capture_logs() as logs:
+        generate_apriori_candidates(
+            bar_bits, condition_bits=[0, 2, 4, 6], k=3, min_hits=0, cell_label="cell-x"
+        )
+    census = [e for e in logs if e["event"] == "sweep.apriori.census"]
+    by_level = {e["level"]: e for e in census}
+    assert set(by_level) == {1, 2, 3}
+
+    # Independent brute-force candidate counts: |C_1|=n, |C_2|=C(n,2), |C_3|=C(n,3).
+    assert by_level[1]["candidates"] == 4
+    assert by_level[1]["frequent"] == 4
+    assert by_level[2]["candidates"] == count_combos(2, 4)  # 6
+    assert by_level[2]["frequent"] == count_combos(2, 4)
+    assert by_level[3]["candidates"] == count_combos(3, 4)  # 4
+    assert "frequent" not in by_level[3]  # target level — Stage-1B decides frequency
+
+    for e in census:
+        assert e["cell"] == "cell-x"
+        assert e["target_k"] == 3
+        assert e["min_hits"] == 0
+        assert e["n_bars"] == 40
+
+
+def test_apriori_census_frequent_matches_brute_force_frontier() -> None:
+    # With a real min_hits filter, the emitted level-1 `frequent` count must equal
+    # the INDEPENDENT brute-force |F_1| (singletons firing on >= min_hits bars).
+    from structlog.testing import capture_logs
+
+    bar_bits = _synthetic_bar_bits(7)
+    min_hits = 250
+    with capture_logs() as logs:
+        generate_apriori_candidates(
+            bar_bits, condition_bits=_BITS, k=3, min_hits=min_hits, n_bars=len(bar_bits)
+        )
+    by_level = {e["level"]: e for e in logs if e["event"] == "sweep.apriori.census"}
+    singleton_masks = [1 << b for b in sorted(set(_BITS))]
+    brute_f1 = sum(1 for c in count_supermasks(bar_bits, singleton_masks) if c >= min_hits)
+    assert by_level[1]["candidates"] == len(set(_BITS))
+    assert by_level[1]["frequent"] == brute_f1
+    assert by_level[1]["frequent"] <= by_level[1]["candidates"]
+
+
+def test_apriori_census_k1_target_level_omits_frequent() -> None:
+    # k == 1 IS the target level: exactly ONE census, candidates = |C_1|, NO frequent.
+    from structlog.testing import capture_logs
+
+    bar_bits = [0b1111] * 10
+    with capture_logs() as logs:
+        generate_apriori_candidates(
+            bar_bits, condition_bits=[0, 2, 4], k=1, min_hits=0, cell_label="c1"
+        )
+    census = [e for e in logs if e["event"] == "sweep.apriori.census"]
+    assert len(census) == 1
+    assert census[0]["level"] == 1
+    assert census[0]["target_k"] == 1
+    assert census[0]["candidates"] == 3
+    assert census[0]["cell"] == "c1"
+    assert "frequent" not in census[0]
