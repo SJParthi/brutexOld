@@ -380,7 +380,8 @@ class TestCompareDailyFreshness:
     def test_grown_1m_extra_day_is_stale(self, tmp_path) -> None:
         """The BND-5b shape: the 1m base grew a completed day the stored ``1day``
         never derived (kill-9 mid-re-derive / CLI fetch with no prebuild) —
-        the height early-out fires stale."""
+        the expected side carries the extra covered day, so the compare fires
+        stale (the 1m-covered direction is JUDGED, never abstained)."""
         df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D2)
         assert df_1day.height == 1  # only _D1 derived; _D2 exists in 1m only
         assert compare_daily_freshness(df_1m, df_1day, before=_D3) == "stale"
@@ -406,6 +407,67 @@ class TestCompareDailyFreshness:
         EXPECTED side exactly as the writer did — no false-stale mid-session."""
         df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D2)
         assert compare_daily_freshness(df_1m, df_1day, before=_D2) == "fresh"
+
+    def test_vendor_era_1m_uncovered_day_abstains_per_bar(self, tmp_path) -> None:
+        """Round-2 permanent-refusal fix: a stored ``1day`` bar on a session with
+        ZERO 1-minute coverage (a #723-era vendor-fetched row — Muhurat-evening
+        1m dropped by the pre-#1294 filter / a settled vendor 1m gap) is
+        UNVERIFIABLE from the base → abstains PER-BAR (fresh), because the
+        latest-wins derived-1day merge can never delete it: judging it stale was
+        a refusal NO prebuild could clear (executed repro, 2026-07-09)."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1,), daily_before=_D2)
+        vendor_row = df_1day.with_columns(
+            (pl.col("ts_utc") + timedelta(days=1)).alias("ts_utc"),  # _D2 midnight, no 1m
+            pl.lit(123456, dtype=pl.Int64).alias("volume"),
+        )
+        stored = pl.concat([df_1day, vendor_row]).sort("ts_utc")
+        assert compare_daily_freshness(df_1m, stored, before=_D3) == "fresh"
+
+    def test_vendor_era_abstain_never_masks_covered_day_drift(self, tmp_path) -> None:
+        """The per-bar abstain is scoped EXACTLY to 1m-less days: a value drift
+        on a 1m-COVERED day beside the abstained vendor row stays stale."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1,), daily_before=_D2)
+        vendor_row = df_1day.with_columns((pl.col("ts_utc") + timedelta(days=1)).alias("ts_utc"))
+        drifted = df_1day.with_columns((pl.col("volume") + 1).alias("volume"))
+        stored = pl.concat([drifted, vendor_row]).sort("ts_utc")
+        assert compare_daily_freshness(df_1m, stored, before=_D3) == "stale"
+
+    def test_empty_1m_base_is_vacuously_fresh(self, tmp_path) -> None:
+        """Documented corollary of the session scope: an EMPTY 1m base verifies
+        nothing — every stored bar abstains — so the comparator reads fresh
+        vacuously. The verdicts caller never keys such a pair (its no-1m-base
+        whole-symbol abstain fires first, pinned separately)."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1,), daily_before=_D2)
+        assert compare_daily_freshness(df_1m.head(0), df_1day, before=_D3) == "fresh"
+
+    def test_naive_ts_utc_treated_as_utc(self, tmp_path) -> None:
+        """A tz-naive ``ts_utc`` (defensive — the lake storage convention says
+        UTC) folds to the SAME IST session dates as the aware frame, so the
+        covered set is identical either way."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1,), daily_before=_D2)
+        naive_1m = df_1m.with_columns(pl.col("ts_utc").dt.replace_time_zone(None))
+        assert compare_daily_freshness(naive_1m, df_1day, before=_D3) == "fresh"
+
+    def test_grounded_before_excuses_only_the_deferred_run_day(self, tmp_path) -> None:
+        """Round-2 writer-mirror fix: with the run day's 1m truncated and the
+        stored ``1day`` holding the writer's grounded-DEFERRED output (no
+        run-day bar), the clock law alone reads stale, but the grounded
+        alternative cutoff accepts it — while an equal *grounded_before*
+        degrades to the single-law compare byte-identically."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D2)
+        # Clock law alone (post-close, cutoff _D3): the missing _D2 bar is stale.
+        assert compare_daily_freshness(df_1m, df_1day, before=_D3) == "stale"
+        # The writer's own grounded cutoff (_D2 deferred) accepts its own output.
+        assert compare_daily_freshness(df_1m, df_1day, before=_D3, grounded_before=_D2) == "fresh"
+        # grounded == before is inert (single-law compare).
+        assert compare_daily_freshness(df_1m, df_1day, before=_D3, grounded_before=_D3) == "stale"
+
+    def test_grounded_before_never_excuses_value_drift(self, tmp_path) -> None:
+        """The grounded arm is DEFER-only leniency: a VALUE drift on a covered
+        day mismatches under BOTH cutoffs — fail-closed preserved."""
+        df_1m, df_1day = self._frames(tmp_path, days=(_D1, _D2), daily_before=_D2)
+        drifted = df_1day.with_columns((pl.col("volume") + 1).alias("volume"))
+        assert compare_daily_freshness(df_1m, drifted, before=_D3, grounded_before=_D2) == "stale"
 
 
 class TestLakeDailyFreshnessVerdicts:
@@ -526,6 +588,175 @@ class TestLakeDailyFreshnessVerdicts:
             daily_before=_D3,
         )
         assert verdicts == {}
+
+    def test_vendor_era_1day_row_no_longer_permanently_refuses(self, tmp_path) -> None:
+        """The round-2 executed refuter repro, inverted: a ``1day`` partition
+        holding a vendor-era row for a session with NO 1m coverage reads FRESH
+        (per-bar abstain) — and stays fresh after the prebuild's latest-wins
+        re-derive merges over the same partition (the state the old whole-series
+        compare judged permanently stale with a remedy that provably could not
+        clear it)."""
+        from datetime import timezone
+        from decimal import Decimal
+
+        from brutex.data.models import CandleBar
+        from brutex.data.spot_daily_resample import resample_1m_to_daily
+        from brutex.engine.sweep_preflight import preflight_derived_freshness
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        sink = _seed_lake_1m_days(tmp_path, (_D1,))
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        df_1m = tf_autoderive.read_lake_bars_frame(symbol_dir, "1minute")
+        vendor_d2 = CandleBar(
+            timestamp=datetime(_D2.year, _D2.month, _D2.day, 0, 0, tzinfo=ist).astimezone(UTC),
+            open=Decimal("101.00"),
+            high=Decimal("103.00"),
+            low=Decimal("100.50"),
+            close=Decimal("102.40"),
+            volume=123456,
+            open_interest=None,
+        )
+        sink.append(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[*resample_1m_to_daily(df_1m, before=_D3), vendor_d2],
+        )
+        common = {
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbols": ["NIFTY"],
+            "intervals": ["1day"],
+            "daily_before": _D3,
+        }
+        first = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common)
+        assert first == {("NIFTY", "1day"): "fresh"}
+        # The prebuild remedy (a latest-wins MERGE that never deletes) leaves the
+        # vendor row in place — the verdict must remain consistent, never a
+        # refusal loop.
+        _write_daily_derived(tmp_path, sink, before=_D3)
+        again = tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common)
+        assert again == {("NIFTY", "1day"): "fresh"}
+        assert preflight_derived_freshness(again).ok
+
+    def test_truncated_run_day_post_close_matches_grounded_writer(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The round-2 writer-mirror pin: the run day's 1m is TRUNCATED (a pull
+        died mid-session) and the REAL prebuild writer (dense symbol, grounding
+        default-ON) grounded-DEFERS the run-day daily bar; a post-close
+        preflight must call the writer's own output FRESH — while the pure
+        clock-law injection over the same lake still reads stale (proving the
+        grounded arm did the work, not the fixture)."""
+        from zoneinfo import ZoneInfo
+
+        from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+        run_day = _D2  # every _day_1m_bars session is truncated (09:16 → 09:35)
+        _seed_lake_1m_days(tmp_path, (_D1, run_day))
+        post_close = datetime(
+            run_day.year, run_day.month, run_day.day, 16, 0, tzinfo=ZoneInfo("Asia/Kolkata")
+        )
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=(),
+            include_daily=True,
+            daily_cutoff_now=post_close,
+            dense_symbol=True,
+        )
+        monkeypatch.setattr(tf_autoderive, "_now_ist", lambda: post_close)
+        common = {
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbols": ["NIFTY"],
+            "intervals": ["1day"],
+        }
+        assert tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common) == {
+            ("NIFTY", "1day"): "fresh"
+        }
+        # The same lake under the pure clock law (an injected _D3 cutoff — the
+        # pre-fix gate behavior) is stale: the grounded mirror is load-bearing.
+        clock_only = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path, daily_before=_D3, **common
+        )
+        assert clock_only == {("NIFTY", "1day"): "stale"}
+
+    def test_truncated_run_day_env_off_mirrors_clock_writer(self, tmp_path, monkeypatch) -> None:
+        """`BRUTEX_DAILY_CUTOFF_GROUNDED=0` reverts gate AND writer to the clock
+        law together: the grounded-deferred stored state reads stale (the
+        env-off writer would have written the partial run-day bar), and a
+        clock-law prebuild under the same env HEALS it — the remedy stays
+        truthful on the disabled arm too."""
+        from zoneinfo import ZoneInfo
+
+        from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+        run_day = _D2
+        sink = _seed_lake_1m_days(tmp_path, (_D1, run_day))
+        _write_daily_derived(tmp_path, sink, before=run_day)  # grounded-deferred shape
+        post_close = datetime(
+            run_day.year, run_day.month, run_day.day, 16, 0, tzinfo=ZoneInfo("Asia/Kolkata")
+        )
+        monkeypatch.setattr(tf_autoderive, "_now_ist", lambda: post_close)
+        monkeypatch.setenv("BRUTEX_DAILY_CUTOFF_GROUNDED", "0")
+        common = {
+            "exchange": "NSE",
+            "segment": "INDEX",
+            "symbols": ["NIFTY"],
+            "intervals": ["1day"],
+        }
+        assert tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common) == {
+            ("NIFTY", "1day"): "stale"
+        }
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=(),
+            include_daily=True,
+            daily_cutoff_now=post_close,
+            dense_symbol=True,
+        )
+        assert tf_autoderive.lake_derived_freshness_verdicts(tmp_path, **common) == {
+            ("NIFTY", "1day"): "fresh"
+        }
+
+    def test_grounded_mirror_never_excuses_value_drift(self, tmp_path, monkeypatch) -> None:
+        """Fail-closed teeth on the production grounded path: a VALUE drift on a
+        completed covered day stays stale even while the truncated run day is
+        grounded-excused."""
+        from zoneinfo import ZoneInfo
+
+        run_day = _D2
+        sink = _seed_lake_1m_days(tmp_path, (_D1, run_day))
+        _write_daily_derived(tmp_path, sink, before=run_day)
+        # Drift the stored _D1 bar in place (rewrite the partition with volume+1).
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        daily_file = next((symbol_dir / "1day").rglob("*.parquet"))
+        drifted = pl.read_parquet(daily_file).with_columns((pl.col("volume") + 1).alias("volume"))
+        drifted.write_parquet(daily_file)
+        monkeypatch.setattr(
+            tf_autoderive,
+            "_now_ist",
+            lambda: datetime(
+                run_day.year, run_day.month, run_day.day, 16, 0, tzinfo=ZoneInfo("Asia/Kolkata")
+            ),
+        )
+        verdicts = tf_autoderive.lake_derived_freshness_verdicts(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=["NIFTY"],
+            intervals=["1day"],
+        )
+        assert verdicts == {("NIFTY", "1day"): "stale"}
 
     def test_fno_segment_1day_abstains(self, tmp_path) -> None:
         """An FNO-segment ``1day`` is never keyed — the F&O daily law is the

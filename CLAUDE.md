@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622 —
+_Last updated: 2026-07-09 (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1623 —
 the `/movers` stored-read FRESHNESS GUARD: a prebuilt stored TF / `1day` day
 slice is now VERIFIED against a fresh re-derive of the raw 1-minute base
 before it is served (the CUT stored frame — the exact served bytes — judged
@@ -29,6 +29,16 @@ delegates to the ONE existing comparator `tf_autoderive.compare_derived_freshnes
 (BND-5b: NEW `compare_daily_freshness` + a `(symbol, "1day")` verdict via
 kw-only `daily_before`, so the sweep-preflight gate now REFUSES on a
 post-crash stale stored `1day` — non-1day verdicts byte-identical, pinned;
+ROUND 2: the judged set is SESSION-SCOPED to the 1m base's coverage (a
+vendor-era `1day` row on a 1m-less session abstains PER-BAR — the
+whole-series compare made it a PERMANENT refusal the latest-wins prebuild
+merge provably could not clear, executed repro) and the cutoff MIRRORS the
+writer's data-grounded DEFER-only law (`grounded_before` +
+`_grounded_daily_cutoff` — a post-close preflight over a TRUNCATED run day
+no longer flags the writer's own grounded-deferred output, env-mirrored via
+the shared `daily_cutoff_grounding_enabled`; value drift stays fail-closed);
+`FreshnessReport.remediation()` gains the delete-1day-partition escalation
+clause for the residual non-canonical-row class;
 abstains kept for no-partition / no-1m-base / FNO segment, the OI-carrying
 FNO daily law a named follow-up DEC-FNO-DAILY-FRESHNESS-001;
 timestamp-INCLUSIVE compare — the deliberate divergence from movers'
@@ -1673,7 +1683,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622** — the
+- **Active branch:** `claude/movers-stored-freshness-guard` (**DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1623** — the
   `/movers` stored-read FRESHNESS GUARD: every prebuilt stored TF / `1day` day slice is verified against a fresh
   re-derive of the raw 1-minute base before it is served (the NEW pure `stored_day_frame_is_stale` delegating to the
   ONE existing `compare_derived_freshness`; the 1day branch value-plane-compares against the canonical
@@ -1688,8 +1698,16 @@ hostile-review pass._
   bytes (never a guess, never a dropped symbol); fresh-lake payloads BYTE-IDENTICAL (spy-pinned, zero events); five
   stale-serve test pins consciously flipped/re-seeded (F1-F5, ledgered). SAME-PR FOLD-IN B (BND-5b): `tf_autoderive`
   gains the pure `compare_daily_freshness` + a `(symbol, "1day")` verdict (kw-only `daily_before`), so the #1492-G1
-  sweep-preflight gate now REFUSES a post-crash stale stored `1day` loudly (`EXIT_USER_ERROR` naming the pair; zero
-  gate-code change — fail-closed on any non-"fresh" string); non-1day verdicts byte-identical pinned; abstains kept
+  sweep-preflight gate now REFUSES a post-crash stale stored `1day` loudly (`EXIT_USER_ERROR` naming the pair;
+  fail-closed on any non-"fresh" string); ROUND 2 (two executed permanent-refusal repros closed): the judged set is
+  SESSION-SCOPED to the 1m base's coverage — a vendor-era `1day` row on a 1m-less session (Muhurat-evening 1m dropped
+  pre-#1294 / settled vendor gap) abstains PER-BAR instead of a stale the latest-wins prebuild merge provably could
+  never clear — and the cutoff MIRRORS the writer's data-grounded DEFER-only law (kw-only `grounded_before` + the
+  per-symbol `_grounded_daily_cutoff` writer mirror over the SHARED `daily_cutoff_grounding_enabled` + the writer's
+  own `_last_ist_datetime`; a post-close preflight over a TRUNCATED run day accepts the writer's own
+  grounded-deferred output, pinned on BOTH env arms; density-blind acceptance disclosed — DEFER-only, absent-bar-only,
+  value drift fail-closed); `FreshnessReport.remediation()` gains the delete-1day-partition-then-prebuild ESCALATION
+  clause for the residual non-canonical-covered-row class; non-1day verdicts byte-identical pinned; abstains kept
   (no partition / no 1m base / FNO — named follow-up DEC-FNO-DAILY-FRESHNESS-001); timestamp-INCLUSIVE by design
   (the lake-plane divergence from movers' value-plane compare, cross-documented). SAME-PR FOLD-IN C (r2j_seam2):
   `latest_movers_date` is 1-minute-aware — the MAX fold of the verbatim `1day` arm + a NEW bounded 1m arm (filename
@@ -3955,7 +3973,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/movers-stored-freshness-guard`
-  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1622 — the `/movers`
+  (DEC-MOVERS-STORED-FRESHNESS-001, MIGRATION.md #1623 — the `/movers`
   stored-read freshness guard: a stale prebuilt TF / `1day` day slice is
   detected against the raw 1-minute base and falls back to the 1-minute
   derive, warned + counted — reachability audited to exactly the CLI

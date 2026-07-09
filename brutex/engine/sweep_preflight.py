@@ -135,12 +135,26 @@ class FreshnessReport:
         return not self.stale
 
     def remediation(self) -> str:
-        """The exact operator remedy: re-run the pipeline's prebuild stage."""
+        """The exact operator remedy: re-run the pipeline's prebuild stage.
+
+        The escalation clause names the ONE residual class the prebuild alone
+        provably cannot clear (review round 2): the derived-``1day`` write is
+        a latest-wins MERGE that never DELETES rows, so a non-canonical
+        legacy row that duplicates a covered session under a different
+        timestamp survives every prebuild — the working remedy there is
+        removing the symbol's stored ``1day`` partition first (the prebuild
+        fully re-derives it from the 1-minute base). 1m-uncovered legacy days
+        no longer refuse at all (they abstain per-bar in
+        :func:`~brutex.data.tf_autoderive.compare_daily_freshness`).
+        """
         return (
             "stale derived TFs (stored table drifted from a fresh 1-minute "
             "re-derivation): run the dashboard's ▶ Pull · full pipeline — its "
             "automatic final prebuild stage re-derives every derived timeframe "
-            "(DEC-PIPELINE-AUTOPREBUILD-001)"
+            "(DEC-PIPELINE-AUTOPREBUILD-001); if a 1day refusal survives a "
+            "prebuild (a non-canonical legacy 1day row the latest-wins merge "
+            "cannot remove), delete that symbol's stored 1day partition and "
+            "re-run the prebuild — it fully re-derives from the 1-minute base"
         )
 
 
