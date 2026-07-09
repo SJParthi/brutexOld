@@ -138,9 +138,16 @@ def _write_run(
     run_dir = oca.runs_root(root) / rid
     run_dir.mkdir(parents=True)
     (run_dir / oca.MANIFEST_FILENAME).write_text(json.dumps(_manifest_obj(rid)), encoding="utf-8")
-    (run_dir / oca.TOP100_FILENAME).write_text(
-        json.dumps(_top100_rows(top100_rows)), encoding="utf-8"
-    )
+    # The writer's OBJECT root (DEC-ONECLICK-TOP100-OBJECT-ROOT-001).
+    top100_doc = {
+        "schema_version": oca.TOP100_SCHEMA_VERSION,
+        "run_id": rid,
+        "preset": "min_dd_first",
+        "source": {"pool": top100_rows},
+        "baselines": {},
+        "entries": _top100_rows(top100_rows),
+    }
+    (run_dir / oca.TOP100_FILENAME).write_text(json.dumps(top100_doc), encoding="utf-8")
     if events_lines:
         lines = "".join(
             json.dumps(

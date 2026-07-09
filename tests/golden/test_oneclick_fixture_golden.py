@@ -39,7 +39,7 @@ _EXPECTED_SHA256: dict[str, str] = {
         "344184a57b869707f2497d8a4a78687c051da7a9c8dca6191c18a0f010cb4a7a"
     ),
     "sweep_runs/r-20260707-fixt01/top100.json": (
-        "85c6bf848afd8c89ebf32b0c0bd674d6dbbe59d785eee92e1adbe0da2f0b0e69"
+        "b8620bf39f436f25a60f5eece45c830f84a2bedb9959321d7b86822ae8def645"
     ),
     "sweep_runs/r-20260707-fixt01/trades/rank-0001.json": (
         "3b2c4ce7d42ff046c27e6a262128f1fd2273f51ef78932ac6d9f4c1edf977386"
@@ -48,10 +48,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "98d5bf94846e2a31a9251c5bef552346de8c9b8a9e485a79dd88338d29b134f5"
     ),
     "sweep_runs/r-corrupt01/top100.json": (
-        "cb42f6c86411c80e6987d6de8c79e00a67eb5199ab8d6e13b18843f2ff0ac544"
+        "fbbc1df32e40eb632bb62fc745f61780a4f233f8ac9f1843883dccb8a2108dfc"
     ),
     "sweep_runs/r-empty01/top100.json": (
-        "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        "0fbd1222ef9b776468c540ed50d90c2fe346d052469a12b4cc806e8ae11af6ba"
     ),
     "sweep_runs/r-hostile01/events.jsonl": (
         "c8150cf2c68dfd432632e96c6fed3221caa8e524bd9849458ba7a59c1c3b5ba9"
@@ -60,10 +60,10 @@ _EXPECTED_SHA256: dict[str, str] = {
         "cdcabe6fdd16bf59275c8c2bc3b9470e0f07830f17714bd381d06c456b4a7422"
     ),
     "sweep_runs/r-hostile01/top100.json": (
-        "08aa0ac074cf5408adc83351d4d4fdbbcfda39723fa1b7ecc6d9b4ea93dc59db"
+        "f00d6ea94bca64143779a7370c034a5867fca65c8ea8c90acfa147a8be55a687"
     ),
     "sweep_runs/r-short01/top100.json": (
-        "9bfd33205aeefd7db6278858c9e9a0160128d6a0098864912f386ef4e669678b"
+        "3dd682629203f3a37cc5281c728615cb5e89b196fbe5363ce1b5ab2cc482cfb6"
     ),
 }
 
@@ -72,10 +72,12 @@ class TestCorpusPinned:
     def test_sha256_manifest_matches_the_committed_corpus(self) -> None:
         # The corpus proper is the ``sweep_runs/`` tree the generator owns
         # (migrated from ``runs/`` under Ruling 4 /
-        # DEC-ONECLICK-SWEEP-RUNS-REBIND-001 — bytes unchanged, only the tree
-        # name moved, so the per-file SHAs are the pre-migration values). The
-        # old sibling ``.gitignore`` re-include is GONE: the root .gitignore
-        # ignores ``runs/`` dirs, not ``sweep_runs/``.
+        # DEC-ONECLICK-SWEEP-RUNS-REBIND-001; every ``top100.json`` then
+        # migrated to the WRITER's object root + engine metric names under
+        # DEC-ONECLICK-TOP100-OBJECT-ROOT-001 — those five SHAs moved with
+        # that deliberate regeneration). The old sibling ``.gitignore``
+        # re-include is GONE: the root .gitignore ignores ``runs/`` dirs,
+        # not ``sweep_runs/``.
         actual = {
             path.relative_to(_FIXTURE_ROOT).as_posix(): hashlib.sha256(
                 path.read_bytes()
@@ -100,10 +102,25 @@ class TestMainRunRoundTrips:
         verdict = ov.reconcile_funnel(manifest)
         assert verdict["ok"] is True  # hand-derived arithmetic, to the digit
 
+    def test_top100_committed_bytes_are_the_writer_object_root(self) -> None:
+        """DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the fixture matches the WRITER's
+        root shape + ENGINE metric names — never the retired bare array."""
+        committed = json.loads((_RUNS / gen.RUN_ID / "top100.json").read_text(encoding="utf-8"))
+        assert isinstance(committed, dict)
+        assert committed["schema_version"] == oc.TOP100_SCHEMA_VERSION
+        assert committed["run_id"] == gen.RUN_ID
+        assert committed["preset"] == "min_dd_first"
+        assert isinstance(committed["entries"], list)
+        raw_metrics = committed["entries"][0]["metrics"]
+        assert "sharpe_ratio" in raw_metrics  # engine names on disk
+        assert "sharpe" not in raw_metrics  # the alias is READER-added only
+        assert "cpcv_pass_pct" not in raw_metrics  # the writer emits none
+
     def test_top100_loads_ok_with_100_rows_and_edge_classes(self) -> None:
         top100 = oc.load_top100(_RUNS / gen.RUN_ID)
         assert top100.status == "ok"
         assert len(top100.rows) == 100
+        assert top100.preset == "min_dd_first"
         by_rank = {row["rank"]: row for row in top100.rows}
         assert by_rank[gen.ZERO_TRADES_RANK]["metrics"]["trades"] == 0
         assert by_rank[gen.NEGATIVE_PF_RANK]["metrics"]["profit_factor"] == -0.5

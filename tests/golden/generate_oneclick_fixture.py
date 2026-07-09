@@ -16,6 +16,21 @@ verifier uses, so the golden proves generator↔verifier SELF-consistency ONLY �
 NOT P2 compatibility), and the INTERIM fixture-only trades page layout
 (``trades/rank-%04d.json``), plus the empty/short/corrupt/hostile twins.
 
+TOP100 SHAPE LAW (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): every ``top100.json``
+twin is the SHIPPED engine writer's OBJECT root ``{schema_version, run_id,
+preset, source, baselines, entries: [...]}`` with the writer's ENGINE metric
+names (``sharpe_ratio`` / ``max_drawdown_paisa`` / ``deflated_sharpe`` /
+``total_trades`` — the display aliases are added by the reader's ONE
+``TOP100_METRIC_KEY_MAP`` boundary) and NO ``cpcv_pass_pct`` (the writer
+emits none — the display renders the honest "—"). The pre-#1621 bare-array
+form was a hand-written fixture-only dialect the real writer never produced —
+the audit lesson this generator now encodes: fixtures match the WRITER's
+shape, not the reader's wishes. The entries deliberately OMIT the #1275
+additive keys (``run_id``/``equity_ref``) so the pre-#1275-artifact trades
+degrade stays pinned; the edge-class rows (tie / zero-trades / negative-PF /
+huge-DD / null-vix / hostile strings) remain display-robustness twins, not
+writer byte-dumps.
+
 Every number is deterministic pure arithmetic (no RNG, no clock) so a
 regeneration is byte-identical; the consuming golden test pins a SHA-256
 manifest over the corpus (tests/golden/fixtures/README.md fixture law).
@@ -42,7 +57,12 @@ from pathlib import Path
 from typing import Any
 
 from brutex.dashboard import oneclick_artifacts
-from brutex.dashboard.oneclick_artifacts import canonical_record_bytes, chain_hash
+from brutex.dashboard.oneclick_artifacts import (
+    TOP100_SCHEMA_VERSION,
+    canonical_record_bytes,
+    chain_hash,
+)
+from brutex.ranking.presets import DEFAULT_PRESET
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "oneclick"
 
@@ -147,14 +167,16 @@ def build_top100_rows() -> list[dict[str, Any]]:
             "direction": DIRECTIONS[idx % len(DIRECTIONS)],
             "arm": f"SL{1 + rank % 3}.0_TP{2 + rank % 4}.0",
             "metrics": {
+                # ENGINE metric names (the writer's _metrics_payload keys) —
+                # the reader's TOP100_METRIC_KEY_MAP adds the display aliases.
+                # NO cpcv_pass_pct: the writer emits none (honest "—").
                 "net_pnl_paisa": 9_000_000 - rank * 37_531,
-                "sharpe": sharpe,
+                "sharpe_ratio": sharpe,
                 "profit_factor": round(2.5 - idx * 0.0113, 10),
                 "win_rate": round(0.61 - idx * 0.0023, 10),
-                "max_dd_paisa": -(150_000 + rank * 8_117),
-                "trades": 180 + (rank * 7) % 260,
-                "dsr": round(0.93 - idx * 0.0041, 10),
-                "cpcv_pass_pct": round(87.5 - idx * 0.31, 10),
+                "max_drawdown_paisa": -(150_000 + rank * 8_117),
+                "total_trades": 180 + (rank * 7) % 260,
+                "deflated_sharpe": round(0.93 - idx * 0.0041, 10),
             },
             "regime": {
                 "trending_pnl_paisa": 6_000_000 - rank * 25_021,
@@ -165,18 +187,58 @@ def build_top100_rows() -> list[dict[str, Any]]:
         }
         rows.append(row)
     # Metric TIE pair (F-m2 golden): rank 42 shares rank 41's sharpe exactly.
-    rows[TIE_RANKS[1] - 1]["metrics"]["sharpe"] = rows[TIE_RANKS[0] - 1]["metrics"]["sharpe"]
+    rows[TIE_RANKS[1] - 1]["metrics"]["sharpe_ratio"] = rows[TIE_RANKS[0] - 1]["metrics"][
+        "sharpe_ratio"
+    ]
     # Zero-trades edge: an honest all-zero metrics row.
     rows[ZERO_TRADES_RANK - 1]["metrics"].update(
-        net_pnl_paisa=0, sharpe=0.0, profit_factor=0.0, win_rate=0.0, max_dd_paisa=0, trades=0
+        net_pnl_paisa=0,
+        sharpe_ratio=0.0,
+        profit_factor=0.0,
+        win_rate=0.0,
+        max_drawdown_paisa=0,
+        total_trades=0,
     )
     # Negative-PF display edge (impossible in reality — renderer must not crash).
     rows[NEGATIVE_PF_RANK - 1]["metrics"]["profit_factor"] = -0.5
     # Huge-drawdown edge.
-    rows[HUGE_DD_RANK - 1]["metrics"]["max_dd_paisa"] = -9_999_999_999
+    rows[HUGE_DD_RANK - 1]["metrics"]["max_drawdown_paisa"] = -9_999_999_999
     # Null VIX band edge (R31 honest NULL).
     rows[NULL_VIX_RANK - 1]["vix_band"] = None
     return rows
+
+
+def build_top100_object(
+    run_id: str, rows: list[dict[str, Any]], *, pool: int | None = None
+) -> dict[str, Any]:
+    """Wrap *rows* in the SHIPPED writer's OBJECT root (the ONE fixture shape law).
+
+    Mirrors ``brutex.engine.top100_artifact.Top100Artifact.to_payload`` key
+    set exactly: ``{schema_version, run_id, preset, source, baselines,
+    entries}`` with the writer's honesty ``source`` header (deterministic
+    fixture tallies — pool == gate_passers, nothing excluded, providers
+    unwired, matching a plain fixture run).
+    """
+    n = len(rows) if pool is None else pool
+    return {
+        "schema_version": TOP100_SCHEMA_VERSION,
+        "run_id": run_id,
+        "preset": DEFAULT_PRESET,
+        "source": {
+            "data_snapshot_hashes": ["f" * 64],
+            "stores": 3,
+            "pool": n,
+            "gate_passers": n,
+            "excluded_no_aggs": 0,
+            "zero_trade_excluded": 0,
+            "parity_excluded": 0,
+            "families_collapsed": 0,
+            "reasons_wired": False,
+            "margin_roi_wired": False,
+        },
+        "baselines": {},
+        "entries": rows,
+    }
 
 
 def build_event_bodies(run_id: str = RUN_ID) -> list[dict[str, Any]]:
@@ -331,19 +393,22 @@ def generate(root: Path = FIXTURE_ROOT) -> None:
     main = runs / RUN_ID
     _write_json(main / "manifest.json", build_manifest())
     top100 = build_top100_rows()
-    _write_json(main / "top100.json", top100)
+    _write_json(main / "top100.json", build_top100_object(RUN_ID, top100))
     _write_events(
         main / "events.jsonl", chain_records(build_event_bodies()), half_written_tail=False
     )
     trades = build_trade_rows()
     _write_json(main / "trades" / "rank-0001.json", {"rows": trades, "total": len(trades)})
 
-    _write_json(runs / EMPTY_RUN_ID / "top100.json", [])
-    _write_json(runs / SHORT_RUN_ID / "top100.json", top100[:SHORT_ROW_COUNT])
+    _write_json(runs / EMPTY_RUN_ID / "top100.json", build_top100_object(EMPTY_RUN_ID, []))
+    _write_json(
+        runs / SHORT_RUN_ID / "top100.json",
+        build_top100_object(SHORT_RUN_ID, top100[:SHORT_ROW_COUNT]),
+    )
 
     corrupt = runs / CORRUPT_RUN_ID
     corrupt.mkdir(parents=True, exist_ok=True)
-    full_json = json.dumps(top100[:3], sort_keys=True)
+    full_json = json.dumps(build_top100_object(CORRUPT_RUN_ID, top100[:3]), sort_keys=True)
     (corrupt / "top100.json").write_text(full_json[:40], encoding="utf-8")  # truncated JSON
     _write_events(
         corrupt / "events.jsonl",
@@ -353,7 +418,9 @@ def generate(root: Path = FIXTURE_ROOT) -> None:
 
     hostile = runs / HOSTILE_RUN_ID
     _write_json(hostile / "manifest.json", build_hostile_manifest())
-    _write_json(hostile / "top100.json", build_hostile_top100())
+    _write_json(
+        hostile / "top100.json", build_top100_object(HOSTILE_RUN_ID, build_hostile_top100())
+    )
     _write_events(
         hostile / "events.jsonl",
         chain_records(build_hostile_event_bodies()),

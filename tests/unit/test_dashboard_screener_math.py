@@ -62,7 +62,18 @@ def _node_call(expr: str, *argv: str) -> Any:
 
 
 def _fixture_rows() -> list[dict[str, Any]]:
-    return json.loads(_TOP100_FIXTURE.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+    """The committed fixture's rows THROUGH the real display reader.
+
+    DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the fixture is the writer's OBJECT
+    root with ENGINE metric names; the screener consumes rows the reader has
+    already validated + metric-mapped (``metrics.sharpe`` et al. are the
+    reader's aliases), so the JS goldens run over EXACTLY the wire rows.
+    """
+    from brutex.dashboard import oneclick_artifacts as oc
+
+    result = oc.load_top100(_TOP100_FIXTURE.parent)
+    assert result.status == "ok", result.detail
+    return [dict(row) for row in result.rows]
 
 
 class TestComparatorTotalOrder:
@@ -213,6 +224,30 @@ class TestApplyFilters:
         ]
         assert [r["rank"] for r in out["rows"]] == [r["rank"] for r in expected]
         assert len(out["rows"]) > 0  # a non-vacuous predicate over the fixture
+
+    def test_engine_named_metrics_without_the_mapping_drop_every_row(self) -> None:
+        """The metric-drift BLAST RADIUS (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+        RAW engine-named rows (``max_drawdown_paisa`` — no ``max_dd_paisa``
+        alias) fail the Max|DD| band filter's number check, so EVERY row is
+        dropped — not merely "—" columns. The reader's ONE metric-key mapping
+        is what keeps the filter alive; the mapped fixture keeps all rows."""
+        raw_engine_rows = [
+            {"rank": 1, "metrics": {"max_drawdown_paisa": -100}},
+            {"rank": 2, "metrics": {"max_drawdown_paisa": -300}},
+        ]
+        dropped = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(raw_engine_rows),
+            json.dumps({"max_abs_dd_paisa": 1_000_000}),
+        )
+        assert dropped["rows"] == []  # the pre-fix failure mode, pinned
+        mapped = _fixture_rows()  # the SAME filter over reader-mapped rows
+        kept = _node_call(
+            "S.applyFilters(ARGS[0], ARGS[1])",
+            json.dumps(mapped),
+            json.dumps({"max_abs_dd_paisa": 10_000_000_000}),
+        )
+        assert len(kept["rows"]) == 100  # every row survives the wide cap
 
     def test_max_abs_dd_cap_compares_the_magnitude_of_the_negative_dd(self) -> None:
         rows = [

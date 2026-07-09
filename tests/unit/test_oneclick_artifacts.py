@@ -159,6 +159,65 @@ class TestArtifactRevision:
         (tmp_path / "sweep_runs").mkdir()
         assert oc.runs_revision(results_root) is not None
 
+    def test_runs_revision_moves_on_an_in_place_manifest_rewrite(self, tmp_path: Path) -> None:
+        """Fold [12] (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): rewriting an
+        EXISTING manifest in place (suspect flip) moves the token even though
+        the sweep_runs directory mtime is byte-identical — the cached runs
+        listing's suspect badge can no longer go stale."""
+        results_root = tmp_path / "sweeps"
+        runs = tmp_path / "sweep_runs"
+        manifest = runs / "r-x" / oc.MANIFEST_FILENAME
+        _write(manifest, json.dumps(_valid_manifest("r-x", suspect=False)))
+        # Pin the directory mtimes so ONLY the manifest file token can move.
+        os.utime(runs, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(runs / "r-x", ns=(1_000_000_000, 1_000_000_000))
+        before = oc.runs_revision(results_root)
+        manifest.write_text(json.dumps(_valid_manifest("r-x", suspect=True)), encoding="utf-8")
+        os.utime(runs, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(runs / "r-x", ns=(1_000_000_000, 1_000_000_000))
+        after = oc.runs_revision(results_root)
+        assert before is not None and after is not None
+        assert before.split(":m")[0] == after.split(":m")[0]  # dir token unchanged
+        assert before != after  # the manifest fold moved the key
+
+    def test_runs_revision_unlistable_tree_degrades_to_the_dir_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "sweep_runs").mkdir()
+
+        def _boom(_path: Any) -> Any:
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(oc.os, "scandir", _boom)
+        token = oc.runs_revision(tmp_path / "sweeps")
+        assert token is not None
+        assert ":m" not in token  # the bare directory stat token
+
+    def test_runs_revision_skips_files_and_unstattable_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runs = tmp_path / "sweep_runs"
+        (runs / "r-x").mkdir(parents=True)
+        (runs / "stray.txt").write_text("not a run dir", encoding="utf-8")
+        real_scandir = os.scandir
+
+        class _EvilEntry:
+            name = "evil"
+
+            @staticmethod
+            def is_dir() -> bool:
+                raise OSError("gone mid-scan")
+
+        def _with_evil(path: Any) -> Any:
+            entries: list[Any] = list(real_scandir(path))
+            entries.append(_EvilEntry())
+            return entries
+
+        monkeypatch.setattr(oc.os, "scandir", _with_evil)
+        token = oc.runs_revision(tmp_path / "sweeps")
+        assert token is not None
+        assert ":m" in token  # folded, with the file + evil entries skipped
+
 
 # ── discovery ───────────────────────────────────────────────────────────
 
@@ -336,66 +395,197 @@ def _top100_row(rank: int = 1, **overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _top100_doc(rows: list[Any], **root_overrides: Any) -> dict[str, Any]:
+    """The WRITER's object root (DEC-ONECLICK-TOP100-OBJECT-ROOT-001 shape law)."""
+    doc: dict[str, Any] = {
+        "schema_version": oc.TOP100_SCHEMA_VERSION,
+        "run_id": "r-unit01",
+        "preset": "min_dd_first",
+        "source": {"pool": len(rows)},
+        "baselines": {},
+        "entries": rows,
+    }
+    doc.update(root_overrides)
+    return doc
+
+
+def _write_top100(run_dir: Path, rows: list[Any], **root_overrides: Any) -> None:
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps(_top100_doc(rows, **root_overrides)))
+
+
 class TestLoadTop100:
     def test_missing_is_awaiting(self, tmp_path: Path) -> None:
         result = oc.load_top100(tmp_path)
         assert result.status == "awaiting"
         assert result.rows == ()
         assert result.revision is None
+        assert result.preset is None
 
     def test_unreadable_is_corrupt(self, tmp_path: Path) -> None:
         (tmp_path / oc.TOP100_FILENAME).mkdir()
         assert oc.load_top100(tmp_path).status == "corrupt"
 
     def test_bad_json_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, '[{"rank": 1')
+        _write(tmp_path / oc.TOP100_FILENAME, '{"entries": [{"rank": 1')
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
         assert "not valid JSON" in result.detail
 
-    def test_non_array_is_corrupt(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, '{"rows": []}')
+    def test_bare_array_is_corrupt_naming_the_retired_form(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-TOP100-OBJECT-ROOT-001: the pre-#1621 fixture-only bare
+        array is RETIRED — a NAMED corrupt, never a silent second dialect."""
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([_top100_row(1)]))
         result = oc.load_top100(tmp_path)
         assert result.status == "corrupt"
-        assert "not a JSON array" in result.detail
+        assert result.rows == ()
+        assert "bare JSON array" in result.detail
+        assert "pre-#1621" in result.detail
 
-    def test_valid_empty_list_is_ok(self, tmp_path: Path) -> None:
+    def test_non_object_scalar_root_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, '"junk"')
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert "not the writer's JSON object root" in result.detail
+
+    def test_unknown_future_schema_version_is_named_corrupt(self, tmp_path: Path) -> None:
+        """An unknown FUTURE schema_version degrades LOUDLY — never a crash."""
+        _write_top100(tmp_path, [_top100_row(1)], schema_version=oc.TOP100_SCHEMA_VERSION + 1)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert f"schema_version {oc.TOP100_SCHEMA_VERSION + 1!r}" in result.detail
+        assert "upgrade the display reader" in result.detail
+
+    def test_missing_schema_version_key_is_tolerated(self, tmp_path: Path) -> None:
+        """schema_version is validated only when PRESENT (lenient absent-key law)."""
+        doc = _top100_doc([_top100_row(1)])
+        del doc["schema_version"]
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps(doc))
+        assert oc.load_top100(tmp_path).status == "ok"
+
+    def test_object_root_without_entries_array_is_corrupt(self, tmp_path: Path) -> None:
+        _write(tmp_path / oc.TOP100_FILENAME, json.dumps({"schema_version": 1, "rows": []}))
+        result = oc.load_top100(tmp_path)
+        assert result.status == "corrupt"
+        assert "no entries array" in result.detail
+
+    def test_valid_empty_entries_is_ok(self, tmp_path: Path) -> None:
         """T-M2 status law: a VALID EMPTY artifact EXISTS — status ok, 0 rows."""
-        _write(tmp_path / oc.TOP100_FILENAME, "[]")
+        _write_top100(tmp_path, [])
         result = oc.load_top100(tmp_path)
         assert result.status == "ok"
         assert result.rows == ()
+        assert result.preset == "min_dd_first"
 
-    def test_short_list_is_ok_with_true_row_count(self, tmp_path: Path) -> None:
-        rows = [_top100_row(rank) for rank in range(1, 18)]
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps(rows))
+    def test_short_entries_is_ok_with_true_row_count(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(rank) for rank in range(1, 18)])
         result = oc.load_top100(tmp_path)
         assert result.status == "ok"
         assert len(result.rows) == 17  # never assumed 100
 
+    def test_non_string_or_blank_preset_reads_none(self, tmp_path: Path) -> None:
+        for bad_preset in (7, ""):
+            _write_top100(tmp_path, [_top100_row(1)], preset=bad_preset)
+            result = oc.load_top100(tmp_path)
+            assert result.status == "ok"
+            assert result.preset is None
+
     def test_non_dict_row_is_partial_keeping_prefix(self, tmp_path: Path) -> None:
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([_top100_row(1), "junk"]))
+        _write_top100(tmp_path, [_top100_row(1), "junk"])
         result = oc.load_top100(tmp_path)
         assert result.status == "partial"
         assert len(result.rows) == 1
         assert "row 1" in result.detail
+        assert result.preset == "min_dd_first"  # the root parsed — preset kept
 
     def test_row_missing_keys_is_partial_naming_them(self, tmp_path: Path) -> None:
         bad = _top100_row(2)
         del bad["metrics"], bad["vix_band"]
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([_top100_row(1), bad]))
+        _write_top100(tmp_path, [_top100_row(1), bad])
         result = oc.load_top100(tmp_path)
         assert result.status == "partial"
         assert len(result.rows) == 1
         assert "metrics" in result.detail
         assert "vix_band" in result.detail
 
+    @pytest.mark.parametrize(
+        ("overrides", "named"),
+        [
+            ({"rank": True}, "non-integer rank"),
+            ({"rank": "1"}, "non-integer rank"),
+            ({"conditions": "PDH_CROSS_UP"}, "conditions is not an array"),
+            ({"metrics": [1, 2]}, "metrics is not an object"),
+            ({"regime": "trending"}, "regime is not an object"),
+            ({"vix_band": 12.5}, "vix_band is neither an object nor null"),
+        ],
+    )
+    def test_inner_shape_defects_are_partial_named(
+        self, tmp_path: Path, overrides: dict[str, Any], named: str
+    ) -> None:
+        """Sub-key validation: a required key with an unusable SHAPE degrades
+        to partial with the defect NAMED, rows kept up to it."""
+        bad = _top100_row(2)
+        bad.update(overrides)
+        _write_top100(tmp_path, [_top100_row(1), bad])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        assert len(result.rows) == 1
+        assert "row 1" in result.detail
+        assert named in result.detail
+
+    def test_vix_band_object_passes_the_shape_gate(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1, vix_band={"lo": 11.0, "hi": 17.5})])
+        assert oc.load_top100(tmp_path).status == "ok"
+
     def test_full_precision_metrics_pass_through_untouched(self, tmp_path: Path) -> None:
         row = _top100_row(1)
         row["metrics"]["sharpe"] = 1.0000000000000002
-        _write(tmp_path / oc.TOP100_FILENAME, json.dumps([row]))
+        _write_top100(tmp_path, [row])
         result = oc.load_top100(tmp_path)
         assert result.rows[0]["metrics"]["sharpe"] == 1.0000000000000002
+
+
+class TestTop100MetricKeyMap:
+    """The ONE reader-boundary metric mapping (DEC-ONECLICK-TOP100-OBJECT-ROOT-001)."""
+
+    def test_engine_names_gain_the_display_aliases_additively(self, tmp_path: Path) -> None:
+        """Every writer metric name maps to its display twin — engine keys kept."""
+        engine_metrics = {
+            "max_drawdown_paisa": -158_117,
+            "sharpe_ratio": 3.2000000000000002,
+            "deflated_sharpe": 0.93,
+            "total_trades": 187,
+            "net_pnl_paisa": 8_962_469,  # unmapped — passes through verbatim
+        }
+        _write_top100(tmp_path, [_top100_row(1, metrics=dict(engine_metrics))])
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert metrics["max_dd_paisa"] == -158_117
+        assert metrics["sharpe"] == 3.2000000000000002  # full precision
+        assert metrics["dsr"] == 0.93
+        assert metrics["trades"] == 187
+        for engine_key, value in engine_metrics.items():
+            assert metrics[engine_key] == value  # additive — nothing removed
+
+    def test_absent_cpcv_stays_absent_never_a_fabricated_zero(self, tmp_path: Path) -> None:
+        """The writer emits no cpcv_pass_pct — the reader must NOT invent one."""
+        _write_top100(tmp_path, [_top100_row(1, metrics={"sharpe_ratio": 1.0})])
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert "cpcv_pass_pct" not in metrics
+
+    def test_existing_display_key_is_never_overwritten(self, tmp_path: Path) -> None:
+        """An artifact already carrying the display name wins over the alias."""
+        _write_top100(
+            tmp_path,
+            [_top100_row(1, metrics={"sharpe_ratio": 9.9, "sharpe": 1.1})],
+        )
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert metrics["sharpe"] == 1.1
+        assert metrics["sharpe_ratio"] == 9.9
+
+    def test_row_without_mapped_keys_is_returned_unchanged(self, tmp_path: Path) -> None:
+        """The no-alias fast path: no engine key present ⇒ the SAME row object."""
+        _write_top100(tmp_path, [_top100_row(1)])
+        metrics = oc.load_top100(tmp_path).rows[0]["metrics"]
+        assert metrics == {"sharpe": 1.2345678901}
 
 
 # ── preflight fixture loader ────────────────────────────────────────────
@@ -921,7 +1111,7 @@ def _rebind_run(tmp_path: Path, run_id: str = "r-x", **row_kwargs: Any) -> Path:
             tuple_ref=row_kwargs.pop("tuple_ref", {"tuple": _TUPLE_REF, "sidecar": "equity"}),
         )
     ]
-    _write(run_dir / oc.TOP100_FILENAME, json.dumps(rows))
+    _write(run_dir / oc.TOP100_FILENAME, json.dumps(_top100_doc(rows, run_id=run_id)))
     return results_root
 
 
@@ -1067,11 +1257,16 @@ class TestTradeStoreReader:
         _write(
             run_dir / oc.TOP100_FILENAME,
             json.dumps(
-                [
-                    _rebind_top100_row(
-                        1, combo="combo-ghost", tuple_ref={"tuple": _TUPLE_REF, "sidecar": "equity"}
-                    )
-                ]
+                _top100_doc(
+                    [
+                        _rebind_top100_row(
+                            1,
+                            combo="combo-ghost",
+                            tuple_ref={"tuple": _TUPLE_REF, "sidecar": "equity"},
+                        )
+                    ],
+                    run_id="r-x",
+                )
             ),
         )
         ghost = oc.TradeStoreReader(results_root).page("r-x", 1, offset=0, limit=10)

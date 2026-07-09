@@ -142,6 +142,11 @@
   </div>
 
   <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+  <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+       the artifact order is its R30 preset (default min_dd_first), which
+       deliberately DIFFERS from /results (Rank-by metric, descending);
+       loadRows fills the live preset via textContent — no sort is changed. -->
+  <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
 
   <div id="scPanel"></div>
   <div class="tablewrap">
@@ -313,6 +318,14 @@
         if (payload.status === 'ok' || payload.status === 'partial') {
           state.rows = payload.rows || [];
           state.rowCount = payload.row_count === undefined ? null : payload.row_count;
+          // [11] sort-basis label: name the ACTUAL artifact preset (fallback
+          // to the default name when the payload carries none) — label only.
+          byId('scSortBasis').textContent =
+            'sort basis: artifact preset '
+            + (typeof payload.preset === 'string' && payload.preset
+              ? payload.preset : 'min_dd_first (default)')
+            + ' — differs from /results (Rank-by metric, descending);'
+            + ' column clicks re-sort this page only';
           byId('scDetail').textContent =
             payload.status === 'partial'
               ? 'PARTIAL artifact: ' + String(payload.detail)

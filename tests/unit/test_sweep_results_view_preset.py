@@ -214,12 +214,17 @@ class TestPresetOrdering:
         with pytest.raises(ValueError, match="unknown ranking preset"):
             build_sweep_leaderboard(tmp_path, preset="not_a_preset")
 
-    def test_preset_payload_gains_exactly_two_additive_keys(self, tmp_path: Path) -> None:
+    def test_preset_payload_gains_exactly_three_additive_keys(self, tmp_path: Path) -> None:
         write_tuple_store(tmp_path, [make_leaderboard_row(1)])
         payload = build_sweep_leaderboard(tmp_path, preset="min_dd_first").to_dict()
-        assert set(payload) == _LEGACY_PAYLOAD_KEYS | {"preset", "preset_inert_axes"}
+        assert set(payload) == _LEGACY_PAYLOAD_KEYS | {
+            "preset",
+            "preset_inert_axes",
+            "preset_tiebreak_rows",
+        }
         # rank_by is echoed unchanged for the dropdown state — it did NOT order.
         assert payload["rank_by"] == DEFAULT_RANK_BY
+        assert payload["preset_tiebreak_rows"] == 0  # no artifact — nothing harvested
 
     def test_preset_composes_with_filters_and_top_n(self, tmp_path: Path) -> None:
         write_tuple_store(
@@ -272,6 +277,188 @@ class TestPresetOrdering:
         )
         board = build_sweep_leaderboard(tmp_path, preset="min_dd_first")
         assert [r["max_drawdown_pct"] for r in board.rows] == [2.0, 7.0]
+
+
+def _write_axes_artifact(
+    lake_root: Path,
+    grid_id: str,
+    entries: list[tuple[str, Any, Any]],
+) -> Path:
+    """Write one contract-shaped top100 OBJECT-root artifact carrying tie-break axes.
+
+    *entries* = ``[(combo_run_id, composite_score, max_consecutive_losses)]``
+    in rank order — the shape :func:`_load_preset_tiebreak_axes` harvests
+    (DEC-ONECLICK-TOP100-OBJECT-ROOT-001 [11]-sibling fold).
+    """
+    import json
+
+    rows = [
+        {
+            "rank": rank,
+            "run_id": rid,
+            "mask_hex": "0x05",
+            "conditions": ["PDH_CROSS_UP"],
+            "tf": "5m",
+            "direction": "long",
+            "arm": {"sl_paisa": None, "tp_paisa": None},
+            "metrics": {"composite_score": comp, "max_consecutive_losses": mcl},
+            "regime": {},
+            "vix_band": None,
+            "family_id": rid,
+        }
+        for rank, (rid, comp, mcl) in enumerate(entries, start=1)
+    ]
+    doc = {
+        "schema_version": 1,
+        "run_id": grid_id,
+        "preset": "min_dd_first",
+        "source": {"pool": len(rows)},
+        "baselines": {},
+        "entries": rows,
+    }
+    path = lake_root / "sweep_runs" / grid_id / "top100.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+class TestPresetTiebreakAxesFold:
+    """The [11]-sibling fold (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): under the
+    SAME preset, /results ties now break with the ENGINE-persisted top100
+    composite/max_consecutive_losses instead of falling straight to run_id
+    ASC — /results rank-1 == one-click rank-1 for artifact-covered rows."""
+
+    def test_tied_dd_breaks_by_artifact_composite_desc(self, tmp_path: Path) -> None:
+        """Pre-fold this ordered [3, 6, 9] (run_id ASC) — the finder's repro."""
+        write_tuple_store(
+            tmp_path,
+            [
+                make_leaderboard_row(3, max_drawdown_pct=10.0),
+                make_leaderboard_row(6, max_drawdown_pct=10.0),
+                make_leaderboard_row(9, max_drawdown_pct=10.0),
+            ],
+        )
+        # The artifact scored seed-9 HIGHEST; seed-6 is absent from it (its
+        # None composite sorts AFTER scored ones — the presets None-after law).
+        _write_axes_artifact(
+            tmp_path,
+            "grid-tb-01",
+            [(run_id_hex(9), 2.0, 1), (run_id_hex(3), 1.0, 1)],
+        )
+        board = build_sweep_leaderboard(tmp_path, preset="min_dd_first")
+        assert [r["run_id"] for r in board.rows] == [
+            run_id_hex(9),
+            run_id_hex(3),
+            run_id_hex(6),
+        ]
+        assert board.preset_tiebreak_rows == 2
+        assert board.preset_inert_axes == ()  # both axes discriminated this view
+
+    def test_equal_composite_breaks_by_fewest_consecutive_losses(self, tmp_path: Path) -> None:
+        """The full R30 chain: dd tie → composite tie → mcl ASC (mirrored)."""
+        write_tuple_store(
+            tmp_path,
+            [
+                make_leaderboard_row(3, max_drawdown_pct=10.0),
+                make_leaderboard_row(9, max_drawdown_pct=10.0),
+            ],
+        )
+        _write_axes_artifact(
+            tmp_path,
+            "grid-tb-02",
+            [(run_id_hex(9), 1.5, 1), (run_id_hex(3), 1.5, 4)],
+        )
+        board = build_sweep_leaderboard(tmp_path, preset="min_dd_first")
+        assert [r["run_id"] for r in board.rows] == [run_id_hex(9), run_id_hex(3)]
+
+    def test_payload_names_the_fold_honestly(self, tmp_path: Path) -> None:
+        write_tuple_store(tmp_path, [make_leaderboard_row(1), make_leaderboard_row(2)])
+        _write_axes_artifact(tmp_path, "grid-tb-03", [(run_id_hex(1), 1.0, 2)])
+        payload = build_sweep_leaderboard(tmp_path, preset="min_dd_first").to_dict()
+        assert payload["preset_tiebreak_rows"] == 1  # seed-2 stayed unharvested
+        assert payload["preset_inert_axes"] == []
+
+    def test_duplicate_run_id_across_artifacts_is_first_wins(self, tmp_path: Path) -> None:
+        """Name-sorted grids, first-wins — the _load_rows_resilient precedent."""
+        write_tuple_store(
+            tmp_path,
+            [
+                make_leaderboard_row(3, max_drawdown_pct=10.0),
+                make_leaderboard_row(6, max_drawdown_pct=10.0),
+            ],
+        )
+        _write_axes_artifact(tmp_path, "grid-a", [(run_id_hex(3), 5.0, 1), (run_id_hex(6), 1.0, 1)])
+        _write_axes_artifact(tmp_path, "grid-b", [(run_id_hex(3), 0.1, 1)])
+        board = build_sweep_leaderboard(tmp_path, preset="min_dd_first")
+        # grid-a's 5.0 (first-wins) keeps seed-3 ahead of seed-6's 1.0.
+        assert [r["run_id"] for r in board.rows] == [run_id_hex(3), run_id_hex(6)]
+
+    def test_junk_axis_values_and_rowless_ids_contribute_nothing(self, tmp_path: Path) -> None:
+        """Bool/non-numeric axis values are filtered; both-None entries skip;
+        rows without a run_id key (pre-#1275 artifacts) skip; a corrupt
+        artifact and a stray FILE under sweep_runs contribute nothing."""
+        write_tuple_store(
+            tmp_path,
+            [
+                make_leaderboard_row(3, max_drawdown_pct=10.0),
+                make_leaderboard_row(6, max_drawdown_pct=10.0),
+            ],
+        )
+        _write_axes_artifact(
+            tmp_path,
+            "grid-junk",
+            [
+                (run_id_hex(6), True, "four"),  # bool comp + str mcl → both None → skipped
+                (run_id_hex(9), None, None),  # both None → skipped
+            ],
+        )
+        # A pre-#1275 row shape: no run_id key at all.
+        _write_axes_artifact(tmp_path, "grid-old", [("", 9.0, 1)])
+        (tmp_path / "sweep_runs" / "corrupt-grid").mkdir(parents=True)
+        (tmp_path / "sweep_runs" / "corrupt-grid" / "top100.json").write_text(
+            "{broken", encoding="utf-8"
+        )
+        (tmp_path / "sweep_runs" / "stray.txt").write_text("not a run dir", encoding="utf-8")
+        board = build_sweep_leaderboard(tmp_path, preset="min_dd_first")
+        # Nothing harvested → the pre-fold run_id-ASC tie order, inert axes named.
+        assert [r["run_id"] for r in board.rows] == [run_id_hex(3), run_id_hex(6)]
+        assert board.preset_tiebreak_rows == 0
+        assert board.to_dict()["preset_inert_axes"] == list(PRESET_INERT_AXES)
+
+    def test_partial_axis_enrichment_names_only_the_inert_axis(self, tmp_path: Path) -> None:
+        """mcl-only harvest: composite stays inert VIEW-WIDE and is named."""
+        write_tuple_store(tmp_path, [make_leaderboard_row(1)])
+        _write_axes_artifact(tmp_path, "grid-mcl", [(run_id_hex(1), None, 3)])
+        payload = build_sweep_leaderboard(tmp_path, preset="min_dd_first").to_dict()
+        assert payload["preset_tiebreak_rows"] == 1
+        assert payload["preset_inert_axes"] == ["composite_score"]
+
+    def test_no_sweep_runs_tree_harvests_nothing(self, tmp_path: Path) -> None:
+        write_tuple_store(tmp_path, [make_leaderboard_row(1)])
+        scan = load_sweep_scan(tmp_path)
+        assert scan.tiebreak_axes == {}
+
+    def test_unstattable_entry_is_skipped_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dir entry dying mid-scan is skipped — never a /results raise."""
+        import os
+
+        from brutex.dashboard import sweep_results_view as srv
+
+        _write_axes_artifact(tmp_path, "grid-ok", [(run_id_hex(1), 1.0, 1)])
+        real_scandir = os.scandir
+
+        class _EvilEntry:
+            name = "evil"
+
+            @staticmethod
+            def is_dir() -> bool:
+                raise OSError("gone mid-scan")
+
+        monkeypatch.setattr(srv.os, "scandir", lambda path: [*real_scandir(path), _EvilEntry()])
+        axes = srv._load_preset_tiebreak_axes(tmp_path)
+        assert axes == {run_id_hex(1): (1.0, 1)}
 
 
 class TestStoreErrorPayload:

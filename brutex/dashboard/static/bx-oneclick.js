@@ -203,6 +203,21 @@ function bxFunnelProvenance(source, runId) {
     return String(value);
   }
 
+  /* [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+     the one-click Top-100 order is the artifact's R30 preset (default
+     min_dd_first — smallest max-drawdown first), which deliberately DIFFERS
+     from /results (Rank-by metric, descending). Label only — neither sort
+     is changed; a missing preset falls back honestly to the default name. */
+  function sortBasisText(preset) {
+    var name =
+      typeof preset === "string" && preset ? preset : "min_dd_first (default)";
+    return (
+      "sort basis: artifact preset " +
+      name +
+      " — differs from /results (Rank-by metric, descending)"
+    );
+  }
+
   function vixBandText(band) {
     if (!band || typeof band !== "object" || band.lo === undefined || band.hi === undefined) {
       return "no VIX band";
@@ -534,6 +549,7 @@ function bxFunnelProvenance(source, runId) {
           }
         }
         if (payload.status === "ok" || payload.status === "partial") {
+          setOc("top100_sort_basis", sortBasisText(payload.preset));
           fillRankOneCard(payload.rows || []);
           renderCombosRows(payload);
           if (payload.rows && payload.rows.length && payload.row_count !== undefined) {

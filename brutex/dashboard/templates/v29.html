@@ -2543,6 +2543,11 @@
     <summary>Standard metrics<span class="hint">— how is it making money?</span></summary>
     <div class="body">
       <div class="oc-sub" id="ocTop100Note">awaiting real run artifact — the metrics below fill from top100.json</div>
+      <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+           the Top-100 order is the ARTIFACT preset (default min_dd_first),
+           which deliberately DIFFERS from /results (Rank-by metric, desc);
+           bx-oneclick.js fills the live preset — neither sort is changed. -->
+      <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
       <div class="kpi-strip">
         <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v" data-oc="r1_net" data-explain="net_pnl_paisa">—</div></div>
         <div class="kpi-cell"><div class="k">Max DD</div><div class="v" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div></div>
@@ -2864,6 +2869,9 @@
     </div>
 
     <!-- TABLE for ranks 4-20 -->
+    <!-- [11] sort-basis honesty label — same live-filled hook as the metrics
+         card above (setOc fills every data-oc node in one pass). -->
+    <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
     <div class="combos-table-wrap">
       <table class="combos-table" id="combosTable">
         <thead>
