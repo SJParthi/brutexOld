@@ -320,6 +320,16 @@ function pct(v) {
   if (!isFinite(n)) return "—";
   return (n * 100).toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
 }
+/* Already-percent values (max_drawdown_pct is PERCENT-valued at the source —
+   the metrics fold multiplies by 100): append the sign only, NEVER re-scale
+   (pct() above is for 0-1 fractions like win_rate). Display-only truncation;
+   the sorted value stays the raw one. */
+function pctVal(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  return n.toLocaleString("en-US", { maximumFractionDigits: 2 }) + "%";
+}
 
 /* Truthful heartbeat driver (fix R-2): "ok" green pulse ONLY on a live payload,
    "warn" amber (stale — a poll failed but the last real table is kept), "down"
@@ -399,8 +409,16 @@ const COLS = [
     '<span class="pnl ' + (Number(r.net_pnl_rupees) >= 0 ? "pos" : "neg") + '">' + esc(r.net_pnl) + "</span>"],
   ["sharpe_ratio", "Sharpe", (r) => metric(r.sharpe_ratio)],
   ["sortino_ratio", "Sortino", (r) => metric(r.sortino_ratio)],
+  /* Risk + rank-axis visibility (DEC-RESULTS-TRUST-HONESTY-001, BLOCKER 6):
+     Calmar + expectancy were offered in the rank-by dropdown yet invisible as
+     columns; Max DD % is the row's percent risk figure (already-percent —
+     pctVal, never re-scaled). Expectancy renders in raw paisa (labeled) —
+     an exact int, never a re-rounded rupee figure. */
+  ["calmar_ratio", "Calmar", (r) => metric(r.calmar_ratio)],
   ["profit_factor", "PF", (r) => metric(r.profit_factor)],
   ["win_rate", "Win %", (r) => pct(r.win_rate)],
+  ["max_drawdown_pct", "Max DD %", (r) => pctVal(r.max_drawdown_pct)],
+  ["expectancy_paisa", "Expectancy (paisa)", (r) => num(r.expectancy_paisa)],
   ["total_trades", "Trades", (r) => num(r.total_trades)],
   /* The honesty law (DEC-RESULTS-TRUST-HONESTY-001): the tuple-scoped DSR is
      NEVER presented unlabeled — its header names the inflating tuple-N scope;
@@ -420,7 +438,8 @@ const COLS = [
 ];
 const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
   "profit_factor", "win_rate", "total_trades", "max_year_share",
-  "deflated_sharpe", "cascade_dsr"]);
+  "deflated_sharpe", "cascade_dsr",
+  "calmar_ratio", "max_drawdown_pct", "expectancy_paisa"]);
 
 /* The 4 KPI cards: label + formatter. Values are the SAME num() strings as ever
    (DEC-SURFACE-TRIAL-001) — countUp writes the final exact string synchronously

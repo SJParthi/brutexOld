@@ -879,6 +879,15 @@ def _project_row(
         "profit_factor": row.profit_factor,
         "win_rate": row.win_rate,
         "max_drawdown_pct": row.max_drawdown_pct,
+        # The two RISK/rank-axis scalars (DEC-RESULTS-TRUST-HONESTY-001, audit
+        # BLOCKER 6) under their bare ResultRow names: both were already
+        # rankable (RANKABLE_COLUMNS) yet invisible on the wire — a rank axis
+        # the operator can pick must be a value the page can show.
+        # ``max_drawdown_paisa`` is the row's ONLY authoritative absolute risk
+        # figure (int paisa magnitude); ``expectancy_paisa`` is the signed
+        # per-trade expectancy (int paisa) — exact ints, never floats.
+        "max_drawdown_paisa": row.max_drawdown_paisa,
+        "expectancy_paisa": row.expectancy_paisa,
         "deflated_sharpe": row.deflated_sharpe,
         "total_trades": row.total_trades,
         "winning_trades": row.winning_trades,

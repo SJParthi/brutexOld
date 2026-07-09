@@ -175,6 +175,30 @@ def test_money_and_full_precision_projection(tmp_path: Path) -> None:
     assert row["win_rate"] == 0.6
 
 
+def test_risk_rank_axis_keys_projected(tmp_path: Path) -> None:
+    """DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 6): the two rankable risk
+    scalars ride the row under their bare ResultRow names as EXACT ints —
+    both were rank axes the operator could pick yet invisible on the wire.
+    """
+    _write_store(
+        tmp_path,
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        rows=[_row(seed=1)],
+    )
+    board = build_sweep_leaderboard(tmp_path)
+    row = board.rows[0]
+    assert row["max_drawdown_paisa"] == 50_00
+    assert row["expectancy_paisa"] == 10_00
+    assert isinstance(row["max_drawdown_paisa"], int)
+    assert isinstance(row["expectancy_paisa"], int)
+    # The percent risk figure stays the raw float (display scaling is
+    # client-side and never touches the sorted value).
+    assert row["max_drawdown_pct"] == 0.05
+    assert row["calmar_ratio"] == 0.9
+
+
 def test_conditions_decoded_from_mask(tmp_path: Path) -> None:
     """A mask with set bits decodes to its condition names; mask 0 → empty string."""
     _write_store(
