@@ -38,6 +38,18 @@ def _no_aws(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("brutex.config.credentials.resolve_groww_aws_credentials", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_disk_floors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin both disk floors to 0 so ``cmd_nightly_backup`` never reads the CI
+    machine's REAL free disk (the 20 GiB lake / 10 GiB backup defaults refused
+    the backup pre-check on a low-disk GitHub runner — the 2026-07-08
+    run-28948028949 red; the sibling test files pin, these three real-lake
+    backup tests were missed).  The floor-breach test overrides with its own
+    in-test ``setenv``."""
+    monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_LAKE_BYTES", "0")
+    monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_BACKUP_BYTES", "0")
+
+
 def _mini_lake(tmp_path: Path) -> tuple[Path, Path]:
     lake = tmp_path / "lake"
     results = lake / "sweeps"
