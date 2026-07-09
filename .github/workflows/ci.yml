@@ -276,7 +276,22 @@ jobs:
     # 75 gives evidenced ~25% headroom over the measured ~60m wall;
     # wall-clock budget only — no gate is weakened. Continues the
     # 15->25->40->60 ratchet.
-    timeout-minutes: 75
+    # 75 -> 110 (2026-07-09, DEC-SWEEP-UNKILLABLE-CORE-001, run 28988287641
+    # job 86022289736): the Phase-2 unkillable-run-core work adds 23,766 lines
+    # of new unit/integration/property tests (16 new 100%-covered modules +
+    # their suites). The job hit the 75m wall (started 01:47:42Z, cancelled
+    # 03:03:00Z) MID step 10 "Strict per-module gate" (orphan pytest reaped at
+    # teardown) with EVERY executed step green: step 8 whole-package coverage
+    # SUCCEEDED at 100.00% in 3946s (65.8m) and coverage-xml uploaded, step 10
+    # got only 442s before the wall. Measured attribution vs the pre-Phase-2
+    # baseline dc859da7 (run 28985489988, SUCCESS, 58m wall): step 8 grew
+    # 2513s -> 3946s (+23.9m) and step 10 (full) was 849s there, so the
+    # projected full Phase-2 wall is ~88m (setup ~2m + step 8 65.8m + smoke
+    # 0.2m + step 10 ~18-20m). 110 gives evidenced ~25% headroom over the
+    # projected ~88m wall. Zero real failures, zero coverage loss (100.00%
+    # reached) — pure wall-time growth from the new test volume. Continues the
+    # 15->25->40->60->75 ratchet.
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v7
         with:
