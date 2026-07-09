@@ -615,6 +615,26 @@
     <div id="phaseProgress" aria-live="polite"></div>
   </div>
 
+  <!-- Greeks backfill (DEC-GREEKS-BULK-REENRICH-001): bulk v1→v2 re-enrich of the
+       F&O options lake's Greeks overlay — reaches EXPIRED contracts + CLI-pulled
+       lakes the pull-side pass never touches. Zero vendor calls; the scan is
+       O(files) (honest — it can take a while on a deep lake); a pull on the same
+       lake is refused while it runs (one lake-writer job at a time). Status is
+       written via textContent ONLY (CodeQL XSS guard). -->
+  <div id="greeksBackfillPanel" role="status" aria-live="polite"
+       style="margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Greeks backfill (v1→v2)</b>
+    <button id="greeksBackfillBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
+            title="Re-stamp every stale (unstamped / v1 / inputs-drifted) option contract's Greeks overlay through the existing enrich driver — expired contracts + CLI-pulled lakes included. Idempotent; zero vendor calls; the O(files) scan may take a while; resumes after a crash from a durable checkpoint.">
+      ▶ Run backfill
+    </button>
+    <label style="margin-left:8px;color:var(--muted);">
+      <input type="checkbox" id="gbDry"> dry-run (scan + report only — zero writes)
+    </label>
+    <span id="gbstatus" style="margin-left:10px;color:var(--muted);"></span>
+  </div>
+
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
        (DEC-MAPPING-INTEGRITY-RECONCILE-001 / DEC-MAPPING-INTEGRITY-ATTEMPTED-001). VERIFIED =
        every ATTEMPTED options-eligible spot pulled its option history; RED = a spot was
@@ -2157,6 +2177,198 @@ async function refreshVerdict() {
     banner.style.display = 'flex';
   } catch (e) { /* offline — leave the banner as-is */ }
 }
+/* ── Greeks backfill (DEC-GREEKS-BULK-REENRICH-001) ──
+   POST to start the background bulk v1→v2 re-enrich, then poll its OWN O(1)
+   progress route every GB_MS until a TERMINAL state is actually OBSERVED.
+   The poll is SELF-RECOVERING — the DEC-PULL-UI-STALENESS-001 posture of the
+   sibling pollProgress above: GB_MAX_FEED_RETRIES is the QUICK-retry budget
+   in FRONT of a 3 s→30 s capped exponential backoff, NOT a give-up bound
+   (fix round 9, refuter-confirmed: the old bounded give-up stopped polling
+   FOREVER after ~3 s of blips on a multi-hour wet run, re-enabled the
+   run-STARTING button mid-job, and its "re-open the page" remedy was
+   false — no re-attach path existed). A non-ok or malformed poll
+   COUNTS as a failure and can never settle the panel; a hidden tab fires
+   ZERO fetches (document.hidden skip + visibilitychange catch-up); on page
+   load gbAttachIfRunning() re-attaches to a live job with ONE probe, so a
+   re-opened page resumes the feed instead of a blank panel. Every gb fetch
+   (poll, start POST, attach probe) rides ONE gbFetchJson helper carrying the
+   sibling's FEED_FETCH_TIMEOUT_MS hung-fetch abort bound armed through the
+   BODY read, and the poll chain is generation-guarded (gbPollGen) so a
+   visibilitychange catch-up SUPERSEDES an in-flight chain instead of forking
+   it (fix round 10, refuter-confirmed: round 9 omitted both — a
+   headers-then-stalled-body response threw nothing, so the catch/backoff was
+   unreachable, nothing was scheduled, and the panel wedged at "running · …"
+   with the Run button disabled until a tab flip or a reload). textContent
+   ONLY — never innerHTML (CodeQL XSS guard). */
+const GB_MS = 600;
+const GB_MAX_FEED_RETRIES = 5;   // quick-retry budget in FRONT of the backoff — NOT a give-up bound
+const GB_BACKOFF_BASE_MS = 3000;
+const GB_BACKOFF_MAX_MS = 30000;
+const GB_HIDDEN_MS = 5000;       // hidden-tab re-check cadence (zero fetches while hidden)
+let gbTimer = null;
+let gbFeedRetries = 0;
+let gbWatchActive = false;
+let gbPollGen = 0;               // re-entrancy generation: a superseded/stale response never repaints
+/* Hung-fetch abort bound for EVERY gb fetch (fix round 10, refuter-confirmed —
+   the sibling pollProgress's own refuter-confirmed bound, omitted by the
+   round-9 rewrite): browsers have NO body-read timeout, so a
+   headers-then-stalled-body response (or a half-open connection dying
+   silently mid-response) would wedge BOTH awaits forever with nothing
+   scheduled — the catch/backoff machinery unreachable, gbStatus frozen at
+   'running · …' and the Run button disabled until a tab flip or a reload.
+   The killer stays ARMED through the BODY read — cleared only in the
+   finally, after r.json() settles — so a stalled response becomes a counted
+   failure within FEED_FETCH_TIMEOUT_MS. ONE helper for all three gb call
+   sites (CLAUDE.md §11 COMMON — no third hand-rolled copy of the controller
+   boilerplate). Returns {ok, status, body}; a non-ok body is parsed
+   best-effort (null when unparseable) so the caller can surface the refusal
+   detail; a malformed OK body still THROWS to the caller — a malformed poll
+   must COUNT as a failure, never settle the panel. */
+async function gbFetchJson(url, opts) {
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;
+  const o = opts || {};
+  if (ctrl) o.signal = ctrl.signal;
+  try {
+    const r = await fetch(url, o);
+    if (!r.ok) {
+      let detail = null;
+      try { detail = await r.json(); } catch (e) { detail = null; }
+      return {ok: false, status: r.status, body: detail};
+    }
+    return {ok: true, status: r.status, body: await r.json()};
+  } finally {
+    if (killer) clearTimeout(killer);   // cleared only AFTER the body read settled — a stalled body aborts too
+  }
+}
+function gbStatus(text) {
+  const el = document.getElementById('gbstatus');
+  if (el) el.textContent = text;
+}
+function gbRetryDelayMs() {
+  if (gbFeedRetries <= GB_MAX_FEED_RETRIES) return GB_MS;                // quick-blip absorber
+  const exp = Math.min(gbFeedRetries - GB_MAX_FEED_RETRIES - 1, 4);      // overflow-proof clamp
+  return Math.min(GB_BACKOFF_MAX_MS, GB_BACKOFF_BASE_MS * Math.pow(2, exp));  // 3s,6s,12s,24s,30s cap
+}
+function gbBeginWatch() {
+  gbWatchActive = true;
+  gbFeedRetries = 0;
+  const btn = document.getElementById('greeksBackfillBtn');
+  if (btn) btn.disabled = true;   // re-enabled ONLY once a terminal state is observed
+  pollGreeksBackfill();
+}
+function gbFinish() {
+  gbWatchActive = false;
+  gbFeedRetries = 0;
+  gbPollGen += 1;   // invalidate any in-flight poll straggler (a settled panel never repaints stale)
+  if (gbTimer) { clearTimeout(gbTimer); gbTimer = null; }
+  const btn = document.getElementById('greeksBackfillBtn');
+  if (btn) btn.disabled = false;
+}
+async function startGreeksBackfill() {
+  const btn = document.getElementById('greeksBackfillBtn');
+  const dry = !!(document.getElementById('gbDry') && document.getElementById('gbDry').checked);
+  if (btn) btn.disabled = true;
+  gbStatus('Starting Greeks backfill…');
+  try {
+    // gbFetchJson (fix round 10): a wedged POST previously left 'Starting
+    // Greeks backfill…' + a disabled button forever — no exception, no timer.
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill' + (dry ? '?dry_run=true' : ''),
+                                  {method: 'POST'});
+    const body = res.body;
+    if (!res.ok) throw new Error((body && body.detail) || ('HTTP ' + res.status));
+    if (!body || !body.started) {
+      // Refused (single-flight): the running writer may be THIS panel's own
+      // backfill (a second click / another tab) — attach to its live feed
+      // instead of a dead-end message; only a foreign lake writer (a pull
+      // holding the flock) leaves the refusal + re-enables the button.
+      const attached = await gbAttachIfRunning();
+      if (!attached) {
+        gbStatus('a job is already running on this lake (backfill or pull) — retry once it finishes');
+        if (btn) btn.disabled = false;
+      }
+      return;
+    }
+    gbStatus((dry ? 'DRY RUN · ' : '') + 'scanning the options lake (O(files) — may take a while)…');
+    gbBeginWatch();
+  } catch (e) {
+    gbStatus('✕ failed to start: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+async function pollGreeksBackfill() {
+  const gen = ++gbPollGen;   // every invocation claims the chain (re-entrancy guard, fix round 10):
+                             // a visibilitychange catch-up during an in-flight fetch SUPERSEDES the
+                             // old chain instead of forking a parallel one, and the superseded
+                             // chain's late response can never overwrite a newer status line.
+  if (gbTimer) { clearTimeout(gbTimer); gbTimer = null; }
+  if (!gbWatchActive) return;
+  if (document.hidden) {
+    // Hidden tab: fire ZERO fetches; re-check on a slow cadence — the
+    // visibilitychange catch-up below re-polls immediately on tab return.
+    gbTimer = setTimeout(pollGreeksBackfill, GB_HIDDEN_MS);
+    return;
+  }
+  try {
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill-progress');
+    if (gen !== gbPollGen) return;                        // superseded — drop the stale response
+    if (!res.ok) throw new Error('HTTP ' + res.status);   // a non-ok poll never settles the panel
+    const s = res.body;
+    if (!s || typeof s.state !== 'string') throw new Error('malformed progress payload');
+    gbFeedRetries = 0;
+    if (s.state === 'running') {
+      const line = (s.total || 0) > 0
+        ? `${(s.completed || 0).toLocaleString('en-IN')} / ${(s.total || 0).toLocaleString('en-IN')} contracts · ${(s.bars || 0).toLocaleString('en-IN')} bars · ${s.current || '…'}`
+        : 'scanning the options lake (O(files) — may take a while)…';
+      gbStatus('running · ' + line);
+      gbTimer = setTimeout(pollGreeksBackfill, GB_MS);
+      return;
+    }
+    // TERMINAL state observed (done / error / idle): the honest terminal line
+    // (detail carries the report's note headline on done, the error text on
+    // error) — only here does the Run button come back.
+    gbStatus((s.state === 'error' ? '✕ ' : '✓ ') + (s.detail || s.state));
+    gbFinish();
+  } catch (e) {
+    if (gen !== gbPollGen) return;   // superseded — a stale failure never repaints or reschedules
+    // NEVER give up while the job may still be running: count the failure,
+    // say so honestly, and keep retrying under the capped backoff.
+    gbFeedRetries += 1;
+    gbStatus('… live progress feed unreachable (the backfill may still be running) — retrying');
+    gbTimer = setTimeout(pollGreeksBackfill, gbRetryDelayMs());
+  }
+}
+/* Page-load re-attach (fix round 9): ONE probe — a re-opened page resumes a
+   running job's live feed instead of a blank panel, so the run-starting
+   button is never the only way to look at a live job. Best-effort: a failed
+   probe leaves the panel idle (a genuinely running job is caught by the next
+   page open or by a Run-click refusal attach). */
+async function gbAttachIfRunning() {
+  try {
+    // gbFetchJson (fix round 10): a wedged probe is aborted + lands in the
+    // best-effort catch instead of hanging the attach path forever.
+    const res = await gbFetchJson('/api/v1/universe/greeks-backfill-progress');
+    if (!res.ok) return false;
+    const s = res.body;
+    if (!s || s.state !== 'running') return false;
+    gbStatus('running · attaching to the live progress feed…');
+    gbBeginWatch();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  // Tab return: re-poll NOW instead of waiting out the hidden-tab cadence or
+  // a backoff (the pollProgress visibilitychange pattern above).
+  if (!document.hidden && gbWatchActive) pollGreeksBackfill();
+});
+const greeksBackfillBtn = document.getElementById('greeksBackfillBtn');
+if (greeksBackfillBtn) {
+  greeksBackfillBtn.addEventListener('click', startGreeksBackfill);
+  gbAttachIfRunning();   // a re-opened page re-attaches to a running backfill
+}
+
 const verdictRefreshBtn = document.getElementById('verdictRefresh');
 if (verdictRefreshBtn) verdictRefreshBtn.addEventListener('click', refreshVerdict);
 const verdictRetryBtn = document.getElementById('verdictRetry');

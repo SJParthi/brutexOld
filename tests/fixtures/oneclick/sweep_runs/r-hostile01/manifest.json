@@ -1,0 +1,101 @@
+{
+ "actual": {
+  "enumerated": 36050,
+  "funnel": [
+   {
+    "count": 33800,
+    "stage": "tested"
+   },
+   {
+    "count": 8000,
+    "stage": "gates"
+   },
+   {
+    "count": 1200,
+    "stage": "rank"
+   },
+   {
+    "count": 400,
+    "stage": "refine"
+   },
+   {
+    "count": 100,
+    "stage": "cascade"
+   }
+  ],
+  "skipped": 2250,
+  "tested": 33800
+ },
+ "dedup_skips": 2250,
+ "estimate": {
+  "est_bytes": 250000000,
+  "est_seconds_provisional": 1800,
+  "trials": 36050
+ },
+ "per_door_kills": [
+  {
+   "door": "gates",
+   "killed": 25800
+  },
+  {
+   "door": "rank",
+   "killed": 6800
+  },
+  {
+   "door": "refine",
+   "killed": 800
+  },
+  {
+   "door": "cascade",
+   "killed": 300
+  }
+ ],
+ "per_stage_timings": [
+  {
+   "seconds": 2.125,
+   "stage": "preflight"
+  },
+  {
+   "seconds": 1412.5,
+   "stage": "sweep"
+  },
+  {
+   "seconds": 96.25,
+   "stage": "gates"
+  },
+  {
+   "seconds": 14.5,
+   "stage": "rank"
+  },
+  {
+   "seconds": 310.75,
+   "stage": "refine"
+  },
+  {
+   "seconds": 188.0,
+   "stage": "cascade"
+  },
+  {
+   "seconds": 3.5,
+   "stage": "artifacts"
+  }
+ ],
+ "run_id": "r-hostile01",
+ "selection": {
+  "symbols": [
+   "<script>alert(1)</script>",
+   "<svg onload=alert(1)>",
+   "x\" onerror=\"alert(1)"
+  ],
+  "tfs": [
+   "5m"
+  ]
+ },
+ "suspect": true,
+ "tripwires": [
+  {
+   "note": "<script>alert(1)</script>",
+   "stage": "sweep"
+  }
+ ]
+}

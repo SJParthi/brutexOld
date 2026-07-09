@@ -1,0 +1,2999 @@
+[
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_00",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0001",
+  "mask_hex": "0x00000000000000000000000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 87.5,
+   "dsr": 0.93,
+   "max_dd_paisa": -158117,
+   "net_pnl_paisa": 8962469,
+   "profit_factor": 2.5,
+   "sharpe": 3.2,
+   "trades": 187,
+   "win_rate": 0.61
+  },
+  "rank": 1,
+  "regime": {
+   "sideways_pnl_paisa": 2987490,
+   "trending_pnl_paisa": 5974979
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_01",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0001",
+  "mask_hex": "0x00000000000000000000000000000007",
+  "metrics": {
+   "cpcv_pass_pct": 87.19,
+   "dsr": 0.9259,
+   "max_dd_paisa": -166234,
+   "net_pnl_paisa": 8924938,
+   "profit_factor": 2.4887,
+   "sharpe": 3.1827,
+   "trades": 194,
+   "win_rate": 0.6077
+  },
+  "rank": 2,
+  "regime": {
+   "sideways_pnl_paisa": 2974980,
+   "trending_pnl_paisa": 5949958
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_02",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0001",
+  "mask_hex": "0x00000000000000000000000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 86.88,
+   "dsr": 0.9218,
+   "max_dd_paisa": -174351,
+   "net_pnl_paisa": 8887407,
+   "profit_factor": 2.4774,
+   "sharpe": 3.1654,
+   "trades": 201,
+   "win_rate": 0.6054
+  },
+  "rank": 3,
+  "regime": {
+   "sideways_pnl_paisa": 2962470,
+   "trending_pnl_paisa": 5924937
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_03",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0001",
+  "mask_hex": "0x0000000000000000000000000000000d",
+  "metrics": {
+   "cpcv_pass_pct": 86.57,
+   "dsr": 0.9177,
+   "max_dd_paisa": -182468,
+   "net_pnl_paisa": 8849876,
+   "profit_factor": 2.4661,
+   "sharpe": 3.1481,
+   "trades": 208,
+   "win_rate": 0.6031
+  },
+  "rank": 4,
+  "regime": {
+   "sideways_pnl_paisa": 2949960,
+   "trending_pnl_paisa": 5899916
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_04",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0002",
+  "mask_hex": "0x00000000000000000000000000000015",
+  "metrics": {
+   "cpcv_pass_pct": 86.26,
+   "dsr": 0.9136,
+   "max_dd_paisa": -190585,
+   "net_pnl_paisa": 8812345,
+   "profit_factor": 2.4548,
+   "sharpe": 3.1308,
+   "trades": 215,
+   "win_rate": 0.6008
+  },
+  "rank": 5,
+  "regime": {
+   "sideways_pnl_paisa": 2937450,
+   "trending_pnl_paisa": 5874895
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_05",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0002",
+  "mask_hex": "0x00000000000000000000000000000025",
+  "metrics": {
+   "cpcv_pass_pct": 85.95,
+   "dsr": 0.9095,
+   "max_dd_paisa": -198702,
+   "net_pnl_paisa": 8774814,
+   "profit_factor": 2.4435,
+   "sharpe": 3.1135,
+   "trades": 222,
+   "win_rate": 0.5985
+  },
+  "rank": 6,
+  "regime": {
+   "sideways_pnl_paisa": 2924940,
+   "trending_pnl_paisa": 5849874
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_06",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0002",
+  "mask_hex": "0x00000000000000000000000000000045",
+  "metrics": {
+   "cpcv_pass_pct": 85.64,
+   "dsr": 0.9054,
+   "max_dd_paisa": -206819,
+   "net_pnl_paisa": 8737283,
+   "profit_factor": 2.4322,
+   "sharpe": 3.0962,
+   "trades": 229,
+   "win_rate": 0.5962
+  },
+  "rank": 7,
+  "regime": {
+   "sideways_pnl_paisa": 2912430,
+   "trending_pnl_paisa": 5824853
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_07",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0002",
+  "mask_hex": "0x00000000000000000000000000000085",
+  "metrics": {
+   "cpcv_pass_pct": 85.33,
+   "dsr": 0.9013,
+   "max_dd_paisa": -214936,
+   "net_pnl_paisa": 8699752,
+   "profit_factor": 2.4209,
+   "sharpe": 3.0789,
+   "trades": 236,
+   "win_rate": 0.5939
+  },
+  "rank": 8,
+  "regime": {
+   "sideways_pnl_paisa": 2899920,
+   "trending_pnl_paisa": 5799832
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_08",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0003",
+  "mask_hex": "0x00000000000000000000000000000105",
+  "metrics": {
+   "cpcv_pass_pct": 85.02,
+   "dsr": 0.8972,
+   "max_dd_paisa": -223053,
+   "net_pnl_paisa": 8662221,
+   "profit_factor": 2.4096,
+   "sharpe": 3.0616,
+   "trades": 243,
+   "win_rate": 0.5916
+  },
+  "rank": 9,
+  "regime": {
+   "sideways_pnl_paisa": 2887410,
+   "trending_pnl_paisa": 5774811
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_09",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0003",
+  "mask_hex": "0x00000000000000000000000000000205",
+  "metrics": {
+   "cpcv_pass_pct": 84.71,
+   "dsr": 0.8931,
+   "max_dd_paisa": -231170,
+   "net_pnl_paisa": 8624690,
+   "profit_factor": 2.3983,
+   "sharpe": 3.0443,
+   "trades": 250,
+   "win_rate": 0.5893
+  },
+  "rank": 10,
+  "regime": {
+   "sideways_pnl_paisa": 2874900,
+   "trending_pnl_paisa": 5749790
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_10",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0003",
+  "mask_hex": "0x00000000000000000000000000000405",
+  "metrics": {
+   "cpcv_pass_pct": 84.4,
+   "dsr": 0.889,
+   "max_dd_paisa": -239287,
+   "net_pnl_paisa": 8587159,
+   "profit_factor": 2.387,
+   "sharpe": 3.027,
+   "trades": 257,
+   "win_rate": 0.587
+  },
+  "rank": 11,
+  "regime": {
+   "sideways_pnl_paisa": 2862390,
+   "trending_pnl_paisa": 5724769
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_11",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0003",
+  "mask_hex": "0x00000000000000000000000000000805",
+  "metrics": {
+   "cpcv_pass_pct": 84.09,
+   "dsr": 0.8849,
+   "max_dd_paisa": -247404,
+   "net_pnl_paisa": 8549628,
+   "profit_factor": 2.3757,
+   "sharpe": 3.0097,
+   "trades": 264,
+   "win_rate": 0.5847
+  },
+  "rank": 12,
+  "regime": {
+   "sideways_pnl_paisa": 2849880,
+   "trending_pnl_paisa": 5699748
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_12",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0004",
+  "mask_hex": "0x00000000000000000000000000001005",
+  "metrics": {
+   "cpcv_pass_pct": 83.78,
+   "dsr": 0.8808,
+   "max_dd_paisa": -255521,
+   "net_pnl_paisa": 8512097,
+   "profit_factor": 2.3644,
+   "sharpe": 2.9924,
+   "trades": 271,
+   "win_rate": 0.5824
+  },
+  "rank": 13,
+  "regime": {
+   "sideways_pnl_paisa": 2837370,
+   "trending_pnl_paisa": 5674727
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_13",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0004",
+  "mask_hex": "0x00000000000000000000000000002005",
+  "metrics": {
+   "cpcv_pass_pct": 83.47,
+   "dsr": 0.8767,
+   "max_dd_paisa": -263638,
+   "net_pnl_paisa": 8474566,
+   "profit_factor": 2.3531,
+   "sharpe": 2.9751,
+   "trades": 278,
+   "win_rate": 0.5801
+  },
+  "rank": 14,
+  "regime": {
+   "sideways_pnl_paisa": 2824860,
+   "trending_pnl_paisa": 5649706
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_14",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0004",
+  "mask_hex": "0x00000000000000000000000000004005",
+  "metrics": {
+   "cpcv_pass_pct": 83.16,
+   "dsr": 0.8726,
+   "max_dd_paisa": -271755,
+   "net_pnl_paisa": 8437035,
+   "profit_factor": 2.3418,
+   "sharpe": 2.9578,
+   "trades": 285,
+   "win_rate": 0.5778
+  },
+  "rank": 15,
+  "regime": {
+   "sideways_pnl_paisa": 2812350,
+   "trending_pnl_paisa": 5624685
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_15",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0004",
+  "mask_hex": "0x00000000000000000000000000008005",
+  "metrics": {
+   "cpcv_pass_pct": 82.85,
+   "dsr": 0.8685,
+   "max_dd_paisa": -279872,
+   "net_pnl_paisa": 8399504,
+   "profit_factor": 2.3305,
+   "sharpe": 2.9405,
+   "trades": 292,
+   "win_rate": 0.5755
+  },
+  "rank": 16,
+  "regime": {
+   "sideways_pnl_paisa": 2799840,
+   "trending_pnl_paisa": 5599664
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_16",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0005",
+  "mask_hex": "0x00000000000000000000000000010005",
+  "metrics": {
+   "cpcv_pass_pct": 82.54,
+   "dsr": 0.8644,
+   "max_dd_paisa": -287989,
+   "net_pnl_paisa": 8361973,
+   "profit_factor": 2.3192,
+   "sharpe": 2.9232,
+   "trades": 299,
+   "win_rate": 0.5732
+  },
+  "rank": 17,
+  "regime": {
+   "sideways_pnl_paisa": 2787330,
+   "trending_pnl_paisa": 5574643
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_17",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0005",
+  "mask_hex": "0x00000000000000000000000000020005",
+  "metrics": {
+   "cpcv_pass_pct": 82.23,
+   "dsr": 0.8603,
+   "max_dd_paisa": -296106,
+   "net_pnl_paisa": 8324442,
+   "profit_factor": 2.3079,
+   "sharpe": 2.9059,
+   "trades": 306,
+   "win_rate": 0.5709
+  },
+  "rank": 18,
+  "regime": {
+   "sideways_pnl_paisa": 2774820,
+   "trending_pnl_paisa": 5549622
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_18",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0005",
+  "mask_hex": "0x00000000000000000000000000040005",
+  "metrics": {
+   "cpcv_pass_pct": 81.92,
+   "dsr": 0.8562,
+   "max_dd_paisa": -304223,
+   "net_pnl_paisa": 8286911,
+   "profit_factor": 2.2966,
+   "sharpe": 2.8886,
+   "trades": 313,
+   "win_rate": 0.5686
+  },
+  "rank": 19,
+  "regime": {
+   "sideways_pnl_paisa": 2762310,
+   "trending_pnl_paisa": 5524601
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_19",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0005",
+  "mask_hex": "0x00000000000000000000000000080005",
+  "metrics": {
+   "cpcv_pass_pct": 81.61,
+   "dsr": 0.8521,
+   "max_dd_paisa": -312340,
+   "net_pnl_paisa": 8249380,
+   "profit_factor": 2.2853,
+   "sharpe": 2.8713,
+   "trades": 320,
+   "win_rate": 0.5663
+  },
+  "rank": 20,
+  "regime": {
+   "sideways_pnl_paisa": 2749800,
+   "trending_pnl_paisa": 5499580
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_20",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0006",
+  "mask_hex": "0x00000000000000000000000000100005",
+  "metrics": {
+   "cpcv_pass_pct": 81.3,
+   "dsr": 0.848,
+   "max_dd_paisa": -320457,
+   "net_pnl_paisa": 8211849,
+   "profit_factor": 2.274,
+   "sharpe": 2.854,
+   "trades": 327,
+   "win_rate": 0.564
+  },
+  "rank": 21,
+  "regime": {
+   "sideways_pnl_paisa": 2737290,
+   "trending_pnl_paisa": 5474559
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_21",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0006",
+  "mask_hex": "0x00000000000000000000000000200005",
+  "metrics": {
+   "cpcv_pass_pct": 80.99,
+   "dsr": 0.8439,
+   "max_dd_paisa": -328574,
+   "net_pnl_paisa": 8174318,
+   "profit_factor": 2.2627,
+   "sharpe": 2.8367,
+   "trades": 334,
+   "win_rate": 0.5617
+  },
+  "rank": 22,
+  "regime": {
+   "sideways_pnl_paisa": 2724780,
+   "trending_pnl_paisa": 5449538
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_22",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0006",
+  "mask_hex": "0x00000000000000000000000000400005",
+  "metrics": {
+   "cpcv_pass_pct": 80.68,
+   "dsr": 0.8398,
+   "max_dd_paisa": -336691,
+   "net_pnl_paisa": 8136787,
+   "profit_factor": 2.2514,
+   "sharpe": 2.8194,
+   "trades": 341,
+   "win_rate": 0.5594
+  },
+  "rank": 23,
+  "regime": {
+   "sideways_pnl_paisa": 2712270,
+   "trending_pnl_paisa": 5424517
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_23",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0006",
+  "mask_hex": "0x00000000000000000000000000800005",
+  "metrics": {
+   "cpcv_pass_pct": 80.37,
+   "dsr": 0.8357,
+   "max_dd_paisa": -344808,
+   "net_pnl_paisa": 8099256,
+   "profit_factor": 2.2401,
+   "sharpe": 2.8021,
+   "trades": 348,
+   "win_rate": 0.5571
+  },
+  "rank": 24,
+  "regime": {
+   "sideways_pnl_paisa": 2699760,
+   "trending_pnl_paisa": 5399496
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_24",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0007",
+  "mask_hex": "0x00000000000000000000000001000005",
+  "metrics": {
+   "cpcv_pass_pct": 80.06,
+   "dsr": 0.8316,
+   "max_dd_paisa": -352925,
+   "net_pnl_paisa": 8061725,
+   "profit_factor": 2.2288,
+   "sharpe": 2.7848,
+   "trades": 355,
+   "win_rate": 0.5548
+  },
+  "rank": 25,
+  "regime": {
+   "sideways_pnl_paisa": 2687250,
+   "trending_pnl_paisa": 5374475
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_25",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0007",
+  "mask_hex": "0x00000000000000000000000002000005",
+  "metrics": {
+   "cpcv_pass_pct": 79.75,
+   "dsr": 0.8275,
+   "max_dd_paisa": -361042,
+   "net_pnl_paisa": 8024194,
+   "profit_factor": 2.2175,
+   "sharpe": 2.7675,
+   "trades": 362,
+   "win_rate": 0.5525
+  },
+  "rank": 26,
+  "regime": {
+   "sideways_pnl_paisa": 2674740,
+   "trending_pnl_paisa": 5349454
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_26",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0007",
+  "mask_hex": "0x00000000000000000000000004000005",
+  "metrics": {
+   "cpcv_pass_pct": 79.44,
+   "dsr": 0.8234,
+   "max_dd_paisa": -369159,
+   "net_pnl_paisa": 7986663,
+   "profit_factor": 2.2062,
+   "sharpe": 2.7502,
+   "trades": 369,
+   "win_rate": 0.5502
+  },
+  "rank": 27,
+  "regime": {
+   "sideways_pnl_paisa": 2662230,
+   "trending_pnl_paisa": 5324433
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_27",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0007",
+  "mask_hex": "0x00000000000000000000000008000005",
+  "metrics": {
+   "cpcv_pass_pct": 79.13,
+   "dsr": 0.8193,
+   "max_dd_paisa": -377276,
+   "net_pnl_paisa": 7949132,
+   "profit_factor": 2.1949,
+   "sharpe": 2.7329,
+   "trades": 376,
+   "win_rate": 0.5479
+  },
+  "rank": 28,
+  "regime": {
+   "sideways_pnl_paisa": 2649720,
+   "trending_pnl_paisa": 5299412
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_28",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0008",
+  "mask_hex": "0x00000000000000000000000010000005",
+  "metrics": {
+   "cpcv_pass_pct": 78.82,
+   "dsr": 0.8152,
+   "max_dd_paisa": -385393,
+   "net_pnl_paisa": 7911601,
+   "profit_factor": 2.1836,
+   "sharpe": 2.7156,
+   "trades": 383,
+   "win_rate": 0.5456
+  },
+  "rank": 29,
+  "regime": {
+   "sideways_pnl_paisa": 2637210,
+   "trending_pnl_paisa": 5274391
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_29",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0008",
+  "mask_hex": "0x00000000000000000000000020000005",
+  "metrics": {
+   "cpcv_pass_pct": 78.51,
+   "dsr": 0.8111,
+   "max_dd_paisa": -393510,
+   "net_pnl_paisa": 7874070,
+   "profit_factor": 2.1723,
+   "sharpe": 2.6983,
+   "trades": 390,
+   "win_rate": 0.5433
+  },
+  "rank": 30,
+  "regime": {
+   "sideways_pnl_paisa": 2624700,
+   "trending_pnl_paisa": 5249370
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_30",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0008",
+  "mask_hex": "0x00000000000000000000000040000005",
+  "metrics": {
+   "cpcv_pass_pct": 78.2,
+   "dsr": 0.807,
+   "max_dd_paisa": -401627,
+   "net_pnl_paisa": 7836539,
+   "profit_factor": 2.161,
+   "sharpe": 2.681,
+   "trades": 397,
+   "win_rate": 0.541
+  },
+  "rank": 31,
+  "regime": {
+   "sideways_pnl_paisa": 2612190,
+   "trending_pnl_paisa": 5224349
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_31",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0008",
+  "mask_hex": "0x00000000000000000000000080000005",
+  "metrics": {
+   "cpcv_pass_pct": 77.89,
+   "dsr": 0.8029,
+   "max_dd_paisa": -409744,
+   "net_pnl_paisa": 7799008,
+   "profit_factor": 2.1497,
+   "sharpe": 2.6637,
+   "trades": 404,
+   "win_rate": 0.5387
+  },
+  "rank": 32,
+  "regime": {
+   "sideways_pnl_paisa": 2599680,
+   "trending_pnl_paisa": 5199328
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_32",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0009",
+  "mask_hex": "0x00000000000000000000000100000005",
+  "metrics": {
+   "cpcv_pass_pct": 77.58,
+   "dsr": 0.7988,
+   "max_dd_paisa": -417861,
+   "net_pnl_paisa": 7761477,
+   "profit_factor": 2.1384,
+   "sharpe": 2.6464,
+   "trades": 411,
+   "win_rate": 0.5364
+  },
+  "rank": 33,
+  "regime": {
+   "sideways_pnl_paisa": 2587170,
+   "trending_pnl_paisa": 5174307
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_33",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0009",
+  "mask_hex": "0x00000000000000000000000200000005",
+  "metrics": {
+   "cpcv_pass_pct": 77.27,
+   "dsr": 0.7947,
+   "max_dd_paisa": -425978,
+   "net_pnl_paisa": 7723946,
+   "profit_factor": 2.1271,
+   "sharpe": 2.6291,
+   "trades": 418,
+   "win_rate": 0.5341
+  },
+  "rank": 34,
+  "regime": {
+   "sideways_pnl_paisa": 2574660,
+   "trending_pnl_paisa": 5149286
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_34",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0009",
+  "mask_hex": "0x00000000000000000000000400000005",
+  "metrics": {
+   "cpcv_pass_pct": 76.96,
+   "dsr": 0.7906,
+   "max_dd_paisa": -434095,
+   "net_pnl_paisa": 7686415,
+   "profit_factor": 2.1158,
+   "sharpe": 2.6118,
+   "trades": 425,
+   "win_rate": 0.5318
+  },
+  "rank": 35,
+  "regime": {
+   "sideways_pnl_paisa": 2562150,
+   "trending_pnl_paisa": 5124265
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_35",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0009",
+  "mask_hex": "0x00000000000000000000000800000005",
+  "metrics": {
+   "cpcv_pass_pct": 76.65,
+   "dsr": 0.7865,
+   "max_dd_paisa": -442212,
+   "net_pnl_paisa": 7648884,
+   "profit_factor": 2.1045,
+   "sharpe": 2.5945,
+   "trades": 432,
+   "win_rate": 0.5295
+  },
+  "rank": 36,
+  "regime": {
+   "sideways_pnl_paisa": 2549640,
+   "trending_pnl_paisa": 5099244
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_36",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0010",
+  "mask_hex": "0x00000000000000000000001000000005",
+  "metrics": {
+   "cpcv_pass_pct": 76.34,
+   "dsr": 0.7824,
+   "max_dd_paisa": -450329,
+   "net_pnl_paisa": 7611353,
+   "profit_factor": 2.0932,
+   "sharpe": 2.5772,
+   "trades": 439,
+   "win_rate": 0.5272
+  },
+  "rank": 37,
+  "regime": {
+   "sideways_pnl_paisa": 2537130,
+   "trending_pnl_paisa": 5074223
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_37",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0010",
+  "mask_hex": "0x00000000000000000000002000000005",
+  "metrics": {
+   "cpcv_pass_pct": 76.03,
+   "dsr": 0.7783,
+   "max_dd_paisa": -458446,
+   "net_pnl_paisa": 7573822,
+   "profit_factor": 2.0819,
+   "sharpe": 2.5599,
+   "trades": 186,
+   "win_rate": 0.5249
+  },
+  "rank": 38,
+  "regime": {
+   "sideways_pnl_paisa": 2524620,
+   "trending_pnl_paisa": 5049202
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_38",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0010",
+  "mask_hex": "0x00000000000000000000004000000005",
+  "metrics": {
+   "cpcv_pass_pct": 75.72,
+   "dsr": 0.7742,
+   "max_dd_paisa": -466563,
+   "net_pnl_paisa": 7536291,
+   "profit_factor": 2.0706,
+   "sharpe": 2.5426,
+   "trades": 193,
+   "win_rate": 0.5226
+  },
+  "rank": 39,
+  "regime": {
+   "sideways_pnl_paisa": 2512110,
+   "trending_pnl_paisa": 5024181
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_39",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0010",
+  "mask_hex": "0x00000000000000000000008000000005",
+  "metrics": {
+   "cpcv_pass_pct": 75.41,
+   "dsr": 0.7701,
+   "max_dd_paisa": -474680,
+   "net_pnl_paisa": 7498760,
+   "profit_factor": 2.0593,
+   "sharpe": 2.5253,
+   "trades": 200,
+   "win_rate": 0.5203
+  },
+  "rank": 40,
+  "regime": {
+   "sideways_pnl_paisa": 2499600,
+   "trending_pnl_paisa": 4999160
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_40",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0011",
+  "mask_hex": "0x00000000000000000000010000000005",
+  "metrics": {
+   "cpcv_pass_pct": 75.1,
+   "dsr": 0.766,
+   "max_dd_paisa": -482797,
+   "net_pnl_paisa": 7461229,
+   "profit_factor": 2.048,
+   "sharpe": 2.508,
+   "trades": 207,
+   "win_rate": 0.518
+  },
+  "rank": 41,
+  "regime": {
+   "sideways_pnl_paisa": 2487090,
+   "trending_pnl_paisa": 4974139
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_41",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0011",
+  "mask_hex": "0x00000000000000000000020000000005",
+  "metrics": {
+   "cpcv_pass_pct": 74.79,
+   "dsr": 0.7619,
+   "max_dd_paisa": -490914,
+   "net_pnl_paisa": 7423698,
+   "profit_factor": 2.0367,
+   "sharpe": 2.508,
+   "trades": 214,
+   "win_rate": 0.5157
+  },
+  "rank": 42,
+  "regime": {
+   "sideways_pnl_paisa": 2474580,
+   "trending_pnl_paisa": 4949118
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_42",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0011",
+  "mask_hex": "0x00000000000000000000040000000005",
+  "metrics": {
+   "cpcv_pass_pct": 74.48,
+   "dsr": 0.7578,
+   "max_dd_paisa": -499031,
+   "net_pnl_paisa": 7386167,
+   "profit_factor": 2.0254,
+   "sharpe": 2.4734,
+   "trades": 221,
+   "win_rate": 0.5134
+  },
+  "rank": 43,
+  "regime": {
+   "sideways_pnl_paisa": 2462070,
+   "trending_pnl_paisa": 4924097
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_43",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0011",
+  "mask_hex": "0x00000000000000000000080000000005",
+  "metrics": {
+   "cpcv_pass_pct": 74.17,
+   "dsr": 0.7537,
+   "max_dd_paisa": -507148,
+   "net_pnl_paisa": 7348636,
+   "profit_factor": 2.0141,
+   "sharpe": 2.4561,
+   "trades": 228,
+   "win_rate": 0.5111
+  },
+  "rank": 44,
+  "regime": {
+   "sideways_pnl_paisa": 2449560,
+   "trending_pnl_paisa": 4899076
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_44",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0012",
+  "mask_hex": "0x00000000000000000000100000000005",
+  "metrics": {
+   "cpcv_pass_pct": 73.86,
+   "dsr": 0.7496,
+   "max_dd_paisa": -515265,
+   "net_pnl_paisa": 7311105,
+   "profit_factor": 2.0028,
+   "sharpe": 2.4388,
+   "trades": 235,
+   "win_rate": 0.5088
+  },
+  "rank": 45,
+  "regime": {
+   "sideways_pnl_paisa": 2437050,
+   "trending_pnl_paisa": 4874055
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_45",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0012",
+  "mask_hex": "0x00000000000000000000200000000005",
+  "metrics": {
+   "cpcv_pass_pct": 73.55,
+   "dsr": 0.7455,
+   "max_dd_paisa": -523382,
+   "net_pnl_paisa": 7273574,
+   "profit_factor": 1.9915,
+   "sharpe": 2.4215,
+   "trades": 242,
+   "win_rate": 0.5065
+  },
+  "rank": 46,
+  "regime": {
+   "sideways_pnl_paisa": 2424540,
+   "trending_pnl_paisa": 4849034
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_46",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0012",
+  "mask_hex": "0x00000000000000000000400000000005",
+  "metrics": {
+   "cpcv_pass_pct": 73.24,
+   "dsr": 0.7414,
+   "max_dd_paisa": -531499,
+   "net_pnl_paisa": 7236043,
+   "profit_factor": 1.9802,
+   "sharpe": 2.4042,
+   "trades": 249,
+   "win_rate": 0.5042
+  },
+  "rank": 47,
+  "regime": {
+   "sideways_pnl_paisa": 2412030,
+   "trending_pnl_paisa": 4824013
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_47",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0012",
+  "mask_hex": "0x00000000000000000000800000000005",
+  "metrics": {
+   "cpcv_pass_pct": 72.93,
+   "dsr": 0.7373,
+   "max_dd_paisa": -539616,
+   "net_pnl_paisa": 7198512,
+   "profit_factor": 1.9689,
+   "sharpe": 2.3869,
+   "trades": 256,
+   "win_rate": 0.5019
+  },
+  "rank": 48,
+  "regime": {
+   "sideways_pnl_paisa": 2399520,
+   "trending_pnl_paisa": 4798992
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_48",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0013",
+  "mask_hex": "0x00000000000000000001000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 72.62,
+   "dsr": 0.7332,
+   "max_dd_paisa": -547733,
+   "net_pnl_paisa": 7160981,
+   "profit_factor": 1.9576,
+   "sharpe": 2.3696,
+   "trades": 263,
+   "win_rate": 0.4996
+  },
+  "rank": 49,
+  "regime": {
+   "sideways_pnl_paisa": 2387010,
+   "trending_pnl_paisa": 4773971
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_49",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0013",
+  "mask_hex": "0x00000000000000000002000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 72.31,
+   "dsr": 0.7291,
+   "max_dd_paisa": -555850,
+   "net_pnl_paisa": 7123450,
+   "profit_factor": 1.9463,
+   "sharpe": 2.3523,
+   "trades": 270,
+   "win_rate": 0.4973
+  },
+  "rank": 50,
+  "regime": {
+   "sideways_pnl_paisa": 2374500,
+   "trending_pnl_paisa": 4748950
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_50",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0013",
+  "mask_hex": "0x00000000000000000004000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 72.0,
+   "dsr": 0.725,
+   "max_dd_paisa": -563967,
+   "net_pnl_paisa": 7085919,
+   "profit_factor": 1.935,
+   "sharpe": 2.335,
+   "trades": 277,
+   "win_rate": 0.495
+  },
+  "rank": 51,
+  "regime": {
+   "sideways_pnl_paisa": 2361990,
+   "trending_pnl_paisa": 4723929
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_51",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0013",
+  "mask_hex": "0x00000000000000000008000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 71.69,
+   "dsr": 0.7209,
+   "max_dd_paisa": -572084,
+   "net_pnl_paisa": 7048388,
+   "profit_factor": 1.9237,
+   "sharpe": 2.3177,
+   "trades": 284,
+   "win_rate": 0.4927
+  },
+  "rank": 52,
+  "regime": {
+   "sideways_pnl_paisa": 2349480,
+   "trending_pnl_paisa": 4698908
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_52",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0014",
+  "mask_hex": "0x00000000000000000010000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 71.38,
+   "dsr": 0.7168,
+   "max_dd_paisa": -580201,
+   "net_pnl_paisa": 7010857,
+   "profit_factor": 1.9124,
+   "sharpe": 2.3004,
+   "trades": 291,
+   "win_rate": 0.4904
+  },
+  "rank": 53,
+  "regime": {
+   "sideways_pnl_paisa": 2336970,
+   "trending_pnl_paisa": 4673887
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_53",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0014",
+  "mask_hex": "0x00000000000000000020000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 71.07,
+   "dsr": 0.7127,
+   "max_dd_paisa": -588318,
+   "net_pnl_paisa": 6973326,
+   "profit_factor": 1.9011,
+   "sharpe": 2.2831,
+   "trades": 298,
+   "win_rate": 0.4881
+  },
+  "rank": 54,
+  "regime": {
+   "sideways_pnl_paisa": 2324460,
+   "trending_pnl_paisa": 4648866
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_54",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0014",
+  "mask_hex": "0x00000000000000000040000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 70.76,
+   "dsr": 0.7086,
+   "max_dd_paisa": -596435,
+   "net_pnl_paisa": 6935795,
+   "profit_factor": 1.8898,
+   "sharpe": 2.2658,
+   "trades": 305,
+   "win_rate": 0.4858
+  },
+  "rank": 55,
+  "regime": {
+   "sideways_pnl_paisa": 2311950,
+   "trending_pnl_paisa": 4623845
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_55",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0014",
+  "mask_hex": "0x00000000000000000080000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 70.45,
+   "dsr": 0.7045,
+   "max_dd_paisa": -604552,
+   "net_pnl_paisa": 6898264,
+   "profit_factor": 1.8785,
+   "sharpe": 2.2485,
+   "trades": 312,
+   "win_rate": 0.4835
+  },
+  "rank": 56,
+  "regime": {
+   "sideways_pnl_paisa": 2299440,
+   "trending_pnl_paisa": 4598824
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_56",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0015",
+  "mask_hex": "0x00000000000000000100000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 70.14,
+   "dsr": 0.7004,
+   "max_dd_paisa": -612669,
+   "net_pnl_paisa": 6860733,
+   "profit_factor": 1.8672,
+   "sharpe": 2.2312,
+   "trades": 319,
+   "win_rate": 0.4812
+  },
+  "rank": 57,
+  "regime": {
+   "sideways_pnl_paisa": 2286930,
+   "trending_pnl_paisa": 4573803
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_57",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0015",
+  "mask_hex": "0x00000000000000000200000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 69.83,
+   "dsr": 0.6963,
+   "max_dd_paisa": -620786,
+   "net_pnl_paisa": 6823202,
+   "profit_factor": 1.8559,
+   "sharpe": 2.2139,
+   "trades": 326,
+   "win_rate": 0.4789
+  },
+  "rank": 58,
+  "regime": {
+   "sideways_pnl_paisa": 2274420,
+   "trending_pnl_paisa": 4548782
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_58",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0015",
+  "mask_hex": "0x00000000000000000400000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 69.52,
+   "dsr": 0.6922,
+   "max_dd_paisa": -628903,
+   "net_pnl_paisa": 6785671,
+   "profit_factor": 1.8446,
+   "sharpe": 2.1966,
+   "trades": 333,
+   "win_rate": 0.4766
+  },
+  "rank": 59,
+  "regime": {
+   "sideways_pnl_paisa": 2261910,
+   "trending_pnl_paisa": 4523761
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_59",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0015",
+  "mask_hex": "0x00000000000000000800000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 69.21,
+   "dsr": 0.6881,
+   "max_dd_paisa": -637020,
+   "net_pnl_paisa": 6748140,
+   "profit_factor": 1.8333,
+   "sharpe": 2.1793,
+   "trades": 340,
+   "win_rate": 0.4743
+  },
+  "rank": 60,
+  "regime": {
+   "sideways_pnl_paisa": 2249400,
+   "trending_pnl_paisa": 4498740
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_00",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0016",
+  "mask_hex": "0x00000000000000000000000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 68.9,
+   "dsr": 0.684,
+   "max_dd_paisa": -645137,
+   "net_pnl_paisa": 6710609,
+   "profit_factor": 1.822,
+   "sharpe": 2.162,
+   "trades": 347,
+   "win_rate": 0.472
+  },
+  "rank": 61,
+  "regime": {
+   "sideways_pnl_paisa": 2236890,
+   "trending_pnl_paisa": 4473719
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_01",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0016",
+  "mask_hex": "0x00000000000000000000000000000007",
+  "metrics": {
+   "cpcv_pass_pct": 68.59,
+   "dsr": 0.6799,
+   "max_dd_paisa": -653254,
+   "net_pnl_paisa": 6673078,
+   "profit_factor": 1.8107,
+   "sharpe": 2.1447,
+   "trades": 354,
+   "win_rate": 0.4697
+  },
+  "rank": 62,
+  "regime": {
+   "sideways_pnl_paisa": 2224380,
+   "trending_pnl_paisa": 4448698
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_02",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0016",
+  "mask_hex": "0x00000000000000000000000000000005",
+  "metrics": {
+   "cpcv_pass_pct": 68.28,
+   "dsr": 0.6758,
+   "max_dd_paisa": -661371,
+   "net_pnl_paisa": 6635547,
+   "profit_factor": 1.7994,
+   "sharpe": 2.1274,
+   "trades": 361,
+   "win_rate": 0.4674
+  },
+  "rank": 63,
+  "regime": {
+   "sideways_pnl_paisa": 2211870,
+   "trending_pnl_paisa": 4423677
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_03",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0016",
+  "mask_hex": "0x0000000000000000000000000000000d",
+  "metrics": {
+   "cpcv_pass_pct": 67.97,
+   "dsr": 0.6717,
+   "max_dd_paisa": -669488,
+   "net_pnl_paisa": 6598016,
+   "profit_factor": 1.7881,
+   "sharpe": 2.1101,
+   "trades": 368,
+   "win_rate": 0.4651
+  },
+  "rank": 64,
+  "regime": {
+   "sideways_pnl_paisa": 2199360,
+   "trending_pnl_paisa": 4398656
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_04",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0017",
+  "mask_hex": "0x00000000000000000000000000000015",
+  "metrics": {
+   "cpcv_pass_pct": 67.66,
+   "dsr": 0.6676,
+   "max_dd_paisa": -677605,
+   "net_pnl_paisa": 6560485,
+   "profit_factor": 1.7768,
+   "sharpe": 2.0928,
+   "trades": 375,
+   "win_rate": 0.4628
+  },
+  "rank": 65,
+  "regime": {
+   "sideways_pnl_paisa": 2186850,
+   "trending_pnl_paisa": 4373635
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_05",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0017",
+  "mask_hex": "0x00000000000000000000000000000025",
+  "metrics": {
+   "cpcv_pass_pct": 67.35,
+   "dsr": 0.6635,
+   "max_dd_paisa": -685722,
+   "net_pnl_paisa": 6522954,
+   "profit_factor": 1.7655,
+   "sharpe": 2.0755,
+   "trades": 382,
+   "win_rate": 0.4605
+  },
+  "rank": 66,
+  "regime": {
+   "sideways_pnl_paisa": 2174340,
+   "trending_pnl_paisa": 4348614
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_06",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0017",
+  "mask_hex": "0x00000000000000000000000000000045",
+  "metrics": {
+   "cpcv_pass_pct": 67.04,
+   "dsr": 0.6594,
+   "max_dd_paisa": -693839,
+   "net_pnl_paisa": 6485423,
+   "profit_factor": 1.7542,
+   "sharpe": 2.0582,
+   "trades": 389,
+   "win_rate": 0.4582
+  },
+  "rank": 67,
+  "regime": {
+   "sideways_pnl_paisa": 2161830,
+   "trending_pnl_paisa": 4323593
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_07",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0017",
+  "mask_hex": "0x00000000000000000000000000000085",
+  "metrics": {
+   "cpcv_pass_pct": 66.73,
+   "dsr": 0.6553,
+   "max_dd_paisa": -701956,
+   "net_pnl_paisa": 6447892,
+   "profit_factor": 1.7429,
+   "sharpe": 2.0409,
+   "trades": 396,
+   "win_rate": 0.4559
+  },
+  "rank": 68,
+  "regime": {
+   "sideways_pnl_paisa": 2149320,
+   "trending_pnl_paisa": 4298572
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_08",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0018",
+  "mask_hex": "0x00000000000000000000000000000105",
+  "metrics": {
+   "cpcv_pass_pct": 66.42,
+   "dsr": 0.6512,
+   "max_dd_paisa": -710073,
+   "net_pnl_paisa": 6410361,
+   "profit_factor": 1.7316,
+   "sharpe": 2.0236,
+   "trades": 403,
+   "win_rate": 0.4536
+  },
+  "rank": 69,
+  "regime": {
+   "sideways_pnl_paisa": 2136810,
+   "trending_pnl_paisa": 4273551
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_09",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0018",
+  "mask_hex": "0x00000000000000000000000000000205",
+  "metrics": {
+   "cpcv_pass_pct": 66.11,
+   "dsr": 0.6471,
+   "max_dd_paisa": -718190,
+   "net_pnl_paisa": 6372830,
+   "profit_factor": 1.7203,
+   "sharpe": 2.0063,
+   "trades": 410,
+   "win_rate": 0.4513
+  },
+  "rank": 70,
+  "regime": {
+   "sideways_pnl_paisa": 2124300,
+   "trending_pnl_paisa": 4248530
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_10",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0018",
+  "mask_hex": "0x00000000000000000000000000000405",
+  "metrics": {
+   "cpcv_pass_pct": 65.8,
+   "dsr": 0.643,
+   "max_dd_paisa": -726307,
+   "net_pnl_paisa": 6335299,
+   "profit_factor": 1.709,
+   "sharpe": 1.989,
+   "trades": 417,
+   "win_rate": 0.449
+  },
+  "rank": 71,
+  "regime": {
+   "sideways_pnl_paisa": 2111790,
+   "trending_pnl_paisa": 4223509
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_11",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0018",
+  "mask_hex": "0x00000000000000000000000000000805",
+  "metrics": {
+   "cpcv_pass_pct": 65.49,
+   "dsr": 0.6389,
+   "max_dd_paisa": -734424,
+   "net_pnl_paisa": 6297768,
+   "profit_factor": 1.6977,
+   "sharpe": 1.9717,
+   "trades": 424,
+   "win_rate": 0.4467
+  },
+  "rank": 72,
+  "regime": {
+   "sideways_pnl_paisa": 2099280,
+   "trending_pnl_paisa": 4198488
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_12",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0019",
+  "mask_hex": "0x00000000000000000000000000001005",
+  "metrics": {
+   "cpcv_pass_pct": 65.18,
+   "dsr": 0.6348,
+   "max_dd_paisa": -742541,
+   "net_pnl_paisa": 6260237,
+   "profit_factor": 1.6864,
+   "sharpe": 1.9544,
+   "trades": 431,
+   "win_rate": 0.4444
+  },
+  "rank": 73,
+  "regime": {
+   "sideways_pnl_paisa": 2086770,
+   "trending_pnl_paisa": 4173467
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_13",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0019",
+  "mask_hex": "0x00000000000000000000000000002005",
+  "metrics": {
+   "cpcv_pass_pct": 64.87,
+   "dsr": 0.6307,
+   "max_dd_paisa": -750658,
+   "net_pnl_paisa": 6222706,
+   "profit_factor": 1.6751,
+   "sharpe": 1.9371,
+   "trades": 438,
+   "win_rate": 0.4421
+  },
+  "rank": 74,
+  "regime": {
+   "sideways_pnl_paisa": 2074260,
+   "trending_pnl_paisa": 4148446
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_14",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0019",
+  "mask_hex": "0x00000000000000000000000000004005",
+  "metrics": {
+   "cpcv_pass_pct": 64.56,
+   "dsr": 0.6266,
+   "max_dd_paisa": -758775,
+   "net_pnl_paisa": 6185175,
+   "profit_factor": 1.6638,
+   "sharpe": 1.9198,
+   "trades": 185,
+   "win_rate": 0.4398
+  },
+  "rank": 75,
+  "regime": {
+   "sideways_pnl_paisa": 2061750,
+   "trending_pnl_paisa": 4123425
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_15",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0019",
+  "mask_hex": "0x00000000000000000000000000008005",
+  "metrics": {
+   "cpcv_pass_pct": 64.25,
+   "dsr": 0.6225,
+   "max_dd_paisa": -766892,
+   "net_pnl_paisa": 6147644,
+   "profit_factor": 1.6525,
+   "sharpe": 1.9025,
+   "trades": 192,
+   "win_rate": 0.4375
+  },
+  "rank": 76,
+  "regime": {
+   "sideways_pnl_paisa": 2049240,
+   "trending_pnl_paisa": 4098404
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_16",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0020",
+  "mask_hex": "0x00000000000000000000000000010005",
+  "metrics": {
+   "cpcv_pass_pct": 63.94,
+   "dsr": 0.6184,
+   "max_dd_paisa": -775009,
+   "net_pnl_paisa": 6110113,
+   "profit_factor": 1.6412,
+   "sharpe": 1.8852,
+   "trades": 199,
+   "win_rate": 0.4352
+  },
+  "rank": 77,
+  "regime": {
+   "sideways_pnl_paisa": 2036730,
+   "trending_pnl_paisa": 4073383
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_17",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0020",
+  "mask_hex": "0x00000000000000000000000000020005",
+  "metrics": {
+   "cpcv_pass_pct": 63.63,
+   "dsr": 0.6143,
+   "max_dd_paisa": -783126,
+   "net_pnl_paisa": 6072582,
+   "profit_factor": 1.6299,
+   "sharpe": 1.8679,
+   "trades": 206,
+   "win_rate": 0.4329
+  },
+  "rank": 78,
+  "regime": {
+   "sideways_pnl_paisa": 2024220,
+   "trending_pnl_paisa": 4048362
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_18",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0020",
+  "mask_hex": "0x00000000000000000000000000040005",
+  "metrics": {
+   "cpcv_pass_pct": 63.32,
+   "dsr": 0.6102,
+   "max_dd_paisa": -791243,
+   "net_pnl_paisa": 6035051,
+   "profit_factor": 1.6186,
+   "sharpe": 1.8506,
+   "trades": 213,
+   "win_rate": 0.4306
+  },
+  "rank": 79,
+  "regime": {
+   "sideways_pnl_paisa": 2011710,
+   "trending_pnl_paisa": 4023341
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_19",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0020",
+  "mask_hex": "0x00000000000000000000000000080005",
+  "metrics": {
+   "cpcv_pass_pct": 63.01,
+   "dsr": 0.6061,
+   "max_dd_paisa": -799360,
+   "net_pnl_paisa": 5997520,
+   "profit_factor": 1.6073,
+   "sharpe": 1.8333,
+   "trades": 220,
+   "win_rate": 0.4283
+  },
+  "rank": 80,
+  "regime": {
+   "sideways_pnl_paisa": 1999200,
+   "trending_pnl_paisa": 3998320
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_20",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0021",
+  "mask_hex": "0x00000000000000000000000000100005",
+  "metrics": {
+   "cpcv_pass_pct": 62.7,
+   "dsr": 0.602,
+   "max_dd_paisa": -807477,
+   "net_pnl_paisa": 5959989,
+   "profit_factor": 1.596,
+   "sharpe": 1.816,
+   "trades": 227,
+   "win_rate": 0.426
+  },
+  "rank": 81,
+  "regime": {
+   "sideways_pnl_paisa": 1986690,
+   "trending_pnl_paisa": 3973299
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_21",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0021",
+  "mask_hex": "0x00000000000000000000000000200005",
+  "metrics": {
+   "cpcv_pass_pct": 62.39,
+   "dsr": 0.5979,
+   "max_dd_paisa": -815594,
+   "net_pnl_paisa": 5922458,
+   "profit_factor": 1.5847,
+   "sharpe": 1.7987,
+   "trades": 234,
+   "win_rate": 0.4237
+  },
+  "rank": 82,
+  "regime": {
+   "sideways_pnl_paisa": 1974180,
+   "trending_pnl_paisa": 3948278
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_22",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0021",
+  "mask_hex": "0x00000000000000000000000000400005",
+  "metrics": {
+   "cpcv_pass_pct": 62.08,
+   "dsr": 0.5938,
+   "max_dd_paisa": -823711,
+   "net_pnl_paisa": 5884927,
+   "profit_factor": 1.5734,
+   "sharpe": 1.7814,
+   "trades": 241,
+   "win_rate": 0.4214
+  },
+  "rank": 83,
+  "regime": {
+   "sideways_pnl_paisa": 1961670,
+   "trending_pnl_paisa": 3923257
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_23",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0021",
+  "mask_hex": "0x00000000000000000000000000800005",
+  "metrics": {
+   "cpcv_pass_pct": 61.77,
+   "dsr": 0.5897,
+   "max_dd_paisa": -831828,
+   "net_pnl_paisa": 5847396,
+   "profit_factor": 1.5621,
+   "sharpe": 1.7641,
+   "trades": 248,
+   "win_rate": 0.4191
+  },
+  "rank": 84,
+  "regime": {
+   "sideways_pnl_paisa": 1949160,
+   "trending_pnl_paisa": 3898236
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_24",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0022",
+  "mask_hex": "0x00000000000000000000000001000005",
+  "metrics": {
+   "cpcv_pass_pct": 61.46,
+   "dsr": 0.5856,
+   "max_dd_paisa": -839945,
+   "net_pnl_paisa": 5809865,
+   "profit_factor": 1.5508,
+   "sharpe": 1.7468,
+   "trades": 255,
+   "win_rate": 0.4168
+  },
+  "rank": 85,
+  "regime": {
+   "sideways_pnl_paisa": 1936650,
+   "trending_pnl_paisa": 3873215
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_25",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0022",
+  "mask_hex": "0x00000000000000000000000002000005",
+  "metrics": {
+   "cpcv_pass_pct": 61.15,
+   "dsr": 0.5815,
+   "max_dd_paisa": -848062,
+   "net_pnl_paisa": 5772334,
+   "profit_factor": 1.5395,
+   "sharpe": 1.7295,
+   "trades": 262,
+   "win_rate": 0.4145
+  },
+  "rank": 86,
+  "regime": {
+   "sideways_pnl_paisa": 1924140,
+   "trending_pnl_paisa": 3848194
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_26",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0022",
+  "mask_hex": "0x00000000000000000000000004000005",
+  "metrics": {
+   "cpcv_pass_pct": 60.84,
+   "dsr": 0.5774,
+   "max_dd_paisa": -856179,
+   "net_pnl_paisa": 5734803,
+   "profit_factor": 1.5282,
+   "sharpe": 1.7122,
+   "trades": 269,
+   "win_rate": 0.4122
+  },
+  "rank": 87,
+  "regime": {
+   "sideways_pnl_paisa": 1911630,
+   "trending_pnl_paisa": 3823173
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_27",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0022",
+  "mask_hex": "0x00000000000000000000000008000005",
+  "metrics": {
+   "cpcv_pass_pct": 60.53,
+   "dsr": 0.5733,
+   "max_dd_paisa": -864296,
+   "net_pnl_paisa": 5697272,
+   "profit_factor": 1.5169,
+   "sharpe": 1.6949,
+   "trades": 276,
+   "win_rate": 0.4099
+  },
+  "rank": 88,
+  "regime": {
+   "sideways_pnl_paisa": 1899120,
+   "trending_pnl_paisa": 3798152
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL3.0_TP3.0",
+  "conditions": [
+   "COND_BIT_28",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0023",
+  "mask_hex": "0x00000000000000000000000010000005",
+  "metrics": {
+   "cpcv_pass_pct": 60.22,
+   "dsr": 0.5692,
+   "max_dd_paisa": -872413,
+   "net_pnl_paisa": 5659741,
+   "profit_factor": 1.5056,
+   "sharpe": 1.6776,
+   "trades": 283,
+   "win_rate": 0.4076
+  },
+  "rank": 89,
+  "regime": {
+   "sideways_pnl_paisa": 1886610,
+   "trending_pnl_paisa": 3773131
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP4.0",
+  "conditions": [
+   "COND_BIT_29",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0023",
+  "mask_hex": "0x00000000000000000000000020000005",
+  "metrics": {
+   "cpcv_pass_pct": 59.91,
+   "dsr": 0.5651,
+   "max_dd_paisa": -880530,
+   "net_pnl_paisa": 5622210,
+   "profit_factor": 1.4943,
+   "sharpe": 1.6603,
+   "trades": 290,
+   "win_rate": 0.4053
+  },
+  "rank": 90,
+  "regime": {
+   "sideways_pnl_paisa": 1874100,
+   "trending_pnl_paisa": 3748110
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP5.0",
+  "conditions": [
+   "COND_BIT_30",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0023",
+  "mask_hex": "0x00000000000000000000000040000005",
+  "metrics": {
+   "cpcv_pass_pct": 59.6,
+   "dsr": 0.561,
+   "max_dd_paisa": -888647,
+   "net_pnl_paisa": 5584679,
+   "profit_factor": 1.483,
+   "sharpe": 1.643,
+   "trades": 297,
+   "win_rate": 0.403
+  },
+  "rank": 91,
+  "regime": {
+   "sideways_pnl_paisa": 1861590,
+   "trending_pnl_paisa": 3723089
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL3.0_TP2.0",
+  "conditions": [
+   "COND_BIT_31",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0023",
+  "mask_hex": "0x00000000000000000000000080000005",
+  "metrics": {
+   "cpcv_pass_pct": 59.29,
+   "dsr": 0.5569,
+   "max_dd_paisa": -896764,
+   "net_pnl_paisa": 5547148,
+   "profit_factor": 1.4717,
+   "sharpe": 1.6257,
+   "trades": 304,
+   "win_rate": 0.4007
+  },
+  "rank": 92,
+  "regime": {
+   "sideways_pnl_paisa": 1849080,
+   "trending_pnl_paisa": 3698068
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL1.0_TP3.0",
+  "conditions": [
+   "COND_BIT_32",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0024",
+  "mask_hex": "0x00000000000000000000000100000005",
+  "metrics": {
+   "cpcv_pass_pct": 58.98,
+   "dsr": 0.5528,
+   "max_dd_paisa": -904881,
+   "net_pnl_paisa": 5509617,
+   "profit_factor": 1.4604,
+   "sharpe": 1.6084,
+   "trades": 311,
+   "win_rate": 0.3984
+  },
+  "rank": 93,
+  "regime": {
+   "sideways_pnl_paisa": 1836570,
+   "trending_pnl_paisa": 3673047
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL2.0_TP4.0",
+  "conditions": [
+   "COND_BIT_33",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0024",
+  "mask_hex": "0x00000000000000000000000200000005",
+  "metrics": {
+   "cpcv_pass_pct": 58.67,
+   "dsr": 0.5487,
+   "max_dd_paisa": -912998,
+   "net_pnl_paisa": 5472086,
+   "profit_factor": 1.4491,
+   "sharpe": 1.5911,
+   "trades": 318,
+   "win_rate": 0.3961
+  },
+  "rank": 94,
+  "regime": {
+   "sideways_pnl_paisa": 1824060,
+   "trending_pnl_paisa": 3648026
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 19.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL3.0_TP5.0",
+  "conditions": [
+   "COND_BIT_34",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0024",
+  "mask_hex": "0x00000000000000000000000400000005",
+  "metrics": {
+   "cpcv_pass_pct": 58.36,
+   "dsr": 0.5446,
+   "max_dd_paisa": -921115,
+   "net_pnl_paisa": 5434555,
+   "profit_factor": 1.4378,
+   "sharpe": 1.5738,
+   "trades": 325,
+   "win_rate": 0.3938
+  },
+  "rank": 95,
+  "regime": {
+   "sideways_pnl_paisa": 1811550,
+   "trending_pnl_paisa": 3623005
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 19.5,
+   "lo": 11.0
+  }
+ },
+ {
+  "arm": "SL1.0_TP2.0",
+  "conditions": [
+   "COND_BIT_35",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0024",
+  "mask_hex": "0x00000000000000000000000800000005",
+  "metrics": {
+   "cpcv_pass_pct": 58.05,
+   "dsr": 0.5405,
+   "max_dd_paisa": -929232,
+   "net_pnl_paisa": 5397024,
+   "profit_factor": 1.4265,
+   "sharpe": 1.5565,
+   "trades": 332,
+   "win_rate": 0.3915
+  },
+  "rank": 96,
+  "regime": {
+   "sideways_pnl_paisa": 1799040,
+   "trending_pnl_paisa": 3597984
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 20.0,
+   "lo": 11.75
+  }
+ },
+ {
+  "arm": "SL2.0_TP3.0",
+  "conditions": [
+   "COND_BIT_36",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0025",
+  "mask_hex": "0x00000000000000000000001000000005",
+  "metrics": {
+   "cpcv_pass_pct": 57.74,
+   "dsr": 0.5364,
+   "max_dd_paisa": 0,
+   "net_pnl_paisa": 0,
+   "profit_factor": 0.0,
+   "sharpe": 0.0,
+   "trades": 0,
+   "win_rate": 0.0
+  },
+  "rank": 97,
+  "regime": {
+   "sideways_pnl_paisa": 1786530,
+   "trending_pnl_paisa": 3572963
+  },
+  "tf": "5m",
+  "vix_band": {
+   "hi": 20.5,
+   "lo": 12.5
+  }
+ },
+ {
+  "arm": "SL3.0_TP4.0",
+  "conditions": [
+   "COND_BIT_37",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0025",
+  "mask_hex": "0x00000000000000000000002000000005",
+  "metrics": {
+   "cpcv_pass_pct": 57.43,
+   "dsr": 0.5323,
+   "max_dd_paisa": -945466,
+   "net_pnl_paisa": 5321962,
+   "profit_factor": -0.5,
+   "sharpe": 1.5219,
+   "trades": 346,
+   "win_rate": 0.3869
+  },
+  "rank": 98,
+  "regime": {
+   "sideways_pnl_paisa": 1774020,
+   "trending_pnl_paisa": 3547942
+  },
+  "tf": "15m",
+  "vix_band": {
+   "hi": 17.5,
+   "lo": 13.25
+  }
+ },
+ {
+  "arm": "SL1.0_TP5.0",
+  "conditions": [
+   "COND_BIT_38",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "long",
+  "family_id": "fam-0025",
+  "mask_hex": "0x00000000000000000000004000000005",
+  "metrics": {
+   "cpcv_pass_pct": 57.12,
+   "dsr": 0.5282,
+   "max_dd_paisa": -9999999999,
+   "net_pnl_paisa": 5284431,
+   "profit_factor": 1.3926,
+   "sharpe": 1.5046,
+   "trades": 353,
+   "win_rate": 0.3846
+  },
+  "rank": 99,
+  "regime": {
+   "sideways_pnl_paisa": 1761510,
+   "trending_pnl_paisa": 3522921
+  },
+  "tf": "1h",
+  "vix_band": {
+   "hi": 18.0,
+   "lo": 14.0
+  }
+ },
+ {
+  "arm": "SL2.0_TP2.0",
+  "conditions": [
+   "COND_BIT_39",
+   "PDH_CROSS_UP"
+  ],
+  "direction": "short",
+  "family_id": "fam-0025",
+  "mask_hex": "0x00000000000000000000008000000005",
+  "metrics": {
+   "cpcv_pass_pct": 56.81,
+   "dsr": 0.5241,
+   "max_dd_paisa": -961700,
+   "net_pnl_paisa": 5246900,
+   "profit_factor": 1.3813,
+   "sharpe": 1.4873,
+   "trades": 360,
+   "win_rate": 0.3823
+  },
+  "rank": 100,
+  "regime": {
+   "sideways_pnl_paisa": 1749000,
+   "trending_pnl_paisa": 3497900
+  },
+  "tf": "5m",
+  "vix_band": null
+ }
+]
