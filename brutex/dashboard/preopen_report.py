@@ -169,10 +169,19 @@ REPORT_BASES: Final[tuple[ReportBasis, ...]] = ("day", "minute")
 REPORT_EXCLUDED_SEGMENTS: Final[frozenset[str]] = frozenset({FNO_CANDLE_LAKE_SEGMENT})
 
 #: Cap on ``preopen.prev_close_noncontiguous`` WARNs emitted per report build
-#: (DEC-PREOPEN-PREVDAY-COMMON-001) — deduped per symbol; everything past the
+#: (DEC-PREOPEN-PREVDAY-COMMON-001) — deduped per ``(exchange, segment,
+#: symbol)`` dataset triple (a bare-symbol key would silence a dual-listed
+#: symbol's second exchange — the hostile-review fold); everything past the
 #: cap rolls into ONE ``preopen.prev_close_noncontiguous_suppressed`` summary
 #: (mirrors the /movers #1535 capped-warn precedent, state kept function-local).
 _HOLE_WARN_CAP: Final[int] = 20
+
+#: The three reproduced shapes a VERIFIED prev-close hole takes — the machine
+#: ``hole_shape`` field on the ``preopen.prev_close_noncontiguous`` WARN
+#: (DEC-PREOPEN-PREVDAY-COMMON-001 hostile-review fold: the original one-line
+#: detail unconditionally advised a re-pull, which is WRONG remediation for
+#: two of the three shapes). See :func:`_hole_shape` for the classification.
+_HoleShape = Literal["extra_nonsession_bar", "prebuild_lag", "missing_session"]
 
 
 def resolve_report_datasets(
@@ -314,7 +323,14 @@ def _daily_prev_close_contiguous(
     ``on_hole(expected, nearest_lake_session)`` EXACTLY when the anchor is
     refused because the nearest earlier daily bar is NOT the calendar's prior
     session (a lake hole) — never on the first-session, coverage-abstain, or
-    zero-close refusals, and never when ``None``. The refusal VALUE contract
+    zero-close refusals, and never when ``None``. The mismatch takes the three
+    reproduced shapes :func:`_hole_shape` classifies for the WARN — an EXTRA
+    calendar-non-session bar AFTER the prior session (``found > expected``, the
+    Muhurat shape), a 1-day series LAGGING the minute series (prebuild lag), or
+    a genuinely MISSING session — but on the daily basis the caller holds no
+    minute evidence (this basis never reads the 1-minute series,
+    DEC-PREOPEN-REPORT-1DAY-001), so its diagnostic is honestly TWO-WAY
+    (extra-non-session-bar vs missing-session). The refusal VALUE contract
     is unchanged (payload byte-identical; its refusals already skip).
     """
     idx = bisect.bisect_left(daily_dates, day)
@@ -371,9 +387,15 @@ def _minute_prev_close_contiguous(
       session).
     * The calendar ABSTAINS (*expected_session* ``None`` — coverage exhausted,
       already WARNed by the COMMON primitive) → ``None``, no *on_hole*.
-    * ``trading_dates[idx − 1] != expected`` (a lake hole — the prior NSE
-      session has no 1-day bar) → ``on_hole(expected, trading_dates[idx − 1])``
-      then ``None``: the row is honestly ABSENT, never a stale-anchored number.
+    * ``trading_dates[idx − 1] != expected`` (a lake hole) →
+      ``on_hole(expected, trading_dates[idx − 1])`` then ``None``: the row is
+      honestly ABSENT, never a stale-anchored number. The mismatch takes the
+      three reproduced shapes :func:`_hole_shape` classifies for the WARN's
+      diagnostic — an EXTRA calendar-non-session 1-day bar AFTER the prior
+      session (``found > expected``, the Muhurat shape), the 1-day series
+      LAGGING the minute series (prebuild lag — the expected session HAS
+      minute bars), or the genuinely MISSING session; the refusal itself is
+      identical in every shape.
     * The prior session's minute window is MISSING (``minute_last`` lacks the
       expected session — the JUBLINGREA case, DEC-PREOPEN-PREVCLOSE-
       CONTIGUITY-001) or its close is zero → ``None`` (byte-preserved skip).
@@ -406,6 +428,73 @@ def _minute_prev_close_contiguous(
     if close is None or close == 0:
         return None
     return close
+
+
+def _hole_shape(
+    expected: date, found: date, minute_evidence: Mapping[date, Decimal] | None
+) -> _HoleShape:
+    """Classify a VERIFIED prev-close hole into its reproduced remediation shape.
+
+    DIAGNOSTIC ONLY (the hostile-review fold on DEC-PREOPEN-PREVDAY-COMMON-001):
+    the refusal itself stands in EVERY shape — the correct-or-absent contract is
+    untouched, and in particular the guard is never re-anchored on
+    ``minute_evidence[expected]``: 1-minute PRESENCE for the expected session
+    does NOT prove session COMPLETENESS (a partially-pulled day's last minute
+    close would be a fabricated PREV. CLOSE). The shape only aims the
+    remediation text in the WARN's ``detail``:
+
+    * ``found > expected`` → ``"extra_nonsession_bar"`` — an EXTRA
+      calendar-non-session 1-day bar sits AFTER the calendar's prior session
+      (the annual Diwali **Muhurat** shape: ingest keeps Muhurat bars per
+      DEC-INGEST-BOUNDARY-INTEGRITY-001 and the prebuild derives their 1-day
+      bar, but the calendar classifies the day a NON-session). The lake is NOT
+      missing a session — a re-pull changes nothing; the day-after row stays
+      conservatively skipped.
+    * ``found < expected`` AND the expected session IS present in the symbol's
+      minute series → ``"prebuild_lag"`` — the 1-day series LAGS the 1-minute
+      series (e.g. a CLI-pulled lake awaiting the pipeline prebuild,
+      DEC-PIPELINE-AUTOPREBUILD-001). Remediation: run the pipeline prebuild,
+      not a re-pull.
+    * ``found < expected`` AND the expected session is absent from the minute
+      evidence too → ``"missing_session"`` — the genuine hole; remediation is
+      re-pulling the missing session.
+
+    *minute_evidence* is ``None`` on the DAILY basis (the day basis never reads
+    the 1-minute series, DEC-PREOPEN-REPORT-1DAY-001), so the daily diagnostic
+    is honestly TWO-WAY — ``extra_nonsession_bar`` vs ``missing_session`` — and
+    a daily-basis prebuild lag reads ``missing_session`` (an accepted,
+    documented limit; the minute basis, which holds the evidence, names it).
+    """
+    if found > expected:
+        return "extra_nonsession_bar"
+    if minute_evidence is not None and expected in minute_evidence:
+        return "prebuild_lag"
+    return "missing_session"
+
+
+def _hole_detail(shape: _HoleShape, expected: date, found: date) -> str:
+    """The honest, shape-matched remediation text for the non-contiguity WARN.
+
+    One sentence per :func:`_hole_shape` verdict — the ``missing_session`` text
+    is the original (pre-fold) detail verbatim; the other two shapes name the
+    evidence and deliberately do NOT advise a re-pull (a re-pull cannot fix
+    either). No served value changes in any shape — the row stays skipped.
+    """
+    if shape == "extra_nonsession_bar":
+        return (
+            f"row conservatively skipped — an EXTRA calendar-non-session 1-day bar "
+            f"({found.isoformat()}, e.g. a Diwali Muhurat session the ingest keeps) sits "
+            f"after the prior NSE session {expected.isoformat()}; the lake is NOT missing "
+            "a session and no action is needed (the day-after row stays absent by the "
+            "correct-or-absent rule)"
+        )
+    if shape == "prebuild_lag":
+        return (
+            f"row skipped — the 1-day series lags the minute series (the prior NSE session "
+            f"{expected.isoformat()} has 1-minute bars but no 1-day bar); run the pipeline "
+            "prebuild to derive the 1-day partition"
+        )
+    return "row skipped — prior NSE session missing from the lake; re-pull the missing session"
 
 
 def build_preopen_rows(
@@ -443,12 +532,22 @@ def build_preopen_rows(
     guard AND the minute guard — the minute basis was calendar-blind before)
     share ONE function-local prior-session memo, so the calendar back-walk runs
     O(unique report days) per build (never O(rows); no globals — NOT an
-    O(1)-total claim). A hole refusal (the prior NSE session missing from the
-    lake) rides the existing skip ``continue`` — the row is honestly ABSENT,
-    never a fabricated %CHNG, never a raise/500 — and is surfaced as ONE
-    ``preopen.prev_close_noncontiguous`` WARN per symbol (capped at
-    :data:`_HOLE_WARN_CAP` per build, with one
-    ``preopen.prev_close_noncontiguous_suppressed`` summary past the cap).
+    O(1)-total claim). A verified hole refusal rides the existing skip
+    ``continue`` — the row is honestly ABSENT, never a fabricated %CHNG, never
+    a raise/500 — and is surfaced as ONE
+    ``preopen.prev_close_noncontiguous`` WARN per ``(exchange, segment,
+    symbol)`` dataset triple (capped at :data:`_HOLE_WARN_CAP` per build, with
+    one ``preopen.prev_close_noncontiguous_suppressed`` summary past the cap).
+    The WARN carries a machine ``hole_shape`` + a shape-matched ``detail``
+    (:func:`_hole_shape` / :func:`_hole_detail` — the hostile-review fold):
+    ``extra_nonsession_bar`` (an extra Muhurat-style non-session 1-day bar
+    after the prior session; no re-pull advice), ``prebuild_lag`` (the 1-day
+    series lags the minute series; remediation is the pipeline prebuild — the
+    minute basis passes its ``minute_last`` as DIAGNOSTIC evidence only, the
+    anchor is never taken from it), or ``missing_session`` (the genuine hole;
+    remediation stays "re-pull the missing session"). The daily basis passes
+    no minute evidence (it never reads the 1-minute series), so its diagnostic
+    is honestly two-way.
     """
     rows: list[PreOpenRow] = []
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
@@ -466,21 +565,31 @@ def build_preopen_rows(
             expected_by_day[day] = _previous_trading_day(day, observed=observed)
         return expected_by_day[day]
 
-    # Non-contiguity WARN state: dedupe per symbol, cap the emitted warns per
-    # build, and roll everything past the cap into ONE summary event.
-    hole_symbols: set[str] = set()
+    # Non-contiguity WARN state: dedupe per (exchange, segment, symbol) dataset
+    # triple (a bare-symbol key would silence a dual-listed symbol's second
+    # exchange), cap the emitted warns per build, and roll everything past the
+    # cap into ONE summary event.
+    hole_keys: set[tuple[str, str, str]] = set()
     holes_suppressed = 0
 
     def _warn_hole(
-        symbol: str, exchange: str, segment: str, day: date, expected: date, found: date
+        symbol: str,
+        exchange: str,
+        segment: str,
+        day: date,
+        expected: date,
+        found: date,
+        minute_evidence: Mapping[date, Decimal] | None,
     ) -> None:
         nonlocal holes_suppressed
-        if symbol in hole_symbols:
+        key = (exchange, segment, symbol)
+        if key in hole_keys:
             return
-        hole_symbols.add(symbol)
-        if len(hole_symbols) > _HOLE_WARN_CAP:
+        hole_keys.add(key)
+        if len(hole_keys) > _HOLE_WARN_CAP:
             holes_suppressed += 1
             return
+        shape = _hole_shape(expected, found, minute_evidence)
         _LOG.warning(
             "preopen.prev_close_noncontiguous",
             basis=basis,
@@ -490,9 +599,8 @@ def build_preopen_rows(
             day=day.isoformat(),
             expected_session=expected.isoformat(),
             nearest_lake_session=found.isoformat(),
-            detail=(
-                "row skipped — prior NSE session missing from the lake; re-pull the missing session"
-            ),
+            hole_shape=shape,
+            detail=_hole_detail(shape, expected, found),
         )
 
     for exchange, segment, symbol in datasets:
@@ -545,6 +653,12 @@ def build_preopen_rows(
                 error=str(exc),
             )
             continue
+        # DIAGNOSTIC evidence for the hole-shape classification (never the
+        # anchor): the minute basis passes its own minute series so a
+        # prebuild-lag hole names the right remediation; the daily basis
+        # passes None (it never reads the 1-minute series) — its diagnostic
+        # is honestly two-way (see _hole_shape).
+        minute_evidence: dict[date, Decimal] | None = minute_last if basis == "minute" else None
         for day in sorted(opens):
             if day < start or day > end:
                 continue
@@ -557,8 +671,9 @@ def build_preopen_rows(
                 _exchange: str = exchange,
                 _segment: str = segment,
                 _day: date = day,
+                _minute: dict[date, Decimal] | None = minute_evidence,
             ) -> None:
-                _warn_hole(_symbol, _exchange, _segment, _day, expected, found)
+                _warn_hole(_symbol, _exchange, _segment, _day, expected, found, _minute)
 
             if basis != "minute":
                 anchor = _daily_prev_close_contiguous(
