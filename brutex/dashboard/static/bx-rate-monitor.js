@@ -193,7 +193,12 @@
       // fix: the earlier `#…Overlay .bxrm-stale` (1-1-0) LOST that contest — the
       // overlay stale colour was dead CSS.)
       "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale{color:var(--red,#FF5C5C);}" +
-      "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale-warn{color:var(--yellow,#FFB74D);}";
+      "#" + OVERLAY_ID + " .bxrm-grid .gv.bxrm-stale-warn{color:var(--yellow,#FFB74D);}" +
+      // Idle collapse (DEC-OPERATOR-PAGE-CLEANVIEW-001): a quiet widget shrinks
+      // to a one-line pill; hover (or a click-to-pin) restores the full card.
+      // ADDITIVE rules only — no pre-existing rule above is edited.
+      "#" + WIDGET_ID + ".bxrm-min:not(:hover) > :not(.bxrm-head) { display: none; }" +
+      "#" + WIDGET_ID + ".bxrm-min:not(:hover) { min-width: 0; opacity: 0.7; padding: 6px 10px; border-radius: 999px; }";
     var style = document.createElement("style");
     style.id = "bxRateMonitorStyles";
     style.textContent = css;
@@ -274,6 +279,15 @@
       ]
     );
     w.addEventListener("click", openOverlay);
+    // Click-to-pin (DEC-OPERATOR-PAGE-CLEANVIEW-001): a click also pins the
+    // widget open so the idle collapse stands down until clicked again.
+    // Presentation only — DOM nodes and the poll machinery are unchanged.
+    w.addEventListener("click", function () {
+      userPinnedOpen = !userPinnedOpen;
+      if (userPinnedOpen) {
+        w.classList.remove("bxrm-min");
+      }
+    });
     document.body.appendChild(w);
     return w;
   }
@@ -350,6 +364,16 @@
       if (age >= STALE_RED_MS) { text = "STALE — " + base + tail; cls = "bxrm-stale"; }
       else if (age >= STALE_WARN_MS) { text = base + tail; cls = "bxrm-stale-warn"; }
       else { text = base; }
+      // Red STALE is reserved for a feed outage DURING an active pull; an idle
+      // page with a slow feed degrades to amber (DEC-OPERATOR-PAGE-CLEANVIEW-001).
+      // lastData.flow_state is the last *known* state during an outage — the
+      // only honest client-side signal. APPEND-ONLY: the pinned chain above is
+      // byte-preserved.
+      var flowActive = lastData && (lastData.flow_state === "flowing" || lastData.flow_state === "stalled" ||
+        lastData.flow_state === "local" || lastData.flow_state === "failing");
+      if (cls && !flowActive) { cls = "bxrm-stale-warn"; text = "feed quiet — " + base + tail; }
+      ageStaleCls = cls;
+      if (cls) { var wq = document.getElementById(WIDGET_ID); if (wq) { wq.classList.remove("bxrm-min"); } }
     }
     if (pill) { pill.textContent = text; pill.className = cls; }
     if (big) { big.textContent = text; big.className = "gv" + (cls ? " " + cls : ""); }
@@ -483,6 +507,11 @@
 
   var lastData = null;
 
+  // ── Idle-collapse state (DEC-OPERATOR-PAGE-CLEANVIEW-001 — presentation
+  //    only; the poll machinery below is untouched) ──
+  var userPinnedOpen = false; // click-to-pin: the collapse stands down
+  var ageStaleCls = "";       // renderAge's last staleness class ("" = fresh)
+
   // ── Self-recovering poll state (DEC-PULL-UI-STALENESS-001) ──
   var pollFailures = 0;
   var lastPollOkMs = null;  // CLIENT clock of the last SUCCESSFUL poll
@@ -546,6 +575,16 @@
   function render(data) {
     lastData = data;
     var state = data && typeof data.flow_state === "string" ? data.flow_state : "idle";
+    // Idle collapse (DEC-OPERATOR-PAGE-CLEANVIEW-001): a quiet widget (idle or
+    // done, not pinned open, not stale) renders as a one-line pill; any active
+    // or degraded state restores the full card. Presentation only.
+    var wroot = document.getElementById(WIDGET_ID);
+    if (wroot) {
+      wroot.classList.toggle(
+        "bxrm-min",
+        (state === "idle" || state === "done") && !userPinnedOpen && !ageStaleCls
+      );
+    }
     // flow_detail (DEC-PIPELINE-PHASE-UI-HONESTY-001): non-empty only for the amber
     // "local" verdict — "local processing — <phase> (no vendor calls)". The compact
     // pill keeps the short state token; the expanded overlay shows the full detail.
