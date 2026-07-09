@@ -140,7 +140,11 @@ from brutex.dashboard.launch_button import register_launch_routes, store_lake_ro
 from brutex.dashboard.mapping_integrity_csv import mapping_integrity_to_csv
 from brutex.dashboard.master_integrity_csv import master_integrity_to_csv
 from brutex.dashboard.metadata_pull import MetadataPullReport, pull_expiries_contracts
-from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
+from brutex.dashboard.movers_cache import (
+    MoversSnapshotCache,
+    candidate_key,
+    revision_generation,
+)
 from brutex.dashboard.movers_futures import (
     build_futures_payload,
     compute_futures_candidates,
@@ -1683,17 +1687,26 @@ def build_app(
     # not share the 256-cap counts instance nor evict its tiny entries); both
     # stay outside the candle int-total cache's key namespace above.
     _window_counts_cache, _window_page_cache = make_window_payload_caches()
-    # The FOUR discovery-walk memos below additionally opt into the PULL-TIME
-    # adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the ported #920
-    # pattern): during a pull the write generation bumps on EVERY window tick,
-    # so each poll used to re-pay a full O(datasets) walk back-to-back — and
-    # post-prebuild (dataset count × the 19 materialised TFs) that walk is
-    # multi-minute. While `_pull_live()` reads True, a generation-mismatched
-    # entry younger than min(max(2 s, its own walk duration), 600 s) is served
-    # STALE (logged `movers_cache.stale_served`, never silent); the moment the
-    # pull ends the probe reads False → fresh recompute, and the post-pipeline
-    # `warm_discovery_memos` force-refreshes them all off ONE shared walk so
-    # the stale-floor state can never outlive the pull.
+    # The discovery-walk memos below (the F&O/spot cascades, the datasets
+    # triple-walk, the latest-date/minute resolvers) additionally opt into the
+    # PULL-TIME adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001, the
+    # ported #920 pattern) — and since DEC-NAV-CACHES-FLOOR-REKEY-001 so do
+    # the nav-latency trio (`_coverage_cache` / `_universe_completeness_cache`
+    # / `_mapping_integrity_cache`) and the /results
+    # `_sweep_leaderboard_cache`, whose freshness tokens moved OUT of the
+    # cache KEY into the GENERATION (`revision_generation`) exactly so the
+    # floor is REACHABLE (a token folded into the key at generation=0 minted
+    # a COLD key per mid-pull poll — the floor's stale-serve branch was
+    # structurally dead for them). Mechanics: during a pull the write
+    # generation bumps on EVERY window tick, so each poll used to re-pay a
+    # full O(datasets) walk back-to-back — and post-prebuild (dataset count ×
+    # the 19 materialised TFs) that walk is multi-minute. While
+    # `_pull_live()` reads True, a generation-mismatched entry younger than
+    # min(max(2 s, its own walk duration), 600 s) is served STALE (logged
+    # `movers_cache.stale_served`, never silent); the moment the pull ends
+    # the probe reads False → fresh recompute, and the post-pipeline
+    # `warm_discovery_memos` force-refreshes the discovery memos off ONE
+    # shared walk so the stale-floor state can never outlive the pull.
     #
     # The /db F&O cascade cache (DEC-DB-FNO-CASCADE-001): the underlying→expiry→contract
     # index is an O(datasets) build over a lake dir-walk; memoised here behind the SAME
@@ -1759,21 +1772,36 @@ def build_app(
     # expiry) — `registry_chain_key`. REUSES the COMMON `MoversSnapshotCache` (LRU: a
     # rarely-hit key evicts; a re-read is one bounded chain, never a whole-table scan).
     _options_strikes_cache = MoversSnapshotCache()
-    # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001): three
-    # uncached pollers — `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness`
-    # and `/api/v1/universe/mapping-integrity` (every 15 s) — re-ran an O(datasets)+ledger
-    # projection on EVERY poll. Each payload is a pure function of the instrument master +
-    # the coverage ledger, so it is memoised behind a COMPOSITE token = the dashboard
-    # write-generation (`_summary_cache.generation`, bumped by every pull / materialize)
-    # AND the instrument-master content revision (`master_revision`, which a keyless
-    # `load-instruments` moves WITHOUT bumping the generation). Folding BOTH into the cache
-    # KEY (with a fixed generation=0) means a hit fires only when neither the ledger nor the
-    # master has changed — a pull OR an instrument load → new key → recompute, never stale
-    # (Golden Rule #1). REUSES the COMMON generation-stamped LRU `MoversSnapshotCache` (the
-    # SAME generic memo `_db_datasets_cache` / `_candle_count_cache` use; no new class).
-    _coverage_cache = MoversSnapshotCache()
-    _universe_completeness_cache = MoversSnapshotCache()
-    _mapping_integrity_cache = MoversSnapshotCache()
+    # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001,
+    # re-keyed by DEC-NAV-CACHES-FLOOR-REKEY-001): three pollers —
+    # `/api/v1/coverage` (every 4 s), `/api/v1/universe/completeness` and
+    # `/api/v1/universe/mapping-integrity` (every 15 s) — each a pure function
+    # of the instrument master + the coverage ledger, memoised behind the
+    # COMPOSITE token = the dashboard write-generation (`_summary_cache.
+    # generation`, bumped by every pull / materialize) AND the
+    # instrument-master content revision (`master_revision`, which a keyless
+    # `load-instruments` moves WITHOUT bumping the generation). The token now
+    # drives the GENERATION via the `revision_generation` digest bridge over a
+    # STABLE key (`_nav_latency_coords`) — invalidation is equivalent to the
+    # superseded token-in-key-at-generation=0 fold (any token change moves the
+    # generation → recompute, never stale — Golden Rule #1), but a mid-pull
+    # mark_dirty storm now lands on the SAME key and can engage the pull-time
+    # adaptive floor below instead of minting a cold key per poll (the #920
+    # storm class this trio was previously blind to: every window tick forced
+    # a full O(datasets)+ledger rebuild per poll). FLOOR CAVEAT (stated): a
+    # floored serve is generation-blind within its window, so a poll landing
+    # ≤ min(max(2 s, its own build duration), 600 s) after an instrument load
+    # DURING a pull may serve the pre-load payload once — bounded, logged
+    # `movers_cache.stale_served`, and closed the moment the pull ends (the
+    # same envelope the discovery memos above accept). REUSES the COMMON
+    # generation-stamped LRU `MoversSnapshotCache` (no new class).
+    _coverage_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    _universe_completeness_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
+    _mapping_integrity_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
     # The /universe lake-uniqueness census (DEC-LAKE-HEAL-001) deliberately does
     # NOT get a `MoversSnapshotCache` here: it is a full bounded lake scan —
     # O(files), one key-column read per file — and `pull_jobs` bumps the write
@@ -1784,21 +1812,30 @@ def build_app(
     # an expensive scan self-throttles to max(2 s, its own duration) capped 120 s
     # while an idle lake stays snappy (see `_build_lake_census_payload_cached`).
     # The /results sweep-leaderboard cache (DEC-DASHBOARD-RESULTS-PAGE-001,
-    # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001): the `<lake>/sweeps` discovery +
+    # re-keyed by DEC-LEDGER-DELTA-O-PAGE-001, then again by
+    # DEC-NAV-CACHES-FLOOR-REKEY-001): the `<lake>/sweeps` discovery +
     # per-tuple Parquet read is O(stores × rows); the ranked leaderboard for a
-    # given (instrument, tf, direction, rank_by, top_n) is a pure function of the
-    # sweep tree, so it is memoised behind the `sweep_results_revision` CONTENT
-    # token folded into the KEY at a fixed `generation=0` (the `_nav_latency_key`
-    # precedent) — NOT the `_summary_cache` write generation, which the pull
-    # funnel's `mark_dirty` bumps per window tick and which a CLI
-    # `brutex sweep-all` (a separate process) never bumps at all. Two-level
-    # entries share this ONE instance: a `sweep_scan|rev=…` SweepScan per
-    # revision + a `sweep_leaderboard|rev=…|…` ranked payload per filter key, so
-    # a filter/rank click within one revision re-ranks the cached scan with zero
-    # store loads (see `api_sweep_leaderboard`). REUSES the COMMON LRU
-    # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
-    # out old-revision keys.
-    _sweep_leaderboard_cache = MoversSnapshotCache()
+    # given (instrument, tf, direction, rank_by, top_n) is a pure function of
+    # the sweep tree, so it is memoised behind the `sweep_results_revision`
+    # CONTENT token — NOT the `_summary_cache` write generation, which the
+    # pull funnel's `mark_dirty` bumps per window tick and which a CLI
+    # `brutex sweep-all` (a separate process) never bumps at all. The token
+    # now drives the GENERATION (`revision_generation`) over STABLE keys —
+    # invalidation equivalent to the superseded rev-in-key fold, but a RUNNING
+    # dashboard sweep's per-flush revision moves can now engage the pull-time
+    # adaptive floor (bounded stale serves, logged) instead of paying the full
+    # scan per 4 s poll; a separate-process CLI sweep still recomputes per
+    # flush (the probe reads False there — the floor's honest envelope).
+    # Two-level entries share this ONE instance: the `sweep_scan` SweepScan +
+    # a `sweep_leaderboard|…` ranked payload per filter key, so a filter/rank
+    # click within one revision re-ranks the cached scan with zero store
+    # loads; on a revision-probe OUTAGE the filter key doubles as the
+    # serve-last-known prefix (DEC-CACHE-SERVE-LAST-KNOWN-001 — see
+    # `api_sweep_leaderboard`). REUSES the COMMON LRU `MoversSnapshotCache`
+    # (no new class — CLAUDE.md §11 COMMON); the LRU ages out old keys.
+    _sweep_leaderboard_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True
+    )
     # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
     # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
     # page, the LAST chain-verify verdict) is keyed on a per-artifact
@@ -4885,24 +4922,32 @@ def build_app(
 
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
 
-    def _nav_latency_key(name: str, store: Any, *extra: object) -> str:
-        """Build the COMPOSITE cache key for the nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001).
+    def _nav_latency_coords(name: str, store: Any, *extra: object) -> tuple[str, int]:
+        """Build the ``(stable key, token generation)`` pair for the nav-latency caches.
 
-        Encodes the route name, the dashboard write-generation (``_summary_cache.generation``,
-        bumped by every pull / materialize) AND the instrument-master content revision
-        (:func:`master_revision`, moved by a keyless ``load-instruments`` that does NOT bump
-        the generation) into ONE string key, plus any route-specific ``extra`` discriminants
-        (e.g. the coverage ``years`` span). Folding BOTH freshness signals into the KEY — and
-        passing ``generation=0`` to :meth:`MoversSnapshotCache.get_or_compute` — means a cache
-        hit fires ONLY when neither the ledger NOR the master has changed since the entry was
-        stored, so a pull or an instrument load always yields a fresh key (never a stale
-        payload — Golden Rule #1). The token is cheap (a COUNT+MAX over the lean master table
-        plus an O(1) generation read), strictly lighter than the projection it guards.
+        DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by DEC-NAV-CACHES-FLOOR-REKEY-001
+        (supersedes ``_nav_latency_key``, which folded the freshness token into
+        the KEY at ``generation=0``). The KEY is the STABLE route identity
+        (name + route-specific ``extra`` discriminants, e.g. the coverage
+        ``years`` span); the GENERATION digests the COMPOSITE freshness token —
+        the dashboard write-generation (``_summary_cache.generation``, bumped
+        by every pull / materialize) AND the instrument-master content revision
+        (:func:`master_revision`, moved by a keyless ``load-instruments`` that
+        does NOT bump the generation) — through the ONE
+        :func:`~brutex.dashboard.movers_cache.revision_generation` digest
+        bridge (any token change moves the generation; the ~2^-64 collision
+        envelope is documented on the bridge). Invalidation is equivalent to
+        the superseded key fold — a pull OR an instrument load recomputes,
+        never stale (Golden Rule #1) — but a mid-pull ``mark_dirty`` storm now
+        lands on the SAME key, so the trio's pull-time adaptive floor is
+        actually REACHABLE (the old cold-key-per-poll shape starved it). The
+        token stays cheap (a COUNT+MAX over the lean master table plus an O(1)
+        generation read), strictly lighter than the projection it guards.
         """
         gen = _summary_cache.generation
         count, latest = master_revision(store)
         extra_repr = "|".join(repr(item) for item in extra)
-        return f"{name}|gen={gen}|m={count}:{latest}|{extra_repr}"
+        return f"{name}|{extra_repr}", revision_generation(f"gen={gen}|m={count}:{latest}")
 
     @app.get("/api/v1/coverage")
     async def api_coverage() -> JSONResponse:
@@ -4945,17 +4990,18 @@ def build_app(
             return build_coverage_payload(store.list_coverage(), expected, years)
 
         # Memoise behind the COMPOSITE (generation, master-revision) token
-        # (DEC-DASHBOARD-NAV-LATENCY-001): a 4 s poll within one generation + master
-        # revision is an O(1) handoff, while a pull (generation bump) OR an instrument
-        # load (master-revision move) yields a new key → recompute, never stale. The
-        # full O(datasets)+ledger build runs ONLY on a miss, on the threadpool worker.
+        # (DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by
+        # DEC-NAV-CACHES-FLOOR-REKEY-001 — the token drives the GENERATION over
+        # a stable key): a 4 s poll within one token is an O(1) handoff; a pull
+        # (generation bump) OR an instrument load (master-revision move) moves
+        # the token → recompute — UNLESS a pull is actively running, where the
+        # per-window-tick bumps engage the bounded, logged adaptive floor
+        # instead of a full O(datasets)+ledger rebuild per poll (the #920
+        # storm class). The build runs ONLY on a miss, on the threadpool worker.
         def _cached_build() -> dict[str, Any]:
-            """Return the coverage payload, memoised behind the composite freshness key."""
-            return _coverage_cache.get_or_compute(
-                _nav_latency_key("coverage", store, years),
-                generation=0,
-                compute=_build,
-            )
+            """Return the coverage payload, memoised behind the composite freshness token."""
+            key, token_gen = _nav_latency_coords("coverage", store, years)
+            return _coverage_cache.get_or_compute(key, generation=token_gen, compute=_build)
 
         return JSONResponse(await _run_lake(_cached_build))
 
@@ -5194,17 +5240,21 @@ def build_app(
         lake = lake_root.parent
 
         # Memoise the per-symbol projection behind the COMPOSITE (generation,
-        # master-revision) token (DEC-DASHBOARD-NAV-LATENCY-001). The inner SPOT lake
+        # master-revision) token (DEC-DASHBOARD-NAV-LATENCY-001, re-keyed by
+        # DEC-NAV-CACHES-FLOOR-REKEY-001 — the token drives the GENERATION over
+        # a stable key). The inner SPOT lake
         # scan is ALREADY `_summary_cache`-cached (DEC-COMPLETENESS-O1-LATENCY-001), but
         # the residual `categorize_instruments` + `list_coverage` + `per_symbol_completeness`
         # projection re-ran on every 15 s poll; this caches the WHOLE map so a repeat poll
-        # within one generation + master revision is an O(1) handoff. A pull (generation) or
-        # an instrument load (master revision) yields a new key → recompute, never stale.
+        # within one token is an O(1) handoff. A pull (generation) or an instrument load
+        # (master revision) moves the token → recompute, never stale — with mid-pull
+        # window-tick bumps riding the bounded, logged adaptive floor (#920).
         def _cached_per_symbol() -> dict[str, dict[str, Any]]:
-            """Return the per-symbol completeness map, memoised behind the composite freshness key."""
+            """Return the per-symbol completeness map, memoised behind the composite token."""
+            key, token_gen = _nav_latency_coords("universe-completeness", store)
             return _universe_completeness_cache.get_or_compute(
-                _nav_latency_key("universe-completeness", store),
-                generation=0,
+                key,
+                generation=token_gen,
                 compute=lambda: _build_per_symbol_completeness(store, lake),
             )
 
@@ -5258,11 +5308,14 @@ def build_app(
         whitelist + ``now`` are constants here; ``now`` only stamps the report's clock, the
         verdict itself depends solely on the cached master + ledger, so a same-revision
         re-serve carrying the entry's ``now`` is byte-identical to recomputing (the entry is
-        dropped the instant either signal moves).
+        dropped the instant either signal moves — with mid-pull window-tick bumps riding
+        the bounded, logged adaptive floor per DEC-NAV-CACHES-FLOOR-REKEY-001, which also
+        moved the token from the key into the generation via ``_nav_latency_coords``).
         """
+        key, token_gen = _nav_latency_coords("mapping-integrity", _require_store())
         return _mapping_integrity_cache.get_or_compute(
-            _nav_latency_key("mapping-integrity", _require_store()),
-            generation=0,
+            key,
+            generation=token_gen,
             compute=_build_mapping_integrity_report,
         )
 
@@ -6639,19 +6692,26 @@ def build_app(
                 return _probe_outage_payload(payload, served_last_known=served)
             # Level 1: ONE rank-independent SweepScan per revision — the
             # O(stores × rows) load + the audit era pass run once, then every
-            # filter/rank/top_n click within this revision re-ranks it.
+            # filter/rank/top_n click within this revision re-ranks it. The
+            # revision drives the GENERATION via the ONE `revision_generation`
+            # digest bridge over STABLE keys (DEC-NAV-CACHES-FLOOR-REKEY-001):
+            # invalidation is equivalent to the superseded rev-in-key fold
+            # (any token change moves the generation), while a RUNNING
+            # dashboard sweep's per-flush revision moves can now engage the
+            # instance's pull-time adaptive floor (bounded, logged stale
+            # serves) instead of paying the full scan per poll.
+            gen = revision_generation(rev)
             scan: SweepScan = _sweep_leaderboard_cache.get_or_compute(
-                f"sweep_scan|rev={rev}",
-                generation=0,
+                "sweep_scan",
+                generation=gen,
                 compute=lambda: load_sweep_scan(lake_root),
             )
-            # Level 2: the ranked payload per filter key. The revision rides
-            # in the KEY at a fixed generation=0 (the `_nav_latency_key`
-            # precedent); the LRU ages out old revisions; `mru_prefix` records
-            # the last-known pointer the probe-outage arm above serves.
+            # Level 2: the ranked payload per stable filter key (same token
+            # generation; `mru_prefix` records the last-known pointer the
+            # probe-outage arm above serves).
             return _sweep_leaderboard_cache.get_or_compute(
-                f"{lb_key}|rev={rev}",
-                generation=0,
+                lb_key,
+                generation=gen,
                 compute=lambda: build_sweep_leaderboard(
                     lake_root,
                     instrument=instrument,

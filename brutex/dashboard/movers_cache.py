@@ -599,8 +599,11 @@ class MoversSnapshotCache:
             # token (DEC-DASHBOARD-LAKE-IO-LIMITER-001): wedged waiters are
             # bounded by the 32-token lake pool and can no longer exhaust
             # AnyIO's default 40-token pool — the waiter SEMANTICS here are
-            # deliberately unchanged.
-            wait_event.wait()
+            # deliberately unchanged. `wait_event` IS bound on every path that
+            # reaches here (not-hit ⇒ the else arm ran; not-break ⇒ a FOREIGN
+            # in-flight owner assigned it) — pyright's flow analysis cannot
+            # correlate `hit` with the assignment, hence the targeted ignore.
+            wait_event.wait()  # pyright: ignore[reportPossiblyUnboundVariable]
         started_at = self._clock()
         try:
             value = compute()
