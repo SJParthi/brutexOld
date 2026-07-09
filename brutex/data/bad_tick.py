@@ -50,17 +50,26 @@ seeded from EVIDENCE, not trust:
 * the first up-to-:data:`HEAD_CONFIRM_BARS` (3) bars of each session are
   buffered (a fixed 3-element buffer — O(1)) and each is judged against the
   **median close of the head window** (a 2-of-3 majority vote): a poison head
-  bar — at ANY of positions 1/2/3 — is itself dropped, and the surviving head
-  bars seed the baseline. PRECISION (round-2 review): "poison" for a HEAD bar
+  bar — at ANY of positions 1/2/3 — is itself dropped, and the post-head
+  baseline SEEDS from the head MEDIAN (round-3 review — never blindly the
+  LAST kept head bar). PRECISION (round-2 review): "poison" for a HEAD bar
   means ``>= max_ratio``x (or ``<= 1/max_ratio``x) the head MEDIAN, not the
   bar's immediate predecessor — so a head spike that is ``>= 4x`` its
-  neighbor yet ``< 4x`` the median is KEPT, silently. That escape band,
+  neighbor yet ``< 4x`` the median is KEPT, silently — but (round-3 review)
+  it can no longer SEAT the post-head baseline: pre-round-3 the baseline was
+  the LAST kept head bar, so an escaped spike at head POSITION 3 became the
+  baseline and, over a flat/declining tail, cascade-dropped every healthy
+  successor whose close was ``<= spike / max_ratio`` — ONE threshold-adjacent
+  corrupt bar sufficed to collapse the session (loudly: skip WARN +
+  majority-dropped WARN, but destructively); with the median seed the escaped
+  spike is kept (Stage-1A still absorbs its ~4x close into the day's OHLC —
+  the residual escape-band cost) yet its healthy successors are judged
+  against the MEDIAN and all survive. That escape band,
   ``[max_ratio * min(other head closes), max_ratio * median)``, is exactly as
   wide as the head-bar dispersion (~1% of price on real minute data), so only
   a threshold-adjacent ~4.00-4.04x spike can ride it (the pre-fix pairwise
-  #1616 screen dropped such a bar; the trade for killing its poison-head
-  cascade); the ``x10`` threat-model class sits far outside the band and is
-  always caught;
+  #1616 screen dropped such a bar); the ``x10`` threat-model class sits far
+  outside the band and is always caught;
 * a genuine overnight / half-day / Muhurat reopen gap can still NEVER
   false-trip: consecutive real head minutes agree with each other (a real
   ``4x`` move across the first 3 minutes is impossible under the NSE circuit
@@ -68,9 +77,13 @@ seeded from EVIDENCE, not trust:
 * **cross-session comparison stays FORBIDDEN** — the head is judged only
   against its OWN session's bars (a stock split in the ~750-name lake must
   never false-trip);
-* after the head resolves, every later bar is judged against the last KEPT
-  close exactly as before (a skipped bar never advances the baseline, so a
-  lone mid-session spike cannot cascade-flag its healthy successor).
+* after the head resolves, the running baseline STARTS at the head MEDIAN
+  (round-3 review) and every later bar is judged against the last KEPT close
+  exactly as before (a skipped bar never advances the baseline, so a lone
+  mid-session spike cannot cascade-flag its healthy successor; a KEPT
+  post-head bar is by construction ``< max_ratio``x the baseline, so — unlike
+  the pre-round-3 escaped head spike — it cannot cascade-drop a successor
+  sitting at the baseline's own level).
 
 Honest limits (disclosed, not papered over):
 
@@ -84,14 +97,17 @@ Honest limits (disclosed, not papered over):
 * a **corrupt-majority head (2 of the first 3 bars corrupt) collapses the
   WHOLE session onto the corruption** — whenever ≥ 2 of the first 3 bars are
   corrupt (the SAME scaling, or two DIFFERENT scalings), the median IS a
-  corrupt bar: the healthy head bar is dropped, the corrupt survivor(s) SEED
+  corrupt bar: the healthy head bar is dropped, the corrupt MEDIAN seeds
   the post-head baseline, and — because a skipped bar never advances the
   baseline — EVERY healthy successor in the session is cascade-dropped. The
   session collapses to the corrupt bar(s) (a differently-scaled corrupt pair
   collapses it to the ONE median poison bar), which Stage-1A absorbs as
   ``_today_ohlc`` and rolls into the NEXT day's pivot / PDH-PDL / Fib
   anchors — the same session-destroying shape as the poison-head bug this
-  module fixes, re-armed at a 2-corrupt-head-bars threshold. For a corrupt
+  module fixes, re-armed at a 2-corrupt-head-bars threshold (round-3 note:
+  with the median-seeded baseline this 2-corrupt threshold is now EXACT — a
+  single kept escape-band head spike no longer re-arms the cascade, so a
+  corrupt MEDIAN is the only remaining head-seeded collapse). For a corrupt
   run of length ≥ 2 STARTING at head position 2 this is a strict REGRESSION
   versus the #1616 screen (which baselined the healthy bar 1 and dropped the
   whole corrupt run); the recorded trade-off: the median vote moved the
@@ -231,7 +247,9 @@ def is_bad_tick(prev_close: float, close: float, *, max_ratio: float = BAD_TICK_
     ----------
     prev_close
         The in-session reference close — the last KEPT good close for a
-        post-head bar, or the head-window median for a head bar (assumed ``> 0``).
+        post-head bar (the running baseline, SEEDED at the head-window median
+        — round-3 review), or the head-window median for a head bar (assumed
+        ``> 0``).
     close
         This bar's close (assumed ``> 0``).
     max_ratio
@@ -254,7 +272,8 @@ class BadTickScreen:
     buffers the first up-to-:data:`HEAD_CONFIRM_BARS` bars, resolves them
     against their median close (the evidence-confirmed head seed,
     ``DEC-BADTICK-HEAD-SEED-001``), then judges every later bar against the
-    last KEPT close. Emits exactly one :data:`BAD_TICK_SKIP_EVENT` WARN per
+    last KEPT close — with the running baseline SEEDED at the head MEDIAN
+    (round-3 review), so a kept escape-band head spike never seats it. Emits exactly one :data:`BAD_TICK_SKIP_EVENT` WARN per
     session that skipped ≥ 1 bar, one
     :data:`BAD_TICK_HEAD_UNCONFIRMED_EVENT` WARN per inconsistent-but-kept
     2-bar session (the disclosed unconfirmable-head limit), and one
@@ -324,7 +343,7 @@ class BadTickScreen:
 
         session: date | None = None
         head: list[int] = []  # pending (unjudged) head-bar row indices, ≤ 3
-        baseline: float | None = None  # last KEPT close once the head resolved
+        baseline: float | None = None  # median-seeded, then last KEPT close
         session_rows = 0  # total rows seen in the current session
         skipped = 0
         first_offender: tuple[float, float] | None = None
@@ -348,12 +367,17 @@ class BadTickScreen:
 
             The median bar itself always survives (``is_bad_tick(m, m)`` is
             ``False`` for any positive ``m``), so a session can never be
-            emptied by its own head screen; the baseline ends on the LAST kept
-            head bar.
+            emptied by its own head screen; the post-head baseline SEEDS from
+            the head MEDIAN — the evidence-confirmed center — never blindly
+            the LAST kept head bar (round-3 review): pre-round-3 a kept
+            escape-band spike at head position 3 seated the baseline and
+            cascade-dropped every healthy successor (module docstring).
             """
+            nonlocal baseline
             median = sorted(closes[i] for i in head)[1]
             for i in head:
                 _judge(median, i)
+            baseline = median
             head.clear()
 
         def _flush() -> None:

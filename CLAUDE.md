@@ -47,7 +47,9 @@ original "same-scaled" qualifier was WRONG) out-votes the median and COLLAPSES
 the WHOLE session onto the corruption (the corrupt survivors seed the
 baseline, every healthy successor cascade-drops, and Stage-1A absorbs the
 corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug-1
-shape re-armed at a 2-corrupt-head-bars threshold; for a corrupt run starting
+shape re-armed at a 2-corrupt-head-bars threshold — a threshold made EXACT by
+the round-3 median-seeded baseline, which sealed the one-kept-escape-band-bar
+variant below it; for a corrupt run starting
 at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
 blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
 `feed.bad_tick_session_majority_dropped` WARN when skipped > kept — round-2
@@ -59,7 +61,13 @@ emitting only the skip WARN — both directions pinned); head verdicts are
 MEDIAN-referenced, so a threshold-adjacent head spike ≥4x its NEIGHBOR yet
 <4x the median rides the disclosed narrow [4·min-neighbor, 4·median) escape
 band and is kept silently (~4.00-4.04x only; the ×10 class always caught —
-round-2 precision, pinned); the head
+round-2 precision, pinned; round-3 FIX: an escaped spike can no longer SEAT
+the post-head baseline — the baseline SEEDS from the head MEDIAN, never the
+LAST kept head bar, so a kept position-3 escape-band spike no longer
+cascade-drops the session's healthy remainder over a flat/declining tail —
+the round-3 review's confirmed shape, position-3 probe + median-seed pins
+added; the residual is the kept spike's own ~4x close in the day's OHLC);
+the head
 verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
 a load truncated inside a session's first 3 bars can keep a poison head the
 full load would drop; pinned; the suffix-independence gates do not route
@@ -501,7 +509,13 @@ screen at the engine read boundary — NEW `brutex/data/bad_tick.py` (`is_bad_ti
 `feed/replay.py::arrow_table_to_bars` (the ONE sweep-feed choke point) SKIPS-and-
 COUNTS a self-consistent scaled bar (close `>= 4x` OR `<= 1/4x` the previous
 IN-SESSION kept close — the `x10` fat-finger class the positivity+ordering checks
-miss), first-bar-of-session exempt, one `feed.bad_tick_skipped` WARN per session,
+miss), ~~first-bar-of-session exempt~~ [CORRECTED 2026-07-08,
+DEC-BADTICK-HEAD-SEED-001 #1625 — FALSE post-#1625: the first bar is no longer
+exempt, it is MEDIAN-voted with the session's first up-to-3 bars and a poison
+head bar at any of positions 1-3 is itself dropped (the unconditional exemption
+had made a ≥4x-scaled poison FIRST bar the unhealable cascade baseline); see the
+§1 Active-branch chain copy of this blurb for the full correction], one
+`feed.bad_tick_skipped` WARN per session,
 default-ON `BRUTEX_BAD_TICK_SCREEN` kill switch, O(1)/bar, never value-editing /
 never fabricating. Threshold 4.0 derived from NSE circuit-breaker physics
 (10/15/20% daily bands → single-minute moves << 0.25x; regular-day goldens
@@ -1748,7 +1762,9 @@ hostile-review pass._
   the WHOLE session onto the corruption (the corrupt survivors seed the
   baseline, every healthy successor cascade-drops, and Stage-1A absorbs the
   corrupt bar(s) as the day's OHLC → the NEXT day's anchors poisoned — the bug-1
-  shape re-armed at a 2-corrupt-head-bars threshold; for a corrupt run starting
+  shape re-armed at a 2-corrupt-head-bars threshold — a threshold made EXACT by
+  the round-3 median-seeded baseline, which sealed the one-kept-escape-band-bar
+  variant below it; for a corrupt run starting
   at head position 2 a strict REGRESSION vs the #1616 screen — disclosed at full
   blast radius, cascade-pinned, and loudly signalled by the NEW observe-only
   `feed.bad_tick_session_majority_dropped` WARN when skipped > kept — round-2
@@ -1760,7 +1776,13 @@ hostile-review pass._
   MEDIAN-referenced, so a threshold-adjacent head spike ≥4x its NEIGHBOR yet
   <4x the median rides the disclosed narrow [4·min-neighbor, 4·median) escape
   band and is kept silently (~4.00-4.04x only; the ×10 class always caught —
-  round-2 precision, pinned); the head
+  round-2 precision, pinned; round-3 FIX: an escaped spike can no longer SEAT
+  the post-head baseline — the baseline SEEDS from the head MEDIAN, never the
+  LAST kept head bar, so a kept position-3 escape-band spike no longer
+  cascade-drops the session's healthy remainder over a flat/declining tail —
+  the round-3 review's confirmed shape, position-3 probe + median-seed pins
+  added; the residual is the kept spike's own ~4x close in the day's OHLC);
+  the head
   verdict is bounded-FORWARD-looking (it reads ≤2 following same-session bars —
   a load truncated inside a session's first 3 bars can keep a poison head the
   full load would drop; pinned; the suffix-independence gates do not route

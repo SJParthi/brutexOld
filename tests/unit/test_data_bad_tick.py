@@ -161,8 +161,9 @@ def test_poison_second_bar_dropped() -> None:
 
 def test_poison_third_bar_dropped_baseline_is_second() -> None:
     rows = [(_D1, 27940.0), (_D1, 27941.0), (_D1, 279400.0), (_D1, 27942.0)]
-    # Head median = 27941 → bar 3 dropped; baseline = 27941 (last KEPT head
-    # bar) so bar 4 is judged against it and kept.
+    # Head median = 27941 → bar 3 dropped; the post-head baseline SEEDS from
+    # the median (27941 — round-3 review) so bar 4 is judged against it and
+    # kept.
     assert _mask(rows) == [True, True, False, True]
 
 
@@ -173,8 +174,8 @@ def test_poison_never_advances_baseline_after_head() -> None:
         (_D1, 27940.0),
         (_D1, 27941.0),
         (_D1, 27942.0),
-        (_D1, 2794.0),  # ÷10 spike — dropped vs baseline 27942
-        (_D1, 27943.0),  # judged vs 27942 (NOT the spike) — kept
+        (_D1, 2794.0),  # ÷10 spike — dropped vs the median-seeded baseline 27941
+        (_D1, 27943.0),  # judged vs 27941 (NOT the spike) — kept
     ]
     assert _mask(rows) == [True, True, True, False, True]
 
@@ -195,7 +196,9 @@ def test_two_consecutive_mid_session_spikes_one_warn() -> None:
     assert warns[0]["skipped"] == 2
     assert warns[0]["session"] == "2024-01-02"
     assert warns[0]["source"] == "NSE/INDEX/NSE-NIFTY/1minute"
-    assert warns[0]["first_ref_close"] == 27942.0
+    # The first post-head bar is judged against the MEDIAN-seeded baseline
+    # (27941 — round-3 review), not the last kept head close (27942).
+    assert warns[0]["first_ref_close"] == 27941.0
     assert warns[0]["first_close"] == 2794.0
     assert warns[0]["max_ratio"] == BAD_TICK_MAX_RATIO
 
@@ -389,6 +392,9 @@ def test_head_escape_band_threshold_adjacent_spike_kept_median_reference_pin() -
     # exactly as wide as the head-bar dispersion (~1% on real minute data), so
     # only a threshold-adjacent ~4.00-4.04x spike can escape; the x10
     # threat-model class sits far outside the band and is always caught.
+    # ROUND-3: an escaped spike is kept but can no longer SEAT the post-head
+    # baseline (median-seeded) — the position-3 cascade shape is pinned by
+    # test_head_escape_band_position_three_spike_cannot_seat_baseline below.
     rows = [(_D1, c) for c in (100.0, 400.5, 101.0, 100.5, 100.8)]
     with capture_logs() as logs:
         assert _mask(rows) == [True] * 5
@@ -402,6 +408,45 @@ def test_head_escape_band_threshold_adjacent_spike_kept_median_reference_pin() -
     with capture_logs() as logs:
         assert _mask(x10) == [True, False, True, True, True]
     assert len([e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]) == 1
+
+
+def test_head_escape_band_position_three_spike_cannot_seat_baseline() -> None:
+    # ROUND-3 REVIEW regression (the confirmed finding's exact probe): an
+    # escape-band spike at head POSITION 3 (400.5 < 4*median(101) = 404, kept)
+    # previously seated the post-head baseline (= the LAST kept head bar) and
+    # cascade-dropped every healthy 100.0 successor (100*4 = 400 <= 400.5) —
+    # the whole 23-bar session collapsed onto its 3-bar head from ONE
+    # threshold-adjacent corrupt bar. With the MEDIAN-seeded baseline the
+    # spike is still kept (the disclosed escape-band residual) but every
+    # healthy successor is judged against the median (101) and survives:
+    # zero skips, zero warns. FAILS with the fix reverted (mask kept only
+    # rows 0-2 and fired skip + majority-dropped warns).
+    rows = [(_D1, c) for c in (100.0, 101.0, 400.5)] + [(_D1, 100.0)] * 20
+    with capture_logs() as logs:
+        assert _mask(rows) == [True] * 23
+    assert not logs
+    # Noisy-tail control from the round-3 evidence: the same head over a tail
+    # with ordinary tick noise is likewise fully kept (pre-fix only the first
+    # post-spike bar dropped before one upside tick ended the cascade).
+    noisy = [(_D1, c) for c in (100.0, 101.0, 400.5, 100.0, 100.2, 100.1, 100.0)]
+    with capture_logs() as logs:
+        assert _mask(noisy) == [True] * 7
+    assert not logs
+
+
+def test_post_head_baseline_seeds_from_median_not_last_kept_head_bar() -> None:
+    # ROUND-3 REVIEW: the first post-head bar is judged against the head
+    # MEDIAN, never the LAST kept head close — 405 is < 4*102 = 408 (the old
+    # last-kept reference would have KEPT it) but >= 4*101 = 404 (the median
+    # reference drops it). Kills a mutant restoring `baseline = last kept
+    # head bar`; FAILS with the fix reverted (405 was kept).
+    rows = [(_D1, 100.0), (_D1, 101.0), (_D1, 102.0), (_D1, 405.0), (_D1, 101.5)]
+    with capture_logs() as logs:
+        assert _mask(rows) == [True, True, True, False, True]
+    warns = [e for e in logs if e.get("event") == BAD_TICK_SKIP_EVENT]
+    assert len(warns) == 1
+    assert warns[0]["first_ref_close"] == 101.0  # the median, not 102.0
+    assert warns[0]["first_close"] == 405.0
 
 
 def test_minimal_corrupt_majority_shapes_emit_only_the_skip_warn() -> None:
@@ -519,7 +564,8 @@ def test_injected_logger_is_used_for_all_three_events() -> None:
             events.append((event, kw))
 
     screen = BadTickScreen(source="src", log=_FakeLog())  # type: ignore[arg-type]
-    # Table 1: a post-head ÷10 spike (skip warn only — 1 skipped vs 3 kept).
+    # Table 1: a post-head ÷10 spike (skip warn only — 1 skipped vs 3 kept;
+    # its reference is the MEDIAN-seeded baseline 101, round-3 review).
     screen.screen_mask([_D1] * 4, [100.0, 101.0, 102.0, 10.0])
     # Table 2: an inconsistent 2-bar session (unconfirmed warn).
     screen.screen_mask([_D2] * 2, [100.0, 1000.0])
@@ -534,7 +580,7 @@ def test_injected_logger_is_used_for_all_three_events() -> None:
                 "session": "2024-01-02",
                 "skipped": 1,
                 "max_ratio": BAD_TICK_MAX_RATIO,
-                "first_ref_close": 102.0,
+                "first_ref_close": 101.0,
                 "first_close": 10.0,
             },
         ),
