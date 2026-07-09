@@ -437,7 +437,7 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
-Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1623 —
+Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1624 —
 India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
 every OBSERVABLE production trade + the persisted nullable
 `vix_mean`/`vix_min`/`vix_max` finalist trio (REFERENCE ONLY — never in the
@@ -1952,7 +1952,7 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
   --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
-  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1623** — the
+  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1624** — the
   dormant India-VIX trade stamping WOKEN end-to-end: the lake's `NSE/INDEX/INDIAVIX` series (1-minute ∪ derived 1-day,
   ONE window-bounded read per launch via NEW `brutex/engine/lake_slice.py::load_lake_slice` +
   `brutex/engine/reference_wire.py::build_vix_stamper`) stamps `vix_at_entry`/`vix_at_exit` on EVERY OBSERVABLE production trade, and
@@ -3686,7 +3686,7 @@ hostile-review pass._
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
-   #1623 — persisted finalist rows additionally carry the derived
+   #1624 — persisted finalist rows additionally carry the derived
    nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
    trade streams are the FIVE named DISCARDED/unobservable streams —
    the Stage-4 cascade candidate re-simulation (stamps would be dropped
@@ -4010,7 +4010,7 @@ hostile-review pass._
   read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
   Earlier: `claude/peaceful-hamilton-kyeu07`
-  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1623 — India-VIX trade stamping wired
+  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1624 — India-VIX trade stamping wired
   end-to-end: `vix_at_entry`/`vix_at_exit` on every OBSERVABLE trade + the
   persisted nullable `vix_mean`/`vix_min`/`vix_max` finalist trio, REFERENCE
   ONLY; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
