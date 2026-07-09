@@ -5,8 +5,10 @@
  * (spot) of the visible top-K rows against an INDEPENDENT read of the SAME
  * lake's 1-minute base via the EXISTING /api/v1/db/candles API. These are the
  * side-effect-free comparison primitives that verify does — extracted here so
- * a node-executed golden can pin them without a browser harness (the
- * bx-format.js / bx-movers-time.js precedent).
+ * a node-executed golden can pin them in milliseconds (the bx-format.js /
+ * bx-movers-time.js precedent); the full chip flow (fetch discipline + DOM)
+ * is ADDITIONALLY executed in real Chromium by the browser truth suite
+ * (tests/browser/test_movers_gate.py, DEC-DASHBOARD-BROWSER-TRUTH-001).
  *
  * FORMATTER LAW (the load-bearing invariant): every numeric comparison
  * formats BOTH sides through the ONE shared bxFixed2 (bx-format.js —
@@ -59,6 +61,29 @@ function bxParseInr(s) {
   if (t === "") return null;
   var n = Number(t);
   return Number.isFinite(n) ? n : null;
+}
+
+/* /db read-allowlist pre-check (round-2 refuter fold): can /api/v1/db/candles
+ * READ this probe coordinate at all? Mirrors db_view._validate_candle_coords
+ * for the verify probe's fixed interval=1minute — exchange ∈ {NSE, BSE}
+ * (partition.VALID_EXCHANGES), segment ∈ {INDEX, CASH, FNO} (VALID_SEGMENTS),
+ * symbol on the read allowlist _SYMBOL_RE (db_view.py:326 —
+ * ^[A-Za-z0-9][A-Za-z0-9_.&\- ]*$) with ".." rejected. The lake WRITE
+ * allowlist is BROADER (a lake-legal symbol may carry ";" / "'" / "=" the
+ * read allowlist rejects), so a row /db cannot read MUST become a DISCLOSED
+ * skip — issuing the probe anyway is a GUARANTEED 400 burned on every render
+ * (and a console error the browser truth suite's console-clean law fails). */
+var _bxDbSymbolRe = /^[A-Za-z0-9][A-Za-z0-9_.&\- ]*$/;
+var _bxDbExchanges = { NSE: true, BSE: true };
+var _bxDbSegments = { INDEX: true, CASH: true, FNO: true };
+function bxDbProbeOk(exchange, segment, symbol) {
+  return (
+    _bxDbExchanges[exchange] === true &&
+    _bxDbSegments[segment] === true &&
+    typeof symbol === "string" &&
+    symbol.indexOf("..") === -1 &&
+    _bxDbSymbolRe.test(symbol)
+  );
 }
 
 /* Resolve the /db row corresponding to the movers as-of cut. *rows* is the
@@ -145,6 +170,7 @@ function bxVerifyRow(o) {
 var BXVerify = {
   bxNum: bxNum,
   bxParseInr: bxParseInr,
+  bxDbProbeOk: bxDbProbeOk,
   bxCutRow: bxCutRow,
   bxVerifyRow: bxVerifyRow,
 };

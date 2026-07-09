@@ -1667,10 +1667,23 @@ hostile-review pass._
   follow-up DEC-MOVERS-VERIFY-FNO-PCT-001); the comparison rides the ONE shared `bxFixed2` via the
   NEW pure node-golden'd `static/bx-verify.js` with BOTH sides Number-coerced FIRST (the /db wire
   delivers `change_pct` as a JSON STRING — `_json_safe` stringifies Decimal; feeding it raw to
-  bxFixed2 would guarantee a false mismatch, golden-pinned). Tests: node-executed goldens over the
-  REAL bx-verify.js + bx-format.js + substring-presence pins (the honest no-browser-harness
-  envelope). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-  lake/schema/scope/vocab/rate change; ruff/ruff-format/`mypy --strict` clean on the new tests).
+  bxFixed2 would guarantee a false mismatch, golden-pinned). ROUND-2 refuter folds (executed-repro
+  driven — a node vm harness over the REAL inline script + the live Chromium truth suite): the
+  tab-switch false-red race killed (asset CAPTURED at schedule time — `runVerify(gen, asset)` —
+  plus a `cancelVerify()` supersede in the tab handler); the spot Latest cut anchored at the
+  payload's OWN `latest_time` echo (a live pull appending 1m bars mid-probe can no longer flip a
+  matching view red; F&O/daily stay first-row with the residual race DISCLOSED in the red copy);
+  the guaranteed-400 probe class killed — NEW pure `bxDbProbeOk` (the `db_view._validate_candle_coords`
+  mirror) pre-screens every coordinate because the lake WRITE allowlist is broader than the /db READ
+  allowlist — an unreadable row is a DISCLOSED `not /db-readable` skip; the missing-row red wording
+  split (`no rows for <date>` vs `rows exist but none at/before <anchor>`); the hidden-tab paused chip
+  resumes on visibilitychange. Tests: node-executed goldens over the REAL bx-verify.js + bx-format.js,
+  substring-presence pins (the fast unit layer), AND the Chromium browser truth suite
+  (`test_movers_gate.py::test_verify_chip_green_execution` — the chip's real green state + the
+  zero-400 probe discipline via the harness console-clean law; the round-1 "no executable-browser
+  harness" claim was WRONG and is retracted). READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format/`mypy --strict`
+  clean on the new tests).
   Earlier: `claude/sweep-log-level-guard` (**DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630** —
   the sweep CLI log-volume guard: ONE `main()`-dispatch guard configures the COMMON
   `observability/logging.configure_logging` seam at INFO by default for

@@ -1,11 +1,16 @@
 """Substring-presence pins for the /movers source-provenance line + live /db
 verify chip + the /db candle deep-link boot handler.
 
-DEC-MOVERS-DB-PROVENANCE-VERIFY-001. The repo has NO executable-browser harness
-(an honest, known limit — the DEC-PULL-UI-STALENESS-001 precedent), so this
-suite pins the PRESENCE of the shipped JS, not its execution — the executed
-teeth are the node goldens in ``test_bx_verify_golden.py`` over the REAL
-``bx-verify.js`` + the REAL ``bx-format.js``.
+DEC-MOVERS-DB-PROVENANCE-VERIFY-001. This suite pins the PRESENCE of the
+shipped JS (the fast unit layer), not its execution. The EXECUTED layers are
+elsewhere and real: the node goldens in ``test_bx_verify_golden.py`` run the
+REAL ``bx-verify.js`` + the REAL ``bx-format.js``, and the repo's Chromium
+browser truth suite (``tests/browser`` — DEC-DASHBOARD-BROWSER-TRUTH-001, the
+CI ``browser`` job) renders /movers with a real payload and executes the full
+chip flow end-to-end (``test_movers_gate.py::test_verify_chip_green_execution``
+pins the green state; its console-clean teardown pins the zero-400 probe
+discipline). The round-1 claim here that "the repo has NO executable-browser
+harness" was WRONG — corrected by the round-2 refuter.
 
 What is pinned here:
 
@@ -144,6 +149,63 @@ class TestMoversVerifyChip:
 
     def test_verify_module_has_no_innerhtml_sink(self) -> None:
         assert ".innerHTML" not in _VERIFY_JS.read_text(encoding="utf-8")
+
+    # ── round-2 refuter folds ─────────────────────────────────────────────
+
+    def test_asset_is_captured_at_schedule_time(self) -> None:
+        # Refuter S2 (tab-switch false-red race): the pass must verify the
+        # asset it was SCHEDULED for — a fire-time state.asset read probes
+        # spot rows as segment=FNO after a tab click.
+        html = _MOVERS.read_text(encoding="utf-8")
+        assert "const asset = state.asset;" in html
+        assert "runVerify(gen, asset)" in html
+        assert "async function runVerify(gen, asset)" in html
+        assert "const isSpot = asset ===" in html
+        assert "const isSpot = state.asset ===" not in html
+
+    def test_tab_switch_supersedes_the_pending_pass(self) -> None:
+        # Belt on top of the schedule-time capture: the asset-tab handler
+        # cancels BEFORE mutating state.asset.
+        html = _MOVERS.read_text(encoding="utf-8")
+        assert "function cancelVerify()" in html
+        idx_cancel = html.index("cancelVerify();")
+        idx_mutate = html.index("state.asset = t.dataset.asset;")
+        assert idx_cancel < idx_mutate
+
+    def test_spot_latest_cut_anchors_at_the_payloads_own_latest_time(self) -> None:
+        # Refuter S3 (live-pull false red): the spot Latest cut anchors at the
+        # payload's own latest_time echo (DEC-MOVERS-ASOF-LATEST-DEFAULT-001),
+        # not the newest /db row at PROBE time; F&O/daily stay un-anchored
+        # (latest_time is a SPOT-derived echo) with the residual race disclosed.
+        html = _MOVERS.read_text(encoding="utf-8")
+        assert "j.time || j.latest_time || null" in html
+        assert "or a live pull advanced /db past this snapshot" in html
+
+    def test_db_unreadable_rows_are_a_disclosed_skip_never_a_400_probe(self) -> None:
+        # The /db READ allowlist (db_view._SYMBOL_RE) is narrower than the lake
+        # WRITE allowlist — an unreadable row must never burn a guaranteed-400
+        # probe (browser console-clean law; one wasted request per render).
+        html = _MOVERS.read_text(encoding="utf-8")
+        assert "BXVerify.bxDbProbeOk(" in html
+        assert "not /db-readable" in html
+        js = _VERIFY_JS.read_text(encoding="utf-8")
+        assert "function bxDbProbeOk(" in js
+        assert r"/^[A-Za-z0-9][A-Za-z0-9_.&\- ]*$/" in js  # the _SYMBOL_RE mirror
+
+    def test_missing_row_wording_distinguishes_empty_page_from_cut_miss(self) -> None:
+        # Refuter S4: "no /db 1-minute rows for <date>" was claimed even when
+        # rows existed but none sat at/before the pick — now a distinct truth.
+        html = _MOVERS.read_text(encoding="utf-8")
+        assert "no /db 1-minute rows for" in html
+        assert "but none at/before" in html
+
+    def test_hidden_pause_resumes_on_visibilitychange(self) -> None:
+        # Refuter S5: a render landing on a hidden tab pauses verify — the
+        # visibilitychange listener must re-schedule on return, never leaving
+        # a stale "paused (hidden tab)" chip on a visible tab.
+        html = _MOVERS.read_text(encoding="utf-8")
+        assert "verifyHiddenPaused" in html
+        assert "else if (!document.hidden && verifyHiddenPaused) scheduleVerify();" in html
 
 
 class TestDbDeepLink:

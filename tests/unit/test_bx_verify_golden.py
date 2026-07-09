@@ -44,6 +44,7 @@ class TestModuleWiring:
         text = _VERIFY_JS.read_text(encoding="utf-8")
         assert "function bxNum(" in text
         assert "function bxParseInr(" in text
+        assert "function bxDbProbeOk(" in text
         assert "function bxCutRow(" in text
         assert "function bxVerifyRow(" in text
         assert "module.exports = BXVerify;" in text
@@ -169,6 +170,45 @@ class TestNodeExecutedGolden:
 
     def test_cut_row_empty_rows_is_null(self) -> None:
         assert self._run_js("v.bxCutRow([], 0, null)") is None
+
+    # ── bxDbProbeOk (the /db read-allowlist pre-check, round-2 refuter fold) ──
+    def test_probe_ok_admits_every_real_read_allowlist_shape(self) -> None:
+        # Mirrors db_view._validate_candle_coords: NSE/BSE × INDEX/CASH/FNO ×
+        # _SYMBOL_RE — incl. the documented '&' (M&M, DEC-PREOPEN-AMPERSAND-001)
+        # and literal-space (INDIA VIX, DEC-PREOPEN-SPACE-SYMBOL-001) admits.
+        for exch, seg, sym in (
+            ("NSE", "INDEX", "NIFTY"),
+            ("BSE", "INDEX", "SENSEX"),
+            ("NSE", "CASH", "M&M"),
+            ("NSE", "INDEX", "INDIA VIX"),
+            ("NSE", "FNO", "NSE-NIFTY-30Jan25-28500-CE"),
+        ):
+            expr = f"v.bxDbProbeOk({json.dumps(exch)}, {json.dumps(seg)}, {json.dumps(sym)})"
+            assert self._run_js(expr) is True, (exch, seg, sym)
+
+    def test_probe_ok_rejects_what_the_route_would_400(self) -> None:
+        # A lake-LEGAL symbol outside the READ allowlist (";", "'", "=" — the
+        # browser fixture's hostile-symbol shape), "..", a bad exchange, a bad
+        # segment, and a non-string symbol are all pre-rejected — the verify
+        # pass must never issue a probe that is guaranteed to 400.
+        hostile = "EVIL&lt;img src=x onerror=window.__bx_xss=1&gt;' onmouseover='window.__bx_xss=1"
+        for exch, seg, sym in (
+            ("NSE", "INDEX", hostile),
+            ("NSE", "INDEX", "A..B"),
+            ("NSE", "INDEX", " LEADINGSPACE"),
+            ("NSE", "INDEX", ""),
+            ("", "INDEX", "NIFTY"),
+            ("MCX", "INDEX", "NIFTY"),
+            ("NSE", "", "NIFTY"),
+            ("NSE", "COMMODITY", "NIFTY"),
+            # prototype-chain probe: an inherited Object key is not a set hit
+            ("hasOwnProperty", "INDEX", "NIFTY"),
+            ("NSE", "constructor", "NIFTY"),
+        ):
+            expr = f"v.bxDbProbeOk({json.dumps(exch)}, {json.dumps(seg)}, {json.dumps(sym)})"
+            assert self._run_js(expr) is False, (exch, seg, sym)
+        assert self._run_js("v.bxDbProbeOk('NSE', 'INDEX', null)") is False
+        assert self._run_js("v.bxDbProbeOk('NSE', 'INDEX', 42)") is False
 
     # ── bxVerifyRow ──
     def test_exact_match_both_cells(self) -> None:
