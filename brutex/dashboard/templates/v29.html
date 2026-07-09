@@ -2448,6 +2448,11 @@
   </div>
   <div class="oc-controls-row">
     <button class="oc-run-btn" id="run-sweep" type="button">🚀 Run Sweep</button>
+    <!-- Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): shown while the
+         sweep reports running; POSTs /api/v1/sweep/cancel. The engine stops at
+         the TUPLE boundary (the in-flight tuple finishes its durable write +
+         checkpoint), so a cancelled run is a clean resumable checkpoint. -->
+    <button class="oc-cascade-btn" id="stop-sweep" type="button" hidden>⏹ Stop</button>
     <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
     <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
   </div>
@@ -3439,6 +3444,11 @@
         // Heartbeat hook: the hero's sweep slot rides THIS fetch — zero extra
         // sockets. Fires before the idle-return so "idle" renders honestly.
         if (window.__bxHbSweep) window.__bxHbSweep(sp);
+        // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): this ALWAYS-ON
+        // poller owns the attach case — the Stop button is visible exactly
+        // while a sweep reports running, even when this page never clicked Run.
+        const stopAttach = document.getElementById('stop-sweep');
+        if (stopAttach && sp) stopAttach.hidden = !sp.running;
         if (!sp || sp.state === 'idle') return;  // nothing running yet
         const panel = document.getElementById('sweepProgressPanel');
         // Un-hide BEFORE the skip gate so the first running snapshot always
@@ -3615,6 +3625,7 @@
     const sweepMsg = document.getElementById('sweep-msg');
     const sweepBar = document.getElementById('sweep-bar');
     const sweepFill = document.getElementById('sweep-bar-fill');
+    const stopBtn = document.getElementById('stop-sweep');
     if (!sweepBtn || !sweepMsg) return;
     let sweepPoll = null;
 
@@ -3627,6 +3638,9 @@
         p.state + ' · ' + pct.toFixed(1) + '% · enumerated=' + (p.enumerated || 0) +
         ' · evaluated=' + (p.evaluated || 0) + ' · survivors=' + (p.survivors || 0) +
         ' · ' + rate + ' combos/sec';
+      // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): visible exactly
+      // while the sweep reports running (covers attach-to-already-running).
+      if (stopBtn) stopBtn.hidden = !p.running;
     }
 
     async function pollRunSweep() {
@@ -3636,12 +3650,36 @@
         renderSweep(p);
         if (!p.running && p.state !== 'idle') {
           clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
-          sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
-            ' survivor(s). The report above refreshes from the new run artifacts.';
+          if (stopBtn) { stopBtn.hidden = true; stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop'; }
+          if (p.state === 'cancelled') {
+            sweepMsg.textContent = '⏹ Sweep cancelled — ' + (p.detail || 'stopped at the tuple boundary') +
+              '. Run again to resume from the checkpoint.';
+          } else {
+            sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
+              ' survivor(s). The report above refreshes from the new run artifacts.';
+          }
         }
       } catch (e) {
         sweepMsg.textContent = 'Could not read sweep progress: ' + e;
       }
+    }
+
+    if (stopBtn) {
+      stopBtn.onclick = async () => {
+        stopBtn.disabled = true;
+        stopBtn.textContent = '⏳ Stopping — finishing current tuple…';
+        try {
+          const r = await fetch('/api/v1/sweep/cancel', { method: 'POST' });
+          const j = await r.json();
+          if (!j.cancelling) {
+            sweepMsg.textContent = 'No running sweep to cancel.';
+            stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
+          }
+        } catch (e) {
+          sweepMsg.textContent = 'Cancel request failed: ' + e;
+          stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop';
+        }
+      };
     }
 
     sweepBtn.onclick = async () => {

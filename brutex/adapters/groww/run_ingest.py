@@ -71,7 +71,7 @@ from brutex.adapters.groww.errors import (
 from brutex.adapters.groww.fetch_pipeline import FetchPipeline
 from brutex.adapters.groww.ingest import IngestReport, Pacer, WindowTick, ingest_spot
 from brutex.adapters.groww.vendor_floor import VendorFloorLearner
-from brutex.adapters.ingest_common import maybe_audit
+from brutex.adapters.ingest_common import CancelCheck, PullCancelled, maybe_audit
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.sink import BarSink
@@ -118,6 +118,11 @@ from brutex.orchestrator.universe_phases import RunParallel
 #: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
 #: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
 #: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
+#: ``PullCancelled`` joins it (DEC-JOB-COOPERATIVE-CANCEL-001): an operator
+#: cooperative cancel is a pull-WIDE graceful stop (every remaining window is
+#: deliberately left un-fetched, never a per-symbol quarantine); it rides the
+#: SAME propagation so the controllers' existing drain + ledger-persist
+#: ``finally`` blocks make cancel ≡ a graceful stop at the window boundary.
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
@@ -126,6 +131,7 @@ _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     GrowwAuthError,
     VendorDownError,
     GrowwCredentialDeadError,
+    PullCancelled,
 )
 
 #: Structured logger — per-underlying spot rollup at INFO (``ingest.underlying``)
@@ -344,8 +350,16 @@ def run_groww_spot_ingest(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe threaded verbatim into every :func:`ingest_spot` call — checked
+    per WINDOW before its vendor fetch; a flagged window raises
+    :class:`~brutex.adapters.ingest_common.PullCancelled` (a
+    ``_GLOBAL_STOP_ERRORS`` member — the pull-wide graceful stop, never a
+    per-symbol quarantine). ``None`` (every legacy caller) is byte-identical.
 
     The OUTER loop is mapped through *run_parallel* so many windows are in flight
     at once and the pull targets UP TO the rate ceiling when Groww is healthy,
@@ -579,6 +593,7 @@ def run_groww_spot_ingest(
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
                 floor_learner=floor_learner,
+                should_stop=should_stop,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
@@ -790,8 +805,15 @@ def run_groww_spot_ingest_with_retry(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is forwarded verbatim into
+    every pass, so a cooperative cancel stops the FIRST pull AND every retry
+    round at the next window boundary via the propagated
+    :class:`~brutex.adapters.ingest_common.PullCancelled` global stop.
+    ``None`` (every legacy caller) is byte-identical.
 
     Run one full :func:`run_groww_spot_ingest` pass, and — when it leaves
     TRANSIENT residual windows (``still_failed_windows`` > 0) AND *auto_retry* is
@@ -888,6 +910,7 @@ def run_groww_spot_ingest_with_retry(
             storm_breaker=storm_breaker,
             write_breaker=write_breaker,
             floor_learner=floor_learner,
+            should_stop=should_stop,
         )
 
     report = _one_pass()

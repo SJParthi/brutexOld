@@ -116,9 +116,12 @@ from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
     OLD_GAP_HORIZON_DAYS,
+    CancelCheck,
+    PullCancelled,
     clamp_window_end,
     drop_bars_after,
     maybe_audit,
+    raise_if_cancelled,
     summarize_conflicts,
 )
 from brutex.adapters.ingest_common import (
@@ -220,6 +223,11 @@ _MAX_BACKOFF_S: float = 8.0
 #: (``GrowwCredentialDeadError`` is a TERMINAL ``GrowwAuthError`` subclass, so it also
 #: satisfies the ``is_terminal_auth_failure`` carve-out — listed explicitly as the
 #: DEC-VENDOR-DOWN-BREAKER-001 escalation member).
+#: ``PullCancelled`` joins it (DEC-JOB-COOPERATIVE-CANCEL-001): an operator
+#: cooperative cancel is a pull-WIDE graceful stop — every remaining contract is
+#: deliberately left un-fetched (never a per-contract quarantine), and the
+#: caller's existing drain + ledger-persist ``finally`` blocks make cancel ≡ a
+#: graceful stop at the contract-window boundary.
 _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     DailyQuotaExceeded,
     QuotaInvariantError,
@@ -228,6 +236,7 @@ _GLOBAL_STOP_ERRORS: tuple[type[BruteXError], ...] = (
     GrowwAuthError,
     VendorDownError,
     GrowwCredentialDeadError,
+    PullCancelled,
 )
 
 #: One unit of OUTER-loop work for the parallel fan-out: a derivative
@@ -1900,8 +1909,18 @@ def run_groww_option_ingest(
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
     audit: AuditWriter | None = None,
+    should_stop: CancelCheck | None = None,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe, checked at the top of every ``(contract, interval)`` pair —
+    each pair IS one ledger window here, so this is the F&O window boundary —
+    BEFORE any vendor call. A flagged pair raises
+    :class:`~brutex.adapters.ingest_common.PullCancelled` (a
+    ``_GLOBAL_STOP_ERRORS`` member — the pull-wide graceful stop; the pair's
+    ledger row stays PLANNED/unsettled, idempotently re-pulled next time).
+    ``None`` (every legacy caller) is byte-identical.
 
     Contract-type-agnostic: the SAME driver ingests OPTION (CE/PE) or FUTURE (FUT)
     contracts — only *market* differs (the lake-ledger namespace:
@@ -2169,6 +2188,10 @@ def run_groww_option_ingest(
             else empty_retry_by_symbol.get(contract.symbol, empty_retry_attempts)
         )
         with pull_id_scope(pull_id):
+            # COOPERATIVE cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the F&O safe
+            # boundary — BEFORE the pair's vendor fetch (each pair is one ledger
+            # window). A flagged pair makes ZERO vendor calls.
+            raise_if_cancelled(should_stop)
             return ingest_option_contract(
                 client,
                 sink,

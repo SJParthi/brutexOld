@@ -517,6 +517,15 @@ class BackgroundPullJob:
         #: DEC-PULL-BEAT-PERRUN-001 fix round). Reset on every :meth:`start`; guarded by
         #: :attr:`_lock`.
         self._foreign_beat_warned = False
+        #: Per-RUN cooperative-cancel token (DEC-JOB-COOPERATIVE-CANCEL-001): a
+        #: FRESH ``threading.Event`` is minted by every :meth:`start` under the
+        #: claim lock — the fresh-per-run object IS the identity gate (the
+        #: ``self._watchdog is watchdog`` law's twin), so a cancel requested
+        #: against run A can never leak into a later run B. The pull work
+        #: closures capture :meth:`cancel_requested` as their ``should_stop``
+        #: window-boundary probe. Initialised here so a pre-first-start read is
+        #: an honest ``False``, never an AttributeError.
+        self._cancel_event = threading.Event()
         #: Count of EMPTY-ambient direct-hook beats ACCEPTED while the run is LIVE —
         #: the documented, reviewer-sanctioned legacy envelope of :meth:`_beat`
         #: (unscoped threads / tests / unrebound hooks). OBSERVABILITY ONLY (review
@@ -639,6 +648,7 @@ class BackgroundPullJob:
             prior_pull_id = self._pull_id
             prior_foreign_beat_warned = self._foreign_beat_warned
             prior_empty_ambient_beats = self._empty_ambient_beats
+            prior_cancel_event = self._cancel_event
             # Publish the run-identity token ATOMICALLY with the single-flight flag, under
             # the SAME lock the gates read it under. Otherwise a stale worker A's finally
             # could acquire the lock in the gap between ``_running = True`` and a later
@@ -657,6 +667,10 @@ class BackgroundPullJob:
             self._pull_id = run_pull_id
             self._foreign_beat_warned = False
             self._empty_ambient_beats = 0
+            # Fresh per-run cancel token (DEC-JOB-COOPERATIVE-CANCEL-001): the
+            # IDENTITY gate — a cancel set against a PRIOR run can never hit
+            # this run (a stale request dies with its own Event object).
+            self._cancel_event = threading.Event()
         # Cross-process account-wide single-flight gate (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001).
         # Taken AFTER the in-process flag (so a same-process double-click is filtered by the
         # cheap flag first) but BEFORE any work is spawned. On contention a peer process is
@@ -686,6 +700,7 @@ class BackgroundPullJob:
                     self._pull_id = prior_pull_id
                     self._foreign_beat_warned = prior_foreign_beat_warned
                     self._empty_ambient_beats = prior_empty_ambient_beats
+                    self._cancel_event = prior_cancel_event
                 return False
         else:
             # ZERO-WRITE run (see the docstring): neither cross-process lock is
@@ -1435,6 +1450,45 @@ class BackgroundPullJob:
         """
         with self._lock:
             return self._job_kind if self._running else None
+
+    def request_cancel(self) -> bool:
+        """Request a COOPERATIVE cancel of the RUNNING job — O(1), thread-safe.
+
+        DEC-JOB-COOPERATIVE-CANCEL-001. Sets the CURRENT run's per-run cancel
+        token so the work's ``should_stop`` probe (:meth:`cancel_requested`,
+        captured by the route work closures and threaded to the pull spines'
+        WINDOW boundary) reads ``True`` from the next boundary on. Returns
+        ``True`` iff a run was live to cancel; an idle job is a ``False``
+        no-op — a between-runs request can never pre-poison a future run (the
+        fresh-Event-per-start identity gate). HONEST latency (Golden Rule
+        #10): cooperative — the current window's fetch + durable write always
+        complete first; a wedged worker ignores it (the WEDGED escalation
+        stays that class's honest terminal).
+        """
+        with self._lock:
+            if not self._running:
+                return False
+            self._cancel_event.set()
+            run_pull_id = self._pull_id
+            job_kind = self._job_kind
+        _LOG.warning(
+            "pull_job.cancel_requested",
+            pull_id=run_pull_id,
+            job_kind=job_kind,
+            note="cooperative — the job stops at its next safe boundary",
+        )
+        return True
+
+    def cancel_requested(self) -> bool:
+        """``True`` iff the CURRENT run's cancel token is set — O(1), thread-safe.
+
+        The ``should_stop`` probe the work closures capture
+        (DEC-JOB-COOPERATIVE-CANCEL-001). Reads the current Event under the
+        lock so a stale run's token (already replaced by a newer
+        :meth:`start`) is never consulted.
+        """
+        with self._lock:
+            return self._cancel_event.is_set()
 
     @property
     def counters(self) -> CoverageCounters:

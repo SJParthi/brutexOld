@@ -93,6 +93,7 @@ from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 # The ``as`` self-alias is the explicit-re-export idiom mypy strict's
 # no-implicit-reexport demands; ruff PLC0414 flags exactly that idiom, hence
 # the per-line noqa (the repo's per-line-noqa-with-rationale house style).
+from brutex.adapters.ingest_common import CancelCheck
 from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )
@@ -135,6 +136,18 @@ PHASE_PREBUILD = "prebuild"
 SEGMENT_SPOT = "spot"
 SEGMENT_FUTURES = "futures"
 SEGMENT_OPTIONS = "options"
+
+#: The honest cancelled-pipeline headline (DEC-JOB-COOPERATIVE-CANCEL-001):
+#: an amber PARTIAL, never a red error, never a fabricated "complete".
+_CANCEL_NOTE: Final[str] = (
+    "pull cancelled by operator — completed windows are durable "
+    "(ledger checkpointed); the next pull resumes the remainder"
+)
+
+
+def _cancel_requested(should_stop: CancelCheck | None) -> bool:
+    """``True`` iff the cooperative-cancel probe is wired AND reads ``True`` — O(1)."""
+    return should_stop is not None and should_stop()
 
 
 def spot_phase_ok(report: BulkSpotReport) -> bool:
@@ -890,8 +903,18 @@ def run_full_pipeline(
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    should_stop: CancelCheck | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe, consulted BETWEEN phases (the phase bodies additionally
+    thread it to their own window boundaries): a cancel observed after phase k
+    stops the chain with ``stopped_after = "<phase k> (cancelled)"`` and an
+    honest note — the completed phases' durable state stands, the skipped
+    phases run on the next pull. ``None`` (every legacy caller) is
+    byte-identical. Composes with the existing gate-failure stop (a cancelled
+    report is never ``ok``).
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -1012,6 +1035,21 @@ def run_full_pipeline(
         The combined, auditable outcome of every phase that ran.
     """
     spot = run_spot()
+    if _cancel_requested(should_stop) or spot.cancelled:
+        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spot
+        # phase either observed the cancel at a window boundary (report
+        # ``cancelled=True``) or the request landed between phases. Stop the
+        # chain honestly — durable work stands, the next pull resumes.
+        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+        return PipelinePullReport(
+            spot=spot,
+            metadata=None,
+            historical=None,
+            stopped_after=f"{PHASE_SPOT} (cancelled)",
+            note=_CANCEL_NOTE,
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
+        )
     if not spot_phase_ok(spot):
         quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
         return PipelinePullReport(
@@ -1025,6 +1063,17 @@ def run_full_pipeline(
         )
 
     metadata = run_metadata()
+    if _cancel_requested(should_stop):
+        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+        return PipelinePullReport(
+            spot=spot,
+            metadata=metadata,
+            historical=None,
+            stopped_after=f"{PHASE_METADATA} (cancelled)",
+            note=_CANCEL_NOTE,
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
+        )
     if not metadata_phase_ok(metadata):
         quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
         return PipelinePullReport(
@@ -1048,6 +1097,21 @@ def run_full_pipeline(
         strict=strict_gate,
     )
     historical = run_historical(prior)
+    if _cancel_requested(should_stop):
+        # A cancel observed during/after the historical phase: skip the
+        # post-steps (prebuild + movers warm) — nothing is lost, the next
+        # clean pull derives (DEC-JOB-COOPERATIVE-CANCEL-001).
+        quarantined_names = derive_quarantined_name_set(spot, historical)
+        quarantined, quarantined_count = _cap_quarantined(quarantined_names)
+        return PipelinePullReport(
+            spot=spot,
+            metadata=metadata,
+            historical=historical,
+            stopped_after=f"{PHASE_HISTORICAL} (cancelled)",
+            note=_CANCEL_NOTE,
+            quarantined_symbols=quarantined,
+            quarantined_count=quarantined_count,
+        )
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of

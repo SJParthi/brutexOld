@@ -95,6 +95,14 @@ EXIT_HEAL_REFUSED = 5
 #: NON-ZERO so an operator script never mistakes a partial sweep for a clean one
 #: (the failed tuples are un-sentineled and will redo next run).
 EXIT_SWEEP_TUPLE_FAILED = 6
+#: sweep-all stopped at a tuple boundary on an operator COOPERATIVE cancel
+#: (DEC-JOB-COOPERATIVE-CANCEL-001): the checkpoint/cache/stores are exactly a
+#: graceful stop's at that boundary (resume by re-running), every post-grid
+#: pass (stage3 / options-sim / cascade / results-depth) was SKIPPED, and the
+#: exit is NON-ZERO so a cron/nightly leg never mistakes a cancelled sweep for
+#: a clean one. Cancel takes precedence over EXIT_SWEEP_TUPLE_FAILED (both
+#: facts stay visible in the summary + audit chain).
+EXIT_SWEEP_CANCELLED = 7
 
 
 class CliUserError(Exception):
@@ -6298,6 +6306,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
     out_root = results_root if results_root is not None else resolved_lake / "sweeps"
 
+    # Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): clear a STALE cancel
+    # sidecar FIRST — a leftover request from a prior cancelled run must never
+    # kill this fresh/resumed run (the identity-gating twin of the pull job's
+    # fresh-Event-per-start) — then build the O(1) per-tuple probe both engine
+    # drivers consult at the tuple boundary. The sidecar mechanism covers this
+    # CLI process, the dashboard's in-process sweep AND the detached
+    # launch-page sweep with ONE durable file.
+    from brutex.engine.sweep_cancel import clear_cancel, make_cancel_probe
+
+    if clear_cancel(out_root):
+        print(
+            "[brutex] sweep-all: cleared a STALE cancel request "
+            f"({out_root / '.sweep_cancel.json'}) — a leftover cancel never kills a new run"
+        )
+    _should_stop = make_cancel_probe(out_root)
+
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     # Engine-scope coordinate law (DEC-ENGINE-SCOPE-GUARD-001, Layer 2): refuse
     # an out-of-engine-scope launch BEFORE the catalog reconcile + bar load —
@@ -6700,6 +6724,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     ingest_audit=ingest_audit,
                     guards=guards,
                     workers=workers,
+                    should_stop=_should_stop,
                 )
             else:
                 result = run_supervised_grid(
@@ -6712,7 +6737,31 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     on_tuple=_on_tuple,
                     on_progress=_on_progress,
                     watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
+                    should_stop=_should_stop,
                 )
+            # ── COOPERATIVE cancel verdict (DEC-JOB-COOPERATIVE-CANCEL-001) ──
+            # The grid stopped at a tuple boundary on the operator's request:
+            # the last completed tuple's durable chain (store flush → sentinel
+            # → cache.record → checkpoint.record) landed, nothing was recorded
+            # for unrun tuples, and the SUPERVISOR_CANCELLED audit line is on
+            # the chain — so a resume (re-run this command) behaves exactly
+            # like a resume after a graceful stop. EVERY post-grid pass
+            # (stage3 / options-sim / cascade / results-depth) is SKIPPED; the
+            # consumed cancel sidecar is cleared so the resume is never
+            # re-cancelled by the stale request. Non-zero exit — a cron leg
+            # never mistakes a cancelled sweep for a clean one; cancel takes
+            # precedence over the tuples_failed exit (both stay visible in
+            # the summary + audit).
+            if result.cancelled:
+                clear_cancel(out_root)
+                print(
+                    "[brutex] sweep-all: CANCELLED at operator request — post-grid "
+                    "passes skipped (stage3/options-sim/cascade/results-depth); "
+                    "resume by re-running (checkpoint + cache + quarantine sidecar "
+                    f"gate the redo). tuples_run={result.tuples_run}/"
+                    f"{result.tuples_total} failed={result.tuples_failed}"
+                )
+                return EXIT_SWEEP_CANCELLED
             # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
             # Runs INSIDE the open audit with-block on this single thread (review
             # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest
