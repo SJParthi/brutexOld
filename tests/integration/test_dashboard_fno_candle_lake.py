@@ -15,6 +15,10 @@ Proven end-to-end against a real lake written by the production
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess  # nosec B404 — fixed-argv node invocation, test-only
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -296,3 +300,126 @@ class TestFnoDisplayTruthPack:
         assert "stored spot used by the Greeks enrichment (per-bar stamp)" in template
         assert "stored per-bar spot stamp written at ingest" in template
         assert "function gridTheadHtml(cols, titles)" in template
+
+
+def _db_template_text() -> str:
+    import brutex.dashboard as dashboard_pkg
+
+    return (Path(dashboard_pkg.__file__).parent / "templates" / "db.html").read_text(
+        encoding="utf-8"
+    )
+
+
+def _js_function(template: str, header: str) -> str:
+    """Extract one top-level ``function name(...) { ... }`` block from the template.
+
+    Every extracted builder closes with the first column-0 ``}`` after its header
+    (the db.html inline script's top-level layout) — a moved/renamed function fails
+    LOUDLY here (ValueError), never a silently-empty extraction.
+    """
+    start = template.index(header)
+    end = template.index("\n}\n", start)
+    return template[start : end + 3]
+
+
+class TestSpotJoinPerCellMarker:
+    """DEC-DB-FNO-DISPLAY-TRUTH-001 item 9, review fold (M1) — the per-cell " ~".
+
+    Full #1539 parity for the 1minute spot-join fallback: the page-level
+    disclosure (spot_join_interval key / .tfnote / th title) gains a PER-CELL
+    " ~" on the spot + moneyness cells whose provenance is the fallback join
+    (bucket-OPEN 1-minute instant vs a prebuilt bucket's resampled close) —
+    values MARKED, never changed. Two layers, mirroring
+    ``test_dashboard_halfup_format.py``: string pins (the honest no-headless-JS
+    envelope) + a node-executed golden over the REAL extracted builders
+    (fails-before: pre-fold ``gridRowsHtml`` had no flag and emitted no marker).
+    """
+
+    def test_template_ships_the_marker_and_threads_the_flag(self) -> None:
+        template = _db_template_text()
+        # The marking line: spot + moneyness only; "?"/"—" carry no fallback-joined
+        # value so they are honestly excluded; appended INSIDE the esc()'d string.
+        assert (
+            'if (spotJoinMark && (col === "spot" || col === "moneyness") '
+            '&& cell !== "?" && cell !== "—") txt += " ~";'
+        ) in template
+        # The flag threads through BOTH render paths (full rebuild + tbody patch).
+        assert "function gridRowsHtml(cols, rows, spotJoinMark)" in template
+        assert "function gridAndPager(cols, rows, total, off, lim, note, titles, spotJoinMark)" in (
+            template
+        )
+        assert "function patchGridRows(grid, cols, rows, total, off, spotJoinMark)" in template
+        assert "tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);" in template
+        assert "Number(body.total || 0), Number(body.offset || 0), wantTfNote);" in template
+        # The legend explains the per-cell marker beside the existing page note.
+        assert 'spot/moneyness cells marked " ~" carry the bar-instant 1-minute values' in template
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_node_executed_marker_present_on_fallback_absent_on_native(self) -> None:
+        # The REAL template builders (esc/fmtCell/moneynessClass/gridRowsHtml +
+        # their consts), executed in node over an FNO-shaped page. Fails-before:
+        # the pre-fold gridRowsHtml ignored a third argument → no " ~" anywhere.
+        template = _db_template_text()
+        pct_cols = re.search(r"^const PCT_COLS = .*$", template, re.M)
+        greek_dp = re.search(r"^const GREEK_DP = .*$", template, re.M)
+        assert pct_cols is not None and greek_dp is not None
+        source = "\n".join(
+            [
+                # bxFixed2 lives in the shared /static/bx-format.js (loaded before the
+                # inline script in the browser); the marker path never reaches it — a
+                # loud throwing stub keeps this golden honest about that claim.
+                'const bxFixed2 = () => { throw new Error("PCT path not under test"); };',
+                pct_cols.group(0),
+                greek_dp.group(0),
+                _js_function(template, "function esc(s)"),
+                _js_function(template, "function fmtCell(col, cell)"),
+                _js_function(template, "function moneynessClass(col, cell)"),
+                _js_function(template, "function gridRowsHtml(cols, rows, spotJoinMark)"),
+            ]
+        )
+        cols = [
+            "timestamp",
+            "close",
+            "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
+            "greeks_status",
+        ]
+        rows = [
+            # a fallback-joined bar (spot present) — spot + moneyness get " ~"
+            ["2025-01-02T09:15:00", 100.8, "OTM +1", "23950.00", "0.00", "100.80", 0, "ok"],
+            # no spot at that instant — "?" carries no fallback value → NOT marked
+            ["2025-01-02T09:16:00", 101.0, "?", None, None, None, 0, "not enriched"],
+        ]
+        script = (
+            source
+            + f"\nconst cols = {json.dumps(cols)};\nconst rows = {json.dumps(rows)};\n"
+            + "console.log(JSON.stringify({"
+            + "  marked: gridRowsHtml(cols, rows, true),"
+            + "  native: gridRowsHtml(cols, rows),"
+            + "  nativeFalse: gridRowsHtml(cols, rows, false),"
+            + "}));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script], capture_output=True, text=True, check=True
+        )
+        out = json.loads(proc.stdout)
+        marked, native = out["marked"], out["native"]
+        # PRESENT on the fallback page: the derived spot + moneyness cells only.
+        assert '<td class="mny-otm">OTM +1 ~</td>' in marked
+        assert '<td class="">23950.00 ~</td>' in marked
+        # NOT on the value columns sharing the row (td-bounded — the spot cell's
+        # own "…0.00 ~" tail must not satisfy a bare substring), never on "?".
+        assert '<td class="">0.00</td>' in marked  # intrinsic, unmarked
+        assert '<td class="">0.00 ~</td>' not in marked
+        assert '<td class="">100.80</td>' in marked  # time_value, unmarked
+        assert '<td class="">100.80 ~</td>' not in marked
+        assert "? ~" not in marked
+        # the null spot cell stays the plain nullcell (no marker path reached)
+        assert '<td class="nullcell">null</td>' in marked
+        # ABSENT on a native-interval page — flag omitted ≡ false ≡ pre-fold bytes.
+        assert " ~" not in native
+        assert native == out["nativeFalse"]
+        assert '<td class="mny-otm">OTM +1</td>' in native

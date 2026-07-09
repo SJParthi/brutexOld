@@ -3328,6 +3328,8 @@ def _fno_derived_rows(
         projection behaviour above — never a fabricated status, never a raise).
         """
         pid = row[pid_idx] if pid_idx >= 0 else None
+        # DuckDB fetchall() returns a native Python int for INTEGER-family columns
+        # (NULL → None) — the driver contract this isinstance narrowing relies on.
         packed = pid if isinstance(pid, int) else None
         return greeks_status_label(packed, is_option=option_type is not None)
 

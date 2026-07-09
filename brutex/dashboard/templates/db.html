@@ -867,7 +867,7 @@ function gridTheadHtml(cols, titles) {
     return '<th' + prov + '><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
   }).join("") + '</tr></thead>';
 }
-function gridRowsHtml(cols, rows) {
+function gridRowsHtml(cols, rows, spotJoinMark) {
   /* Prev-close CONTIGUITY marker (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001 — the /db
      twin of the /movers #1539 " *"): when a row's prev_close_contiguous cell is
      `false`, the %-change baseline BRIDGED a real NSE-session lake hole, so the
@@ -889,6 +889,19 @@ function gridRowsHtml(cols, rows) {
       if (cell == null) return '<td class="nullcell">null</td>';
       let txt = fmtCell(col, cell);
       if (noncontig && (col === "change_pct" || col === "open_gap_pct")) txt += " *";
+      /* Spot-join FALLBACK marker (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9, per-cell —
+         the review-fold twin of the " *" above): when the page's spot join fell
+         back to the 1minute base feed (`spotJoinMark`, page-level — the payload's
+         spot_join_interval != interval), the derived spot/moneyness cells gain a
+         trailing " ~" mirroring the .tfnote legend's glyph, so the differing
+         provenance (bucket-OPEN 1-minute instant vs a prebuilt bucket's resampled
+         close) is visible ON the cell, not only at page level. Values MARKED,
+         never changed (#1539 doctrine); the " ~" is appended INSIDE the esc'd
+         payload string exactly like " *". A "?"/"—" cell carries NO fallback-
+         joined value (no spot at that instant / no derivation) so it is honestly
+         NOT marked; a null spot cell already rendered `null` above. Every
+         non-candle caller passes nothing → undefined → inert, byte-identical. */
+      if (spotJoinMark && (col === "spot" || col === "moneyness") && cell !== "?" && cell !== "—") txt += " ~";
       return '<td class="' + moneynessClass(col, cell).trim() + '">' + esc(txt) + '</td>';
     }).join("") + '</tr>';
   }).join("");
@@ -905,10 +918,12 @@ function gridPagerHtml(total, off, rowCount) {
     + '<span class="prange">' + gridRangeText(from, to, total) + '</span>'
     + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
 }
-function gridAndPager(cols, rows, total, off, lim, note, titles) {
+function gridAndPager(cols, rows, total, off, lim, note, titles, spotJoinMark) {
   /* `titles` (optional, default undefined → markup byte-identical): the per-column
      <th title> provenance map threaded to gridTheadHtml — only the candle view
-     passes one (DEC-DB-FNO-DISPLAY-TRUTH-001 item 10). */
+     passes one (DEC-DB-FNO-DISPLAY-TRUTH-001 item 10). `spotJoinMark` (optional,
+     default undefined → inert): the item-9 per-cell " ~" flag threaded to
+     gridRowsHtml — only the candle view passes one (the review fold). */
   let html = "";
   if (!rows.length) {
     /* Schema-when-empty: when the table has no rows BUT the backend returned its
@@ -923,7 +938,7 @@ function gridAndPager(cols, rows, total, off, lim, note, titles) {
     }
   } else {
     html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols, titles)
-      + '<tbody>' + gridRowsHtml(cols, rows) + '</tbody></table></div>';
+      + '<tbody>' + gridRowsHtml(cols, rows, spotJoinMark) + '</tbody></table></div>';
   }
   html += gridPagerHtml(total, off, rows.length);
   return html;
@@ -937,7 +952,7 @@ function gridAndPager(cols, rows, total, off, lim, note, titles) {
    the paging click. Returns false when the shapes differ — no table/tbody yet,
    an empty page, a column-set change — so the caller falls back to today's full
    grid.innerHTML rebuild; error/empty states always take the full-rebuild path. */
-function patchGridRows(grid, cols, rows, total, off) {
+function patchGridRows(grid, cols, rows, total, off, spotJoinMark) {
   if (!rows.length || !cols.length || !(total > 0)) return false;
   const table = grid.querySelector(".gridwrap > table");
   if (!table || table.getAttribute("data-cols") !== JSON.stringify(cols)) return false;
@@ -945,7 +960,10 @@ function patchGridRows(grid, cols, rows, total, off) {
   const prev = grid.querySelector("#dbprev"), next = grid.querySelector("#dbnext");
   const range = grid.querySelector(".pager .prange");
   if (!tbody || !prev || !next || !range) return false;
-  tbody.innerHTML = gridRowsHtml(cols, rows);
+  /* `spotJoinMark` rides the SAME builder as the full rebuild so a tbody-only
+     patch marks identically (the wantTfNote gate above the caller already forces
+     a full rebuild on any presence FLIP, so the flag is stable within a patch). */
+  tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);
   const to = off + rows.length;
   prev.disabled = !(off > 0);
   next.disabled = !(to < total);
@@ -1489,11 +1507,16 @@ function candleGridHtml(body, err, notice) {
      page's per-bar spot/moneyness join fell back to the always-present 1minute base
      feed (no display-interval spot partition prebuilt — a partially-prebuilt /
      CLI-pulled lake), say so — real stored values, honestly provenance-labelled.
-     The interval token is server-validated but esc()'d anyway (defence in depth). */
-  const tfNote = body.spot_join_interval && body.interval && body.spot_join_interval !== body.interval
-    ? '<div class="tfnote">~ underlying spot joined from the 1minute series (no ' + esc(body.interval) + ' spot partition prebuilt) — spot/moneyness are the bar-instant 1-minute values; run a pipeline pull to prebuild.</div>'
+     The SAME flag threads to gridAndPager as the per-cell " ~" marker (the review
+     fold — full #1539 parity: page-level note AND per-cell marker), and the legend
+     line explains the marker. The interval token is server-validated but esc()'d
+     anyway (defence in depth). */
+  const spotJoinMark = !!(body.spot_join_interval && body.interval
+    && body.spot_join_interval !== body.interval);
+  const tfNote = spotJoinMark
+    ? '<div class="tfnote">~ underlying spot joined from the 1minute series (no ' + esc(body.interval) + ' spot partition prebuilt) — spot/moneyness cells marked " ~" carry the bar-instant 1-minute values; run a pipeline pull to prebuild.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100), null, candleHeaderTitles()) + stepNote + contigNote + tfNote;
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100), null, candleHeaderTitles(), spotJoinMark) + stepNote + contigNote + tfNote;
 }
 
 /* Per-tab <th title> provenance map for the same-looking "spot"-family headers
@@ -1598,14 +1621,16 @@ function updateCandleGrid(body, err) {
   /* The spot-join fallback note also renders OUTSIDE the tbody — a presence change
      (the join interval flipping across pages/datasets) falls back to a full rebuild,
      never a stale note (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9 — the wantNote/wantContig
-     idiom). */
+     idiom). The SAME flag threads into patchGridRows so the tbody-only patch marks
+     its spot/moneyness cells " ~" exactly like the full rebuild (the review fold);
+     the presence gate above guarantees the flag matches the standing legend. */
   const wantTfNote = !!(body && body.spot_join_interval && body.interval
     && body.spot_join_interval !== body.interval);
   const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote")
     && wantContig === !!grid.querySelector(".contignote")
     && wantTfNote === !!grid.querySelector(".tfnote")
     && patchGridRows(grid, body.columns || [], body.rows || [],
-      Number(body.total || 0), Number(body.offset || 0));
+      Number(body.total || 0), Number(body.offset || 0), wantTfNote);
   if (!patched) grid.innerHTML = candleGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
