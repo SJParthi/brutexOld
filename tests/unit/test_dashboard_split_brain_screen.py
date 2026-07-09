@@ -25,7 +25,8 @@ pytest.importorskip("pyarrow")
 
 import polars as pl
 from brutex.data.instrument_store import InstrumentStore
-from brutex.data.models import CandleBar
+from brutex.data.models import CandleBar, OptionBar
+from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
 from brutex.data.parquet_writer import ParquetWriter
 
 _DAY = date(2024, 3, 1)
@@ -279,6 +280,39 @@ class TestDbSplitBrain:
         # Clean data → page 2 served intact (the seed read ran, screen was a no-op).
         assert _closes_from_page(out) == [1003.0, 1004.0, 1005.0]
 
+    def test_seed_window_all_screened_yields_no_seed(self, conn: object, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import query_candles
+
+        # First two same-session predecessor bars are INSANE (high<low); page 2 (the
+        # two good bars) then has a seed WINDOW that screens out entirely → no seed
+        # (the `if not kept` branch). The page's good bars still serve correctly.
+        part = tmp_path / "bars" / "NSE" / "INDEX" / "NSE-NIFTY" / "1minute" / "2024" / "03.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        ts = [datetime(2024, 3, 1, 3, 45, tzinfo=UTC) + timedelta(minutes=i) for i in range(4)]
+        pl.DataFrame(
+            {
+                "timestamp": pl.Series(ts).dt.replace_time_zone("UTC"),
+                "open": [100.0, 100.0, 1000.0, 1001.0],
+                "high": [1.0, 1.0, 1002.0, 1003.0],  # rows 0,1: high<low insane
+                "low": [50.0, 50.0, 999.0, 1000.0],
+                "close": [100.5, 100.5, 1000.0, 1001.0],
+                "volume": [10, 10, 10, 10],
+                "open_interest": [None, None, None, None],
+            }
+        ).write_parquet(part)
+        out = query_candles(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            descending=False,
+            limit=2,
+            offset=2,  # page 2 = the two good bars; predecessors (the insane pair) all screen out
+        )
+        assert _closes_from_page(out) == [1000.0, 1001.0]
+
 
 # ── price_sanity closure (insane bar) on BOTH surfaces ───────────────────────
 
@@ -331,3 +365,130 @@ class TestPriceSanityClosure:
         )
         assert frame is not None
         assert frame.get_column("close").to_list() == [1000.0, 1002.0]
+
+
+# ── options scope: bad-tick OFF, insane ON (MAJOR-1 fix) ─────────────────────
+
+_OPT_PK = "NSE_FNO|13|WEEK|0|ATM|CALL"
+_OPT_SERIES = "NSE_FNO__13__WEEK__0__ATM__CALL"
+# Premium closes with a legit 5× jump (1.00 → 5.00) — a bad tick by the index 4×
+# rule, but a legitimate deep-OTM premium move on leverage.
+_PREMIUM_CLOSES = ["1.00", "5.00", "1.00"]
+
+
+def _premium_bar(minute: int, close: str) -> CandleBar:
+    """A premium-safe 1m bar (high=c+0.5, low=c-0.5 — positive + ordered for c≥0.5)."""
+    c = Decimal(close)
+    ts = datetime(2024, 3, 1, 3, 45, tzinfo=UTC) + timedelta(minutes=minute)
+    return CandleBar(
+        timestamp=ts,
+        open=c,
+        high=c + Decimal("0.5"),
+        low=c - Decimal("0.5"),
+        close=c,
+        volume=10,
+        open_interest=1000 + minute,
+    )
+
+
+def _fno_premium(lake: Path, symbol: str) -> None:
+    """Write an FNO 1m contract whose premium closes carry a legit 5× jump."""
+    bars = [_premium_bar(i, c) for i, c in enumerate(_PREMIUM_CLOSES)]
+    ParquetWriter(lake_root=lake).write(
+        exchange="NSE", segment="FNO", symbol=symbol, interval="1minute", bars=bars
+    )
+
+
+def _opt_coord() -> OptionSeriesCoordinate:
+    seg, sec, flag, code, offset, _typ = _OPT_PK.split("|")
+    return OptionSeriesCoordinate(
+        exch_id="NSE",
+        exchange_segment=seg,
+        security_id=int(sec),
+        underlying_symbol="NIFTY",
+        expiry_flag=flag,
+        expiry_code=int(code),
+        strike_offset=offset,
+    )
+
+
+def _obar_premium(minute: int, close: str) -> OptionBar:
+    c = Decimal(close)
+    ts = datetime(2024, 3, 1, 4, 0, tzinfo=UTC) + timedelta(minutes=minute)
+    return OptionBar(
+        timestamp=ts,
+        open=c,
+        high=c + Decimal("0.5"),
+        low=c - Decimal("0.5"),
+        close=c,
+        volume=250,
+        open_interest=1200,
+        side="CE",
+        strike=Decimal("17500.00"),
+        spot=Decimal("17480.55"),
+        iv=Decimal("0.15"),
+    )
+
+
+class TestOptionsScope:
+    def test_movers_options_keeps_legit_4x_premium(self, tmp_path: Path) -> None:
+        """OPTIONS reader (bad_tick=False) KEEPS a ≥4× premium move; FUTURES drops it."""
+        from brutex.dashboard.movers_futures import _read_future_session
+
+        sym = "NSE-NIFTY-28Mar24-17500-CE"
+        _fno_premium(tmp_path, sym)
+        opt = _read_future_session(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=sym,
+            day=_DAY,
+            cutoff_min=None,
+            bad_tick=False,
+        )
+        fut = _read_future_session(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=sym,
+            day=_DAY,
+            cutoff_min=None,
+            bad_tick=True,
+        )
+        assert opt is not None and fut is not None
+        # Options keep the 5× bar → strictly larger turnover than the futures view
+        # (which drops it as a bad tick). This is the anti-split-brain scope fix.
+        assert opt[2] > fut[2]  # value_paisa: options includes the 5.00 bar
+        assert str(opt[0]) == "1.00"  # LTP is the last kept premium bar (all 3 kept)
+
+    def test_movers_options_drops_insane_bar(self, tmp_path: Path) -> None:
+        """Even with bad_tick=False, a positivity-insane option bar is dropped."""
+        from brutex.dashboard.movers_futures import _read_future_session
+
+        sym = "NSE-NIFTY-28Mar24-17500-CE"
+        _write_raw_insane(tmp_path, symbol=sym, segment="FNO")
+        read = _read_future_session(
+            tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol=sym,
+            day=_DAY,
+            cutoff_min=None,
+            bad_tick=False,
+        )
+        assert read is not None
+        # 3 raw bars, middle is high<low insane → dropped → LTP is the last GOOD bar.
+        assert str(read[0]) == "1002.00"
+
+    def test_db_options_keeps_legit_4x_premium(self, conn: object, tmp_path: Path) -> None:
+        """/db expired-options page keeps a ≥4× premium move (bad_tick OFF)."""
+        from brutex.dashboard.db_view import query_option_candles
+
+        OptionParquetWriter(lake_root=tmp_path).write(
+            partition_key=_OPT_PK,
+            coordinate=_opt_coord(),
+            bars=[_obar_premium(i, c) for i, c in enumerate(_PREMIUM_CLOSES)],
+        )
+        out = query_option_candles(conn, tmp_path, series=_OPT_SERIES, limit=50)
+        assert 5.0 in _closes_from_page(out)  # the 5× premium bar is KEPT, not dropped
+        assert sorted(_closes_from_page(out)) == [1.0, 1.0, 5.0]

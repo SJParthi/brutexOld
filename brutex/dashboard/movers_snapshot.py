@@ -1148,6 +1148,13 @@ def resolve_prev_close(
     DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — this resolver ADDS only the found
     session date. Pure lake read — provenance judgement (and any warning) stays
     at the candidate-loop level.
+
+    HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): this baseline read is NOT
+    routed through the bad-tick/insane screen, so a prior-session last bar that is
+    itself a scaled spike would inflate ``prev_close`` and thus the %-move on the
+    BASELINE side (the live LTP/turnover side IS screened). Disclosed, not fixed
+    here — re-pulling / healing the poisoned prior session is the real remedy; the
+    screened live side already closes the fabricated Top-Value class.
     """
     import polars as pl
 

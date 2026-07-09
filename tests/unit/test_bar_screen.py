@@ -216,6 +216,19 @@ class TestScreenRows:
         out = screen_rows(rows, cols)
         assert [r[4] for r in out] == [100.0]
 
+    def test_bad_tick_off_keeps_spike_but_still_drops_insane(self) -> None:
+        # The OPTIONS semantics (DEC-DASHBOARD-READ-SCREEN-001): bad_tick_enabled=False
+        # keeps a legit ≥4× move (option premia move ≥4×/min) but STILL drops an
+        # insane (high<low) bar — the insane arm is unconditional.
+        cols = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"]
+        rows = [
+            (_OPEN_UTC, 1.0, 1.5, 0.5, 1.0, 10, None),  # premium 1.00
+            (_OPEN_UTC + timedelta(minutes=1), 5.0, 5.5, 4.5, 5.0, 10, None),  # 5× jump, KEPT
+            (_OPEN_UTC + timedelta(minutes=2), 2.0, 1.0, 3.0, 2.0, 10, None),  # high<low, DROPPED
+        ]
+        out = screen_rows(rows, cols, bad_tick_enabled=False)
+        assert [r[4] for r in out] == [1.0, 5.0]  # 5× kept, insane dropped
+
     def test_seed_catches_left_edge_spike(self) -> None:
         # A page whose FIRST row is itself a spike vs a same-session predecessor:
         # without a seed the first bar is exempt (kept); WITH the seed it drops.
