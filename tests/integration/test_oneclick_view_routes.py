@@ -132,7 +132,10 @@ class TestPagesServe:
             assert f'id="{control}"' in html, control
         assert 'id="swConditions"' in html
         assert "disabled" in html.split('id="swConditions"')[1][:120]
-        assert "Condition filter — not available yet" in html
+        # Review round 2: the note names the filter a FUTURE SWEEP option so
+        # the adjacent Re-verify explainer can't be read as describing it.
+        assert "A future sweep option" in html
+        assert "Not available yet (coming in a later update)" in html
         # The preflight/estimator strip is HONEST about not being available.
         assert "Time estimate: not available yet" in html
         # R3: the button never pulls — stated on the page.

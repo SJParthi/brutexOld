@@ -190,6 +190,15 @@ _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
         "alert",
     ),
     (
+        # Review round 2: the THIRD corrupt-top100 sibling — the shared
+        # reader's OSError/UnicodeDecodeError arm ("<artifact>
+        # unreadable/corrupt: <Exc>"), which also propagates into the trades
+        # note — no longer renders filename jargon.
+        "top100.json unreadable/corrupt: OSError",
+        "The winner list is damaged and couldn't be read.",
+        "alert",
+    ),
+    (
         "row 3 is not an object — rows kept up to it",
         "Part of the winner list couldn't be read — showing the readable entries.",
         "notice",
@@ -545,6 +554,60 @@ class TestOperatorPageVisibleTextClean:
         assert 'id="ocTimeline"' not in body, "the timeline must stay outside (unmoved)"
         # Never auto-opened: the details carries no `open` attribute.
         assert re.search(r'<details id="bxDiagnostics"[^>]*\bopen\b', html) is None
+
+    def test_hero_and_heartbeat_handle_the_failing_and_local_verdicts(self) -> None:
+        """Review round 2: the DISTINCT server verdicts flow_state='failing'
+        (FLOW_FAILING — an active pull whose every call fails) and 'local'
+        (FLOW_LOCAL — an active no-vendor-calls stage) must never fall
+        through to the false-calm idle arms of the hero or heartbeat card."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        # Hero row 3 red covers 'failing' with honest wording.
+        assert "const pullFailing = S.pull === 'failing';" in html
+        assert "'the data pull is failing every call'" in html
+        # Hero row 2 sub never invents a fetch during a local stage.
+        assert "processing pulled data locally — no vendor calls right now" in html
+        # A pull's FIRST stalled tick reads paused-but-active, never Idle
+        # (the >=2-tick hysteresis still owns the red escalation).
+        assert "(S.pull === 'stalled' && S.pullStalledTicks < 2)" in html
+        assert "data flow paused — waiting on the data vendor" in html
+        # The heartbeat pull card renders both states as ACTIVE — in
+        # agreement with its own pullWasActive() classifier.
+        assert "pull running — every call is failing" in html
+        assert "pull running — processing locally" in html
+
+    def test_hero_suspect_row_claims_latest_only_when_true(self) -> None:
+        """Review round 2: the suspect flag rides the SELECTED run's
+        manifest, so 'Latest' is claimed only when that run IS the runs
+        feed's latest_run_id; an older selection reads 'Selected'."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "(isLatest ? 'Latest' : 'Selected')" in html
+        assert "' run needs review — a self-check flagged its numbers'" in html
+
+    def test_inline_msg_sinks_clear_stale_error_titles(self) -> None:
+        """Review round 2: the round-1 stale-title law reaches the two v29
+        inline message sinks — a healthy #sweep-msg / #cascade-msg write
+        clears the previous blip's raw-error tooltip."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert html.count("sweepMsg.removeAttribute('title')") >= 2
+        assert "cascadeMsg.removeAttribute('title')" in html
+
+    def test_advanced_condition_filter_names_itself_a_future_sweep_option(self) -> None:
+        """Review round 2: the Re-verify explainer sits directly above its
+        own button and the disabled condition filter carries its own note
+        naming it a FUTURE SWEEP option — never read as a re-verify knob."""
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert "A future sweep option — picks which market conditions a sweep" in html
+        assert "Re-verify — re-runs the 9-filter statistical verification" in html
+        # Order inside the disclosure: filter row first, then the re-verify
+        # explainer, then the button it describes.
+        advanced = re.search(r'<details class="oc-advanced">(.*?)</details>', html, re.S)
+        assert advanced is not None
+        body = advanced.group(1)
+        assert (
+            body.index("A future sweep option")
+            < body.index("Re-verify — re-runs")
+            < body.index("↻ Re-verify latest run")
+        )
 
     def test_status_hero_present_with_the_idle_default(self) -> None:
         html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")

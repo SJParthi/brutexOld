@@ -207,6 +207,23 @@ class TestOneclickWidgetLayer:
         js = _js(_ONECLICK)
         assert "window.BXExplain.AWAITING_TEXT" in js
 
+    def test_awaiting_banner_swaps_the_cta_while_a_sweep_runs(self) -> None:
+        """Review round 2: the no-selected-run arm consults the module's own
+        state.sweepRunning and renders the RUNNING variant — never a "press
+        Run Sweep" call-to-action the running sweep itself refuses."""
+        js = _js(_ONECLICK)
+        assert "} else if (state.sweepRunning) {" in js
+        assert "window.BXExplain.AWAITING_RUNNING_TEXT" in js
+
+    def test_hero_fanout_names_the_selected_run_not_the_latest(self) -> None:
+        """Review round 2: the manifest is run-scoped to the SELECTED run —
+        its fan-out key says so (`suspectRunId`); the TRUE latest_run_id
+        rides the ticker's runs-poller fan-out only."""
+        js = _js(_ONECLICK)
+        assert "suspectRunId: payload.run_id" in js
+        assert "latestRunId: payload.run_id" not in js
+        assert "latestRunId: runsPayload ? runsPayload.latest_run_id : null" in js
+
     def test_ring_label_and_poll_constants_unchanged_by_cleanview(self) -> None:
         """DEC-OPERATOR-PAGE-CLEANVIEW-001 byte-preservation: the honest ring
         cap label + the shared poll constants are display contracts the

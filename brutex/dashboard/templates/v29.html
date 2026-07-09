@@ -2445,16 +2445,18 @@
   </div>
   <details class="oc-advanced">
     <summary>Advanced</summary>
-    <div class="oc-sub">Re-run the 9-filter statistical verification on the most recent completed
-      sweep. This starts no new backtest — every full sweep already runs this check automatically.</div>
     <div class="oc-controls-row">
       <label>CONDITION FILTER
-        <select id="swConditions" multiple size="2" disabled title="Condition filter — not available yet (coming in a later update)">
+        <select id="swConditions" multiple size="2" disabled title="Condition filter — a future sweep option; not available yet (coming in a later update)">
           <option>(disabled)</option>
         </select>
       </label>
-      <span class="oc-disabled-note">Condition filter — not available yet (coming in a later update)</span>
+      <span class="oc-disabled-note">A future sweep option — picks which market conditions a sweep
+        tries. Not available yet (coming in a later update).</span>
     </div>
+    <div class="oc-sub">Re-verify — re-runs the 9-filter statistical verification on the most recent
+      completed sweep. This starts no new backtest — every full sweep already runs this check
+      automatically.</div>
     <div class="oc-controls-row">
       <button class="oc-cascade-btn" id="run-cascade" type="button">↻ Re-verify latest run</button>
     </div>
@@ -3669,6 +3671,15 @@
             'data pull in progress');
         } else if (state === 'stalled') {
           setSlot('pull', 'warn', 'pull running — data flow paused', 'waiting on the data vendor · usually recovers on its own');
+        } else if (state === 'failing') {
+          // pull_rate_view FLOW_FAILING: an ACTIVE pull whose every call
+          // fails — never "no data pull running" (review round 2; matches
+          // the pullWasActive() classification above).
+          setSlot('pull', 'bad', 'pull running — every call is failing', 'calls are being spent and all fail · check the data vendor');
+        } else if (state === 'local') {
+          // pull_rate_view FLOW_LOCAL: an ACTIVE pull in a local
+          // processing stage — the payload declares NO vendor calls.
+          setSlot('pull', 'ok', 'pull running — processing locally', 'no vendor calls right now · a local processing stage');
         } else if (state === 'done') {
           setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
         } else {
@@ -3751,6 +3762,10 @@
         'Sweep running — ' + pct.toFixed(1) + '% · ' + (p.evaluated || 0).toLocaleString() +
         ' of ' + (p.enumerated || 0).toLocaleString() + ' tested · ' +
         (p.survivors || 0) + ' winners so far · ' + rate + '/s';
+      // A recovered poll clears the previous blip's raw-error title — a
+      // stale attribution on a healthy message is worse than none (the
+      // round-1 stale-title law, applied to this inline sink in round 2).
+      sweepMsg.removeAttribute('title');
     }
 
     async function pollRunSweep() {
@@ -3778,6 +3793,9 @@
     sweepBtn.onclick = async () => {
       sweepBtn.disabled = true;
       sweepMsg.textContent = 'Starting the sweep…';
+      // Round-1 stale-title law on this inline sink too: a fresh start
+      // never carries the previous attempt's raw-error tooltip.
+      sweepMsg.removeAttribute('title');
       const q = new URLSearchParams();
       const symSel = document.getElementById('swSymbols');
       const syms = symSel ? Array.from(symSel.selectedOptions).map(o => o.value).join(',') : '';
@@ -3829,6 +3847,7 @@
       cascadeBtn.onclick = async () => {
         cascadeBtn.disabled = true;
         cascadeMsg.textContent = 'Re-checking the latest run through the 9 statistical filters…';
+        cascadeMsg.removeAttribute('title'); // round-1 stale-title law (round 2 here)
         try {
           const r = await fetch('/api/v1/cascade/run', { method: 'POST' });
           const j = await r.json();
@@ -3889,6 +3908,8 @@
       pullStalledTicks: 0,
       proofFailing: false,
       suspect: false,
+      suspectRunId: null, // the run the suspect flag came from (selected run)
+      latestRunId: null,  // the runs feed's latest_run_id (review round 2)
       feedOut: false      // sweep feed outage (idle suffix only — never red)
     };
     // Hero-local helpers (the template's fmtEta is IIFE-scoped — do NOT
@@ -3924,27 +3945,53 @@
         tone('ok');
         return;
       }
-      // 2 · an active data pull.
-      if (S.pull === 'flowing' || S.pull === 'local') {
+      // 2 · an active data pull (review round 2: an ACTIVE pull must never
+      //     read Idle — 'local' is a real pull in a no-vendor-calls stage
+      //     [pull_rate_view FLOW_LOCAL, so the sub never invents a fetch],
+      //     and a pull's FIRST stalled tick reads paused-but-active here
+      //     while the ≥2-tick hysteresis decides the red escalation below).
+      if (S.pull === 'flowing' || S.pull === 'local' ||
+          (S.pull === 'stalled' && S.pullStalledTicks < 2)) {
         line.textContent = 'Data pull in progress';
-        sub.textContent = 'fetching market data';
-        tone('ok');
+        if (S.pull === 'local') {
+          sub.textContent = 'processing pulled data locally — no vendor calls right now';
+          tone('ok');
+        } else if (S.pull === 'stalled') {
+          sub.textContent = 'data flow paused — waiting on the data vendor';
+          tone('warn');
+        } else {
+          sub.textContent = 'fetching market data';
+          tone('ok');
+        }
         return;
       }
-      // 3 · attention needed — the ONLY red.
+      // 3 · attention needed — the ONLY red. An actively-FAILING pull
+      //     (flow_state 'failing' — pull_rate_view FLOW_FAILING: calls are
+      //     being spent and every one fails) is red IMMEDIATELY, no
+      //     hysteresis (review round 2 — it previously fell through to the
+      //     false-calm Idle row).
       const sweepBroken = !!(sp && (sp.state === 'error' || sp.state === 'failed'));
-      if (S.pullStalledTicks >= 2 || sweepBroken || S.proofFailing) {
+      const pullFailing = S.pull === 'failing';
+      if (S.pullStalledTicks >= 2 || pullFailing || sweepBroken || S.proofFailing) {
         const reason = sweepBroken ? 'the sweep stopped with an error'
           : S.proofFailing ? 'system health checks are failing'
-            : 'the data pull has stopped moving';
+            : pullFailing ? 'the data pull is failing every call'
+              : 'the data pull has stopped moving';
         line.textContent = 'Attention needed — ' + reason;
         sub.textContent = 'details under System details below';
         tone('bad');
         return;
       }
-      // 4 · the selected run is flagged.
+      // 4 · the selected run is flagged. "Latest" is claimed ONLY when the
+      //     flagged run IS the latest known run — an older selection reads
+      //     "Selected run" (review round 2: the flag is fed from the
+      //     SELECTED run's manifest, so the old fixed wording misattributed
+      //     an older suspect run to the latest).
       if (S.suspect) {
-        line.textContent = 'Latest run needs review — a self-check flagged its numbers';
+        const isLatest = !!(S.latestRunId && S.suspectRunId &&
+          String(S.suspectRunId) === String(S.latestRunId));
+        line.textContent = (isLatest ? 'Latest' : 'Selected') +
+          ' run needs review — a self-check flagged its numbers';
         sub.textContent = 'see the Verify panel below';
         tone('warn');
         return;
@@ -3987,7 +4034,13 @@
         render();
       },
       oneclick: function (info) {
-        if (info && typeof info.suspect === 'boolean') S.suspect = info.suspect;
+        if (info && typeof info.suspect === 'boolean') {
+          S.suspect = info.suspect;
+          // The flag rides the SELECTED run's manifest — remember whose it
+          // is so row 4 only claims "Latest" when that is true (round 2).
+          S.suspectRunId = info.suspectRunId === undefined ? null : info.suspectRunId;
+        }
+        if (info && info.latestRunId !== undefined) S.latestRunId = info.latestRunId;
         render();
       }
     };

@@ -9,10 +9,11 @@ fixture run:
   ``Idle — ready to run`` on the muted tone; the rate widget collapses to
   its quiet pill; the awaiting banner's computed style is NEUTRAL (no gold
   gradient — empty ≠ error);
-* **hero state machine** — rows 1 (running sweep), 3 (attention — stalled
-  pull ≥ 2 ticks), 4 (suspect run) and 6 (idle) each render from
-  route-fulfilled payloads, every poll cycle advanced deterministically via
-  the frozen ``page.clock``;
+* **hero state machine** — rows 1 (running sweep), 2 (first stalled tick =
+  active, review round 2), 3 (attention — stalled pull ≥ 2 ticks AND the
+  immediately-red ``flow_state='failing'`` verdict), 4 (suspect run) and 6
+  (idle) each render from route-fulfilled payloads, every poll cycle
+  advanced deterministically via the frozen ``page.clock``;
 * **STALE tier gating** — a feed outage on an IDLE page degrades the rate
   widget to the amber ``feed quiet`` readout (never the red STALE class),
   while the SAME outage during an ACTIVE pull still goes loud red;
@@ -247,7 +248,8 @@ def test_hero_flags_a_suspect_run(new_page: NewPageFactory, tmp_path: Path) -> N
 
 
 def test_hero_attention_on_stalled_pull(new_page: NewPageFactory, tmp_path: Path) -> None:
-    """A pull stalled for >= 2 heartbeat ticks is the ONLY red hero path."""
+    """A pull stalled for >= 2 heartbeat ticks is a red hero path — and the
+    FIRST stalled tick reads paused-but-ACTIVE, never Idle (review round 2)."""
     session = new_page(build_operator_app(tmp_path), stub_widgets=False)
     page = session.page
     page.route("**/api/v1/pull/rate", _fulfill_json({"flow_state": "stalled"}))
@@ -255,18 +257,45 @@ def test_hero_attention_on_stalled_pull(new_page: NewPageFactory, tmp_path: Path
     page.route("**/api/v1/liveproof", _fulfill_json({"preflight": None, "probes": None}))
     freeze_page_clock(page)
     session.goto("/")
-    # First heartbeat pull tick fires at load; two more cycles under the
-    # frozen clock push the stalled counter past the >=2-tick gate.
-    page.wait_for_selector("#bxHeroLine")
+    # First heartbeat pull tick fires at load: one stalled tick = an active
+    # pull with paused flow (warn), NOT the false-calm idle row.
+    hero = page.locator("#bxHeroLine")
+    expect(hero).to_have_text("Data pull in progress")
+    expect(hero).to_have_class("hero-warn")
+    expect(page.locator("#bxHeroSub")).to_contain_text("data flow paused")
+    # Two more cycles under the frozen clock push the stalled counter past
+    # the >=2-tick gate — the red escalation.
     for _ in range(2):
         with page.expect_response("**/api/v1/pull/rate"):
             page.clock.fast_forward(_HEARTBEAT_PULL_MS)
-    hero = page.locator("#bxHeroLine")
     expect(hero).to_contain_text("Attention needed — the data pull has stopped moving")
     expect(hero).to_have_class("hero-bad")
     # The stalled widget is NOT collapsed (degraded is never hidden).
     cls = page.get_attribute("#bxRateMonitor", "class") or ""
     assert "bxrm-min" not in cls.split()
+
+
+# ── hero row 3: attention — actively-FAILING pull (review round 2) ─────────
+
+
+def test_hero_red_on_failing_pull(new_page: NewPageFactory, tmp_path: Path) -> None:
+    """The DISTINCT server verdict flow_state='failing' (FLOW_FAILING — an
+    ACTIVE pull whose every call fails) is red IMMEDIATELY on the hero and
+    ALERT-toned on the heartbeat pull card — it previously fell through to
+    the false-calm 'Idle — ready to run' row (review round 2)."""
+    session = new_page(build_operator_app(tmp_path), stub_widgets=False)
+    page = session.page
+    page.route("**/api/v1/pull/rate", _fulfill_json({"flow_state": "failing"}))
+    page.route("**/api/v1/universe/pull-progress", _fulfill_json({"running": False}))
+    page.route("**/api/v1/liveproof", _fulfill_json({"preflight": None, "probes": None}))
+    freeze_page_clock(page)
+    session.goto("/")
+    hero = page.locator("#bxHeroLine")
+    expect(hero).to_have_text("Attention needed — the data pull is failing every call")
+    expect(hero).to_have_class("hero-bad")
+    # The heartbeat pull card agrees (ALERT tone, active wording) — never
+    # "no data pull running" for an active-and-failing pull.
+    expect(page.locator("#hbPull .hb-big")).to_have_text("pull running — every call is failing")
 
 
 # ── acceptance #3: STALE red is reserved for an outage DURING an active pull ──

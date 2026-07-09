@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1623 —
+_Last updated: 2026-07-09 (DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1631 —
 the operator-page (v29 at /) CLEAN-VIEW pass, frontend/templates/static/tests
 ONLY — ZERO Python source edits, API payload bytes UNTOUCHED (the 326-test
 payload-pin family passes UNMODIFIED — the wire held): every dev-jargon copy
@@ -1646,7 +1646,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/operator-page-cleanview` (**DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1623** — the
+- **Active branch:** `claude/operator-page-cleanview` (**DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1631** — the
   operator-page (v29 at `/`) CLEAN-VIEW pass, frontend/templates/static/tests ONLY (ZERO Python source edits — 14
   files: 5 static + 3 templates + 6 tests; API payload bytes UNTOUCHED, the 326-test payload-pin family passes
   UNMODIFIED): dev-jargon copy → plain English at RENDER time through the ONE NEW catalog
@@ -3923,7 +3923,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/operator-page-cleanview`
-  (DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1623 — the operator-page
+  (DEC-OPERATOR-PAGE-CLEANVIEW-001, MIGRATION.md #1631 — the operator-page
   clean-view pass: render-time plain-English copy catalog `bx-copy.js`
   (verbatim-server tooltips, unknown strings pass through) + one-Run-button
   consolidation + status hero/diagnostics demotion + quiet-idle rate widget

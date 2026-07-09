@@ -47,6 +47,13 @@ _EXPECTED_AWAITING_TEXT = (
     "page comes from a real run — nothing is ever invented."
 )
 
+#: The while-a-sweep-RUNS variant (review round 2 — the fixed wording above
+#: told the operator to press Run Sweep for the whole first-run window).
+_EXPECTED_AWAITING_RUNNING_TEXT = (
+    "First sweep is running — results appear here the moment it completes. "
+    "Every number on this page comes from a real run — nothing is ever invented."
+)
+
 _NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(_NODE is None, reason="node not installed")
@@ -110,6 +117,12 @@ class TestExplainLookup:
         """C-NIT-3: the banner wording lives in ONE constant — pinned verbatim."""
         out = _node_call("E.AWAITING_TEXT")
         assert out == _EXPECTED_AWAITING_TEXT
+
+    def test_awaiting_running_text_constant_matches_the_pinned_wording(self) -> None:
+        """Review round 2: the no-completed-run banner while a sweep RUNS —
+        never a 'press Run Sweep' call-to-action the running sweep refuses."""
+        out = _node_call("E.AWAITING_RUNNING_TEXT")
+        assert out == _EXPECTED_AWAITING_RUNNING_TEXT
 
 
 class TestPaisaToRupees:

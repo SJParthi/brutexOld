@@ -39,6 +39,18 @@ var BX_AWAITING_TEXT =
   "page comes from a real run — nothing is ever invented.";
 
 /**
+ * The no-completed-run banner while a sweep is RUNNING (review round 2):
+ * the fixed wording above told the operator to "press Run Sweep" for the
+ * whole first-run window — a call-to-action the running sweep refuses.
+ * Same one-constant discipline as BX_AWAITING_TEXT (C-NIT-3).
+ *
+ * @type {string}
+ */
+var BX_AWAITING_RUNNING_TEXT =
+  "First sweep is running — results appear here the moment it completes. " +
+  "Every number on this page comes from a real run — nothing is ever invented.";
+
+/**
  * The fixed metric → one-plain-English-line table (R36 hover lines; R27: a
  * LOOKUP, never generated text). Keys cover every BX_SCREENER_COLUMNS
  * explain key + the trade-row fields + the operator-page funnel/KPI hooks.
@@ -263,6 +275,7 @@ function bxBindExplainHover(root, tip) {
 
 var BXExplain = {
   AWAITING_TEXT: BX_AWAITING_TEXT,
+  AWAITING_RUNNING_TEXT: BX_AWAITING_RUNNING_TEXT,
   MODE_STORAGE_KEY: BX_MODE_STORAGE_KEY,
   TABLE: BX_EXPLAIN,
   explain: bxExplain,

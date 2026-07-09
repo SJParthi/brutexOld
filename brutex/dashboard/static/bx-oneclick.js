@@ -262,6 +262,15 @@ function bxFunnelProvenance(source, runId) {
         // claim (review round 1).
         if (state.selectedRunId && window.BXCopy) {
           window.BXCopy.apply(awaiting, payload.detail, { fallback: "waiting for run data" });
+        } else if (state.sweepRunning) {
+          // Review round 2: a fresh lake's FIRST sweep runs with NO
+          // completed run selected, so this banner sat under a "Sweep
+          // running" hero telling the operator to press Run Sweep — a
+          // call-to-action the running sweep itself refuses. The
+          // sweep-progress poller already owns state.sweepRunning (C-M2).
+          awaiting.textContent = window.BXExplain
+            ? window.BXExplain.AWAITING_RUNNING_TEXT : "waiting for run data";
+          awaiting.removeAttribute("title");
         } else {
           awaiting.textContent =
             window.BXExplain ? window.BXExplain.AWAITING_TEXT : "waiting for run data";
@@ -287,9 +296,13 @@ function bxFunnelProvenance(source, runId) {
       pill.className = "oc-pill oc-pill-" + rawState.replace(/[^a-z]/g, "-");
     }
     if (window.BXHero && window.BXHero.oneclick) {
+      // The manifest is run-scoped to the SELECTED run — its run_id is the
+      // flagged run's identity, NOT the latest run (review round 2: the old
+      // `latestRunId:` key here misattributed an older suspect run; the
+      // TRUE latest_run_id rides the ticker's runs-poller fan-out).
       window.BXHero.oneclick({
         suspect: !!(payload.manifest && payload.manifest.suspect === true),
-        latestRunId: payload.run_id
+        suspectRunId: payload.run_id
       });
     }
     var fx = byId("ocFixtureBadge");

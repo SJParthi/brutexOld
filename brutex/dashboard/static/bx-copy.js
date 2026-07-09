@@ -171,7 +171,11 @@ var BX_COPY_RULES = [
     tier: "alert"
   },
   {
-    re: /^top100\.json is not (?:valid JSON|a JSON array)$/,
+    /* All THREE corrupt-top100 siblings of the SAME shared reader — the
+       "unreadable/corrupt: <Exc>" arm was a catalog gap rendering filename
+       jargon in the winner-list AND trades notes (review round 2; the
+       manifest twin below was widened in round 1). */
+    re: /^top100\.json (?:is not valid JSON|is not a JSON array|unreadable\/corrupt)/,
     text: "The winner list is damaged and couldn't be read.",
     tier: "alert"
   },
