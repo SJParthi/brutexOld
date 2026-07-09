@@ -221,6 +221,11 @@ _MAX_EVENTS_LIMIT: Final[int] = 1000
 #: Hard per-page row bound for the trades readers.
 _MAX_TRADES_LIMIT: Final[int] = 1000
 
+#: Hard per-page row bound for the equity-series reader — one row per
+#: SESSION (≈250/year), so 5000 covers ~20 years in one chart fetch while
+#: still bounding a hostile/corrupt artifact read (O(page) law).
+_MAX_EQUITY_LIMIT: Final[int] = 5000
+
 #: The genesis ``prev_hash`` of the ASSUMED events chain law (§0.1 proposal).
 _CHAIN_GENESIS: Final[str] = "0" * 64
 
@@ -1303,6 +1308,10 @@ class TradesReader(Protocol):
         """Return one page of trade rows for (*run_id*, *rank*)."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
+    def equity_page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
+        """Return one page of stored equity-series points for (*run_id*, *rank*)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
 
 class AwaitingTradesReader:
     """No-lake FALLBACK: always ``status='awaiting'``, ``source='none'``.
@@ -1332,6 +1341,27 @@ class AwaitingTradesReader:
             total=None,
             source="none",
             detail=f"{AWAITING_DETAIL} — no lake root wired for trades",
+        )
+
+    def equity_page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
+        """Return the honest awaiting equity page (parameters accepted, unused).
+
+        Parameters
+        ----------
+        run_id, rank, offset, limit
+            Accepted for :class:`TradesReader` conformance.
+
+        Returns
+        -------
+        TradesResult
+            ``status='awaiting'``, ``source='none'``, ``total=None``.
+        """
+        return TradesResult(
+            status="awaiting",
+            rows=(),
+            total=None,
+            source="none",
+            detail=f"{AWAITING_DETAIL} — no lake root wired for the equity series",
         )
 
 
@@ -1417,6 +1447,32 @@ class FixtureTradesReader:
             total=parsed.total,
             source="fixture",
             detail=parsed.detail,
+        )
+
+    def equity_page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
+        """Return the honest awaiting equity page — the fixture tree has no sidecars.
+
+        The interim §0.3 fixture layout carries trades pages ONLY; the equity
+        SERIES lives in the #1275 results-depth sidecars, which only the
+        production :class:`TradeStoreReader` serves. The fixture arm therefore
+        reads honest awaiting — never a synthesized curve (Golden Rule #1).
+
+        Parameters
+        ----------
+        run_id, rank, offset, limit
+            Accepted for :class:`TradesReader` conformance.
+
+        Returns
+        -------
+        TradesResult
+            ``status='awaiting'``, ``source='none'``, ``total=None``.
+        """
+        return TradesResult(
+            status="awaiting",
+            rows=(),
+            total=None,
+            source="none",
+            detail=f"{AWAITING_DETAIL} — the fixture tree carries no results-depth equity sidecars",
         )
 
     def _parse_cached(self, path: Path, revision: str) -> _ParsedTrades:
@@ -1511,6 +1567,50 @@ def sidecar_paths_from_ref(run_dir: Path, tuple_ref: str) -> SidecarPaths | None
     )
 
 
+def _load_equity_records(path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
+    """Read ONE combo's equity-series rows from the ``<stem>.equity.parquet`` sidecar.
+
+    The display-zone read of ``trade_store.EQUITY_COLUMNS`` (engine edits are
+    forbidden in this zone and the engine ships no equity page reader — the
+    stamp indexes only ``trade_spans``): an O(equity-file) ``run_id`` filter
+    in session-date order (the writer sorts per capture), memoised by the
+    caller per (file revision, combo). Every value is projected onto the
+    wire shape verbatim — never synthesized.
+
+    Raises
+    ------
+    TradeStoreError
+        When polars is unavailable or the sidecar is unreadable/mis-shaped
+        (the SAME error family the trades reader maps to a NAMED corrupt).
+    """
+    try:
+        import polars as pl
+    except ImportError as exc:  # the [data] extra is absent — never a route 500
+        raise TradeStoreError(
+            "polars is required to read the equity sidecar — install brutex[data]"
+        ) from exc
+    try:
+        frame = pl.scan_parquet(path).filter(pl.col("run_id") == combo_run_id).collect()
+        records = tuple(
+            {
+                "session_date": str(record["session_date"]),
+                "equity_close_paisa": int(record["equity_close_paisa"]),
+                # A no-1m-bars session stores an honest None low (the
+                # SessionEquityPoint contract) — passed through, never 0.
+                "equity_intraday_low_paisa": (
+                    None
+                    if record["equity_intraday_low_paisa"] is None
+                    else int(record["equity_intraday_low_paisa"])
+                ),
+                "trades_closed": int(record["trades_closed"]),
+            }
+            for record in frame.iter_rows(named=True)
+        )
+    except (pl.exceptions.PolarsError, OSError, KeyError, TypeError, ValueError) as exc:
+        raise TradeStoreError(f"unreadable equity sidecar at {path}: {exc}") from exc
+    return records
+
+
 class TradeStoreReader:
     """PRODUCTION trades reader over the SHIPPED #1275 results-depth sidecars.
 
@@ -1553,6 +1653,7 @@ class TradeStoreReader:
         self._results_root = results_root
         self._lock = threading.Lock()
         self._top100_memo: tuple[str, str, Top100Result] | None = None
+        self._equity_memo: tuple[tuple[str, str, str], tuple[dict[str, Any], ...]] | None = None
         self.parse_count: int = 0
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -1574,6 +1675,105 @@ class TradeStoreReader:
         TradesResult
             ``source='results_store'`` whenever the sidecars were consulted;
             absent artifacts → honest awaiting (``total=None``, never 0).
+        """
+        resolved = self._resolve_sidecars(run_id, rank)
+        if isinstance(resolved, TradesResult):
+            return resolved
+        combo_run_id, paths = resolved
+        try:
+            page = read_trade_page(paths, run_id=combo_run_id, offset=offset, limit=limit)
+        except TradeStoreError as exc:
+            _LOG.warning(
+                "oneclick.artifact_corrupt",
+                artifact="results_depth_trades",
+                path=str(paths.stamp),
+                error_type=type(exc).__name__,
+            )
+            return TradesResult(
+                "corrupt", (), None, "results_store", f"results-depth read failed: {exc}"
+            )
+        detail = ""
+        if limit != page.limit:
+            detail = f"limit clamped to {page.limit} (trade_store page law)"
+        return TradesResult(
+            status="ok",
+            rows=tuple(dict(row) for row in page.rows),
+            total=page.total,
+            source="results_store",
+            detail=detail,
+        )
+
+    def equity_page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
+        """Return one page of the combo's STORED equity-series points.
+
+        The R27 "equity curve = stored real series" read
+        (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001, audit item 4C — overlaps #48):
+        the entry's ``equity_ref`` sidecar (``<stem>.equity.parquet``,
+        ``trade_store.EQUITY_COLUMNS`` — one row per (finalist, session))
+        resolved through the SAME rank → ``equity_ref.tuple`` chain the
+        trades page uses, with the SAME honesty degrades (pre-#1275 artifact /
+        absent sidecars → awaiting; hostile ref / unreadable file → NAMED
+        corrupt; never a 500, never a fabricated curve).
+
+        HONEST envelope: the stamp carries NO equity span index (unlike the
+        trades' ``trade_spans``), so the FIRST read per (file revision, combo)
+        is an O(equity-file) ``run_id`` filter; the single-entry memo makes
+        every repeat page an O(page) slice. ``limit`` clamps to
+        ``[1, 5000]`` (one row per session ≈ 250/year — one fetch charts ~20
+        years) and the clamp is named in ``detail``.
+
+        Parameters
+        ----------
+        run_id
+            The sweep run directory name (unsafe ids degrade to awaiting).
+        rank
+            The 1-based leaderboard rank.
+        offset, limit
+            Page window (offset clamped ≥ 0; limit to ``[1, 5000]``).
+
+        Returns
+        -------
+        TradesResult
+            ``rows`` are ``{session_date, equity_close_paisa,
+            equity_intraday_low_paisa, trades_closed}`` wire points;
+            ``total`` is the combo's full series length.
+        """
+        resolved = self._resolve_sidecars(run_id, rank)
+        if isinstance(resolved, TradesResult):
+            return resolved
+        combo_run_id, paths = resolved
+        try:
+            series = self._equity_cached(paths.equity, combo_run_id)
+        except TradeStoreError as exc:
+            _LOG.warning(
+                "oneclick.artifact_corrupt",
+                artifact="results_depth_equity",
+                path=str(paths.equity),
+                error_type=type(exc).__name__,
+            )
+            return TradesResult(
+                "corrupt", (), None, "results_store", f"equity sidecar read failed: {exc}"
+            )
+        page_offset = max(0, offset)
+        page_limit = max(1, min(limit, _MAX_EQUITY_LIMIT))
+        detail = ""
+        if page_limit != limit:
+            detail = f"limit clamped to {page_limit} (equity page law)"
+        return TradesResult(
+            status="ok",
+            rows=series[page_offset : page_offset + page_limit],
+            total=len(series),
+            source="results_store",
+            detail=detail,
+        )
+
+    def _resolve_sidecars(self, run_id: str, rank: int) -> tuple[str, SidecarPaths] | TradesResult:
+        """Resolve (*run_id*, *rank*) → the combo's ``(store run_id, sidecar paths)``.
+
+        The ONE rank → ``equity_ref.tuple`` resolution chain shared by the
+        trades AND equity pages (steps 1-2 of the class docstring). Returns a
+        :class:`TradesResult` degrade instead of raising — awaiting for
+        absent/pre-#1275 artifacts, NAMED corrupt for a hostile tuple ref.
         """
         if not is_safe_run_id(run_id) or rank < 1:
             return TradesResult(
@@ -1624,28 +1824,31 @@ class TradeStoreReader:
                 "none",
                 f"{AWAITING_DETAIL} — results-depth sidecars absent for {tuple_ref}",
             )
-        try:
-            page = read_trade_page(paths, run_id=combo_run_id, offset=offset, limit=limit)
-        except TradeStoreError as exc:
-            _LOG.warning(
-                "oneclick.artifact_corrupt",
-                artifact="results_depth_trades",
-                path=str(paths.stamp),
-                error_type=type(exc).__name__,
-            )
-            return TradesResult(
-                "corrupt", (), None, "results_store", f"results-depth read failed: {exc}"
-            )
-        detail = ""
-        if limit != page.limit:
-            detail = f"limit clamped to {page.limit} (trade_store page law)"
-        return TradesResult(
-            status="ok",
-            rows=tuple(dict(row) for row in page.rows),
-            total=page.total,
-            source="results_store",
-            detail=detail,
-        )
+        return combo_run_id, paths
+
+    def _equity_cached(self, path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
+        """Serve the single-entry ``(path, revision, combo)`` equity memo.
+
+        A ``None`` revision (absent/unstattable) reads fresh and caches
+        NOTHING (the ``lake_revision`` doctrine — no stale illusion).
+
+        Raises
+        ------
+        TradeStoreError
+            When the sidecar is unreadable (the caller names it corrupt).
+        """
+        revision = artifact_revision(path)
+        if revision is None:
+            return _load_equity_records(path, combo_run_id)
+        key = (str(path), revision, combo_run_id)
+        with self._lock:
+            memo = self._equity_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        series = _load_equity_records(path, combo_run_id)
+        with self._lock:
+            self._equity_memo = (key, series)
+        return series
 
     def _top100_cached(self, run_dir: Path) -> Top100Result:
         """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.

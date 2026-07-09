@@ -1,0 +1,281 @@
+"""Node goldens + wiring pins for the winner-detail truth pack (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001).
+
+Fails-before (the expectation-audit items 2/3/4): the /strategy story card
+labeled the gross signal-only P&L "net P&L" (HIGH #12 — Track 1 never trades,
+no cost is subtracted); the SHIPPED results-depth aggregates
+(expectancy/recovery/streaks/MAE/MFE/minute-path DD/exit mix/worst-5-days —
+all in ``entry.metrics``, ``top100_artifact._metrics_payload``) and the
+regime breakdown (``entry.regime`` — one_regime_wonder/by_trend) were
+NEVER rendered (HIGH #14/#13) while the card claimed they "land with the P3
+data" — a stale deferral over data that ships in every artifact.
+
+ONE pure builder set now owns the composite lines (``bx-oneclick.js`` —
+exit mix · worst-5-days · trend split · regime wonder · avg/extreme pair ·
+minute-path DD; money through an INJECTED house formatter so the node
+goldens run formatter-explicit), consumed by the /strategy card AND the
+operator card. Every builder degrades to the honest "—" — never an invented
+number, never "null" prose (Golden Rule #1).
+
+This suite executes the REAL shipped ``bx-oneclick.js`` under node (the
+bx-chart.js precedent) and pins the template wiring by source string
+(honest envelope — the #1557 Playwright job does not drive these pages).
+Skipped (visibly) where node is absent; the CI node-presence guard lives in
+``test_dashboard_oneclick_frontend.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+_DASHBOARD = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
+_STATIC = _DASHBOARD / "static"
+_TEMPLATES = _DASHBOARD / "templates"
+_ONECLICK_JS = _STATIC / "bx-oneclick.js"
+_CHART_JS = _STATIC / "bx-chart.js"
+
+_NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(_NODE is None, reason="node not installed")
+
+#: The node-side stand-in for the page's money formatter (formatter is
+#: INJECTED, so the goldens pin builder logic, not ₹ formatting).
+_FMT = "((p) => 'F' + String(p))"
+
+
+def _node_call(expr: str, *argv: str) -> Any:
+    """Run the REAL shipped bx-oneclick.js under node and return the JSON result."""
+    script = (
+        f"const O = require({json.dumps(str(_ONECLICK_JS))});"
+        f"const C = require({json.dumps(str(_CHART_JS))});"
+        f"const FMT = {_FMT};"
+        "const ARGS = process.argv.slice(1).map((a) => JSON.parse(a));"
+        f"console.log(JSON.stringify({expr}));"
+    )
+    proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+        ["node", "-e", script, *argv],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(proc.stdout)
+
+
+class TestExitMixText:
+    """bxExitMixText — the writer's metrics.exits object → one honest line."""
+
+    def test_writer_exits_object_renders_all_five_reasons(self) -> None:
+        exits = {
+            "stop_loss": 12,
+            "take_profit": 30,
+            "signal": 5,
+            "forced_1520": 3,
+            "end_of_data": 0,
+        }
+        out = _node_call("O.bxExitMixText(ARGS[0])", json.dumps(exits))
+        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0"
+
+    @pytest.mark.parametrize("bad", ["null", "undefined", "[]", '"x"', "7"])
+    def test_absent_or_malformed_reads_the_honest_dash(self, bad: str) -> None:
+        assert _node_call(f"O.bxExitMixText({bad})") == "—"
+
+    def test_non_numeric_count_reads_question_mark_never_invented(self) -> None:
+        out = _node_call("O.bxExitMixText(ARGS[0])", json.dumps({"stop_loss": "junk"}))
+        assert out.startswith("SL ?")
+
+
+class TestWorst5DaysText:
+    """bxWorst5DaysText — metrics.worst5_days (a METRICS key — writer truth)."""
+
+    def test_entries_render_date_and_formatted_pnl(self) -> None:
+        worst5 = [["2024-01-02", -500], ["2024-03-08", -350]]
+        out = _node_call("O.bxWorst5DaysText(ARGS[0], FMT)", json.dumps(worst5))
+        assert out == "2024-01-02 F-500 · 2024-03-08 F-350"
+
+    def test_valid_empty_list_reads_none_stored(self) -> None:
+        assert _node_call("O.bxWorst5DaysText(ARGS[0], FMT)", json.dumps([])) == "none stored"
+
+    @pytest.mark.parametrize("bad", ["null", "undefined", '"x"', "{}"])
+    def test_absent_or_non_array_reads_the_honest_dash(self, bad: str) -> None:
+        assert _node_call(f"O.bxWorst5DaysText({bad}, FMT)") == "—"
+
+    def test_one_malformed_entry_abstains_whole_line(self) -> None:
+        """Never a partial fabrication — a malformed entry abstains the line."""
+        worst5 = [["2024-01-02", -500], ["2024-03-08"]]
+        assert _node_call("O.bxWorst5DaysText(ARGS[0], FMT)", json.dumps(worst5)) == "—"
+
+
+class TestTrendSplitText:
+    """bxTrendSplitText — regime.by_trend, keys sorted deterministic."""
+
+    def test_trend_map_renders_sorted_keys(self) -> None:
+        by_trend = {"trending": 6_000, "sideways": 3_000}
+        out = _node_call("O.bxTrendSplitText(ARGS[0], FMT)", json.dumps(by_trend))
+        assert out == "sideways F3000 · trending F6000"
+
+    @pytest.mark.parametrize("bad", ["null", "undefined", "{}", "[]", '"x"'])
+    def test_absent_or_empty_reads_the_honest_dash(self, bad: str) -> None:
+        assert _node_call(f"O.bxTrendSplitText({bad}, FMT)") == "—"
+
+    def test_non_numeric_value_reads_question_mark(self) -> None:
+        out = _node_call("O.bxTrendSplitText(ARGS[0], FMT)", json.dumps({"trending": None}))
+        assert out == "trending ?"
+
+
+class TestRegimeWonderText:
+    """bxRegimeWonderText — the one-regime-wonder verdict sentence."""
+
+    def test_true_with_axis_is_the_loud_warning(self) -> None:
+        out = _node_call('O.bxRegimeWonderText(true, "year")')
+        assert out == "ONE-REGIME WONDER — profits concentrate in a single year"
+
+    def test_true_without_axis_falls_back_to_regime(self) -> None:
+        assert (
+            _node_call("O.bxRegimeWonderText(true, null)")
+            == "ONE-REGIME WONDER — profits concentrate in a single regime"
+        )
+
+    def test_false_is_the_spread_verdict(self) -> None:
+        assert _node_call("O.bxRegimeWonderText(false, null)") == "profits spread across regimes"
+
+    @pytest.mark.parametrize("bad", ["null", "undefined", '"yes"', "1"])
+    def test_unknown_flag_reads_the_honest_dash(self, bad: str) -> None:
+        assert _node_call(f"O.bxRegimeWonderText({bad}, null)") == "—"
+
+
+class TestAvgExtremeAndMinuteDd:
+    """bxAvgExtremeText (MAE/MFE pair cells) + bxMinutePathDdText."""
+
+    def test_both_legs_render(self) -> None:
+        out = _node_call('O.bxAvgExtremeText(120, 400, "worst", FMT)')
+        assert out == "avg F120 · worst F400"
+
+    def test_single_leg_renders_alone(self) -> None:
+        assert _node_call('O.bxAvgExtremeText(120, null, "worst", FMT)') == "avg F120"
+        assert _node_call('O.bxAvgExtremeText(null, 900, "best", FMT)') == "best F900"
+
+    def test_both_absent_reads_the_honest_dash(self) -> None:
+        assert _node_call('O.bxAvgExtremeText(null, undefined, "worst", FMT)') == "—"
+
+    def test_minute_path_dd_with_pct(self) -> None:
+        assert _node_call("O.bxMinutePathDdText(1500, 1.5, FMT)") == "F1500 (1.5%)"
+
+    def test_minute_path_dd_without_pct(self) -> None:
+        assert _node_call("O.bxMinutePathDdText(1500, null, FMT)") == "F1500"
+
+    @pytest.mark.parametrize("bad", ["null", "undefined", '"x"', "NaN"])
+    def test_minute_path_dd_absent_reads_the_honest_dash(self, bad: str) -> None:
+        assert _node_call(f"O.bxMinutePathDdText({bad}, 1.5, FMT)") == "—"
+
+
+class TestMinutePathSeries:
+    """bx-chart.js bxMinutePathSeries — the stored-series → chart bridge (4C)."""
+
+    def test_points_map_and_final_is_last_close(self) -> None:
+        rows = [
+            {"session_date": "2026-07-01", "equity_close_paisa": 1_000},
+            {"session_date": "2026-07-02", "equity_close_paisa": 1_500},
+        ]
+        out = _node_call("C.minutePathSeries(ARGS[0])", json.dumps(rows))
+        assert out["empty"] is False
+        assert [p["cum_paisa"] for p in out["points"]] == [1_000, 1_500]
+        assert out["final_paisa"] == 1_500
+        assert out["invalid_rows"] == 0
+
+    def test_invalid_points_are_skipped_and_counted(self) -> None:
+        rows = [
+            {"equity_close_paisa": 1_000},
+            {"equity_close_paisa": None},  # skipped + counted
+            {"equity_close_paisa": 2.5},  # non-integer paisa — skipped
+            {},
+        ]
+        out = _node_call("C.minutePathSeries(ARGS[0])", json.dumps(rows))
+        assert [p["cum_paisa"] for p in out["points"]] == [1_000]
+        assert out["invalid_rows"] == 3
+
+    def test_empty_or_non_array_is_the_empty_flag(self) -> None:
+        assert _node_call("C.minutePathSeries([])")["empty"] is True
+        assert _node_call("C.minutePathSeries(null)")["empty"] is True
+
+
+class TestWinnerDetailWiring:
+    """Source-string pins: relabels + the new sections read the ONE builders."""
+
+    def test_strategy_card_gross_signal_label_and_chip(self) -> None:
+        """HIGH #12: the story card's P&L is 'gross signal P&L' + the
+        persistent signal-only chip — never the bare 'net P&L' claim."""
+        html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
+        assert "Edge — gross signal P&amp;L" in html
+        assert "signal-only — costs modeled in the options-translation track" in html
+        assert 'id="stSignalOnly"' in html
+        assert "Edge — net P&amp;L" not in html  # killed label
+
+    def test_operator_hero_gross_signal_label(self) -> None:
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        assert (
+            "gross signal P&amp;L (signal-only — costs modeled in the options-translation track)"
+            in html
+        )
+        assert "Gross signal P&amp;L" in html
+        assert 'data-explain="gross_signal_pnl"' in html
+        assert "net P&amp;L · buy-&amp;-hold baseline lands with P3" not in html  # killed
+
+    def test_strategy_deep_stats_section_reads_the_builders(self) -> None:
+        html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
+        for anchor in (
+            'id="stExpectancy"',
+            'id="stRecovery"',
+            'id="stLossStreak"',
+            'id="stMae"',
+            'id="stMfe"',
+            'id="stMinuteDd"',
+            'id="stExitMix"',
+            'id="stWorst5"',
+        ):
+            assert anchor in html, anchor
+        assert "window.BXOneclick.exitMixText(m.exits)" in html
+        assert "window.BXOneclick.worst5DaysText(m.worst5_days, money)" in html
+        assert (
+            "window.BXOneclick.avgExtremeText(m.mae_avg_paisa, m.mae_worst_paisa, 'worst', money)"
+            in html
+        )
+        assert (
+            "window.BXOneclick.minutePathDdText(m.max_dd_minute_path_paisa, m.max_dd_minute_path_pct, money)"
+            in html
+        )
+
+    def test_deep_stats_beginner_summary_rides_the_block_toggle(self) -> None:
+        html = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
+        assert 'class="plain-eng-block"' in html
+        assert 'class="jargon-block"' in html
+        assert "body.share-mode .jargon-block { display:none; }" in html
+
+    def test_operator_card_regime_hooks(self) -> None:
+        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        for hook in ("r1_trend_split", "r1_regime_wonder", "r1_worst5"):
+            assert f'data-oc="{hook}"' in html, hook
+        js = _ONECLICK_JS.read_text(encoding="utf-8")
+        assert 'setOc("r1_trend_split", bxTrendSplitText(reg.by_trend, paisaText));' in js
+        assert 'setOc("r1_worst5", bxWorst5DaysText(m.worst5_days, paisaText));' in js
+
+    def test_explain_table_carries_every_new_key(self) -> None:
+        js = (_STATIC / "bx-explain.js").read_text(encoding="utf-8")
+        for key in (
+            "gross_signal_pnl:",
+            "expectancy_paisa:",
+            "recovery_factor:",
+            "max_consecutive_losses:",
+            "mae_avg_paisa:",
+            "mfe_avg_paisa:",
+            "max_dd_minute_path_paisa:",
+            "exit_mix:",
+            "worst5_days:",
+            "by_trend:",
+            "one_regime_wonder:",
+        ):
+            assert key in js, key

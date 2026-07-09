@@ -1128,6 +1128,20 @@ def _captured_trade(seq: int, *, status_name: str = "OK") -> Any:
     )
 
 
+def _equity_point(day: int, *, close: int, low: int | None = None) -> Any:
+    """One REAL SessionEquityPoint (the engine's own dataclass, never forged)."""
+    from datetime import date
+
+    from brutex.engine.minute_path import SessionEquityPoint
+
+    return SessionEquityPoint(
+        session_date=date(2026, 7, day),
+        equity_close_paisa=close,
+        equity_intraday_low_paisa=low,
+        trades_closed=1,
+    )
+
+
 def _write_sidecars(
     run_dir: Path,
     *,
@@ -1135,6 +1149,7 @@ def _write_sidecars(
     combo: str = _COMBO,
     n_trades: int = 3,
     statuses: tuple[str, ...] = (),
+    equity: tuple[Any, ...] = (),
 ) -> None:
     """Write a REAL results-depth trio via trade_store's OWN public writer."""
     from brutex.engine.minute_path import PathStatus
@@ -1147,7 +1162,7 @@ def _write_sidecars(
     capture = ComboCapture(
         run_id=combo,
         trades=tuple(_captured_trade(i, status_name=kind) for i, kind in enumerate(kinds)),
-        equity=(),
+        equity=equity,
         equity_status=PathStatus.OK,
         vix_missing_trades=0,
         parity_ok=True,
@@ -1374,3 +1389,160 @@ class TestTradeStoreReader:
         assert reader.parse_count == 1
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2  # nothing was cached
+
+
+_EQUITY_POINTS = (
+    _equity_point(1, close=1_000, low=900),
+    _equity_point(2, close=1_500, low=None),  # honest None low (no-1m session)
+    _equity_point(3, close=1_200, low=1_100),
+)
+
+
+class TestEquityPage:
+    """The equity-series page (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item 4C)."""
+
+    def test_awaiting_reader_equity_is_awaiting(self) -> None:
+        page = oc.AwaitingTradesReader().equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "awaiting"
+        assert page.total is None
+        assert "equity series" in page.detail
+
+    def test_fixture_reader_equity_is_awaiting_never_synthesized(self, tmp_path: Path) -> None:
+        page = oc.FixtureTradesReader(tmp_path).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "awaiting"
+        assert page.rows == ()
+        assert "no results-depth" in page.detail
+
+    def test_shared_resolution_degrades_match_the_trades_page(self, tmp_path: Path) -> None:
+        """The ONE _resolve_sidecars chain: every trades degrade fires on the
+        equity page with the SAME status/detail (unsafe id · absent top100 ·
+        rank miss · absent sidecars)."""
+        reader = oc.TradeStoreReader(tmp_path / "sweeps")
+        assert reader.equity_page("../evil", 1, offset=0, limit=10).status == "awaiting"
+        assert reader.equity_page("r-x", 0, offset=0, limit=10).status == "awaiting"
+        results_root = _rebind_run(tmp_path)
+        reader = oc.TradeStoreReader(results_root)
+        miss = reader.equity_page("r-x", 42, offset=0, limit=10)
+        assert miss.status == "awaiting"
+        assert "rank 42" in miss.detail
+        absent = reader.equity_page("r-x", 1, offset=0, limit=10)
+        assert absent.status == "awaiting"
+        assert "sidecars absent" in absent.detail
+
+    def test_real_sidecars_serve_the_stored_series(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert page.source == "results_store"
+        assert page.total == 3
+        assert [row["session_date"] for row in page.rows] == [
+            "2026-07-01",
+            "2026-07-02",
+            "2026-07-03",
+        ]
+        assert [row["equity_close_paisa"] for row in page.rows] == [1_000, 1_500, 1_200]
+        # The honest None low passes through — never a fabricated 0 (R31 law).
+        assert page.rows[1]["equity_intraday_low_paisa"] is None
+        assert page.rows[0]["equity_intraday_low_paisa"] == 900
+        assert all(row["trades_closed"] == 1 for row in page.rows)
+
+    def test_offset_and_negative_offset_page_the_series(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        page = reader.equity_page("r-x", 1, offset=1, limit=1)
+        assert [row["session_date"] for row in page.rows] == ["2026-07-02"]
+        assert page.total == 3
+        clamped = reader.equity_page("r-x", 1, offset=-5, limit=100)
+        assert len(clamped.rows) == 3  # negative offset clamps to 0
+
+    def test_limit_beyond_the_equity_cap_is_clamped_and_named(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=999_999)
+        assert page.status == "ok"
+        assert page.detail == "limit clamped to 5000 (equity page law)"
+
+    def test_unknown_combo_serves_an_honest_empty_series(self, tmp_path: Path) -> None:
+        """A combo with no equity rows (present sidecars, foreign run_id
+        filter) pages total=0 — never an invented curve."""
+        results_root = _rebind_run(tmp_path, combo="beefbeef" + "0" * 56)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", combo=_COMBO, equity=_EQUITY_POINTS)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert page.rows == ()
+        assert page.total == 0
+
+    def test_unreadable_equity_sidecar_is_named_corrupt(self, tmp_path: Path) -> None:
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        paths = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+        assert paths is not None
+        paths.equity.write_bytes(b"{not parquet")
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "corrupt"
+        assert "equity sidecar read failed" in page.detail
+
+    def test_polars_unavailable_is_named_corrupt_never_a_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The [data]-extra-absent arm: ImportError maps to the SAME corrupt
+        degrade (the route can never 500 over a missing dependency)."""
+        import sys
+
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        monkeypatch.setitem(sys.modules, "polars", None)
+        page = oc.TradeStoreReader(results_root).equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "corrupt"
+        assert "polars is required" in page.detail
+
+    def test_series_memo_reads_once_per_revision_per_combo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        results_root = _rebind_run(tmp_path)
+        _write_sidecars(oc.runs_root(results_root) / "r-x", equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        calls = {"n": 0}
+        real = oc._load_equity_records
+
+        def _spy(path: Path, combo: str) -> tuple[dict[str, Any], ...]:
+            calls["n"] += 1
+            return real(path, combo)
+
+        monkeypatch.setattr(oc, "_load_equity_records", _spy)
+        for _ in range(3):
+            page = reader.equity_page("r-x", 1, offset=0, limit=2)
+            assert page.status == "ok"
+        assert calls["n"] == 1  # one filtered read; repeat pages slice the memo
+
+    def test_unstattable_equity_reads_fresh_and_caches_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A None equity revision computes fresh and caches NOTHING."""
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        paths = oc.sidecar_paths_from_ref(run_dir, _TUPLE_REF)
+        assert paths is not None
+        reader = oc.TradeStoreReader(results_root)
+        real = oc.artifact_revision
+        monkeypatch.setattr(
+            oc,
+            "artifact_revision",
+            lambda path: None if path == paths.equity else real(path),
+        )
+        calls = {"n": 0}
+        real_load = oc._load_equity_records
+
+        def _spy(path: Path, combo: str) -> tuple[dict[str, Any], ...]:
+            calls["n"] += 1
+            return real_load(path, combo)
+
+        monkeypatch.setattr(oc, "_load_equity_records", _spy)
+        assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
+        assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
+        assert calls["n"] == 2  # nothing was cached (lake_revision doctrine)
