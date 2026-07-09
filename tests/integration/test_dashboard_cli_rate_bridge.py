@@ -812,6 +812,58 @@ class TestDeadWallTimeWarnDedup:
         assert dead2["bridge_source"] == "unverified"
         assert dead2["flow_state"] == "idle"
 
+    def test_live_future_rewriting_bridge_warns_once(self, tmp_path: Path) -> None:
+        # THE FIX (hostile-review MINOR): a LIVE publisher whose clock is materially in
+        # the future REWRITES the bridge each poll with a DISTINCT future ``wall_time``.
+        # The OLD exact-stamp dedup re-warned EVERY poll (~20/min forever); keying on
+        # the dead CLASS collapses every materially-future stamp to the ONE "future"
+        # class → exactly ONE warn across 5 rewriting polls, while every poll still
+        # reads the dead verdict honestly. ttl_s=0 forces a re-read of each rewrite.
+        cache = RateBridgeCache(ttl_s=0.0)
+        base_future = time.time() + 10_000_000.0
+        with (
+            _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c,
+            capture_logs() as logs,
+        ):
+            bodies = []
+            for i in range(5):
+                # A DIFFERENT future stamp every poll — same dead CLASS ("future").
+                self._publish_raw(tmp_path, repr(base_future + float(i)))
+                bodies.append(c.get("/api/v1/pull/rate").json())
+        assert _count_dead_warns(logs) == 1
+        for body in bodies:
+            assert body["flow_state"] == "idle"
+            assert body["req_per_sec_achieved"] == 0.0
+            assert body["bridge_source"] == "unverified"
+
+    def test_absent_bridge_re_arms_dedup_then_new_dead_episode_re_warns(
+        self, tmp_path: Path
+    ) -> None:
+        # NIT (reviewer #4) teeth: dead(+inf) → ABSENT (file removed, re-arms the
+        # dedup, no warn) → dead(+inf) again → the SAME +inf re-warns because the
+        # absent poll reset the baseline. 3 polls, 2 warns. A mutation deleting the
+        # absent-bridge re-arm (app.py ``else: _last_warned_dead_class = None``) would
+        # leave the stale "pos_inf" baseline across the absent poll → the second
+        # dead(+inf) would be suppressed → 1 warn → this test FAILS.
+        cache = RateBridgeCache(ttl_s=0.0)
+        self._publish_raw(tmp_path, "1e999")  # dead: +inf
+        with (
+            _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c,
+            capture_logs() as logs,
+        ):
+            dead1 = c.get("/api/v1/pull/rate").json()
+            rate_bridge_path(tmp_path).unlink()  # ABSENT bridge — re-arms the dedup
+            absent = c.get("/api/v1/pull/rate").json()
+            self._publish_raw(tmp_path, "1e999")  # dead again (same +inf stamp)
+            dead2 = c.get("/api/v1/pull/rate").json()
+        assert _count_dead_warns(logs) == 2
+        assert dead1["bridge_source"] == "unverified"
+        assert dead1["flow_state"] == "idle"
+        # Absent bridge → the panel-only projection (unwired/idle), never a dead warn.
+        assert absent["flow_state"] == "idle"
+        assert dead2["bridge_source"] == "unverified"
+        assert dead2["flow_state"] == "idle"
+
     def test_healthy_bridge_never_warns(self, tmp_path: Path) -> None:
         _publish_now(tmp_path, effective_rps=3.3, current_rps=8.0)
         with _client(DashboardState(), _FakeStore(tmp_path)) as c, capture_logs() as logs:

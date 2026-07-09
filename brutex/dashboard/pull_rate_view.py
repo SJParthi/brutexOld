@@ -559,8 +559,8 @@ def bridge_age_seconds(
     tuple[float, bool]
         ``(age_seconds, dead_evidence)``. On ``dead_evidence`` the age is ``inf`` so
         the merged guard treats the bridge as absent; the caller additionally labels
-        the served ``bridge_source`` ``unverified`` and WARNs once per distinct dead
-        ``wall_time`` stamp (:func:`should_warn_dead_bridge`).
+        the served ``bridge_source`` ``unverified`` and WARNs once per persistent
+        dead-CLASS episode (:func:`dead_bridge_class` + :func:`should_warn_dead_bridge`).
     """
     if not math.isfinite(wall_time) or not math.isfinite(now_wall):
         return math.inf, True
@@ -570,50 +570,112 @@ def bridge_age_seconds(
     return (delta if delta > 0.0 else 0.0), False
 
 
-def should_warn_dead_bridge(current_wall_time: float, last_warned: float | None) -> bool:
-    """Return ``True`` iff the dead-bridge WARN should fire for this poll's ``wall_time``.
+def dead_bridge_class(
+    now_wall: float,
+    wall_time: float,
+    *,
+    future_skew_s: float = BRIDGE_FUTURE_SKEW_TOLERANCE_S,
+) -> str | None:
+    """Classify a bridge ``wall_time`` into its DEAD-EVIDENCE class (or ``None`` if live).
 
-    DEDUP per distinct dead ``wall_time`` stamp. The live-rate widget polls
-    ``GET /api/v1/pull/rate`` site-wide every ~3 s, and a dead bridge (a SIGKILLed
-    CLI leaving a stuck ``+inf`` / ``NaN`` / materially-future stamp — see
-    :func:`bridge_age_seconds`) is a PERSISTENT condition. An unthrottled
-    ``pull_rate.bridge_dead_wall_time`` WARN would therefore fire ~20/min
-    INDEFINITELY. This is the ONE decision function that collapses that to ONE WARN
-    per distinct dead stamp, matching the repo's deduped-per-key WARN convention
+    The dead-bridge WARN dedup keys on this CLASS, not the exact ``wall_time`` stamp
+    (hostile-review MINOR). Keying on the exact stamp collapsed a STUCK bridge (a
+    frozen stamp) to one WARN, but a LIVE publisher whose clock is materially in the
+    future and REWRITES the bridge each ~1 s emits a DISTINCT future ``wall_time``
+    every poll — so the exact-stamp dedup re-warned ~20/min forever for that subcase,
+    defeating the throttle. Collapsing every materially-future stamp (and every
+    non-finite one) to a small fixed set of CLASSES makes a persistent dead condition
+    — stuck OR live-rewriting — warn exactly once (Golden Rule #10 honesty; CLAUDE.md
+    §11 COMMON — one source of truth). Returns non-``None`` for EXACTLY the inputs
+    :func:`bridge_age_seconds` reports as ``dead_evidence`` (the two share the same
+    dead law), so the caller can gate the WARN on the same verdict it labels
+    ``unverified``.
+
+    Classes, in order:
+
+    * ``"nan"`` — a ``NaN`` ``wall_time``.
+    * ``"pos_inf"`` / ``"neg_inf"`` — a ``+inf`` / ``-inf`` ``wall_time``.
+    * ``"reader_clock"`` — a finite ``wall_time`` but a non-finite ``now_wall`` (a
+      broken reader clock; dead per :func:`bridge_age_seconds`).
+    * ``"future"`` — a finite ``wall_time`` MORE than ``future_skew_s`` ahead of a
+      finite ``now_wall`` (a ms-scaled epoch / corrupt stamp / badly-skewed clock).
+    * ``None`` — a LIVE bridge: a past ``wall_time`` or one within ``future_skew_s``
+      of ``now_wall`` (ordinary cross-host NTP skew is not dead).
+
+    Parameters
+    ----------
+    now_wall
+        The reader's wall clock (``time.time()``).
+    wall_time
+        The bridge snapshot's embedded publish wall clock.
+    future_skew_s
+        The tolerated future skew (default :data:`BRIDGE_FUTURE_SKEW_TOLERANCE_S`).
+
+    Returns
+    -------
+    str | None
+        The dead class, or ``None`` when the bridge is live.
+    """
+    if math.isnan(wall_time):
+        return "nan"
+    if wall_time == math.inf:
+        return "pos_inf"
+    if wall_time == -math.inf:
+        return "neg_inf"
+    if not math.isfinite(now_wall):
+        return "reader_clock"
+    if now_wall - wall_time < -future_skew_s:
+        return "future"
+    return None
+
+
+def should_warn_dead_bridge(current_class: str | None, last_warned_class: str | None) -> bool:
+    """Return ``True`` iff the dead-bridge WARN should fire for this poll's dead CLASS.
+
+    DEDUP per persistent dead-CLASS episode, NOT per distinct ``wall_time`` stamp
+    (hostile-review MINOR). The live-rate widget polls ``GET /api/v1/pull/rate``
+    site-wide every ~3 s, and a dead bridge (a SIGKILLed CLI leaving a stuck
+    ``+inf`` / ``NaN`` / materially-future stamp, OR a LIVE publisher with a
+    badly-future clock rewriting a fresh future stamp each second — see
+    :func:`dead_bridge_class`) is a PERSISTENT condition. An unthrottled
+    ``pull_rate.bridge_dead_wall_time`` WARN would fire ~20/min INDEFINITELY. This
+    is the ONE decision function that collapses that to ONE WARN per persistent
+    dead-class episode, matching the repo's deduped-per-key WARN convention
     (Golden Rule #10 honesty; CLAUDE.md §11 COMMON — one source of truth).
 
     Rules, in order:
 
-    * ``last_warned is None`` (the FIRST dead poll, or the bridge just recovered and
-      the caller re-armed the dedup) → ``True`` (warn).
-    * a ``NaN`` ``current_wall_time`` whose prior warned stamp was ALSO ``NaN`` →
-      ``False`` — a persistent ``NaN`` bridge must warn only once, but ``NaN != NaN``
-      would otherwise re-warn every poll, so the ``NaN``-vs-``NaN`` case is handled
-      explicitly here.
-    * otherwise → warn iff the stamp CHANGED (``current_wall_time != last_warned``),
-      so a NEW distinct dead episode (``+inf`` → a different future stamp, or a
-      changed ``NaN``-vs-finite pair) re-warns exactly once.
+    * ``current_class is None`` (the bridge is LIVE, not dead) → ``False`` — never
+      warn for a healthy bridge (defensive; the caller only invokes this on the dead
+      arm).
+    * ``last_warned_class is None`` (the FIRST dead poll, or the bridge just recovered
+      / went absent and the caller re-armed the dedup) → ``True`` (warn).
+    * otherwise → warn iff the dead CLASS CHANGED
+      (``current_class != last_warned_class``), so a NEW dead episode (a class
+      transition e.g. ``future`` → ``nan``) re-warns exactly once, while a persistent
+      same-class dead bridge (stuck ``+inf`` OR a live publisher rewriting distinct
+      future stamps every poll) warns exactly once.
 
-    The caller resets ``last_warned`` to ``None`` whenever the bridge is healthy (or
-    absent), so a fresh dead episode after a recovery always re-warns.
+    The caller resets ``last_warned_class`` to ``None`` whenever the bridge is healthy
+    OR absent, so a fresh dead episode after a recovery always re-warns once.
 
     Parameters
     ----------
-    current_wall_time
-        This poll's dead-evidence ``wall_time`` (non-finite or materially future).
-    last_warned
-        The last dead ``wall_time`` the caller acted on, or ``None`` when re-armed.
+    current_class
+        This poll's dead class from :func:`dead_bridge_class` (``None`` when live).
+    last_warned_class
+        The last dead class the caller acted on, or ``None`` when re-armed.
 
     Returns
     -------
     bool
         ``True`` to emit the WARN this poll; ``False`` to suppress it as a duplicate.
     """
-    if last_warned is None:
+    if current_class is None:
+        return False
+    if last_warned_class is None:
         return True
-    if math.isnan(current_wall_time):
-        return not math.isnan(last_warned)
-    return current_wall_time != last_warned
+    return current_class != last_warned_class
 
 
 def build_pull_rate_view_merged(
@@ -810,5 +872,6 @@ __all__ = [
     "bridge_age_seconds",
     "build_pull_rate_view",
     "build_pull_rate_view_merged",
+    "dead_bridge_class",
     "should_warn_dead_bridge",
 ]

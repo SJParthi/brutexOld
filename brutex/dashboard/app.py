@@ -1455,12 +1455,13 @@ def build_app(
     _rate_bridge_cache = rate_bridge_cache if rate_bridge_cache is not None else RateBridgeCache()
 
     # Dedup baseline for the dead-bridge WARN (GET /api/v1/pull/rate). A dead CLI
-    # bridge (a stuck +inf/NaN/future wall_time) is PERSISTENT and the widget polls
-    # site-wide every ~3 s, so the WARN is emitted ONCE per distinct dead stamp and
-    # re-armed to None when the bridge is healthy/absent (DEC-PULL-RATE-BRIDGE-
+    # bridge (a stuck +inf/NaN/future wall_time, OR a live publisher with a badly-future
+    # clock rewriting a fresh future stamp each second) is PERSISTENT and the widget polls
+    # site-wide every ~3 s, so the WARN is emitted ONCE per persistent dead-CLASS episode
+    # and re-armed to None when the bridge is healthy/absent (DEC-PULL-RATE-BRIDGE-
     # NONBLOCK-CACHE-001; see the route body). Touched only on the event loop, so no
     # lock. App-instance state (no module-global mutable state — CLAUDE.md §4).
-    _last_warned_dead_wall_time: float | None = None
+    _last_warned_dead_class: str | None = None
 
     # The movers PREBUILD GATE (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): while the
     # one-click /pull-pipeline runs, /api/v1/movers returns an honest `gated: true`
@@ -1790,10 +1791,11 @@ def build_app(
         from brutex.dashboard.pull_rate_view import (
             bridge_age_seconds,
             build_pull_rate_view_merged,
+            dead_bridge_class,
             should_warn_dead_bridge,
         )
 
-        nonlocal _last_warned_dead_wall_time
+        nonlocal _last_warned_dead_class
         now_monotonic = time.monotonic()
         with state._lock:  # pyright: ignore[reportPrivateUsage]
             panel = state.rate_limit
@@ -1846,36 +1848,43 @@ def build_app(
             # ``inf`` age (⇒ the merged guard treats the bridge as ABSENT ⇒ idle) for
             # that class while tolerating a few seconds of ordinary cross-host clock
             # skew; a fresh (past) ``wall_time`` is byte-identical to the old clamp.
-            bridge_age, bridge_dead_evidence = bridge_age_seconds(time.time(), snapshot.wall_time)
+            now_wall = time.time()
+            bridge_age, bridge_dead_evidence = bridge_age_seconds(now_wall, snapshot.wall_time)
             if bridge_dead_evidence:
                 # Label the served provenance ``unverified`` (never a trusted "live")
                 # so a corrupt/skewed publisher is visible, not silent. The WARN is
-                # DEDUPED per distinct dead ``wall_time`` stamp: the widget polls this
-                # route site-wide every ~3 s and a dead bridge (a SIGKILLed CLI's stuck
-                # +inf/NaN/future stamp) is a PERSISTENT condition, so an unthrottled
-                # WARN would fire ~20/min forever. ``should_warn_dead_bridge`` fires it
-                # ONCE per distinct dead stamp; the healthy/absent arms below re-arm the
-                # dedup so a NEW dead episode after a recovery re-warns (CLAUDE.md §11
-                # deduped-per-key WARN convention). ``_last_warned_dead_wall_time`` is
-                # touched only on the event loop between awaits, so it needs no lock.
+                # DEDUPED per persistent dead-CLASS episode: the widget polls this route
+                # site-wide every ~3 s and a dead bridge (a SIGKILLed CLI's stuck
+                # +inf/NaN/future stamp, OR a live publisher whose badly-future clock
+                # rewrites a DISTINCT future stamp each second) is a PERSISTENT condition,
+                # so an unthrottled WARN would fire ~20/min forever. Keying the dedup on
+                # the dead CLASS (via ``dead_bridge_class``) — not the exact stamp —
+                # collapses that live-rewriting-future subcase to ONE warn too;
+                # ``should_warn_dead_bridge`` fires once per persistent class, re-warns on
+                # a class transition, and the healthy/absent arms below re-arm the dedup so
+                # a NEW dead episode after a recovery re-warns (CLAUDE.md §11 deduped-per-key
+                # WARN convention). ``_last_warned_dead_class`` is touched only on the event
+                # loop between awaits, so it needs no lock.
+                current_dead_class = dead_bridge_class(now_wall, snapshot.wall_time)
                 bridge_result = BridgeReadResult(
                     snapshot, BRIDGE_SOURCE_UNVERIFIED, bridge_result.probe_age_s
                 )
-                if should_warn_dead_bridge(snapshot.wall_time, _last_warned_dead_wall_time):
+                if should_warn_dead_bridge(current_dead_class, _last_warned_dead_class):
                     _LOG.warning(
                         "pull_rate.bridge_dead_wall_time",
                         wall_time=snapshot.wall_time,
+                        dead_class=current_dead_class,
                         detail=(
                             "CLI rate-bridge wall_time is non-finite or materially in the "
                             "future — DEAD EVIDENCE, treated as absent (idle), never a "
                             "fabricated 'flowing'"
                         ),
                     )
-                _last_warned_dead_wall_time = snapshot.wall_time
+                _last_warned_dead_class = current_dead_class
             else:
                 # Bridge healthy again → re-arm the dead-bridge WARN dedup so a NEW
                 # dead episode after this recovery re-warns exactly once.
-                _last_warned_dead_wall_time = None
+                _last_warned_dead_class = None
             bridge_effective_rps = snapshot.effective_rps
             bridge_current_rps = snapshot.current_rps
             bridge_recent_minute = snapshot.recent_minute
@@ -1887,7 +1896,7 @@ def build_app(
         else:
             # No bridge snapshot (unwired / missing / unreadable) → re-arm the
             # dead-bridge WARN dedup: a later dead episode is a fresh one.
-            _last_warned_dead_wall_time = None
+            _last_warned_dead_class = None
 
         view = build_pull_rate_view_merged(
             panel_effective_rps=panel_effective_rps,

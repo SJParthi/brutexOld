@@ -28,6 +28,7 @@ from brutex.dashboard.pull_rate_view import (
     bridge_age_seconds,
     build_pull_rate_view,
     build_pull_rate_view_merged,
+    dead_bridge_class,
     should_warn_dead_bridge,
 )
 
@@ -1378,35 +1379,81 @@ class TestBridgeAgeSeconds:
         assert dead is True
 
 
+class TestDeadBridgeClass:
+    """`dead_bridge_class` — classify a bridge ``wall_time`` into its DEAD-EVIDENCE
+    class (hostile-review MINOR). Returns non-``None`` for EXACTLY the inputs
+    :func:`bridge_age_seconds` reports as ``dead_evidence``, so a live publisher with
+    a badly-future clock rewriting a fresh future stamp each poll collapses to the ONE
+    ``"future"`` class instead of a distinct stamp every poll."""
+
+    def test_nan_wall_time_is_nan_class(self) -> None:
+        assert dead_bridge_class(1000.0, math.nan) == "nan"
+
+    def test_positive_infinity_is_pos_inf_class(self) -> None:
+        assert dead_bridge_class(1000.0, math.inf) == "pos_inf"
+
+    def test_negative_infinity_is_neg_inf_class(self) -> None:
+        assert dead_bridge_class(1000.0, -math.inf) == "neg_inf"
+
+    def test_non_finite_now_wall_with_finite_wall_time_is_reader_clock(self) -> None:
+        # bridge_age_seconds also treats a non-finite now_wall as dead — same law.
+        assert dead_bridge_class(math.inf, 1000.0) == "reader_clock"
+
+    def test_materially_future_wall_time_is_future_class(self) -> None:
+        wt = 1000.0 + BRIDGE_FUTURE_SKEW_TOLERANCE_S + 1.0
+        assert dead_bridge_class(1000.0, wt) == "future"
+
+    def test_two_distinct_future_stamps_share_one_class(self) -> None:
+        # THE FIX: a live publisher rewriting a DIFFERENT future stamp each poll —
+        # both land in the ONE "future" class, so the dedup fires once (below).
+        now = 1000.0
+        wt1 = now + 10_000_000.0
+        wt2 = now + 20_000_000.0
+        assert dead_bridge_class(now, wt1) == dead_bridge_class(now, wt2) == "future"
+
+    def test_within_skew_future_is_live_none(self) -> None:
+        # Ordinary cross-host NTP skew is NOT dead.
+        assert dead_bridge_class(1000.0, 1000.0 + BRIDGE_FUTURE_SKEW_TOLERANCE_S) is None
+
+    def test_fresh_past_wall_time_is_live_none(self) -> None:
+        assert dead_bridge_class(1000.0, 990.0) is None
+
+
 class TestShouldWarnDeadBridge:
     """`should_warn_dead_bridge` — the dead-bridge WARN dedup (hostile-review MINOR):
-    a PERSISTENT dead CLI bridge (a stuck +inf/NaN/future ``wall_time``) polled
-    site-wide every ~3 s must WARN ONCE per distinct dead stamp, never ~20/min
-    forever, matching the repo's deduped-per-key WARN convention (Golden Rule #10)."""
+    a PERSISTENT dead CLI bridge (a stuck +inf/NaN/future ``wall_time``, OR a live
+    publisher rewriting a distinct future stamp each poll) polled site-wide every ~3 s
+    must WARN ONCE per persistent dead-CLASS episode, never ~20/min forever, matching
+    the repo's deduped-per-key WARN convention (Golden Rule #10). Keyed on the dead
+    CLASS, not the exact stamp."""
+
+    def test_live_bridge_never_warns(self) -> None:
+        # current_class None (not dead) → never warn — the defensive live arm.
+        assert should_warn_dead_bridge(None, None) is False
+        assert should_warn_dead_bridge(None, "pos_inf") is False
 
     def test_first_dead_poll_warns(self) -> None:
-        # No prior warned stamp (first dead poll, or just re-armed) → warn.
-        assert should_warn_dead_bridge(math.inf, None) is True
+        # No prior warned class (first dead poll, or just re-armed) → warn.
+        assert should_warn_dead_bridge("pos_inf", None) is True
 
-    def test_persistent_same_infinity_stamp_is_suppressed(self) -> None:
-        # A repeat poll of the SAME dead +inf stamp is a duplicate → no warn.
-        assert should_warn_dead_bridge(math.inf, math.inf) is False
+    def test_persistent_same_class_is_suppressed(self) -> None:
+        # A repeat poll of the SAME dead class is a duplicate → no warn.
+        assert should_warn_dead_bridge("pos_inf", "pos_inf") is False
 
-    def test_distinct_future_stamp_after_infinity_re_warns(self) -> None:
-        # inf → a different (future finite) dead stamp is a NEW episode → warn.
-        assert should_warn_dead_bridge(1e18, math.inf) is True
+    def test_persistent_future_class_is_suppressed(self) -> None:
+        # THE FIX: a live publisher rewriting a distinct future stamp every poll maps
+        # to the SAME "future" class → warns exactly once, not ~20/min forever.
+        assert should_warn_dead_bridge("future", "future") is False
 
-    def test_persistent_same_future_stamp_is_suppressed(self) -> None:
-        assert should_warn_dead_bridge(1e18, 1e18) is False
+    def test_class_transition_future_to_nan_re_warns(self) -> None:
+        # A NEW dead episode (a class transition) re-warns exactly once.
+        assert should_warn_dead_bridge("nan", "future") is True
 
-    def test_persistent_nan_stamp_is_suppressed(self) -> None:
-        # NaN != NaN would re-warn forever; the NaN-vs-NaN case is handled explicitly.
-        assert should_warn_dead_bridge(math.nan, math.nan) is False
+    def test_class_transition_infinity_to_future_re_warns(self) -> None:
+        assert should_warn_dead_bridge("future", "pos_inf") is True
 
-    def test_nan_after_finite_dead_stamp_re_warns(self) -> None:
-        # A finite dead stamp → NaN is a distinct dead episode → warn.
-        assert should_warn_dead_bridge(math.nan, 1e18) is True
+    def test_persistent_nan_class_is_suppressed(self) -> None:
+        assert should_warn_dead_bridge("nan", "nan") is False
 
-    def test_finite_after_nan_dead_stamp_re_warns(self) -> None:
-        # NaN → a finite dead stamp (inf) is a distinct dead episode → warn.
-        assert should_warn_dead_bridge(math.inf, math.nan) is True
+    def test_class_transition_nan_to_infinity_re_warns(self) -> None:
+        assert should_warn_dead_bridge("pos_inf", "nan") is True
