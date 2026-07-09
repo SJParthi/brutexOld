@@ -18,7 +18,37 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
+_Last updated: 2026-07-09 (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1623 —
+the /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named
+follow-up CLOSED: the minute-basis PREV. CLOSE anchored on the symbol's OWN
+1-day series with ZERO real-calendar check (its docstring called a real NSE
+session absent from BOTH series "a genuine holiday" — the confirmed repro
+fabricated pct_chng=+10.0 for 2024-01-04 across the missing Wednesday
+2024-01-03, and select_top_movers would have crowned it); the minute guard is
+now the exact structural mirror of the daily guard — the checked calendar is
+the prior-session AUTHORITY, refusal = honest row ABSENCE ("correct-or-absent,
+never wrong"; never a fabricated %CHNG, never a 500), surfaced as ONE
+`preopen.prev_close_noncontiguous` WARN per symbol (capped 20/build + one
+suppressed summary). CONSOLIDATION: `nse.previous_trading_session` gains the
+REMOVE-ONLY kw-only `observed` overlay kwarg (default frozenset() —
+every existing caller byte-identical, parity-pinned) and
+`preopen_report._previous_trading_day` becomes a THIN delegator over it
+(private walk DELETED; delegation-equivalence pinned over the full covered
+span; the module-local `calendar.coverage_exhausted` event RETIRED for the
+COMMON `calendar.previous_session_coverage_exhausted` — a sanctioned,
+consumer-free rename). SANCTIONED: hole rows disappear from minute-basis
+exports (remediation = re-pull the missing session); coverage-abstain +
+Muhurat-bar / unflagged-drift anchors now SKIP on the minute basis too
+(parity with daily; an overlay-flagged day is recovered). HONEST: the
+pure-minute no-1day fallback arm stays deliberately calendar-blind (a chosen,
+pinned limit); the prior-session memo is O(unique report days) per build, NOT
+O(1)-total. EVIDENCE: the finder's repro KILLED on the fixed tree; PRE-fix
+goldens (weekend + Holi-2024 + Budget-Saturday contiguous fixture) byte-equal;
+the `!=`→`==` mutant proven dead on both guards. READ-ONLY dashboard — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+preopen_report.py + calendars/nse.py 100% line+branch; ruff/ruff-format clean,
+`mypy --strict` clean, pyright 0 errors at the pre-change baseline).
+Earlier: 2026-07-08 (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 —
 the P4 merge-integration rebind of the one-click display adapter onto the
 SHIPPED #1275 results-depth artifacts: the ONE discovery seam
 (`oneclick_artifacts.runs_root`) repoints `<results_root>/runs/` → the
@@ -867,8 +897,9 @@ NON-session documented limit), enriched resolvers `resolve_prev_close`/
 EMIT-ON-FALSE row projection (contiguous + abstained payloads byte-for-byte
 the pre-fix wire, golden-pinned both arms + a frozen additive-key-NAME set).
 HONEST: makes the wrong %change VISIBLE, does not fix the number — re-pulling
-the missing session does; `preopen_report._previous_trading_day` NOT refactored
-(named follow-up DEC-PREOPEN-PREVDAY-COMMON-001). READ-ONLY dashboard — ENGINE
+the missing session does; `preopen_report._previous_trading_day` was NOT
+refactored there (named follow-up DEC-PREOPEN-PREVDAY-COMMON-001 — since
+CLOSED by MIGRATION.md #1623). READ-ONLY dashboard — ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100% line+branch).
 Earlier: 2026-07-07 (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001,
 MIGRATION.md #1538 — the `/movers` SPOT "Top Value" (turnover) is now
@@ -1618,7 +1649,42 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
+- **Active branch:** `claude/preopen-prevday-common` (**DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1623** — the
+  /reports preopen MINUTE-basis calendar-contiguity fix + the #1539-named follow-up consolidation: the minute-basis
+  PREV. CLOSE guard (`_minute_prev_close_contiguous`) anchored on `trading_dates[idx-1]` — the symbol's OWN 1-day
+  series — with ZERO real-NSE-calendar check (its docstring claimed a session absent from BOTH series is "a genuine
+  holiday"; the confirmed repro: a lake holding 2024-01-02 + 2024-01-04 in BOTH series with the REAL Wednesday session
+  2024-01-03 absent from BOTH emitted prev_close=100.0 → a FABRICATED pct_chng=+10.0 that `select_top_movers` would
+  have crowned, while the DAY basis on the identical lake skipped). THE FIX: the minute guard is now the exact
+  structural mirror of `_daily_prev_close_contiguous` — the checked calendar (`_previous_trading_day`) is the
+  prior-session AUTHORITY; the anchor is valid ONLY when the nearest earlier 1-day date IS the calendar's prior
+  session AND that session has minute data; refusal = honest row ABSENCE riding the existing skip `continue`
+  ("correct-or-absent, never wrong" — never a fabricated %CHNG, never a raise/500). Both guards gain the
+  Ellipsis-sentinel `expected_session` seam + the `on_hole(expected, nearest_lake_session)` observability seam;
+  `build_preopen_rows` threads the observed overlay into BOTH bases through ONE function-local O(unique days)
+  prior-session memo (spy-pinned one-walk-per-day; NOT an O(1)-total claim) and surfaces holes as
+  `preopen.prev_close_noncontiguous` WARNs (per-symbol dedup, cap 20/build, ONE
+  `preopen.prev_close_noncontiguous_suppressed` summary). CONSOLIDATION (the #1535/#1539-named follow-up CLOSED):
+  `nse.previous_trading_session` gains kw-only `observed: AbstractSet[date] = frozenset()` — REMOVE-ONLY
+  (`is_trading_day_checked(probe) and probe not in observed`; plain data, no overlay-loader import into nse.py, no
+  cycle; default-empty parity pinned unit + hypothesis so every existing caller is byte-identical) — and
+  `preopen_report._previous_trading_day` becomes a THIN delegator over it (name+signature KEPT, private walk DELETED;
+  delegation-equivalence pinned against a verbatim in-test copy of the old walk over every day 2020-01-02→2026-12-31
+  × observed sets; the module-local `calendar.coverage_exhausted` event RETIRED for the COMMON
+  `calendar.previous_session_coverage_exhausted` — a sanctioned, grep-verified consumer-free observability rename,
+  its one test pin reconciled). SANCTIONED (each pinned): minute-basis hole rows DISAPPEAR from exports (remediation
+  re-pull); coverage-abstain + Muhurat-bar / unflagged-drift anchor days now SKIP on the minute basis (parity with
+  daily; an overlay-flagged day is recovered — the dedicated spurious-skip pin). HONEST: the pure-minute no-1day
+  fallback arm stays deliberately calendar-blind (a CHOSEN, pinned, ledgered limit). EVIDENCE: the finder's repro
+  KILLED on the fixed tree ("row SKIPPED (no fabrication) … VERDICT: NOT CONFIRMED"); PRE-fix-captured goldens
+  (contiguous weekend + Holi-2024-cluster + Budget-Saturday fixture, day+minute .xlsx + .zip) byte-equal post-fix;
+  the `!=`→`==` expected-check mutant proven dead on BOTH guards; the fixture audit of test_preopen_report.py +
+  test_surface_trial_reports.py found ZERO non-real-session dates. READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `preopen_report.py` (307/90) + `calendars/nse.py`
+  (204/52) BOTH 100.00% line+branch on their static gates; ruff/ruff-format clean; `mypy --strict` clean (403 files);
+  pyright 0 errors at the pre-change baseline, +2 test-file `reportPrivateUsage` warnings — the house private-import
+  test pattern.)
+  Earlier: `claude/oneclick-sweep-runs-rebind` (**DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621** — the
   P4 merge-integration rebind, built ON TOP of PR #1280's `claude/operator-page-real-rebuild` head (the eventual PR
   targets main only after #1280 merges): the one-click discovery seam repoints `<results_root>/runs/` → the Ruling-4
   `sweep_runs/` SIBLING root (mirror-pinned to `trade_store.sweep_run_dir`; NO legacy `runs/` fallback — the fixture
@@ -2157,8 +2223,9 @@ hostile-review pass._
   `movers.prev_baseline_noncontiguous` WARN + a single suppressed summary; `movers.html` appends a strict-`=== false`
   " *" marker (pre-esc, the " ~" precedent) + a note legend, substring-presence pinned (honest envelope). HONEST:
   makes the wrong %change VISIBLE — stamped + warned + marked — it does NOT fix the number (re-pulling the missing
-  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` deliberately NOT refactored — the
-  named follow-up DEC-PREOPEN-PREVDAY-COMMON-001. READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  session does; no bar is ever fabricated); `preopen_report._previous_trading_day` was deliberately NOT refactored
+  there — the named follow-up DEC-PREOPEN-PREVDAY-COMMON-001, since CLOSED by MIGRATION.md #1623 (the thin-delegator
+  consolidation). READ-ONLY dashboard — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options/calendars-nse ALL 100%
   line+branch (679-test family run); ruff/ruff-format clean, `mypy --strict` + pyright at the pre-change baseline).
   Earlier (same branch): (**DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001, MIGRATION.md #1538**
@@ -3870,7 +3937,15 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/oneclick-sweep-runs-rebind`
+- **Active feature branch:** `claude/preopen-prevday-common`
+  (DEC-PREOPEN-PREVDAY-COMMON-001, MIGRATION.md #1623 — the /reports preopen
+  minute-basis calendar-contiguity fix (a real-session lake hole no longer
+  fabricates a %CHNG — correct-or-absent) + the #1539-named follow-up CLOSED:
+  `_previous_trading_day` delegates to the COMMON
+  `nse.previous_trading_session`, which gains the remove-only `observed`
+  overlay kwarg; READ-ONLY dashboard; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/oneclick-sweep-runs-rebind`
   (DEC-ONECLICK-SWEEP-RUNS-REBIND-001, MIGRATION.md #1621 — the P4
   merge-integration rebind: oneclick discovery repointed to the Ruling-4
   `sweep_runs/` sibling root + the production `TradeStoreReader` over the
