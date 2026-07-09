@@ -31,14 +31,22 @@ the prior-session AUTHORITY, refusal = honest row ABSENCE ("correct-or-absent,
 never wrong"; never a fabricated %CHNG, never a 500), surfaced as ONE
 `preopen.prev_close_noncontiguous` WARN per (exchange, segment, symbol)
 dataset triple (capped 20/build + one suppressed summary) carrying a
-THREE-WAY machine `hole_shape` + shape-matched detail (the hostile-review
+machine `hole_shape` + shape-matched detail (the hostile-review
 fold — the original one-line "re-pull" advice was WRONG remediation in two
-reproduced shapes): extra_nonsession_bar (a Muhurat extra 1-day bar after
-the prior session — NO re-pull advice) / prebuild_lag (the 1day series lags
+reproduced shapes; since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment
+fold, MIGRATION.md #1632, the split is FOUR-WAY): muhurat_session_bar (the
+calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed",
+cross-referencing the #1616 engine anchor law + /movers' prev_close_muhurat
+display stamp) / extra_nonsession_bar (a non-Muhurat unexpected non-session
+bar — honestly suspicious, inspect it) / prebuild_lag (the 1day series lags
 the minute series — run the pipeline prebuild; diagnostic only, the guard
 never anchors on minute presence) / missing_session (the genuine hole —
-re-pull kept verbatim); the daily basis reads no minute series so its
-diagnostic is honestly two-way. CONSOLIDATION: `nse.previous_trading_session` gains the
+re-pull kept verbatim); the found<expected arms are two-way on the daily
+basis (no minute series read). The same #1632 fold ends the annual /movers
+false-hole flag: a day-after-Diwali Muhurat baseline now reads
+contiguous-True + EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat`
++ " †" + ONE INFO per build (never " *"/WARN), and /db gains the static
+%CHNG anchor footnote. CONSOLIDATION: `nse.previous_trading_session` gains the
 REMOVE-ONLY kw-only `observed` overlay kwarg (default frozenset() —
 every existing caller byte-identical, parity-pinned) and
 `preopen_report._previous_trading_day` becomes a THIN delegator over it
@@ -930,7 +938,11 @@ figure is 0.2033%) is now STAMPED (`prev_close_session`/`prev_close_contiguous`
 per (symbol, kind)), and marked " *" on the screen — while the SERVED VALUE is
 untouched in every branch: NEW COMMON `calendars/nse.previous_trading_session`
 (strict back-walk, coverage-floor ABSTAIN — never a guessed session; Muhurat =
-NON-session documented limit), enriched resolvers `resolve_prev_close`/
+NON-session documented limit [SUPERSEDED for the movers VERDICT layer by
+DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1632: the walk still
+treats Muhurat a NON-session, but a found-after-expected Muhurat baseline now
+reads contiguous-True + `prev_close_muhurat`/`oi_baseline_muhurat` — a healthy
+lake, never a false hole]), enriched resolvers `resolve_prev_close`/
 `resolve_prev_oi` with byte-identical `.value` seams over the historical
 `_prev_day_close`/`_prev_day_oi`, ONE pure `prev_baseline_provenance`, and
 EMIT-ON-FALSE row projection (contiguous + abstained payloads byte-for-byte
@@ -1705,13 +1717,26 @@ hostile-review pass._
   prior-session memo (spy-pinned one-walk-per-day; NOT an O(1)-total claim) and surfaces holes as
   `preopen.prev_close_noncontiguous` WARNs (deduped per (exchange, segment, symbol) dataset triple — the
   hostile-review fold widened the bare-symbol key that silenced a dual-listed symbol's second exchange — cap
-  20/build, ONE `preopen.prev_close_noncontiguous_suppressed` summary) carrying a THREE-WAY machine `hole_shape`
+  20/build, ONE `preopen.prev_close_noncontiguous_suppressed` summary) carrying a machine `hole_shape`
   + shape-matched detail (the review fold on the original unconditional "re-pull" advice, WRONG in two reproduced
-  shapes): extra_nonsession_bar (Muhurat extra 1-day bar — no re-pull advice) / prebuild_lag (1day lags minute —
+  shapes; FOUR-WAY since the DEC-PREVSESSION-MUHURAT-COHERENCE-001 amendment fold, MIGRATION.md #1632):
+  muhurat_session_bar (the calendar-confirmed Diwali boundary — a HEALTHY lake, "no action needed", cross-referencing
+  the #1616 engine anchor law + /movers' prev_close_muhurat display stamp) / extra_nonsession_bar (a non-Muhurat
+  unexpected non-session bar — honestly suspicious, inspect it; the old "e.g. a Diwali Muhurat session" guess is
+  gone) / prebuild_lag (1day lags minute —
   run the pipeline prebuild; DIAGNOSTIC only, the guard never anchors on minute presence — a partial-day close
   would be a fabrication) / missing_session (genuine hole — re-pull kept verbatim); the daily basis carries no
-  minute evidence, so its diagnostic is honestly two-way; the golden generator now REFUSES to overwrite existing
-  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). CONSOLIDATION (the #1535/#1539-named follow-up CLOSED):
+  minute evidence, so only its found<expected diagnostic degrades; the golden generator now REFUSES to overwrite existing
+  fixtures without BRUTEX_REGEN_PREOPEN_GOLDEN=1 (the pre-fix capture stays the oracle). THE SAME #1632 AMENDMENT
+  FOLD (DEC-PREVSESSION-MUHURAT-COHERENCE-001, this branch, the recorded TWO-LAW design — engine anchor law #1616
+  vs display baseline law): /movers stops false-flagging the day-after-Diwali boundary as a lake hole — a
+  found-after-expected Muhurat baseline reads contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/
+  `oi_baseline_muhurat` keys + " †" + at most ONE `movers.prev_baseline_muhurat` INFO per build (never the false
+  EMIT-ON-FALSE pair/" *"/WARN — the SANCTIONED wire delta, pinned before/after; every non-Muhurat row
+  byte-identical; the 39-key warm grid fires ZERO noncontiguous WARNs on a healthy Muhurat lake), and /db gains the
+  static "%CHNG anchors on the nearest stored prior bar (including a Diwali Muhurat session's close)" footnote
+  (per-row marker = named follow-up DEC-DB-MUHURAT-PREVCLOSE-MARK-001; the operator-gated
+  DEC-PREOPEN-MUHURAT-SERVE-001 stays behind a bhavcopy evidence gate). CONSOLIDATION (the #1535/#1539-named follow-up CLOSED):
   `nse.previous_trading_session` gains kw-only `observed: AbstractSet[date] = frozenset()` — REMOVE-ONLY
   (`is_trading_day_checked(probe) and probe not in observed`; plain data, no overlay-loader import into nse.py, no
   cycle; default-empty parity pinned unit + hypothesis so every existing caller is byte-identical) — and
@@ -2274,7 +2299,10 @@ hostile-review pass._
   where the true figure is 0.2033%) are now judged against the NEW COMMON `calendars/nse.previous_trading_session`
   (strict `is_trading_day_checked` back-walk over weekends/holidays, Budget weekend sessions honoured, coverage-floor
   ABSTAIN with one `calendar.previous_session_coverage_exhausted` warning — never a guessed session; Muhurat day =
-  documented NON-session limit; NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
+  documented NON-session limit [the WALK's stance stands, but the VERDICT layer's false-hole reading of a
+  day-after-Diwali Muhurat baseline is SUPERSEDED by DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1632 —
+  contiguous-True + the EMIT-ON-TRUE `prev_close_muhurat`/`oi_baseline_muhurat` stamp + " †", never " *"/WARN];
+  NSE≡BSE so the exchange arg is inert parity today). The enriched resolvers
   `movers_snapshot.resolve_prev_close` → `PrevDayBaseline(value, found_date)` + `movers_futures.resolve_prev_oi` →
   `PrevOiBaseline(value, found_date)` keep byte-identical `.value` seams (`_prev_day_close`/`_prev_day_oi` wrappers —
   every historical pin green unmodified; `_prior_session_last_from_minute` appends its found date, [0]/[1] stable);
@@ -4006,7 +4034,14 @@ hostile-review pass._
   fabricates a %CHNG — correct-or-absent) + the #1539-named follow-up CLOSED:
   `_previous_trading_day` delegates to the COMMON
   `nse.previous_trading_session`, which gains the remove-only `observed`
-  overlay kwarg; READ-ONLY dashboard; ENGINE UNCHANGED —
+  overlay kwarg; PLUS the same-branch amendment fold
+  DEC-PREVSESSION-MUHURAT-COHERENCE-001, MIGRATION.md #1632 — the two-law
+  day-after-Diwali coherence ruling: /movers stops false-flagging a healthy
+  Muhurat-boundary lake as a lake hole (contiguous-True + EMIT-ON-TRUE
+  `prev_close_muhurat`/`oi_baseline_muhurat` + " †" + one INFO, never
+  " *"/WARN), preopen names the boundary definitively (`muhurat_session_bar`;
+  `extra_nonsession_bar` reworded honestly suspicious), /db gains the static
+  %CHNG anchor footnote; READ-ONLY dashboard; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
