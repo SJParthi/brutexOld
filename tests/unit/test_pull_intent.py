@@ -789,7 +789,8 @@ def test_legacy_resume_peer_active_preserves_operator_intent_written_in_window(
         # The race window: our synthetic intent is already on disk; the
         # operator's REAL click lands before the PEER_ACTIVE cleanup runs.
         assert store.load() is not None, "the synthetic intent was persisted first"
-        assert store.write(operator_intent)
+        wrote = store.write(operator_intent)
+        assert wrote, "the operator's click must persist inside the race window"
         return False  # a peer pull holds the flock ⇒ PEER_ACTIVE
 
     launched: list[PullIntent] = []
@@ -818,7 +819,8 @@ def test_legacy_resume_peer_active_created_at_alone_defeats_a_false_match(
     )
 
     def _probe() -> bool:
-        assert store.write(operator_intent)
+        wrote = store.write(operator_intent)
+        assert wrote, "the operator's click must persist inside the race window"
         return False
 
     launched: list[PullIntent] = []

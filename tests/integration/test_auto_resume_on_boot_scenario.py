@@ -167,24 +167,36 @@ def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
     ledger.record(_window(5), raw_bars=0, error_type="RATE_LIMIT", bars_appended=0, now=now)
     save_window_ledger(ledger, lake_root)
 
-    # BOTH dashboard handles the old child died on: the boot-window L3 sweeper's
-    # catalog (the incident's first-raising site) + the lifetime rw store.
-    catalog = Catalog.open(lake_root / "catalog.duckdb")
-    store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    try:
+    # BOTH dashboard handles the old child died on — HELD across the resume: the
+    # boot-window L3 sweeper's catalog (the incident's first-raising site) + the
+    # lifetime rw store.
+    with (
+        Catalog.open(lake_root / "catalog.duckdb"),
+        InstrumentStore.open(lake_root / "instruments.duckdb"),
+    ):
         reloaded = load_window_ledger(lake_root)
         incomplete = detect_incomplete_pull(reloaded)
         assert incomplete is not None
         assert incomplete.failed == 1
 
         launched: list[PullIntent] = []
-        verdict = maybe_resume_on_boot(
-            load_ledger=lambda: load_window_ledger(lake_root),
-            resume=lambda _incomplete: run_legacy_resume(
+
+        def _resume(_incomplete: IncompletePull) -> None:
+            """Discard the honest ``ResumeAction`` — the ``resume`` seam is ``-> None``.
+
+            Mirrors the production binding (``app.py``'s ``_resume_legacy_pull``),
+            which likewise drops :func:`run_legacy_resume`'s return value; the
+            action's outcome is asserted separately via the direct call below.
+            """
+            run_legacy_resume(
                 PullIntentStore(lake_root),
                 launch=launched.append,
                 probe_singleflight=lambda: True,
-            ),
+            )
+
+        verdict = maybe_resume_on_boot(
+            load_ledger=lambda: load_window_ledger(lake_root),
+            resume=_resume,
             enabled=True,
         )
         assert verdict is ResumeVerdict.RESUMED
@@ -198,6 +210,3 @@ def test_incident_shape_inprocess_resume_with_held_store_and_durable_ledger(
             probe_singleflight=lambda: True,
         )
         assert direct is ResumeAction.FIRED
-    finally:
-        store.close()
-        catalog.close()

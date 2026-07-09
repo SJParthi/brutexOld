@@ -176,15 +176,13 @@ class TestIncidentClassRegression:
         from brutex.data.catalog import Catalog
 
         db = tmp_path / "catalog.duckdb"
-        catalog = Catalog.open(db)  # the L3 sweeper's boot-window handle
-        try:
+        # The L3 sweeper's boot-window handle — HELD across the child spawn.
+        with Catalog.open(db):
             proc = self._run_child(
                 "from pathlib import Path\n"
                 "from brutex.data.catalog import Catalog\n"
                 f"Catalog.open(Path({str(db)!r}))\n"
             )
-        finally:
-            catalog.close()
         assert proc.returncode != 0, "the child MUST die on the exclusive DuckDB lock"
         assert "CatalogError" in proc.stderr or "lock" in proc.stderr.lower()
 
@@ -200,15 +198,13 @@ class TestIncidentClassRegression:
         from brutex.data.instrument_store import InstrumentStore
 
         db = tmp_path / "instruments.duckdb"
-        store = InstrumentStore.open(db)  # the dashboard's lifetime rw handle
-        try:
+        # The dashboard's lifetime rw handle — HELD across the child spawn.
+        with InstrumentStore.open(db):
             proc = self._run_child(
                 "from pathlib import Path\n"
                 "from brutex.data.instrument_store import InstrumentStore\n"
                 f"InstrumentStore.open(Path({str(db)!r}))\n"
             )
-        finally:
-            store.close()
         assert proc.returncode != 0, "the child MUST die on the exclusive DuckDB lock"
         # The uncaught CatalogError names the lock conflict — the exact stderr the
         # old fire-and-forget child threw away (inherited, never captured).
@@ -221,8 +217,8 @@ class TestIncidentClassRegression:
         from brutex.data.instrument_store import InstrumentStore
 
         popen_calls = _wire_legacy_wants_to_fire(monkeypatch)
-        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        try:
+        # The dashboard's own rw handle — HELD while the in-process resume fires.
+        with InstrumentStore.open(tmp_path / "instruments.duckdb"):
             fired = threading.Event()
             log = mock.Mock()
             cli._start_auto_resume_on_boot(
@@ -235,8 +231,6 @@ class TestIncidentClassRegression:
                 "rw store handle is held — no second store open, no DuckDB lock"
             )
             assert _wait_for_verdict(log) == "resumed"
-        finally:
-            store.close()
         assert popen_calls == [], "zero subprocess spawns while the store is held"
 
 
