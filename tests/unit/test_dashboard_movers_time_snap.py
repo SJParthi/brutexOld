@@ -642,7 +642,7 @@ class TestExplicitPickEqualsDbBar:
         Latest requests — ``test_explicit_time_leaves_latest_time_none``);
         making it detectable is the NAMED follow-up
         DEC-MOVERS-EXPLICIT-PICK-FORMING-ECHO-001. If this test ever FAILS,
-        the envelope moved — reconcile the ledger #1631 HONEST section, the
+        the envelope moved — reconcile the ledger #1632 HONEST section, the
         movers.html as-of note, and the bx-movers-time.js header together.
         """
         bars = [

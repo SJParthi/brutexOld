@@ -7,9 +7,10 @@ STRUCTURE (DOM-structure / template-string assertions, the
 ``test_dashboard_pull_rate_monitor.py`` every-template idiom) that the JS
 perf fixes rely on:
 
-(a) each of the four 4 s-poller pages (``coverage.html`` /
+(a) each of the five 4 s-poller pages (``coverage.html`` /
     ``fetch_windows.html`` / ``expired_options.html`` /
-    ``spot_coverage.html``) carries its CLIENT-side
+    ``spot_coverage.html`` / ``completeness.html`` — the last added by
+    DEC-DASHBOARD-POLL-HYGIENE-001) carries its CLIENT-side
     skip-render-when-unchanged guard (raw response-text memo compare — the
     backend payloads are frozen, no generation/etag field exists on the
     wire) AND still polls on the 4 s ``setInterval`` cadence;
@@ -98,6 +99,13 @@ _POLLER_GUARDS: dict[str, tuple[str, ...]] = {
         "let lastPayloadTxt = null;",
         'let lastLiveLine = "";',
         "if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return; }",
+    ),
+    # completeness.html gained the raw-text memo in DEC-DASHBOARD-POLL-HYGIENE-001
+    # (the ~750-row options table was rebuilt every 4 s with no diff gate).
+    "completeness.html": (
+        "let lastBoardTxt = null;",
+        'let lastLiveLine = "";',
+        "if (txt === lastBoardTxt) { liveTxt.textContent = lastLiveLine; return; }",
     ),
 }
 

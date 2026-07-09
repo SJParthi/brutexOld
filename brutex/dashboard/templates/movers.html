@@ -536,6 +536,17 @@ function syncControls() {
   $("topn").max = "500";  // matches the /api/v1/movers route cap (DEC-MOVERS-COMPLETENESS-001).
 }
 async function load() {
+  /* Hidden-tab pause for the gated auto-retry (DEC-DASHBOARD-POLL-HYGIENE-001):
+     while the pull pipeline GATES movers, load() re-arms itself every 5 s — a
+     background tab must not keep hammering /api/v1/movers. If hidden while a gate
+     cycle is active, re-arm the retry WITHOUT fetching and bail; the
+     visibilitychange listener below fires an immediate load() on return. A
+     non-gated hidden load is left untouched (movers does not poll when idle). */
+  if (document.hidden && wasGated) {
+    clearTimeout(gateTimer);
+    gateTimer = setTimeout(load, GATE_RETRY_MS);
+    return;
+  }
   /* The server note ECHOES the raw ?asset= query param (pending_asset_payload),
      so it is set via textContent on a dedicated span — the static "<b>Note:</b>"
      label stays in the DOM — never innerHTML (DEC-DASHBOARD-XSS-HARDENING-001).
@@ -774,6 +785,12 @@ function debouncedLoad() { clearTimeout(debounceTimer); debounceTimer = setTimeo
 ["topn","minvol"].forEach(id => $(id).onchange = debouncedLoad);
 $("refresh").onclick = load;
 fillTimes(); renderPills(); load();
+/* Immediate catch-up on tab return while GATED (DEC-DASHBOARD-POLL-HYGIENE-001):
+   the gated auto-retry pauses fetches while hidden, so re-poll NOW on becoming
+   visible; clear the pending hidden-armed retry first so it cannot double-fire. */
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden && wasGated) { clearTimeout(gateTimer); load(); }
+});
 </script>
 </body>
 </html>
