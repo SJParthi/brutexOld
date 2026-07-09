@@ -5,19 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Coverage</title>
 <style>
-  :root {
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Design tokens + the header/brandmark/logo/topnav skins come from the TWO
+     shared sheets linked below (bx-theme.css + bx-design.css) — the page's
+     former inline :root duplicate token block + header/logo/brandmark/topnav
+     rules are REMOVED (Golden Rule #11 COMMON: the shared :root is the ONE
+     token source; DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A). Only page-LAYOUT
+     rules stay inline. */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -30,16 +23,6 @@
   }
   @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
 
-  header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
-  }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
-  .topnav a { color:var(--blue); text-decoration:none; }
   .topnav .sep { color:var(--border-strong); }
   .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
   /* Truthful heartbeat (DEC-DASHBOARD-UX-ANIMATE-001): the dot starts NEUTRAL
@@ -48,10 +31,14 @@
      pulses green while the endpoints are down. */
   .live .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
 
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
+  /* Sibling-parity subnav (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A): the
+     SAME pill row the coverage sub-pages carry — the hub previously lacked
+     it, so hub ↔ sub-page navigation jumped by a whole nav row. */
+  .subnav { display:flex; gap:10px; padding:12px 24px; border-bottom:1px solid var(--border);
+    animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; }
+  .subnav a { font-size:13px; text-decoration:none; color:var(--muted); padding:6px 12px;
+    border:1px solid var(--border-strong); border-radius:999px; transition:.16s; }
+  .subnav a:hover { border-color:var(--blue); color:var(--text); }
 
   /* Band vertical pad 18px → 16px: aligns the hub to its sibling coverage
      pages (spot_coverage/fetch_windows use 16px 24px) so tabbing between the
@@ -106,6 +93,7 @@
   @media (max-width: 680px) {
     header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .live { margin-left: 0; }
+    .subnav { padding: 10px 14px; }
     .band { gap: 14px; padding: 14px; }
     .kpi .v { font-size: 20px; }
     .cards { grid-template-columns: 1fr; padding: 16px 14px; gap: 14px; }
@@ -145,6 +133,15 @@
     </nav>
     <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">polling</span></div>
   </header>
+
+  <!-- Sibling-parity subnav (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A): the
+       same pill row the focused sub-pages carry, so the nav row no longer
+       appears/disappears when moving hub ↔ sub-page. -->
+  <nav class="subnav">
+    <a href="/coverage/options">⛓️ Expired options</a>
+    <a href="/coverage/spot">📈 Spot coverage</a>
+    <a href="/coverage/windows">🪟 Fetch windows</a>
+  </nav>
 
   <div class="band">
     <div class="kpi"><span class="v ok" id="ul"><span class="bx-skel" aria-hidden="true"></span></span><span class="l">underlyings pulled</span></div>

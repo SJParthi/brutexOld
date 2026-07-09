@@ -5,19 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BruteX — Spot coverage</title>
 <style>
-  :root {
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
-    --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
-    --ctl-h:38px; --tap:40px; --gutter:clamp(16px,3vw,24px);
-    --elev-1:0 2px 10px rgba(0,0,0,.28); --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1); --line:var(--border-strong);
-  }
+  /* Design tokens + the header/brandmark/logo/topnav skins come from the TWO
+     shared sheets linked below (bx-theme.css + bx-design.css) — the page's
+     former inline :root duplicate token block + header/logo/brandmark/topnav
+     rules are REMOVED (Golden Rule #11 COMMON: the shared :root is the ONE
+     token source; DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A). Only page-LAYOUT
+     rules stay inline. */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -30,21 +23,7 @@
   }
   @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes gradShift { 0%{background-position:0% 50%;} 50%{background-position:100% 50%;} 100%{background-position:0% 50%;} }
-  .brandmark { width:30px; height:30px; border-radius:9px; flex:0 0 auto; display:grid; place-items:center; font-size:16px; color:#0A0D11; font-weight:900; background:linear-gradient(135deg,var(--purple),var(--blue) 55%,var(--green)); background-size:180% 180%; box-shadow:0 4px 14px rgba(91,141,239,.35); animation:gradShift 8s var(--ease) infinite; }
-  .topnav a:hover { color:var(--text-bright); }
-  .topnav a[aria-current="page"] { color:var(--text-bright); background:var(--surface-3); box-shadow:inset 0 0 0 1px var(--border-strong); border-radius:var(--r-sm); padding:6px 10px; }
 
-  header {
-    display:flex; align-items:center; gap:14px; padding:16px 24px;
-    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
-  }
-  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
-    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .sub { color:var(--muted); font-size:12px; }
-  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
-  .topnav a { color:var(--blue); text-decoration:none; }
   .topnav .sep { color:var(--border-strong); }
   .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
   /* Truthful heartbeat (DEC-DASHBOARD-UX-ANIMATE-001): the dot starts NEUTRAL
@@ -76,22 +55,19 @@
   #status { margin-left:auto; font-size:12px; color:var(--muted); }
 
   /* The working scroll-container sticky-thead pattern — the family reference
-     (panelwrap is the flex scroll host; #panel scrolls; thead sticks at top:0
-     INSIDE it). Kept verbatim; position:relative only anchors the stale bar. */
+     (panelwrap is the flex scroll host; #panel is the .bx-tablewrap scroller;
+     thead sticks at top:0 INSIDE it). Kept verbatim; position:relative only
+     anchors the stale bar. */
   .panelwrap { flex:1; padding:14px 24px 24px; animation: fadeInUp .5s ease both; min-height:0; display:flex; position:relative; }
   #panel { flex:1; overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  /* 8 columns need room: below this the PANEL scrolls horizontally (it is
+  /* Table skin: bx-design.css .bx-table--dense/--zebra + .num own the grid now
+     (the local table/thead/tbody duplicates are removed; #panel carries
+     .bx-tablewrap so the uppercase thead sticks inside the scroller).
+     8 columns need room: below this the PANEL scrolls horizontally (it is
      already overflow:auto) — the body never does. */
   #panel table { min-width:760px; }
-  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
-    font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
-    text-transform:uppercase; letter-spacing:.5px; }
-  tbody td { padding:9px 14px; border-top:1px solid var(--border); }
-  tbody tr:hover { background:var(--surface-2); }
   .sym { font-weight:700; color:var(--text-bright); }
   .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
-  .num { font-variant-numeric:tabular-nums; }
 
   /* ── DEC-DASHBOARD-UX-ANIMATE-001: stale ribbon (error-after-success) ──
      When a refresh fails AFTER real data has rendered, the last real table is
@@ -178,7 +154,7 @@
          the old bare loading literal could sit forever on an error/hung fetch. This
          skeleton ALWAYS resolves — data, an honest empty state, or an honest error
          card with Retry (every fetch is deadline-guarded once bx-ui.js executes). -->
-    <div id="panel">
+    <div id="panel" class="bx-tablewrap">
       <div class="bx-skel-grid" aria-hidden="true" style="grid-template-columns:repeat(4,minmax(0,1fr));">
         <span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span>
         <span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span>
@@ -197,7 +173,9 @@
    over planner-planned ranges (SETTLED / PENDING n / FAILED m); resampled
    intervals are "derived from 1m" (the fetch ledger does not apply) and a lake
    with no ledger shows an honest "no ledger record" — a trading-day gap audit
-   is NOT claimed. Escape-before-innerHTML (XSS).
+   is NOT claimed. createElement/textContent-only DOM building (XSS discipline —
+   the former escape-before-innerHTML table build was converted, zero innerHTML
+   sinks; DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A).
 
    DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
    rendered VALUE string is byte-identical): the fetch is deadline-guarded
@@ -218,31 +196,32 @@ const liveTxt = document.getElementById("livetxt");
 const liveDot = document.getElementById("livedot");
 const statusEl = document.getElementById("status");
 
-function esc(s) {
-  return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = String(text);
+  return node;
 }
+function asText(v) { return String(v == null ? "" : v); }
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
 /* The completeness chip (DEC-SPOT-COVERAGE-COMPLETENESS-001) — every state
    carries its honest scope; "settled" is deliberately NOT called "complete".
-   Chip TEXT is unchanged; colors now come from the shared tokenized
-   .bx-chip classes instead of inline shadow-palette hex styles. */
+   Chip TEXT is unchanged; colors come from the shared tokenized .bx-chip
+   classes. "derived from 1m" now rides the INFO (blue) channel — the design
+   system's derived/planned tint — so it no longer shares one neutral tint
+   with the semantically different "no ledger record" (which stays muted):
+   the two distinct states are distinguishable by color, not only by reading
+   the text (DEC-DASHBOARD-VISUAL-OVERHAUL-001 Batch A). */
 function completenessChip(r) {
   const c = r.completeness;
-  if (c === "settled") return '<span class="bx-chip ok">SETTLED</span>';
-  if (c === "pending")
-    return '<span class="bx-chip warn">PENDING ' + esc(num(r.windows_pending)) + "</span>";
-  if (c === "failed")
-    return '<span class="bx-chip bad">FAILED ' + esc(num(r.windows_failed)) + "</span>";
-  if (c === "derived") return '<span class="bx-chip muted">derived from 1m</span>';
+  if (c === "settled") return el("span", "bx-chip ok", "SETTLED");
+  if (c === "pending") return el("span", "bx-chip warn", "PENDING " + num(r.windows_pending));
+  if (c === "failed") return el("span", "bx-chip bad", "FAILED " + num(r.windows_failed));
+  if (c === "derived") return el("span", "bx-chip info", "derived from 1m");
   if (c === "ambiguous")
-    return '<span class="bx-chip warn">shared symbol — see /coverage/windows</span>';
-  return '<span class="bx-chip muted">no ledger record</span>';
+    return el("span", "bx-chip warn", "shared symbol — see /coverage/windows");
+  return el("span", "bx-chip muted", "no ledger record");
 }
 
 /* One-shot row entrance on the FIRST data render only — a poll re-render
@@ -251,30 +230,53 @@ let rowsAnimated = false;
 
 function renderSpot(rows) {
   if (!rows.length) {
-    panel.innerHTML = '<div class="empty">no spot datasets in the lake yet — pull a spot symbol (e.g. NIFTY 1minute) from the Database page</div>';
+    /* Honest empty state (.bx-state.empty) — message text VERBATIM, one node. */
+    const state = el("div", "bx-state empty");
+    state.appendChild(el("div", "hint", "no spot datasets in the lake yet — pull a spot symbol (e.g. NIFTY 1minute) from the Database page"));
+    panel.replaceChildren(state);
     return;
   }
-  const body = rows.map(r =>
-    "<tr>"
-    + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
-    + "<td>" + esc(r.exchange) + "</td>"
-    + "<td>" + esc(r.segment) + "</td>"
-    + "<td>" + esc(r.interval) + "</td>"
-    + '<td class="num">' + esc(num(r.bars)) + "</td>"
-    + "<td>" + esc(r.first_date || "") + "</td>"
-    + "<td>" + esc(r.last_date || "") + "</td>"
-    + "<td>" + completenessChip(r) + "</td>"
-    + "</tr>"
-  ).join("");
   /* The 20-word honesty caveat moved OUT of the header subtitle (it overflowed
      the no-wrap header at ~900-1300px) into this column tooltip + the status
      line, which already carries it. */
-  panel.innerHTML =
-    "<table><thead><tr>"
-    + "<th>Symbol</th><th>Exchange</th><th>Segment</th><th>Interval</th>"
-    + "<th>Bars</th><th>First date</th><th>Last date</th>"
-    + '<th title="chip = ledger-settled within planned ranges — a trading-day gap audit is NOT claimed">Fetch windows ⓘ</th>'
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
+  const table = el("table", "bx-table bx-table--dense bx-table--zebra");
+  const headRow = el("tr");
+  [
+    ["Symbol", "", ""],
+    ["Exchange", "", ""],
+    ["Segment", "", ""],
+    ["Interval", "", ""],
+    ["Bars", "num", ""],
+    ["First date", "", ""],
+    ["Last date", "", ""],
+    ["Fetch windows ⓘ", "", "chip = ledger-settled within planned ranges — a trading-day gap audit is NOT claimed"],
+  ].forEach(spec => {
+    const th = el("th", spec[1] || null, spec[0]);
+    if (spec[2]) th.title = spec[2];
+    headRow.appendChild(th);
+  });
+  const thead = el("thead");
+  thead.appendChild(headRow);
+  const tbody = el("tbody");
+  rows.forEach(r => {
+    const tr = el("tr");
+    const sym = el("td");
+    sym.appendChild(el("span", "sym", asText(r.symbol)));
+    tr.appendChild(sym);
+    tr.appendChild(el("td", null, asText(r.exchange)));
+    tr.appendChild(el("td", null, asText(r.segment)));
+    tr.appendChild(el("td", null, asText(r.interval)));
+    tr.appendChild(el("td", "num", num(r.bars)));
+    tr.appendChild(el("td", null, asText(r.first_date || "")));
+    tr.appendChild(el("td", null, asText(r.last_date || "")));
+    const chip = el("td");
+    chip.appendChild(completenessChip(r));
+    tr.appendChild(chip);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  panel.replaceChildren(table);
   if (!rowsAnimated && window.BXUI) {
     BXUI.stagger(panel.querySelector("tbody"), "first-render", { rows: true, cap: 20 });
     rowsAnimated = true;
@@ -283,7 +285,7 @@ function renderSpot(rows) {
 
 /* Skip-render-when-unchanged (DEC-DASHBOARD-JS-PERF-001): the raw response
    text last rendered — an identical body skips JSON.parse + the KPI/status
-   writes + the whole renderSpot innerHTML rebuild (client-side compare only;
+   writes + the whole renderSpot table rebuild (client-side compare only;
    the payload carries no generation/etag field, backend frozen — and a server
    generation token alone would be WRONG here anyway: the completeness-chip
    rollup deliberately lives OUTSIDE the SummaryCache, the C8 freshness
@@ -304,9 +306,9 @@ function setDot(state) { if (window.BXUI) { BXUI.setDotState(liveDot, state); } 
    exact string is written synchronously via textContent, then a transform-only
    settle pop; an identical value = zero DOM writes, zero re-animation —
    skip-render-memo friendly) and fall back to a plain write pre-BXUI. */
-function setKpi(el, s) {
+function setKpi(node, s) {
   s = String(s);
-  if (window.BXUI) { BXUI.countUp(el, s); } else if (el.textContent !== s) { el.textContent = s; }
+  if (window.BXUI) { BXUI.countUp(node, s); } else if (node.textContent !== s) { node.textContent = s; }
 }
 /* A KPI that never received data resolves its skeleton to an honest "—" on a
    failed tick; a KPI that HAS data keeps the last real value. */
