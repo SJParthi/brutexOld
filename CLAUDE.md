@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-08 (DEC-BADTICK-HEAD-SEED-001 +
+_Last updated: 2026-07-09 (DEC-BADTICK-HEAD-SEED-001 +
 DEC-MUHURAT-WEEKLY-ANCHOR-ABSTAIN-001, MIGRATION.md #1625 —
 the two #1616 data-edge-guard follow-on defects fixed as ONE change set:
 (1) DEC-BADTICK-HEAD-SEED-001 — the bad-tick screen's session-head baseline is
@@ -97,8 +97,14 @@ carries its own validator stub header, MIGRATION.md #1626. ENGINE UNCHANGED — 
 F&O lake REFERENCE_ONLY; no scope/vocab/rate-cap/lake-schema change;
 `bad_tick.py` + `replay.py` + `stage1a.py` ALL 100% line+branch; P-06 +
 suffix-independence suites pass UNMODIFIED; ruff/ruff-format clean, `mypy
---strict` clean, pyright at the pre-change baseline, 0 new (round-2
-post-merge: 40 errors = the f028fe65 main baseline exactly).)
+--strict` clean, pyright at the pre-change baseline, 0 new (round-4
+post-merge re-measure on the b73d3b4b-merged tree: `pyright brutex` 0
+errors, `brutex tests` 1 error in `tests/unit/test_window_ledger.py` —
+untouched by this branch, main's own baseline; the round-2 figure of 40 was
+the f028fe65-era measure). The FULL
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1625 — this header carries outcome summaries, never the round-by-round
+story.)
 Earlier: 2026-07-07 (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 —
 write-time PER-FILE lake STATS manifest: NEW leaf
 `brutex/data/lake_stats_manifest.py` (one atomically-replaced JSON shard per
@@ -553,9 +559,11 @@ IN-SESSION kept close — the `x10` fat-finger class the positivity+ordering che
 miss), ~~first-bar-of-session exempt~~ [CORRECTED 2026-07-08,
 DEC-BADTICK-HEAD-SEED-001 #1625 — FALSE post-#1625: the first bar is no longer
 exempt, it is MEDIAN-voted with the session's first up-to-3 bars and a poison
-head bar at any of positions 1-3 is itself dropped (the unconditional exemption
-had made a ≥4x-scaled poison FIRST bar the unhealable cascade baseline); see the
-§1 Active-branch chain copy of this blurb for the full correction], one
+head bar at any of positions 1-3 that is ≥4x (or ≤1/4x) the HEAD MEDIAN is
+itself dropped (the unconditional exemption had made a ≥4x-scaled poison FIRST
+bar the unhealable cascade baseline); see the §1 Active-branch chain copy of
+this blurb for the full correction incl. the remaining #1625-disclosed limits
+(1-2-bar head, corrupt-MAJORITY head, escape-band kept spike, truncated load)], one
 `feed.bad_tick_skipped` WARN per session,
 default-ON `BRUTEX_BAD_TICK_SCREEN` kill switch, O(1)/bar, never value-editing /
 never fabricating. Threshold 4.0 derived from NSE circuit-breaker physics
@@ -2281,10 +2289,14 @@ hostile-review pass._
   caught; ~~a corrupt FIRST bar of a session is not screened by this guard~~ [CORRECTED 2026-07-08,
   DEC-BADTICK-HEAD-SEED-001 #1625 — this UNDERSTATED the defect: the corrupt first bar was not merely
   unscreened, it was KEPT AS THE BASELINE and destroyed the rest of its session; a corrupt head bar at any of
-  positions 1-3 is NOW caught by the median-of-first-3 head vote — the remaining honest limits are the
+  positions 1-3 that is ≥4x (or ≤1/4x) the HEAD MEDIAN is NOW caught by the median-of-first-3 head vote
+  (round-4 precision: "caught" is median-referenced, never unconditional) — the remaining honest limits are the
   unconfirmable 1-2-bar session head + the corrupt-MAJORITY head (≥2 corrupt of the first 3 bars — SAME or
   DIFFERENT scalings — out-vote the median, seed the baseline, and collapse the WHOLE session onto the
-  corruption), both disclosed in full in #1625 with the round-1 collapse WARN + cascade pins]).
+  corruption) + the disclosed threshold-adjacent `[4·min-neighbor, 4·median)` escape-band kept head spike
+  (since round 3 it can no longer seat the baseline) and the bounded-FORWARD-looking truncated-load corner
+  (round-4 enumeration completion — the two corners round 1/2 disclosed in #1625 were omitted here), all
+  disclosed in full in #1625 with the round-1 collapse WARN + cascade pins]).
   ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
