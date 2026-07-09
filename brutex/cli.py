@@ -107,6 +107,69 @@ class CliUserError(Exception):
     """
 
 
+def _configure_sweep_logging() -> None:
+    """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
+
+    A bare ``brutex sweep`` / ``sweep-all`` / ``sweep-daemon`` process
+    previously ran with structlog UNCONFIGURED, whose default wrapper class
+    filters at NOTSET — so the engine's per-trade DEBUG events
+    (``trade_sim.entry`` / ``trade_sim.exit``, two per simulated trade)
+    streamed unfiltered to stderr: a MEASURED 870 MB of log output on a small
+    ~200-session composite-run fixture, which on the §8 production 2-4 day
+    full-grid run is a disk-fill risk (disk-full mid-sweep → ``LakeWriteHalt``
+    = a run-killer) plus severe I/O overhead
+    (DEC-SWEEP-LOG-VOLUME-GUARD-001). This guard routes through the ONE
+    COMMON :func:`brutex.observability.logging.configure_logging` seam (the
+    same seam ``cmd_dashboard`` configures at startup) at INFO by default,
+    with the fail-loud ``$BRUTEX_LOG_LEVEL`` operator override
+    (``DEBUG``/``INFO``/``WARNING``/``ERROR``, case-insensitive; junk →
+    :class:`CliUserError` → one loud ``[brutex] …`` line + exit 1, never a
+    silent fallback). It runs at the ``main()`` dispatch, BEFORE the engine
+    modules are even imported, so every engine logger's first use binds the
+    filtering wrapper (structlog caches on first use).
+
+    Honest envelope (Golden Rule #10): this bounds LOG VOLUME ONLY — a
+    sink-level threshold. No event's level is changed and nothing at WARNING
+    or ERROR is dropped; the hash-chained audit JSONL records
+    (``engine.sweep_audit.SweepAuditWriter`` /
+    ``orchestrator.audit.AuditWriter``) are direct file appends, NOT
+    structlog events, so the Golden-Rule-#8 audit trail is byte-untouched at
+    every level (verified: neither module imports structlog). When structlog
+    is ALREADY configured in this process the guard defers entirely (after
+    validating the env var): the dashboard's in-process sweep job
+    (``run_sweep_from_request`` → ``cmd_sweep_all``) runs after
+    ``cmd_dashboard`` configured INFO + the rotating file sink at startup —
+    reconfiguring here would drop that file sink, and structlog's first-use
+    logger cache would ignore a mid-process swap anyway.
+
+    PARALLEL WORKERS (R4 fold): the production sweep is parallel — SPAWN
+    workers start from a CLEAN interpreter and do NOT inherit this process's
+    structlog config, so the pool initializer
+    (``engine.sweep_parallel._worker_init``) applies the SAME bound
+    worker-side via
+    :func:`brutex.observability.logging.configure_process_logging_best_effort`
+    (``$BRUTEX_LOG_LEVEL`` propagates to spawn children through the
+    environment). The dashboard-launched sweep inherits that automatically —
+    it funnels into the same ``run_parallel_grid`` → ``_worker_init`` path.
+
+    OPERATOR NOTE: ``BRUTEX_LOG_LEVEL=ERROR`` also silences the WARNING-level
+    operational events (stall-watchdog / quarantine / skip warnings) an
+    unattended long sweep relies on — INFO (the default) or WARNING is
+    recommended; ERROR is an opt-in hazard, accepted deliberately.
+    """
+    import structlog
+
+    from brutex.observability.logging import configure_logging, resolve_env_log_level
+
+    try:
+        level = resolve_env_log_level()
+    except ValueError as exc:
+        raise CliUserError(str(exc)) from exc
+    if structlog.is_configured():
+        return
+    configure_logging(level=level, json_renderer=False)
+
+
 def default_condition_bits() -> list[int]:
     """Return the DEFAULT swept condition-bit set — every IMPLEMENTED bit.
 
@@ -8954,6 +9017,16 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
+    if args.command in {"sweep", "sweep-all", "sweep-daemon"}:
+        # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
+        # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
+        # module's first logger use — an unconfigured sweep process streamed
+        # per-trade DEBUG events to stderr (measured 870 MB on a ~200-session
+        # fixture; a disk-fill run-killer on the 2-4 day grid run). ONE COMMON
+        # call site covering all three sweep entries (sweep-daemon reuses
+        # cmd_sweep_all; the dashboard sweep job is already configured by
+        # cmd_dashboard at startup and the guard defers to it).
+        _configure_sweep_logging()
     if args.command == "backup":
         return cmd_backup(args)
     if args.command == "sweep":
