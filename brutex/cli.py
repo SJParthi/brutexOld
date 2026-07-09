@@ -6745,8 +6745,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # → cache.record → checkpoint.record) landed, nothing was recorded
             # for unrun tuples, and the SUPERVISOR_CANCELLED audit line is on
             # the chain — so a resume (re-run this command) behaves exactly
-            # like a resume after a graceful stop. EVERY post-grid pass
-            # (stage3 / options-sim / cascade / results-depth) is SKIPPED; the
+            # like a resume after a graceful stop. EVERY post-grid pass —
+            # stage3, options-sim, cascade and results-depth — is SKIPPED; the
             # consumed cancel sidecar is cleared so the resume is never
             # re-cancelled by the stale request. Non-zero exit — a cron leg
             # never mistakes a cancelled sweep for a clean one; cancel takes

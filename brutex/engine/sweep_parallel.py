@@ -1022,6 +1022,7 @@ class ParallelGridDriver:
 
     __slots__ = (
         "_bars_for",
+        "_cancelled",
         "_grid",
         "_guards",
         "_heap",
@@ -1029,7 +1030,6 @@ class ParallelGridDriver:
         "_monotonic",
         "_n_unique",
         "_next_apply",
-        "_cancelled",
         "_quarantined",
         "_root",
         "_should_stop",
@@ -1242,9 +1242,7 @@ class ParallelGridDriver:
                 subject=self._subject,
                 payload=cancel_payload,
             )
-            self._guards.progress.cancelled(
-                detail=f"cancelled at tuple {self._next_apply}/{total}"
-            )
+            self._guards.progress.cancelled(detail=f"cancelled at tuple {self._next_apply}/{total}")
             _LOG.warning("sweep_parallel.cancelled", subject=self._subject, **cancel_payload)
             return SupervisedGridSummary(
                 sweep_id=sweep_id,

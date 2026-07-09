@@ -3770,3 +3770,39 @@ class TestIngestAuditWiring:
     def test_pull_candles_dry_run_writes_no_audit(self, tmp_path: Path) -> None:
         pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert not (tmp_path / "audit").exists()
+
+
+class TestCooperativeCancel:
+    """DEC-JOB-COOPERATIVE-CANCEL-001: a cooperative cancel maps to the honest partial verdict."""
+
+    def test_cancel_at_window_boundary_sets_cancelled_and_keeps_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """A should_stop that fires stops the spot pull gracefully — cancelled=True, no crash.
+
+        The spine raises ``PullCancelled`` at the first window boundary (before any
+        vendor call); ``pull_all_spot`` CATCHES it like the quota / mass-empty global
+        stops, latches ``final_cancelled``, halts the remaining step groups, and the
+        report reads ``cancelled=True`` — an honest partial, NOT an ``error`` and with
+        NO Telegram alert (the operator asked for it).
+        """
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_BULK_NOW,
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        assert report.auth_aborted is False
+        assert report.quota_exhausted is False
+        assert report.to_dict()["cancelled"] is True
+        events = {log["event"] for log in logs}
+        assert "universe.pull_all.cancelled" in events
+
+    def test_no_probe_is_not_cancelled(self, tmp_path: Path) -> None:
+        """The default (no should_stop) pull is never cancelled — byte-compatible."""
+        report = pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert report.cancelled is False
+        assert report.to_dict()["cancelled"] is False

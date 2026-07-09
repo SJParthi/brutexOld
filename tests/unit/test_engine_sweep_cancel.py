@@ -81,9 +81,7 @@ class TestCancelRequested:
         monkeypatch.setattr(sweep_cancel.os, "stat", _boom)
         assert cancel_requested(tmp_path) is True
 
-    def test_probe_is_one_os_stat(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_probe_is_one_os_stat(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """O(1)-per-tuple discipline: the hot probe is exactly ONE os.stat call."""
         calls: list[object] = []
         real_stat = os.stat

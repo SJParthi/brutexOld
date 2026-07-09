@@ -1657,3 +1657,43 @@ class TestRunningJobKind:
         )
         captured[0]()
         assert job.running_job_kind is None
+
+
+# ── cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001) ──
+
+
+def test_request_cancel_on_idle_job_is_a_false_noop() -> None:
+    """An idle job has no run to cancel — False, and the token stays unset."""
+    job = _job()
+    assert job.request_cancel() is False
+    assert job.cancel_requested() is False
+
+
+def test_request_cancel_on_a_running_job_sets_the_token() -> None:
+    """Inside a live run the cancel token flips True and request_cancel reports True."""
+    job = _job()
+    observed: dict[str, bool] = {}
+
+    def work(on_progress: ProgressHook) -> None:
+        observed["before"] = job.cancel_requested()
+        observed["req"] = job.request_cancel()
+        observed["after"] = job.cancel_requested()
+
+    assert job.start(work, total=1) is True
+    assert observed == {"before": False, "req": True, "after": True}
+
+
+def test_fresh_cancel_token_per_start_never_leaks() -> None:
+    """A cancel requested against run A can never pre-poison run B (identity gate)."""
+    job = _job()
+    seen: list[bool] = []
+
+    def work(on_progress: ProgressHook) -> None:
+        # A fresh Event is minted by every start, so each run reads False first,
+        # even though the PRIOR run set its own (now-replaced) token.
+        seen.append(job.cancel_requested())
+        job.request_cancel()
+
+    assert job.start(work, total=1) is True
+    assert job.start(work, total=1) is True
+    assert seen == [False, False]
