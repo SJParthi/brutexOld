@@ -1206,9 +1206,21 @@ async function loadLakeUniqueness() {
     const detail = document.getElementById("lakedetail");
     if (!panel || !m.present) return;
     panel.style.display = "block";
-    if (m.findings_total === 0) {
+    /* DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review BLOCKER): a skipped/unreadable
+       file is NEVER classified, so "0 findings" alone can NOT certify clean — the
+       CLEAN branch is gated on zero findings AND zero skips, and a skip paints a
+       distinct UNREADABLE red (engine vs reference-only, mirroring the CLI
+       disambiguation). Runs in the verdict-present path regardless of any
+       rescanning state so a skip is never silent-green. */
+    if (m.findings_total === 0 && (m.files_skipped || 0) === 0) {
       verdict.textContent = " ✅ CLEAN";
       verdict.style.color = "#4ade80";
+    } else if ((m.engine_files_skipped || 0) > 0) {
+      verdict.textContent = " ❌ engine indexes UNREADABLE — census incomplete, cannot certify clean";
+      verdict.style.color = "#f87171";
+    } else if ((m.files_skipped || 0) > 0) {
+      verdict.textContent = " ❌ scan incomplete — reference/non-engine file unreadable; ENGINE indexes verified CLEAN";
+      verdict.style.color = "#f87171";
     } else if (m.engine_clean) {
       verdict.textContent = " ❌ " + m.findings_total + " poisoned";
       verdict.style.color = "#f87171";

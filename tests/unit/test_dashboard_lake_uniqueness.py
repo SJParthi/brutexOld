@@ -383,3 +383,100 @@ class TestUniverseChipMarkers:
         assert "textContent" in body
         assert "innerHTML" not in body
         assert "engine indexes POISONED" in body
+        # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review BLOCKER): the verdict
+        # CONSUMES the skip signals — the CLEAN branch is gated on zero skips and
+        # a skip paints a distinct UNREADABLE red (never silent-green ✅).
+        assert "m.findings_total === 0 && (m.files_skipped || 0) === 0" in body
+        assert "(m.engine_files_skipped || 0) > 0" in body
+        assert "engine indexes UNREADABLE" in body
+        assert "scan incomplete" in body
+
+
+class TestUniverseChipVerdictExecuted:
+    """Node-executed proof the chip verdict CONSUMES ``engine_files_skipped`` /
+    ``files_skipped`` — a skipped file is NEVER painted silent-green ✅
+    (DEC-AUDIT-CENSUS-HONESTY-001, hostile-review BLOCKER). Skipped where node
+    is absent; the ``TestUniverseChipMarkers`` string pins still gate."""
+
+    _UNIVERSE = (
+        Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "universe.html"
+    )
+
+    def _decide(self, payload: dict[str, object]) -> str:
+        """Run the REAL verdict-decision block from universe.html on *payload*."""
+        import json
+        import shutil
+        import subprocess  # nosec B404 — fixed-argv node invocation, test-only
+
+        if shutil.which("node") is None:  # pragma: no cover - environment-dependent
+            pytest.skip("node not installed")
+        text = self._UNIVERSE.read_text(encoding="utf-8")
+        start = text.index("if (m.findings_total === 0 && (m.files_skipped")
+        end = text.index("const segs", start)
+        block = text[start:end]
+        script = (
+            "const m = JSON.parse(process.argv[1]);"
+            "const verdict = { style: {}, textContent: '' };"
+            f"{block}"
+            "console.log(verdict.textContent);"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script, json.dumps(payload)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return proc.stdout.strip()
+
+    def test_clean_payload_paints_green_clean(self) -> None:
+        out = self._decide({"findings_total": 0, "files_skipped": 0, "engine_files_skipped": 0})
+        assert "CLEAN" in out and "❌" not in out
+
+    def test_engine_skip_is_never_silent_green(self) -> None:
+        # The BLOCKER: 0 findings but an UNREADABLE engine file → NOT ✅ CLEAN.
+        out = self._decide(
+            {
+                "findings_total": 0,
+                "files_skipped": 1,
+                "engine_files_skipped": 1,
+                "engine_clean": False,
+            }
+        )
+        assert "CLEAN" not in out.split("verified")[0]  # not the top-line "✅ CLEAN"
+        assert "UNREADABLE" in out
+        assert "❌" in out
+
+    def test_reference_only_skip_is_non_clean_but_engine_clean(self) -> None:
+        out = self._decide(
+            {
+                "findings_total": 0,
+                "files_skipped": 1,
+                "engine_files_skipped": 0,
+                "engine_clean": True,
+            }
+        )
+        assert "scan incomplete" in out
+        assert "ENGINE indexes verified CLEAN" in out
+        assert "❌" in out
+
+    def test_engine_poison_paints_poisoned(self) -> None:
+        out = self._decide(
+            {
+                "findings_total": 2,
+                "files_skipped": 0,
+                "engine_files_skipped": 0,
+                "engine_clean": False,
+            }
+        )
+        assert "poisoned" in out and "engine indexes POISONED" in out
+
+    def test_non_engine_poison_paints_poisoned_count(self) -> None:
+        out = self._decide(
+            {
+                "findings_total": 3,
+                "files_skipped": 0,
+                "engine_files_skipped": 0,
+                "engine_clean": True,
+            }
+        )
+        assert "3 poisoned" in out and "POISONED" not in out

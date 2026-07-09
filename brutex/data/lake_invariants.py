@@ -103,6 +103,11 @@ OPTIONS_SEGMENT: Final[str] = "OPTIONS"
 #: The ``bars/`` segments in census display order.
 _BAR_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH", "FNO")
 
+#: The number of leading ``bars/``-relative path parts that form a
+#: ``(exchange, segment, symbol)`` coordinate (used by
+#: :func:`_engine_coord_from_path` on the path-parse-failure branch).
+_COORD_PART_COUNT: Final[int] = 3
+
 #: Human label for the engine-index verdict lines.
 _ENGINE_LABEL: Final[str] = "NIFTY/BANKNIFTY/SENSEX"
 
@@ -227,9 +232,13 @@ type LakeFinding = (
 class LakeScanReport:
     """Outcome of one :func:`scan_lake_invariants` pass.
 
-    ``files_by_segment`` (per-``bars/``-segment scanned counts) and
-    ``engine_files`` (scanned files on :data:`ENGINE_INDEX_COORDS` series) are
-    defaulted trailing fields feeding :func:`build_lake_census`.
+    ``files_by_segment`` (per-``bars/``-segment scanned counts),
+    ``engine_files`` (scanned files on :data:`ENGINE_INDEX_COORDS` series) and
+    ``engine_files_skipped`` (files on those series that were UNREADABLE /
+    schema-drifted and thus skipped — the census-honesty signal of
+    DEC-AUDIT-CENSUS-HONESTY-001; a skipped engine file cannot be classified,
+    so a "0 findings" verdict over it would be silently green over corruption)
+    are defaulted trailing fields feeding :func:`build_lake_census`.
     """
 
     findings: tuple[LakeFinding, ...]
@@ -241,6 +250,13 @@ class LakeScanReport:
     duration_s: float
     files_by_segment: tuple[tuple[str, int], ...] = ()
     engine_files: int = 0
+    engine_files_skipped: int = 0
+    #: The FIRST unreadable/skipped file encountered in scan order (bars first,
+    #: then options), or ``None`` when nothing was skipped. Named on the human
+    #: ``brutex lake audit-unique`` disambiguation line so a cron/operator that
+    #: never sees the ``lake.invariant.scan_skip`` stderr log still knows WHICH
+    #: file left the census incomplete (DEC-AUDIT-CENSUS-HONESTY-001).
+    first_skipped_path: str | None = None
 
 
 def _utc_aware(ts: datetime) -> datetime:
@@ -508,6 +524,26 @@ def _bar_files(
     return sorted(base.glob(pattern))
 
 
+def _engine_coord_from_path(path: Path, lake_root: Path) -> tuple[str, str, str] | None:
+    """The ``(exchange, segment, symbol)`` of a ``bars/`` file, read POSITIONALLY.
+
+    Used ONLY on the path-parse-failure branch, where ``parse_partition_path``
+    could not decode the file yet the census must still know whether the file
+    lives on an :data:`ENGINE_INDEX_COORDS` series (a corrupt engine PATH must
+    flip the engine verdict — DEC-AUDIT-CENSUS-HONESTY-001). ``_bar_files``
+    guarantees the six-segment ``bars/exch/seg/sym/interval/yyyy/mm.parquet``
+    layout, so the first three parts under ``bars/`` are the coordinate; returns
+    ``None`` for any path that is not under ``bars/`` or is too shallow.
+    """
+    try:
+        parts = path.relative_to(lake_root / BAR_DIR_NAME).parts
+    except ValueError:
+        return None
+    if len(parts) < _COORD_PART_COUNT:
+        return None
+    return (parts[0], parts[1], parts[2])
+
+
 def _classify_overlap(
     lake_root: Path,
     coords: PartitionCoords,
@@ -634,6 +670,14 @@ def scan_lake_invariants(
     files_scanned = 0
     files_skipped = 0
     engine_files = 0
+    engine_files_skipped = 0
+    first_skipped: list[str] = []
+
+    def _note_first_skip(skipped: Path) -> None:
+        """Remember the FIRST skipped file (O(1) — used to NAME it in the CLI)."""
+        if not first_skipped:
+            first_skipped.append(str(skipped))
+
     files_by_segment: dict[str, int] = {}
     symbol_dirs: dict[tuple[str, str], set[str]] = {}
     per_series: dict[tuple[str, str, str, str], list[tuple[PartitionCoords, Path]]] = {}
@@ -644,6 +688,18 @@ def scan_lake_invariants(
             parsed = parse_partition_path(path, lake_root=lake_root)
         except PartitionError:
             files_skipped += 1
+            _note_first_skip(path)
+            # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review MAJOR): an ENGINE-index
+            # file whose PATH fails to parse (a non-integer / month-13 year dir
+            # under bars/NSE/INDEX/NIFTY/...) is STILL an unreadable engine file —
+            # derive its (exchange, segment, symbol) POSITIONALLY from the glob
+            # tail (`_bar_files` guarantees the six-segment
+            # bars/exch/seg/sym/interval/yyyy/mm.parquet shape) so it flips the
+            # engine verdict too. Without this the CLI/json mis-attribute it as a
+            # reference-only skip ("ENGINE verified CLEAN") while doctor — which
+            # scopes per-coord and counts ALL skips — FAILs, so the two disagree.
+            if _engine_coord_from_path(path, lake_root) in ENGINE_INDEX_COORDS:
+                engine_files_skipped += 1
             continue
         coords = PartitionCoords(
             exchange=cast(str, parsed["exchange"]),
@@ -670,6 +726,13 @@ def scan_lake_invariants(
             except parquet_read_skip_errors() as exc:
                 _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                 files_skipped += 1
+                _note_first_skip(path)
+                if (coords.exchange, coords.segment, coords.symbol) in ENGINE_INDEX_COORDS:
+                    # A skipped ENGINE-index file (unreadable / schema-drifted) is
+                    # NEVER classified — so it must flip the census verdict, else
+                    # "0 findings" reads silently green over engine corruption
+                    # (DEC-AUDIT-CENSUS-HONESTY-001).
+                    engine_files_skipped += 1
                 _pause(per_file_pause)
                 continue
             _pause(per_file_pause)
@@ -730,6 +793,7 @@ def scan_lake_invariants(
                     except parquet_read_skip_errors() as exc:
                         _LOG.warning("lake.invariant.scan_skip", path=str(path), error=str(exc))
                         option_files_skipped += 1
+                        _note_first_skip(path)
                         _pause(per_file_pause)
                         continue
                     _pause(per_file_pause)
@@ -756,6 +820,8 @@ def scan_lake_invariants(
         duration_s=time.perf_counter() - started,
         files_by_segment=tuple(sorted(files_by_segment.items())),
         engine_files=engine_files,
+        engine_files_skipped=engine_files_skipped,
+        first_skipped_path=first_skipped[0] if first_skipped else None,
     )
     _LOG.info(
         "lake.invariant.scan_complete",
@@ -792,13 +858,28 @@ class SegmentCensus:
 
 @dataclass(frozen=True, slots=True)
 class LakeCensus:
-    """The operator-facing census fold of one :class:`LakeScanReport`."""
+    """The operator-facing census fold of one :class:`LakeScanReport`.
+
+    ``files_skipped`` (bars + options that were UNREADABLE / schema-drifted and
+    thus skipped) and ``engine_files_skipped`` (that subset on the
+    :data:`ENGINE_INDEX_COORDS` series) are the DEC-AUDIT-CENSUS-HONESTY-001
+    completeness signals: a skipped file is never classified, so a census with
+    ``files_skipped > 0`` cannot honestly certify "0 findings", and
+    ``engine_files_skipped > 0`` flips ``engine_clean`` (the operator's trust
+    verdict) to False regardless of ``findings_total``.
+    """
 
     segments: tuple[SegmentCensus, ...]
     engine_clean: bool
     engine_detail: str
     findings_total: int
     files_scanned: int
+    files_skipped: int = 0
+    engine_files_skipped: int = 0
+    #: The FIRST unreadable/skipped file (mirrors
+    #: :attr:`LakeScanReport.first_skipped_path`) — carried through so the CLI
+    #: can NAME it on the disambiguation line without a second scan.
+    first_skipped_path: str | None = None
 
 
 def _engine_relevant(finding: LakeFinding) -> bool:
@@ -890,21 +971,43 @@ def build_lake_census(report: LakeScanReport) -> LakeCensus:
             drift_dirs=0,
         )
     )
+    # A skipped ENGINE-index file (unreadable / schema-drifted) is never
+    # classified, so it MUST flip the trust verdict — otherwise "0 findings"
+    # reads silently green over engine corruption (DEC-AUDIT-CENSUS-HONESTY-001).
+    engine_skipped = report.engine_files_skipped
+    skip_note = (
+        f" — WARNING: {engine_skipped} engine-index file(s) UNREADABLE (skipped), "
+        "census INCOMPLETE, cannot certify clean"
+        if engine_skipped
+        else ""
+    )
     if engine_findings:
         offenders = [_engine_offender(f) for f in engine_findings[:_ENGINE_DETAIL_CAP]]
         extra = len(engine_findings) - len(offenders)
         suffix = f" (+{extra} more)" if extra else ""
-        detail = f"{_ENGINE_LABEL}: {len(engine_findings)} findings — " + (
-            ", ".join(offenders) + suffix
+        detail = (
+            f"{_ENGINE_LABEL}: {len(engine_findings)} findings — "
+            + ", ".join(offenders)
+            + suffix
+            + skip_note
+        )
+    elif engine_skipped:
+        detail = (
+            f"{_ENGINE_LABEL}: {engine_skipped} engine-index file(s) UNREADABLE "
+            f"(skipped) over {report.engine_files} readable file(s) — census "
+            "INCOMPLETE, cannot certify clean"
         )
     else:
         detail = f"{_ENGINE_LABEL}: 0 findings over {report.engine_files} files"
     return LakeCensus(
         segments=tuple(rows),
-        engine_clean=not engine_findings,
+        engine_clean=not engine_findings and engine_skipped == 0,
         engine_detail=detail,
         findings_total=len(report.findings),
         files_scanned=report.files_scanned + report.option_files_scanned,
+        files_skipped=report.files_skipped + report.option_files_skipped,
+        engine_files_skipped=engine_skipped,
+        first_skipped_path=report.first_skipped_path,
     )
 
 
@@ -946,6 +1049,9 @@ def census_to_dict(
         "engine_detail": census.engine_detail,
         "findings_total": census.findings_total,
         "files_scanned": census.files_scanned,
+        "files_skipped": census.files_skipped,
+        "engine_files_skipped": census.engine_files_skipped,
+        "first_skipped_path": census.first_skipped_path,
         "segments": [
             {
                 "segment": row.segment,

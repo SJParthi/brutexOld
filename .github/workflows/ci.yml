@@ -474,10 +474,12 @@ jobs:
           # `check_wheel_freshness` stage whose dedicated suite lives in
           # `test_doctor_wheel_freshness.py`; DEC-RUST-SOURCE-DIGEST-TWIN-001
           # (MIGRATION.md #1258) added the `wheel_source_digest` stages whose
-          # dedicated suite lives in `test_doctor_wheel_source_digest.py` —
-          # the module's covering set is ALL THREE files (the first two alone
-          # read 96.78% since the digest stages landed), so the gate runs
-          # them together.
+          # dedicated suite lives in `test_doctor_wheel_source_digest.py`;
+          # DEC-AUDIT-CENSUS-HONESTY-001 (renumber on merge) added the
+          # `check_lake_uniqueness` UNREADABLE-skip FAIL arms whose tests live
+          # in `test_doctor.py`'s `TestLakeUniquenessSkipHonesty` (the stem-
+          # matched home, so the per-module discovery gate covers them too), so
+          # the covering set stays these three files run together.
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest \
               --cov=brutex.doctor \
