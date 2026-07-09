@@ -235,58 +235,6 @@
   }
   .shake-on-reveal { animation: cameraShake 0.5s ease-in-out 0.6s 1; }
 
-  /* v24.4 — First-frame HOOK banner (TOP) — the viral stopper */
-  .hook-banner {
-    position: relative;
-    margin: 0;
-    padding: 14px 24px;
-    background: linear-gradient(90deg,
-      rgba(255,176,122,0.18) 0%,
-      rgba(91,141,239,0.22) 50%,
-      rgba(255,200,87,0.18) 100%);
-    background-size: 250% 100%;
-    border-bottom: 1px solid rgba(91,141,239,0.3);
-    overflow: hidden;
-    animation: gradientShift 5s ease-in-out infinite;
-  }
-  .hook-banner .scroll-track {
-    display: flex;
-    gap: 32px;
-    white-space: nowrap;
-    animation: tickerScroll 30s linear infinite;
-    font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    font-size: 13px;
-    font-weight: 700;
-  }
-  @keyframes tickerScroll {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(-50%); }
-  }
-  .hook-banner .tick { display: inline-flex; align-items: center; gap: 6px; }
-  .hook-banner .tick.up { color: var(--green-bright); }
-  .hook-banner .tick.down { color: var(--red); }
-  .hook-banner .tick .sym { color: var(--muted); font-weight: 600; }
-  .hook-banner .live-dot {
-    width: 8px; height: 8px;
-    background: var(--green-bright);
-    border-radius: 50%;
-    box-shadow: 0 0 10px var(--green-bright);
-    animation: pulse 1.5s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-  .hook-banner .live-tag {
-    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
-    z-index: 5;
-    background: var(--bg);
-    padding: 5px 10px;
-    border-radius: 5px;
-    border: 1px solid var(--green);
-    color: var(--green-bright);
-    font-size: 11px; font-weight: 900; letter-spacing: 0.1em;
-    display: inline-flex; align-items: center; gap: 6px;
-    box-shadow: 0 0 16px rgba(255,200,87,0.4);
-  }
-
   /* v24.5 — Glow ring on hero rank-pill (cumulative attention magnet) */
   .rank-pill { position: relative; }
   .rank-pill::before {
@@ -2257,29 +2205,11 @@
 </head>
 <body class="operator-mode">
 
-<!-- v24.4: First-frame HOOK — live ticker banner (the viral stopper) -->
-<div class="hook-banner">
-  <span class="live-tag"><span class="live-dot"></span>LIVE</span>
-  <div class="scroll-track" id="liveTickerTrack">
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-    <!-- duplicated for seamless ticker loop -->
-    <span class="tick up">+1.34% <span class="sym">NIFTY · 09:35→11:48 · TP hit</span></span>
-    <span class="tick up">+0.81% <span class="sym">BANKNIFTY · 09:42→15:20 · forced 15:20</span></span>
-    <span class="tick down">−0.61% <span class="sym">NIFTY SHORT · 09:38→10:24 · SL hit</span></span>
-    <span class="tick up">+1.39% <span class="sym">SENSEX · 09:36→13:11 · TP hit</span></span>
-    <span class="tick down">−0.59% <span class="sym">NIFTY · 09:34→09:51 · SL hit</span></span>
-    <span class="tick up">+2.12% <span class="sym">BANKNIFTY · 09:31→12:04 · TP hit</span></span>
-    <span class="tick up">+0.94% <span class="sym">SENSEX · 09:38→11:22 · TP hit</span></span>
-    <span class="tick up">+1.71% <span class="sym">NIFTY · 09:33→14:11 · TP hit</span></span>
-  </div>
-</div>
+<!-- The v24.4 "LIVE" hook-banner ticker is REMOVED (DEC-ONECLICK-TOP100-OBJECT-ROOT-001, coordinator ruling): its 16 trade
+     ticks were FABRICATED mockup numbers behind a LIVE tag — a Golden-Rule-#1
+     violation. An absent widget beats a lying one; the HONEST #bxTickerStrip
+     below (sweep status + latest run id from the real runs payload, awaiting
+     states) is the one ticker that stays. -->
 
 <!-- v24.2: particle burst container -->
 <div class="particle-burst" id="particleBurst"></div>
@@ -3734,7 +3664,7 @@
       const io = new IntersectionObserver((entries) => {
         entries.forEach((en) => en.target.classList.toggle('bx-anim-off', !en.isIntersecting));
       }, { rootMargin: '80px' });
-      ['.hook-banner', '.verdict', '.equity-wrap'].forEach((sel) => {
+      ['.verdict', '.equity-wrap'].forEach((sel) => {
         const n = document.querySelector(sel);
         if (n) io.observe(n);
       });

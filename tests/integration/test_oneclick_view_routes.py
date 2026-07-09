@@ -226,6 +226,45 @@ class TestMockupKilled:
 # ---------------------------------------------------------------------------
 
 
+class TestFabricatedLiveTickerKilled:
+    """Coordinator ruling (DEC-ONECLICK-TOP100-OBJECT-ROOT-001): the v24.4
+    "LIVE" hook-banner ticker rendered 16 FABRICATED trade ticks behind a
+    LIVE tag — a Golden-Rule-#1 violation. REMOVED outright (an absent
+    widget beats a lying one); the HONEST #bxTickerStrip (sweep status +
+    latest run id from the real runs payload, awaiting states) stays."""
+
+    #: The fabricated hook-banner's distinctive literals — none may survive
+    #: in ANY template (widget markup, CSS, JS observer hook, tick strings).
+    _KILLED_TOKENS = (
+        'id="liveTickerTrack"',
+        "hook-banner .scroll-track",
+        "tickerScroll",
+        "+1.34%",
+        "09:35\u219211:48",  # the first fabricated tick's time span
+        "viral stopper",
+    )
+
+    @pytest.mark.parametrize(
+        "template", ["v29.html", "screener.html", "strategy.html", "results.html"]
+    )
+    def test_fabricated_ticker_tokens_gone_everywhere(self, template: str) -> None:
+        html = _template(template)
+        for token in self._KILLED_TOKENS:
+            literal = token.encode().decode("unicode_escape")
+            assert literal not in html, f"fabricated LIVE-ticker token survived: {token}"
+
+    def test_the_honest_ticker_strip_stays(self) -> None:
+        """The REAL-data strip (bx-oneclick.js renderTicker — sweep status +
+        latest run id, honest awaiting default) is the ONE ticker kept."""
+        for template in ("v29.html", "screener.html", "strategy.html"):
+            html = _template(template)
+            assert 'id="bxTickerStrip"' in html, template
+            assert "no runs yet — awaiting real run artifact" in html, template
+        js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert "sweep: idle" in js  # derived states, never invented trades
+        assert "latest run " in js
+
+
 class TestOneclickSections:
     def test_awaiting_banner_present_with_the_shared_wording(self) -> None:
         html = _template("v29.html")

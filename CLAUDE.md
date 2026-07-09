@@ -47,7 +47,10 @@ inert axes wire-disclosed per #1617 Ruling 10, the /results UI sends no
 R44 arithmetic count null costs at ₹0 with the honest "gross of those
 costs" caveat — 3 real rows previously read an EMPTY curve / "0 trades");
 the /screener count line's numerator is the RENDERED count, naming the
-render cap. Fold [12]: `runs_revision` folds per-run
+render cap. Coordinator ruling folded: the /operator v24.4 "LIVE"
+hook-banner ticker (16 hardcoded fabricated trade ticks) is DELETED
+outright — the honest `#bxTickerStrip` (real runs payload) is the one
+ticker kept, killed-token-pinned. Fold [12]: `runs_revision` folds per-run
 manifest stat tokens so an in-place `suspect` rewrite moves the cached
 runs-listing key (O(run dirs) stats per poll, stated). DISPLAY zone only —
 ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine writer byte-untouched;
@@ -1697,7 +1700,8 @@ hostile-review pass._
   sort-basis labels on /results + the one-click surfaces (labels only — the preset tie-break
   divergence is RULED design-sanctioned per #1617 Ruling 10, `?preset=` UI exposure negative-pinned);
   [W2-4] — Ruling-18 null costs count at ₹0 with the honest gross-curve caveat instead of excluding
-  every real trade; [W2-5] — the /screener count line names the render cap; [12] —
+  every real trade; [W2-5] — the /screener count line names the render cap; the fabricated v24.4
+  "LIVE" hook-banner ticker is DELETED by coordinator ruling (the honest #bxTickerStrip stays); [12] —
   `runs_revision` folds per-run manifest stat tokens (an in-place `suspect` rewrite moves the cached
   runs-listing key). DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX), engine writer
   byte-untouched; both oneclick modules 100% line+branch standalone.)
