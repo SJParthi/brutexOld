@@ -2383,7 +2383,11 @@ def build_app(
             dry_run=dry_run,
         )
         store = _require_store()
-        instrument = store.get(symbol)
+        # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003: the symbol lookup is a synchronous
+        # DuckDB read on the lake volume — run it on a worker (the #1622 doctrine)
+        # so a slow/stalled volume can never freeze the loop at click time. The
+        # unknown-symbol 400 stays OUT here (the api_universe_instruments idiom).
+        instrument = await run_in_threadpool(store.get, symbol)
         if instrument is None:
             raise HTTPException(
                 status_code=400,
@@ -2682,30 +2686,45 @@ def build_app(
         loudly-labeled synthetic dry-run.
         """
         dry_run = _gate_pull_dry_run(dry_run, route="universe.pull_all")
-        if symbols is not None:
-            try:
-                instruments = resolve_pull_symbols(symbols, _require_store().get)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            detail = f"{len(instruments)} symbols spot"
-        elif symbol is not None:
-            store = _require_store()
-            instrument = store.get(symbol)
-            if instrument is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
-                )
-            instruments = [instrument]
-            detail = f"{symbol} spot"
-        elif kind is not None:
-            instruments = _select_bulk_targets(kind)
-            detail = f"{kind} spot"
-        else:
+
+        def _resolve_selection() -> tuple[list[Instrument], str]:
+            """Resolve the spot selection + its progress label — store reads only.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class):
+            ``resolve_pull_symbols`` runs one DuckDB ``store.get`` per token and
+            ``_select_bulk_targets`` runs two whole-store reads — all of which
+            sat ON the event loop, so a slow/stalled lake volume froze every
+            concurrent poll the moment the operator clicked Pull. Runs on a
+            threadpool worker; the ``HTTPException``s raised here propagate out
+            of ``run_in_threadpool`` unchanged, and the ``ValueError`` → 400
+            mapping stays OUTSIDE the offload (the #1622
+            ``api_universe_instruments`` idiom).
+            """
+            if symbols is not None:
+                selected = resolve_pull_symbols(symbols, _require_store().get)
+                return selected, f"{len(selected)} symbols spot"
+            if symbol is not None:
+                instrument = _require_store().get(symbol)
+                if instrument is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                    )
+                return [instrument], f"{symbol} spot"
+            if kind is not None:
+                return _select_bulk_targets(kind), f"{kind} spot"
             raise HTTPException(
                 status_code=400,
                 detail="pull-all requires ?symbols=..., ?symbol=... or ?kind=...",
             )
+
+        try:
+            instruments, detail = await run_in_threadpool(_resolve_selection)
+        except ValueError as exc:
+            # resolve_pull_symbols' fail-CLOSED empty/unknown-selection refusal
+            # (byte-identical to the pre-offload per-arm catch — the other arms
+            # raise HTTPException directly, which passes through untouched).
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
@@ -2850,46 +2869,63 @@ def build_app(
             years = _resolve_metadata_years(from_date, to_date)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if symbols is not None:
-            try:
-                instruments = resolve_pull_symbols(symbols, _require_store().get)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            detail = f"{len(instruments)} symbols metadata"
-        elif symbol is not None:
-            store = _require_store()
-            instrument = store.get(symbol)
-            if instrument is None:
+
+        def _resolve_selection() -> tuple[list[Instrument], str, frozenset[int]]:
+            """Resolve the metadata selection + the reference-only skip set.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class):
+            the per-token ``store.get``s, ``_select_bulk_targets``' two
+            whole-store reads AND the ``reference_only_security_ids`` scan are
+            all synchronous DuckDB reads that sat ON the event loop. One
+            threadpool closure resolves everything the launch needs;
+            ``HTTPException``s propagate unchanged, the ``ValueError`` → 400
+            mapping stays OUTSIDE (the #1622 ``api_universe_instruments``
+            idiom).
+
+            The reference-only set skips REF underlyings BEFORE the chain
+            pull's network calls (DEC-SKIP-REF-METADATA-001): a REFERENCE_ONLY
+            underlying — a spot-only index (INDIAVIX / MIDCAP50 / NIFTY100, …)
+            or a non-F&O NTM constituent (DEC-NTM-GROWW-REPOINT-001 /
+            DEC-NON-OPTION-INDEX-REFTAG-001) — has NO F&O chain, so
+            ``get_expiries`` would return empty and persist nothing (already
+            SAFE), but it still costs one wasted empty network call. The
+            store's ``reference_only_security_ids`` is the SAME set the
+            /universe REF badge uses; the caller partitions on it so a
+            mistaken REF selection is a TRUE zero-call no-op — reported, never
+            silently dropped; TRADABLE behaviour byte-unchanged.
+            """
+            if symbols is not None:
+                selected = resolve_pull_symbols(symbols, _require_store().get)
+                label = f"{len(selected)} symbols metadata"
+            elif symbol is not None:
+                instrument = _require_store().get(symbol)
+                if instrument is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                    )
+                selected = [instrument]
+                label = f"{symbol} metadata"
+            elif kind is not None:
+                selected = _select_bulk_targets(kind)
+                label = f"{kind} metadata"
+            else:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                    detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
                 )
-            instruments = [instrument]
-            detail = f"{symbol} metadata"
-        elif kind is not None:
-            instruments = _select_bulk_targets(kind)
-            detail = f"{kind} metadata"
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="pull-expiries-contracts requires ?symbols=..., ?symbol=... or ?kind=...",
-            )
+            return selected, label, _require_store().reference_only_security_ids()
+
+        try:
+            instruments, detail, reference_only_ids = await run_in_threadpool(_resolve_selection)
+        except ValueError as exc:
+            # resolve_pull_symbols' fail-CLOSED refusal (byte-identical to the
+            # pre-offload per-arm catch).
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
             # (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — never look like a real pull).
             detail = label_synthetic(detail)
-        # Skip reference-only underlyings BEFORE the chain pull's network calls
-        # (DEC-SKIP-REF-METADATA-001). A REFERENCE_ONLY underlying — a spot-only
-        # index (INDIAVIX / MIDCAP50 / NIFTY100, …) or a non-F&O NTM constituent
-        # (DEC-NTM-GROWW-REPOINT-001 / DEC-NON-OPTION-INDEX-REFTAG-001) — has NO
-        # F&O chain, so ``get_expiries`` would return empty and persist nothing
-        # (already SAFE), but it still costs one wasted empty network call. The
-        # store's ``reference_only_security_ids`` is the SAME set the /universe REF
-        # badge uses; partition on it so a mistaken REF selection is a TRUE
-        # zero-call no-op. The set is reported (never silently dropped); TRADABLE
-        # behaviour is byte-unchanged (observability + an efficiency guard, NOT a
-        # behaviour change for F&O underlyings).
-        reference_only_ids = _require_store().reference_only_security_ids()
         tradable = [inst for inst in instruments if inst.security_id not in reference_only_ids]
         skipped_reference_only = [
             inst.symbol_name for inst in instruments if inst.security_id in reference_only_ids
@@ -3004,7 +3040,7 @@ def build_app(
             }
         )
 
-    def _start_composite_historical_pull(
+    async def _start_composite_historical_pull(
         *,
         symbols: str | None,
         interval: str,
@@ -3025,18 +3061,32 @@ def build_app(
         :func:`brutex.dashboard.composite_pull.pull_historical_for_underlyings` on the
         single-flight background job (poll ``/pull-progress``). An ALL-reference-only
         selection is an honest no-op (``started: False``, never a 400).
+
+        DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003: the selection resolution (one DuckDB
+        ``store.get`` per token + the ``reference_only_security_ids`` scan) runs on
+        a threadpool worker — it sat ON the event loop, freezing every concurrent
+        poll at click time on a slow/stalled lake volume. The ``ValueError`` → 400
+        mapping stays OUTSIDE the offload (the #1622 idiom).
         """
         if symbols is None:
             raise HTTPException(
                 status_code=400,
                 detail="enumerate=true requires ?symbols=a,b,c (the multi-select)",
             )
+        selected_symbols = symbols
+
+        def _resolve_composite_selection() -> tuple[list[Instrument], list[int], frozenset[int]]:
+            """Resolve selection + year grid + REF skip set — store reads only."""
+            resolved = resolve_pull_symbols(selected_symbols, _require_store().get)
+            year_grid = _resolve_metadata_years(from_date, to_date)
+            return resolved, year_grid, _require_store().reference_only_security_ids()
+
         try:
-            instruments = resolve_pull_symbols(symbols, _require_store().get)
-            years = _resolve_metadata_years(from_date, to_date)
+            instruments, years, reference_only_ids = await run_in_threadpool(
+                _resolve_composite_selection
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        reference_only_ids = _require_store().reference_only_security_ids()
         skipped_reference_only = [
             inst.symbol_name for inst in instruments if inst.security_id in reference_only_ids
         ]
@@ -3207,7 +3257,7 @@ def build_app(
         # candles, reusing BOTH existing spines + the reference-only guard. The single-
         # underlying / contract / kind / all grammar below is byte-unchanged.
         if symbols is not None or enumerate:
-            return _start_composite_historical_pull(
+            return await _start_composite_historical_pull(
                 symbols=symbols,
                 interval=interval,
                 intervals=intervals,
@@ -3220,19 +3270,51 @@ def build_app(
                 lake_root=lake_root,
             )
         registry_path = lake_root / "registry.duckdb"
-        # Resolve the selection to concrete registry rows BEFORE the job starts, so an
-        # empty/no-match selection is an immediate honest 400 (never a fabricated contract).
-        with RegistryStore.open(registry_path) as registry:
-            selected = _resolve_historical_contracts(
-                registry,
-                contract=contract,
-                contracts=contracts,
-                underlying=underlying,
-                expiry_date=expiry_date,
-                kind=kind,
-                all_cached=all,
-                select_kind=_select_bulk_targets,
+
+        def _resolve_direct_selection() -> tuple[list[ContractRow], dict[str, bool]]:
+            """Resolve the direct grammar to registry rows + the six-step kind map.
+
+            DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 (the M16 launch-route class — the
+            WORST offender): ``RegistryStore.open`` + ``_resolve_historical_contracts``
+            (a full ``list_contracts`` over the whole cached chain) +
+            ``_underlying_kind_map`` over BOTH ``_select_bulk_targets`` reads all ran
+            ON the event loop, so a click on "Pull historical" froze every concurrent
+            dashboard request for the whole resolution on a slow/stalled volume. The
+            selection is still resolved BEFORE the job starts, so an empty/no-match
+            selection stays an immediate honest 400 (raised by the caller — never a
+            fabricated contract).
+
+            Six-step order on the DIRECT-selection grammars too
+            (DEC-PULL-SIX-STEP-ORDER-001 review fix): this route's
+            ?contract/?contracts/?underlying/?kind/?all paths ran the legacy 2-bucket
+            FUT-then-OPT order because no ``underlying_kinds`` was threaded —
+            reproducing the motivating 2026-07-05 inversion (stock options before
+            index options) on a real vendor pull. Build the classification map over
+            EVERY admitted underlying (both kinds) with the SAME resolved-key builder
+            the composite uses; a selection whose underlying is somehow absent orders
+            stock-side (WARNed + counted inside the spine, never dropped). Built at
+            launch time on the worker, captured by the job closure below; skipped
+            entirely for an empty selection (the pre-offload order — the map was
+            never built when the 400 fired first).
+            """
+            with RegistryStore.open(registry_path) as registry:
+                rows = _resolve_historical_contracts(
+                    registry,
+                    contract=contract,
+                    contracts=contracts,
+                    underlying=underlying,
+                    expiry_date=expiry_date,
+                    kind=kind,
+                    all_cached=all,
+                    select_kind=_select_bulk_targets,
+                )
+            if not rows:
+                return [], {}
+            return rows, _underlying_kind_map(
+                _select_bulk_targets("index") + _select_bulk_targets("stock")
             )
+
+        selected, underlying_kinds = await run_in_threadpool(_resolve_direct_selection)
         if not selected:
             raise HTTPException(
                 status_code=400,
@@ -3241,18 +3323,6 @@ def build_app(
                     "(the ⛓ button), then select a contract / chain / underlying / all"
                 ),
             )
-        # Six-step order on the DIRECT-selection grammars too (DEC-PULL-SIX-STEP-ORDER-001
-        # review fix): this route's ?contract/?contracts/?underlying/?kind/?all paths ran
-        # the legacy 2-bucket FUT-then-OPT order because no ``underlying_kinds`` was
-        # threaded — reproducing the motivating 2026-07-05 inversion (stock options
-        # before index options) on a real vendor pull. Build the classification map over
-        # EVERY admitted underlying (both kinds) with the SAME resolved-key builder the
-        # composite uses; a selection whose underlying is somehow absent orders
-        # stock-side (WARNed + counted inside the spine, never dropped). Built at route
-        # time (request thread), captured by the job closure below.
-        underlying_kinds = _underlying_kind_map(
-            _select_bulk_targets("index") + _select_bulk_targets("stock")
-        )
         detail = f"{len(selected)} contracts historical"
         if dry_run:
             # Explicit synthetic run: the progress title must SAY so loudly
@@ -4283,11 +4353,16 @@ def build_app(
         ``?dry_run=true`` runs the loudly-labeled synthetic pass.
         """
         dry_run = _gate_pull_dry_run(dry_run, route="universe.retry_failed")
+
         # SHARED selection resolver (CLAUDE.md §11 COMMON — the same precedence
         # symbols > symbol > whole-universe the pull-pipeline uses; fail-CLOSED on an
-        # empty/unknown selection → 400, DEC-PULL-SELECTED-PIPELINE-001).
-        try:
-            instruments, target_source = resolve_pull_targets(
+        # empty/unknown selection → 400, DEC-PULL-SELECTED-PIPELINE-001). Resolved on
+        # a threadpool worker (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 — the per-token
+        # `store.get`s + the two whole-store `_select_bulk_targets` reads are
+        # synchronous DuckDB reads that sat ON the event loop); the ValueError → 400
+        # mapping stays OUTSIDE the offload (the #1622 api_universe_instruments idiom).
+        def _resolve_targets() -> tuple[list[Instrument], str]:
+            return resolve_pull_targets(
                 symbols=symbols,
                 symbol=symbol,
                 lookup=_require_store().get,
@@ -4295,6 +4370,9 @@ def build_app(
                     _select_bulk_targets("index") + _select_bulk_targets("stock")
                 ),
             )
+
+        try:
+            instruments, target_source = await run_in_threadpool(_resolve_targets)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         detail = f"retry {symbols or symbol or (kind or 'all')} spot ({target_source})"

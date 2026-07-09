@@ -22,6 +22,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Generator, Iterator
 from pathlib import Path
@@ -285,3 +286,161 @@ def test_sweep_progress_stalled_read_keeps_loop_free_and_is_bounded(
         time.sleep(0.2)
     assert healed is not None, "the memo never self-healed after the volume recovered"
     assert healed["progress_source"] in ("live", "cached")
+
+
+# ── DEC-DASHBOARD-EVENTLOOP-OFFLOAD-003 — the pull-LAUNCH routes' resolver reads ──
+
+
+def _post(port: int, path: str, timeout: float) -> tuple[int, bytes]:
+    """Blocking POST via stdlib urllib (called from worker threads); 4xx returned, not raised."""
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(  # noqa: S310 — fixed local http://127.0.0.1 test URL
+            request, timeout=timeout
+        ) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:  # a 400/503 refusal IS the expected answer
+        return exc.code, exc.read()
+
+
+def _assert_launch_resolution_off_loop(
+    server: _RealServer,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    patch_target: str,
+    stall_return: object,
+    launch_path: str,
+    expect_status: int,
+    expect_detail: bytes,
+) -> None:
+    """Stall a launch route's resolver read, prove /api/v1/state stays free.
+
+    The M16 class: the POST pull-launch routes resolved their selection
+    (RegistryStore.open / _resolve_historical_contracts / _select_bulk_targets /
+    store.get / reference_only_security_ids / _underlying_kind_map) ON the
+    uvicorn event loop — a slow/stalled lake volume froze every concurrent poll
+    the moment the operator clicked a Pull button. Post-fix the resolution runs
+    on a threadpool worker: the launch request itself still waits for its
+    resolver (no deadline claimed — validation semantics preserved), but a
+    concurrent ``/api/v1/state`` poll answers fast, and the eventually-released
+    launch completes with its EXACT pre-offload validation answer.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _stall(*_a: object, **_k: object) -> object:
+        entered.set()
+        release.wait(timeout=_STALL_S)
+        return stall_return
+
+    monkeypatch.setattr(patch_target, _stall)
+
+    blocked: dict[str, Any] = {}
+
+    def _fire_blocked() -> None:
+        try:
+            blocked["status"], blocked["body"] = _post(server.port, launch_path, timeout=15.0)
+        except Exception as exc:  # pragma: no cover - only on a hung/failed offload
+            blocked["error"] = repr(exc)
+
+    thread = threading.Thread(target=_fire_blocked, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(timeout=_STALL_S + 2.0), "the stalled resolver was never entered"
+        start = time.perf_counter()
+        status, _ = _get(server.port, "/api/v1/state", timeout=_STALL_S + 2.0)
+        elapsed = time.perf_counter() - start
+        assert status == 200
+        assert elapsed < _POLL_BUDGET_S, (
+            f"/api/v1/state took {elapsed * 1000:.0f}ms while {launch_path} resolved — "
+            "the launch resolver is running ON the uvicorn event loop (regression)."
+        )
+    finally:
+        release.set()
+        thread.join(timeout=10.0)
+    assert not thread.is_alive(), f"the blocked {launch_path} request never completed"
+    assert "error" not in blocked, f"blocked request failed: {blocked.get('error')}"
+    # Behaviour parity: the released launch answers EXACTLY as before the offload.
+    assert blocked["status"] == expect_status, blocked
+    assert expect_detail in bytes(blocked["body"]), blocked
+
+
+def test_pull_single_symbol_lookup_off_loop_real_server(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/pull: the store.get lookup must resolve on a worker."""
+    _assert_launch_resolution_off_loop(
+        server,
+        monkeypatch,
+        patch_target="brutex.data.instrument_store.InstrumentStore.get",
+        stall_return=None,
+        launch_path="/api/v1/universe/pull?symbol=GHOST&dry_run=true",
+        expect_status=400,
+        expect_detail=b"unknown security_id",
+    )
+
+
+def test_pull_all_selection_off_loop_real_server(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/pull-all: the selection resolution must run on a worker."""
+    _assert_launch_resolution_off_loop(
+        server,
+        monkeypatch,
+        patch_target="brutex.data.instrument_store.InstrumentStore.get",
+        stall_return=None,
+        launch_path="/api/v1/universe/pull-all?symbol=GHOST&dry_run=true",
+        expect_status=400,
+        expect_detail=b"unknown security_id",
+    )
+
+
+def test_pull_expiries_contracts_selection_off_loop_real_server(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/pull-expiries-contracts: selection + REF set on a worker."""
+    _assert_launch_resolution_off_loop(
+        server,
+        monkeypatch,
+        patch_target="brutex.data.instrument_store.InstrumentStore.get",
+        stall_return=None,
+        launch_path="/api/v1/universe/pull-expiries-contracts?symbol=GHOST&dry_run=true",
+        expect_status=400,
+        expect_detail=b"unknown security_id",
+    )
+
+
+def test_pull_historical_direct_selection_off_loop_real_server(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/pull-historical: registry resolution must run on a worker.
+
+    The WORST M16 offender: RegistryStore.open + _resolve_historical_contracts
+    (a full list_contracts) + _underlying_kind_map all ran on the loop. The
+    stub stalls the contract resolution and returns an empty match, so the
+    released launch answers the EXACT pre-offload honest 400.
+    """
+    _assert_launch_resolution_off_loop(
+        server,
+        monkeypatch,
+        patch_target="brutex.dashboard.app._resolve_historical_contracts",
+        stall_return=[],
+        launch_path="/api/v1/universe/pull-historical?contract=NSE-NIFTY-X&dry_run=true",
+        expect_status=400,
+        expect_detail=b"no cached contracts matched",
+    )
+
+
+def test_retry_failed_selection_off_loop_real_server(
+    server: _RealServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /universe/retry-failed: resolve_pull_targets must run on a worker."""
+    _assert_launch_resolution_off_loop(
+        server,
+        monkeypatch,
+        patch_target="brutex.data.instrument_store.InstrumentStore.get",
+        stall_return=None,
+        launch_path="/api/v1/universe/retry-failed?symbols=GHOST&dry_run=true",
+        expect_status=400,
+        expect_detail=b"GHOST",
+    )
