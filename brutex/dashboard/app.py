@@ -80,6 +80,7 @@ from brutex.dashboard.composite_pull import (
     _underlying_kind_map,  # pyright: ignore[reportPrivateUsage]
     pull_historical_for_underlyings,
 )
+from brutex.dashboard.coverage_missing import build_missing_sessions_payload
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -88,6 +89,7 @@ from brutex.dashboard.coverage_view import (
 from brutex.dashboard.db_view import (
     REGISTRY_CONTRACT_COLUMNS,
     REGISTRY_EXPIRY_COLUMNS,
+    SPOT_VERDICT_INTERVALS,
     fno_candle_lake_schema,
     list_candle_datasets,
     list_columns,
@@ -104,6 +106,7 @@ from brutex.dashboard.db_view import (
     sample_rows,
     spot_window_rollup,
     summarize_option_datasets,
+    summarize_spot_datasets,
     summarize_spot_verdict_datasets,
     table_summary,
 )
@@ -258,6 +261,7 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -283,6 +287,7 @@ from brutex.data.mapping_integrity import (
 )
 from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
+from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
@@ -1642,6 +1647,11 @@ def build_app(
     # (Golden Rule #1). REUSES the COMMON generation-stamped LRU `MoversSnapshotCache` (the
     # SAME generic memo `_db_datasets_cache` / `_candle_count_cache` use; no new class).
     _coverage_cache = MoversSnapshotCache()
+    # The /coverage/missing-sessions drill cache (DEC-COVERAGE-MISSING-SESSIONS-001): the
+    # session_dates-enriched spot scan (ONE array_agg(DISTINCT ist_date) folded into the
+    # existing coverage aggregate — O(bars), no extra pass) is memoised per write-generation
+    # so a repeat drill within one generation is an O(1) handoff and a pull re-derives it.
+    _missing_sessions_cache = MoversSnapshotCache()
     _universe_completeness_cache = MoversSnapshotCache()
     _mapping_integrity_cache = MoversSnapshotCache()
     # The /universe lake-uniqueness census (DEC-LAKE-HEAL-001) deliberately does
@@ -4736,6 +4746,75 @@ def build_app(
             )
 
         return JSONResponse(await run_in_threadpool(_rows_and_rollup))
+
+    @app.get("/api/v1/coverage/missing-sessions")
+    async def api_coverage_missing_sessions(
+        symbol: str | None = None,
+        exchange: str | None = None,
+        interval: str | None = None,
+        range_start: str | None = None,
+        range_end: str | None = None,
+    ) -> JSONResponse:
+        """GET /api/v1/coverage/missing-sessions — the per-date trading-day gap drill.
+
+        DEC-COVERAGE-MISSING-SESSIONS-001 — closes the long-disclaimed *"per-window gap
+        audit not claimed"* hole: for every fetched-``1minute`` spot dataset it lists the
+        EXACT NSE/BSE trading sessions with no stored bar over the audited range, so the
+        operator can re-pull precisely the missing dates BEFORE committing a 2-4 day sweep
+        (this also feeds the night-pull short-day check). Optional ``?symbol=``/
+        ``?exchange=``/``?interval=`` filters (case-insensitive exact) narrow the drill;
+        ``?range_start=``/``?range_end=`` (ISO ``YYYY-MM-DD``) override the default
+        ``[first_date, last_date]`` interior-gap range (e.g. to audit against the 2020 pull
+        floor). READ-ONLY — no pull logic.
+
+        **Honest envelope (Golden Rule #10):** the distinct stored dates come from ONE
+        ``array_agg(DISTINCT ist_date)`` folded into the SAME per-session coverage scan
+        (O(bars), cached per write-generation — no extra pass); the set-difference per
+        dataset is O(sessions), NOT O(1). Muhurat evening sessions fall on holidays, so
+        they are never *expected* and never flagged missing. The audit ABSTAINS (an honest
+        ``abstain_reason``, never a fabricated "0 gaps") on an unparseable/out-of-coverage
+        range or missing stored dates. No filesystem-backed store → a well-shaped empty
+        payload, never a 500.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse(build_missing_sessions_payload([]))
+        lake = lake_root.parent
+
+        def _recompute() -> list[dict[str, Any]]:
+            """The session_dates-enriched spot scan (cache-miss / dirty path only).
+
+            Runs on a threadpool worker, building ``store.connection`` here so the store
+            RLock stays on one thread. FNO-pruned + bounded to the spot verdict intervals
+            (the ~10⁵-10⁶ F&O contract partitions never carry a spot gap audit); the
+            ``session_date_segments`` opt-in adds the DISTINCT-ist-date ``array_agg`` to the
+            existing single per-session CTE — no second lake pass.
+            """
+            return summarize_spot_datasets(
+                store.connection,
+                lake,
+                exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT}),
+                intervals=SPOT_VERDICT_INTERVALS,
+                session_date_segments=frozenset(SPOT_PROBE_SEGMENTS),
+            )
+
+        def _work() -> dict[str, Any]:
+            rows = _missing_sessions_cache.get_or_compute(
+                "coverage_missing_sessions",
+                generation=_summary_cache.generation,
+                compute=_recompute,
+            )
+            return build_missing_sessions_payload(
+                rows,
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                range_start=range_start,
+                range_end=range_end,
+            )
+
+        return JSONResponse(await run_in_threadpool(_work))
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:

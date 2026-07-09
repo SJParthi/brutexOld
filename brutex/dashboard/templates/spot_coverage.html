@@ -124,6 +124,25 @@
     .panelwrap { padding: 10px 14px 16px; }
     .stalebar { left: 14px; right: 14px; top: 10px; }
   }
+  /* ── Missing-session gap drill (DEC-COVERAGE-MISSING-SESSIONS-001) ── */
+  .drillwrap { padding: 4px 24px 28px; }
+  .drillhead { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
+  .drillhead strong { color:var(--text-bright); font-size:14px; }
+  .drillsub { color:var(--muted); font-size:12px; flex:1 1 320px; }
+  .drillhead button { background:var(--blue); color:#fff; border:0; border-radius:8px;
+    padding:7px 14px; font-size:12px; font-weight:700; cursor:pointer; }
+  .drillhead input { background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+    border-radius:8px; padding:7px 10px; font-size:12px; }
+  .drillrow { border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:10px;
+    background:var(--surface); }
+  .drillrow .head { display:flex; gap:14px; flex-wrap:wrap; align-items:baseline; margin-bottom:6px; }
+  .drillrow .sym { font-weight:700; color:var(--text-bright); }
+  .drillrow .meta { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+  .drillrow .gapcount { color:var(--yellow); font-weight:700; font-size:12px; }
+  .drillrow .clean { color:var(--green, #34d399); font-weight:700; font-size:12px; }
+  .drillrow .dates { color:var(--text); font-size:12px; font-family:var(--mono, monospace);
+    word-break:break-word; line-height:1.7; }
+  .drillrow .abstain { color:var(--muted); font-size:12px; font-style:italic; }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
 <!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, padding-only
@@ -141,7 +160,7 @@
   <header>
     <div class="brandmark" aria-hidden="true">B</div>
     <div class="logo">BruteX</div>
-    <div class="sub">Spot coverage — one row per spot dataset · fetch-window chip = ledger-settled within planned ranges (range density feeds the /completeness amber chip; per-window gap audit not claimed)</div>
+    <div class="sub">Spot coverage — one row per spot dataset · fetch-window chip = ledger-settled within planned ranges (range density feeds the /completeness amber chip) · the per-date missing-session gap list is below (DEC-COVERAGE-MISSING-SESSIONS-001)</div>
     <nav class="topnav" aria-label="Primary">
       <a href="/">Operator</a>
       <span class="sep">·</span>
@@ -187,6 +206,20 @@
         <span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span><span class="bx-skel bx-skel-cell"></span>
       </div>
     </div>
+  </div>
+
+  <!-- Missing-session gap drill (DEC-COVERAGE-MISSING-SESSIONS-001): the exact
+       trading-day gap list the "per-window gap audit not claimed" disclaimer
+       always deferred. ON-DEMAND (one cached O(bars) scan + O(sessions) diff),
+       so it never rides the 4 s spot poll. textContent/createElement only. -->
+  <div class="drillwrap" id="drillwrap">
+    <div class="drillhead">
+      <strong>Missing-session gap list</strong>
+      <span class="drillsub">Exact NSE/BSE trading sessions with no stored 1-minute bar — re-pull these dates before a sweep. Honest envelope: one cached O(bars) scan + an O(sessions) diff; muhurat/holidays/weekends are never expected. Interior gaps of the covered span; add ?from/?to to audit a wider range.</span>
+      <input type="text" id="drillsym" placeholder="symbol filter (e.g. NIFTY)" aria-label="symbol filter" />
+      <button type="button" id="drillbtn">Load gap list</button>
+    </div>
+    <div id="drill"></div>
   </div>
 
 <script>
@@ -404,6 +437,90 @@ async function poll() {
     showFailure({ offline: !timedOut, verdict: timedOut ? "timed out" : "offline" });
   }
 }
+
+/* ── Missing-session gap drill (DEC-COVERAGE-MISSING-SESSIONS-001) ──
+   On-demand fetch of /api/v1/coverage/missing-sessions; renders the per-dataset
+   drill via createElement + textContent ONLY — every value, including the symbol
+   and the missing ISO dates, is a text node, so a hostile lake key/date can never
+   inject markup (XSS-safe). Never throws into the poll loop. */
+const drillBtn = document.getElementById("drillbtn");
+const drillOut = document.getElementById("drill");
+const drillSym = document.getElementById("drillsym");
+
+function drillMsg(text) {
+  while (drillOut.firstChild) { drillOut.removeChild(drillOut.firstChild); }
+  const d = document.createElement("div");
+  d.className = "empty";
+  d.textContent = text;
+  drillOut.appendChild(d);
+}
+
+function renderMissing(body) {
+  while (drillOut.firstChild) { drillOut.removeChild(drillOut.firstChild); }
+  const rows = (body && body.rows) || [];
+  if (!rows.length) {
+    drillMsg("no fetched 1-minute spot datasets to audit yet");
+    return;
+  }
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "drillrow";
+    const head = document.createElement("div");
+    head.className = "head";
+    const sym = document.createElement("span");
+    sym.className = "sym";
+    sym.textContent = String(r.symbol) + " · " + String(r.exchange);
+    head.appendChild(sym);
+    if (r.abstained) {
+      const ab = document.createElement("span");
+      ab.className = "abstain";
+      ab.textContent = "cannot audit — " + String(r.abstain_reason);
+      head.appendChild(ab);
+      row.appendChild(head);
+      drillOut.appendChild(row);
+      continue;
+    }
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = num(r.present_count) + " / " + num(r.expected_count)
+      + " sessions stored · " + String(r.range_start) + " → " + String(r.range_end);
+    head.appendChild(meta);
+    const cnt = document.createElement("span");
+    const missing = r.missing_count || 0;
+    cnt.className = missing > 0 ? "gapcount" : "clean";
+    cnt.textContent = missing > 0 ? (num(missing) + " missing") : "no gaps";
+    head.appendChild(cnt);
+    row.appendChild(head);
+    if (missing > 0) {
+      const dates = document.createElement("div");
+      dates.className = "dates";
+      let txt = (r.missing_dates || []).join(", ");
+      if (r.missing_truncated) { txt += " … (+" + num(missing - (r.missing_dates || []).length) + " more)"; }
+      dates.textContent = txt;
+      row.appendChild(dates);
+    }
+    drillOut.appendChild(row);
+  }
+}
+
+async function loadMissing() {
+  drillBtn.disabled = true;
+  drillMsg("scanning the lake for gaps…");
+  let url = "/api/v1/coverage/missing-sessions";
+  const sym = (drillSym.value || "").trim();
+  if (sym) { url += "?symbol=" + encodeURIComponent(sym); }
+  try {
+    const r = await doFetch(url);
+    if (!r.ok) { drillMsg("couldn't load gap list — error " + r.status); return; }
+    renderMissing(JSON.parse(await r.text()));
+  } catch (e) {
+    drillMsg((e && e.timeout) ? "gap list timed out — retry" : "gap list offline — retry");
+  } finally {
+    drillBtn.disabled = false;
+  }
+}
+drillBtn.addEventListener("click", loadMissing);
+drillSym.addEventListener("keydown", function (e) { if (e.key === "Enter") loadMissing(); });
 
 poll();
 setInterval(poll, 4000);
