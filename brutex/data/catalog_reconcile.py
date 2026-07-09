@@ -50,8 +50,11 @@ from brutex.data.partition import BAR_DIR_NAME, parse_partition_path
 __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
 
 #: One ``catalog.reconcile.parquet_skip`` warning per unreadable partition file, so a
-#: corrupt Parquet that would otherwise crash the FIRST step of every sweep load + F&O
-#: window derivation is surfaced + skipped, never silent (GAP #9).
+#: corrupt / present-but-unreadable Parquet that would otherwise crash the FIRST step of
+#: every sweep load + F&O window derivation is surfaced + skipped, never silent (GAP #9).
+#: A present-but-unreadable fault (corrupt decode, or a NON-ENOENT OSError — directory /
+#: permission / EIO) additionally lands on ``ReconcileResult.unreadable`` so the launch
+#: REFUSES; a ``FileNotFoundError`` vanished file stays a benign skip (#1635 round 2 M3).
 _LOG = structlog.get_logger("brutex.data.catalog_reconcile")
 
 
@@ -71,23 +74,27 @@ class ReconcileResult:
         version-incompatible Parquet — logged ``catalog.reconcile.parquet_skip``
         and skipped instead of crashing the whole reconcile, GAP #9).
     unreadable
-        Absolute paths of the CORRUPT / version-incompatible Parquet partition
-        files skipped by the GAP-#9 ``except pl.exceptions.PolarsError`` arm
-        ONLY (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1635 —
-        review round 1 NARROWED the populating arm to the polars decode
-        failure) — the distinct corrupt-class subset of ``skipped``. A benign
-        ``PartitionError`` (unparseable path), a zero-row partition, AND an
-        ``OSError`` file-level fault (a VANISHED file — ENOENT from a
-        concurrent heal/fetch — or a transient FS blip) are data ABSENCE, not
-        data LOSS, and are counted in ``skipped`` but NEVER here (the
-        false-refuse guard: "absent != corrupt", and the sweep-launch refusal
-        has no escape flag, so a transient glitch must never abort a multi-day
-        launch). Populated so the ``brutex sweep-all`` launch can REFUSE
-        loudly on a corrupt month — an INTERIOR hole invisible in the swept
-        output that silently poisons the PDH/PDL/pivot/Fib anchors
-        (bits 6-29+48-51) while ``data_snapshot_hash`` stamps the holed series
-        as canonical (Golden Rule #4). Defaulted ``()`` so every existing
-        three-/four-field construction stays compatible.
+        Absolute paths of the CORRUPT / PRESENT-but-unreadable Parquet
+        partition files — the distinct data-LOSS subset of ``skipped``
+        (DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001, MIGRATION.md #1635). Populated
+        by (a) the ``except pl.exceptions.PolarsError`` arm (a corrupt /
+        version-incompatible decode) AND (b) the ``except OSError`` arm for
+        every NON-``FileNotFoundError`` OS fault — a data-bearing DIRECTORY
+        named ``<mm>.parquet/`` (``IsADirectoryError``), a chmod-000 /
+        wrong-owner file (``PermissionError``), an ``EIO`` device fault — each
+        holds REAL data the sweep would silently skip (review round 2 M3
+        REVERSED the round-1 "all OSError → benign" carve-out, which holed the
+        launch for present-but-unreadable data). ONLY three classes stay
+        benignly on ``skipped`` and NEVER reach here (the false-refuse guard,
+        "absent != corrupt"): a ``PartitionError`` (unparseable path), a
+        zero-row partition, and a ``FileNotFoundError`` VANISHED file (ENOENT
+        from a concurrent heal/fetch racing the glob — the escape-less launch
+        refusal must not abort on a transient glitch). Populated so the
+        ``brutex sweep-all`` launch can REFUSE loudly on such a month — an
+        INTERIOR hole invisible in the swept output that silently poisons the
+        PDH/PDL/pivot/Fib anchors (bits 6-29+48-51) while ``data_snapshot_hash``
+        stamps the holed series as canonical (Golden Rule #4). Defaulted ``()``
+        so every existing three-/four-field construction stays compatible.
     findings
         Lake invariant findings detected by the free L1 piggyback
         (DEC-LAKE-HEAL-001, ``check_invariants=True``): intra-file duplicate
@@ -207,12 +214,14 @@ def reconcile_catalog_from_lake(
             symbol_dirs.setdefault(
                 (cast(str, coords["exchange"]), cast(str, coords["segment"])), set()
             ).add(cast(str, coords["symbol"]))
-        # GAP #9: a single corrupt / version-incompatible Parquet file (a polars
-        # PolarsError, or an OSError fault) must NOT crash the whole reconcile — which
+        # GAP #9: a single unreadable Parquet file (a polars PolarsError decode
+        # failure, or an OSError fault) must NOT crash the whole reconcile — which
         # runs at the START of every sweep load + F&O window derivation. Log + skip that
         # one file (counted in `skipped`) and continue; every readable partition still
-        # reconciles. NARROW set (the two arms below): a genuine code bug still
-        # propagates (Golden Rule #1).
+        # reconciles. NARROW set (the three arms below): a genuine code bug still
+        # propagates (Golden Rule #1). The three arms split the fault by MEANING:
+        # PolarsError + non-ENOENT OSError are present-but-unreadable (→ `unreadable` →
+        # launch REFUSES), while FileNotFoundError alone is a benign vanished-file skip.
         try:
             timestamps = pl.read_parquet(path, columns=["timestamp"]).get_column("timestamp")
             row_count = timestamps.len()
@@ -234,15 +243,33 @@ def reconcile_catalog_from_lake(
             skipped += 1
             unreadable.append(str(path))
             continue
-        except OSError as exc:
-            # #1635 review round 1 (M1): an OSError is a FILE-LEVEL fault — a
-            # VANISHED file (ENOENT from a concurrent heal/fetch racing the glob)
-            # or a transient FS blip — data ABSENCE, not data LOSS. Count it as a
-            # benign ``skipped`` (WARN kept) and NEVER on ``unreadable``: the
-            # sweep-launch refusal has no escape flag, so a transient glitch must
-            # not abort a multi-day launch ("absent != corrupt").
+        except FileNotFoundError as exc:
+            # #1635 review round 2 (M3): ``FileNotFoundError`` (ENOENT) ONLY is a
+            # genuine VANISHED file — a concurrent heal/fetch raced the glob and the
+            # partition was gone by read time — data ABSENCE, not data LOSS. Count it
+            # a benign ``skipped`` (WARN kept) and NEVER on ``unreadable``: the
+            # escape-less sweep-launch refusal must not abort a multi-day launch on a
+            # transient glitch ("absent != corrupt"). This is the ONLY OSError subclass
+            # treated benignly — every other is present-but-unreadable (the arm below).
             _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
             skipped += 1
+            continue
+        except OSError as exc:
+            # #1635 review round 2 (M3): a NON-ENOENT OSError is a PRESENT-but-
+            # UNREADABLE partition, NOT absence — the exact silent-partial class this
+            # refusal exists to close. Concrete shapes: a data-bearing DIRECTORY named
+            # ``<mm>.parquet/`` (``pl.read_parquet`` reads its real rows, then
+            # ``path.read_bytes()`` raises ``IsADirectoryError`` — the #1558 FIX-ROUND-8
+            # dataset-directory shape); a chmod-000 / wrong-owner file
+            # (``PermissionError``); an ``EIO`` device fault. Each holds REAL data the
+            # sweep would silently skip (poisoning the PDH/PDL/pivot/Fib anchors while
+            # ``data_snapshot_hash`` stamps the holed series canonical), so it joins
+            # ``unreadable`` and REFUSES the launch loudly (present != absent). This
+            # REVERSES the round-1 "all OSError → benign" carve-out, which holed the
+            # launch for present-but-unreadable data.
+            _LOG.warning("catalog.reconcile.parquet_skip", path=str(path), error=str(exc))
+            skipped += 1
+            unreadable.append(str(path))
             continue
         if check_invariants:
             # DEC-LAKE-HEAL-001 L1: classification rides the timestamp column this

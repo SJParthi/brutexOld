@@ -10,7 +10,10 @@ identity" WARN on a perfectly healthy resume (and, inversely, a run-N failed
 count whose store survived from an earlier run could inflate the allowance and
 mask a real deletion). The fix classifies each missing store DETERMINISTICALLY
 in the pass — an empty bar slice ⇒ expected-missing, resume or not — and the
-CLI threads only the run-scoped ``tuples_failed + tuples_quarantined_prior``.
+CLI threads the run-scoped FAILED count. Review round 2 M1 then narrowed the
+COUNT to ``tuples_failed`` ONLY: the quarantined-prior class is attributed BY
+IDENTITY (the ``.sweep_quarantine.json`` label set via ``quarantined_labels``),
+so a STALE sidecar count can no longer be spent on an unrelated deletion.
 
 Both tests drive the REAL ``cmd_sweep_all`` twice over one results_root (the
 second run is a full checkpoint resume: every tuple folds into

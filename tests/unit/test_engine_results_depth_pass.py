@@ -666,7 +666,8 @@ class TestMissingStoreLoud:
     """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): a missing
     finalist store is classified deterministically (no-bars ⇒ expected; bars
     present ⇒ deletion-suspect), counted + capped-INFO'd + — when the
-    bars-present count exceeds the run-scoped failed/quarantined allowance —
+    bars-present, not-quarantined count exceeds the run-scoped FAILED
+    allowance (round 2 M1: the quarantined-prior class is identity-attributed) —
     WARNed loud with an actionable path sample. The out_root fixture swept the
     ONE-arm _grid(); running the pass over the TWO-arm grid leaves the tp=None
     tuple with no store on disk — exactly one (bars-present) missing store."""
@@ -735,7 +736,9 @@ class TestMissingStoreLoud:
         tallies = _Tallies()
         with capture_logs() as logs:
             for i in range(_MISSING_STORE_LOG_CAP + 5):
-                _note_missing_store(Path(f"/lake/{i}.parquet"), tallies, no_bars=False)
+                _note_missing_store(
+                    Path(f"/lake/{i}.parquet"), tallies, no_bars=False, quarantined=False
+                )
         infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
         assert len(infos) == _MISSING_STORE_LOG_CAP  # INFO capped
         assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 5  # count uncapped
@@ -754,7 +757,9 @@ class TestMissingStoreLoud:
         tallies = _Tallies()
         with capture_logs() as logs:
             for i in range(_MISSING_STORE_LOG_CAP + 3):
-                _note_missing_store(Path(f"/lake/nb-{i}.parquet"), tallies, no_bars=True)
+                _note_missing_store(
+                    Path(f"/lake/nb-{i}.parquet"), tallies, no_bars=True, quarantined=False
+                )
         infos = [log for log in logs if log["event"] == "results_depth.missing_store_no_bars"]
         assert len(infos) == _MISSING_STORE_LOG_CAP  # shared INFO cap
         assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 3
@@ -819,6 +824,141 @@ class TestMissingStoreLoud:
         assert not [
             log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
         ]
+
+
+class TestMissingStoreQuarantineIdentity:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M1): a
+    quarantined-prior missing store is attributed BY IDENTITY (the sidecar
+    label set), NOT by a stale COUNT — so a stale entry for a tuple whose store
+    now EXISTS can never launder an UNRELATED deletion into a silent green run.
+    Plus round-2 MUST-FIX 2: a raising ``bars_for`` on a missing store
+    quarantines ONLY that tuple (never aborts the pass)."""
+
+    def _two_symbol_swept(self, dest: Path) -> SweepGridConfig:
+        dest.mkdir()
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        _run_sweep(dest, grid, _BARS)
+        return grid
+
+    def test_stale_quarantine_identity_never_masks_a_deletion(self, tmp_path: Path) -> None:
+        """THE round-2 M1 refuter repro: a STALE quarantine entry for tuple T
+        (whose store still EXISTS) + a deleted UNRELATED tuple D (bars present)
+        → the WARN FIRES naming D. The pre-fix count-based code
+        (``expected_missing = tuples_failed + tuples_quarantined_prior``, a
+        caller passing an allowance of 1) was SILENT here: missing(1) −
+        allowance(1) = 0."""
+        from brutex.engine.sweep_supervisor import tuple_label
+
+        dest = tmp_path / "sweeps"
+        grid = self._two_symbol_swept(dest)
+        tuples = list(iter_sweep_tuples(grid))
+        d_tuple, t_tuple = tuples[0], tuples[1]
+        d_store = tuple_store_path(dest, d_tuple, grid)
+        t_store = tuple_store_path(dest, t_tuple, grid)
+        assert d_store.exists() and t_store.exists()  # both swept
+        d_store.unlink()  # the genuine deletion
+        with capture_logs() as logs:
+            report = _run_pass(
+                dest,
+                grid,
+                expected_missing=0,  # FAILED-only allowance; no failures this run
+                quarantined_labels=frozenset({tuple_label(t_tuple)}),  # STALE: T exists
+            )
+        assert report.tuples_missing_store == 1
+        # The stale identity matched NOTHING (T is not missing), so it granted
+        # ZERO allowance — the deletion of D is loudly unexplained.
+        assert report.missing_expected_quarantined == 0
+        assert report.missing_store_unexplained == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["missing_quarantined"] == 0
+        assert d_store.name in str(warns[0]["sample"])
+
+    def test_quarantined_identity_explains_a_genuinely_missing_tuple(self, tmp_path: Path) -> None:
+        """The complement: when the MISSING tuple's own identity is in the
+        sidecar set, it is explained (``missing_expected_quarantined``) — a
+        capped INFO, NEVER the unexplained WARN."""
+        from brutex.engine.sweep_supervisor import tuple_label
+
+        dest = tmp_path / "sweeps"
+        grid = self._two_symbol_swept(dest)
+        d_tuple = next(iter_sweep_tuples(grid))
+        d_store = tuple_store_path(dest, d_tuple, grid)
+        d_store.unlink()
+        with capture_logs() as logs:
+            report = _run_pass(
+                dest,
+                grid,
+                expected_missing=0,
+                quarantined_labels=frozenset({tuple_label(d_tuple)}),
+            )
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_quarantined == 1
+        assert report.missing_store_unexplained == 0
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_quarantined"]
+        assert len(infos) == 1
+        assert report.missing_store_sample == ()  # quarantined misses are never sampled
+
+    def test_note_missing_store_quarantined_shares_the_info_cap(self) -> None:
+        from brutex.engine.results_depth_pass import (
+            _MISSING_STORE_LOG_CAP,
+            _note_missing_store,
+        )
+
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(_MISSING_STORE_LOG_CAP + 4):
+                _note_missing_store(
+                    Path(f"/lake/q-{i}.parquet"), tallies, no_bars=False, quarantined=True
+                )
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_quarantined"]
+        assert len(infos) == _MISSING_STORE_LOG_CAP  # shared INFO cap
+        assert tallies.missing_expected_quarantined == _MISSING_STORE_LOG_CAP + 4
+        assert tallies.missing_store_sample == []  # never sampled
+        assert not [log for log in logs if log["event"] == "results_depth.missing_store"]
+
+    def test_raising_bars_for_on_missing_store_quarantines_one_tuple(self, tmp_path: Path) -> None:
+        """Round-2 MUST-FIX 2: the ``_bars`` no-bars classification runs INSIDE
+        the per-tuple try, so a lake-reading ``bars_for`` that RAISES on the
+        missing tuple quarantines ONLY that tuple (counted ``tuples_errored`` +
+        logged) and the pass keeps going — the sibling with a present store is
+        still processed. The pre-fix code had ``_bars`` OUTSIDE the try, so the
+        raise aborted the WHOLE pass."""
+
+        class _Boom(Exception):
+            pass
+
+        dest = tmp_path / "sweeps"
+        grid = self._two_symbol_swept(dest)
+        bnf_tuple = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        tuple_store_path(dest, bnf_tuple, grid).unlink()  # BANKNIFTY store missing
+
+        def _raising_bars_for(instrument: str, _tf: str) -> list[CandleBar]:
+            if instrument == "BANKNIFTY":
+                raise _Boom("lake read failed for the missing tuple")
+            return _BARS
+
+        with capture_logs() as logs:
+            report = run_results_depth_pass(
+                out_root=dest,
+                grid=grid,
+                bars_for=_raising_bars_for,
+                minute_bars_for=lambda _i: _BARS,
+                expected_missing=0,
+            )
+        # The raising bars_for did NOT abort the pass: BANKNIFTY quarantined
+        # (counted errored), NIFTY still processed.
+        assert report.tuples_errored == 1
+        assert report.tuples_processed >= 1
+        # It raised during classification, so the missing store was never
+        # tallied as missing (it is an errored tuple instead).
+        assert report.tuples_missing_store == 0
+        errs = [log for log in logs if log["event"] == "results_depth.tuple_error"]
+        assert len(errs) == 1
+        assert errs[0]["error_type"] == "_Boom"
 
 
 class TestBarsSha256:

@@ -527,9 +527,15 @@ def write_tuple_sidecars(
         "trade_spans": {run_id: list(span) for run_id, span in stamp.trade_spans.items()},
         "produced_at_utc": stamp.produced_at_utc,
     }
-    # DEC-DEPTH-STAMP-REFDATA-001 (#1637): emit the key ONLY when present, so a
-    # None-fingerprint stamp is byte-identical to a pre-feature stamp (the
-    # additive-column back-compat law — an old reader sees the same bytes).
+    # DEC-DEPTH-STAMP-REFDATA-001 (#1637): emit the key ONLY when present (the
+    # additive-column back-compat law). Byte-identity is scoped to the DEFAULT
+    # ``reference_fingerprint=None`` primitive path (the direct ``write_tuple_sidecars``
+    # callers + the trades/aggs/equity goldens) — a ``None`` stamp renders exactly a
+    # pre-feature stamp, so an old reader sees the same bytes. It is NOT a claim about
+    # the production DEPTH-PASS path, which ALWAYS passes a hex fingerprint — even a
+    # no-VIX run, whose fp folds the "absent" digest token, not ``None`` — so those
+    # stamps carry the key and are DELIBERATELY not pre-feature-identical (that hex fp
+    # is exactly what re-derives a tuple once a VIX feed is pulled later).
     if stamp.reference_fingerprint is not None:
         payload["reference_fingerprint"] = stamp.reference_fingerprint
     rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
@@ -612,6 +618,14 @@ def load_stamp(paths: SidecarPaths, *, verify_hashes: bool = True) -> TupleSidec
     the run-end pass's skip/rebuild decision — by Parquet decode errors, or by
     the span belt); no repo writer ever rewrites a sidecar in place without a
     rename, so the stat probe tracks every sanctioned write.
+
+    DELIBERATE (disclosed trade-off, #1636 review round 2 LEAVE-AS-IS): the
+    ``except OSError → None`` arm treats EVERY read fault on an EXISTING stamp
+    — including a transient ``EIO`` device blip — as damage → rebuild, NEVER a
+    raise. The worst case of a false "damage" verdict is ONE redundant,
+    idempotent re-derive of that tuple; raising instead would abort the whole
+    fenced depth pass on a transient fault (the transient-abort class). Do NOT
+    narrow this arm.
     """
 
     def _invalid(reason: str) -> None:

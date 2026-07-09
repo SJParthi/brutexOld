@@ -186,7 +186,8 @@ class TestDefaultRunnerArm:
 
 class TestMissingStoreThreading:
     """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2): the adapter
-    threads the sweep's run-scoped failed/quarantined allowance into the pass +
+    threads the sweep's run-scoped FAILED allowance + the quarantined-prior
+    IDENTITY set (round 2 M1) into the pass +
     mirrors the pass's OWN computed ``missing_store_unexplained`` onto stderr,
     while the fence (``return True``) is byte-preserved."""
 
@@ -200,6 +201,20 @@ class TestMissingStoreThreading:
         _call(tmp_path, _runner, expected_missing=3)
         assert captured["expected_missing"] == 3
 
+    def test_quarantined_labels_are_threaded_to_the_pass(self, tmp_path: Path) -> None:
+        """Review round 2 M1: the durable quarantine IDENTITY set reaches the
+        pass verbatim, so its per-tuple attribution can close the count-based
+        masking."""
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs: Any) -> ResultsDepthReport:
+            captured.update(kwargs)
+            return _report()
+
+        labels = frozenset({"NIFTY/1minute/BUY/k=1/sl=80/tp=50"})
+        _call(tmp_path, _runner, expected_missing=1, quarantined_labels=labels)
+        assert captured["quarantined_labels"] == labels
+
     def test_unexplained_missing_warns_on_stderr_with_sample(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -212,15 +227,18 @@ class TestMissingStoreThreading:
         assert ok is True  # the fence's "NEVER fails the sweep" contract holds
         err = capsys.readouterr().err
         assert (
-            "3 bars-present finalist store(s) missing beyond the sweep's "
-            "run-scoped failed/quarantined allowance"
+            "3 bars-present, not-quarantined finalist store(s) missing beyond the "
+            "sweep's run-scoped FAILED allowance"
         ) in err
         assert "missing=5" in err
         assert "no_bars=0" in err
-        assert "expected=2" in err
+        assert "quarantined=0" in err  # round 2 M1: the identity-explained count
+        assert "failed_expected=2" in err
         assert "/lake/a.parquet" in err
         # Review round 1 M2: the run-scoped residual heuristic is disclosed.
         assert "under-attributed" in err
+        # Review round 2 M1: the identity attribution is disclosed.
+        assert "stale sidecar can no longer mask a deletion" in err
 
     def test_explained_missing_is_silent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -258,5 +276,123 @@ class TestMissingStoreThreading:
         )
         _call(tmp_path, lambda **_kwargs: report, expected_missing=0)
         err = capsys.readouterr().err.rstrip()
-        assert "1 bars-present finalist store(s) missing" in err
+        assert "1 bars-present, not-quarantined finalist store(s) missing" in err
         assert err.endswith("rebuild")  # no ": <sample>" suffix when the sample is empty
+
+
+class TestReferenceUnreadableWarn:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M4): the
+    reference-loader reconcile's ``unreadable`` list is no longer DISCARDED —
+    a corrupt/unreadable reference (VIX/1day/1m) month is surfaced LOUDLY so a
+    holed reference series is never silently stamped canonical."""
+
+    def test_warn_fires_and_names_the_file(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with capture_logs() as logs:
+            count = cli._warn_unreadable_reference_partitions(
+                ("/lake/bars/NSE/INDEX/INDIAVIX/1minute/2024/02.parquet",),
+                symbol="INDIAVIX",
+                interval="1minute",
+            )
+        assert count == 1
+        warns = [
+            log for log in logs if log["event"] == "results_depth.reference_partition_unreadable"
+        ]
+        assert len(warns) == 1
+        assert warns[0]["symbol"] == "INDIAVIX"
+        assert warns[0]["interval"] == "1minute"
+        assert warns[0]["count"] == 1
+        err = capsys.readouterr().err
+        assert "unreadable (corrupt) reference partition file(s) for INDIAVIX/1minute" in err
+        assert "02.parquet" in err  # the file is NAMED
+
+    def test_no_op_when_nothing_unreadable(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with capture_logs() as logs:
+            count = cli._warn_unreadable_reference_partitions(
+                (), symbol="INDIAVIX", interval="1minute"
+            )
+        assert count == 0
+        assert not logs
+        assert capsys.readouterr().err == ""
+
+    def test_sample_is_capped_but_count_is_true(self, capsys: pytest.CaptureFixture[str]) -> None:
+        n = cli._REFERENCE_UNREADABLE_WARN_CAP + 3
+        files = tuple(f"/lake/{i:02d}.parquet" for i in range(n))
+        with capture_logs() as logs:
+            count = cli._warn_unreadable_reference_partitions(
+                files, symbol="INDIAVIX", interval="1minute"
+            )
+        assert count == n  # true count, not the cap
+        warn = next(
+            log for log in logs if log["event"] == "results_depth.reference_partition_unreadable"
+        )
+        assert warn["count"] == n
+        assert len(warn["files"]) == cli._REFERENCE_UNREADABLE_WARN_CAP  # sample capped
+        assert "(+3 more)" in capsys.readouterr().err
+
+
+class TestDepthQuarantinedLabels:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M1): the cli
+    helper reads the durable ``.sweep_quarantine.json`` sidecar (#1608) via the
+    COMMON loader, sweep-scoped + fail-soft."""
+
+    def test_reads_the_sidecar_labels_for_the_sweep_id(self, tmp_path: Path) -> None:
+        import json
+
+        from brutex.engine.sweep_parallel import quarantine_sidecar_path
+
+        sidecar = quarantine_sidecar_path(tmp_path)
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "index": 1,
+                            "tuple": "NIFTY/1minute/BUY/k=1/sl=80/tp=50",
+                            "sweep_id": "S1",
+                        },
+                        {"index": 2, "tuple": "OTHER", "sweep_id": "S2"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        labels = cli._depth_quarantined_labels(tmp_path, "S1")
+        assert labels == frozenset({"NIFTY/1minute/BUY/k=1/sl=80/tp=50"})
+        assert isinstance(labels, frozenset)
+
+    def test_missing_sidecar_returns_the_empty_set(self, tmp_path: Path) -> None:
+        assert cli._depth_quarantined_labels(tmp_path, "S1") == frozenset()
+
+
+class TestReferenceLoaderUnreadableWiring:
+    """MF4 wiring proof: the REAL ``_depth_reference_loader`` surfaces a corrupt
+    reference month through ``_warn_unreadable_reference_partitions`` — the
+    reconcile's ``unreadable`` list is no longer discarded at this seam."""
+
+    def test_corrupt_reference_month_warns_and_load_degrades(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pytest.importorskip("duckdb")
+        lake = tmp_path / "lake"
+        shard = lake / "bars" / "NSE" / "INDEX" / "INDIAVIX" / "1minute" / "2024" / "01.parquet"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"not a parquet file at all")  # corrupt reference month
+        loader = cli._depth_reference_loader(
+            slices={},
+            lake_root=lake,
+            catalog_path=tmp_path / "catalog.duckdb",
+            exchange="NSE",
+            segment="INDEX",
+            start="2024-01-01",
+            end="2024-02-01",
+            interval="1minute",
+        )
+        with capture_logs() as logs:
+            bars = loader("INDIAVIX")
+        assert bars is None  # honest degrade — nothing readable, never fabricated
+        assert [
+            log for log in logs if log["event"] == "results_depth.reference_partition_unreadable"
+        ]
+        err = capsys.readouterr().err
+        assert "unreadable (corrupt) reference partition file(s) for INDIAVIX/1minute" in err
+        assert "01.parquet" in err

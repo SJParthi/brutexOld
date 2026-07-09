@@ -20,7 +20,9 @@ Covered branches:
 
 from __future__ import annotations
 
+import errno
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -270,11 +272,13 @@ class TestReconcile:
     def test_vanished_file_is_benign_skipped_not_unreadable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#1635 review round 1 M1: an ``OSError`` at read time is data ABSENCE,
-        not data LOSS — a file that VANISHES between the glob listing and the
-        read (ENOENT from a concurrent heal/fetch, an NFS blip) is counted in
+        """#1635 round 1 M1, NARROWED by round 2 M3: a ``FileNotFoundError``
+        (ENOENT — the file VANISHES between the glob listing and the read, a
+        concurrent heal/fetch) is data ABSENCE, not data LOSS — counted in
         ``skipped`` (WARN kept) but NEVER on ``unreadable``, so the escape-less
         sweep-launch refusal cannot be tripped by a transient FS glitch.
+        ENOENT is now the ONLY benign OSError subclass (round 2 M3 reclassified
+        every OTHER OSError as present-but-unreadable → ``unreadable``).
 
         Fails-before: the pre-fix combined ``parquet_read_skip_errors()`` arm
         recorded the vanished file on ``unreadable`` → a launch REFUSAL.
@@ -310,12 +314,17 @@ class TestReconcile:
         assert len(skips) == 1
         assert "BANKNIFTY" in skips[0]["path"]
 
-    def test_unreadable_is_populated_only_by_the_corrupt_arm(self, tmp_path: Path) -> None:
-        """DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): the three skip classes
+    def test_unreadable_names_only_the_corrupt_file_among_benign_skips(
+        self, tmp_path: Path
+    ) -> None:
+        """DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1635): the skip classes
         disambiguate — a CORRUPT/unreadable partition lands on ``unreadable``, while
         a benign unparseable-path skip AND a benign zero-row skip do NOT (data
         ABSENCE is never data LOSS — the false-refuse guard). A clean partition
         alongside them still reconciles; ``unreadable`` names ONLY the corrupt file.
+        (Round 3 M3: ``unreadable`` is populated by the PolarsError arm AND the
+        non-ENOENT OSError arm — the directory/permission/EIO tests below — this
+        test pins that the two BENIGN classes never reach either arm.)
         """
         _write_partition(tmp_path, symbol="NIFTY", n=3)  # a GOOD partition
         # (a) benign: an unparseable partition PATH (invalid exchange segment).
@@ -343,6 +352,94 @@ class TestReconcile:
         assert result.partitions_reconciled == 1
         assert result.skipped == 3  # unparseable + zero-row + corrupt
         assert result.unreadable == (str(corrupt),)  # ONLY the corrupt file
+
+    def test_data_bearing_directory_at_month_path_is_unreadable(self, tmp_path: Path) -> None:
+        """#1635 review round 2 M3 — THE refuter repro, REAL filesystem: a
+        DIRECTORY named ``<mm>.parquet/`` holding a real parquet part (the #1558
+        FIX-ROUND-8 dataset-directory shape) is PRESENT data the sweep would
+        silently skip. ``pl.read_parquet`` reads the directory's rows fine, then
+        ``path.read_bytes()`` raises ``IsADirectoryError`` — a non-ENOENT
+        OSError — so it must land on ``unreadable`` and REFUSE the launch.
+
+        Fails-before: round 1's "all OSError → benign" carve-out counted it a
+        benign ``skipped`` → the sweep launched over the silently-holed month
+        (PDH/PDL/pivot/Fib anchors poisoned, the holed series hashed canonical).
+        """
+        from structlog.testing import capture_logs
+
+        _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
+        dir_shard = (
+            tmp_path / "bars" / "NSE" / "INDEX" / "BANKNIFTY" / "1minute" / "2021" / "01.parquet"
+        )
+        dir_shard.mkdir(parents=True)
+        # REAL data inside the directory — polars reads it, read_bytes cannot.
+        pl.DataFrame(
+            {
+                "timestamp": pl.Series(
+                    [datetime(2021, 1, 4, 9, 15, tzinfo=UTC)], dtype=pl.Datetime("us", "UTC")
+                )
+            }
+        ).write_parquet(dir_shard / "part-0.parquet")
+        with _open(tmp_path) as cat, capture_logs() as logs:
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        assert result.partitions_reconciled == 1  # the good partition still lands
+        assert result.skipped == 1
+        assert result.unreadable == (str(dir_shard),)  # present != absent — REFUSE
+        skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
+        assert len(skips) == 1
+        assert "BANKNIFTY" in skips[0]["path"]
+
+    @pytest.mark.parametrize(
+        ("exc_factory", "label"),
+        [
+            (
+                lambda p: PermissionError(errno.EACCES, "permission denied", str(p)),
+                "permission",
+            ),
+            (lambda p: OSError(errno.EIO, "I/O error", str(p)), "eio"),
+        ],
+    )
+    def test_permission_and_eio_faults_are_unreadable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        exc_factory: Callable[[Path], OSError],
+        label: str,
+    ) -> None:
+        """#1635 review round 2 M3: a chmod-000 / wrong-owner file
+        (``PermissionError``) and an ``EIO`` device fault are PRESENT data the
+        process cannot read — data LOSS, not absence — so each lands on
+        ``unreadable`` and REFUSES the launch. (Monkeypatched at the module's
+        ``pl`` seam — the vanishing-test pattern — because this suite runs as
+        root, where a real chmod-000 file still reads.)
+
+        Fails-before: round 1's "all OSError → benign" arm counted BOTH a
+        benign ``skipped`` — a silent-partial sweep launch.
+        """
+        from types import SimpleNamespace
+
+        import brutex.data.catalog_reconcile as cr
+        from structlog.testing import capture_logs
+
+        _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
+        target = _write_partition(tmp_path, symbol="BANKNIFTY", n=3)
+        real_read = pl.read_parquet
+
+        def _faulting_read(path: object, *args: object, **kwargs: object) -> object:
+            if Path(str(path)) == target:
+                raise exc_factory(target)
+            return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            cr, "pl", SimpleNamespace(read_parquet=_faulting_read, exceptions=pl.exceptions)
+        )
+        with _open(tmp_path) as cat, capture_logs() as logs:
+            result = cr.reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+        assert result.partitions_reconciled == 1, label
+        assert result.skipped == 1
+        assert result.unreadable == (str(target),)  # present-but-unreadable — REFUSE
+        skips = [e for e in logs if e["event"] == "catalog.reconcile.parquet_skip"]
+        assert len(skips) == 1
 
     def test_reconciled_partition_is_get_bars_readable(self, tmp_path: Path) -> None:
         # The whole point: after reconcile, get_bars (the sweep read path) returns bars.

@@ -6921,15 +6921,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
-                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2):
-                # the RUN-SCOPED failed/quarantined allowance ONLY. The no-bars
-                # class is deliberately NOT summed here — the pass classifies it
-                # deterministically per missing store (an empty bars_for slice ⇒
-                # expected-missing), which is resume-safe: a resumed run's
-                # prefix no-bars tuples fold into skipped_resume, so a run-N
-                # counter here would false-WARN on a healthy resume, and summing
-                # tuples_skipped_no_bars would DOUBLE-allow (masking deletions).
-                expected_missing=(result.tuples_failed + result.tuples_quarantined_prior),
+                # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 1 M2 +
+                # round 2 M1): the RUN-SCOPED FAILED allowance ONLY (a
+                # SweepComboError-failed tuple genuinely never wrote a store —
+                # run-scoped, freshly computed, can never over-claim). The
+                # quarantined-prior class is NO LONGER summed here — it is
+                # attributed BY IDENTITY in the pass via quarantined_labels
+                # (below): a durable sidecar COUNT could go stale (its clear is
+                # manual, #1608) and an unrelated deletion could consume the
+                # stale allowance — a silent green run — while a per-tuple
+                # IDENTITY match grants allowance ONLY for the tuple actually
+                # missing. The no-bars class is likewise NOT summed (the pass
+                # classifies it deterministically per missing store — resume-safe:
+                # a run-N counter here would false-WARN on a healthy resume, and
+                # summing tuples_skipped_no_bars would DOUBLE-allow).
+                expected_missing=result.tuples_failed,
+                quarantined_labels=_depth_quarantined_labels(out_root, grid_identity(grid)),
             )
         else:
             print(
@@ -8621,6 +8628,53 @@ _RESULTS_DEPTH_VIX_EXCHANGE: Final[str] = "NSE"
 _RESULTS_DEPTH_VIX_SEGMENT: Final[str] = "INDEX"
 _RESULTS_DEPTH_VIX_SYMBOL: Final[str] = "INDIAVIX"
 
+#: Cap on the ``results_depth.reference_partition_unreadable`` WARN's named-file
+#: sample (the reference-loader twin of ``_MISSING_STORE_SAMPLE_CAP``).
+_REFERENCE_UNREADABLE_WARN_CAP: Final[int] = 20
+
+
+def _warn_unreadable_reference_partitions(
+    unreadable: Sequence[str], *, symbol: str, interval: str
+) -> int:
+    """LOUD capped WARN naming corrupt/unreadable reference partition(s).
+
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M4). The
+    results-depth REFERENCE reconcile (VIX 1m + reference 1day/1m) must NEVER
+    fail the sweep — a corrupt/unreadable reference month is NOT a launch
+    refusal here (unlike the sweep-launch reconcile, which refuses; the depth
+    pass is post-sweep and fenced) — but it must NOT be SILENT either: the
+    holed reference series would be stamped as the canonical
+    ``reference_fingerprint`` (skip-current FOREVER). Emit one capped WARN +
+    stderr line NAMING the file(s) so the operator sees it. Returns the count
+    (0 ⇒ no-op, nothing unreadable). NOT a report-count seam: the reference
+    loader is separate from the pass's ``ResultsDepthReport`` — surfacing the
+    count there would need threading a mutable sink through the loader closure,
+    an explicit honest limit deferred (the WARN is the visible signal).
+    """
+    count = len(unreadable)
+    if count == 0:
+        return 0
+    shown = sorted(unreadable)[:_REFERENCE_UNREADABLE_WARN_CAP]
+    extra = count - len(shown)
+    more = f" (+{extra} more)" if extra > 0 else ""
+    import structlog
+
+    structlog.get_logger("brutex.cli").warning(
+        "results_depth.reference_partition_unreadable",
+        symbol=symbol,
+        interval=interval,
+        count=count,
+        files=shown,
+    )
+    print(
+        f"[brutex] WARNING: results-depth — {count} unreadable (corrupt) reference "
+        f"partition file(s) for {symbol}/{interval}: the reference series is HOLED and "
+        "would stamp as canonical (skip-current forever); quarantine/heal or re-pull the "
+        f"named months, then re-run 'brutex sweep-all': {', '.join(shown)}{more}",
+        file=sys.stderr,
+    )
+    return count
+
 
 def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _maybe_run_options_sim_on_winners precedent; the fenced orchestration in _run_results_depth_adapter is the covered surface)
     *,
@@ -8655,13 +8709,19 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
             from brutex.feed.replay import ReplayFeed
 
             with Catalog.open(catalog_path) as cat:
-                reconcile_catalog_from_lake(
+                reconcile_result = reconcile_catalog_from_lake(
                     lake_root=lake_root,
                     catalog=cat,
                     exchange=exchange,
                     segment=segment,
                     symbol=symbol,
                     interval=interval,
+                )
+                # #1636 round 2 M4: a corrupt reference month is skipped by the
+                # reconcile — surface it LOUDLY (never fail the sweep) so a holed
+                # reference series is never silently stamped canonical.
+                _warn_unreadable_reference_partitions(
+                    reconcile_result.unreadable, symbol=symbol, interval=interval
                 )
                 feed = ReplayFeed(
                     catalog=cat,
@@ -8689,6 +8749,24 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
     return _load
 
 
+def _depth_quarantined_labels(out_root: Path, sweep_id: str) -> frozenset[str]:
+    """The quarantined-prior tuple IDENTITY set for the results-depth pass.
+
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1636, review round 2 M1). Reads the
+    durable ``<out_root>/.sweep_quarantine.json`` sidecar (#1608) through the
+    COMMON :func:`~brutex.engine.sweep_parallel.load_quarantined_tuple_labels`
+    — sweep-scoped by *sweep_id*, and itself FAIL-SOFT (a missing / corrupt /
+    hostile sidecar → the empty set + one loud ``sweep.quarantine.sidecar_corrupt``
+    WARN, never a raise), so wiring it can never fail a completed sweep. The
+    pass attributes each bars-present missing store whose ``tuple_label`` is in
+    this set BY IDENTITY (``missing_expected_quarantined``), closing the
+    count-based masking a stale sidecar could otherwise cause.
+    """
+    from brutex.engine.sweep_parallel import load_quarantined_tuple_labels
+
+    return frozenset(load_quarantined_tuple_labels(out_root, sweep_id))
+
+
 def _run_results_depth_adapter(
     *,
     out_root: Path,
@@ -8699,6 +8777,7 @@ def _run_results_depth_adapter(
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
     expected_missing: int | None = None,
+    quarantined_labels: frozenset[str] | None = None,
     pass_runner: Callable[..., Any] | None = None,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
@@ -8716,15 +8795,22 @@ def _run_results_depth_adapter(
     raw (global stops are never swallowed). Returns ``True`` iff the pass
     completed and its report printed.
 
-    ``expected_missing`` is the sweep's RUN-SCOPED failed/quarantined allowance
-    (``tuples_failed + tuples_quarantined_prior`` — the no-bars class is NOT
-    summed: the pass classifies it deterministically per missing store, which
-    is resume-safe; review round 1 M2), threaded into the pass so a
-    BARS-PRESENT missing-store count beyond it raises one
-    ``results_depth.missing_store_unexplained`` WARN + one mirrored stderr line
-    (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636). The stderr mirror
-    reads the pass's OWN ``report.missing_store_unexplained`` — ONE formula,
-    never re-derived here. HONEST residual (disclosed in both messages): the
+    ``expected_missing`` is the sweep's RUN-SCOPED **FAILED-only** allowance
+    (``tuples_failed`` — review round 2 M1 narrowed it from
+    ``tuples_failed + tuples_quarantined_prior``: the quarantined-prior class is
+    now attributed BY IDENTITY via ``quarantined_labels`` below, and the no-bars
+    class deterministically per missing store — neither is part of this count).
+    ``quarantined_labels`` is the durable ``.sweep_quarantine.json`` label SET
+    (``load_quarantined_tuple_labels`` — #1608). Both are threaded into the pass
+    so a bars-present, not-quarantined missing-store count beyond the FAILED
+    allowance raises one ``results_depth.missing_store_unexplained`` WARN + one
+    mirrored stderr line (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1636).
+    The identity attribution closes the round-2 masking: a STALE quarantine
+    sidecar entry for a tuple whose store now exists can no longer LAUNDER an
+    unrelated deletion into a silent green run (a COUNT allowance could be spent
+    on the deletion; an IDENTITY match cannot). The stderr mirror reads the
+    pass's OWN ``report.missing_store_unexplained`` — ONE formula, never
+    re-derived here. HONEST residual (disclosed in both messages): the
     allowance is run-scoped, so a deletion coinciding with prior-run failures
     can be under-attributed. The return value STAYS ``True`` in the unexplained
     case — the fenced "NEVER fails the sweep" contract is byte-preserved; it is
@@ -8767,6 +8853,7 @@ def _run_results_depth_adapter(
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
             expected_missing=expected_missing,
+            quarantined_labels=quarantined_labels,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -8803,13 +8890,17 @@ def _run_results_depth_adapter(
         sample = ", ".join(report.missing_store_sample)
         sample_suffix = f": {sample}" if sample else ""
         print(
-            f"[brutex] WARNING: results-depth — {unexplained_missing} bars-present finalist "
-            "store(s) missing beyond the sweep's run-scoped failed/quarantined allowance "
+            f"[brutex] WARNING: results-depth — {unexplained_missing} bars-present, "
+            "not-quarantined finalist store(s) missing beyond the sweep's run-scoped "
+            "FAILED allowance "
             f"(missing={report.tuples_missing_store}, "
-            f"no_bars={report.missing_expected_no_bars}, expected={expected_missing}) — "
-            "partial store deletion or a foreign grid identity (a deletion coinciding "
-            "with prior-run failures can be under-attributed); re-run "
-            f"'brutex sweep-all' with the same selection to rebuild{sample_suffix}",
+            f"no_bars={report.missing_expected_no_bars}, "
+            f"quarantined={report.missing_expected_quarantined}, "
+            f"failed_expected={expected_missing}) — partial store deletion or a foreign "
+            "grid identity (quarantined-prior tuples are attributed by identity, so a "
+            "stale sidecar can no longer mask a deletion; a deletion coinciding with "
+            "prior-run FAILURES can be under-attributed); re-run 'brutex sweep-all' "
+            f"with the same selection to rebuild{sample_suffix}",
             file=sys.stderr,
         )
     return True
