@@ -6285,6 +6285,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.engine.sweep_run import SweepRunSummary
     from brutex.engine.sweep_supervisor import (
         SweepGuards,
+        deliver_summary_safe,
         grid_identity,
         publish_progress,
         run_supervised_grid,
@@ -6911,9 +6912,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # Surface the RICH grid summary to the optional consumer (G5b): the
         # dashboard job captures it to render an honest finish-detail note
         # (failed / quarantined-prior tuple counts) instead of a bare "done".
+        # FENCED (review fold): this call sits INSIDE the sweep_abort_alert block,
+        # so a raising consumer would fire a false CRITICAL Telegram abort alert
+        # on an already-successful sweep whose results are persisted —
+        # deliver_summary_safe swallows + logs, mirroring publish_progress_safe.
         # The CLI/daemon int-return contract is UNCHANGED — this is additive.
-        if on_summary is not None:
-            on_summary(result)
+        import structlog
+
+        deliver_summary_safe(on_summary, result, log=structlog.get_logger("brutex.sweep"))
         # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
         # EXIT_OK; any tuple skipped after a SweepComboError makes the exit non-zero.
         return sweep_all_exit_code(result.tuples_failed)

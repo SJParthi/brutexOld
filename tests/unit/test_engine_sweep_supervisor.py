@@ -60,6 +60,7 @@ from brutex.engine.sweep_supervisor import (
     SupervisedGridSummary,
     SweepGuards,
     _drive_watchdog,
+    deliver_summary_safe,
     grid_identity,
     idle_progress,
     publish_progress,
@@ -1292,6 +1293,61 @@ class TestPublishProgressSafe:
         assert failures[0]["log_level"] == "warning"
         assert failures[0]["error_type"] == "OSError"
         assert "read-only file system" in failures[0]["error"]
+
+
+class TestDeliverSummarySafe:
+    """G5b fence: the run-end summary hook is best-effort (review fold).
+
+    ``deliver_summary_safe`` runs AFTER a successful sweep whose results are
+    persisted; inside ``cmd_sweep_all`` it sits under ``sweep_abort_alert``, so a
+    raising consumer must NEVER propagate (it would fire a false CRITICAL abort
+    alert). Mirrors ``publish_progress_safe`` — swallow + one
+    ``sweep.on_summary_failed`` WARNING; a ``None`` hook is a no-op.
+    """
+
+    @staticmethod
+    def _summary() -> SupervisedGridSummary:
+        return SupervisedGridSummary(
+            sweep_id="x",
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            skipped_cache=0,
+            skipped_resume=0,
+            enumerated=5,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=5,
+            ranked=2,
+            persisted=2,
+            tuples_failed=0,
+        )
+
+    def test_none_hook_is_a_noop(self) -> None:
+        # The ``on_summary is None`` early-return branch — nothing invoked/logged.
+        with capture_logs() as logs:
+            deliver_summary_safe(None, self._summary())
+        assert not any(e["event"] == "sweep.on_summary_failed" for e in logs)
+
+    def test_normal_hook_is_called_through(self) -> None:
+        seen: list[SupervisedGridSummary] = []
+        summary = self._summary()
+        with capture_logs() as logs:
+            deliver_summary_safe(seen.append, summary)
+        assert seen == [summary]  # invoked once with the exact summary
+        assert not any(e["event"] == "sweep.on_summary_failed" for e in logs)
+
+    def test_raising_hook_is_swallowed_and_logged(self) -> None:
+        def _boom(_summary: SupervisedGridSummary) -> None:
+            raise RuntimeError("consumer blew up")
+
+        with capture_logs() as logs:
+            deliver_summary_safe(_boom, self._summary())  # must NOT raise
+        failures = [e for e in logs if e["event"] == "sweep.on_summary_failed"]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "RuntimeError"
+        assert "consumer blew up" in failures[0]["error"]
 
 
 # ────── dataclasses ──────

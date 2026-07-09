@@ -310,6 +310,27 @@ def test_cmd_sweep_all_clean_run_fires_no_halt_alert(
     assert len(completed) == 1
 
 
+def test_cmd_sweep_all_delivers_the_summary_to_on_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G5b end-to-end: a real run delivers exactly ONE SupervisedGridSummary.
+
+    Drives the REAL ``cmd_sweep_all`` True-branch of ``deliver_summary_safe``
+    (the fenced review-fold seam) — the dashboard job's capture path — over the
+    tiny persisted lake.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    captured: list[Any] = []
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", on_summary=captured.append)
+
+    assert rc == 0
+    assert len(captured) == 1
+    assert isinstance(captured[0], sweep_supervisor.SupervisedGridSummary)
+    assert captured[0].tuples_run >= 1
+
+
 def test_cmd_sweep_all_runs_the_sweep_chain_inside_keep_awake(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -925,6 +925,43 @@ def publish_progress_safe(
         )
 
 
+def deliver_summary_safe(
+    on_summary: Callable[[SupervisedGridSummary], None] | None,
+    summary: SupervisedGridSummary,
+    *,
+    log: Any = _LOG,
+) -> None:
+    """Fire the optional run-end summary hook, SWALLOWING any error (G5b fence).
+
+    The ``on_summary`` consumer (the dashboard job's finish-note capture) runs
+    AFTER a successful sweep whose results are already persisted; a raising
+    consumer must NEVER mask that success. Inside ``cmd_sweep_all`` this call sits
+    under the ``sweep_abort_alert`` block, so an unfenced raise would fire a false
+    CRITICAL Telegram abort alert on an already-successful sweep. This mirrors
+    :func:`publish_progress_safe`: only the best-effort hook is fenced, the
+    sweep's own result / exit path is untouched. A ``None`` hook is a no-op.
+
+    Parameters
+    ----------
+    on_summary
+        The caller's run-end summary hook, or ``None`` (no-op).
+    summary
+        The completed run's :class:`SupervisedGridSummary`.
+    log
+        The structlog logger for the swallowed-error WARNING.
+    """
+    if on_summary is None:
+        return
+    try:
+        on_summary(summary)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — the summary hook is best-effort
+        log.warning(
+            "sweep.on_summary_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 def publish_progress(path: Path, snapshot: SweepProgressSnapshot) -> None:
     """Atomically write *snapshot* to *path* as JSON — the dashboard file bridge.
 
@@ -991,6 +1028,7 @@ __all__ = [
     "SUPERVISOR_ACTION_TUPLE_RESUME",
     "SupervisedGridSummary",
     "SweepGuards",
+    "deliver_summary_safe",
     "grid_identity",
     "idle_progress",
     "publish_progress",
