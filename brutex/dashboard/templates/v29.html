@@ -712,35 +712,9 @@
 
   /* ==================== v29 PUNCH PACK ==================== */
   /* Goal: 5-second graspability + honest envelope (Golden Rule #1).
-     Five fixes:
-     1) PREVIEW DATA badge — placeholder numbers are honest about it
-     2) Hero one-liner — the headline reads in 1 second
-     3) Funnel as horizontal sentence — one-glance 33B→1 collapse
-     4) Filter cards 3+3+3 staggered reveal — cognitive load 9→3
-     5) Rule card collapse + 32pt NET — money number dominates */
-
-  /* v29.1 — PREVIEW DATA honest-envelope badge in mode bar */
-  .preview-badge {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 4px 10px;
-    border: 1.5px solid var(--yellow);
-    border-radius: 6px;
-    background: rgba(255,183,77,0.08);
-    color: var(--yellow);
-    font-size: 10.5px;
-    font-weight: 800;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    cursor: help;
-    transition: background 0.2s;
-    animation: previewPulse 3.5s ease-in-out infinite;
-  }
-  .preview-badge:hover { background: rgba(255,183,77,0.18); }
-  .preview-badge::before { content: "◈"; font-size: 11px; }
-  @keyframes previewPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(255,183,77,0); }
-    50% { box-shadow: 0 0 0 4px rgba(255,183,77,0.18); }
-  }
+     The PREVIEW mockup badge/ribbon are KILLED (DEC-OPERATOR-PAGE-REAL-001):
+     every number on this page is now fed from real run artifacts via the
+     /api/v1/oneclick/* contracts or shows the honest em-dash awaiting state. */
 
   /* v29.2 — Hero one-liner: the 1-second headline */
   .hero-collapse-line {
@@ -2195,11 +2169,67 @@
   .hb-big.hb-bad { color: var(--red); }
   .hb-big.hb-idle { color: var(--muted); font-weight: 600; }
 
-  /* Persistent PREVIEW ribbon — the mockup ₹ figures below were disclosed
-     only by a 10px corner badge; this slim strip labels the WHOLE report. */
-  .preview-ribbon { display: flex; align-items: center; gap: 10px; margin: 14px var(--gutter) 0; padding: 7px 14px; border: 1px solid rgba(255,183,77,0.3); border-radius: 8px; background: linear-gradient(90deg, rgba(255,183,77,0.10), rgba(255,183,77,0.04)); font-size: 11px; color: var(--muted); }
-  .preview-ribbon .pr-mark { color: var(--yellow); font-weight: 800; letter-spacing: 0.1em; white-space: nowrap; flex-shrink: 0; }
-  .preview-ribbon .pr-mark::before { content: "◈ "; }
+  /* ══ One-click REAL wiring surfaces (DEC-OPERATOR-PAGE-REAL-001) ══
+     Run bar · awaiting banner · chain map · timeline · VERIFY-ME panel ·
+     run controls. All values arrive via textContent from the
+     /api/v1/oneclick/* contracts — never markup interpolation. */
+  .oc-awaiting { display: flex; align-items: center; gap: 10px; margin: 14px var(--gutter) 0; padding: 9px 14px; border: 1px solid rgba(255,183,77,0.4); border-radius: 8px; background: linear-gradient(90deg, rgba(255,183,77,0.12), rgba(255,183,77,0.04)); font-size: 12px; color: var(--yellow); font-weight: 700; }
+  .oc-runbar { display: flex; align-items: center; gap: 12px; margin: 14px var(--gutter) 0; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .oc-pill { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border-strong); font-weight: 800; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .oc-pill-complete { color: var(--green-bright); border-color: var(--green-dim); }
+  .oc-pill-suspect { color: var(--red); border-color: var(--red); }
+  .oc-pill-artifacts-partial, .oc-pill-corrupt { color: var(--yellow); border-color: var(--yellow); }
+  .oc-fixture-badge { padding: 4px 10px; border: 1.5px solid var(--purple); border-radius: 6px; color: var(--purple); font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+  .oc-updated { font-size: 11px; color: var(--muted); }
+  .oc-updated-warn { color: var(--yellow); }
+  .oc-updated-stale { color: var(--red); font-weight: 800; }
+  .oc-section { margin: 16px var(--gutter) 0; padding: 16px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+  .oc-section h3 { font-size: 14px; font-weight: 800; margin-bottom: 10px; }
+  .oc-section .oc-sub { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+  .oc-chain-link { display: inline-flex; align-items: center; gap: 6px; margin: 0 8px 8px 0; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border-strong); font-size: 11px; font-weight: 700; color: var(--muted); }
+  .oc-chain-green { color: var(--green-bright); border-color: var(--green-dim); }
+  .oc-chain-amber { color: var(--yellow); border-color: var(--yellow); }
+  .oc-chain-red { color: var(--red); border-color: var(--red); }
+  .oc-chain-pending { opacity: 0.7; }
+  #ocTimeline { max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.7; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px 12px; }
+  .oc-event-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+  .oc-verify-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .oc-verify-state { min-width: 86px; text-align: center; padding: 2px 8px; border-radius: 6px; font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; border: 1px solid var(--border-strong); color: var(--muted); }
+  .oc-verify-pass { color: var(--green-bright); border-color: var(--green-dim); }
+  .oc-verify-fail { color: var(--red); border-color: var(--red); }
+  .oc-verify-ready { color: var(--blue); border-color: var(--blue); }
+  .oc-verify-awaiting { color: var(--yellow); border-color: var(--yellow); }
+  .oc-verify-not_wired { opacity: 0.65; }
+  .oc-verify-detail { color: var(--muted); font-size: 11px; }
+  .oc-controls-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-top: 10px; }
+  .oc-controls-row label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 4px; }
+  .oc-controls-row input, .oc-controls-row select { background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 12px; }
+  .oc-run-btn { background: linear-gradient(135deg, var(--green-dim), var(--green)); color: #04110D; border: none; padding: 10px 18px; border-radius: 8px; font-size: 13px; font-weight: 800; cursor: pointer; }
+  .oc-cascade-btn { background: linear-gradient(135deg, var(--blue), var(--purple)); color: white; border: none; padding: 10px 18px; border-radius: 8px; font-size: 13px; font-weight: 800; cursor: pointer; }
+  .oc-msg { font-size: 12px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
+  .oc-source-badge { padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .oc-disabled-note { font-size: 11px; color: var(--muted); }
+  #bxTip { position: absolute; z-index: 1200; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
+  .equity-host { min-height: 120px; }
+  .equity-host svg { width: 100%; height: 220px; display: block; }
+  .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
+  .oc-chain-stage { font-weight: 800; }
+  .oc-chain-count { color: var(--muted); font-weight: 600; }
+  .oc-strip-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 11px; }
+  .oc-strip-stage { min-width: 90px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .oc-strip-bar { flex: 1; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.3); overflow: hidden; }
+  .oc-strip-fill { height: 100%; background: linear-gradient(90deg, var(--blue), var(--purple)); }
+  .oc-strip-secs { min-width: 70px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  .oc-verify-name { font-weight: 700; min-width: 240px; }
+  .oc-verify-line { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); padding: 2px 0; }
+  .oc-manifest-funnel { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-top: 12px; padding: 10px 14px; background: rgba(0,0,0,0.25); border-radius: 8px; font-size: 12px; }
+  .oc-manifest-funnel .stage { color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; }
+  .oc-manifest-funnel .cnt { font-weight: 800; font-variant-numeric: tabular-nums; }
+  .bx-candle-wick { stroke: var(--muted); stroke-width: 1; }
+  .bx-candle-up { fill: #26D9B0; stroke: #26D9B0; }
+  .bx-candle-down { fill: #FF5C5C; stroke: #FF5C5C; }
+  .bx-arrow-entry { fill: #26D9B0; }
+  .bx-arrow-exit { fill: #FFB74D; }
 
   /* Offscreen ambient-animation pause (IntersectionObserver adds/removes
      .bx-anim-off): richer feel at LOWER runtime cost; transform/opacity
@@ -2217,6 +2247,13 @@
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
+<!-- One-click REAL wiring (DEC-OPERATOR-PAGE-REAL-001) — load order law:
+     bx-ui → bx-poll → bx-explain → bx-chart → bx-oneclick (defer preserves
+     document order, so BXOneclick sees every dependency namespace). -->
+<script defer src="/static/bx-poll.js"></script>
+<script defer src="/static/bx-explain.js"></script>
+<script defer src="/static/bx-chart.js"></script>
+<script defer src="/static/bx-oneclick.js"></script>
 </head>
 <body class="operator-mode">
 
@@ -2264,11 +2301,10 @@
     <a href="/reports">Reports</a>
   </nav>
   <div class="mode-bar-right">
-    <span class="preview-badge" title="ALL 13 SweepFunnelSnapshot schema fields are now LIVE (step_0/1/2/3/4/5/6/7/8/9 + winners_top_n + sweep_id + snapshot_at) — values flow from the brute-force sweep via /api/v1/state every 2s. ONLY remaining placeholder: top combos table P&L, equity curve, KPI tiles, podium cards. Methodology is institutional-grade. Badge stays until brutex/strategies/sweep.py wires update_sweep_funnel() (Phase 3).">Preview Data</span>
+    <button id="bxModeToggle" class="oc-source-badge" type="button" title="Beginner = plain English everywhere · Pro = technical masks/stats (R33 toggle — one shared mechanism)">Pro ✓</button>
     <div class="mode-toggle">
       <button data-mode="operator" class="active">⚙ Operator</button>
       <button data-mode="share">✨ Share</button>
-      <button data-mode="reel">🎬 Reel</button>
     </div>
     <div class="export-menu">
       <button class="export-btn" id="exportBtn">📷 Export ▾</button>
@@ -2282,12 +2318,10 @@
 </div>
 
 <div class="sweep-id show-operator-only">
-  <span>RUN <code data-bind="sweep_id">a3f72c8…41b9d</code></span>
-  <span>COMMIT <code>d2e4f1</code></span>
-  <span>DATA <code>2026-05-22</code></span>
-  <span>IND v1.2</span>
-  <span data-bind="snapshot_at">2026-05-23 17:42 IST</span>
-  <span class="ok">DETERMINISM PASS · AUDIT REPLAY OK</span>
+  <span>RUN <code data-bind="sweep_id">—</code></span>
+  <span>SNAPSHOT <span data-bind="snapshot_at">—</span></span>
+  <span>SELECTED <code data-oc="run_id">—</code></span>
+  <span data-oc="suspect">verification pending — see the VERIFY-ME panel below</span>
 </div>
 
 <!-- Live sweep-progress panel (DEC-SWEEP-WIRE-GA-001) — populated by the
@@ -2307,7 +2341,7 @@
 
 <div class="brand-watermark show-share-only">
   <div class="handle">@brutex_sj</div>
-  <div class="tag">Brute-force backtest · 28.4M strategies tested</div>
+  <div class="tag">Brute-force backtest · BruteX</div>
 </div>
 
 <!-- .bx-wrap--wide (bx-design.css): fluid centered container — caps the page
@@ -2319,14 +2353,13 @@
 <!-- ══ LIVE SYSTEM HEARTBEAT (DEC-DASHBOARD-UX-ANIMATE-001) ══════════════
      REAL pipeline state from real endpoints — /api/v1/pull/rate,
      /api/v1/sweep-progress (shared with the poller below, zero extra
-     sockets) and /api/v1/liveproof — shown ABOVE the preview report so the
-     operator's mid-pull glance lands on truth, not mockup ₹ figures.
-     Each slot: skeleton shimmer → data / honest idle / honest
-     "unreachable — retrying". Never a terminal "Loading…". -->
+     sockets) and /api/v1/liveproof. Each slot: skeleton shimmer → data /
+     honest idle / honest "unreachable — retrying". Never a terminal
+     "Loading…". -->
 <section class="hb show-operator-only" id="bxHeartbeat" aria-label="Live system status">
   <div class="hb-head">
     <span class="hb-title">System heartbeat</span>
-    <span class="hb-sub">live endpoints — everything below this strip is the preview report</span>
+    <span class="hb-sub">live endpoints — the report below is fed from real run artifacts</span>
   </div>
   <div class="hb-grid">
     <div class="bx-card hb-card" id="hbPull">
@@ -2344,21 +2377,94 @@
   </div>
 </section>
 
-<!-- Persistent preview disclosure: the corner badge alone was far too quiet
-     for a page of hard-coded ₹ figures (Golden Rule #1). -->
-<div class="preview-ribbon show-operator-only" role="note">
-  <span class="pr-mark">PREVIEW</span>
-  <span class="pr-text">The report below shows mockup numbers until Phase-3 wires update_sweep_funnel() — only the sweep-funnel fields (data-bind) and the sweep-progress strip are live. Real pipeline state is in the heartbeat above.</span>
+<!-- ══ One-click REAL wiring (DEC-OPERATOR-PAGE-REAL-001) ══
+     Ticker strip (R36 always visible) · run bar · honest awaiting banner ·
+     Run controls (moved here from /reports per R25). Everything below is
+     fed from /api/v1/oneclick/* artifact contracts via bx-oneclick.js —
+     textContent only, never markup interpolation. -->
+<div class="oc-runbar show-operator-only" id="ocRunBar">
+  <span id="bxTickerStrip">sweep: — · no runs yet — awaiting real run artifact</span>
+  <span class="oc-pill" id="ocRunPill">pending</span>
+  <label>run
+    <select id="ocRunSelect" title="completed runs, newest first"></select>
+  </label>
+  <span class="oc-fixture-badge" id="ocFixtureBadge" hidden>FIXTURE DATA — BRUTEX_ONECLICK_FIXTURE_ROOT active</span>
+  <span class="oc-updated" id="ocUpdated">updated — awaiting first poll</span>
 </div>
+<div class="oc-awaiting show-operator-only" id="ocAwaiting" role="note">
+  awaiting real run artifact — run a sweep from the Run controls; this page never shows invented numbers
+</div>
+
+<section class="oc-section show-operator-only" id="ocRunControls" aria-label="Run controls">
+  <h3>▶ Run controls</h3>
+  <div class="oc-sub">The ONE canonical Run button (moved here from /reports — R25/O-b).
+    Sweep-only: this button NEVER pulls — pull/prebuild/heal live on /universe (R3).
+    Blank selectors keep the engine defaults (all 3 indices · all 21 timeframes ·
+    2020-01-01 → today).</div>
+  <div class="oc-controls-row">
+    <label>SYMBOLS
+      <select id="swSymbols" multiple size="3" title="blank = all 3, NIFTY-first">
+        <option value="NIFTY">NIFTY</option>
+        <option value="BANKNIFTY">BANKNIFTY</option>
+        <option value="SENSEX">SENSEX</option>
+      </select>
+    </label>
+    <label>TIMEFRAMES
+      <input id="swIntervals" type="text" placeholder="blank = all 21 (e.g. 1minute,5minute,15minute)" style="min-width:240px;">
+    </label>
+    <label>FROM
+      <input id="swStart" type="date" value="2020-01-01">
+    </label>
+    <label>TO
+      <input id="swEnd" type="date">
+    </label>
+    <label>K-DEPTH
+      <input id="swK" type="number" min="1" max="5" placeholder="default">
+    </label>
+    <label>DIRECTIONS
+      <select id="swDirections">
+        <option value="">both (default)</option>
+        <option value="long">long</option>
+        <option value="short">short</option>
+      </select>
+    </label>
+    <label>SL
+      <input id="swSl" type="text" placeholder="default grid" style="max-width:110px;">
+    </label>
+    <label>TP
+      <input id="swTp" type="text" placeholder="default grid" style="max-width:110px;">
+    </label>
+    <label>TOP-N
+      <input id="swTop" type="number" min="1" placeholder="default">
+    </label>
+  </div>
+  <div class="oc-controls-row">
+    <label>CONDITION-SUBSET
+      <select id="swConditions" multiple size="2" disabled title="condition-subset — not wired yet, lands at merge-integration (P1 backend --conditions exists)">
+        <option>(disabled)</option>
+      </select>
+    </label>
+    <span class="oc-disabled-note">condition-subset — not wired yet, lands at merge-integration (P1 backend --conditions exists)</span>
+  </div>
+  <div class="oc-controls-row">
+    <button class="oc-run-btn" id="run-sweep" type="button">🚀 Run Sweep</button>
+    <button class="oc-cascade-btn" id="run-cascade" type="button">🪜 Run cascade</button>
+    <span class="oc-disabled-note" id="ocPreflight">estimator not wired yet — lands at merge-integration (P1); every time estimate is PROVISIONAL until the smoke run calibrates it (R23)</span>
+  </div>
+  <div class="oc-msg" id="sweep-msg"></div>
+  <div id="sweep-bar" style="display:none;margin-top:10px;height:8px;border-radius:4px;background:#1b2030;overflow:hidden;">
+    <div id="sweep-bar-fill" style="height:100%;width:0%;background:var(--green);transition:width .4s;"></div>
+  </div>
+  <div class="oc-msg" id="cascade-msg"></div>
+</section>
 
 <header>
   <div class="picker">
-    <span class="rank-pill">#127</span>
-    <span class="strategy-name jargon">SuperTrend × EMA9&gt;21 × VIX&lt;14 × PDH-cross ▾</span>
-    <span class="strategy-name plain-eng" style="display:none">My winning strategy ▾</span>
-    <span class="meta">NIFTY 50 · 15m · Long-only · <span class="jargon">#127 of 28.4M passing (top 0.0004%)</span><span class="plain-eng" style="display:none">Top 0.0004% of 28.4M tested</span></span>
+    <span class="rank-pill" data-oc="r1_rank" data-explain="rank">—</span>
+    <span class="strategy-name" data-oc="r1_name">— awaiting real run artifact —</span>
+    <span class="meta"><span data-oc="sel_symbols">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
   </div>
-  <div class="date-range">📅 Dec 15, 2025 — May 22, 2026</div>
+  <div class="date-range">📅 <span data-oc="date_range">—</span></div>
   <nav class="tabs">
     <button data-tab="combos">🏆 Top combos</button>
     <button data-tab="metrics" class="active">Metrics</button>
@@ -2377,187 +2483,101 @@
     </div>
     <div class="verdict-text">
       <span class="tldr">In plain English</span>
-      Put <strong>₹10,00,000</strong> into this strategy 5 months ago, today you'd have <strong class="pos">₹11,42,800</strong> — vs <strong>₹10,47,200</strong> from just holding NIFTY. That's <span class="highlight">₹95,600 extra</span> with only a <strong>4.2% bumpy patch</strong>. Statistical tests confirm this is a <strong class="pos">real edge — not luck</strong>.
+      Best stored winner: <strong data-oc="r1_name">—</strong>. Net P&amp;L
+      <strong class="pos" data-oc="r1_net" data-explain="net_pnl_paisa">—</strong>
+      over <span data-oc="r1_trades" data-explain="trades">—</span> trades ·
+      <span data-oc="r1_vix_band" data-explain="vix_band">no VIX band</span>.
+      Every number on this card comes from the stored run artifact — nothing is invented (R27).
     </div>
     <div class="verdict-rank-box">
-      <div class="verdict-rank-big shake-on-reveal">#127</div>
-      <div class="verdict-rank-small">of 28.4M tested<br>top 0.0004%</div>
+      <div class="verdict-rank-big shake-on-reveal" data-oc="r1_rank">—</div>
+      <div class="verdict-rank-small">of <span data-oc="actual_tested">—</span> tested combos</div>
     </div>
   </div>
 
   <section class="hero">
     <div class="hero-cards">
-      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = money made above just holding the index.">
+      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = net trade P&L from the stored run artifact (R27: Σ trade P&L − full costs).">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4 12l8 10 8-10L12 2z"/></svg>EDGE</div>
-        <div class="big" data-countup="142800" data-prefix="+₹">+₹0</div>
-        <div class="sub">+18.4% vs buy &amp; hold</div>
+        <div class="big" data-oc="r1_net" data-explain="net_pnl_paisa">—</div>
+        <div class="sub">net P&amp;L · buy-&amp;-hold baseline lands with P3</div>
       </div>
       <div class="card green anim-card" style="animation-delay: 0.35s" data-tooltip="RISK = worst drop in equity from a peak.">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7v6c0 5.5 3.8 10.7 10 12 6.2-1.3 10-6.5 10-12V7l-10-5z"/></svg>RISK</div>
-        <div class="big" data-countup="-4.2" data-suffix="%" data-decimals="1">0%</div>
-        <div class="sub">max drawdown · 11 days</div>
+        <div class="big" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div>
+        <div class="sub">max drawdown (stored)</div>
       </div>
-      <div class="card green anim-card" style="animation-delay: 0.45s" data-tooltip="CONSISTENCY = return per unit of bumpiness.">
+      <div class="card green anim-card" style="animation-delay: 0.45s" data-tooltip="CONSISTENCY = return per unit of bumpiness (full-precision Sharpe — never rounded).">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 17h2v2H3zm4-4h2v6H7zm4-4h2v10h-2zm4 2h2v8h-2zm4-6h2v14h-2z"/></svg>CONSISTENCY</div>
-        <div class="big" data-countup="1.87" data-decimals="2">0.00</div>
-        <div class="sub"><span class="jargon">Sharpe · Sortino 2.41</span><span class="plain-eng" style="display:none">Steady gains, low volatility</span></div>
+        <div class="big" data-oc="r1_sharpe" data-explain="sharpe">—</div>
+        <div class="sub"><span class="jargon">Sharpe (full precision)</span><span class="plain-eng" style="display:none">Steady gains, low volatility</span></div>
       </div>
-      <div class="card yellow anim-card" style="animation-delay: 0.55s" data-tooltip="Statistical confidence that this edge is real, not luck.">
+      <div class="card yellow anim-card" style="animation-delay: 0.55s" data-tooltip="Statistical confidence that this edge is real, not luck (actual DSR + CPCV pass %).">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2v6.5L3 12l6 3.5V22h6v-6.5l6-3.5-6-3.5V2H9z"/></svg><span class="jargon">REAL OR FLUKE?</span><span class="plain-eng" style="display:none">PROOF</span></div>
-        <div class="big" data-countup="0.92" data-decimals="2">0.00</div>
-        <div class="sub"><span class="jargon">DSR · CPCV 78% pass</span><span class="plain-eng" style="display:none">Statistically verified</span></div>
+        <div class="big" data-oc="r1_dsr" data-explain="dsr">—</div>
+        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass</span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
       </div>
     </div>
 
     <div class="equity-wrap">
       <div class="chart-header">
-        <span class="chart-title">Equity curve</span>
+        <span class="chart-title">Equity curve <span class="dim" style="font-size:10px">per-trade close equity — minute-path equity lands with P3</span></span>
         <div class="legend">
           <span class="eq">Equity</span>
-          <span class="bh">Buy &amp; hold</span>
-          <span class="vix show-operator-only">High-VIX</span>
-          <span class="dd show-operator-only">Drawdown</span>
         </div>
       </div>
-      <svg class="equity-svg" viewBox="0 0 1000 280" preserveAspectRatio="none">
-        <g stroke="#1E222D" stroke-width="1" opacity="0.6">
-          <line x1="0" y1="70" x2="1000" y2="70"/>
-          <line x1="0" y1="140" x2="1000" y2="140"/>
-          <line x1="0" y1="210" x2="1000" y2="210"/>
-        </g>
-        <polyline class="buyhold-line" points="0,225 100,220 200,215 300,205 400,200 500,193 600,185 700,175 800,166 900,160 1000,154" fill="none" stroke="#5B8DEF" stroke-width="1.5" opacity="0.55" stroke-dasharray="6,4"/>
-        <polygon points="0,230 50,227 100,221 150,215 200,210 250,202 300,193 350,197 400,182 450,174 500,160 550,165 600,145 650,128 700,118 750,106 800,92 850,77 900,62 950,48 1000,38 1000,280 0,280" fill="url(#equityGradient)" opacity="0.45"/>
-        <defs>
-          <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#FFC857" stop-opacity="0.5"/>
-            <stop offset="100%" stop-color="#FFC857" stop-opacity="0"/>
-          </linearGradient>
-        </defs>
-        <polyline class="equity-line" points="0,230 50,227 100,221 150,215 200,210 250,202 300,193 350,197 400,182 450,174 500,160 550,165 600,145 650,128 700,118 750,106 800,92 850,77 900,62 950,48 1000,38" fill="none" stroke="#FFC857" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" filter="drop-shadow(0 0 8px rgba(255,200,87,0.5))"/>
-        <circle class="end-dot" cx="1000" cy="38" r="6" fill="#FFE3A1"/>
-      </svg>
+      <!-- Rebuilt client-side by bx-chart.js (integer-paisa cumsum) from the
+           trades API; empty/awaiting renders an honest note, never a
+           fabricated polyline. -->
+      <div class="equity-host" id="ocEquityHost">
+        <div class="oc-sub">no trades yet — awaiting real run artifact</div>
+      </div>
     </div>
   </section>
 
   <details open class="show-operator-only">
     <summary>Standard metrics<span class="hint">— how is it making money?</span></summary>
     <div class="body">
+      <div class="oc-sub" id="ocTop100Note">awaiting real run artifact — the metrics below fill from top100.json</div>
       <div class="kpi-strip">
-        <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v pos">+₹1,42,800</div></div>
-        <div class="kpi-cell"><div class="k">Max DD</div><div class="v neg">−4.2%</div></div>
-        <div class="kpi-cell"><div class="k">Trades</div><div class="v">1,247</div></div>
-        <div class="kpi-cell"><div class="k">% Win</div><div class="v">58.4%</div></div>
-        <div class="kpi-cell"><div class="k">Profit factor</div><div class="v">1.84</div></div>
-        <div class="kpi-cell"><div class="k">Smoothness</div><div class="v">1.87</div></div>
-        <div class="kpi-cell"><div class="k">Real Edge</div><div class="v">0.92</div></div>
-        <div class="kpi-cell"><div class="k">Rank</div><div class="v">#127</div></div>
+        <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v" data-oc="r1_net" data-explain="net_pnl_paisa">—</div></div>
+        <div class="kpi-cell"><div class="k">Max DD</div><div class="v" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div></div>
+        <div class="kpi-cell"><div class="k">Trades</div><div class="v" data-oc="r1_trades" data-explain="trades">—</div></div>
+        <div class="kpi-cell"><div class="k">% Win</div><div class="v" data-oc="r1_win_rate" data-explain="win_rate">—</div></div>
+        <div class="kpi-cell"><div class="k">Profit factor</div><div class="v" data-oc="r1_pf" data-explain="profit_factor">—</div></div>
+        <div class="kpi-cell"><div class="k">Sharpe</div><div class="v" data-oc="r1_sharpe" data-explain="sharpe">—</div></div>
+        <div class="kpi-cell"><div class="k">DSR</div><div class="v" data-oc="r1_dsr" data-explain="dsr">—</div></div>
+        <div class="kpi-cell"><div class="k">Rank</div><div class="v" data-oc="r1_rank" data-explain="rank">—</div></div>
       </div>
       <div class="grid-2">
         <div class="panel">
           <h3>Returns</h3>
           <table>
-            <tr><td>Initial capital</td><td>₹10,00,000</td></tr>
-            <tr><td>Net P&amp;L</td><td class="pos">+₹1,42,800</td></tr>
-            <tr><td>Gross profit</td><td class="pos">₹3,11,400</td></tr>
-            <tr><td>Gross loss</td><td class="neg">−₹1,68,600</td></tr>
-            <tr><td>Buy &amp; hold return</td><td class="pos">+₹47,200</td></tr>
-            <tr><td>Outperformance</td><td class="pos">+18.4%</td></tr>
+            <tr><td>Net P&amp;L</td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Trades</td><td data-oc="r1_trades">—</td></tr>
+            <tr><td>SL/TP arm</td><td data-oc="r1_arm">—</td></tr>
+            <tr><td>Buy &amp; hold baseline</td><td>— (lands with P3 — O-n)</td></tr>
           </table>
         </div>
         <div class="panel">
           <h3>Risk-adjusted · institutional rigor</h3>
           <table>
-            <tr><td>Smoothness score</td><td>1.87</td></tr>
-            <tr><td>Down-smoothness</td><td>2.41</td></tr>
-            <tr><td>Return ÷ worst drop</td><td>3.40</td></tr>
-            <tr><td>Annual ÷ worst drop</td><td>2.86</td></tr>
-            <tr><td>DSR</td><td>0.92</td></tr>
-            <tr><td>CPCV pass</td><td>78%</td></tr>
-            <tr><td>Walk-forward pass</td><td>71%</td></tr>
+            <tr><td>Sharpe (full precision)</td><td data-oc="r1_sharpe">—</td></tr>
+            <tr><td>DSR</td><td data-oc="r1_dsr">—</td></tr>
+            <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
+            <tr><td>Max drawdown</td><td data-oc="r1_max_dd">—</td></tr>
+            <tr><td>VIX band</td><td data-oc="r1_vix_band">no VIX band</td></tr>
           </table>
         </div>
       </div>
-      <div class="grid-2">
-        <div class="panel">
-          <h3>P&amp;L distribution</h3>
-          <div class="histogram">
-            <div class="bar" style="height:8%; background:#8B95B0; animation-delay:1.0s"></div>
-            <div class="bar" style="height:14%; background:#8B95B0; animation-delay:1.05s"></div>
-            <div class="bar" style="height:22%; background:#8B95B0; animation-delay:1.10s"></div>
-            <div class="bar" style="height:48%; background:#8B95B0; animation-delay:1.15s"></div>
-            <div class="bar" style="height:72%; background:#8B95B0; animation-delay:1.20s"></div>
-            <div class="bar" style="height:90%; background:#8B95B0; opacity:0.6; animation-delay:1.25s"></div>
-            <div class="bar" style="height:78%; background:#FFC857; opacity:0.6; animation-delay:1.30s"></div>
-            <div class="bar" style="height:95%; background:#FFC857; animation-delay:1.35s"></div>
-            <div class="bar" style="height:80%; background:#FFC857; animation-delay:1.40s"></div>
-            <div class="bar" style="height:62%; background:#FFC857; animation-delay:1.45s"></div>
-            <div class="bar" style="height:42%; background:#FFC857; animation-delay:1.50s"></div>
-            <div class="bar" style="height:25%; background:#FFC857; animation-delay:1.55s"></div>
-            <div class="bar" style="height:12%; background:#FFC857; animation-delay:1.60s"></div>
-          </div>
-        </div>
-        <div class="panel">
-          <h3>Win / Loss</h3>
-          <div class="donut-wrap">
-            <svg class="donut-svg" viewBox="0 0 100 100">
-              <circle r="40" cx="50" cy="50" fill="transparent" stroke="#232938" stroke-width="14"/>
-              <circle class="donut-fill" r="40" cx="50" cy="50" fill="transparent" stroke="#FFC857" stroke-width="14" transform="rotate(-90 50 50)" filter="drop-shadow(0 0 6px rgba(255,200,87,0.4))"/>
-            </svg>
-            <div class="donut-stats">
-              <div class="donut-row"><span><span class="dot-sm" style="background:#FFC857"></span>Wins</span><span><strong>728</strong> (58.4%)</span></div>
-              <div class="donut-row"><span><span class="dot-sm" style="background:#8B95B0"></span>Losses</span><span><strong>519</strong> (41.6%)</span></div>
-              <div class="donut-row"><span>Avg win</span><span class="pos">+₹428</span></div>
-              <div class="donut-row"><span>Avg loss</span><span class="neg">−₹325</span></div>
-              <div class="donut-row"><span>Win / Loss ratio</span><span><strong>1.32</strong></span></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ===== CHARGES PANEL ===== -->
-      <div class="charges-panel" id="chargesPanel">
-        <div class="charges-panel-head">
-          <h3>Charges &amp; Net P&amp;L after fees</h3>
-          <div class="charges-proxy">
-            <span class="show-operator-only">Execution proxy:</span>
-            <select id="proxySelect">
-              <option value="etf-intraday">NIFTYBEES ETF (intraday)</option>
-              <option value="etf-delivery">NIFTYBEES ETF (delivery)</option>
-              <option value="futures">NIFTY Futures (1 lot)</option>
-              <option value="options-atm">NIFTY ATM Options (1 lot)</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="charges-grid">
-          <div>
-            <table class="charges-table" id="chargesBreakdown">
-              <tr><td class="lbl">Gross P&amp;L</td><td class="val pos" id="ch-gross">+₹1,42,800</td></tr>
-              <tr><td class="lbl">Brokerage <span class="show-operator-only dim" style="font-size:10px">(2,494 orders × ₹20)</span></td><td class="val neg" id="ch-brok">−₹49,880</td></tr>
-              <tr><td class="lbl">STT <span class="show-operator-only dim" style="font-size:10px">(0.025% sell side)</span></td><td class="val neg" id="ch-stt">−₹14,560</td></tr>
-              <tr><td class="lbl">Exchange charges <span class="show-operator-only dim" style="font-size:10px">(NSE)</span></td><td class="val neg" id="ch-exch">−₹4,470</td></tr>
-              <tr><td class="lbl">GST <span class="show-operator-only dim" style="font-size:10px">(18% on brok + exch)</span></td><td class="val neg" id="ch-gst">−₹9,800</td></tr>
-              <tr><td class="lbl">SEBI charges</td><td class="val neg" id="ch-sebi">−₹250</td></tr>
-              <tr><td class="lbl">Stamp duty <span class="show-operator-only dim" style="font-size:10px">(buy side)</span></td><td class="val neg" id="ch-stamp">−₹2,330</td></tr>
-              <tr class="total"><td class="lbl">Total charges</td><td class="val neg" id="ch-total">−₹81,290</td></tr>
-            </table>
-          </div>
-          <div class="charges-net">
-            <div class="lbl">NET P&amp;L AFTER CHARGES</div>
-            <div class="val" id="ch-net">+₹61,510</div>
-            <div class="pct" id="ch-netpct">+6.15% on ₹10,00,000</div>
-            <div class="gross">Gross was <strong style="color:var(--text)">+₹1,42,800</strong> · charges ate <strong style="color:var(--red)">57%</strong> of edge</div>
-          </div>
-        </div>
-
-        <div class="charges-warn show-operator-only">
-          ⚠ Track 1 is signal-only by design (spot indexes aren't directly tradable). Charges shown assume execution via the proxy chosen above. Switch the dropdown to compare different execution paths. High-frequency strategies often die under charges — this estimator catches that before you deploy.
-        </div>
-      </div>
+      <!-- The fabricated CHARGES decomposition table is DELETED outright:
+           Track 1 is signal-only ("Brokerage assumption: NONE" — CLAUDE.md §7);
+           a fabricated brokerage table was doubly dishonest
+           (DEC-OPERATOR-PAGE-REAL-001 kill sweep). -->
     </div>
   </details>
 </div>
@@ -2574,57 +2594,61 @@
         <span class="auto-hero-badge">Auto-picked</span>
         <span style="margin-left: 8px; padding: 4px 12px; background: linear-gradient(135deg, var(--purple), var(--pink)); color: white; border-radius: 6px; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;">9-filter institutional pipeline</span>
       </div>
-      <div class="hero-collapse-line">From <span class="big-num">33,000,000,000</span> ideas → <span class="winner-num">1</span> winner that pays <span class="money-num">+₹88,300/day</span></div>
-      <h2>Top 20 winning strategies · survived 9 institutional statistical filters</h2>
-      <div class="sub">No manual configuration. The brute-force engine tests every combo across <strong>730 BILLION trials</strong> — each one with stop-loss + take-profit grids AND with signal-driven exits, so only ideas that work under BOTH approaches survive. Then 9 institutional statistical filters in sequence — same rigor used by López de Prado / Bailey / White / Hansen at top-tier quant funds (Renaissance, Two Sigma, AQR). You don't tune anything — system picks top-to-bottom.</div>
-
+      <div class="hero-collapse-line">From <span class="big-num" data-oc="actual_enumerated">—</span> enumerated ideas → <span class="winner-num" data-oc="r1_rank">—</span> best stored winner</div>
+      <h2>Top stored strategies · survived the 9-filter institutional pipeline</h2>
+      <div class="sub">No manual configuration. The brute-force engine tests every combo of the selection — stop-loss + take-profit grids AND signal-driven exits — then 9 institutional statistical filters in sequence (López de Prado / Bailey / White / Hansen rigor). The counts on this page come from the selected run's manifest — never a stale hardcoded figure (R20).</div>
       <div class="auto-flow">
         <div class="auto-flow-step tested">
-          <div class="big">730 B</div>
-          <div class="lbl">Total combo<br>space</div>
+          <div class="big" data-oc="actual_enumerated">—</div>
+          <div class="lbl">Enumerated<br>this run</div>
         </div>
         <div class="auto-flow-step real">
-          <div class="big">~10,000</div>
-          <div class="lbl">Stage 3 survivors:<br>cheap filter + backtest</div>
+          <div class="big" data-oc="actual_tested">—</div>
+          <div class="lbl">Tested<br>this run</div>
         </div>
         <div class="auto-flow-step safe">
-          <div class="big">~100</div>
-          <div class="lbl">Stage 4 survivors:<br>9 stat filters passed</div>
+          <div class="big" data-oc="actual_skipped">—</div>
+          <div class="lbl">Skipped<br>(dedup — R6)</div>
         </div>
         <div class="auto-flow-step top">
-          <div class="big">⭐ Top 20</div>
-          <div class="lbl">Auto-rank:<br>profit × win rate</div>
+          <div class="big">⭐ Top 100</div>
+          <div class="lbl">Best-of-Best<br>→ full screener</div>
         </div>
-      </div>
-
-      <div class="sweep-progress">
-        <div class="sweep-status-dot"></div>
-        <div class="label"><strong>Sweep running incrementally</strong> · 28.4 M of 730 B trial space tested · 15-22 hr overnight envelope on M4 Pro · top combos auto-refresh as new ones beat leaderboard</div>
-        <div class="sweep-bar"><div class="sweep-bar-fill" style="width: 0.004%"></div></div>
-        <div class="sweep-pct">0.004%</div>
       </div>
     </div>
 
-    <!-- ===== NEW v23: ANIMATED FUNNEL PIPELINE — 33B → 174 → 1 ===== -->
+    <!-- ===== ANIMATED FUNNEL PIPELINE — fed from real sources ONLY:
+         the LIVE /api/v1/state data-bind poller while a sweep runs, the
+         selected run's manifest actual.funnel when idle (C-M2 precedence;
+         provenance labeled beside the funnel). Placeholders are honest
+         em-dashes, never mockup counts. ===== -->
     <div style="background: linear-gradient(135deg, rgba(91,141,239,0.08), rgba(255,200,87,0.06)); border: 1px solid rgba(91,141,239,0.25); border-radius: 14px; padding: 26px 28px; margin-bottom: 22px; position: relative; overflow: hidden;">
       <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 18px;">
         <span style="font-size: 26px; animation: float 3s ease-in-out infinite;">🌪️</span>
-        <h3 style="font-size: 19px; font-weight: 800; letter-spacing: -0.01em;">The funnel · 33 billion candidates collapse to 1 winner</h3>
+        <h3 style="font-size: 19px; font-weight: 800; letter-spacing: -0.01em;">The funnel · every candidate collapses through the gates</h3>
+        <span class="oc-sub" id="ocFunnelProvenance" style="margin-left:auto; margin-bottom:0;">funnel source: — (no live sweep, no run selected)</span>
       </div>
       <div class="funnel-horizontal">
-        <span class="step-num" data-bind="step_0_all_candidates">33B</span><span class="fn-arrow">→</span>
-        <span class="step-num" data-bind="step_1_cheap_prefilter">12M</span><span class="fn-arrow">→</span>
-        <span class="step-num" data-bind="step_2_real_edge_test">1.2M</span><span class="fn-arrow">→</span>
-        <span class="step-num" data-bind="step_3_unseen_data">84K</span><span class="fn-arrow">→</span>
-        <span class="step-num" data-bind="step_4_best_of_n">2.4K</span><span class="fn-arrow">→</span>
-        <span class="step-num" data-bind="step_7_three_windows">410</span><span class="fn-arrow">→</span>
-        <span class="step-num" data-bind="step_8_sealed_lockbox">174</span><span class="fn-arrow">→</span>
-        <span class="step-num winner" data-bind="winners_top_n">1</span>
+        <span class="step-num" data-bind="step_0_all_candidates">—</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_1_cheap_prefilter">—</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_2_real_edge_test">—</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_3_unseen_data">—</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_4_best_of_n">—</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_7_three_windows">—</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_8_sealed_lockbox">—</span><span class="fn-arrow">→</span>
+        <span class="step-num winner" data-bind="winners_top_n">—</span>
       </div>
-      <div style="display:none">
-        <span style="margin-left: auto; font-size: 11px; padding: 4px 10px; background: rgba(255,200,87,0.18); color: var(--green); border-radius: 5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;">NEW · v23</span>
+      <!-- The completed-run manifest funnel (stage vocabulary per the
+           contracts memory: tested → gates → rank → refine → cascade).
+           Filled ONLY when idle (bxFunnelWriteAllowed) for the selected run. -->
+      <div class="oc-manifest-funnel" id="ocManifestFunnel">
+        <span class="stage">tested</span><span class="cnt" data-oc-funnel="tested">—</span>
+        <span class="stage">gates</span><span class="cnt" data-oc-funnel="gates">—</span>
+        <span class="stage">rank</span><span class="cnt" data-oc-funnel="rank">—</span>
+        <span class="stage">refine</span><span class="cnt" data-oc-funnel="refine">—</span>
+        <span class="stage">cascade</span><span class="cnt" data-oc-funnel="cascade">—</span>
       </div>
-      <div style="color: var(--muted); font-size: 13px; margin-bottom: 18px; line-height: 1.5;">Watch the survivor count drop at each filter. Most candidates are luck — only the rare few that survive every gate go live.</div>
+      <div style="color: var(--muted); font-size: 13px; margin: 14px 0 18px; line-height: 1.5;">Watch the survivor count drop at each filter. Most candidates are luck — only the rare few that survive every gate go live.</div>
 
       <!-- v25 REDESIGN: vertical staircase funnel — no label overlap -->
       <div class="funnel25">
@@ -2633,10 +2657,10 @@
             <div class="lab">Step 0</div>
             <div class="name">All candidates tested</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 100%; --color: #9D7BFF;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #9D7BFF;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_0_all_candidates">33,000,000,000</div>
-            <div class="dim">100%</div>
+            <div class="big" data-bind="step_0_all_candidates">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.15s">
@@ -2644,21 +2668,21 @@
             <div class="lab">Step 1</div>
             <div class="name">Cheap pre-filter (top-K composite)</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 36%; --color: #5B8DEF;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_1_cheap_prefilter">12,000,000</div>
-            <div class="dim">0.036%</div>
+            <div class="big" data-bind="step_1_cheap_prefilter">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.30s">
           <div class="funnel25-left">
             <div class="lab">Step 2</div>
-            <div class="name">Real-edge test (corrects for 33 B tries)</div>
+            <div class="name">Real-edge test (corrects for every try made)</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 10%; --color: #5B8DEF;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_2_real_edge_test">1,200,000</div>
-            <div class="dim">0.0036%</div>
+            <div class="big" data-bind="step_2_real_edge_test">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.45s">
@@ -2666,10 +2690,10 @@
             <div class="lab">Step 3</div>
             <div class="name">Works on data it never saw</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 7%; --color: #5B8DEF;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_3_unseen_data">84,000</div>
-            <div class="dim">0.00025%</div>
+            <div class="big" data-bind="step_3_unseen_data">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.60s">
@@ -2679,10 +2703,10 @@
               <span data-bind="step_5_not_overfit" style="color:var(--muted)">not-overfit</span>,
               <span data-bind="step_6_multi_test" style="color:var(--muted)">multi-test</span>)</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 4%; --color: #FFC857;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_4_best_of_n">2,400</div>
-            <div class="dim">0.0000072%</div>
+            <div class="big" data-bind="step_4_best_of_n">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.75s">
@@ -2690,10 +2714,10 @@
             <div class="lab">Step 7</div>
             <div class="name">3 time-windows all profitable</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 2.5%; --color: #FFC857;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_7_three_windows">410</div>
-            <div class="dim">0.0000012%</div>
+            <div class="big" data-bind="step_7_three_windows">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.90s">
@@ -2702,42 +2726,42 @@
             <div class="name">6-month sealed lockbox — opened ONCE (also tracked:
               <span data-bind="step_9_random_shuffle" style="color:var(--muted)">random-shuffle</span>)</div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 1.5%; --color: #FFC857;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
-            <div class="big" data-bind="step_8_sealed_lockbox">174</div>
-            <div class="dim">0.0000005%</div>
+            <div class="big" data-bind="step_8_sealed_lockbox">—</div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
         <div class="funnel25-row survivor" style="--delay: 1.05s">
           <div class="funnel25-left">
             <div class="lab gold">👑 RANK 1</div>
-            <div class="name">Your live pick · Combo #1247</div>
+            <div class="name">Best stored winner <span data-oc="r1_name" style="color:var(--muted)">—</span></div>
           </div>
-          <div class="funnel25-bar"><div class="fill" style="--w: 1%; --color: #FFB74D;"></div></div>
+          <div class="funnel25-bar"><div class="fill" style="--w: 0%; --color: #FFB74D;"></div></div>
           <div class="funnel25-right">
-            <div class="big gold"><span data-bind="winners_top_n">1</span> of <span data-bind="step_8_sealed_lockbox">174</span></div>
-            <div class="dim">the chosen one</div>
+            <div class="big gold"><span data-bind="winners_top_n">—</span> of <span data-bind="step_8_sealed_lockbox">—</span></div>
+            <div class="dim">awaiting run</div>
           </div>
         </div>
       </div>
 
-      <!-- Inline reading aid -->
+      <!-- Inline reading aid — every cell fed from the selected run's manifest -->
       <div style="margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px;">
         <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px;">
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">START</div>
-          <div style="font-size: 18px; font-weight: 800; color: var(--text-bright); margin-top: 3px; font-variant-numeric: tabular-nums;">33 B</div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">ENUMERATED</div>
+          <div style="font-size: 18px; font-weight: 800; color: var(--text-bright); margin-top: 3px; font-variant-numeric: tabular-nums;" data-oc="actual_enumerated">—</div>
         </div>
         <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px;">
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">AFTER 9 FILTERS</div>
-          <div style="font-size: 18px; font-weight: 800; color: var(--green-bright); margin-top: 3px; font-variant-numeric: tabular-nums;">174</div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">TESTED</div>
+          <div style="font-size: 18px; font-weight: 800; color: var(--green-bright); margin-top: 3px; font-variant-numeric: tabular-nums;" data-oc="actual_tested">—</div>
         </div>
         <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px;">
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">SURVIVAL RATE</div>
-          <div style="font-size: 18px; font-weight: 800; color: var(--text-bright); margin-top: 3px; font-variant-numeric: tabular-nums;">0.0000005%</div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">SKIPPED · DEDUP (R6)</div>
+          <div style="font-size: 18px; font-weight: 800; color: var(--text-bright); margin-top: 3px; font-variant-numeric: tabular-nums;" data-oc="actual_skipped">—</div>
         </div>
         <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px;">
-          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">YOUR LIVE PICK</div>
-          <div style="font-size: 18px; font-weight: 800; color: var(--yellow); margin-top: 3px;">#1247</div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700;">BEST STORED WINNER</div>
+          <div style="font-size: 18px; font-weight: 800; color: var(--yellow); margin-top: 3px;" data-oc="r1_rank">—</div>
         </div>
       </div>
     </div>
@@ -2748,7 +2772,7 @@
         <span style="font-size: 24px;">🏛️</span>
         <h3 style="font-size: 18px; font-weight: 800; letter-spacing: -0.01em;">9 institutional statistical filters · all must pass to reach Top 20</h3>
       </div>
-      <div style="color: var(--muted); font-size: 13px; margin-bottom: 20px;">Same pipeline used by Renaissance, Two Sigma, AQR. Each filter cites a peer-reviewed paper. Combos that survive all 9 are statistically real edges — not flukes hiding in 730 B random tries.</div>
+      <div style="color: var(--muted); font-size: 13px; margin-bottom: 20px;">Same pipeline used by Renaissance, Two Sigma, AQR. Each filter cites a peer-reviewed paper. Combos that survive all 9 are statistically real edges — not flukes hiding in a huge trial space.</div>
 
       <!-- v25 MOTION REDESIGN: each filter has its own mini-animation -->
       <!-- v29.4: 3+3+3 staggered reveal — show first 3, hide rest behind "↓ 6 more filters" -->
@@ -2761,7 +2785,7 @@
         <div class="f25-card">
           <div class="anim"><div class="f25-ruler"></div></div>
           <div class="ttl">2 · Real edge (not luck)</div>
-          <div class="sub">Adjusts for testing 33 billion ideas — the edge must shrink and still be real.</div>
+          <div class="sub">Adjusts for every idea tested — the edge must shrink and still be real.</div>
         </div>
         <div class="f25-card">
           <div class="anim"><div class="f25-blindfold-wrap"><div class="band"></div></div></div>
@@ -2809,312 +2833,18 @@
       </div>
     </div>
 
-    <!-- Manual override toggle (sliders hidden by default) -->
-    <button class="manual-toggle" id="manualToggle">Refine manually — show sliders to override the auto-detected thresholds</button>
+    <!-- The manual-threshold slider panel + ranking-methodology block were
+         DELETED (DEC-OPERATOR-PAGE-REAL-001): their pass-counts were SIMULATED
+         client-side (fabricated numbers — R27). Ranking presets return with
+         P3's ranking data; filter/sort lives on /screener today. -->
 
-    <div class="top-combos-header" style="display:none">
-      <h2><span class="trophy">🏆</span> Top combos from your sweep</h2>
-      <div class="meta" id="comboMeta">Showing top <strong style="color:var(--text)" id="showCount">20</strong> of <strong style="color:var(--text)">12,847</strong> passing combos</div>
-    </div>
-
-    <!-- WRAP existing reqs panel + ranking-block in collapsible -->
-    <div class="reqs-panel-wrap" id="reqsPanelWrap">
-
-    <!-- RANKING METHODOLOGY -->
-    <div class="ranking-block">
-      <div class="ranking-controls">
-        <div class="ranking-ctrl">
-          <span class="lbl">Ranked by</span>
-          <select id="rankBy">
-            <option value="composite">⭐ Composite score (recommended)</option>
-            <option value="sharpe">Sharpe ratio</option>
-            <option value="dsr">DSR (statistical confidence)</option>
-            <option value="netafter">Net P&amp;L after charges</option>
-            <option value="winrate">Win rate %</option>
-            <option value="cpcv">CPCV pass rate</option>
-          </select>
-        </div>
-        <div class="ranking-ctrl">
-          <span class="lbl">Show top</span>
-          <select id="showTop">
-            <option value="20">20</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-            <option value="500">500</option>
-          </select>
-        </div>
-        <div class="ranking-ctrl">
-          <span class="lbl">Execution proxy</span>
-          <select id="topProxySelect">
-            <option value="etf-intraday">NIFTYBEES ETF (intraday)</option>
-            <option value="etf-delivery">NIFTYBEES ETF (delivery)</option>
-            <option value="futures">NIFTY Futures (1 lot)</option>
-            <option value="options-atm">NIFTY ATM Options</option>
-          </select>
-        </div>
-      </div>
-
-      <!-- FUNNEL -->
-      <div class="funnel">
-        <div class="funnel-step tested"><div class="num">730 B</div><div class="lbl">Total trial space<br>(SL/TP grid + signal-exit)</div></div>
-        <div class="funnel-arrow">→</div>
-        <div class="funnel-step passed"><div class="num">~10 K</div><div class="lbl">Stage 3 survivors<br>(post backtest)</div></div>
-        <div class="funnel-arrow">→</div>
-        <div class="funnel-step real"><div class="num">~100</div><div class="lbl">9 stat filters<br>passed (Stage 4)</div></div>
-        <div class="funnel-arrow">→</div>
-        <div class="funnel-step you"><div class="num">~10</div><div class="lbl">Lockbox-tested<br>final picks</div></div>
-      </div>
-
-      <!-- FORMULA -->
-      <div class="ranking-formula" id="formulaBox">
-        <strong>Composite formula (built around YOUR 5 stated aims):</strong><br>
-        Composite = <strong>NET PROFIT</strong> × <span class="v">30%</span> &nbsp;+&nbsp; <strong>WIN RATE</strong> × <span class="v">20%</span> &nbsp;+&nbsp; <strong>TRADE QUALITY</strong> × <span class="v">15%</span> &nbsp;+&nbsp; <strong>SAFETY (low drawdown)</strong> × <span class="v">20%</span> &nbsp;+&nbsp; <strong>REAL EDGE (not fluke)</strong> × <span class="v">15%</span><br>
-        Why this exact mix: PROFIT is what you actually earn (after charges). WIN RATE + TRADE QUALITY = your "more winning trades" aim. SAFETY = your "very less stop loss" aim. REAL EDGE protects you from picking a fluke out of 28M random tries.
-      </div>
-    </div>
-
-    <!-- ===== YOUR REQUIREMENTS — hard filters with sliders ===== -->
-    <div class="reqs-panel">
-      <div class="reqs-head">
-        <div class="reqs-head-left">
-          <h3>🎯 YOUR REQUIREMENTS · move sliders to filter</h3>
-          <p>BruteX shows only combos that PASS your safety thresholds (Max DD, Max trade loss, Real, Robust). Then ranks them by your chosen optimization. Win rate slider is lenient — slide higher only if you want to be stricter.</p>
-        </div>
-        <div class="reqs-count-box">
-          <div class="big" id="passCount">247</div>
-          <div class="lbl">combos pass<br>your filters</div>
-        </div>
-      </div>
-
-      <div class="reqs-grid">
-        <div class="req-card">
-          <div class="req-head"><span class="ic">🎯</span><span class="nm">Win Rate</span></div>
-          <div class="val-row"><span class="val" id="vWin">≥60%</span><span class="op">≥</span></div>
-          <input type="range" class="req-slider" id="sWin" min="40" max="95" step="1" value="60">
-          <div class="req-quote">✓ "maximised winning rates" — slide up for stricter</div>
-        </div>
-        <div class="req-card">
-          <div class="req-head"><span class="ic">🛡️</span><span class="nm">Max Loss / Trade</span></div>
-          <div class="val-row"><span class="val" id="vLoss">≤1.0%</span><span class="op">≤</span></div>
-          <input type="range" class="req-slider" id="sLoss" min="0.1" max="5" step="0.1" value="1.0">
-          <div class="req-quote">✓ "very less stop loss" — per-trade cap</div>
-        </div>
-        <div class="req-card">
-          <div class="req-head"><span class="ic">📉</span><span class="nm">Max Drawdown</span></div>
-          <div class="val-row"><span class="val" id="vDD">≤5%</span><span class="op">≤</span></div>
-          <input type="range" class="req-slider" id="sDD" min="1" max="20" step="0.5" value="5">
-          <div class="req-quote">✓ "very less max drawdown" — overall equity</div>
-        </div>
-        <div class="req-card">
-          <div class="req-head"><span class="ic">✓</span><span class="nm">Real (not fluke)</span></div>
-          <div class="val-row"><span class="val" id="vDSR">≥0.50</span><span class="op">≥</span></div>
-          <input type="range" class="req-slider" id="sDSR" min="0" max="1" step="0.05" value="0.5">
-          <div class="req-quote">✓ "without fluke" — DSR corrects for testing bias</div>
-        </div>
-        <div class="req-card">
-          <div class="req-head"><span class="ic">🔬</span><span class="nm">Robust on unseen data</span></div>
-          <div class="val-row"><span class="val" id="vCPCV">≥70%</span><span class="op">≥</span></div>
-          <input type="range" class="req-slider" id="sCPCV" min="50" max="95" step="1" value="70">
-          <div class="req-quote">✓ Edge holds when tested on hidden folds</div>
-        </div>
-      </div>
-
-      <div class="reality-banner" id="realityBanner">
-        <span class="ic">💡</span>
-        <div class="txt">
-          <strong>Reality check on "only winning" / 100% win rate:</strong> No real strategy hits 100% without hidden tail risk (e.g. selling deep-OTM options has 95%+ win rate but one bad day wipes years of gains). Sustainable strategies in the BruteX sweep cluster around <strong>55-72% win rate</strong>. Above 80% exists but trades rarely (low frequency, high selectivity). Your <strong>"extreme massive target profit"</strong> aim is best achieved by combos in the 60-72% win-rate range with high trade count — that's where the Sweet Spot sort puts them.
-        </div>
-      </div>
-    </div>
-
-    <!-- Sort selector -->
-    <div class="sort-bar">
-      <label>Sort by</label>
-      <select id="sortBy">
-        <option value="sweet">⭐ Sweet Spot (Profit × Win Rate · best of both)</option>
-        <option value="profit">💰 Net Profit alone (max rupees)</option>
-        <option value="win">🎯 Win Rate alone (max %)</option>
-        <option value="combined">📊 Net Profit ÷ Max Drawdown (return per pain)</option>
-      </select>
-      <label style="margin-left:auto">Show</label>
-      <select id="showTopV2">
-        <option value="20">Top 20</option>
-        <option value="50">Top 50</option>
-        <option value="100">Top 100</option>
-      </select>
-    </div>
-
-    </div> <!-- /reqs-panel-wrap -->
-
-    <!-- ===== RULE CARDS — every top combo in Rules_Explain.xlsx format ===== -->
-    <div class="rule-cards-section">
-      <div class="rule-cards-head">
-        <span class="ic">📖</span>
-        <h3>Top combos · explained as Rules · trigger → market status → action</h3>
-        <span class="sub">Same format as your Rules_Explain.xlsx — every combo spells out the exact mechanics</span>
-      </div>
-
-      <div class="rule-card top1 v29-collapse">
-        <div class="rule-card-num">RULE #1<br><span style="font-size: 10px; font-weight: 600; opacity: 0.9;">🥇 GOLD</span></div>
-        <div class="rule-col">
-          <div class="rule-col-head">TRIGGER (what fires entry)</div>
-          <div class="rule-col-body">Price touches <strong>DAILY Pivot R2</strong> from below (Pivot R2 auto-recalculated from prev-day H/L/C) AND <strong>intraday VWAP &lt; candle</strong> AND <strong>ATR &gt; 1.5× rolling avg</strong> AND <strong>BB-squeeze</strong> released</div>
-        </div>
-        <div class="rule-col">
-          <div class="rule-col-head">MARKET STATUS (when valid)</div>
-          <div class="rule-col-body"><strong>BANKNIFTY · 5m TF</strong> · VIX in <span class="num">11-15</span> range · trending session (ADX &gt; 22) · post-09:30 only</div>
-        </div>
-        <div class="rule-col">
-          <div class="rule-col-head">ACTION (what to do)</div>
-          <div class="rule-col-body"><span class="rule-action-pill both">LONG + SHORT</span><br>Entry: <strong>next bar OPEN</strong> · SL: <span class="num">12 paisa</span> · Target: <span class="num">35 paisa</span> · Auto-close <strong>15:20 IST</strong></div>
-        </div>
-        <div class="rule-stats">
-          <div class="rule-stat"><div class="v pos">+₹84,200</div><div class="l">Net (after charges)</div></div>
-          <div class="rule-stat"><div class="v">2,156</div><div class="l">Trades</div></div>
-          <div class="rule-stat"><div class="v">56.1%</div><div class="l">Win rate</div></div>
-          <div class="rule-stat"><div class="v">2.04</div><div class="l">Smoothness</div></div>
-          <div class="rule-stat"><div class="v pos">0.88</div><div class="l">Real edge</div></div>
-          <div class="rule-stat"><div class="v">−4.2%</div><div class="l">Max drawdown</div></div>
-        </div>
-        <button class="rule-expand-btn v29-rule-toggle" type="button">Show mechanics <span class="chev">▾</span></button>
-      </div>
-
-      <div class="rule-card v29-collapse">
-        <div class="rule-card-num">RULE #2<br><span style="font-size: 10px; font-weight: 600; opacity: 0.9;">🥈 SILVER</span></div>
-        <div class="rule-col">
-          <div class="rule-col-head">TRIGGER (what fires entry)</div>
-          <div class="rule-col-body"><strong>EMA9 crosses above EMA21</strong> at bar close AND <strong>SuperTrend BUY signal</strong> AND <strong>VIX &lt; 14</strong> AND <strong>Donchian break</strong> (price exceeds 20-bar high)</div>
-        </div>
-        <div class="rule-col">
-          <div class="rule-col-head">MARKET STATUS (when valid)</div>
-          <div class="rule-col-body"><strong>NIFTY 50 · 15m TF</strong> · Low-VIX regime only · Pivot Day-1 zone · session 09:30 to 14:30</div>
-        </div>
-        <div class="rule-col">
-          <div class="rule-col-head">ACTION (what to do)</div>
-          <div class="rule-col-body"><span class="rule-action-pill buy">LONG ONLY</span><br>Entry: <strong>next bar OPEN</strong> · SL: <span class="num">15 paisa</span> · Target: <span class="num">42 paisa</span> · Auto-close <strong>15:20 IST</strong></div>
-        </div>
-        <div class="rule-stats">
-          <div class="rule-stat"><div class="v pos">+₹61,510</div><div class="l">Net (after charges)</div></div>
-          <div class="rule-stat"><div class="v">1,247</div><div class="l">Trades</div></div>
-          <div class="rule-stat"><div class="v">58.4%</div><div class="l">Win rate</div></div>
-          <div class="rule-stat"><div class="v">1.87</div><div class="l">Smoothness</div></div>
-          <div class="rule-stat"><div class="v pos">0.92</div><div class="l">Real edge</div></div>
-          <div class="rule-stat"><div class="v">−3.2%</div><div class="l">Max drawdown</div></div>
-        </div>
-        <button class="rule-expand-btn v29-rule-toggle" type="button">Show mechanics <span class="chev">▾</span></button>
-      </div>
-
-      <div class="rule-card v29-collapse">
-        <div class="rule-card-num">RULE #3<br><span style="font-size: 10px; font-weight: 600; opacity: 0.9;">🥉 BRONZE</span></div>
-        <div class="rule-col">
-          <div class="rule-col-head">TRIGGER (what fires entry)</div>
-          <div class="rule-col-body"><strong>RSI divergence</strong> (price LH, RSI HL) AND <strong>MACD crossover</strong> at bar close AND <strong>price touches PDH</strong> from below AND <strong>Pivot R1 confluence</strong></div>
-        </div>
-        <div class="rule-col">
-          <div class="rule-col-head">MARKET STATUS (when valid)</div>
-          <div class="rule-col-body"><strong>NIFTY 50 · 1h TF</strong> · trending day · VIX &lt; 18 · within session pivot range</div>
-        </div>
-        <div class="rule-col">
-          <div class="rule-col-head">ACTION (what to do)</div>
-          <div class="rule-col-body"><span class="rule-action-pill buy">LONG ONLY</span><br>Entry: <strong>next bar OPEN</strong> · SL: <span class="num">35 paisa</span> · Target: <span class="num">120 paisa</span> · Auto-close <strong>15:20 IST</strong></div>
-        </div>
-        <div class="rule-stats">
-          <div class="rule-stat"><div class="v pos">+₹88,300</div><div class="l">Net (after charges)</div></div>
-          <div class="rule-stat"><div class="v">412</div><div class="l">Trades</div></div>
-          <div class="rule-stat"><div class="v">61.2%</div><div class="l">Win rate</div></div>
-          <div class="rule-stat"><div class="v">1.91</div><div class="l">Smoothness</div></div>
-          <div class="rule-stat"><div class="v pos">0.85</div><div class="l">Real edge</div></div>
-          <div class="rule-stat"><div class="v">−2.4%</div><div class="l">Max drawdown</div></div>
-        </div>
-        <button class="rule-expand-btn v29-rule-toggle" type="button">Show mechanics <span class="chev">▾</span></button>
-      </div>
-    </div>
-
-    <!-- PODIUM: top 3 -->
-    <div class="podium">
-      <!-- SILVER (#2) — left -->
-      <div class="podium-card silver" data-rank="2">
-        <div class="podium-medal">🥈</div>
-        <div class="podium-rank">Rank #2 · Silver</div>
-        <div class="podium-combo-id">Combo <span class="slot-reveal" data-slot-final="#1,247">████</span> <span style="opacity:0.5" data-tooltip="Internal combo identifier">ⓘ</span></div>
-        <div class="podium-tags">
-          <span class="podium-tag">NIFTY 50</span>
-          <span class="podium-tag">15m</span>
-          <span class="podium-tag l">LONG</span>
-        </div>
-        <div class="podium-strat">EMA9&gt;21 × SuperTrend × VIX&lt;14 × Donchian-break</div>
-        <div class="podium-stats">
-          <div class="podium-stat"><div class="k">Gross P&amp;L</div><div class="v pos">+₹1,42,800</div></div>
-          <div class="podium-stat"><div class="k">Net (after charges)</div><div class="v pos">+₹61,510</div></div>
-          <div class="podium-stat"><div class="k">Smoothness</div><div class="v">1.87</div></div>
-          <div class="podium-stat"><div class="k">Real Edge</div><div class="v">0.92</div></div>
-        </div>
-        <div class="pass-list">
-          <div class="pass-list-title">Requirements check <span class="badge ok">✓ PASSES ALL 5</span></div>
-          <div class="pass-row"><span class="ic">🎯</span><span class="lbl">Win rate (need ≥60%)</span><span class="actual ok">62%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">🛡️</span><span class="lbl">Max loss (need ≤1%)</span><span class="actual ok">0.4%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">📉</span><span class="lbl">Max DD (need ≤5%)</span><span class="actual ok">3.2%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">✓</span><span class="lbl">Real (need DSR ≥0.5)</span><span class="actual ok">0.92</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">🔬</span><span class="lbl">Robust (need CPCV ≥70%)</span><span class="actual ok">78%</span><span class="check ok">✓</span></div>
-        </div>
-        <button class="podium-view-btn">View full report →</button>
-      </div>
-
-      <!-- GOLD (#1) — center -->
-      <div class="podium-card gold" data-rank="1">
-        <div class="podium-medal">🥇</div>
-        <div class="podium-rank">Rank #1 · Gold</div>
-        <div class="podium-combo-id">Combo #2,156 <span style="opacity:0.5" data-tooltip="Internal combo identifier">ⓘ</span></div>
-        <div class="podium-tags">
-          <span class="podium-tag">BANKNIFTY</span>
-          <span class="podium-tag">5m</span>
-          <span class="podium-tag ls">LONG+SHORT</span>
-        </div>
-        <div class="podium-strat">SuperTrend × VWAP × BB-squeeze × ATR-spike</div>
-        <div class="podium-stats">
-          <div class="podium-stat"><div class="k">Gross P&amp;L</div><div class="v pos">+₹2,18,400</div></div>
-          <div class="podium-stat"><div class="k">Net (after charges)</div><div class="v pos">+₹84,200</div></div>
-          <div class="podium-stat"><div class="k">Smoothness</div><div class="v">2.04</div></div>
-          <div class="podium-stat"><div class="k">Real Edge</div><div class="v">0.88</div></div>
-        </div>
-        <div class="pass-list">
-          <div class="pass-list-title">Requirements check <span class="badge ok">✓ PASSES ALL 5</span></div>
-          <div class="pass-row"><span class="ic">🎯</span><span class="lbl">Win rate (need ≥60%)</span><span class="actual ok">66%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">🛡️</span><span class="lbl">Max loss (need ≤1%)</span><span class="actual ok">0.21%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">📉</span><span class="lbl">Max DD (need ≤5%)</span><span class="actual ok">3.8%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">✓</span><span class="lbl">Real (need DSR ≥0.5)</span><span class="actual ok">0.88</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">🔬</span><span class="lbl">Robust (need CPCV ≥70%)</span><span class="actual ok">82%</span><span class="check ok">✓</span></div>
-        </div>
-        <button class="podium-view-btn">View full report →</button>
-      </div>
-
-      <!-- BRONZE (#3) — right -->
-      <div class="podium-card bronze" data-rank="3">
-        <div class="podium-medal">🥉</div>
-        <div class="podium-rank">Rank #3 · Bronze</div>
-        <div class="podium-combo-id">Combo #412 <span style="opacity:0.5" data-tooltip="Internal combo identifier">ⓘ</span></div>
-        <div class="podium-tags">
-          <span class="podium-tag">NIFTY 50</span>
-          <span class="podium-tag">1h</span>
-          <span class="podium-tag l">LONG</span>
-        </div>
-        <div class="podium-strat">RSI-divergence × MACD-cross × PDH × Pivot-R1</div>
-        <div class="podium-stats">
-          <div class="podium-stat"><div class="k">Gross P&amp;L</div><div class="v pos">+₹1,18,900</div></div>
-          <div class="podium-stat"><div class="k">Net (after charges)</div><div class="v pos">+₹88,300</div></div>
-          <div class="podium-stat"><div class="k">Smoothness</div><div class="v">1.91</div></div>
-          <div class="podium-stat"><div class="k">Real Edge</div><div class="v">0.85</div></div>
-        </div>
-        <div class="pass-list">
-          <div class="pass-list-title">Requirements check <span class="badge ok">✓ PASSES ALL 5</span></div>
-          <div class="pass-row"><span class="ic">🎯</span><span class="lbl">Win rate (need ≥60%)</span><span class="actual ok">72%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">🛡️</span><span class="lbl">Max loss (need ≤1%)</span><span class="actual ok">0.6%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">📉</span><span class="lbl">Max DD (need ≤5%)</span><span class="actual ok">2.4%</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">✓</span><span class="lbl">Real (need DSR ≥0.5)</span><span class="actual ok">0.85</span><span class="check ok">✓</span></div>
-          <div class="pass-row"><span class="ic">🔬</span><span class="lbl">Robust (need CPCV ≥70%)</span><span class="actual ok">75%</span><span class="check ok">✓</span></div>
-        </div>
-        <button class="podium-view-btn">View full report →</button>
-      </div>
+    <!-- The fabricated RULE #1/#2/#3 cards + the podium mockups were DELETED
+         (DEC-OPERATOR-PAGE-REAL-001): no contract source exists for them yet;
+         the real Best-of-Best rows render in the table below from top100.json.
+         The setup → status → action story returns with P3's phrase table. -->
+    <div class="top-combos-header">
+      <h2><span class="trophy">🏆</span> Top combos from the selected run</h2>
+      <div class="meta" id="comboMeta">rows fill from top100.json — awaiting real run artifact</div>
     </div>
 
     <!-- FILTER BAR -->
@@ -3154,55 +2884,34 @@
             <th></th>
           </tr>
         </thead>
+        <!-- Rows are built client-side from top100.json (createElement +
+             textContent — never markup interpolation); the 17 fabricated
+             mockup rows are DELETED (DEC-OPERATOR-PAGE-REAL-001). -->
         <tbody id="combosBody">
-          <tr><td><span class="rank">#4</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#982</span></td><td><span class="strat-desc">SuperTrend × VWAP × VIX-regime × Opening-range</span></td><td><span class="inst">SENSEX</span></td><td>15m</td><td><span class="dir-l">L</span></td><td data-sort="982">982</td><td class="pos" data-sort="104200">+₹1,04,200</td><td class="neg" data-sort="-62100">−₹62,100</td><td class="pos" data-sort="42100">+₹42,100</td><td data-sort="1.74">1.74</td><td data-sort="0.79">0.79</td><td data-sort="8.2">8.2</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#5</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#1,893</span></td><td><span class="strat-desc">EMA-cross × BB-bounce × Volume-spike × VIX&lt;16</span></td><td><span class="inst">BANKNIFTY</span></td><td>15m</td><td><span class="dir-ls">L+S</span></td><td data-sort="1893">1,893</td><td class="pos" data-sort="98700">+₹98,700</td><td class="neg" data-sort="-70300">−₹70,300</td><td class="pos" data-sort="28400">+₹28,400</td><td data-sort="1.68">1.68</td><td data-sort="0.74">0.74</td><td data-sort="7.8">7.8</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#6</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#2,480</span></td><td><span class="strat-desc">SuperTrend × Pivot-S1 × ATR × Time-of-day</span></td><td><span class="inst">NIFTY 50</span></td><td>5m</td><td><span class="dir-s">S</span></td><td data-sort="2480">2,480</td><td class="pos" data-sort="92300">+₹92,300</td><td class="neg" data-sort="-78100">−₹78,100</td><td class="pos" data-sort="14200">+₹14,200</td><td data-sort="1.62">1.62</td><td data-sort="0.71">0.71</td><td data-sort="7.5">7.5</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#7</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#687</span></td><td><span class="strat-desc">VWAP-cross × MACD × Donchian-break × Vol&gt;avg</span></td><td><span class="inst">NIFTY 50</span></td><td>30m</td><td><span class="dir-l">L</span></td><td data-sort="687">687</td><td class="pos" data-sort="88600">+₹88,600</td><td class="neg" data-sort="-32200">−₹32,200</td><td class="pos" data-sort="56400">+₹56,400</td><td data-sort="1.71">1.71</td><td data-sort="0.76">0.76</td><td data-sort="8.1">8.1</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#8</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#294</span></td><td><span class="strat-desc">RSI&lt;30 × Pivot-S2 × Bollinger × VIX-spike</span></td><td><span class="inst">BANKNIFTY</span></td><td>1h</td><td><span class="dir-l">L</span></td><td data-sort="294">294</td><td class="pos" data-sort="82100">+₹82,100</td><td class="neg" data-sort="-17800">−₹17,800</td><td class="pos" data-sort="64300">+₹64,300</td><td data-sort="1.83">1.83</td><td data-sort="0.81">0.81</td><td data-sort="8.4">8.4</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#9</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#187</span></td><td><span class="strat-desc">EMA50&gt;200 × SuperTrend × ADX&gt;25 × VIX-bracket</span></td><td><span class="inst">SENSEX</span></td><td>1h</td><td><span class="dir-l">L</span></td><td data-sort="187">187</td><td class="pos" data-sort="76400">+₹76,400</td><td class="neg" data-sort="-18200">−₹18,200</td><td class="pos" data-sort="58200">+₹58,200</td><td data-sort="1.79">1.79</td><td data-sort="0.78">0.78</td><td data-sort="8.0">8.0</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#10</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#1,542</span></td><td><span class="strat-desc">Ichimoku × ATR-band × Pivot-R2 × Open-gap</span></td><td><span class="inst">NIFTY 50</span></td><td>15m</td><td><span class="dir-ls">L+S</span></td><td data-sort="1542">1,542</td><td class="pos" data-sort="71800">+₹71,800</td><td class="neg" data-sort="-59400">−₹59,400</td><td class="pos" data-sort="12400">+₹12,400</td><td data-sort="1.55">1.55</td><td data-sort="0.67">0.67</td><td data-sort="7.2">7.2</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#11</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#568</span></td><td><span class="strat-desc">SuperTrend × VWAP-band × RSI × Volume-cluster</span></td><td><span class="inst">BANKNIFTY</span></td><td>30m</td><td><span class="dir-l">L</span></td><td data-sort="568">568</td><td class="pos" data-sort="68200">+₹68,200</td><td class="neg" data-sort="-29300">−₹29,300</td><td class="pos" data-sort="38900">+₹38,900</td><td data-sort="1.61">1.61</td><td data-sort="0.69">0.69</td><td data-sort="7.4">7.4</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#12</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#3,210</span></td><td><span class="strat-desc">BB-squeeze × MACD × Pivot × Time-filter</span></td><td><span class="inst">NIFTY 50</span></td><td>5m</td><td><span class="dir-ls">L+S</span></td><td data-sort="3210">3,210</td><td class="pos" data-sort="65400">+₹65,400</td><td class="neg" data-sort="-83600">−₹83,600</td><td class="neg" data-sort="-18200">−₹18,200</td><td data-sort="1.42">1.42</td><td data-sort="0.61">0.61</td><td data-sort="5.8">5.8</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#13</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#1,876</span></td><td><span class="strat-desc">SuperTrend-fast × VIX-band × Pivot-R1</span></td><td><span class="inst">SENSEX</span></td><td>5m</td><td><span class="dir-l">L</span></td><td data-sort="1876">1,876</td><td class="pos" data-sort="62100">+₹62,100</td><td class="neg" data-sort="-66900">−₹66,900</td><td class="neg" data-sort="-4800">−₹4,800</td><td data-sort="1.48">1.48</td><td data-sort="0.64">0.64</td><td data-sort="6.2">6.2</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#14</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#87</span></td><td><span class="strat-desc">EMA-bundle × Donchian × ADX × VIX&lt;18</span></td><td><span class="inst">NIFTY 50</span></td><td>1d</td><td><span class="dir-l">L</span></td><td data-sort="87">87</td><td class="pos" data-sort="58300">+₹58,300</td><td class="neg" data-sort="-6200">−₹6,200</td><td class="pos" data-sort="52100">+₹52,100</td><td data-sort="1.66">1.66</td><td data-sort="0.72">0.72</td><td data-sort="7.6">7.6</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#15</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#1,124</span></td><td><span class="strat-desc">RSI-cross × Stoch × Volume × PDH</span></td><td><span class="inst">BANKNIFTY</span></td><td>15m</td><td><span class="dir-s">S</span></td><td data-sort="1124">1,124</td><td class="pos" data-sort="54600">+₹54,600</td><td class="neg" data-sort="-35700">−₹35,700</td><td class="pos" data-sort="18900">+₹18,900</td><td data-sort="1.39">1.39</td><td data-sort="0.58">0.58</td><td data-sort="6.4">6.4</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#16</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#356</span></td><td><span class="strat-desc">SuperTrend × Bollinger × Vol-shock × VIX-filter</span></td><td><span class="inst">NIFTY 50</span></td><td>1h</td><td><span class="dir-ls">L+S</span></td><td data-sort="356">356</td><td class="pos" data-sort="51200">+₹51,200</td><td class="neg" data-sort="-18800">−₹18,800</td><td class="pos" data-sort="32400">+₹32,400</td><td data-sort="1.52">1.52</td><td data-sort="0.66">0.66</td><td data-sort="7.1">7.1</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#17</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#891</span></td><td><span class="strat-desc">VWAP-reject × MACD × Pivot-S1</span></td><td><span class="inst">SENSEX</span></td><td>15m</td><td><span class="dir-l">L</span></td><td data-sort="891">891</td><td class="pos" data-sort="48900">+₹48,900</td><td class="neg" data-sort="-39700">−₹39,700</td><td class="pos" data-sort="9200">+₹9,200</td><td data-sort="1.34">1.34</td><td data-sort="0.55">0.55</td><td data-sort="5.9">5.9</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#18</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#612</span></td><td><span class="strat-desc">ATR-channel × ADX × Vol-spike × VIX-spike</span></td><td><span class="inst">NIFTY 50</span></td><td>30m</td><td><span class="dir-ls">L+S</span></td><td data-sort="612">612</td><td class="pos" data-sort="45700">+₹45,700</td><td class="neg" data-sort="-23900">−₹23,900</td><td class="pos" data-sort="21800">+₹21,800</td><td data-sort="1.41">1.41</td><td data-sort="0.59">0.59</td><td data-sort="6.3">6.3</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#19</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#241</span></td><td><span class="strat-desc">EMA-ribbon × Pivot-R1 × Time-of-day</span></td><td><span class="inst">BANKNIFTY</span></td><td>1h</td><td><span class="dir-l">L</span></td><td data-sort="241">241</td><td class="pos" data-sort="42300">+₹42,300</td><td class="neg" data-sort="-13700">−₹13,700</td><td class="pos" data-sort="28600">+₹28,600</td><td data-sort="1.46">1.46</td><td data-sort="0.62">0.62</td><td data-sort="6.8">6.8</td><td><button class="combos-action">View</button></td></tr>
-          <tr><td><span class="rank">#20</span></td><td data-tooltip="Internal combo identifier"><span class="mask">#478</span></td><td><span class="strat-desc">SuperTrend × RSI × VWAP × Opening-range</span></td><td><span class="inst">SENSEX</span></td><td>30m</td><td><span class="dir-l">L</span></td><td data-sort="478">478</td><td class="pos" data-sort="38900">+₹38,900</td><td class="neg" data-sort="-23500">−₹23,500</td><td class="pos" data-sort="15400">+₹15,400</td><td data-sort="1.38">1.38</td><td data-sort="0.56">0.56</td><td data-sort="6.0">6.0</td><td><button class="combos-action">View</button></td></tr>
         </tbody>
       </table>
       <div class="show-more-row">
-        <button class="show-more-btn" id="showMoreBtn">Load more combos (227 remaining of 247 high-confidence picks)</button>
+        <a class="show-more-btn" href="/screener" style="text-decoration:none; display:inline-block;">🏆 Winners — open the full strategy screener →</a>
       </div>
     </div>
   </div>
 </div>
 
 <div id="tab-trades" class="tab-content">
-  <!-- Banner: every trade inherits the RULE shown on Top Combos page -->
-  <div style="margin: 16px 28px 0; padding: 18px 22px; background: linear-gradient(135deg, rgba(91,141,239,0.10), rgba(157,123,255,0.06)); border: 1px solid rgba(91,141,239,0.25); border-radius: 12px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap;">
-    <span style="font-size: 22px;">📖</span>
-    <div style="flex: 1;">
-      <div style="font-size: 13px; color: var(--text); line-height: 1.5;">All <strong style="color: var(--text-bright);">1,247 trades</strong> below were fired by the <strong style="color: var(--blue);">SAME RULE</strong> — they all inherit the same trigger conditions, market status, and exit logic. The rule's abstract formula is shown on the <strong>Top Combos page</strong> — per-trade rows only show the specific execution (price · time · P&amp;L).</div>
-    </div>
-    <button onclick="document.querySelector('.tabs button[data-tab=\'combos\']').click()" style="background: linear-gradient(135deg, var(--blue), var(--purple)); color: white; border: none; padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer;">View rule definition →</button>
-  </div>
+  <!-- R24 every-trade-visible: rows come from the trades API (contract row
+       shape entry/exit ts+px · direction · lots · exit reason · P&L · costs ·
+       MAE · MFE · VIX). PRODUCTION default is the honest AwaitingTradesReader
+       ("trades land at merge-integration") — never invented rows. -->
   <div class="trades-wrap">
     <div class="trades-header">
-      <h2>List of trades · Strategy #127</h2>
-      <span class="count">15 of 1,247 · newest first</span>
+      <h2>List of trades · <span data-oc="r1_rank">—</span> <span data-oc="r1_name" class="dim">—</span></h2>
+      <span class="oc-source-badge" id="ocTradesSource">source: none</span>
+      <span class="count" id="ocTradesNote">awaiting real run artifact — trades land at merge-integration (ResultsStore paged API)</span>
     </div>
+    <div id="ocTradesError"></div>
     <table class="trades-table">
-      <thead><tr><th>#</th><th>Type</th><th>Instrument</th><th>Entry</th><th>Exit</th><th>Entry ₹</th><th>Exit ₹</th><th>VIX</th><th>Gross P&amp;L</th><th>Charges</th><th>NET P&amp;L</th><th>%</th><th>Cumulative</th></tr></thead>
-      <tbody>
-        <tr class="win-row"><td class="trade-id">1247</td><td><span class="trade-type long">LONG</span></td><td><span class="inst-badge nifty">NIFTY</span></td><td class="dim">22 May 2026 · 14:30</td><td class="dim">22 May 2026 · 15:20</td><td>23,418</td><td>23,512</td><td><span class="vix-chip">12.4</span></td><td class="pos">+₹94</td><td class="neg dim">−₹65</td><td class="pos">+₹29</td><td class="pos">+0.13%</td><td class="pos">+₹61,510</td></tr>
-        <tr class="win-row"><td class="trade-id">1246</td><td><span class="trade-type short">SHORT</span></td><td><span class="inst-badge banknifty">BANKNIFTY</span></td><td class="dim">22 May 2026 · 11:15</td><td class="dim">22 May 2026 · 13:48</td><td>23,512</td><td>23,398</td><td><span class="vix-chip">12.1</span></td><td class="pos">+₹114</td><td class="neg dim">−₹65</td><td class="pos">+₹49</td><td class="pos">+0.21%</td><td class="pos">+₹61,481</td></tr>
-        <tr class="win-row"><td class="trade-id">1245</td><td><span class="trade-type long">LONG</span></td><td><span class="inst-badge nifty">NIFTY</span></td><td class="dim">21 May 2026 · 15:01</td><td class="dim">22 May 2026 · 10:30</td><td>23,388</td><td>23,498</td><td><span class="vix-chip">11.8</span></td><td class="pos">+₹110</td><td class="neg dim">−₹65</td><td class="pos">+₹45</td><td class="pos">+0.19%</td><td class="pos">+₹61,432</td></tr>
-        <tr class="loss-row"><td class="trade-id">1244</td><td><span class="trade-type long">LONG</span></td><td><span class="inst-badge sensex">SENSEX</span></td><td class="dim">21 May 2026 · 11:42</td><td class="dim">21 May 2026 · 14:18</td><td>23,402</td><td>23,366</td><td><span class="vix-chip">13.2</span></td><td class="neg">−₹36</td><td class="neg dim">−₹65</td><td class="neg">−₹101</td><td class="neg">−0.43%</td><td class="pos">+₹61,387</td></tr>
-        <tr class="win-row"><td class="trade-id">1243</td><td><span class="trade-type short">SHORT</span></td><td><span class="inst-badge nifty">NIFTY</span></td><td class="dim">20 May 2026 · 14:48</td><td class="dim">21 May 2026 · 10:42</td><td>23,478</td><td>23,388</td><td><span class="vix-chip">13.6</span></td><td class="pos">+₹90</td><td class="neg dim">−₹65</td><td class="pos">+₹25</td><td class="pos">+0.11%</td><td class="pos">+₹61,488</td></tr>
+      <thead><tr><th>Dir</th><th>Entry ts</th><th>Entry px</th><th>Exit ts</th><th>Exit px</th><th>Lots</th><th>Exit reason</th><th>P&amp;L</th><th>Costs</th><th>MAE</th><th>MFE</th><th>VIX in</th><th>VIX out</th></tr></thead>
+      <tbody id="ocTradesBody">
       </tbody>
     </table>
   </div>
@@ -3210,217 +2919,73 @@
 
 <div id="tab-sweep" class="tab-content">
   <div class="sweep-context-wrap">
+    <!-- R28 run-manifest observability: every figure below is the selected
+         run's manifest verbatim (em-dash until a run exists). The fabricated
+         smoothness bell curve was DELETED — no distribution artifact exists
+         yet (DEC-OPERATOR-PAGE-REAL-001). -->
     <div class="sweep-hero">
-      <div class="sweep-hero-stat"><div class="num">730 B</div><div class="lab">Total trial space<br>(SL/TP grid + signal-exit)</div></div>
-      <div class="sweep-hero-stat"><div class="num">28.4M</div><div class="lab">Tested so far<br>(0.004% of space)</div></div>
-      <div class="sweep-hero-stat"><div class="num">~100</div><div class="lab">9 stat filters<br>passed</div></div>
-      <div class="sweep-hero-stat"><div class="num">#127</div><div class="lab">Your strategy<br>top 0.0004%</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="actual_enumerated">—</div><div class="lab">Enumerated<br>(manifest actual)</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="actual_tested">—</div><div class="lab">Tested<br>(manifest actual)</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="actual_skipped">—</div><div class="lab">Skipped<br>(dedup — R6)</div></div>
+      <div class="sweep-hero-stat"><div class="num" data-oc="r1_rank">—</div><div class="lab">Best stored<br>winner rank</div></div>
     </div>
-    <div class="bell-curve-wrap">
-      <h3>Smoothness distribution — your strategy is the orange marker (right tail)</h3>
-      <svg class="bell-svg" viewBox="0 0 1000 300" preserveAspectRatio="none">
-        <g stroke="#1E222D" stroke-width="1"><line x1="0" y1="80" x2="1000" y2="80"/><line x1="0" y1="160" x2="1000" y2="160"/><line x1="0" y1="240" x2="1000" y2="240"/></g>
-        <g>
-          <rect class="bell-bar" x="0" y="290" width="32" height="6" fill="#1A8870" style="animation-delay:0.1s"/>
-          <rect class="bell-bar" x="34" y="285" width="32" height="11" fill="#1A8870" style="animation-delay:0.12s"/>
-          <rect class="bell-bar" x="68" y="278" width="32" height="18" fill="#1A8870" style="animation-delay:0.14s"/>
-          <rect class="bell-bar" x="102" y="265" width="32" height="31" fill="#1A8870" style="animation-delay:0.16s"/>
-          <rect class="bell-bar" x="136" y="240" width="32" height="56" fill="#1A8870" style="animation-delay:0.18s"/>
-          <rect class="bell-bar" x="170" y="200" width="32" height="96" fill="#1A8870" style="animation-delay:0.20s"/>
-          <rect class="bell-bar" x="204" y="150" width="32" height="146" fill="#1A8870" style="animation-delay:0.22s"/>
-          <rect class="bell-bar" x="238" y="105" width="32" height="191" fill="#FFC857" style="animation-delay:0.24s"/>
-          <rect class="bell-bar" x="272" y="75" width="32" height="221" fill="#FFC857" style="animation-delay:0.26s"/>
-          <rect class="bell-bar" x="306" y="60" width="32" height="236" fill="#FFC857" style="animation-delay:0.28s"/>
-          <rect class="bell-bar" x="340" y="68" width="32" height="228" fill="#FFC857" style="animation-delay:0.30s"/>
-          <rect class="bell-bar" x="374" y="88" width="32" height="208" fill="#FFC857" style="animation-delay:0.32s"/>
-          <rect class="bell-bar" x="408" y="115" width="32" height="181" fill="#FFC857" style="animation-delay:0.34s"/>
-          <rect class="bell-bar" x="442" y="145" width="32" height="151" fill="#FFC857" style="animation-delay:0.36s"/>
-          <rect class="bell-bar" x="476" y="175" width="32" height="121" fill="#FFC857" style="animation-delay:0.38s"/>
-          <rect class="bell-bar" x="510" y="200" width="32" height="96" fill="#FFC857" style="animation-delay:0.40s"/>
-          <rect class="bell-bar" x="544" y="225" width="32" height="71" fill="#FFC857" style="animation-delay:0.42s"/>
-          <rect class="bell-bar" x="578" y="245" width="32" height="51" fill="#5B8DEF" style="animation-delay:0.44s"/>
-          <rect class="bell-bar" x="612" y="260" width="32" height="36" fill="#5B8DEF" style="animation-delay:0.46s"/>
-          <rect class="bell-bar" x="646" y="270" width="32" height="26" fill="#5B8DEF" style="animation-delay:0.48s"/>
-          <rect class="bell-bar" x="680" y="276" width="32" height="20" fill="#5B8DEF" style="animation-delay:0.50s"/>
-          <rect class="bell-bar" x="714" y="280" width="32" height="16" fill="#5B8DEF" style="animation-delay:0.52s"/>
-          <rect class="bell-bar" x="748" y="283" width="32" height="13" fill="#9D7BFF" style="animation-delay:0.54s"/>
-          <rect class="bell-bar" x="782" y="286" width="32" height="10" fill="#9D7BFF" style="animation-delay:0.56s"/>
-          <rect class="bell-bar" x="816" y="289" width="32" height="7" fill="#9D7BFF" style="animation-delay:0.58s"/>
-          <rect class="bell-bar" x="850" y="291" width="32" height="5" fill="#9D7BFF" style="animation-delay:0.60s"/>
-          <rect class="bell-bar" x="884" y="293" width="32" height="3" fill="#FFB74D" style="animation-delay:0.62s"/>
-          <rect class="bell-bar" x="918" y="294" width="32" height="2" fill="#FFB74D" style="animation-delay:0.64s"/>
-          <rect class="bell-bar" x="952" y="295" width="32" height="1" fill="#FFB74D" style="animation-delay:0.66s"/>
-        </g>
-        <g>
-          <line x1="866" y1="0" x2="866" y2="296" stroke="#FFB74D" stroke-width="2" stroke-dasharray="4,4"/>
-          <circle cx="866" cy="291" r="7" fill="#FFB74D" filter="drop-shadow(0 0 12px #FFB74D)"/>
-          <rect x="780" y="14" width="172" height="48" rx="7" fill="#0A0D11" stroke="#FFB74D" stroke-width="1.5"/>
-          <text x="866" y="34" text-anchor="middle" fill="#FFB74D" font-size="11" font-weight="800">YOUR STRATEGY</text>
-          <text x="866" y="52" text-anchor="middle" fill="#E5E8EC" font-size="13" font-weight="700">Top 0.0004%</text>
-        </g>
-      </svg>
-    </div>
+    <div class="oc-sub" style="margin-top:12px;">Selected run <span data-oc="run_id">—</span> · window <span data-oc="date_range">—</span> · symbols <span data-oc="sel_symbols">—</span> · <span data-oc="suspect">verification pending</span></div>
   </div>
 </div>
 
+<!-- ══ Live run observability (DEC-OPERATOR-PAGE-REAL-001) — always
+     visible, never tab-gated: chain map (R41) · per-stage progress strips ·
+     searchable timeline (capped client ring) · R44 VERIFY-ME panel. ══ -->
+<section class="oc-section show-operator-only" id="ocChainSection" aria-label="Run chain map">
+  <h3>🔗 Chain map</h3>
+  <div class="oc-sub">preflight → sweep → gates → rank → refine → cascade → artifacts → display — link states are SERVER truth (green/amber/red/pending); an unknown stage reads pending, never green.</div>
+  <div id="ocChainMap"><span class="oc-chain-link oc-chain-pending">awaiting real run artifact</span></div>
+</section>
+
+<section class="oc-section show-operator-only" id="ocProgressSection" aria-label="Per-stage progress">
+  <h3>⏱ Per-stage progress</h3>
+  <div id="ocProgressStrips"><div class="oc-sub">per-stage timings — awaiting real run artifact</div></div>
+</section>
+
+<section class="oc-section show-operator-only" id="ocTimelineSection" aria-label="Run timeline">
+  <h3>📜 Run timeline</h3>
+  <div class="oc-controls-row" style="margin-top:0;">
+    <label>search (window-scoped — filters the loaded ring only, not the whole file)
+      <input id="ocTimelineSearch" type="text" placeholder="e.g. tripwire">
+    </label>
+    <button class="oc-cascade-btn" id="ocTimelineEarlier" type="button" style="padding:7px 12px;font-size:11px;">load earlier</button>
+    <span class="oc-sub" id="ocTimelineLabel" style="margin-bottom:0;">live tail — the newest events stream in below</span>
+  </div>
+  <div id="ocTimeline"></div>
+</section>
+
+<section class="oc-section show-operator-only" id="ocVerifyPanel" aria-label="VERIFY-ME panel">
+  <h3>🛡 VERIFY ME — the 7 operator acceptance checks (R44)</h3>
+  <div class="oc-sub">Trust is EARNED by your own hands, never promised: pass / fail / ready (awaiting your judgment) / awaiting / not_wired. Operator-judged checks can never exceed "ready" server-side.</div>
+  <div id="ocVerifyError"></div>
+  <div id="ocVerifyChecks"><div class="oc-verify-row"><span class="oc-verify-state oc-verify-awaiting">awaiting</span><span class="oc-verify-name">checks load once a run is selected</span><span class="oc-verify-detail">awaiting real run artifact</span></div></div>
+  <div class="oc-controls-row">
+    <button class="oc-cascade-btn" id="ocVerifyChainBtn" type="button">▶ Replay audit chain (O(file) — runs on click only)</button>
+    <button class="oc-run-btn" id="ocVerifyRefreshBtn" type="button" style="padding:8px 14px;">↻ Refresh checks</button>
+  </div>
+  <h3 style="margin-top:16px;">Funnel reconcile (check #7)</h3>
+  <div id="ocVerifyFunnel"><div class="oc-verify-line">funnel reconcile awaiting — no run selected</div></div>
+</section>
+
 <footer>
-  <span class="show-operator-only">run_hash=a3f72c8…41b9d · commit=d2e4f1 · indicator_version=1.2</span>
+  <span class="show-operator-only">run <span data-oc="run_id">—</span> · verification lives in the VERIFY-ME panel above (R44 — never a pre-printed PASS)</span>
   <span class="show-share-only">@brutex_sj · brute-force backtest</span>
   <span class="ok-row">
-    <span class="show-operator-only"><span class="check">✓</span> Determinism PASS</span>
-    <span class="show-operator-only"><span class="check">✓</span> Audit replay PASS</span>
-    <span>BruteX v22 · top combos table now matches the rest · 9-filter · 730 B</span>
+    <span>BruteX · operator page · fed from real run artifacts only</span>
   </span>
 </footer>
 
 </main>
 
-<!-- ============================================================ -->
-<!-- REEL OVERLAY                                                 -->
-<!-- ============================================================ -->
-<div class="reel-overlay" id="reelOverlay">
-  <button class="reel-exit" id="reelExit">×</button>
-  <div class="reel-progress" id="reelProgress">
-    <span class="active"></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
-  </div>
-
-  <div class="reel-frame">
-
-    <!-- Slide 1: HOOK -->
-    <div class="reel-slide s1" data-idx="0">
-      <div class="reel-overhead">5 months ago, I asked one question:</div>
-      <div class="reel-huge gradient">"What if I tested<br>EVERY possible<br>trading strategy?"</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 2: SCALE -->
-    <div class="reel-slide s2" data-idx="1">
-      <div class="reel-overhead">So I built a system that tested</div>
-      <div class="reel-huge gradient" data-reel-counter="28401392">0</div>
-      <div class="reel-sub">trading strategies</div>
-      <div class="reel-sub-small">across 5 years of NIFTY data</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 3: REALITY -->
-    <div class="reel-slide s3" data-idx="2">
-      <div class="reel-overhead">The result?</div>
-      <div class="reel-huge red">99.99%</div>
-      <div class="reel-sub">lose money</div>
-      <div class="reel-sub-small">most "strategies" are just gambling</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 4: THE ONE -->
-    <div class="reel-slide s4" data-idx="3">
-      <div class="reel-overhead">But ONE was different.</div>
-      <div class="reel-visual">
-        <svg class="reel-bell-svg" viewBox="0 0 400 160">
-          <g>
-            <rect x="0" y="155" width="14" height="5" fill="#1A8870"/>
-            <rect x="16" y="148" width="14" height="12" fill="#1A8870"/>
-            <rect x="32" y="138" width="14" height="22" fill="#1A8870"/>
-            <rect x="48" y="118" width="14" height="42" fill="#1A8870"/>
-            <rect x="64" y="90" width="14" height="70" fill="#FFC857"/>
-            <rect x="80" y="60" width="14" height="100" fill="#FFC857"/>
-            <rect x="96" y="40" width="14" height="120" fill="#FFC857"/>
-            <rect x="112" y="35" width="14" height="125" fill="#FFC857"/>
-            <rect x="128" y="45" width="14" height="115" fill="#FFC857"/>
-            <rect x="144" y="65" width="14" height="95" fill="#FFC857"/>
-            <rect x="160" y="85" width="14" height="75" fill="#FFC857"/>
-            <rect x="176" y="110" width="14" height="50" fill="#FFC857"/>
-            <rect x="192" y="130" width="14" height="30" fill="#5B8DEF"/>
-            <rect x="208" y="142" width="14" height="18" fill="#5B8DEF"/>
-            <rect x="224" y="148" width="14" height="12" fill="#5B8DEF"/>
-            <rect x="240" y="152" width="14" height="8" fill="#5B8DEF"/>
-            <rect x="256" y="154" width="14" height="6" fill="#9D7BFF"/>
-            <rect x="272" y="155" width="14" height="5" fill="#9D7BFF"/>
-            <rect x="288" y="156" width="14" height="4" fill="#9D7BFF"/>
-            <rect x="304" y="157" width="14" height="3" fill="#FFB74D"/>
-            <rect x="320" y="158" width="14" height="2" fill="#FFB74D"/>
-          </g>
-          <line x1="327" y1="0" x2="327" y2="160" stroke="#FFB74D" stroke-width="2" stroke-dasharray="3,3"/>
-          <circle cx="327" cy="158" r="6" fill="#FFB74D" filter="drop-shadow(0 0 10px #FFB74D)"/>
-          <circle cx="310" cy="10" r="2" fill="#FFB74D"><animate attributeName="opacity" values="0;1;0" dur="1.6s" repeatCount="indefinite"/></circle>
-          <circle cx="345" cy="20" r="2" fill="#FFB74D"><animate attributeName="opacity" values="0;1;0" dur="1.6s" begin="0.4s" repeatCount="indefinite"/></circle>
-          <circle cx="335" cy="40" r="1.5" fill="#FFB74D"><animate attributeName="opacity" values="0;1;0" dur="1.6s" begin="0.8s" repeatCount="indefinite"/></circle>
-        </svg>
-      </div>
-      <div class="reel-huge yellow" style="font-size: clamp(40px, 11vw, 60px)">#127</div>
-      <div class="reel-sub">out of 28.4 million</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 5: EDGE -->
-    <div class="reel-slide s5" data-idx="4">
-      <div class="reel-overhead">In 5 months, it made</div>
-      <div class="reel-huge green">+₹95,600</div>
-      <div class="reel-sub">more than just holding NIFTY</div>
-      <div class="reel-visual">
-        <svg class="reel-equity-svg" viewBox="0 0 380 120" preserveAspectRatio="none">
-          <polyline points="0,100 60,90 120,75 180,70 240,55 300,40 380,15" fill="none" stroke="#FFC857" stroke-width="3" stroke-linecap="round" filter="drop-shadow(0 0 8px rgba(255,200,87,0.7))"/>
-          <polyline points="0,100 60,98 120,94 180,90 240,86 300,82 380,76" fill="none" stroke="#5B8DEF" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.6"/>
-          <circle cx="380" cy="15" r="5" fill="#FFE3A1" filter="drop-shadow(0 0 12px #FFC857)"/>
-        </svg>
-      </div>
-      <div class="reel-sub-small">+18.4% outperformance</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 6: SAFETY -->
-    <div class="reel-slide s6" data-idx="5">
-      <div class="reel-overhead">Worst drop?</div>
-      <div class="reel-huge red">−4.2%</div>
-      <div class="reel-sub">that's it.</div>
-      <div class="reel-sub-small">recovered in 11 days</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 7: PROOF -->
-    <div class="reel-slide s7" data-idx="6">
-      <div class="reel-overhead">Statistical tests confirm:</div>
-      <div class="reel-visual">
-        <div class="reel-check">
-          <svg viewBox="0 0 24 24"><path d="M20.285 6.708l-11.49 11.49-5.075-5.075 1.414-1.414 3.661 3.66 10.075-10.075z"/></svg>
-        </div>
-      </div>
-      <div class="reel-huge green">REAL EDGE</div>
-      <div class="reel-sub">not luck.</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 8: RANK -->
-    <div class="reel-slide s8" data-idx="7">
-      <div class="reel-overhead">Out of 28.4 million tested,<br>this strategy ranks</div>
-      <div class="reel-huge gradient">#127</div>
-      <div class="reel-sub">that's the</div>
-      <div class="reel-huge green" style="font-size: clamp(40px, 12vw, 60px); margin-top: 6px;">top 0.0004%</div>
-      <div class="reel-tap-hint">scroll ↓</div>
-    </div>
-
-    <!-- Slide 9: CTA -->
-    <div class="reel-slide s9" data-idx="8">
-      <div class="reel-overhead">Want the full method?</div>
-      <div class="reel-brand-big">@brutex_sj</div>
-      <div class="reel-sub">Follow for more brute-force backtests</div>
-      <button class="reel-follow-btn">Follow →</button>
-    </div>
-
-  </div>
-</div>
-
-<!-- v23 REEL UPGRADE: progress dots that show current slide -->
-<div class="reel-progress-dots" id="reelProgressDots">
-  <div class="dot active" data-i="0"></div>
-  <div class="dot" data-i="1"></div>
-  <div class="dot" data-i="2"></div>
-  <div class="dot" data-i="3"></div>
-  <div class="dot" data-i="4"></div>
-  <div class="dot" data-i="5"></div>
-  <div class="dot" data-i="6"></div>
-  <div class="dot" data-i="7"></div>
-  <div class="dot" data-i="8"></div>
-</div>
+<!-- The REEL overlay (9 marketing slides of fabricated ₹ / rank / count
+     claims) was DELETED in the DEC-OPERATOR-PAGE-REAL-001 kill sweep — no
+     contract source exists for a share reel; it can return fed from real
+     artifacts. -->
 
 <div class="modal-back" id="modalBack">
   <div class="modal">
@@ -3446,90 +3011,16 @@
       document.querySelectorAll('.mode-toggle button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
 
-      if (mode === 'reel') {
-        document.getElementById('reelOverlay').classList.add('open');
-        document.body.classList.add('reel-mode'); // v23: surface body class so reel-progress-dots show
-        document.querySelector('.reel-overlay').scrollTop = 0;
-        setTimeout(() => {
-          const firstSlide = document.querySelector('.reel-slide[data-idx="0"]');
-          if (firstSlide) firstSlide.classList.add('in-view');
-        }, 50);
-        return;
-      }
-
-      document.body.classList.remove('operator-mode', 'share-mode', 'reel-mode');
+      document.body.classList.remove('operator-mode', 'share-mode');
       document.body.classList.add(mode + '-mode');
       if (mode === 'share') fireConfetti();
     });
   });
 
-  document.getElementById('reelExit').addEventListener('click', () => {
-    document.getElementById('reelOverlay').classList.remove('open');
-    document.body.classList.remove('reel-mode'); // v23
-    document.querySelector('.mode-toggle button[data-mode="reel"]').classList.remove('active');
-    const currentMode = document.body.classList.contains('share-mode') ? 'share' : 'operator';
-    document.querySelector(`.mode-toggle button[data-mode="${currentMode}"]`).classList.add('active');
-  });
+  // countUp + the reel machinery were DELETED with the mockup values they
+  // animated (DEC-OPERATOR-PAGE-REAL-001) — real values arrive via
+  // bx-oneclick.js textContent fills.
 
-  function countUp(el, attr) {
-    const target = parseFloat(el.dataset[attr]);
-    const decimals = parseInt(el.dataset.decimals || '0', 10);
-    const prefix = el.dataset.prefix || '';
-    const suffix = el.dataset.suffix || '';
-    const duration = 1800;
-    const start = performance.now();
-    const tick = (now) => {
-      const t = Math.min((now - start) / duration, 1);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const v = target * eased;
-      let text;
-      if (decimals === 0) text = Math.round(Math.abs(v)).toLocaleString('en-IN');
-      else text = Math.abs(v).toFixed(decimals);
-      const cleanPrefix = (v < 0 && prefix.includes('+')) ? '−₹' : (v < 0 ? '−' : prefix);
-      el.textContent = cleanPrefix + text + suffix;
-      if (t < 1) requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }
-  window.addEventListener('load', () => {
-    setTimeout(() => document.querySelectorAll('[data-countup]').forEach(el => countUp(el, 'countup')), 400);
-  });
-
-  // Reel slide observer
-  const reelObserver = new IntersectionObserver(entries => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting && entry.intersectionRatio > 0.5) {
-        entry.target.classList.add('in-view');
-        const idx = parseInt(entry.target.dataset.idx, 10);
-        document.querySelectorAll('#reelProgress span').forEach((s, i) => {
-          s.classList.toggle('active', i <= idx);
-        });
-        // v23 REEL UPGRADE: update bottom progress-dots indicator
-        document.querySelectorAll('#reelProgressDots .dot').forEach((d, i) => {
-          d.classList.toggle('active', i === idx);
-        });
-        const counters = entry.target.querySelectorAll('[data-reel-counter]');
-        counters.forEach(c => {
-          if (!c.dataset.fired) {
-            c.dataset.fired = '1';
-            const target = parseFloat(c.dataset.reelCounter);
-            const start = performance.now();
-            const tick = now => {
-              const t = Math.min((now - start) / 2200, 1);
-              const eased = 1 - Math.pow(1 - t, 4);
-              c.textContent = Math.round(target * eased).toLocaleString('en-IN');
-              if (t < 1) requestAnimationFrame(tick);
-            };
-            requestAnimationFrame(tick);
-          }
-        });
-        if (entry.target.classList.contains('s7')) fireConfetti();
-        if (entry.target.classList.contains('s9')) fireConfetti();
-      }
-    });
-  }, { threshold: [0.5] });
-
-  document.querySelectorAll('.reel-slide').forEach(s => reelObserver.observe(s));
 
   function fireConfetti() {
     const c = document.getElementById('confetti');
@@ -3628,30 +3119,31 @@
     // fn runs ONCE, ~ms after the LAST call, always with the final values.
     const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
 
-    // #comboMeta static structure — built ONCE on the first filter run (lazy,
-    // so the initial "Showing top …" markup stays untouched until a filter is
-    // used, exactly like the innerHTML rewrite this replaces); afterwards only
-    // the count <strong> is patched via textContent, and only when it changed.
-    // No innerHTML sink at all on this path (createElement + textContent).
+    // #comboMeta static structure — built ONCE on the first filter run;
+    // afterwards only the two <strong> counters are patched via textContent.
+    // The total is the REAL loaded row count (top100.json), never a
+    // hardcoded figure. No innerHTML sink on this path.
     let comboMetaCountEl = null;
+    let comboMetaTotalEl = null;
     let comboMetaLastVisible = null;
-    function renderComboMeta(visible) {
+    function renderComboMeta(visible, total) {
       if (visible === comboMetaLastVisible) return;
       comboMetaLastVisible = visible;
       if (!comboMetaCountEl) {
         const meta = document.getElementById('comboMeta');
+        if (!meta) return;
         meta.textContent = 'Showing ';
         comboMetaCountEl = document.createElement('strong');
         comboMetaCountEl.style.color = 'var(--text)';
         meta.appendChild(comboMetaCountEl);
         meta.appendChild(document.createTextNode(' of '));
-        const totalEl = document.createElement('strong');
-        totalEl.style.color = 'var(--text)';
-        totalEl.textContent = '12,847';
-        meta.appendChild(totalEl);
-        meta.appendChild(document.createTextNode(' passing combos'));
+        comboMetaTotalEl = document.createElement('strong');
+        comboMetaTotalEl.style.color = 'var(--text)';
+        meta.appendChild(comboMetaTotalEl);
+        meta.appendChild(document.createTextNode(' stored winners'));
       }
       comboMetaCountEl.textContent = String(visible);
+      comboMetaTotalEl.textContent = String(total);
     }
 
     function applyFilters() {
@@ -3677,7 +3169,7 @@
         row.style.display = ok ? '' : 'none';
         if (ok) visible++;
       });
-      renderComboMeta(visible);
+      renderComboMeta(visible, document.querySelectorAll('#combosBody tr').length);
     }
     const applyFiltersDebounced = debounce(applyFilters, 200);
     ['fInst', 'fTF', 'fDir', 'fSharpe', 'fDSR'].forEach(id => {
@@ -3698,167 +3190,13 @@
       });
     });
 
-    // ===== Manual override toggle (sliders hidden by default = AUTO MODE) =====
-    const manualToggle = document.getElementById('manualToggle');
-    const reqsPanelWrap = document.getElementById('reqsPanelWrap');
-    if (manualToggle && reqsPanelWrap) {
-      manualToggle.addEventListener('click', () => {
-        reqsPanelWrap.classList.toggle('open');
-        const open = reqsPanelWrap.classList.contains('open');
-        manualToggle.textContent = open
-          ? '✕ Hide manual sliders — go back to fully automatic'
-          : 'Refine manually — show sliders to override the auto-detected thresholds';
-      });
-    }
-
-    // ===== Live slider filtering (AUTO MODE detects defaults from sweep distribution) =====
-    const sliders = [
-      { id: 'sWin',  label: 'vWin',  prefix: '≥', suffix: '%', dec: 0 },
-      { id: 'sLoss', label: 'vLoss', prefix: '≤', suffix: '%', dec: 1 },
-      { id: 'sDD',   label: 'vDD',   prefix: '≤', suffix: '%', dec: 1 },
-      { id: 'sDSR',  label: 'vDSR',  prefix: '≥', suffix: '',  dec: 2 },
-      { id: 'sCPCV', label: 'vCPCV', prefix: '≥', suffix: '%', dec: 0 }
-    ];
-
-    // Reality-banner state key (DEC-DASHBOARD-JS-PERF-001): the ~600-char
-    // banner innerHTML is reassigned ONLY when the branch (or its embedded
-    // numbers) changes, not on every slider drag tick. The strings below are
-    // static template text — no server/user data reaches this existing sink.
-    let lastBannerKey = '';
-
-    function updatePassCount() {
-      const win  = parseFloat(document.getElementById('sWin').value);
-      const loss = parseFloat(document.getElementById('sLoss').value);
-      const dd   = parseFloat(document.getElementById('sDD').value);
-      const dsr  = parseFloat(document.getElementById('sDSR').value);
-      const cpcv = parseFloat(document.getElementById('sCPCV').value);
-      // Approximate pass count (simulated based on slider strictness vs realistic sweep distribution)
-      // Sweep has 12,847 statistically-real combos. As filters tighten, count drops.
-      const winSlack  = Math.max(0, 1 - Math.max(0, (win  - 50)) / 45);
-      const lossSlack = Math.max(0, Math.min(1, loss / 2.5));
-      const ddSlack   = Math.max(0, Math.min(1, dd / 10));
-      const dsrSlack  = Math.max(0, 1 - dsr * 0.95);
-      const cpcvSlack = Math.max(0, 1 - Math.max(0, (cpcv - 50)) / 45);
-      const fraction = winSlack * lossSlack * ddSlack * dsrSlack * cpcvSlack;
-      const count = Math.max(0, Math.round(12847 * fraction * 0.07));
-      const el = document.getElementById('passCount');
-      if (el) el.textContent = count.toLocaleString('en-IN');
-      const banner = document.getElementById('realityBanner');
-      if (banner) {
-        const bannerKey = count === 0 ? 'zero' : (win >= 80 ? 'high:' + win + ':' + count : 'normal');
-        if (bannerKey !== lastBannerKey) {
-          lastBannerKey = bannerKey;
-          if (count === 0) {
-            banner.classList.add('error');
-            banner.querySelector('.txt').innerHTML = '<strong>⚠ Zero combos pass these thresholds.</strong> You\'re asking for something the data does NOT contain. Try relaxing the strictest one (most likely Win Rate &gt; 80% or Max DD &lt; 2%). The sweep distribution shows what\'s actually achievable — 100% win rate without hidden risk does not exist.';
-          } else if (win >= 80) {
-            banner.classList.remove('error');
-            banner.querySelector('.txt').innerHTML = '<strong>Heads up:</strong> Win rate ≥' + win + '% is rare (' + count + ' combos pass). These tend to be low-frequency strategies — fewer trades, smaller total profit. If "extreme massive target profit" is your priority, consider lowering Win Rate to 60-72% range where high-trade-count strategies live.';
-          } else {
-            banner.classList.remove('error');
-            banner.querySelector('.txt').innerHTML = '<strong>Reality check on "only winning" / 100% win rate:</strong> No real strategy hits 100% without hidden tail risk (e.g. selling deep-OTM options has 95%+ win rate but one bad day wipes years of gains). Sustainable strategies in the BruteX sweep cluster around <strong>55-72% win rate</strong>. Above 80% exists but trades rarely (low frequency, high selectivity). Your <strong>"extreme massive target profit"</strong> aim is best achieved by combos in the 60-72% win-rate range with high trade count — that\'s where the Sweet Spot sort puts them.';
-          }
-        }
-      }
-    }
-
-    sliders.forEach(s => {
-      const el = document.getElementById(s.id);
-      const lbl = document.getElementById(s.label);
-      if (el && lbl) {
-        el.addEventListener('input', () => {
-          const v = parseFloat(el.value);
-          lbl.textContent = s.prefix + v.toFixed(s.dec) + s.suffix;
-          updatePassCount();
-        });
-      }
-    });
-
-    // Show top selector
-    const showTop = document.getElementById('showTop');
-    if (showTop) {
-      showTop.addEventListener('change', () => {
-        document.getElementById('showCount').textContent = showTop.value;
-        const more = document.getElementById('showMoreBtn');
-        if (more) more.textContent = `Load more combos (${247 - parseInt(showTop.value, 10)} remaining of 247 high-confidence picks)`;
-      });
-    }
-
-    // Ranking-by formula text update
-    const rankBy = document.getElementById('rankBy');
-    const formulas = {
-      composite: '<strong>Composite formula (built around YOUR 5 stated aims):</strong><br>Composite = <strong>NET PROFIT</strong> × <span class="v">30%</span> &nbsp;+&nbsp; <strong>WIN RATE</strong> × <span class="v">20%</span> &nbsp;+&nbsp; <strong>TRADE QUALITY</strong> × <span class="v">15%</span> &nbsp;+&nbsp; <strong>SAFETY (low drawdown)</strong> × <span class="v">20%</span> &nbsp;+&nbsp; <strong>REAL EDGE (not fluke)</strong> × <span class="v">15%</span><br>Why this exact mix: PROFIT is what you actually earn (after charges). WIN RATE + TRADE QUALITY = your "more winning trades" aim. SAFETY = your "very less stop loss" aim. REAL EDGE protects you from picking a fluke out of 28M random tries.',
-      sharpe: '<strong>Ranked by raw Sharpe ratio:</strong><br>Sharpe = (Mean return − Risk-free rate) ÷ StdDev of returns<br>Higher Sharpe = more return per unit of bumpiness. <span class="v">⚠</span> Sharpe alone can be misleading: a strategy that "looks great" on training data might just be one of 28M random tries that got lucky. Use DSR or Composite for safer ranking.',
-      dsr: '<strong>Ranked by DSR (Deflated Sharpe Ratio):</strong><br>DSR = Sharpe corrected for the fact that you tested 28M strategies<br>Bailey & López de Prado. DSR > 0 means "after accounting for testing bias, the edge is probably real". This is the most honest single metric for brute-force sweeps.',
-      netafter: '<strong>Ranked by Net P&amp;L after charges:</strong><br>Sorts strategies by what you actually keep after brokerage, STT, exchange, GST, SEBI, stamp duty<br>Most realistic measure. A high-Sharpe strategy that trades 5,000 times can lose all profit to fees — this ranking catches that.',
-      winrate: '<strong>Ranked by win rate %:</strong><br>% of trades that ended profitable<br><span class="v">⚠</span> Win rate alone is misleading: a 90% win-rate strategy that loses ₹10K once and wins ₹100 nine times is still a loser. Always pair with Profit factor or Net P&amp;L.',
-      cpcv: '<strong>Ranked by CPCV pass rate (out-of-sample robustness):</strong><br>Combinatorial Purged Cross-Validation — % of held-out folds where strategy still wins<br>Strategies that pass &gt; 75% of CPCV folds are unlikely to be curve-fits. This is the gold standard for "does it hold on data the strategy never saw".'
-    };
-    if (rankBy) {
-      rankBy.addEventListener('change', () => {
-        document.getElementById('formulaBox').innerHTML = formulas[rankBy.value] || formulas.composite;
-      });
-    }
-
-    // Show more
-    const showMoreBtn = document.getElementById('showMoreBtn');
-    if (showMoreBtn) {
-      showMoreBtn.addEventListener('click', () => {
-        showMoreBtn.textContent = 'Loading more combos…';
-        setTimeout(() => {
-          showMoreBtn.textContent = '(In real version: would load combos 21-100 from sweep results parquet)';
-          showMoreBtn.disabled = true;
-          showMoreBtn.style.opacity = '0.5';
-        }, 600);
-      });
-    }
-
-    // Podium "View" buttons → load that combo
-    document.querySelectorAll('.podium-view-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        document.querySelector('.tabs button[data-tab="metrics"]').click();
-      });
-    });
-    document.querySelectorAll('.podium-card').forEach(card => {
-      card.addEventListener('click', () => {
-        document.querySelector('.tabs button[data-tab="metrics"]').click();
-      });
-    });
+    // The manual-slider / ranking-formula / show-more / podium handlers were
+    // DELETED with their fabricated DOM (DEC-OPERATOR-PAGE-REAL-001) — the
+    // simulated pass-count math violated R27 (no invented numbers).
   }
 
-  // ===== Charges: proxy switcher =====
-  const chargesData = {
-    'etf-intraday':  { brok: 49880, stt: 14560, exch: 4470, gst: 9800,  sebi: 250, stamp: 2330, label: 'NIFTYBEES ETF (intraday)' },
-    'etf-delivery':  { brok: 49880, stt: 582,   exch: 4470, gst: 9800,  sebi: 250, stamp: 2330, label: 'NIFTYBEES ETF (delivery)' },
-    'futures':       { brok: 49880, stt: 182000,exch: 22240,gst: 12970, sebi: 1170,stamp: 23420,label: 'NIFTY Futures (1 lot)' },
-    'options-atm':   { brok: 49880, stt: 87500, exch: 49880,gst: 17956, sebi: 581, stamp: 8762, label: 'NIFTY ATM Options (1 lot)' }
-  };
-  const fmt = n => '−₹' + Math.abs(Math.round(n)).toLocaleString('en-IN');
-  const fmtPos = n => (n >= 0 ? '+₹' : '−₹') + Math.abs(Math.round(n)).toLocaleString('en-IN');
-  const proxySelect = document.getElementById('proxySelect');
-  if (proxySelect) {
-    proxySelect.addEventListener('change', () => {
-      const d = chargesData[proxySelect.value];
-      const total = d.brok + d.stt + d.exch + d.gst + d.sebi + d.stamp;
-      const gross = 142800;
-      const net = gross - total;
-      const pct = (net / 1000000) * 100;
-      const eaten = Math.round((total / gross) * 100);
-      document.getElementById('ch-brok').textContent = fmt(d.brok);
-      document.getElementById('ch-stt').textContent = fmt(d.stt);
-      document.getElementById('ch-exch').textContent = fmt(d.exch);
-      document.getElementById('ch-gst').textContent = fmt(d.gst);
-      document.getElementById('ch-sebi').textContent = fmt(d.sebi);
-      document.getElementById('ch-stamp').textContent = fmt(d.stamp);
-      document.getElementById('ch-total').textContent = fmt(total);
-      const netEl = document.getElementById('ch-net');
-      netEl.textContent = fmtPos(net);
-      netEl.style.color = net >= 0 ? 'var(--green-bright)' : 'var(--red)';
-      document.getElementById('ch-netpct').textContent = (net >= 0 ? '+' : '') + pct.toFixed(2) + '% on ₹10,00,000';
-      document.getElementById('ch-netpct').style.color = net >= 0 ? 'var(--green)' : 'var(--red)';
-    });
-  }
+  // The fabricated charges-proxy switcher was DELETED with its table
+  // (Track 1 is signal-only — CLAUDE.md §7 "Brokerage assumption: NONE").
 
   // ==================== v27 ANIMATION PACK JS ====================
 
@@ -3867,71 +3205,6 @@
     document.querySelectorAll('.end-dot').forEach(el => el.classList.add('v27-beam'));
   }
 
-  // v27.2 — 3D podium gold-card cursor tilt (parallax)
-  function v27PodiumTilt() {
-    const gold = document.querySelector('.podium-card.gold');
-    if (!gold) return;
-    gold.classList.add('v27-tilt');
-    gold.addEventListener('mousemove', e => {
-      const r = gold.getBoundingClientRect();
-      const px = (e.clientX - r.left) / r.width;   // 0..1
-      const py = (e.clientY - r.top) / r.height;   // 0..1
-      const rx = (px - 0.5) * 10;   // -5..5 deg around Y
-      const ry = -(py - 0.5) * 8;   // -4..4 deg around X (inverted)
-      gold.style.setProperty('--rx', rx + 'deg');
-      gold.style.setProperty('--ry', ry + 'deg');
-    });
-    gold.addEventListener('mouseleave', () => {
-      gold.style.setProperty('--rx', '0deg');
-      gold.style.setProperty('--ry', '0deg');
-    });
-  }
-
-  // v27.3 — reel auto-advance every 4s with progress ring
-  function v27ReelAutoAdvance() {
-    // Inject the progress-ring element
-    const ring = document.createElement('div');
-    ring.className = 'reel-auto-ring';
-    ring.innerHTML = `
-      <svg viewBox="0 0 42 42">
-        <circle class="ring-bg" cx="21" cy="21" r="18"/>
-        <circle class="ring-fg" cx="21" cy="21" r="18"/>
-      </svg>
-      <div class="icon">▶</div>`;
-    document.body.appendChild(ring);
-
-    const fg = ring.querySelector('.ring-fg');
-    const slides = document.querySelectorAll('.reel-slide');
-    let timer = null;
-    let elapsed = 0;
-    const period = 4000; // 4s per slide
-
-    function step() {
-      if (!document.body.classList.contains('reel-mode')) {
-        elapsed = 0;
-        fg.style.strokeDashoffset = 113;
-        return;
-      }
-      elapsed += 100;
-      const pct = Math.min(elapsed / period, 1);
-      fg.style.strokeDashoffset = 113 * (1 - pct);
-      if (pct >= 1) {
-        elapsed = 0;
-        // Advance to next slide via scroll
-        const overlay = document.getElementById('reelOverlay');
-        const currentIdx = Array.from(slides).findIndex(s => {
-          const r = s.getBoundingClientRect();
-          return r.top >= -50 && r.top < window.innerHeight / 2;
-        });
-        const next = slides[currentIdx + 1] || slides[0];
-        if (next && overlay) {
-          next.scrollIntoView({ behavior: 'smooth' });
-        }
-      }
-    }
-    if (timer) clearInterval(timer);
-    timer = setInterval(step, 100);
-  }
 
   // v27.4 — apply scale-pop+glow-sweep class to KPI cards
   function v27KpiPop() {
@@ -3942,8 +3215,6 @@
 
   window.addEventListener('load', () => {
     setTimeout(v27EquityBeam, 800);
-    setTimeout(v27PodiumTilt, 600);
-    setTimeout(v27ReelAutoAdvance, 1000);
     setTimeout(v27KpiPop, 300);
   });
 
@@ -3967,7 +3238,7 @@
   // Inject sparkle particles above winning P&L cells (motion = meaning, not color)
   function decorateWinSparkles() {
     document.querySelectorAll('td.pos').forEach(el => {
-      if (el.dataset.sparkled || el.textContent.includes('₹65')) return; // skip "charges" cells
+      if (el.dataset.sparkled) return;
       el.classList.add('has-sparkle');
       for (let i = 0; i < 4; i++) {
         const sk = document.createElement('span');
@@ -4010,53 +3281,14 @@
     }
   }
 
-  // v24.1 — slot-machine reveal for [data-slot-final]
-  function slotReveal(el) {
-    const final = el.dataset.slotFinal || el.textContent;
-    const charset = '0123456789#,$%';
-    const finalChars = final.split('');
-    el.innerHTML = '';
-    finalChars.forEach((c, i) => {
-      const span = document.createElement('span');
-      span.className = 'ch scrambling';
-      span.textContent = charset[Math.floor(Math.random() * charset.length)];
-      el.appendChild(span);
-    });
-    const spans = el.querySelectorAll('.ch');
-    const startTime = performance.now();
-    const totalDuration = 1100;
-    const perCharLock = totalDuration / finalChars.length;
-    function tick(now) {
-      const elapsed = now - startTime;
-      spans.forEach((s, i) => {
-        const lockAt = i * perCharLock + 250;
-        if (elapsed >= lockAt) {
-          if (!s.classList.contains('locked')) {
-            s.classList.remove('scrambling');
-            s.classList.add('locked');
-            s.textContent = finalChars[i];
-          }
-        } else {
-          s.textContent = charset[Math.floor(Math.random() * charset.length)];
-        }
-      });
-      if (elapsed < totalDuration + 100) requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
-  }
-
-  // Trigger everything after a beat
+  // Trigger everything after a beat (the slot-machine reveal died with the
+  // fabricated podium combo ids — DEC-OPERATOR-PAGE-REAL-001)
   window.addEventListener('load', () => {
     setTimeout(() => {
       // Particle burst from rank-pill in the header
       const rankPill = document.querySelector('.rank-pill');
       fireParticleBurst(rankPill);
     }, 350);
-
-    // Slot-reveal all combo IDs (cascaded by 200ms each so eyes catch each one)
-    document.querySelectorAll('.slot-reveal').forEach((el, i) => {
-      setTimeout(() => slotReveal(el), 600 + i * 220);
-    });
   });
 
   // ==================== v29 PUNCH PACK JS ====================
@@ -4096,7 +3328,7 @@
   // §6.4 step 4 (write the poller ONCE, all future data-bind fields
   // ride this same loop — incremental swap-out).
   //
-  // First field wired: step_0_all_candidates (the 33B at funnel head).
+  // First field wired: step_0_all_candidates (the funnel head).
   // Future PRs (DEC-DASHBOARD-LIVE-2, 3, ...) add data-bind="<field>"
   // to additional spans — no change needed to this poller.
   (function () {
@@ -4131,8 +3363,8 @@
         if (!res.ok) return;  // server hiccup; next tick retries
         const snap = await res.json();
         // Sweep funnel may be null when no sweep has started yet —
-        // leave the mockup placeholder values in that case (PREVIEW
-        // DATA badge stays visible per §6.4 step 5).
+        // the honest em-dash placeholders stay in that case (the manifest
+        // fill in bx-oneclick.js covers the completed-run view — C-M2).
         const funnel = snap.sweep_funnel;
         if (!funnel) return;
         const payload = JSON.stringify(funnel);
@@ -4144,6 +3376,13 @@
             el.textContent = formatNumber(funnel[key]);
           }
         });
+        // C-M2 funnel write precedence: the LIVE writer stamps its
+        // provenance beside the funnel (bx-oneclick's manifest fill labels
+        // the completed-run side) — two sources never interleave silently.
+        const prov = document.getElementById('ocFunnelProvenance');
+        if (prov && window.BXOneclick) {
+          prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+        }
       } catch (e) { /* network blip; next tick retries */ }
     }
 
@@ -4364,6 +3603,114 @@
       setSlot('pull', 'idle', 'offline preview', 'live endpoints available when served by the dashboard');
       setSlot('sweep', 'idle', 'offline preview', 'live endpoints available when served by the dashboard');
       setSlot('proof', 'idle', 'offline preview', 'live endpoints available when served by the dashboard');
+    }
+  })();
+
+  // ==================== RUN CONTROLS (DEC-OPERATOR-PAGE-REAL-001) ====================
+  // Moved here from /reports (R25/O-b): POST /api/v1/sweep/run with the R2
+  // selectors (blank ⇒ engine defaults), then poll /api/v1/sweep-progress.
+  // The button NEVER pulls (R3). All writes are textContent — never markup.
+  (function () {
+    const sweepBtn = document.getElementById('run-sweep');
+    const sweepMsg = document.getElementById('sweep-msg');
+    const sweepBar = document.getElementById('sweep-bar');
+    const sweepFill = document.getElementById('sweep-bar-fill');
+    if (!sweepBtn || !sweepMsg) return;
+    let sweepPoll = null;
+
+    function renderSweep(p) {
+      const pct = Math.max(0, Math.min(100, p.percent || 0));
+      sweepBar.style.display = 'block';
+      sweepFill.style.width = pct.toFixed(1) + '%';
+      const rate = p.combos_per_sec ? Math.round(p.combos_per_sec).toLocaleString() : '0';
+      sweepMsg.textContent =
+        p.state + ' · ' + pct.toFixed(1) + '% · enumerated=' + (p.enumerated || 0) +
+        ' · evaluated=' + (p.evaluated || 0) + ' · survivors=' + (p.survivors || 0) +
+        ' · ' + rate + ' combos/sec';
+    }
+
+    async function pollRunSweep() {
+      try {
+        const r = await fetch('/api/v1/sweep-progress');
+        const p = await r.json();
+        renderSweep(p);
+        if (!p.running && p.state !== 'idle') {
+          clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
+          sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
+            ' survivor(s). The report above refreshes from the new run artifacts.';
+        }
+      } catch (e) {
+        sweepMsg.textContent = 'Could not read sweep progress: ' + e;
+      }
+    }
+
+    sweepBtn.onclick = async () => {
+      sweepBtn.disabled = true;
+      sweepMsg.textContent = 'Starting the brute-force sweep…';
+      const q = new URLSearchParams();
+      const symSel = document.getElementById('swSymbols');
+      const syms = symSel ? Array.from(symSel.selectedOptions).map(o => o.value).join(',') : '';
+      const itv = (document.getElementById('swIntervals').value || '').trim();
+      const st = (document.getElementById('swStart').value || '').trim();
+      const en = (document.getElementById('swEnd').value || '').trim();
+      const k = (document.getElementById('swK').value || '').trim();
+      const dir = (document.getElementById('swDirections').value || '').trim();
+      const sl = (document.getElementById('swSl').value || '').trim();
+      const tp = (document.getElementById('swTp').value || '').trim();
+      const top = (document.getElementById('swTop').value || '').trim();
+      if (syms) q.set('symbols', syms);
+      if (itv) q.set('intervals', itv);
+      if (st) q.set('start', st);
+      if (en) q.set('end', en);
+      if (k) q.set('k', k);
+      if (dir) q.set('directions', dir);
+      if (sl) q.set('sl', sl);
+      if (tp) q.set('tp', tp);
+      if (top) q.set('top', top);
+      try {
+        const r = await fetch('/api/v1/sweep/run?' + q.toString(), { method: 'POST' });
+        const j = await r.json();
+        if (r.status === 400) {
+          sweepMsg.textContent = 'Sweep refused: ' + (j.detail || ('HTTP ' + r.status));
+          sweepBtn.disabled = false; return;
+        }
+        if (!j.started) {
+          sweepMsg.textContent = 'A pull or sweep is already running — wait for it to finish.';
+          sweepBtn.disabled = false; return;
+        }
+        sweepMsg.textContent = 'Sweep started — ' + j.symbols + ' · ' + j.intervals +
+          ' · ' + j.start + ' → ' + j.end + '. Watching progress…';
+        if (sweepPoll) clearInterval(sweepPoll);
+        sweepPoll = setInterval(pollRunSweep, 1200);
+        pollRunSweep();
+      } catch (e) {
+        sweepMsg.textContent = 'Sweep request failed: ' + e;
+        sweepBtn.disabled = false;
+      }
+    };
+
+    const cascadeBtn = document.getElementById('run-cascade');
+    const cascadeMsg = document.getElementById('cascade-msg');
+    if (cascadeBtn && cascadeMsg) {
+      cascadeBtn.onclick = async () => {
+        cascadeBtn.disabled = true;
+        cascadeMsg.textContent = 'Running the nine-filter cascade…';
+        try {
+          const r = await fetch('/api/v1/cascade/run', { method: 'POST' });
+          const j = await r.json();
+          if (j.ok) {
+            cascadeMsg.textContent =
+              'Cascade done — sweep ' + j.sweep_id.slice(0, 16) + ' · pools=' + j.pools +
+              ' · candidates=' + j.candidates + ' · survivors=' + j.survivors;
+          } else {
+            cascadeMsg.textContent = 'Cascade error: ' + (j.error || ('HTTP ' + r.status));
+          }
+        } catch (e) {
+          cascadeMsg.textContent = 'Cascade request failed: ' + e;
+        } finally {
+          cascadeBtn.disabled = false;
+        }
+      };
     }
   })();
 

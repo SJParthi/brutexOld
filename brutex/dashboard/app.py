@@ -62,6 +62,7 @@ from brutex.adapters.ingest_common import (
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.paths import resolve_lake_root
+from brutex.dashboard import oneclick_artifacts, oneclick_view
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
     build_completeness_scoreboard,
@@ -1136,6 +1137,7 @@ def build_app(
     liveproof: LiveProofAutorun | None = None,
     allowed_hosts: Sequence[str] | None = None,
     pull_intent_store: PullIntentStore | None = None,
+    oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
@@ -1257,6 +1259,17 @@ def build_app(
         ``None`` (the default — unit tests / bare apps) disables all of it;
         ``build_app`` itself never fires a resume (the launcher seam does), so
         constructing an app stays side-effect-free.
+    oneclick_trades_reader
+        Optional typed :class:`~brutex.dashboard.oneclick_artifacts.TradesReader`
+        for the ``/api/v1/oneclick/trades`` route (DEC-OPERATOR-PAGE-REAL-001).
+        ``None`` (the default) resolves per request: the fail-loud
+        ``BRUTEX_ONECLICK_FIXTURE_ROOT`` fixture tree activates a memoised
+        :class:`~brutex.dashboard.oneclick_artifacts.FixtureTradesReader`,
+        otherwise the HONEST
+        :class:`~brutex.dashboard.oneclick_artifacts.AwaitingTradesReader`
+        serves ``status="awaiting"`` — production can NEVER serve a real lake
+        path as trade data until the ResultsStore paged API lands at
+        merge-integration.
     session_rate
         Optional :class:`~brutex.dashboard.pull_controller.SessionRateController`
         — the ONE per-session rate holder every pull shares
@@ -1653,6 +1666,17 @@ def build_app(
     # `MoversSnapshotCache` (no new class — CLAUDE.md §11 COMMON); the LRU ages
     # out old-revision keys.
     _sweep_leaderboard_cache = MoversSnapshotCache()
+    # The one-click artifact read memo (DEC-OPERATOR-PAGE-REAL-001): every
+    # `/api/v1/oneclick/*` read (runs listing, manifest, top100, events tail
+    # page, the LAST chain-verify verdict) is keyed on a per-artifact
+    # `"mtime_ns:size"` stat token folded into the KEY at a FIXED generation=0
+    # (the `_sweep_leaderboard_cache` `rev=` precedent) — a repeat poll of an
+    # unchanged artifact is an O(1) hit, a token move re-parses, and a `None`
+    # token (absent / stat outage) computes fresh and caches NOTHING (never a
+    # stale serve, never a poisoned key). HONEST envelope (Golden Rule #10):
+    # the FIRST read per revision pays the O(artifact) parse; the cached hit is
+    # O(1) vs run count / artifact size. REUSES the COMMON `MoversSnapshotCache`.
+    _oneclick_cache = MoversSnapshotCache()
     # ONE rate controller per dashboard session, shared across every pull
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
@@ -6166,7 +6190,7 @@ def build_app(
         and the full-precision Sharpe / profit-factor / win-rate — NEVER rounded).
 
         READ-ONLY (CLAUDE.md §3): ranks results the operator already produced; it
-        NEVER touches the brute-force engine or the 52-condition vocabulary (the
+        NEVER touches the brute-force engine or the 60-condition vocabulary (the
         ENGINE stays NIFTY/BANKNIFTY/SENSEX).
 
         Query parameters
@@ -6328,6 +6352,385 @@ def build_app(
             # never reaches the wire — store_error_payload logs the full detail
             # server-side and serves only the stable generic markers.
             return JSONResponse(store_error_payload(exc))
+
+    # ── One-click artifact routes (DEC-OPERATOR-PAGE-REAL-001) ──────────
+    # The ONE integration-adapter surface over the sweep-oneclick artifact
+    # CONTRACTS (manifest.json / top100.json / events.jsonl / trades pages) —
+    # thin closures over the 100%-unit-tested `oneclick_artifacts` +
+    # `oneclick_view` modules, offloaded via `run_in_threadpool` (the app.py
+    # doctrine). Unknown run dirs are HONEST 200 `status:"awaiting"` payloads
+    # (polls must never error-loop); ONLY a genuinely bad request — missing/
+    # unsafe run_id, a junk BRUTEX_ONECLICK_FIXTURE_ROOT — is a 400.
+
+    def _oneclick_require_run_id(run_id: str | None) -> str:
+        """400 unless *run_id* is present and ONE safe path segment (no traversal)."""
+        if run_id is None or not run_id.strip():
+            raise HTTPException(status_code=400, detail="run_id query parameter is required")
+        rid = run_id.strip()
+        if not oneclick_artifacts.is_safe_run_id(rid):
+            raise HTTPException(
+                status_code=400,
+                detail="run_id must be one safe path segment ([A-Za-z0-9._-])",
+            )
+        return rid
+
+    def _oneclick_roots() -> tuple[Path | None, Path | None]:
+        """Resolve ``(results_root, fixture_root)`` — the fixture override wins.
+
+        Returns ``(None, None)`` when no lake root is wired — no instrument
+        store at all (mirrors ``_require_store``'s condition WITHOUT raising
+        its 503) or a store lacking a real ``path`` — so the routes serve the
+        honest ``status:"awaiting"`` payload, never a 500/503. A junk fixture
+        env raises the 400.
+        """
+        try:
+            fixture_root = oneclick_artifacts.resolve_fixture_root()
+        except oneclick_artifacts.OneclickConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if fixture_root is not None:
+            return fixture_root, fixture_root
+        if instrument_store is None:
+            return None, None
+        store_path = getattr(instrument_store, "path", None)
+        if not isinstance(store_path, Path):
+            return None, None
+        return default_results_root(store_path.parent), None
+
+    # FixtureTradesReader instances memoised per fixture root so their
+    # parse-once-per-revision memo survives across requests (owned by this app
+    # instance — no module-global mutable state, CLAUDE.md §4).
+    _oneclick_fixture_readers: dict[str, oneclick_artifacts.FixtureTradesReader] = {}
+
+    def _oneclick_reader(fixture_root: Path | None) -> oneclick_artifacts.TradesReader:
+        """The typed trades seam: injected reader > fixture reader > honest awaiting."""
+        if oneclick_trades_reader is not None:
+            return oneclick_trades_reader
+        if fixture_root is None:
+            return oneclick_artifacts.AwaitingTradesReader()
+        key = str(fixture_root)
+        reader = _oneclick_fixture_readers.get(key)
+        if reader is None:
+            reader = oneclick_artifacts.FixtureTradesReader(fixture_root)
+            _oneclick_fixture_readers[key] = reader
+        return reader
+
+    @app.get("/api/v1/oneclick/runs")
+    async def api_oneclick_runs() -> JSONResponse:
+        """GET /api/v1/oneclick/runs — discovered sweep runs, newest first.
+
+        Lists ``<results_root>/runs/<run_id>/`` directories with per-artifact
+        presence flags + the manifest's ``suspect`` verdict (``null`` until
+        readable — never fabricated). Memoised per ``runs/`` dir stat token;
+        an empty/absent tree is the loud ``status:"awaiting"`` payload.
+        """
+
+        def _resolve() -> dict[str, Any]:
+            """Build the oneclick runs payload off the event loop (revision-cached)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_runs_payload((), fixture_root_active=fixture_active)
+            results_root: Path = root
+            rev = oneclick_artifacts.runs_revision(results_root)
+
+            def _fresh() -> dict[str, Any]:
+                return oneclick_view.build_runs_payload(
+                    oneclick_artifacts.discover_runs(results_root),
+                    fixture_root_active=fixture_active,
+                )
+
+            if rev is None:
+                return _fresh()
+            return _oneclick_cache.get_or_compute(
+                f"oc_runs|rev={rev}|fx={fixture_active}", generation=0, compute=_fresh
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
+    @app.get("/api/v1/oneclick/manifest")
+    async def api_oneclick_manifest(
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/manifest?run_id= — one run's manifest + pill state.
+
+        The P2 contract keys pass through VERBATIM; the pill "state" word is
+        derived mechanically and the payload names the derivation
+        (``pill.derived_from`` — C-MINOR-2). Missing → awaiting; bad JSON →
+        corrupt; missing contract keys → partial naming them. NEVER invents
+        counts.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the manifest payload off the event loop (stat-token cached)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_manifest_payload(
+                    rid,
+                    oneclick_artifacts.ManifestResult(
+                        "awaiting", None, "no lake configured — awaiting real run artifact", None
+                    ),
+                    fixture_root_active=fixture_active,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.MANIFEST_FILENAME
+            )
+            # Sibling-artifact PRESENCE rides the cache KEY as two cheap stat
+            # probes (never a parse) so the pill's missing-file naming
+            # refreshes when top100.json / events.jsonl land without a
+            # manifest rewrite; the manifest PARSE (incl. the pill probe)
+            # stays inside the cached compute — parse once per revision.
+            has_top100 = (
+                oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
+                is not None
+            )
+            events_rev = oneclick_artifacts.artifact_revision(
+                run_dir / oneclick_artifacts.EVENTS_FILENAME
+            )
+            has_events = events_rev is not None
+
+            def _fresh() -> dict[str, Any]:
+                manifest_result = oneclick_artifacts.load_manifest(run_dir)
+                payload = oneclick_view.build_manifest_payload(
+                    rid,
+                    manifest_result,
+                    fixture_root_active=fixture_active,
+                    info=oneclick_artifacts.probe_run_dir(run_dir),
+                )
+                # R41 chain map: link states derive from per_stage_timings +
+                # tripwires + the RECENT event kinds (one O(page) tail read —
+                # never a whole-file scan); an unknown stage reads "pending",
+                # never green (DEC-OPERATOR-PAGE-REAL-001).
+                recent = oneclick_artifacts.tail_events(run_dir, offset=-1, limit=200)
+                kinds = [str(rec.get("kind", "")) for rec in recent.records]
+                payload["chain_links"] = oneclick_view.chain_links(manifest_result, kinds)
+                return payload
+
+            if rev is None:
+                return _fresh()
+            # The key folds the manifest revision AND the events revision (the
+            # chain-map input) — a growing events.jsonl refreshes the links.
+            return _oneclick_cache.get_or_compute(
+                f"oc_manifest|{rid}|rev={rev}|files={int(has_top100)}{int(has_events)}"
+                f"|ev={events_rev}|fx={fixture_active}",
+                generation=0,
+                compute=_fresh,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
+    @app.get("/api/v1/oneclick/top100")
+    async def api_oneclick_top100(
+        run_id: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/top100?run_id= — the P3 leaderboard rows, verbatim.
+
+        Rows pass through UNTOUCHED (metrics keep full precision — money 2dp
+        is client-side via ``bxFixed2`` ONLY); ``row_count`` is always
+        ``len(rows)`` (a valid EMPTY artifact is ``ok`` with the honest
+        ``empty_note`` — T-M2). A bad row degrades to ``partial`` with the
+        row index named, rows kept up to it — never a 500.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the top100 payload off the event loop (stat-token cached)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_top100_payload(
+                    rid,
+                    oneclick_artifacts.Top100Result(
+                        "awaiting", (), "no lake configured — awaiting real run artifact", None
+                    ),
+                    fixture_root_active=fixture_active,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.TOP100_FILENAME)
+
+            def _fresh() -> dict[str, Any]:
+                return oneclick_view.build_top100_payload(
+                    rid,
+                    oneclick_artifacts.load_top100(run_dir),
+                    fixture_root_active=fixture_active,
+                )
+
+            if rev is None:
+                return _fresh()
+            return _oneclick_cache.get_or_compute(
+                f"oc_top100|{rid}|rev={rev}|fx={fixture_active}",
+                generation=0,
+                compute=_fresh,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
+    @app.get("/api/v1/oneclick/events")
+    async def api_oneclick_events(
+        run_id: str | None = Query(default=None),
+        offset: int = Query(default=0, ge=-1),
+        limit: int = Query(default=200, ge=1, le=1000),
+        kind: str | None = Query(default=None),
+        q: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/events — O(page) byte-offset flight-recorder tail.
+
+        ``seek(offset)`` + read forward ≤ ``limit`` lines bounded by a 1 MiB
+        window — server work is bounded by the READ WINDOW, never the log
+        size; ``kind``/``q`` filter that window only (``window_filtered`` in
+        the payload states it). ``offset=-1`` anchors at the tail; a repeat
+        poll at ``offset == total_bytes`` with an unchanged stat token
+        short-circuits via the cache. A half-written last line is the honest
+        ``truncated_tail`` — re-read once complete, never an error.
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Tail the events page off the event loop (byte-offset seek, O(page))."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            window_filtered = bool(kind or q)
+            if root is None:
+                return oneclick_view.build_events_payload(
+                    rid,
+                    oneclick_artifacts.EventsPage(
+                        "awaiting",
+                        (),
+                        0,
+                        0,
+                        False,
+                        "no lake configured — awaiting real run artifact",
+                    ),
+                    fixture_root_active=fixture_active,
+                    window_filtered=window_filtered,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+
+            def _fresh() -> dict[str, Any]:
+                page = oneclick_artifacts.tail_events(
+                    run_dir, offset=offset, limit=limit, kind=kind, q=q
+                )
+                return oneclick_view.build_events_payload(
+                    rid,
+                    page,
+                    fixture_root_active=fixture_active,
+                    window_filtered=window_filtered,
+                )
+
+            if rev is None:
+                return _fresh()
+            # json-encoded key parts: kind/q are operator-typed strings that
+            # may contain the `|` separator — encoding keeps keys collision-free.
+            key = "oc_events|" + json.dumps(
+                [rid, offset, limit, kind, q, rev, fixture_active], ensure_ascii=False
+            )
+            return _oneclick_cache.get_or_compute(key, generation=0, compute=_fresh)
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
+    @app.get("/api/v1/oneclick/trades")
+    async def api_oneclick_trades(
+        run_id: str | None = Query(default=None),
+        rank: int = Query(default=1, ge=1),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/trades — one paged trade list via the typed seam.
+
+        PRODUCTION DEFAULT is the honest ``AwaitingTradesReader`` (trades land
+        at merge-integration via the ResultsStore paged API); the file-reading
+        ``FixtureTradesReader`` activates ONLY under the fail-loud
+        ``BRUTEX_ONECLICK_FIXTURE_ROOT``. ``source`` is a VISIBLE badge
+        client-side (C-M5); ``total`` stays ``null`` when unknown — never a
+        fabricated 0; VIX nulls pass through (R31 honest NULL).
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Build the trades payload off the event loop via the TradesReader seam."""
+            try:
+                fixture_root = oneclick_artifacts.resolve_fixture_root()
+            except oneclick_artifacts.OneclickConfigError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            reader = _oneclick_reader(fixture_root)
+            page = reader.page(rid, rank, offset=offset, limit=limit)
+            return oneclick_view.build_trades_payload(
+                rid,
+                rank,
+                page,
+                offset=offset,
+                limit=limit,
+                fixture_root_active=fixture_root is not None,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
+
+    @app.get("/api/v1/oneclick/verify")
+    async def api_oneclick_verify(
+        run_id: str | None = Query(default=None),
+        check: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/oneclick/verify?run_id=[&check=chain] — the R44 panel rows.
+
+        Seven checks under the 5-state truth table (pass/fail/ready/awaiting/
+        not_wired): operator-judged checks cap at ``ready`` server-side;
+        un-wired capabilities read ``not_wired``, never a fake green.
+        ``check=chain`` triggers the O(file) hash-chain verification
+        (button-click ONLY — its verdict is cached per events revision);
+        without it the chain row serves the LAST cached verdict, or the
+        honest ``awaiting`` when this revision was never verified (the
+        raising-compute peek stores nothing — T-M4 cache-keyed resolution).
+        """
+        rid = _oneclick_require_run_id(run_id)
+
+        def _resolve() -> dict[str, Any]:
+            """Run the verify checks off the event loop (chain check on click only)."""
+            root, fixture_root = _oneclick_roots()
+            fixture_active = fixture_root is not None
+            if root is None:
+                return oneclick_view.build_verify_payload(
+                    rid,
+                    oneclick_artifacts.ManifestResult(
+                        "awaiting", None, "no lake configured — awaiting real run artifact", None
+                    ),
+                    None,
+                    False,
+                    fixture_root_active=fixture_active,
+                )
+            run_dir = oneclick_artifacts.runs_root(root) / rid
+            manifest = oneclick_artifacts.load_manifest(run_dir)
+            rev = oneclick_artifacts.artifact_revision(run_dir / oneclick_artifacts.EVENTS_FILENAME)
+            chain: tuple[bool, int, int | None, str] | None = None
+            if rev is not None:
+                chain_key = f"oc_chain|{rid}|rev={rev}"
+                if check == "chain":
+                    chain = _oneclick_cache.get_or_compute(
+                        chain_key,
+                        generation=0,
+                        compute=lambda: oneclick_artifacts.verify_events_chain(run_dir),
+                    )
+                else:
+                    try:
+                        chain = _oneclick_cache.get_or_compute(
+                            chain_key,
+                            generation=0,
+                            compute=oneclick_artifacts.raise_chain_not_verified,
+                        )
+                    except oneclick_artifacts.ChainNotVerifiedError:
+                        chain = None
+            trades_probe = _oneclick_reader(fixture_root).page(rid, 1, offset=0, limit=1)
+            return oneclick_view.build_verify_payload(
+                rid,
+                manifest,
+                chain,
+                trades_probe.status in {"ok", "partial"},
+                fixture_root_active=fixture_active,
+            )
+
+        return JSONResponse(await run_in_threadpool(_resolve))
 
     @app.get("/api/v1/logs")
     async def api_logs(
@@ -7034,6 +7437,35 @@ def build_app(
         """GET / — inline HTML dashboard with embedded JS WebSocket client."""
         return _render_index_html()
 
+    @app.get("/screener", response_class=HTMLResponse)
+    async def screener_page() -> str:
+        """GET /screener — the strategy screener over the top-100 artifact.
+
+        DEC-OPERATOR-PAGE-REAL-001 / R36: client-side filter/sort (win% · DD ·
+        PF · VIX band · TF · direction) over ONE ``/api/v1/oneclick/top100``
+        fetch; rows are createElement/textContent-built (never markup
+        interpolation); a row click opens ``/strategy?run_id=&rank=`` — the
+        ≤2-clicks law (Overview → Winners → strategy). Serves the static
+        template verbatim; every number arrives client-side from the artifact
+        contracts (loud "awaiting real run artifact" until a run exists).
+        """
+        return _render_screener_html()
+
+    @app.get("/strategy", response_class=HTMLResponse)
+    async def strategy_page() -> str:
+        """GET /strategy — the chart-first single-strategy page.
+
+        DEC-OPERATOR-PAGE-REAL-001 / R36: candle chart with entry/exit arrows
+        drawn ON it (candles from the EXISTING ``/api/v1/db/candles``; trades
+        from ``/api/v1/oneclick/trades`` — inline at load, never tab-gated),
+        equity curve below (client integer-paisa cumsum, labeled "per-trade
+        close equity — minute-path equity lands with P3"), hover-any-number
+        plain-English lines, Beginner/Pro toggle, ``vix_band`` on the story
+        card. ``run_id``/``rank``/``trade`` arrive as query params read
+        client-side; the template is served verbatim.
+        """
+        return _render_strategy_html()
+
     # WebSocket handler — defined at module scope below to sidestep
     # the `from __future__ import annotations` closure-annotation
     # resolution problem. We register it dynamically.
@@ -7428,6 +7860,50 @@ def _render_index_html() -> str:
         mockup values stay visible until the poller receives real data.
     """
     return _load_v29_template()
+
+
+_SCREENER_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "screener.html"
+_SCREENER_TEMPLATE_CACHE: str | None = None
+
+
+def _load_screener_template() -> str:
+    """Read ``templates/screener.html`` once and serve the cached text verbatim.
+
+    Same read-once module-cache pattern as every other page template
+    (DEC-OPERATOR-PAGE-REAL-001); the page is fully static — all data arrives
+    client-side from the ``/api/v1/oneclick/*`` artifact contracts.
+    """
+    global _SCREENER_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _SCREENER_TEMPLATE_CACHE is None:
+        _SCREENER_TEMPLATE_CACHE = _SCREENER_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _SCREENER_TEMPLATE_CACHE
+
+
+def _render_screener_html() -> str:
+    """Render the ``/screener`` strategy-screener page (verbatim template)."""
+    return _load_screener_template()
+
+
+_STRATEGY_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "strategy.html"
+_STRATEGY_TEMPLATE_CACHE: str | None = None
+
+
+def _load_strategy_template() -> str:
+    """Read ``templates/strategy.html`` once and serve the cached text verbatim.
+
+    Same read-once module-cache pattern as every other page template
+    (DEC-OPERATOR-PAGE-REAL-001); query params (``run_id``/``rank``/``trade``)
+    are read client-side — no server-side substitution.
+    """
+    global _STRATEGY_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _STRATEGY_TEMPLATE_CACHE is None:
+        _STRATEGY_TEMPLATE_CACHE = _STRATEGY_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _STRATEGY_TEMPLATE_CACHE
+
+
+def _render_strategy_html() -> str:
+    """Render the ``/strategy`` chart-first strategy page (verbatim template)."""
+    return _load_strategy_template()
 
 
 _UNIVERSE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "universe.html"

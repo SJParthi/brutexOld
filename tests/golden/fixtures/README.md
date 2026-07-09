@@ -90,6 +90,32 @@ Fixture-A trade 1 from `test_engine_trade_sim_golden.py` (long, take-profit +50p
 → pnl 50 / mfe 60 / mae 10 / holding 2) ⇒ **Σ = 12 × 50 = 600 paisa**. Track-1
 spot is signal-only → NO brokerage (CLAUDE.md §7), so net == gross.
 
+### #10 — one-click artifact contract corpus (DEC-OPERATOR-PAGE-REAL-001)
+
+Files live under `tests/fixtures/oneclick/runs/**` (NOT this directory — the
+corpus is a whole `runs/` directory TREE the dashboard adapter reads
+path-shaped, registered HERE per the fixture law). CONTRACT-shaped fixtures
+for the P4 display build (sweep-parallel-integration-contracts): the P2 run
+manifest (`manifest.json`, funnel hand-derived so R44 check #7 reconciles to
+the digit), the P3 top-100 leaderboard (`top100.json`, 100 rows over a 3-TF ×
+2-direction mini-universe incl. zero-trades / negative-PF / huge-DD /
+null-vix-band / metric-tie edge rows), the P2 flight-recorder events JSONL
+(118 records, hash-chained via the adapter's OWN `chain_hash` seam —
+generator↔verifier SELF-consistency only, algorithm ASSUMED until P2 merges),
+the INTERIM fixture-only trades page (`trades/rank-0001.json`, 412 rows,
+every 13th VIX null), plus the empty (`r-empty01`) / short (`r-short01`) /
+corrupt (`r-corrupt01`, truncated JSON + half-written events tail) / hostile
+XSS (`r-hostile01`) twins.
+
+* Generator: `../generate_oneclick_fixture.py` (deterministic pure
+  arithmetic; imports `chain_hash` from `brutex.dashboard.oneclick_artifacts`
+  so exactly ONE chain-algorithm definition exists).
+* Golden gate: `../test_oneclick_fixture_golden.py` — SHA-256 manifest +
+  adapter round-trip + end-to-end chain verify + funnel reconcile + per-twin
+  named statuses.
+* Regenerate: `python tests/golden/generate_oneclick_fixture.py` then update
+  the `_EXPECTED_SHA256` manifest in the test.
+
 ### Results-store optional-column back-compat corpora (DEC-VIX-STAMP-WIRE-001)
 
 `results_store_pre_vix_columns.parquet` + `results_store_pre_deflated_sharpe.parquet`

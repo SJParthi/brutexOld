@@ -2107,6 +2107,25 @@ jobs:
           else
             echo "(brutex.orchestrator.supervisor test file not present yet — gate inactive)"
           fi
+          # DEC-OPERATOR-PAGE-REAL-001 (MIGRATION.md #1561): the ONE oneclick
+          # integration adapter — reads the P2/P3 artifact contract shapes
+          # (manifest/top100/events/trades) from disk with named awaiting/
+          # corrupt/partial degrades, never a 500 or a fabricated count.
+          # 100% line+branch on oneclick_artifacts.py.
+          if compgen -G "tests/unit/test_oneclick_artifacts.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.oneclick_artifacts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_oneclick_artifacts.py
+          else
+            echo "(brutex.dashboard.oneclick_artifacts test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-PAGE-REAL-001 (MIGRATION.md #1561): the pure oneclick
+          # payload builders — run pill / chain map / funnel reconcile / the
+          # R44 5-state verify truth table (no I/O, no FastAPI). 100%
+          # line+branch on oneclick_view.py.
+          if compgen -G "tests/unit/test_oneclick_view.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.oneclick_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_oneclick_view.py
+          else
+            echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
           # unit suite (the package-wide brutex.engine gate above also runs
